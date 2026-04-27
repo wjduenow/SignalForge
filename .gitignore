@@ -46,8 +46,10 @@ htmlcov/
 
 # Local Claude Code state
 .claude/scheduled_tasks.lock
+.claude/plugins/
 
 # Beads / Dolt (added by bd init)
+.beads/
 .dolt/
 *.db
 .beads-credential-key
