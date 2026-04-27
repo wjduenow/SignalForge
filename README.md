@@ -35,10 +35,12 @@ SignalForge generates the same artifacts, then asks a different question: **does
 
 The grading layer reuses [clauditor](https://github.com/wjduenow/clauditor)'s LLM-as-judge methodology, applied to a new artifact class.
 
+> **Status (v0.1, in progress):** Not yet on PyPI. The CLI shape below is the
+> intended target — the CLI itself ships in a follow-up ticket of v0.1. Today
+> the package installs from a clone with `pip install -e .[dev]`.
+
 ## Quick start
 
-> Pre-alpha — not yet on PyPI. The intended shape:
->
 > ```bash
 > pip install signalforge
 > signalforge generate models/marts/customer_lifetime_value.sql
