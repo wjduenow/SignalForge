@@ -5,7 +5,7 @@
 - **Ticket:** [#1](https://github.com/wjduenow/SignalForge/issues/1)
 - **Branch:** `feature/1-scaffolding` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/1-scaffolding` (created via `bark`)
-- **Phase:** published (PR #14, awaiting approval)
+- **Phase:** devolved (PR #14, bd epic `bd_1-scaffolding-mxk`)
 - **Sessions:** 1 (started 2026-04-27)
 - **Plan author:** Claude Code (Opus 4.7)
 
@@ -321,4 +321,22 @@ US-002, US-003, US-005 can run in parallel after US-001. US-004 waits on US-002+
 
 ## Beads Manifest
 
-*(Phase 7 — pending)*
+Created 2026-04-27 via `bd create` + `bd link` from the worktree (bd is worktree-aware via `bd context` — auto-discovers the canonical `.beads/` at `/home/wesd/Projects/SignalForge/.beads/`; no symlink or env var needed).
+
+**Epic:** `bd_1-scaffolding-mxk` — *1: Project scaffolding (pyproject, src layout, ruff, pytest, CI)* (P1, `external-ref=gh-1`)
+
+| Bead ID | Story | Priority | Blocked by |
+| --- | --- | --- | --- |
+| `bd_1-scaffolding-mxk.1` | US-001 — `pyproject.toml` foundation + src layout + `__version__` | P1 | — (READY) |
+| `bd_1-scaffolding-mxk.2` | US-002 — Ruff + pyright config | P2 | `.1` |
+| `bd_1-scaffolding-mxk.3` | US-003 — `tests/` + smoke test + pytest config | P2 | `.1` |
+| `bd_1-scaffolding-mxk.4` | US-004 — GitHub Actions CI workflow | P2 | `.2`, `.3` |
+| `bd_1-scaffolding-mxk.5` | US-005 — `CONTRIBUTING.md` + README v0.1 status callout | P3 | `.1` |
+| `bd_1-scaffolding-mxk.6` | US-006 — Quality Gate (4× code-reviewer + CodeRabbit) | P2 | `.1`, `.2`, `.3`, `.4`, `.5` |
+| `bd_1-scaffolding-mxk.7` | US-007 — Patterns & Memory | P4 | `.6` |
+
+11 `blocks` edges. `bd ready` returns only `.1` (and the epic itself).
+
+**To start work:** `cd` to either the worktree or the canonical checkout (bd works from both), run `bd ready`, claim `.1` with `bd update bd_1-scaffolding-mxk.1 --status=in_progress`, and follow the US-001 spec in this plan doc.
+
+**Note on Dolt sync:** Bark configured a Dolt remote pointing at `git+ssh://git@github.com/wjduenow/SignalForge.git`, but GitHub does not host Dolt servers — `bd dolt push` will not work against this URL. Local `.beads/` is the only persistence for now. Resolve when picking a long-term stance per #13.
