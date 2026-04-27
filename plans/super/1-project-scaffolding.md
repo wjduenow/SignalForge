@@ -5,7 +5,7 @@
 - **Ticket:** [#1](https://github.com/wjduenow/SignalForge/issues/1)
 - **Branch:** `feature/1-scaffolding` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/1-scaffolding` (created via `bark`)
-- **Phase:** architecture
+- **Phase:** detailing
 - **Sessions:** 1 (started 2026-04-27)
 - **Plan author:** Claude Code (Opus 4.7)
 
@@ -105,7 +105,219 @@ None. Eight `concern`s — all resolved through explicit choices in Phase 3 belo
 
 ## Detailed Breakdown
 
-*(Phase 4 — pending)*
+Five implementation stories + Quality Gate + Patterns & Memory. Ordering follows the natural Python-package dependency chain (build foundation → tooling configs → tests → CI → docs). Validation command set by this work: `pip install -e .[dev] && ruff check . && pyright && pytest`.
+
+### US-001 — `pyproject.toml` foundation + src layout + `__version__`
+
+**Description.** Create the build foundation: PEP 621 `[project]` metadata, hatchling backend, dynamic version, src-layout package, and `[project.optional-dependencies].dev`. This unblocks `pip install -e .[dev]`.
+
+**Traces to:** DEC-002, DEC-003, DEC-004, DEC-011, DEC-014.
+
+**Files.**
+
+- `pyproject.toml` (new)
+  - `[build-system] requires = ["hatchling>=1.18"], build-backend = "hatchling.build"`
+  - `[project]`: `name = "signalforge"`, `dynamic = ["version"]`, `description`, `requires-python = ">=3.10"`, `license = "Apache-2.0"`, `authors`, `readme = "README.md"`. No runtime deps yet.
+  - `[project.optional-dependencies] dev = ["ruff", "pyright", "pytest"]` (no version pins in v0.1; widen later via DEC-004 follow-up).
+  - `[project.urls]` Homepage + Issues pointing at `https://github.com/wjduenow/SignalForge`.
+  - `[tool.hatch.version] path = "src/signalforge/__init__.py"`
+  - `[tool.hatch.build.targets.wheel] packages = ["src/signalforge"]`
+- `src/signalforge/__init__.py` (new): `__version__ = "0.1.0.dev0"`. Single line + a docstring naming the package.
+
+**Acceptance.**
+
+- `pip install -e .[dev]` succeeds in a fresh venv with Python 3.11.
+- `python -c "import signalforge; print(signalforge.__version__)"` prints `0.1.0.dev0`.
+- `python -m build` (or `hatch build`) produces a wheel whose `RECORD` includes `signalforge/__init__.py`.
+
+**Done when.** `pip install -e .[dev]` and the import + version smoke check both pass on a fresh venv.
+
+**Depends on.** none.
+
+---
+
+### US-002 — Ruff + pyright config
+
+**Description.** Wire up linting and type checking. Both configs live in `pyproject.toml`. Pick a starter rule set that's strict enough to be useful but not so strict it derails empty modules.
+
+**Traces to:** DEC-002.
+
+**Files.**
+
+- `pyproject.toml` (modify): add
+  - `[tool.ruff]`: `line-length = 100`, `target-version = "py310"` (matches `requires-python` floor).
+  - `[tool.ruff.lint]`: `select = ["E", "F", "W", "I", "UP", "B", "SIM"]`, `ignore = []`. (E/F/W = pycodestyle+pyflakes core; I = isort; UP = pyupgrade; B = bugbear; SIM = simplify.)
+  - `[tool.ruff.format]`: empty block (accept defaults).
+  - `[tool.pyright]`: `include = ["src", "tests"]`, `pythonVersion = "3.11"` (matches CI; widen later), `typeCheckingMode = "standard"`, `reportMissingImports = "error"`.
+
+**Acceptance.**
+
+- `ruff check .` exits 0 against the empty package.
+- `ruff format --check .` exits 0.
+- `pyright` exits 0 against `src/` and `tests/`.
+
+**Done when.** All three commands above exit 0 in the worktree.
+
+**Depends on.** US-001.
+
+---
+
+### US-003 — `tests/` + smoke test + pytest config
+
+**Description.** Stand up the test framework with a non-trivial sentinel that doubles as an install/import smoke check.
+
+**Traces to:** DEC-010.
+
+**TDD.**
+
+The story *is* the first test, so the workflow inverts slightly: write the smoke test first, watch it fail with `ModuleNotFoundError` (proving collection works), then verify it passes after US-001 lands.
+
+Specific assertions:
+
+- `from signalforge import __version__` succeeds.
+- `__version__` is a non-empty string.
+- (Optional) `__version__` matches a basic PEP 440 shape (`re.match(r"\d+\.\d+\.\d+", __version__)`).
+
+**Files.**
+
+- `tests/test_smoke.py` (new): the assertions above. No `tests/__init__.py` (pytest's rootdir handles it; matches src-layout convention).
+- `pyproject.toml` (modify): `[tool.pytest.ini_options]` with `testpaths = ["tests"]`, `addopts = "-ra --strict-markers"`, `minversion = "7.0"`.
+
+**Acceptance.**
+
+- `pytest` collects exactly 1 test and passes.
+- `pytest --collect-only` shows `tests/test_smoke.py::test_version_is_set` (or whatever the function is named).
+- Adding a bogus `@pytest.mark.does_not_exist` to the smoke test causes pytest to error out (proves `--strict-markers` is active).
+
+**Done when.** `pytest` exits 0 with one passing test, and the strict-markers behavior is verified once locally before reverting the bogus marker.
+
+**Depends on.** US-001.
+
+---
+
+### US-004 — GitHub Actions CI workflow
+
+**Description.** Single CI workflow that runs ruff + pyright + pytest on PRs into `dev` and pushes to `main`. Pinned, scoped, cached.
+
+**Traces to:** DEC-003, DEC-009.
+
+**Files.**
+
+- `.github/workflows/ci.yml` (new). Shape:
+  - `name: ci`
+  - `on: { pull_request: { branches: [dev] }, push: { branches: [main] } }`
+  - `permissions: { contents: read }`
+  - `concurrency: { group: "ci-${{ github.ref }}", cancel-in-progress: true }`
+  - `jobs.lint-test`:
+    - `runs-on: ubuntu-latest`
+    - Steps:
+      1. `actions/checkout@<sha> # v4.2.x`
+      2. `actions/setup-python@<sha> # v5.x.y` with `python-version: "3.11"` and `cache: "pip"`
+      3. `pip install -e .[dev]`
+      4. `ruff check .`
+      5. `ruff format --check .`
+      6. `pyright`
+      7. `pytest`
+
+SHAs to be looked up against the latest `v4` / `v5` tag at implementation time and recorded as `# vX.Y.Z` trailing comments per DEC-009.
+
+**Acceptance.**
+
+- A trivial PR into `dev` triggers the workflow and it passes against the `feature/1-scaffolding` branch.
+- The workflow file passes `actionlint` (or equivalent lint) without warnings.
+- A test that intentionally fails (locally only — do not commit) is caught by the workflow when pushed to a throwaway branch.
+
+**Done when.** The workflow completes green on the PR for #1 (Phase 5 will create the PR; this story is "done" once the workflow file is committed and locally validated).
+
+**Depends on.** US-002, US-003.
+
+---
+
+### US-005 — `CONTRIBUTING.md` + README v0.1 status callout
+
+**Description.** Two documentation touches: a fresh, lean `CONTRIBUTING.md`, and a one-paragraph status callout in `README.md` so the existing `pip install signalforge` quick-start doesn't lead readers off a cliff.
+
+**Traces to:** DEC-012, DEC-013.
+
+**Files.**
+
+- `CONTRIBUTING.md` (new, ~25 lines):
+  - Branching: `feature/<n>-<short-name>` off `dev`; PR back into `dev`; `main` is the released line, only `dev` → `main` merges.
+  - Local dev: `pip install -e .[dev]`, then `ruff check . && ruff format --check . && pyright && pytest`.
+  - License reminder: contributions are Apache-2.0; the repo-level `LICENSE` covers per-file headers.
+  - Issues: link to `https://github.com/wjduenow/SignalForge/issues`. State that v0.1 ships as design-in-the-open on `dev`.
+  - Explicitly out of scope for this iteration: `bark`, `/super-plan`, `bd` — none of these are contributor expectations yet (tracked under #13).
+- `README.md` (modify): insert a short callout block just above the existing `## Quick start` heading, e.g.:
+  ```
+  > **Status (v0.1, in progress):** Not yet on PyPI. The CLI shape below is the
+  > intended target — the CLI itself ships in a follow-up ticket. Today the
+  > package installs from a clone with `pip install -e .[dev]`.
+  ```
+
+**Acceptance.**
+
+- `CONTRIBUTING.md` exists, is ≤ 40 lines, and links to the issue tracker.
+- `README.md` quick-start no longer makes claims that fail at execution time for a v0.1 reader.
+
+**Done when.** Both files render correctly on GitHub (preview locally with `gh pr view --web` after Phase 5).
+
+**Depends on.** US-001 (so the `pip install -e .[dev]` instruction in CONTRIBUTING is real).
+
+---
+
+### US-006 — Quality Gate
+
+**Description.** Sweep the full changeset for issues before merge. Run code reviewer 4 times; on each pass, fix every real bug found before the next pass. Run CodeRabbit if available. End on green validation.
+
+**Traces to:** all DEC-### in this plan (gate covers everything).
+
+**Acceptance.**
+
+- 4 sequential code-reviewer passes; each pass either finds no issues or every found issue is fixed before the next pass starts.
+- CodeRabbit review (if available) — all real issues addressed.
+- Final validation green: `pip install -e .[dev] && ruff check . && ruff format --check . && pyright && pytest` exits 0.
+- Git status clean (no uncommitted work).
+
+**Done when.** All passes report no remaining real issues *and* the validation command exits 0.
+
+**Depends on.** US-001, US-002, US-003, US-004, US-005.
+
+---
+
+### US-007 — Patterns & Memory
+
+**Description.** Capture conventions established in this ticket so future Claude Code sessions inherit them without re-deriving.
+
+**Traces to:** DEC-009, DEC-010, DEC-011, DEC-013.
+
+**Files.**
+
+- `.claude/rules/python-build.md` (new): src layout + hatchling dynamic-version pattern; explicit `[tool.hatch.build.targets.wheel] packages` requirement.
+- `.claude/rules/ci-supply-chain.md` (new): GHA SHA-pinning convention with `# vX.Y.Z` trailing comment; top-level `permissions: contents: read`; `concurrency` cancel-in-progress.
+- `.claude/rules/testing-signal.md` (new): "no `assert True` smoke tests — every test must be capable of failing"; `--strict-markers` is a hard rule.
+- Update `CLAUDE.md` validation command section to reference the canonical 4-step run (`pip install -e .[dev] && ruff check . && pyright && pytest`).
+
+**Acceptance.**
+
+- All three new rule files exist, are ≤ 40 lines each, and follow the project's existing CLAUDE.md tone.
+- `CLAUDE.md` includes the validation command as the canonical "how to verify" recipe.
+- Memory entries (auto-memory): note that issue #13 captures the beads ↔ super-plan stance; don't re-litigate.
+
+**Done when.** Files committed, `git status` clean. Future `/super-plan` runs in this repo discover and apply these rules in Phase 1's Convention Checker subagent.
+
+**Depends on.** US-006.
+
+---
+
+### Story dependency graph
+
+```
+US-001 ──┬──► US-002 ──┐
+         ├──► US-003 ──┼──► US-004 ──┐
+         └──► US-005 ─────────────────┴──► US-006 ──► US-007
+```
+
+US-002, US-003, US-005 can run in parallel after US-001. US-004 waits on US-002+US-003. US-006 waits on all implementation stories. US-007 waits on US-006.
 
 ## Beads Manifest
 
