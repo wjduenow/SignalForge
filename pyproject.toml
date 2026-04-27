@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "signalforge"
+dynamic = ["version"]
+description = "Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship."
+requires-python = ">=3.10"
+license = "Apache-2.0"
+readme = "README.md"
+authors = [{name = "wjduenow"}]
+
+[project.optional-dependencies]
+dev = ["ruff", "pyright", "pytest"]
+
+[project.urls]
+Homepage = "https://github.com/wjduenow/SignalForge"
+Issues = "https://github.com/wjduenow/SignalForge/issues"
+
+[tool.hatch.version]
+path = "src/signalforge/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/signalforge"]
