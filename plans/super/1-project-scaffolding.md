@@ -5,7 +5,7 @@
 - **Ticket:** [#1](https://github.com/wjduenow/SignalForge/issues/1)
 - **Branch:** `feature/1-scaffolding` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/1-scaffolding` (created via `bark`)
-- **Phase:** detailing
+- **Phase:** published (PR #14, awaiting approval)
 - **Sessions:** 1 (started 2026-04-27)
 - **Plan author:** Claude Code (Opus 4.7)
 
