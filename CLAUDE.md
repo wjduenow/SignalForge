@@ -50,3 +50,16 @@ When the first code goes in, prefer choices consistent with the README's stated 
 - **dbt-codegen** — rule-based YAML scaffolder. SignalForge *complements* it (codegen scaffolds; SignalForge drafts/prunes/grades). Don't duplicate codegen's rule-based generation.
 - **dbt-osmosis** — schema propagation; orthogonal concern, not a competitor.
 - **Recce** — PR-time data diff; complementary.
+
+
+## Beads (issue tracker, available)
+
+This repo has **bd (beads)** initialized for issue tracking. It is one tool among several — use it where it fits, not as the only path. The `/super-plan` workflow devolves stories into beads in its final phase; ad-hoc work doesn't have to.
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+bd prime              # Full command reference
+```
