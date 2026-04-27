@@ -11,7 +11,7 @@ SignalForge is pre-alpha and designing in the open. The differentiator is the pr
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e .[dev]
+pip install -e ".[dev]"   # quoted for zsh; bash also accepts this form
 ```
 
 Validate before pushing:

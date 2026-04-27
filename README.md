@@ -37,7 +37,7 @@ The grading layer reuses [clauditor](https://github.com/wjduenow/clauditor)'s LL
 
 > **Status (v0.1, in progress):** Not yet on PyPI. The CLI shape below is the
 > intended target — the CLI itself ships in a follow-up ticket of v0.1. Today
-> the package installs from a clone with `pip install -e .[dev]`.
+> the package installs from a clone with `pip install -e ".[dev]"`.
 
 ## Quick start
 
@@ -46,7 +46,7 @@ The grading layer reuses [clauditor](https://github.com/wjduenow/clauditor)'s LL
 > signalforge generate models/marts/customer_lifetime_value.sql
 > ```
 
-A first runnable version is targeted for v0.1 (single-model draft + warehouse prune, Snowflake adapter, CLI only).
+A first runnable version is targeted for v0.1 (single-model draft + warehouse prune, BigQuery adapter, CLI only).
 
 ## Roadmap
 
