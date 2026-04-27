@@ -1,0 +1,43 @@
+{
+  "skill_name": "review-agentskills-spec",
+  "description": "Eval spec for /review-agentskills-spec — audits agentskills.io spec drift vs clauditor's enforcement",
+  "test_args": "",
+  "assertions": [
+    {
+      "id": "min_length",
+      "type": "min_length",
+      "length": 800
+    },
+    {
+      "id": "mentions_agentskills",
+      "type": "contains",
+      "needle": "agentskills"
+    },
+    {
+      "id": "mentions_coverage_status",
+      "type": "regex",
+      "pattern": "matches|missing|drifted"
+    },
+    {
+      "id": "no_error",
+      "type": "not_contains",
+      "needle": "Error:"
+    }
+  ],
+  "grading_criteria": [
+    {
+      "id": "fetched_spec",
+      "criterion": "Did the skill successfully fetch and read the agentskills.io specification (not just guess at its contents)?"
+    },
+    {
+      "id": "coverage_table",
+      "criterion": "Does the output include a coverage inventory mapping spec rules to clauditor's current behavior, classifying each as matches/missing/drifted?"
+    },
+    {
+      "id": "actionable",
+      "criterion": "Are the identified gaps or drift items specific and actionable (not vague or generic)?"
+    }
+  ],
+  "grading_model": "claude-sonnet-4-6",
+  "timeout": 480
+}
