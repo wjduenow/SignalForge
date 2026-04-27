@@ -49,6 +49,7 @@ htmlcov/
 .claude/plugins/
 
 # Beads / Dolt (added by bd init)
+.beads/
 .dolt/
 *.db
 .beads-credential-key
