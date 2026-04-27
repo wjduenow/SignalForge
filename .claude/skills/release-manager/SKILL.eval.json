@@ -1,0 +1,45 @@
+{
+  "skill_name": "release-manager",
+  "description": "Eval spec for /release-manager — verifies pre-flight checks and version summary run cleanly",
+  "test_args": "test",
+  "allow_hang_heuristic": false,
+  "timeout": 120,
+  "assertions": [
+    {
+      "id": "non-trivial-output",
+      "type": "min_length",
+      "length": 200
+    },
+    {
+      "id": "runs-preflight",
+      "type": "contains",
+      "needle": "pre-flight"
+    },
+    {
+      "id": "identifies-test-release",
+      "type": "contains",
+      "needle": "test release"
+    },
+    {
+      "id": "shows-version",
+      "type": "regex",
+      "pattern": "\\d+\\.\\d+\\.\\d+"
+    },
+    {
+      "id": "no-traceback",
+      "type": "not_contains",
+      "needle": "Traceback"
+    }
+  ],
+  "grading_criteria": [
+    {
+      "id": "preflight-summary",
+      "criterion": "Does the output include a clear summary of which pre-flight checks ran and whether they passed or failed?"
+    },
+    {
+      "id": "version-shown-before-confirm",
+      "criterion": "Does the output show the current and release version before asking for confirmation, so the user can verify what will be published?"
+    }
+  ],
+  "grading_model": "claude-sonnet-4-6"
+}
