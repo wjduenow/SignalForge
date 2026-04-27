@@ -4,7 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-Pre-alpha. As of this writing the repo contains only `README.md` and `LICENSE` — no source, tests, or build configuration exist yet. Design is happening in the open on the `dev` branch; code is expected to land with the v0.1 milestone. When asked to "build" or "test" without scaffolding present, surface that fact rather than guessing at commands.
+Pre-alpha. Issue #1 (project scaffolding) shipped: `pyproject.toml` (Hatchling + src layout), `src/signalforge/__init__.py` with `__version__`, smoke test, ruff + pyright + pytest configs, GitHub Actions CI on PRs into `dev` and pushes to `main`, and `CONTRIBUTING.md`. Design is happening in the open on the `dev` branch; feature work (BigQuery adapter, LLM client, prune logic) lands next.
+
+## Validation
+
+Canonical validation command for this repo (run locally; CI runs the same four checks):
+
+```bash
+pip install -e ".[dev]" && ruff check . && ruff format --check . && pyright && pytest
+```
+
+Quote the `".[dev]"` — bare `.[dev]` is a glob in zsh.
 
 ## What SignalForge is
 
@@ -50,3 +60,16 @@ When the first code goes in, prefer choices consistent with the README's stated 
 - **dbt-codegen** — rule-based YAML scaffolder. SignalForge *complements* it (codegen scaffolds; SignalForge drafts/prunes/grades). Don't duplicate codegen's rule-based generation.
 - **dbt-osmosis** — schema propagation; orthogonal concern, not a competitor.
 - **Recce** — PR-time data diff; complementary.
+
+
+## Beads (issue tracker, available)
+
+This repo has **bd (beads)** initialized for issue tracking. It is one tool among several — use it where it fits, not as the only path. The `/super-plan` workflow devolves stories into beads in its final phase; ad-hoc work doesn't have to.
+
+```bash
+bd ready              # Find available work
+bd show <id>          # View issue details
+bd update <id> --claim  # Claim work
+bd close <id>         # Complete work
+bd prime              # Full command reference
+```
