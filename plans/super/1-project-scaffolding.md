@@ -4,8 +4,8 @@
 
 - **Ticket:** [#1](https://github.com/wjduenow/SignalForge/issues/1)
 - **Branch:** `feature/1-scaffolding` (off `dev`)
-- **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/1-scaffolding` (created via `bark`)
-- **Phase:** devolved (PR #14, bd epic `bd_1-scaffolding-mxk`)
+- **Worktree:** created via `bark new feature/1-scaffolding --from dev` (path is local-machine; not recorded here).
+- **Phase:** implemented (all 7 stories merged on `feature/1-scaffolding`; PR #14 ready for review; bd epic `bd_1-scaffolding-mxk` closed).
 - **Sessions:** 1 (started 2026-04-27)
 - **Plan author:** Claude Code (Opus 4.7)
 
@@ -82,7 +82,7 @@ Reviewed inline (no subagents) — the entire universe of code is the diff this 
 
 ### Phase 2 housekeeping note (informational, not blocking)
 
-- Bark's `bd init` ran against the original repo at `/home/wesd/Projects/SignalForge/.beads/` (not the worktree). Phase 7 must run from the original checkout, or re-init beads in the worktree. `.beads/` now ignored repo-wide via `.gitignore`.
+- Bark's `bd init` ran against the original (non-worktree) checkout's `.beads/` directory (not the worktree). Phase 7 turned out to work fine from any worktree because bd is worktree-aware via `bd context` — auto-discovers the canonical `.beads/` from any cwd inside the repo. `.beads/` now ignored repo-wide via `.gitignore`.
 
 ### Blockers
 
@@ -105,7 +105,7 @@ None. Eight `concern`s — all resolved through explicit choices in Phase 3 belo
 
 ## Detailed Breakdown
 
-Five implementation stories + Quality Gate + Patterns & Memory. Ordering follows the natural Python-package dependency chain (build foundation → tooling configs → tests → CI → docs). Validation command set by this work: `pip install -e .[dev] && ruff check . && pyright && pytest`.
+Five implementation stories + Quality Gate + Patterns & Memory. Ordering follows the natural Python-package dependency chain (build foundation → tooling configs → tests → CI → docs). Validation command set by this work (canonical recipe; CLAUDE.md §Validation is the source of truth): `pip install -e ".[dev]" && ruff check . && ruff format --check . && pyright && pytest`.
 
 ### US-001 — `pyproject.toml` foundation + src layout + `__version__`
 
@@ -185,11 +185,11 @@ Specific assertions:
 
 **Acceptance.**
 
-- `pytest` collects exactly 1 test and passes.
-- `pytest --collect-only` shows `tests/test_smoke.py::test_version_is_set` (or whatever the function is named).
-- Adding a bogus `@pytest.mark.does_not_exist` to the smoke test causes pytest to error out (proves `--strict-markers` is active).
+- `pytest` collects 3 tests and all pass.
+- `pytest --collect-only` shows `tests/test_smoke.py::test_version_is_non_empty_string`, `::test_version_matches_pep440_shape`, and `::test_import_has_no_error_chain`.
+- Adding a bogus `@pytest.mark.does_not_exist` to the smoke test causes pytest to *error* (not warn) at collection time. Note: under pytest 9.x this requires both `addopts = "-ra --strict-markers"` AND a separate `strict_markers = true` ini setting — `--strict-markers` in `addopts` does not propagate to `getini("strict_markers")`. See `.claude/rules/testing-signal.md`.
 
-**Done when.** `pytest` exits 0 with one passing test, and the strict-markers behavior is verified once locally before reverting the bogus marker.
+**Done when.** `pytest` exits 0 with three passing tests, and the strict-markers behavior is verified once locally before reverting the bogus marker.
 
 **Depends on.** US-001.
 
@@ -321,7 +321,7 @@ US-002, US-003, US-005 can run in parallel after US-001. US-004 waits on US-002+
 
 ## Beads Manifest
 
-Created 2026-04-27 via `bd create` + `bd link` from the worktree (bd is worktree-aware via `bd context` — auto-discovers the canonical `.beads/` at `/home/wesd/Projects/SignalForge/.beads/`; no symlink or env var needed).
+Created 2026-04-27 via `bd create` + `bd link` from the worktree (bd is worktree-aware via `bd context` — auto-discovers the canonical `.beads/` in the original (non-worktree) checkout; no symlink or env var needed).
 
 **Epic:** `bd_1-scaffolding-mxk` — *1: Project scaffolding (pyproject, src layout, ruff, pytest, CI)* (P1, `external-ref=gh-1`)
 

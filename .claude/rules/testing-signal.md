@@ -2,7 +2,7 @@
 
 Established by issue #1 scaffolding (DEC-010). Apply to every test in this repo.
 
-This rule encodes SignalForge's load-bearing principle (`CLAUDE.md` §1) into the test suite: a test that always passes is worse than no test, because it consumes review attention without catching anything.
+This rule encodes SignalForge's first architectural commitment (signal over volume) from `CLAUDE.md` into the test suite: a test that always passes is worse than no test, because it consumes review attention without catching anything.
 
 ## No `assert True`-shaped tests
 

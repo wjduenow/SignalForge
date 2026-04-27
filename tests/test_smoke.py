@@ -15,8 +15,10 @@ def test_version_matches_pep440_shape() -> None:
 
 
 def test_import_has_no_error_chain() -> None:
-    # Re-import to confirm the package is wired up via the wheel-target packages
-    # declaration in pyproject.toml — a broken src-layout would surface here.
+    # Re-import via importlib and assert the version matches the direct import
+    # — sanity check that the package resolves to the same module object regardless
+    # of import mechanism. (Editable installs go via .pth, not the wheel target;
+    # wheel packaging is verified at build time, not here.)
     import importlib
 
     module = importlib.import_module("signalforge")
