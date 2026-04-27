@@ -50,11 +50,17 @@ A first runnable version is targeted for v0.1 (single-model draft + warehouse pr
 
 | Version | Scope                                                                              |
 | ------- | ---------------------------------------------------------------------------------- |
-| v0.1    | Single-model draft + warehouse prune; Snowflake adapter; CLI only                  |
-| v0.2    | BigQuery and Postgres adapters; project-wide drift detection                       |
+| v0.1    | Single-model draft + warehouse prune; first warehouse adapter (BigQuery); CLI only |
+| v0.2    | Additional warehouse adapters (Snowflake, Postgres); project-wide drift detection  |
 | v0.3    | GitHub Action with PR comment integration                                          |
 | v0.4    | Rubric customization; organization-wide style profiles                             |
 | v1.0    | dbt Fusion engine compatibility; dbt MCP server consumption                        |
+
+The architecture is warehouse-agnostic — adapters plug in behind a thin
+sampling/profiling interface. BigQuery is the v0.1 target because of its
+generous query-bytes pricing for sampled reads and its first-class
+`INFORMATION_SCHEMA.JOBS` history for downstream cost analysis. Snowflake,
+Databricks, Postgres, and Redshift are all on the roadmap; PRs welcome.
 
 Detail is tracked in GitHub Issues against this repo.
 
