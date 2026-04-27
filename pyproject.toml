@@ -39,3 +39,9 @@ include = ["src", "tests"]
 pythonVersion = "3.11"
 typeCheckingMode = "standard"
 reportMissingImports = "error"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+minversion = "7.0"
+strict_markers = true
