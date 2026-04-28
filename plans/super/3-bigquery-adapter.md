@@ -5,7 +5,7 @@
 - **Ticket:** [#3](https://github.com/wjduenow/SignalForge/issues/3)
 - **Branch:** `feature/3-bigquery-adapter` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/3-bigquery-adapter` (created via `bark new feature/3-bigquery-adapter --from dev`)
-- **Phase:** detailing (Phase 1–3 complete; story breakdown drafted; awaiting user approval before Phase 5 publish)
+- **Phase:** devolved (epic `bd_1-scaffolding-8xk` + 14 tasks live; PR [#16](https://github.com/wjduenow/SignalForge/pull/16) draft)
 - **Sessions:** 1 (started 2026-04-27, refined and detailed 2026-04-28)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.1
@@ -701,8 +701,26 @@ Every story validated against the four `.claude/rules/*.md`:
 
 ## Beads Manifest
 
-*(awaiting devolve)*
+Devolved 2026-04-28. Epic + 14 tasks created via `bd create --parent ... --deps ...`. `bd ready` returns US-001 as the only initially-unblocked task; the rest unlock as predecessors close.
 
-## Beads Manifest
+- **Epic:** `bd_1-scaffolding-8xk` — *3: BigQuery warehouse adapter* (P2)
+- **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/3-bigquery-adapter`
+- **External ref:** `gh-3` ([#3](https://github.com/wjduenow/SignalForge/issues/3))
+- **Plan PR:** [#16](https://github.com/wjduenow/SignalForge/pull/16) (draft)
 
-*(awaiting devolve)*
+| Bead ID | Story | Priority | Depends on |
+| --- | --- | --- | --- |
+| `bd_1-scaffolding-8xk.1` | US-001 — Deps + pytest markers + addopts | P1 | — |
+| `bd_1-scaffolding-8xk.2` | US-002 — Test fixtures: dbt profiles | P1 | .1 |
+| `bd_1-scaffolding-8xk.3` | US-003 — Errors module | P1 | .1 |
+| `bd_1-scaffolding-8xk.4` | US-004 — Typed models module | P1 | .3 |
+| `bd_1-scaffolding-8xk.5` | US-005 — Profiles loader module | P1 | .2, .3, .4 |
+| `bd_1-scaffolding-8xk.6` | US-006 — WarehouseAdapter ABC + factory | P1 | .5 |
+| `bd_1-scaffolding-8xk.7` | US-007 — FakeBigQueryClient test infrastructure | P1 | .4 |
+| `bd_1-scaffolding-8xk.8` | US-008 — BigQueryAdapter implementation | P1 | .6, .7 |
+| `bd_1-scaffolding-8xk.9` | US-009 — Unit tests for warehouse subpackage | P1 | .3, .4, .5, .6, .7, .8 |
+| `bd_1-scaffolding-8xk.10` | US-010 — Integration tests (gated) | P2 | .8 |
+| `bd_1-scaffolding-8xk.11` | US-011 — Public API re-exports | P1 | .3, .4, .5, .6, .7, .8 |
+| `bd_1-scaffolding-8xk.12` | US-012 — Documentation: warehouse-adapter-ops.md | P2 | .8 |
+| `bd_1-scaffolding-8xk.13` | US-013 — Quality Gate | P2 | .1–.12 |
+| `bd_1-scaffolding-8xk.14` | US-014 — Patterns & Memory | P4 | .13 |
