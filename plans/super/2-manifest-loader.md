@@ -5,7 +5,7 @@
 - **Ticket:** [#2](https://github.com/wjduenow/SignalForge/issues/2)
 - **Branch:** `feature/2-manifest-loader` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/2-manifest-loader` (created via `bark new feature/2-manifest-loader --from dev`)
-- **Phase:** detailing (Phases 1–4 complete; awaiting user approval to publish PR)
+- **Phase:** devolved (epic `bd_1-scaffolding-28p` + 9 tasks live in `.beads/`; PR [#15](https://github.com/wjduenow/SignalForge/pull/15) draft)
 - **Sessions:** 1 (started 2026-04-27)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.1
@@ -500,4 +500,24 @@ Each story above respects the project's three rules:
 
 ## Beads Manifest
 
-*Phase 7 — pending.*
+Created 2026-04-27 from the worktree (`bd` is worktree-aware — auto-discovers the canonical `.beads/` in the original checkout; no symlink or env var needed). Database prefix `bd_1-scaffolding` is fixed from when bd was first initialised under #1; suffixes are unique per epic.
+
+**Epic:** `bd_1-scaffolding-28p` — *2: dbt manifest loader (read manifest.json + resolve a single model)* (P1, `external-ref=gh-2`)
+
+| Bead ID | Story | Priority | Blocked by |
+| --- | --- | --- | --- |
+| `bd_1-scaffolding-28p.1` | US-001 — pyproject deps (Pydantic v2 + dbt-core) + pytest markers | P1 | — (READY) |
+| `bd_1-scaffolding-28p.2` | US-002 — Test fixtures (tiny dbt project + 4 schema versions + medium + 5 error-path) | P2 | `.1` |
+| `bd_1-scaffolding-28p.3` | US-003 — Manifest errors module (TDD) | P2 | `.1` |
+| `bd_1-scaffolding-28p.4` | US-004 — Manifest Pydantic models module (TDD) | P2 | `.2`, `.3` |
+| `bd_1-scaffolding-28p.5` | US-005 — Manifest loader module (TDD; carries 7 regression tests) | P1 | `.4` |
+| `bd_1-scaffolding-28p.6` | US-006 — Public `__init__.py` re-exports + private-symbol guard | P3 | `.5` |
+| `bd_1-scaffolding-28p.7` | US-007 — Documentation (research index + ops guide + CONTRIBUTING update) | P3 | `.5` |
+| `bd_1-scaffolding-28p.8` | US-008 — Quality Gate (4× code-reviewer + CodeRabbit) | P2 | `.6`, `.7` |
+| `bd_1-scaffolding-28p.9` | US-009 — Patterns & Memory | P4 | `.8` |
+
+10 `blocks` edges. `bd ready` returns only `.1` (and the epic itself).
+
+**To start work:** `cd` to either the worktree (`/home/wesd/dev/worktrees/SignalForge/feature/2-manifest-loader`) or the canonical checkout (bd works from both), run `bd ready`, claim `.1` with `bd update bd_1-scaffolding-28p.1 --status=in_progress`, and follow the US-001 spec in this plan doc. After US-001 lands, `bd ready` will return `.2` and `.3` in parallel.
+
+**Note on Dolt sync:** Same caveat as #1 — bark configured a Dolt remote pointing at `git+ssh://git@github.com/wjduenow/SignalForge.git`, but GitHub does not host Dolt servers. Local `.beads/` is the only persistence; resolve when picking a long-term stance per [#13](https://github.com/wjduenow/SignalForge/issues/13).
