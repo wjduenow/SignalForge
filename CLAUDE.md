@@ -4,18 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-Pre-alpha. Two issues shipped:
+Pre-alpha. Three issues shipped:
 
 - **#1 (project scaffolding)** — `pyproject.toml` (Hatchling + src layout), `src/signalforge/__init__.py` with `__version__`, smoke test, ruff + pyright + pytest configs, GitHub Actions CI on PRs into `dev` and pushes to `main`, and `CONTRIBUTING.md`.
-- **#2 (manifest loader)** — `signalforge.manifest` subpackage: typed `Manifest` / `Model` (Pydantic v2), `load(project_dir, manifest_path=None) -> Manifest`, single-model resolver by `unique_id` or file path, schema-version tolerance v9–v12, symlink-hardened path canonicalisation, soft 200 MB warning. First stable v0.1 public API surface. See `docs/manifest-loader-ops.md` for the operational reference.
+- **#2 (manifest loader)** — `signalforge.manifest` subpackage: typed `Manifest` / `Model` (Pydantic v2), `load(project_dir, manifest_path=None) -> Manifest`, single-model resolver by `unique_id` or file path, schema-version tolerance v9–v12, symlink-hardened path canonicalisation, soft 200 MB warning. See `docs/manifest-loader-ops.md` for the operational reference.
+- **#3 (BigQuery warehouse adapter)** — `signalforge.warehouse` subpackage: `WarehouseAdapter` ABC + `from_profile` factory, `BigQueryAdapter` (the only v0.1 concrete adapter), `load_profile` for dbt `profiles.yml`, deterministic hash-mod sampling with fail-loud sizing checks, identifier-validation at construction time, `QueryJobConfig` defaults that pin `use_query_cache=False`. See `docs/warehouse-adapter-ops.md` for the operational reference.
 
-Design is happening in the open on the `dev` branch; remaining feature work (BigQuery adapter, LLM client, prune logic) lands next.
+Design is happening in the open on the `dev` branch; remaining feature work (LLM client, prune logic) lands next.
 
 ## Public API surface (v0.1)
 
 - `signalforge.manifest.load`, `Manifest`, `Model`, and the `ManifestError` hierarchy. Documented in `docs/manifest-loader-ops.md`.
+- `signalforge.warehouse.load_profile`, `DbtProfileTarget`, the `WarehouseAdapter` ABC + `from_profile` factory, the `BigQueryAdapter` concrete, the typed value objects (`Dialect`, `BIGQUERY_DIALECT`, `TableRef`, `PartitionFilter`, `ColumnStats`, `TestResult`), and the `WarehouseError` hierarchy. Documented in `docs/warehouse-adapter-ops.md`.
 
-Internals (`_loader_helpers`, etc.) are `_`-prefixed and not part of the public contract.
+Internals (`_loader_helpers`, `_sql_safety`, `_path_safety`, `_test_result_repr`, `adapters/_client`, etc.) are `_`-prefixed and not part of the public contract.
 
 ## Validation
 
