@@ -1,0 +1,32 @@
+# Drift-detector fixture. Mirrors every documented field for dbt-bigquery
+# 1.9's `oauth` method (https://docs.getdbt.com/docs/core/connect-data-platform/bigquery-setup).
+#
+# The drift test (US-005) constructs a one-off `StrictModel(BaseModel)` with
+# `extra="forbid"` and validates this fixture against it. If a future
+# dbt-bigquery release adds a new top-level field and someone mirrors it
+# here without also adding it to `signalforge.warehouse.profiles.DbtProfileTarget`,
+# the strict model fails to validate and the test trips loudly. (DEC-017.)
+#
+# Bump this file when dbt-bigquery releases a new minor version: rename to
+# `dbt_bigquery_drift_v1_X.yml`, refresh the fields, and update
+# `DbtProfileTarget` for any field SignalForge needs to surface.
+signalforge_test:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: my-gcp-project
+      dataset: analytics
+      threads: 4
+      location: US
+      priority: interactive
+      maximum_bytes_billed: 1000000000
+      timeout_seconds: 300
+      retries: 1
+      keyfile: null
+      impersonate_service_account: null
+      gcs_bucket: null
+      dataproc_region: null
+      compute_region: null
+      oauth_redirect_uri: null
