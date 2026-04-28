@@ -32,13 +32,14 @@ Design notes
   for manifest paths too: the invariant ("the loader must not read files
   outside the project tree") is identical, and a single error class keeps
   the catch surface small for callers.
-* **Lazy resolver indexes.** :func:`get_model` builds two indexes
-  (``unique_id -> Model`` and ``original_file_path -> Model``) on first
-  call and caches them on the :class:`Manifest` instance via
-  :func:`object.__setattr__` — the standard Pydantic v2 escape hatch for
-  frozen models. The loader also stashes the resolved ``project_dir`` on
-  the manifest the same way so file-path lookups can canonicalise inputs
-  without the caller passing it again.
+* **Lazy resolver indexes.** :func:`get_model` lazily builds and caches
+  path-based indexes (e.g. ``original_file_path -> Model``) on the
+  :class:`Manifest` instance via :func:`object.__setattr__` — the
+  standard Pydantic v2 escape hatch for frozen models. Unique-id lookup
+  uses ``manifest.nodes`` directly rather than a separate cached
+  ``unique_id -> Model`` index. The loader also stashes the resolved
+  ``project_dir`` on the manifest the same way so file-path lookups can
+  canonicalise inputs without the caller passing it again.
 """
 
 from __future__ import annotations

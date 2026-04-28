@@ -4,7 +4,7 @@
 
 - **Ticket:** [#2](https://github.com/wjduenow/SignalForge/issues/2)
 - **Branch:** `feature/2-manifest-loader` (off `dev`)
-- **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/2-manifest-loader` (created via `bark new feature/2-manifest-loader --from dev`)
+- **Worktree:** `<local-worktree>/SignalForge/feature/2-manifest-loader` (created via `bark new feature/2-manifest-loader --from dev`)
 - **Phase:** devolved (epic `bd_1-scaffolding-28p` + 9 tasks live in `.beads/`; PR [#15](https://github.com/wjduenow/SignalForge/pull/15) draft)
 - **Sessions:** 1 (started 2026-04-27)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
@@ -518,6 +518,6 @@ Created 2026-04-27 from the worktree (`bd` is worktree-aware — auto-discovers 
 
 10 `blocks` edges. `bd ready` returns only `.1` (and the epic itself).
 
-**To start work:** `cd` to either the worktree (`/home/wesd/dev/worktrees/SignalForge/feature/2-manifest-loader`) or the canonical checkout (bd works from both), run `bd ready`, claim `.1` with `bd update bd_1-scaffolding-28p.1 --status=in_progress`, and follow the US-001 spec in this plan doc. After US-001 lands, `bd ready` will return `.2` and `.3` in parallel.
+**To start work:** `cd` to either the local worktree or the canonical checkout (bd works from both — auto-discovers the canonical `.beads/`), run `bd ready`, claim `.1` with `bd update bd_1-scaffolding-28p.1 --status=in_progress`, and follow the US-001 spec in this plan doc. After US-001 lands, `bd ready` will return `.2` and `.3` in parallel.
 
 **Note on Dolt sync:** Same caveat as #1 — bark configured a Dolt remote pointing at `git+ssh://git@github.com/wjduenow/SignalForge.git`, but GitHub does not host Dolt servers. Local `.beads/` is the only persistence; resolve when picking a long-term stance per [#13](https://github.com/wjduenow/SignalForge/issues/13).

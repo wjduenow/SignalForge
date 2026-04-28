@@ -28,9 +28,9 @@ def _canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
             p = Path(input_path)
         resolved = p.resolve(strict=False)
     except RuntimeError as exc:        # symlink loop
-        raise PathOutsideProjectError(...) from exc
+        raise ModelPathOutsideProjectError(...) from exc
     if not resolved.is_relative_to(project_resolved):
-        raise PathOutsideProjectError(...)
+        raise ModelPathOutsideProjectError(...)
     return resolved
 ```
 
