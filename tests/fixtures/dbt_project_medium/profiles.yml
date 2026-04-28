@@ -1,0 +1,9 @@
+# Same DuckDB profile as dbt_project_small/profiles.yml — point DBT_PROFILES_DIR
+# at this directory before running `dbt parse`.
+signalforge_test:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: 'dev.duckdb'
+      threads: 1

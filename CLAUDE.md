@@ -4,7 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-Pre-alpha. Issue #1 (project scaffolding) shipped: `pyproject.toml` (Hatchling + src layout), `src/signalforge/__init__.py` with `__version__`, smoke test, ruff + pyright + pytest configs, GitHub Actions CI on PRs into `dev` and pushes to `main`, and `CONTRIBUTING.md`. Design is happening in the open on the `dev` branch; feature work (BigQuery adapter, LLM client, prune logic) lands next.
+Pre-alpha. Two issues shipped:
+
+- **#1 (project scaffolding)** — `pyproject.toml` (Hatchling + src layout), `src/signalforge/__init__.py` with `__version__`, smoke test, ruff + pyright + pytest configs, GitHub Actions CI on PRs into `dev` and pushes to `main`, and `CONTRIBUTING.md`.
+- **#2 (manifest loader)** — `signalforge.manifest` subpackage: typed `Manifest` / `Model` (Pydantic v2), `load(project_dir, manifest_path=None) -> Manifest`, single-model resolver by `unique_id` or file path, schema-version tolerance v9–v12, symlink-hardened path canonicalisation, soft 200 MB warning. First stable v0.1 public API surface. See `docs/manifest-loader-ops.md` for the operational reference.
+
+Design is happening in the open on the `dev` branch; remaining feature work (BigQuery adapter, LLM client, prune logic) lands next.
+
+## Public API surface (v0.1)
+
+- `signalforge.manifest.load`, `Manifest`, `Model`, and the `ManifestError` hierarchy. Documented in `docs/manifest-loader-ops.md`.
+
+Internals (`_loader_helpers`, etc.) are `_`-prefixed and not part of the public contract.
 
 ## Validation
 

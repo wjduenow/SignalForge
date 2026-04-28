@@ -26,6 +26,20 @@ To verify locally: temporarily decorate a test with `@pytest.mark.does_not_exist
 
 Do NOT create `tests/__init__.py`. Pytest's rootdir handles discovery for src layouts; an empty `__init__.py` masks import errors and makes failures harder to read.
 
+## Fixture regeneration via ephemeral `uvx`
+
+When a fixture's correctness depends on an external tool's output (dbt's `manifest.json`, etc.), commit the *generated* artefact and document a regeneration script that runs the tool via `uvx` (or `pipx run`) at a pinned version:
+
+```bash
+uvx --python 3.11 --from "dbt-duckdb==X.Y.*" --with "dbt-core==X.Y.*" dbt parse
+```
+
+Pin the tool version in dev-deps for the *latest* schema only — older versions are summoned ephemerally. Strip non-deterministic fields (`generated_at`, `invocation_id`, `user_id`, etc.) with `jq` before committing so the JSON is reproducible. Reference: `tests/fixtures/regenerate.sh` (issue #2).
+
+## Drift detection via one-off `extra="forbid"` model
+
+If a parser uses `extra="ignore"` in production (forward-compat), pair it with a test that constructs a one-off `StrictModel(BaseModel)` with `extra="forbid"` and validates a known-current fixture against it. Adding a key to the fixture without updating the model breaks the test loudly. Reference: `tests/manifest/test_models.py::test_drift_detector_extra_forbid`.
+
 ## Reference
 
-`plans/super/1-project-scaffolding.md` — DEC-010. `tests/test_smoke.py` — current implementation. The `strict_markers = true` ini setting was discovered during US-003 of issue #1.
+`plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh` — current implementations.

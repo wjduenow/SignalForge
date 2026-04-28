@@ -20,6 +20,18 @@ Validate before pushing:
 ruff check . && ruff format --check . && pyright && pytest
 ```
 
+## Test markers
+
+Tests are tagged with `@pytest.mark.{unit, integration, error}` (declared in
+`pyproject.toml`). Run a single category with `pytest -m unit`. New tests
+SHOULD use a marker; bare tests are fine for true smoke checks.
+
+## Regenerating fixtures
+
+Fixture regen lives in [`tests/fixtures/README.md`](tests/fixtures/README.md).
+v12 is a one-liner against the in-`[dev]` `dbt-core` install; older schemas
+(v9 / v10 / v11) use ephemeral `uvx` invocations.
+
 ## License
 
 Contributions are Apache-2.0. The repo-level [LICENSE](LICENSE) covers it — do not add per-file license preambles.
