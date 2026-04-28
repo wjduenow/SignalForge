@@ -43,3 +43,27 @@ File issues at https://github.com/wjduenow/SignalForge/issues. v0.1 is design-in
 ## Out of scope for this iteration
 
 `bark`, `/super-plan`, and `bd` are internal tooling, not contributor expectations. Tracked under #13.
+
+## BigQuery integration tests
+
+A small set of tests under `tests/warehouse/test_bigquery_integration.py`
+exercises `BigQueryAdapter` against the real `bigquery-public-data`
+dataset. They are skipped by default — both via `@pytest.mark.bigquery`
+(filtered out by `addopts = -m 'not bigquery'`) and via `skipif(not
+SF_RUN_BQ)`.
+
+### Running them locally
+
+1. Configure Application Default Credentials:
+   ```bash
+   gcloud auth application-default login
+   ```
+
+2. Run with the gate:
+   ```bash
+   SF_RUN_BQ=1 pytest -m bigquery
+   ```
+
+The tests query `bigquery-public-data.samples.shakespeare` (164K rows,
+free under the 1 TB/month BigQuery tier). They are maintainer-only for
+v0.1; no CI job runs them.
