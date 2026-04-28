@@ -71,3 +71,13 @@ docs/temp/
 Read order for a builder evaluating viability: opportunity-report → pain-deep-dive → ai-tools-deep-dive → tool-design-sketches → technical-surface.
 
 Read order for a builder ready to start: tool-design-sketches (Forge section) → technical-surface → opportunity-report Section 4.
+
+## Warehouse adapter
+
+The v0.1 BigQuery adapter operationalises the sampling/profiling/test-runner
+seam this research argued for. Implementer references:
+
+- [`../warehouse-adapter-ops.md`](../warehouse-adapter-ops.md) — operations
+  guide (ADC setup, cost defaults, sampling strategy, typed-error reference).
+- [`../../plans/super/3-bigquery-adapter.md`](../../plans/super/3-bigquery-adapter.md)
+  — design record (DEC-001 … DEC-027) backing the ops guide.
