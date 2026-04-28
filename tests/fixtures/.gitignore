@@ -1,0 +1,23 @@
+# Fixture-local ignores.
+#
+# When `dbt parse` (or `regenerate.sh`) runs against the small/medium projects,
+# it leaves behind machine-local artifacts we never want committed:
+#   - `.user.yml`      — random UUID identifying the running user/host
+#   - `logs/`          — dbt's own log directory
+#   - `dev.duckdb`     — the empty DuckDB file from the test profile
+#   - target/manifest.json — the un-scrubbed, timestamped manifest
+#                            (regenerate.sh produces manifest_v<N>.json from it)
+#   - target/{partial_parse.msgpack,perf_info.json,semantic_manifest.json,...}
+#
+# We commit ONLY the scrubbed `target/manifest_v*.json` files.
+
+dbt_project_*/.user.yml
+dbt_project_*/logs/
+dbt_project_*/dev.duckdb
+dbt_project_*/target/manifest.json
+dbt_project_*/target/partial_parse.msgpack
+dbt_project_*/target/perf_info.json
+dbt_project_*/target/semantic_manifest.json
+dbt_project_*/target/graph.gpickle
+dbt_project_*/target/graph_summary.json
+dbt_project_*/target/run_results.json
