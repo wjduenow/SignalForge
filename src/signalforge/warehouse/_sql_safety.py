@@ -16,14 +16,16 @@ unquoted dataset/table/column names anyway."""
 
 # Google's GCP project ID rules: 6-30 chars, must start with a lowercase
 # letter, may contain lowercase letters, digits, or hyphens, and may not
-# end with a hyphen. Legacy "domain-scoped" project IDs of the shape
-# ``example.com:my-project`` are also accepted via the optional
-# ``<org>:<project>`` prefix. The strict identifier form is also accepted
-# as a fallback so existing test fixtures (``fake_project``) and uppercase
-# legacy IDs remain valid.
+# end with a hyphen. The strict identifier form is also accepted as a
+# fallback (with the same 6-30 length bound) so existing test fixtures
+# (``fake_project``) and uppercase legacy IDs remain valid.
+#
+# Legacy "domain-scoped" project IDs of the shape ``example.com:my-project``
+# are NOT supported in v0.1: the regex would reject the dot, AND the
+# ``_quote`` SQL renderer in ``adapters/bigquery.py`` does not split on the
+# colon. Tracked as a v0.2 follow-up in ``docs/warehouse-adapter-ops.md``.
 _PROJECT_RE = re.compile(
-    r"^[A-Za-z][A-Za-z0-9-]{4,28}[A-Za-z0-9]"
-    r"(?::[A-Za-z][A-Za-z0-9_-]*)?$|^[A-Za-z_][A-Za-z0-9_]*$"
+    r"^[A-Za-z][A-Za-z0-9-]{4,28}[A-Za-z0-9]$|^[A-Za-z_][A-Za-z0-9_]{4,28}[A-Za-z0-9_]$"
 )
 
 
@@ -50,10 +52,10 @@ def validate_project_id(field: str, value: str) -> None:
 
     GCP project IDs use a separate grammar from BigQuery's other
     identifiers: 6-30 chars, lowercase-letter start, hyphens permitted,
-    must not end with a hyphen, with an optional legacy domain-scoped
-    ``<org>:<project>`` prefix. The strict ``[A-Za-z_][A-Za-z0-9_]*``
-    identifier form is also accepted as a fallback so existing fixtures
-    using underscored fake IDs continue to validate.
+    must not end with a hyphen. A strict-identifier fallback (also
+    bounded to 6-30 chars) is accepted so existing fixtures using
+    underscored fake IDs continue to validate. Legacy domain-scoped IDs
+    (``example.com:my-project``) are deferred to v0.2.
 
     Adversarial inputs (whitespace, quoting, SQL fragments) are rejected.
     """

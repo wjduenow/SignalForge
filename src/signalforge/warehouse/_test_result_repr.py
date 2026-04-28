@@ -30,14 +30,20 @@ def _render_value(v: Any, bq_type: str) -> str:
         return "NULL"
     bq_type_upper = bq_type.upper()
     if bq_type_upper in ("TIMESTAMP", "DATETIME") and isinstance(v, (datetime, str)):
-        return f"{bq_type_upper}('{_truncate(str(v))}')"
+        return f"{bq_type_upper}('{_escape_sql_literal(_truncate(str(v)))}')"
     if bq_type_upper == "DATE" and isinstance(v, (date, str)):
-        return f"DATE('{_truncate(str(v))}')"
+        return f"DATE('{_escape_sql_literal(_truncate(str(v)))}')"
     if isinstance(v, str):
-        return f"'{_truncate(v)}'"
+        return f"'{_escape_sql_literal(_truncate(v))}'"
     if isinstance(v, bool):
         return "TRUE" if v else "FALSE"
     return _truncate(repr(v))
+
+
+def _escape_sql_literal(s: str) -> str:
+    """Escape ``\\`` and ``'`` so the rendered fragment is safe to paste
+    into a BigQuery single-quoted string literal."""
+    return s.replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _truncate(s: str) -> str:

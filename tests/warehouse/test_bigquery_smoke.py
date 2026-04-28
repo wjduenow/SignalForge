@@ -130,7 +130,7 @@ def test_render_partition_filter_escapes_backslash() -> None:
 def test_column_stats_outside_context_raises_runtime_error() -> None:
     """DEC-025: ``column_stats`` must be called inside ``with adapter:``."""
     adapter = _make_adapter()
-    ref = TableRef(project="p", dataset="d", name="t")
+    ref = TableRef(project="proj01", dataset="d", name="t")
 
     with pytest.raises(RuntimeError, match="column_stats must be called inside"):
         adapter.column_stats(ref, "x")
