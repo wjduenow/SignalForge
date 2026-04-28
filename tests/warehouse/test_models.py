@@ -73,9 +73,21 @@ def test_tableref_rejects_invalid_name() -> None:
 @pytest.mark.unit
 @pytest.mark.error
 def test_tableref_rejects_invalid_project() -> None:
-    """Hyphenated project string fails the DEC-013 identifier regex."""
+    """Adversarial project string (whitespace + ``!``) fails the project regex.
+
+    Hyphens are intentionally allowed (real GCP project IDs use them); the
+    rejection set is the SQL-injection-shaped inputs.
+    """
     with pytest.raises(InvalidIdentifierError):
-        TableRef(project="bad-project", dataset="d", name="t")
+        TableRef(project="bad project!", dataset="d", name="t")
+
+
+@pytest.mark.unit
+def test_tableref_accepts_hyphenated_gcp_project() -> None:
+    """Real GCP project IDs use hyphens (``my-co-prod-12345``); the project
+    regex must accept them. Closes the QG-of-US-013 finding-1 gap."""
+    ref = TableRef(project="my-co-prod-12345", dataset="d", name="t")
+    assert ref.project == "my-co-prod-12345"
 
 
 @pytest.mark.unit

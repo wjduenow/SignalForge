@@ -99,10 +99,16 @@ class TableRef:
 
     def __post_init__(self) -> None:
         # Validate non-None fields (project is allowed to be None — DEC-027).
-        from signalforge.warehouse._sql_safety import validate_identifier
+        # ``project`` follows GCP's hyphen-permissive grammar; ``dataset``
+        # and ``name`` use the strict identifier regex (BigQuery rejects
+        # hyphens in unquoted dataset / table names anyway).
+        from signalforge.warehouse._sql_safety import (
+            validate_identifier,
+            validate_project_id,
+        )
 
         if self.project is not None:
-            validate_identifier("project", self.project)
+            validate_project_id("project", self.project)
         validate_identifier("dataset", self.dataset)
         validate_identifier("name", self.name)
 

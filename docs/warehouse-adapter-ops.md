@@ -108,18 +108,20 @@ The BigQuery adapter is opinionated about cost on every query.
   v0.2 may re-enable caching behind an explicit opt-in; in v0.1 it is
   unconditionally off.
 - **BigQuery job labels are auto-set** on every query:
-  - `signalforge_stage` — the pipeline stage that issued the query
-    (e.g. `column_stats`, `sample_rows`, `run_test_sql`).
+  - `signalforge_stage` — the pipeline stage that issued the query.
+    Values are `warehouse_sample` (from `sample_rows`), `warehouse_stats`
+    (from `column_stats`), and `warehouse_test` (from `run_test_sql`).
   - `signalforge_version` — the package version (with `.` rewritten to
     `_` to satisfy BigQuery's label-character constraint).
 
   Both are filterable in `INFORMATION_SCHEMA.JOBS_BY_PROJECT` for v0.2
-  cost analysis, e.g.:
+  cost analysis. Stage labels are `warehouse_sample`, `warehouse_stats`,
+  and `warehouse_test` (one per pipeline stage that issues a query):
 
   ```sql
   SELECT job_id, total_bytes_billed
   FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
-  WHERE labels.signalforge_stage = 'sample_rows'
+  WHERE labels.signalforge_stage = 'warehouse_sample'
   ```
 
 ## Sampling strategy
@@ -132,8 +134,14 @@ The BigQuery adapter is opinionated about cost on every query.
 ```sql
 SELECT * FROM <quoted> AS t
 WHERE MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), bucket) < 1
+ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(t))
 LIMIT n
 ```
+
+The trailing `ORDER BY` makes the `LIMIT` truncation deterministic when
+the bucket filter retains more than `n` rows; without it BigQuery's
+`LIMIT` picks an arbitrary subset and breaks the same-input →
+same-output prune contract.
 
 `bucket` is sized from `Table.num_rows` so the expected sample size lands
 near `n`. The hash-mod approach is deterministic across runs, works on
@@ -190,15 +198,21 @@ is silent on the user's side and very loud on the bill.
 ## `column_stats` access pattern
 
 `adapter.column_stats(table, column)` returns a `ColumnStats` object
-with `count`, `distinct`, `nulls`, `min`, `max`, and `data_type`. To
-keep query count down, calls are **batched per table** (DEC-025): the
-adapter accumulates references inside the active `with adapter:` block
-and flushes them as a single SQL query the first time any field of any
-returned `ColumnStats` is read.
+with `count`, `distinct`, `nulls`, `min`, `max`, and `data_type`. The
+call MUST be inside a `with adapter:` block (DEC-025); calling it
+outside one raises `RuntimeError`.
 
-This means `column_stats` MUST be called inside a `with adapter:` block
-— calling it outside one raises `RuntimeError`. The recommended pattern
-is to collect references first, then read fields:
+**Flush semantics in v0.1.** Inside an active `with adapter:` block,
+each call to `adapter.column_stats(table, col)` issues one BigQuery
+query for that column. Calls are not lazily batched in v0.1 — DEC-008
+anticipated a lazy proxy on `ColumnStats`, but the v0.1 implementation
+flushes eagerly so the returned object is a fully-populated typed
+value. v0.2 will land the lazy proxy and batch all pending columns of
+a table into a single query when any field of any returned
+`ColumnStats` is read.
+
+Use the recommended pattern below to keep call sites cheap to refactor
+when the lazy form lands:
 
 ```python
 with WarehouseAdapter.from_profile(profile) as adapter:
@@ -207,9 +221,9 @@ with WarehouseAdapter.from_profile(profile) as adapter:
         print(col, stats.count, stats.distinct, stats.nulls)
 ```
 
-The first `stats.count` read flushes a single batched query covering
-all three columns; subsequent reads on the same table are served from
-the result cached on the references.
+In v0.1 this issues three queries (one per `column_stats` call); v0.2
+will collapse all three into a single batched query at first field
+read.
 
 **Complex types (DEC-016).** For BigQuery types where ordering is not
 meaningful — `GEOGRAPHY`, `JSON`, `BYTES`, `ARRAY<...>`, `STRUCT<...>`,
@@ -291,3 +305,17 @@ on a `↳ Remediation:` line by `__str__`.
 | `SamplingError`                          | Parent for sampling-time failures; never raised directly. Catch it to handle both subclasses uniformly.  | _(none)_                                             | Inspect the subclass remediation; fail-loud is preferred to silent over-spend.                   |
 | `SamplingRequiresPartitionFilterError`   | `Table.num_rows >= 100_000_000` and no `PartitionFilter` was supplied.                                   | `table`, `num_rows`                                  | Pass a `PartitionFilter` to scope the sample.                                                    |
 | `UnknownTableSizeError`                  | `Table.num_rows` is `None`/`0` and no `PartitionFilter` was supplied.                                    | `table`                                              | Provide `partition_filter`, or call `adapter.refresh_table_metadata` once `num_rows` is populated. |
+
+## v0.2 follow-ups
+
+Known gaps that ship in a later release; tracked here so users can plan
+around them and maintainers can keep the doc honest as scope changes.
+
+- **Lazy `column_stats` proxy.** v0.1 flushes one query per
+  `column_stats` call (see [§`column_stats` access
+  pattern](#column_stats-access-pattern)). v0.2 will land a proxy on
+  `ColumnStats` so the queued columns of a table flush as a single
+  batched query at first field read.
+- **GCP project-ID grammar.** `TableRef.project` accepts the
+  hyphen-permissive GCP project-ID grammar (e.g. `my-co-prod-12345`).
+  Shipped in the QG of US-013.

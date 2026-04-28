@@ -88,14 +88,43 @@ def test_render_partition_filter_date_emits_date() -> None:
 
 
 def test_render_partition_filter_str_escapes_single_quotes() -> None:
-    """``str`` partition values should be single-quote-escaped (``'``→``''``)
-    so adversarial tenant ids cannot smuggle SQL fragments (DEC-014)."""
+    """``str`` partition values must escape both ``\\`` and ``'`` for safe
+    inclusion in a BigQuery single-quoted string literal (DEC-014). The
+    backslash escape runs first so the subsequent ``'``→``\\'`` pass cannot
+    be undone by an adversarial trailing ``\\``."""
     adapter = _make_adapter()
     pf = PartitionFilter(column="tenant", op="=", value="o'brien")
 
     rendered = adapter._render_partition_filter(pf)
 
-    assert rendered == "`tenant` = 'o''brien'"
+    # BQ standard SQL accepts ``\'`` inside single-quoted literals.
+    assert rendered == r"`tenant` = 'o\'brien'"
+
+
+def test_render_partition_filter_escapes_backslash() -> None:
+    """An adversarial value ending in ``\\'`` must not terminate the BQ
+    string literal early. The backslash gets doubled so the trailing
+    ``'`` is then independently escaped to ``\\'``; the resulting literal
+    has no unescaped ``'`` between the opening and closing quotes."""
+    adapter = _make_adapter()
+    pf = PartitionFilter(column="c", op="=", value=r"x\' OR 1=1 --")
+
+    rendered = adapter._render_partition_filter(pf)
+
+    # Strip the column / op prefix so we can reason about the literal alone.
+    literal = rendered.split(" = ", 1)[1]
+    assert literal.startswith("'")
+    assert literal.endswith("'")
+    inner = literal[1:-1]
+    # Every ``'`` inside the literal must be backslash-escaped.
+    i = 0
+    while i < len(inner):
+        if inner[i] == "\\":
+            # Skip the escape character + the escaped char.
+            i += 2
+            continue
+        assert inner[i] != "'", f"unescaped single quote at index {i} of {literal!r}"
+        i += 1
 
 
 def test_column_stats_outside_context_raises_runtime_error() -> None:
