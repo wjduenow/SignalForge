@@ -271,6 +271,22 @@ class BigQueryAdapter(WarehouseAdapter):
             rendered = f"'{escape_bq_string_literal(str(pf.value))}'"
         return f"`{pf.column}` {pf.op} {rendered}"
 
+    def refresh_table_metadata(self, table: TableRef) -> None:
+        """Drop any cached ``Table`` metadata for ``table``.
+
+        Useful when an :class:`UnknownTableSizeError` was raised because
+        the table's ``num_rows`` was stale (e.g. the table was just
+        materialised) — call this and retry the failing operation
+        without leaving and re-entering the ``with adapter:`` block.
+
+        No-op outside an active context (when there is no cache to
+        invalidate). Does not refetch — the next call to ``_get_table``
+        will repopulate.
+        """
+        cache = self._table_metadata_cache
+        if cache is not None:
+            cache.pop(table, None)
+
     def _get_table(self, table: TableRef) -> Any:
         """Return ``Table`` metadata, caching inside an active context."""
         cache = self._table_metadata_cache

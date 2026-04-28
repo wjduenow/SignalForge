@@ -716,6 +716,50 @@ def test_context_manager_enter_returns_self(adapter: BigQueryAdapter) -> None:
         assert a is adapter
 
 
+def test_refresh_table_metadata_drops_cache_entry(
+    adapter: BigQueryAdapter,
+    fake_client: FakeBigQueryClient,
+    table_ref: TableRef,
+    shakespeare_table: FakeTable,
+) -> None:
+    """``refresh_table_metadata`` invalidates one entry; the next call
+    re-fetches via ``get_table``. Backs the user-facing remediation in
+    ``UnknownTableSizeError.default_remediation``.
+    """
+    fake_client.expect_get_table(ref=table_ref, returns=shakespeare_table)
+    fake_client.expect_query(matching=r"FARM_FINGERPRINT", returns=[{"x": 1}])
+    fake_client.expect_get_table(ref=table_ref, returns=shakespeare_table)
+    fake_client.expect_query(matching=r"FARM_FINGERPRINT", returns=[{"x": 2}])
+
+    with adapter:
+        adapter.sample_rows(table_ref, n=10)
+        # First sample populated the cache; refresh should drop it,
+        # forcing the second sample to consume the second get_table.
+        assert adapter._table_metadata_cache is not None
+        assert table_ref in adapter._table_metadata_cache
+
+        adapter.refresh_table_metadata(table_ref)
+
+        assert table_ref not in adapter._table_metadata_cache
+        adapter.sample_rows(table_ref, n=10)
+
+    # All four expectations consumed — second get_table was needed.
+    fake_client.assert_all_expectations_met()
+
+
+def test_refresh_table_metadata_outside_context_is_noop(
+    adapter: BigQueryAdapter,
+    table_ref: TableRef,
+) -> None:
+    """Calling outside ``with adapter:`` is a safe no-op (no cache to invalidate)."""
+    # Cache is None outside context.
+    assert adapter._table_metadata_cache is None
+
+    adapter.refresh_table_metadata(table_ref)  # should not raise
+
+    assert adapter._table_metadata_cache is None
+
+
 def test_context_manager_exit_clears_caches(
     adapter: BigQueryAdapter,
     fake_client: FakeBigQueryClient,
