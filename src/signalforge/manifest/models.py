@@ -24,6 +24,8 @@ Design commitments:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -174,3 +176,31 @@ class Manifest(BaseModel):
     metadata: dict[str, Any]
     nodes: dict[str, Model] = Field(default_factory=dict)
     disabled: dict[str, list[Model]] = Field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # Thin method wrappers — delegate to free functions in ``loader.py``.
+    # Deferred imports avoid the ``models <-> loader`` circular dep.
+    # ------------------------------------------------------------------
+
+    def get_model(self, key: str | Path) -> Model:
+        """Resolve a model by ``unique_id`` (``"model.*"``) or by file path.
+
+        Delegates to :func:`signalforge.manifest.loader.get_model`. See
+        that function for the full error contract.
+        """
+        from signalforge.manifest.loader import get_model as _get
+
+        return _get(self, key)
+
+    def iter_models(self) -> Iterator[Model]:
+        """Iterate over enabled (``resource_type == "model"``) nodes."""
+        from signalforge.manifest.loader import iter_models as _iter
+
+        return _iter(self)
+
+    @property
+    def schema_version(self) -> str:
+        """Return the manifest's ``metadata.dbt_schema_version`` URL string."""
+        from signalforge.manifest.loader import schema_version as _v
+
+        return _v(self)
