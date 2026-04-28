@@ -127,6 +127,25 @@ def test_render_partition_filter_escapes_backslash() -> None:
         i += 1
 
 
+def test_render_partition_filter_escapes_newlines_and_tabs() -> None:
+    """Newline / CR / tab in a value must be escaped — BQ rejects raw
+    control chars inside single-quoted literals."""
+    adapter = _make_adapter()
+    pf = PartitionFilter(column="c", op="=", value="a\nb\tc\rd")
+
+    rendered = adapter._render_partition_filter(pf)
+
+    # No raw control characters survive into the rendered SQL.
+    literal = rendered.split(" = ", 1)[1]
+    assert "\n" not in literal
+    assert "\r" not in literal
+    assert "\t" not in literal
+    # The escape sequences are present as backslash-letter pairs.
+    assert r"\n" in literal
+    assert r"\r" in literal
+    assert r"\t" in literal
+
+
 def test_column_stats_outside_context_raises_runtime_error() -> None:
     """DEC-025: ``column_stats`` must be called inside ``with adapter:``."""
     adapter = _make_adapter()

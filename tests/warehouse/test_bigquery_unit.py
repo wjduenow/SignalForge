@@ -739,6 +739,37 @@ def test_context_manager_exit_clears_caches(
     assert adapter._column_stats_results is None
 
 
+def test_context_manager_exit_clears_caches_even_if_flush_raises(
+    adapter: BigQueryAdapter,
+    fake_client: FakeBigQueryClient,
+    table_ref: TableRef,
+    shakespeare_table: FakeTable,
+) -> None:
+    """A flush failure during clean exit must NOT leave the adapter in a
+    half-cleaned state — the next ``with`` block must start from empty
+    caches (DEC-025).
+    """
+    # Seed a pending column_stats batch that will fail to flush at exit
+    # because the get_table expectation needed by the flush is missing.
+    fake_client.expect_get_table(ref=table_ref, returns=shakespeare_table)
+    fake_client.expect_query(matching=r"FARM_FINGERPRINT", returns=[{"x": 1}])
+
+    with pytest.raises(AssertionError), adapter:  # noqa: PT012
+        adapter.sample_rows(table_ref, n=10)
+        # Queue a column_stats request whose flush will fail because
+        # no get_table / query expectations are registered for it.
+        assert adapter._column_stats_pending is not None
+        adapter._column_stats_pending[table_ref] = ["nonexistent_col"]
+        # __exit__ tries to flush; FakeBigQueryClient raises
+        # AssertionError on unexpected calls, which propagates because
+        # exc_type is None on clean exit.
+
+    # Despite the flush raising, the cleanup ran in the finally block.
+    assert adapter._table_metadata_cache is None
+    assert adapter._column_stats_pending is None
+    assert adapter._column_stats_results is None
+
+
 def test_context_manager_exit_swallows_flush_errors_during_user_exception(
     adapter: BigQueryAdapter,
     fake_client: FakeBigQueryClient,

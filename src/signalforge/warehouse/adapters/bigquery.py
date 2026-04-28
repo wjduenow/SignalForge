@@ -182,21 +182,24 @@ class BigQueryAdapter(WarehouseAdapter):
         # Flush any still-pending column_stats batches so the results dict
         # is populated for any caller still holding a returned ColumnStats
         # reference. If we're already unwinding a user exception, swallow
-        # any flush errors so we don't mask the original.
-        pending = self._column_stats_pending or {}
-        for table in list(pending.keys()):
-            if not pending[table]:
-                continue
-            try:
-                self._flush_column_stats_batch(table)
-            except Exception:
-                if exc_type is None:
-                    raise
-        # Conservative cache invalidation (DEC-025): a fresh ``with`` block
-        # re-fetches metadata, which is the safer default.
-        self._table_metadata_cache = None
-        self._column_stats_pending = None
-        self._column_stats_results = None
+        # any flush errors so we don't mask the original. Cache cleanup
+        # runs in ``finally`` so a failing flush during a clean exit
+        # cannot leave the adapter in a half-cleaned state — the next
+        # ``with`` block must start from a known empty cache (DEC-025).
+        try:
+            pending = self._column_stats_pending or {}
+            for table in list(pending.keys()):
+                if not pending[table]:
+                    continue
+                try:
+                    self._flush_column_stats_batch(table)
+                except Exception:
+                    if exc_type is None:
+                        raise
+        finally:
+            self._table_metadata_cache = None
+            self._column_stats_pending = None
+            self._column_stats_results = None
 
     # ------------------------------------------------------------------
     # Public dialect surface.
@@ -248,17 +251,14 @@ class BigQueryAdapter(WarehouseAdapter):
         """Render a :class:`PartitionFilter` to a SQL fragment (DEC-014).
 
         ``datetime`` → ``TIMESTAMP('…')``; ``date`` → ``DATE('…')``;
-        ``str`` is escaped for safe inclusion inside a single-quoted
-        BigQuery string literal. The column name is already
-        DEC-013-validated by :class:`PartitionFilter`'s ``__post_init__``.
+        ``str`` is escaped via :func:`escape_bq_string_literal` for safe
+        inclusion inside a single-quoted BigQuery string literal. The
+        column name is already DEC-013-validated by
+        :class:`PartitionFilter`'s ``__post_init__``.
 
-        BigQuery's standard SQL treats ``\\`` as the escape character
-        inside single-quoted string literals, so an adversarial value
-        ending in ``\\`` would otherwise terminate the literal early
-        (``'x\\' OR 1=1 --'`` becomes a parser-level escape). The
-        backslash is escaped first so the subsequent quote-escape pass
-        cannot be undone, then ``'`` is escaped via ``\\'`` (which BQ's
-        standard SQL accepts inside single-quoted literals).
+        ``escape_bq_string_literal`` handles backslash, single-quote,
+        newline, carriage return, tab, and NUL — the full set BigQuery
+        either escapes inside single-quoted literals or rejects.
         """
         # ``datetime`` is a subclass of ``date``, so check it first.
         if isinstance(pf.value, datetime):
@@ -266,10 +266,9 @@ class BigQueryAdapter(WarehouseAdapter):
         elif isinstance(pf.value, date):
             rendered = f"DATE('{pf.value.isoformat()}')"
         else:
-            # Order matters: escape ``\`` first so the subsequent quote
-            # escape cannot produce an unintended ``\\'`` sequence.
-            escaped = str(pf.value).replace("\\", "\\\\").replace("'", "\\'")
-            rendered = f"'{escaped}'"
+            from signalforge.warehouse._sql_safety import escape_bq_string_literal
+
+            rendered = f"'{escape_bq_string_literal(str(pf.value))}'"
         return f"`{pf.column}` {pf.op} {rendered}"
 
     def _get_table(self, table: TableRef) -> Any:

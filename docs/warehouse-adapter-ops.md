@@ -319,3 +319,14 @@ around them and maintainers can keep the doc honest as scope changes.
 - **GCP project-ID grammar.** `TableRef.project` accepts the
   hyphen-permissive GCP project-ID grammar (e.g. `my-co-prod-12345`).
   Shipped in the QG of US-013.
+- **Legacy domain-scoped project IDs.** v0.1 rejects
+  `example.com:my-project` style IDs (Google Workspace tenants
+  pre-2014). The fix needs both a regex update *and* a `_quote()` change
+  to render the colon outside the backtick group. Defer to v0.2 with
+  proper round-trip tests against an actual domain-scoped project.
+- **Drift detector for `DbtProfileTarget`.** v0.1 validates a
+  hand-curated fixture against a hand-curated `StrictModel` — both
+  drift together if a maintainer updates one without the other. v0.2
+  will regenerate `dbt_bigquery_drift_v1_X.yml` from a pinned
+  `dbt-bigquery==1.X.*` release via `uvx`, mirroring the manifest
+  fixture regeneration pattern from issue #2's `tests/fixtures/regenerate.sh`.
