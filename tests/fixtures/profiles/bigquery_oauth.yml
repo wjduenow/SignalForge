@@ -1,0 +1,13 @@
+# Minimal valid ADC (Application Default Credentials) profile for BigQuery.
+# This is the v0.1 happy path: `method: oauth` means dbt-bigquery falls
+# through to ADC, which is what `gcloud auth application-default login`
+# provisions. Consumed by `tests/warehouse/test_profiles.py` (US-005).
+signalforge_test:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: my-gcp-project
+      dataset: analytics
+      location: US

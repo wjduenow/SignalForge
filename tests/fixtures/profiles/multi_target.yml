@@ -1,0 +1,19 @@
+# Two-target profile. The default `target:` field selects `dev`; passing
+# `target="prod"` to `load_profile` must override that selection and return
+# the `prod` outputs entry instead. Drives the target-override test in
+# US-005.
+signalforge_test:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: my-gcp-project-dev
+      dataset: analytics_dev
+      location: US
+    prod:
+      type: bigquery
+      method: oauth
+      project: my-gcp-project-prod
+      dataset: analytics_prod
+      location: US
