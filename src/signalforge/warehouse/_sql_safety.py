@@ -65,6 +65,27 @@ def validate_project_id(field: str, value: str) -> None:
         raise InvalidIdentifierError(field=field, value=value)
 
 
+def escape_bq_string_literal(s: str) -> str:
+    """Escape characters so the result is safe inside a BQ single-quoted literal.
+
+    BigQuery's standard SQL treats ``\\`` as an escape character inside
+    single-quoted strings AND forbids unescaped newlines/carriage
+    returns. This helper handles both: backslash first (so the
+    subsequent escape pass can't be undone), then quotes, then the
+    common control chars. NUL is dropped because BQ rejects it
+    outright. Shared by ``_render_partition_filter`` and
+    ``_test_result_repr`` so the two stay in lockstep.
+    """
+    return (
+        s.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+        .replace("\x00", "")
+    )
+
+
 # Lightweight SQL safety rejects for run_test_sql (DEC-013).
 # Not a SQL parser — just catches the easy mistakes the LLM drafter could make.
 
