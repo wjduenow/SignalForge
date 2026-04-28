@@ -46,25 +46,13 @@ _SF_RUN_BQ_REASON = "requires SF_RUN_BQ=1 and ADC"
 
 
 def _shakespeare_ref() -> TableRef:
-    """Build the Shakespeare ``TableRef`` inside the test body.
+    """Build the Shakespeare ``TableRef`` for the integration tests.
 
-    Real BigQuery project IDs may contain hyphens (``bigquery-public-data``);
-    DEC-013's strict ``[A-Za-z_][A-Za-z0-9_]*`` regex rejects them at
-    ``TableRef.__post_init__``. The adapter's ``_quote`` path renders the
-    project inside backticks where BQ accepts the hyphen, so the issue is
-    purely the construction guard. Bypassing the guard via ``__new__`` +
-    ``object.__setattr__`` (frozen dataclass) is localised to
-    integration-test setup; loosening the project-id regex is tracked
-    separately and out of scope for US-010.
-
-    Constructing inside the test body — not at module import — also keeps
-    the bypass off the default ``pytest`` collection path.
+    Real GCP project IDs use hyphens (``bigquery-public-data``); since the
+    QG of US-013, the project regex accepts the hyphen-permissive GCP
+    grammar so the regular ``TableRef(...)`` constructor is sufficient.
     """
-    ref = TableRef.__new__(TableRef)
-    object.__setattr__(ref, "project", "bigquery-public-data")
-    object.__setattr__(ref, "dataset", "samples")
-    object.__setattr__(ref, "name", "shakespeare")
-    return ref
+    return TableRef(project="bigquery-public-data", dataset="samples", name="shakespeare")
 
 
 @pytest.mark.bigquery

@@ -248,9 +248,17 @@ class BigQueryAdapter(WarehouseAdapter):
         """Render a :class:`PartitionFilter` to a SQL fragment (DEC-014).
 
         ``datetime`` → ``TIMESTAMP('…')``; ``date`` → ``DATE('…')``;
-        ``str`` is single-quote escaped (``'`` → ``''``). The column name
-        is already DEC-013-validated by :class:`PartitionFilter`'s
-        ``__post_init__``.
+        ``str`` is escaped for safe inclusion inside a single-quoted
+        BigQuery string literal. The column name is already
+        DEC-013-validated by :class:`PartitionFilter`'s ``__post_init__``.
+
+        BigQuery's standard SQL treats ``\\`` as the escape character
+        inside single-quoted string literals, so an adversarial value
+        ending in ``\\`` would otherwise terminate the literal early
+        (``'x\\' OR 1=1 --'`` becomes a parser-level escape). The
+        backslash is escaped first so the subsequent quote-escape pass
+        cannot be undone, then ``'`` is escaped via ``\\'`` (which BQ's
+        standard SQL accepts inside single-quoted literals).
         """
         # ``datetime`` is a subclass of ``date``, so check it first.
         if isinstance(pf.value, datetime):
@@ -258,7 +266,9 @@ class BigQueryAdapter(WarehouseAdapter):
         elif isinstance(pf.value, date):
             rendered = f"DATE('{pf.value.isoformat()}')"
         else:
-            escaped = str(pf.value).replace("'", "''")
+            # Order matters: escape ``\`` first so the subsequent quote
+            # escape cannot produce an unintended ``\\'`` sequence.
+            escaped = str(pf.value).replace("\\", "\\\\").replace("'", "\\'")
             rendered = f"'{escaped}'"
         return f"`{pf.column}` {pf.op} {rendered}"
 
@@ -270,7 +280,7 @@ class BigQueryAdapter(WarehouseAdapter):
         try:
             meta = self._get_client().get_table(table)
         except Exception as exc:
-            mapped = map_bq_exception(exc)
+            mapped = map_bq_exception(exc, context={"max_bytes_billed": self._max_bytes_billed})
             if mapped is exc:
                 raise
             raise mapped from exc
@@ -336,7 +346,16 @@ class BigQueryAdapter(WarehouseAdapter):
         if partition_filter is not None:
             where_clauses.append(self._render_partition_filter(partition_filter))
         where_sql = " AND ".join(where_clauses)
-        sql = f"SELECT * FROM {quoted} AS t WHERE {where_sql} LIMIT {n}"
+        # ``ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(t))`` makes ``LIMIT n``
+        # truncation deterministic when the WHERE filter retains more than
+        # ``n`` rows (DEC-006). Without it BigQuery's LIMIT picks an
+        # arbitrary subset and breaks the same-input → same-output prune
+        # contract.
+        sql = (
+            f"SELECT * FROM {quoted} AS t WHERE {where_sql} "
+            f"ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(t)) "
+            f"LIMIT {n}"
+        )
 
         try:
             job = self._get_client().query(
@@ -344,7 +363,7 @@ class BigQueryAdapter(WarehouseAdapter):
             )
             rows = list(job.result())
         except Exception as exc:
-            mapped = map_bq_exception(exc)
+            mapped = map_bq_exception(exc, context={"max_bytes_billed": self._max_bytes_billed})
             if mapped is exc:
                 raise
             raise mapped from exc
@@ -443,7 +462,7 @@ class BigQueryAdapter(WarehouseAdapter):
             )
             rows = list(job.result())
         except Exception as exc:
-            mapped = map_bq_exception(exc)
+            mapped = map_bq_exception(exc, context={"max_bytes_billed": self._max_bytes_billed})
             if mapped is exc:
                 raise
             raise mapped from exc
@@ -504,7 +523,7 @@ class BigQueryAdapter(WarehouseAdapter):
             )
             rows = list(job.result())
         except Exception as exc:
-            mapped = map_bq_exception(exc)
+            mapped = map_bq_exception(exc, context={"max_bytes_billed": self._max_bytes_billed})
             if mapped is exc:
                 raise
             raise mapped from exc

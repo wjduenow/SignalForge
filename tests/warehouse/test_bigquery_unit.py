@@ -26,6 +26,7 @@ from signalforge.warehouse import (
     BIGQUERY_DIALECT,
     BigQueryAdapter,
     BytesBilledExceededError,
+    ColumnNotFoundError,
     PartitionFilter,
     QuerySyntaxError,
     SamplingRequiresPartitionFilterError,
@@ -102,6 +103,27 @@ def test_query_job_config_stage_label_threads_through(adapter: BigQueryAdapter) 
     """A different ``stage`` argument should yield a different label."""
     cfg = adapter._default_job_config("warehouse_test")
     assert dict(cfg.labels)["signalforge_stage"] == "warehouse_test"
+
+
+def test_make_query_job_config_sets_use_query_cache_false() -> None:
+    """DEC-015 (non-negotiable): the shared job-config helper must always
+    produce ``use_query_cache=False``. Until US-013's QG this branch was
+    masked from coverage by ``# pragma: no cover``; it's the only place
+    the cache is disabled, so it gets a unit test of its own."""
+    from google.cloud import bigquery
+
+    from signalforge import __version__
+    from signalforge.warehouse.adapters._client import make_query_job_config
+
+    cfg = make_query_job_config(stage="warehouse_sample", max_bytes_billed=12345)
+
+    assert isinstance(cfg, bigquery.QueryJobConfig)
+    assert cfg.use_query_cache is False
+    assert cfg.maximum_bytes_billed == 12345
+    assert cfg.labels == {
+        "signalforge_stage": "warehouse_sample",
+        "signalforge_version": __version__.replace(".", "_"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -596,6 +618,46 @@ def test_bytes_billed_exceeded_wraps_bq_bad_request(
         adapter.run_test_sql("SELECT 1")
 
 
+def test_bytes_billed_exceeded_carries_configured_limit(
+    fake_client: FakeBigQueryClient,
+) -> None:
+    """The mapper must thread the adapter's configured ``max_bytes_billed``
+    through ``context=`` so the rendered error carries the real cap (not
+    the historical ``limit=0`` placeholder)."""
+    fake_client.expect_query(
+        matching=r"COUNT\(\*\)",
+        returns=BadRequest("Query exceeded limit for maximum bytes billed"),
+    )
+    adapter = BigQueryAdapter(
+        project="fake_project",
+        location="US",
+        max_bytes_billed=42_000_000,
+        client=fake_client,
+    )
+
+    with pytest.raises(BytesBilledExceededError) as exc_info:
+        adapter.run_test_sql("SELECT 1")
+
+    assert exc_info.value.limit == 42_000_000
+    assert "limit=42000000" in str(exc_info.value)
+
+
+def test_column_not_found_wraps_bq_bad_request(
+    adapter: BigQueryAdapter,
+    fake_client: FakeBigQueryClient,
+) -> None:
+    """Real BigQuery surfaces missing columns as ``BadRequest`` with the
+    text ``Unrecognized name``. The mapper must route those to
+    ColumnNotFoundError, not the generic QuerySyntaxError bucket."""
+    fake_client.expect_query(
+        matching=r"COUNT\(\*\)",
+        returns=BadRequest("Unrecognized name: foo at [3:8]"),
+    )
+
+    with pytest.raises(ColumnNotFoundError):
+        adapter.run_test_sql("SELECT foo FROM `p.d.t`")
+
+
 def test_query_syntax_error_wraps_bq_bad_request(
     adapter: BigQueryAdapter,
     fake_client: FakeBigQueryClient,
@@ -759,3 +821,28 @@ def test_sample_rows_emits_limit_clause(
     adapter.sample_rows(table_ref, n=7)
 
     assert re.search(r"LIMIT 7\s*$", captured["sqls"][0]) is not None
+
+
+def test_sample_rows_includes_order_by_for_deterministic_limit(
+    adapter: BigQueryAdapter,
+    fake_client: FakeBigQueryClient,
+    table_ref: TableRef,
+    shakespeare_table: FakeTable,
+) -> None:
+    """DEC-006: when the bucket-mod WHERE retains more than n rows, the
+    ``LIMIT`` truncation must be deterministic. The adapter inserts
+    ``ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(t))`` before ``LIMIT`` so
+    the same input always yields the same sample."""
+    fake_client.expect_get_table(ref=table_ref, returns=shakespeare_table)
+    fake_client.expect_query(
+        matching=r"ORDER BY FARM_FINGERPRINT",
+        returns=[{"x": 1}],
+    )
+    captured = _wrap_query_capture(fake_client)
+
+    adapter.sample_rows(table_ref, n=10)
+
+    sql = captured["sqls"][0]
+    assert "ORDER BY" in sql
+    # ORDER BY must precede LIMIT in the rendered SQL.
+    assert sql.index("ORDER BY") < sql.index("LIMIT")

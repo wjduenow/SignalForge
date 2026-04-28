@@ -72,9 +72,7 @@ def make_real_client(
         raise WarehouseAuthError(message=str(exc)) from exc
 
 
-def make_query_job_config(
-    *, max_bytes_billed: int, stage: str, version: str
-) -> Any:  # pragma: no cover - exercised by integration tests only
+def make_query_job_config(*, max_bytes_billed: int, stage: str, version: str | None = None) -> Any:
     """Build a ``QueryJobConfig`` with DEC-015 defaults.
 
     ``use_query_cache=False`` is non-negotiable — Architectural Commitment
@@ -84,9 +82,16 @@ def make_query_job_config(
 
     BigQuery labels must be lowercase and may not contain ``.`` — we
     translate the package version (e.g. ``"0.1.0.dev0"``) by replacing
-    every ``.`` with ``_``.
+    every ``.`` with ``_``. When ``version`` is omitted, the helper
+    resolves the running ``signalforge.__version__`` so the unit test
+    can call this function without an integration-tier ``version=`` kwarg.
     """
     from google.cloud import bigquery  # type: ignore[import-not-found]
+
+    if version is None:
+        from signalforge import __version__ as _pkg_version
+
+        version = _pkg_version
 
     return bigquery.QueryJobConfig(  # type: ignore[no-any-return]
         use_query_cache=False,
@@ -98,12 +103,18 @@ def make_query_job_config(
     )
 
 
-def map_bq_exception(exc: Exception) -> Exception:
+def map_bq_exception(exc: Exception, *, context: dict[str, Any] | None = None) -> Exception:
     """Translate ``google.api_core.exceptions`` into typed warehouse errors.
 
     Returns the *new* exception so the caller can ``raise mapped from exc``.
     Returns ``exc`` unchanged when no specific mapping fits — the caller
     should re-raise the original in that case rather than swallow it.
+
+    The optional ``context`` kwarg carries adapter-side state that the
+    raw Google exception doesn't expose — currently
+    ``max_bytes_billed`` so :class:`BytesBilledExceededError` can render
+    the actual configured cap (the alternative was a misleading
+    ``limit=0`` placeholder).
 
     The ``google.api_core`` import is lazy so this module can be imported
     in test environments where the SDK is shimmed (or when a test injects
@@ -125,16 +136,21 @@ def map_bq_exception(exc: Exception) -> Exception:
     if isinstance(exc, gae.Forbidden):
         return WarehouseAuthError(message=str(exc))
     if isinstance(exc, gae.NotFound):
-        msg = str(exc).lower()
-        if "column" in msg or "field" in msg:
-            return ColumnNotFoundError(table="?", column=str(exc))
-        # Default to TableNotFoundError when we can't tell — the most common
-        # 404 from the BQ API is "table not found" anyway.
+        # Real BigQuery surfaces missing columns as ``BadRequest`` /
+        # "Unrecognized name", not ``NotFound`` — so every ``NotFound``
+        # we see in production maps to a missing table.
         return TableNotFoundError(table=str(exc))
     if isinstance(exc, gae.BadRequest):
         msg = str(exc).lower()
         if "exceeded limit" in msg or "maximum bytes billed" in msg:
-            return BytesBilledExceededError(job_id=None, bytes_billed=None, limit=0)
+            limit = (
+                int(context["max_bytes_billed"])
+                if context is not None and "max_bytes_billed" in context
+                else 0
+            )
+            return BytesBilledExceededError(job_id=None, bytes_billed=None, limit=limit)
+        if "unrecognized name" in msg or ("name" in msg and "not found" in msg):
+            return ColumnNotFoundError(table="?", column=str(exc))
         # All other BadRequests bucket into "your SQL is malformed" — DEC-007
         # callers can distinguish via attribute access on the typed error.
         return QuerySyntaxError(detail=str(exc))
