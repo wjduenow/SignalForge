@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: raw
+    description: "Raw landing zone (synthetic — fixture only)."
+    schema: raw
+    tables:
+      - name: users
+        description: "Raw user rows from the synthetic source system."
+        columns:
+          - name: id
+            description: "Synthetic primary key."
+          - name: email
+            description: "User email."
+          - name: created_at
+            description: "Row creation timestamp."

@@ -1,0 +1,18 @@
+name: signalforge_test_medium
+version: 1.0.0
+config-version: 2
+
+profile: signalforge_test
+
+model-paths: ["models"]
+target-path: target
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  signalforge_test_medium:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

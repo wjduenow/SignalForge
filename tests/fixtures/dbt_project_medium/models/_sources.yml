@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: raw
+    description: "Raw landing zone (synthetic — fixture only)."
+    schema: raw
+    tables:
+      - name: events
+        description: "Synthetic event stream used by every staging model."
