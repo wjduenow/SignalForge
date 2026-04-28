@@ -59,7 +59,7 @@ def test_bigquery_dialect_constant_is_frozen() -> None:
 def test_tableref_rejects_invalid_dataset() -> None:
     """Hyphenated dataset name fails the DEC-013 identifier regex."""
     with pytest.raises(InvalidIdentifierError):
-        TableRef(project="p", dataset="bad-name", name="t")
+        TableRef(project="proj01", dataset="bad-name", name="t")
 
 
 @pytest.mark.unit
@@ -67,7 +67,7 @@ def test_tableref_rejects_invalid_dataset() -> None:
 def test_tableref_rejects_invalid_name() -> None:
     """Adversarial table name with `;` is rejected at construction time."""
     with pytest.raises(InvalidIdentifierError):
-        TableRef(project="p", dataset="d", name="x;DROP")
+        TableRef(project="proj01", dataset="d", name="x;DROP")
 
 
 @pytest.mark.unit
@@ -182,6 +182,22 @@ def test_compact_repr_truncates_long_strings() -> None:
     # max (37 x's + '...'), wrapped in single quotes.
     assert "..." in rendered
     assert "x" * 41 not in rendered
+
+
+@pytest.mark.unit
+def test_compact_repr_escapes_quotes_and_backslashes() -> None:
+    """String values render paste-safe — `'` and `\\` are escaped (DEC-020).
+
+    Without this, a sample failure containing ``o'brien`` would render as
+    ``name='o'brien'`` (unbalanced quote) — pasting into a WHERE clause
+    is then either a parse error or, worse, an injection seam.
+    """
+    rendered = compact_repr({"name": "o'brien", "path": r"c:\windows"})
+    # Single quotes inside the literal must be backslash-escaped.
+    assert r"name='o\'brien'" in rendered
+    # Backslashes must also be escaped so the trailing escape doesn't eat
+    # the closing quote.
+    assert r"path='c:\\windows'" in rendered
 
 
 @pytest.mark.unit
