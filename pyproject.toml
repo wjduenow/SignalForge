@@ -43,7 +43,10 @@ reportMissingImports = "error"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers -m 'not bigquery'"
+# `--import-mode=importlib` lets us share basenames across test dirs (e.g.
+# tests/manifest/test_errors.py and tests/warehouse/test_errors.py) without
+# adding tests/__init__.py — keeps `testing-signal.md`'s no-init rule intact.
+addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery'"
 minversion = "7.0"
 strict_markers = true
 markers = [
