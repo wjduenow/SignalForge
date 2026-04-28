@@ -316,9 +316,6 @@ around them and maintainers can keep the doc honest as scope changes.
   pattern](#column_stats-access-pattern)). v0.2 will land a proxy on
   `ColumnStats` so the queued columns of a table flush as a single
   batched query at first field read.
-- **GCP project-ID grammar.** `TableRef.project` accepts the
-  hyphen-permissive GCP project-ID grammar (e.g. `my-co-prod-12345`).
-  Shipped in the QG of US-013.
 - **Legacy domain-scoped project IDs.** v0.1 rejects
   `example.com:my-project` style IDs (Google Workspace tenants
   pre-2014). The fix needs both a regex update *and* a `_quote()` change
