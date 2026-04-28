@@ -93,13 +93,25 @@ def _canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
     paths whose resolved form is not under the resolved ``project_dir``.
 
     Raises :class:`ModelPathOutsideProjectError` if the resolved path
-    escapes the project tree.
+    escapes the project tree, or if either path contains a symlink loop
+    (``Path.resolve`` raises :class:`RuntimeError` on cycles regardless of
+    the ``strict=`` flag).
     """
     p = Path(input_path)
-    project_resolved = project_dir.resolve(strict=True)
+    try:
+        project_resolved = project_dir.resolve(strict=True)
+    except RuntimeError as exc:
+        raise ModelPathOutsideProjectError(
+            f"project_dir contains a symlink loop: {project_dir}",
+        ) from exc
     if not p.is_absolute():
         p = project_resolved / p
-    resolved = p.resolve(strict=False)
+    try:
+        resolved = p.resolve(strict=False)
+    except RuntimeError as exc:
+        raise ModelPathOutsideProjectError(
+            f"Path contains a symlink loop: {p}",
+        ) from exc
     if not resolved.is_relative_to(project_resolved):
         raise ModelPathOutsideProjectError(
             f"Path {resolved} escapes project_dir {project_resolved}.",
@@ -181,11 +193,15 @@ def load(
             f"project_dir is not a directory: {project_resolved}",
         )
 
-    if manifest_path is None:
-        resolved_manifest = project_resolved / "target" / "manifest.json"
-    else:
-        # _canonicalise_path raises ModelPathOutsideProjectError if escape.
-        resolved_manifest = _canonicalise_path(manifest_path, project_resolved)
+    # Always go through _canonicalise_path — even the default
+    # target/manifest.json could be a symlink (or sit inside a symlinked
+    # target/) pointing outside the project root. DEC-007 hardening must
+    # apply uniformly to both default and override paths.
+    default_path = Path("target") / "manifest.json"
+    resolved_manifest = _canonicalise_path(
+        manifest_path if manifest_path is not None else default_path,
+        project_resolved,
+    )
 
     if not resolved_manifest.exists() or not resolved_manifest.is_file():
         raise ManifestNotFoundError(

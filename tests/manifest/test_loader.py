@@ -335,9 +335,11 @@ def test_empty_raw_code_raises_at_resolve_time(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
+@pytest.mark.integration
 def test_oversize_manifest_emits_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     # Drop the threshold to 100 bytes so any real fixture trips it.
+    # Integration-marked because it exercises the full load() round-trip
+    # against a committed fixture file.
     monkeypatch.setattr("signalforge.manifest.loader.MAX_MANIFEST_BYTES", 100)
     with pytest.warns(UserWarning, match="resident memory"):
         load(SMALL_PROJECT, manifest_path="target/manifest_v12.json")
@@ -430,3 +432,61 @@ def test_iter_models_returns_all_enabled_models(v12_manifest: Manifest) -> None:
     ids = {m.unique_id for m in v12_manifest.iter_models()}
     assert KNOWN_UNIQUE_ID in ids
     assert DISABLED_UNIQUE_ID not in ids  # disabled lives in `disabled`, not `nodes`
+
+
+# ---------------------------------------------------------------------------
+# 17. Default target/manifest.json must also be canonicalised (DEC-007 hardening,
+#     post-pass-2 review fix). A symlink at target/manifest.json pointing
+#     outside the project root must be rejected even when no explicit
+#     manifest_path override is supplied.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.error
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need admin on Windows")
+def test_default_manifest_path_symlink_escape_is_rejected(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    target = project / "target"
+    target.mkdir()
+    outside_manifest = tmp_path / "outside.json"
+    outside_manifest.write_text("{}")
+    (target / "manifest.json").symlink_to(outside_manifest)
+
+    with pytest.raises(ModelPathOutsideProjectError):
+        load(project)
+
+
+# ---------------------------------------------------------------------------
+# 18. Symlink loops must surface as ModelPathOutsideProjectError, not as a
+#     bare RuntimeError (Path.resolve raises RuntimeError on cycles regardless
+#     of strict=). Post-pass-2 fix.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.error
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need admin on Windows")
+def test_symlink_loop_in_default_path_is_rejected(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    target = project / "target"
+    target.mkdir()
+    # a -> b, b -> a forms a cycle.
+    (target / "a").symlink_to(target / "b")
+    (target / "b").symlink_to(target / "a")
+    (target / "manifest.json").symlink_to(target / "a")
+
+    with pytest.raises(ModelPathOutsideProjectError):
+        load(project)
+
+
+@pytest.mark.error
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need admin on Windows")
+def test_symlink_loop_in_explicit_manifest_path_is_rejected(tmp_path: Path) -> None:
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "a").symlink_to(project / "b")
+    (project / "b").symlink_to(project / "a")
+
+    with pytest.raises(ModelPathOutsideProjectError):
+        load(project, manifest_path=project / "a")
