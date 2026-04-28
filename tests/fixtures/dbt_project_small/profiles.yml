@@ -1,0 +1,10 @@
+# Committed alongside the fixture project so contributors don't need a real
+# warehouse to regenerate manifests. Set DBT_PROFILES_DIR to this directory
+# before invoking `dbt parse` (see ../regenerate.sh and ../README.md).
+signalforge_test:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: 'dev.duckdb'
+      threads: 1
