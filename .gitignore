@@ -57,3 +57,6 @@ work-*/
 
 # Windows NTFS Alternate Data Streams (created when files cross from Windows -> WSL)
 *:Zone.Identifier
+
+# bark worktree scaffolding artifact
+uv.lock
