@@ -49,6 +49,16 @@ The grading layer reuses [clauditor](https://github.com/wjduenow/clauditor)'s LL
 
 A first runnable version is targeted for v0.1 (single-model draft + warehouse prune, BigQuery adapter, CLI only).
 
+## Configuration
+
+### Configuring the BigQuery adapter
+
+SignalForge reads your dbt profile and instantiates a `BigQueryAdapter`
+via `WarehouseAdapter.from_profile(profile)`. See
+[docs/warehouse-adapter-ops.md](docs/warehouse-adapter-ops.md) for ADC
+setup, cost defaults, sampling strategy (and the TABLESAMPLE
+cost-asterisk), `PartitionFilter` use, and the typed-error reference.
+
 ## Roadmap
 
 | Version | Scope                                                                              |
