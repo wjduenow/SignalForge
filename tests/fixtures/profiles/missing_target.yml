@@ -1,0 +1,12 @@
+# Profile whose `target:` field names `dev` but whose `outputs:` map only
+# defines `prod`. `load_profile` must raise `ProfileTargetNotFoundError`
+# listing the available outputs in its remediation.
+signalforge_test:
+  target: dev
+  outputs:
+    prod:
+      type: bigquery
+      method: oauth
+      project: my-gcp-project-prod
+      dataset: analytics_prod
+      location: US

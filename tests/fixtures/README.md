@@ -1,8 +1,14 @@
-# Manifest fixtures
+# Test fixtures
 
-This directory holds the fixture corpus for the manifest-loader module
-(`src/signalforge/manifest/`). It tracks DEC-005, DEC-009, and DEC-012 from
+This directory holds the fixture corpora for SignalForge's external-format
+readers. The manifest-loader fixtures (`src/signalforge/manifest/`) track
+DEC-005, DEC-009, and DEC-012 from
 [`plans/super/2-manifest-loader.md`](../../plans/super/2-manifest-loader.md).
+The profile fixtures (`src/signalforge/warehouse/profiles.py`) track DEC-009
+and DEC-017 from
+[`plans/super/3-bigquery-adapter.md`](../../plans/super/3-bigquery-adapter.md).
+
+# Manifest fixtures
 
 ## Layout
 
@@ -135,6 +141,36 @@ removing schema-additive top-level keys (`unit_tests`, `saved_queries`,
 `metadata.dbt_schema_version` — but this is a last resort; prefer real
 parses whenever possible.
 
+# Profiles
+
+The six YAML files in `tests/fixtures/profiles/` are hand-authored, not
+generated. They mirror the
+[dbt-bigquery docs](https://docs.getdbt.com/docs/core/connect-data-platform/bigquery-setup)
+as of dbt-bigquery 1.9 and are consumed by `tests/warehouse/test_profiles.py`
+(US-005).
+
+| File | Purpose |
+| ---- | ------- |
+| `bigquery_oauth.yml` | Minimal valid ADC profile — the v0.1 happy path. |
+| `bigquery_service_account.yml` | `method: service-account`; drives `UnsupportedAuthMethodError` (DEC-017). |
+| `multi_target.yml` | Two outputs (`dev`, `prod`); drives the `target=` override test. |
+| `missing_target.yml` | `target: dev` but only `prod` defined; drives `ProfileTargetNotFoundError`. |
+| `dbt_project.yml` | Minimal `dbt_project.yml` that pairs with any of the above for project-root resolution tests. |
+| `dbt_bigquery_drift_v1_9.yml` | Every documented dbt-bigquery 1.9 oauth field; drives the `extra="forbid"` strict-model drift detector (DEC-017). |
+
+**Regeneration trigger:** when dbt-bigquery releases a new minor version,
+review the docs page and bump `dbt_bigquery_drift_v1_9.yml` (rename to
+`_v1_X.yml`, refresh the field set). Update
+`signalforge.warehouse.profiles.DbtProfileTarget` to model any new fields
+the SignalForge adapter needs to surface; the rest fall through `extra="forbid"`
+and get caught by the drift detector.
+
+Hand-authoring is acceptable here because dbt profiles are user-authored
+YAML in the wild — drift-from-tool-output isn't the failure mode (unlike
+`manifest.json`, which dbt itself generates). The tradeoff is documented in
+[`testing-signal.md`](../../.claude/rules/testing-signal.md): regenerate via
+ephemeral `uvx` when the tool emits the artefact, hand-author when humans do.
+
 ## See also
 
 - [`docs/manifest-loader-ops.md`](../../docs/manifest-loader-ops.md) — operational
@@ -142,3 +178,6 @@ parses whenever possible.
   this link will resolve once that story lands.
 - [`plans/super/2-manifest-loader.md`](../../plans/super/2-manifest-loader.md) —
   full plan, including DEC entries for each fixture-shape choice.
+- [`plans/super/3-bigquery-adapter.md`](../../plans/super/3-bigquery-adapter.md) —
+  warehouse-adapter plan; DEC-009 and DEC-017 set the contract the profile
+  fixtures support.

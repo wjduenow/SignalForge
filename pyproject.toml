@@ -10,10 +10,10 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 readme = "README.md"
 authors = [{name = "wjduenow"}]
-dependencies = ["pydantic>=2.5,<3"]
+dependencies = ["google-cloud-bigquery>=3.20,<4", "PyYAML>=6,<7", "pydantic>=2.5,<3"]
 
 [project.optional-dependencies]
-dev = ["ruff", "pyright", "pytest", "dbt-core>=1.8,<2"]
+dev = ["ruff", "pyright", "pytest", "dbt-core>=1.8,<2", "types-PyYAML>=6,<7"]
 
 [project.urls]
 Homepage = "https://github.com/wjduenow/SignalForge"
@@ -43,11 +43,15 @@ reportMissingImports = "error"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers"
+# `--import-mode=importlib` lets us share basenames across test dirs (e.g.
+# tests/manifest/test_errors.py and tests/warehouse/test_errors.py) without
+# adding tests/__init__.py — keeps `testing-signal.md`'s no-init rule intact.
+addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery'"
 minversion = "7.0"
 strict_markers = true
 markers = [
   "unit: unit-level tests with no FS I/O beyond fixtures",
   "integration: tests exercising the full load() round-trip",
   "error: tests asserting an exception with its remediation",
+  "bigquery: tests requiring BigQuery credentials (gated by SF_RUN_BQ=1)",
 ]
