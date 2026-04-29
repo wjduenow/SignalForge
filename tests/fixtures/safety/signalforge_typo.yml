@@ -1,0 +1,3 @@
+safety:
+  redacts:
+    extend: ["*foo"]

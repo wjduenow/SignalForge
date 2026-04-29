@@ -1,0 +1,4 @@
+safety:
+  mode: schema-only
+llm:
+  model: claude-opus-4-7
