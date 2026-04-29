@@ -1,0 +1,2 @@
+safety:
+  audit_path: ../../escape.jsonl

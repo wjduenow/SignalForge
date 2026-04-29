@@ -1,0 +1,123 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "project_name": "sf_demo",
+    "generated_at": null,
+    "invocation_id": null,
+    "user_id": null,
+    "send_anonymous_usage_stats": null,
+    "adapter_type": null,
+    "env": {}
+  },
+  "nodes": {
+    "model.sf_demo.customers": {
+      "database": "dev",
+      "schema": "main",
+      "name": "customers",
+      "resource_type": "model",
+      "package_name": "sf_demo",
+      "path": "marts/customers.sql",
+      "original_file_path": "models/marts/customers.sql",
+      "unique_id": "model.sf_demo.customers",
+      "alias": "customers",
+      "config": {
+        "materialized": "table",
+        "tags": [],
+        "meta": {}
+      },
+      "tags": [],
+      "description": "",
+      "meta": {},
+      "columns": {
+        "id": {
+          "name": "id",
+          "description": "",
+          "meta": {},
+          "tags": []
+        },
+        "email": {
+          "name": "email",
+          "description": "",
+          "meta": {},
+          "tags": []
+        },
+        "customer_ssn_optout": {
+          "name": "customer_ssn_optout",
+          "description": "",
+          "meta": {
+            "signalforge": {
+              "sample": false
+            }
+          },
+          "tags": []
+        },
+        "taxpayer_id": {
+          "name": "taxpayer_id",
+          "description": "",
+          "meta": {},
+          "tags": ["pii"]
+        },
+        "birth_date": {
+          "name": "birth_date",
+          "description": "",
+          "meta": {
+            "contains_pii": true
+          },
+          "tags": []
+        }
+      },
+      "depends_on": {
+        "macros": [],
+        "nodes": []
+      },
+      "refs": [],
+      "sources": [],
+      "raw_code": "select 1 as id, 'a@b.c' as email, '000-00-0000' as customer_ssn_optout, '12345' as taxpayer_id, current_date as birth_date",
+      "language": "sql",
+      "access": "protected",
+      "version": null,
+      "latest_version": null,
+      "primary_key": []
+    },
+    "model.sf_demo.orders_pii_at_model": {
+      "database": "dev",
+      "schema": "main",
+      "name": "orders_pii_at_model",
+      "resource_type": "model",
+      "package_name": "sf_demo",
+      "path": "marts/orders_pii_at_model.sql",
+      "original_file_path": "models/marts/orders_pii_at_model.sql",
+      "unique_id": "model.sf_demo.orders_pii_at_model",
+      "alias": "orders_pii_at_model",
+      "config": {
+        "materialized": "table",
+        "tags": ["pii"],
+        "meta": {}
+      },
+      "tags": ["pii"],
+      "description": "",
+      "meta": {},
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "description": "",
+          "meta": {},
+          "tags": []
+        }
+      },
+      "depends_on": {
+        "macros": [],
+        "nodes": []
+      },
+      "refs": [],
+      "sources": [],
+      "raw_code": "select 1 as order_id",
+      "language": "sql",
+      "access": "protected",
+      "version": null,
+      "latest_version": null,
+      "primary_key": []
+    }
+  },
+  "disabled": {}
+}
