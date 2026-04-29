@@ -25,6 +25,9 @@ dist/
 coverage.xml
 htmlcov/
 
+# SignalForge runtime state (audit log lives here; sensitive — see docs/safety-ops.md)
+.signalforge/
+
 # Local-only symlinked / synced skills — ignore all except maintainer-owned skills
 .claude/skills/*
 !.claude/skills/release-manager
