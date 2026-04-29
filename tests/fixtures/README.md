@@ -171,6 +171,71 @@ YAML in the wild — drift-from-tool-output isn't the failure mode (unlike
 [`testing-signal.md`](../../.claude/rules/testing-signal.md): regenerate via
 ephemeral `uvx` when the tool emits the artefact, hand-author when humans do.
 
+# Safety
+
+The fixtures under `tests/fixtures/safety/` back the PII-safety layer
+(US-005..US-011) and track DEC-005, DEC-013, DEC-014, DEC-016, DEC-017,
+DEC-021, DEC-025, and DEC-026 from
+[`plans/super/4-pii-safety.md`](../../plans/super/4-pii-safety.md).
+
+## Layout
+
+```
+tests/fixtures/safety/
+├── signalforge_minimal.yml                    # happy path; mode=schema-only
+├── signalforge_extend.yml                     # redact.extend (DEC-017)
+├── signalforge_replace_empty.yml              # redact.replace=[]; WARN on load
+├── signalforge_extend_replace_conflict.yml    # both keys → mutual-exclusion error
+├── signalforge_unknown_mode.yml               # InvalidSamplingModeError (DEC-021)
+├── signalforge_typo.yml                       # `redacts:` → extra="forbid" trip
+├── signalforge_audit_path_traversal.yml       # DEC-013 path-traversal guard
+├── signalforge_unknown_top_level.yml          # unknown top-level keys ignored
+├── manifest_with_pii_meta.json                # PII signals at column + model level
+├── audit_events_sample.jsonl                  # one canonical AuditEvent line
+└── regenerate.sh                              # regenerates the JSONL only
+```
+
+## `signalforge.yml` variants — hand-authored
+
+The eight YAML files are hand-authored, not regenerated. They mirror the
+`signalforge.yml` schema locked in DEC-025 (`safety:` is the only top-level
+key SignalForge consumes in v0.1; everything else is left for future stages).
+Bump them when the `signalforge.yml` schema evolves — there is no tool to
+regenerate against, since users author these by hand in the wild.
+
+Hand-authoring is appropriate here for the same reason as the
+[`profiles/`](#profiles) fixtures: drift-from-tool-output is not the failure
+mode. The trade-off is documented in
+[`testing-signal.md`](../../.claude/rules/testing-signal.md).
+
+## `manifest_with_pii_meta.json` — hand-derived
+
+This manifest is hand-derived, not produced by `dbt parse`. It carries the
+minimum shape required to construct `signalforge.manifest.models.Manifest`
+plus PII metadata exercising all four opt-out signals at column level
+(`*email` pattern match, `meta.signalforge.sample: false`, `tags: ["pii"]`,
+`meta.contains_pii: true`) and one model-level signal (`tags: ["pii"]` on
+the model itself, cascading to every column).
+
+`metadata.dbt_schema_version` points at v12 — the latest version in the
+loader's tolerated v9–v12 range (issue #2). Bump this fixture (and its
+schema URL) when the loader's tolerated range narrows or shifts.
+
+## `audit_events_sample.jsonl` — regenerated
+
+Regenerate with:
+
+```bash
+bash tests/fixtures/safety/regenerate.sh
+```
+
+The script is the source of truth for the audit-event shape until US-004
+lands the typed `AuditEvent` model. The committed JSONL is exactly one
+line and the regen is deterministic — `git diff` after re-running must be
+empty. When US-004 lands, swap the inline dict construction for an
+`AuditEvent(...).model_dump_json()` call so drift in the typed model
+propagates here.
+
 ## See also
 
 - [`docs/manifest-loader-ops.md`](../../docs/manifest-loader-ops.md) — operational
