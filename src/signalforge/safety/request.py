@@ -83,7 +83,7 @@ def build_llm_request(
       for everyone else.
     * :attr:`SamplingMode.AGGREGATE_ONLY` — delegates to
       :func:`signalforge.safety.aggregate.aggregate_columns`.
-      ``sampled_rows=None``; ``aggregates`` is a dict keyed by hashed name
+      ``sampled_rows=None``; ``aggregates`` is a tuple of (hashed-name,
       (redacted columns, value=``None``) or real name (otherwise, value=
       :class:`ColumnStats`).
     * :attr:`SamplingMode.SAMPLE` — calls ``adapter.sample_rows`` inside the
@@ -154,7 +154,11 @@ def build_llm_request(
             [c.name for c in model.columns_list],
             policy,
         )
-        aggregates = aggregates_dict
+        # Convert to tuple-of-tuples so the LLMRequest.aggregates field is
+        # transitively immutable (DEC-022). A bare dict on a frozen Pydantic
+        # model is still mutable in its contents, which would let a downstream
+        # consumer rewrite values after the audit log has been written.
+        aggregates = tuple(aggregates_dict.items())
     elif policy.mode is SamplingMode.SAMPLE:
         table = TableRef.from_model(model)
         with adapter:

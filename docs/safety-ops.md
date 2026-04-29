@@ -286,7 +286,13 @@ Recommendations:
   `.gitignore`).
 - **Restrict at-rest permissions.** The writer creates
   `.signalforge/` at `0o700` and `audit.jsonl` at `0o600` on first
-  call. Don't relax these.
+  call. Don't relax these. Note: if `.signalforge/` already exists
+  with looser permissions (e.g. created by a different process or
+  user), the writer's `mkdir(exist_ok=True, mode=0o700)` will NOT
+  tighten the existing directory — Python's `mkdir` only applies
+  `mode` when creating. Verify pre-existing directory permissions
+  before deploying; tighten manually if needed
+  (`chmod 700 .signalforge/`).
 - **Don't ship as a build artifact.** Strip from container images and
   CI uploads.
 - **Don't check in.** The "explainable diffs" commitment applies to

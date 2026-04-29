@@ -187,7 +187,13 @@ class SafetyPolicy(BaseModel):
                 value=value,
                 allowed=tuple(m.value for m in SamplingMode),
             )
-        return value
+        # Non-string, non-enum input (e.g. mode=42, mode=None, mode=[]) must
+        # raise the typed error rather than fall through to Pydantic's generic
+        # ValidationError — keeps the safety-layer error hierarchy homogeneous.
+        raise InvalidSamplingModeError(
+            value=value,
+            allowed=tuple(m.value for m in SamplingMode),
+        )
 
     @field_validator("redact_patterns")
     @classmethod
@@ -228,8 +234,17 @@ class SafetyPolicy(BaseModel):
         Used by issue #9's CLI to apply ``--mode`` after loading from
         ``signalforge.yml``. Frozen Pydantic models cannot be mutated;
         this is the canonical override path (DEC-018).
+
+        Re-runs all validators (including the sample-mode WARNING per
+        DEC-021) by going through ``model_validate`` rather than
+        ``model_copy``. ``model_copy(update=...)`` is a shallow shortcut
+        that skips ``@model_validator(mode="after")``, which would
+        silently enable sample mode without emitting the WARNING — a
+        regression caught by Quality-Gate review.
         """
-        return self.model_copy(update={"mode": mode})
+        data = self.model_dump()
+        data["mode"] = mode
+        return SafetyPolicy.model_validate(data)
 
 
 def _compute_policy_hash(policy: SafetyPolicy) -> str:

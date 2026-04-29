@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -138,6 +139,19 @@ def test_safety_policy_mode_unknown_raises_invalid_sampling_mode_error() -> None
         SafetyPolicy.model_validate({"mode": "phantom"})
 
 
+@pytest.mark.parametrize("bad_value", [42, 3.14, None, [], {}, ("schema-only",), object()])
+def test_safety_policy_mode_non_string_non_enum_raises_invalid_sampling_mode_error(
+    bad_value: Any,
+) -> None:
+    """Regression: the ``@field_validator(mode="before")`` previously fell
+    through to Pydantic's generic ``ValidationError`` when given non-string,
+    non-enum input (e.g. ``mode=42``). Now every invalid type raises the
+    typed ``InvalidSamplingModeError`` so the safety-layer error hierarchy
+    stays homogeneous. Caught by Quality-Gate review."""
+    with pytest.raises(InvalidSamplingModeError):
+        SafetyPolicy.model_validate({"mode": bad_value})
+
+
 # ---------------------------------------------------------------------------
 # Pattern-injection rejection (DEC-023)
 # ---------------------------------------------------------------------------
@@ -212,6 +226,46 @@ def test_safety_policy_schema_only_mode_no_warning(
 ) -> None:
     with caplog.at_level(logging.WARNING, logger="signalforge.safety"):
         SafetyPolicy(mode=SamplingMode.SCHEMA_ONLY)
+    warning_records = [
+        r for r in caplog.records if r.name == "signalforge.safety" and r.levelno == logging.WARNING
+    ]
+    assert warning_records == []
+
+
+def test_safety_policy_with_mode_sample_emits_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Regression: ``with_mode(SAMPLE)`` MUST re-trigger the validator chain.
+
+    Pydantic v2's ``model_copy(update=...)`` skips ``@model_validator(mode="after")``
+    by default — that path was the original implementation and silently
+    enabled sample mode without WARNING when the CLI's ``--mode sample`` flag
+    flowed through. Caught by Quality-Gate review; ``with_mode`` now goes
+    through ``model_validate`` so the WARNING fires every time sample mode is
+    enabled, regardless of whether construction was direct or via override.
+    """
+    policy = SafetyPolicy()  # SCHEMA_ONLY, no warning
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="signalforge.safety"):
+        overridden = policy.with_mode(SamplingMode.SAMPLE)
+    assert overridden.mode is SamplingMode.SAMPLE
+    warning_records = [
+        r for r in caplog.records if r.name == "signalforge.safety" and r.levelno == logging.WARNING
+    ]
+    assert len(warning_records) == 1
+    assert "Sample mode enabled" in warning_records[0].getMessage()
+
+
+def test_safety_policy_with_mode_schema_only_emits_no_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Symmetric check: switching FROM sample mode (or staying off it) must
+    not spuriously fire the warning."""
+    policy = SafetyPolicy(mode=SamplingMode.SAMPLE)
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="signalforge.safety"):
+        overridden = policy.with_mode(SamplingMode.SCHEMA_ONLY)
+    assert overridden.mode is SamplingMode.SCHEMA_ONLY
     warning_records = [
         r for r in caplog.records if r.name == "signalforge.safety" and r.levelno == logging.WARNING
     ]

@@ -199,6 +199,35 @@ def test_llm_request_sampled_rows_immutable_when_present() -> None:
         request.sampled_rows = None  # type: ignore[misc]
 
 
+def test_llm_request_aggregates_is_tuple_of_tuples_when_present() -> None:
+    """Regression: ``aggregates`` was ``dict`` (mutable post-frozen) — caught by
+    Quality-Gate review. Now ``tuple[tuple[str, ColumnStats|None], ...]`` so
+    downstream consumers (#5) cannot ``request.aggregates["x"] = ...`` after
+    the audit log has been written (DEC-022 transitive immutability)."""
+    from signalforge.warehouse.models import ColumnStats
+
+    stats = ColumnStats(count=10, distinct=5, nulls=0, min=0, max=9, data_type="INT64")
+    request = _valid_llm_request(aggregates=(("id", stats), ("col_a3f29c61", None)))
+    assert request.aggregates is not None
+    assert request.aggregates.__class__ is tuple
+    for entry in request.aggregates:
+        assert entry.__class__ is tuple
+        assert len(entry) == 2
+        assert isinstance(entry[0], str)
+        assert entry[1] is None or isinstance(entry[1], ColumnStats)
+
+
+def test_llm_request_aggregates_immutable_when_none() -> None:
+    request = _valid_llm_request(aggregates=None)
+    assert request.aggregates is None
+
+
+def test_llm_request_aggregates_field_reassignment_blocked_by_frozen() -> None:
+    request = _valid_llm_request(aggregates=(("id", None),))
+    with pytest.raises(ValidationError):
+        request.aggregates = None  # type: ignore[misc]
+
+
 def test_llm_request_schema_field_is_tuple_of_tuples() -> None:
     request = _valid_llm_request()
     assert request.schema.__class__ is tuple

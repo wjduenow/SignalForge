@@ -172,11 +172,13 @@ def test_build_llm_request_aggregate_only_calls_column_stats_per_non_redacted_co
     fake.assert_all_expectations_met()
     assert request.sampled_rows is None
     assert request.aggregates is not None
-    # ``id`` keyed by real name with stats; redacted columns keyed by hashed
-    # name with None.
-    assert "id" in request.aggregates
-    assert isinstance(request.aggregates["id"], ColumnStats)
-    assert request.aggregates[hash_column_name("email")] is None
+    # aggregates is tuple[tuple[name, stats], ...] — convert to dict for the
+    # membership checks. The tuple shape (vs. dict) is the DEC-022 immutability
+    # guarantee: downstream consumers can't mutate values post-audit.
+    aggregates_by_name = dict(request.aggregates)
+    assert "id" in aggregates_by_name
+    assert isinstance(aggregates_by_name["id"], ColumnStats)
+    assert aggregates_by_name[hash_column_name("email")] is None
 
 
 def test_build_llm_request_aggregate_only_no_sample_rows_calls(

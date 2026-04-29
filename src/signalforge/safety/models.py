@@ -126,7 +126,12 @@ class LLMRequest(BaseModel):
     columns_sent: tuple[str, ...]
     redactions: tuple[RedactionRecord, ...]
     sampled_rows: tuple[dict[str, Any], ...] | None = None
-    aggregates: dict[str, ColumnStats | None] | None = None
+    # Tuple-of-tuples (not dict) so frozen=True actually prevents mutation:
+    # downstream consumers cannot do `request.aggregates["x"] = ...` post-audit
+    # (DEC-022 transitive immutability). Convention: list order matches
+    # ``columns_sent``; redacted columns appear with their hashed name as key
+    # and ``None`` as value.
+    aggregates: tuple[tuple[str, ColumnStats | None], ...] | None = None
     # ``schema`` overrides Pydantic v1's deprecated :meth:`BaseModel.schema`
     # method on this subclass. The override is intentional — the field name is
     # part of the documented LLMRequest contract — so pyright's structural
