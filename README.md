@@ -59,6 +59,31 @@ via `WarehouseAdapter.from_profile(profile)`. See
 setup, cost defaults, sampling strategy (and the TABLESAMPLE
 cost-asterisk), `PartitionFilter` use, and the typed-error reference.
 
+## Data safety
+
+Schema-only is the default. The LLM never sees row data unless you
+explicitly opt in via `safety.mode: sample` in `signalforge.yml` (or
+the post-#9 `--mode` CLI flag). Even column *names* that match the
+built-in PII patterns (`*email`, `*phone`, `*ssn`) — or that you flag
+via dbt `tags: ["pii"]` / `meta.contains_pii: true` /
+`meta.signalforge.sample: false` — are replaced with stable hashed
+placeholders (`col_<8 hex>`) before reaching the LLM.
+
+Every LLM call produces one structured record at
+`.signalforge/audit.jsonl` (default; configurable via
+`safety.audit_path`). The file contains plaintext column-name metadata
+and should be treated as sensitive: this repo's `.gitignore` already
+covers `.signalforge/`; the writer creates the directory at `0o700`
+and the audit file at `0o600`. The audit writer is fail-closed — if
+the write fails, the LLM call is aborted (no silent drafts without an
+audit trail). See [docs/safety-ops.md](docs/safety-ops.md) for the
+JSONL schema.
+
+Full reference — mode semantics, the four opt-out signals and their
+precedence, the `signalforge.yml` schema, the audit schema, debugging,
+and the typed-error reference — is in
+[docs/safety-ops.md](docs/safety-ops.md).
+
 ## Roadmap
 
 | Version | Scope                                                                              |
