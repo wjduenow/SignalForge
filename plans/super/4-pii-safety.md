@@ -722,16 +722,27 @@ Thirteen stories. Architecture order: deps-and-config → fixtures → errors �
 
 ## Beads Manifest
 
-*(Phase 7 — populated on devolve.)*
+Devolved 2026-04-28. Worktree: `/home/wesd/dev/worktrees/SignalForge/feature/4-pii-safety`.
 
-## Refinement Log
+**Epic:** `bd_1-scaffolding-o6f` — 4: PII safety layer.
 
-*(Phase 3 — populated after Architecture Review.)*
+**Tasks** (in architecture order; each carries the full acceptance criteria from its US-NNN story above):
 
-## Detailed Breakdown
+| ID | Story | Depends on |
+| --- | --- | --- |
+| `bd_1-scaffolding-0ix` | US-001 — Subpackage scaffolding + pytest config | (none — entry point) |
+| `bd_1-scaffolding-o64` | US-002 — Test fixtures | US-001 |
+| `bd_1-scaffolding-rix` | US-003 — Errors module | US-001 |
+| `bd_1-scaffolding-agc` | US-004 — Typed models | US-003 |
+| `bd_1-scaffolding-pfj` | US-005 — SafetyPolicy + helpers | US-003, US-004 |
+| `bd_1-scaffolding-ly6` | US-006 — Config loader + path safety | US-002, US-003, US-005 |
+| `bd_1-scaffolding-mg2` | US-007 — Audit module | US-003, US-004 |
+| `bd_1-scaffolding-y47` | US-008 — Redaction helpers | US-004, US-005 |
+| `bd_1-scaffolding-3z5` | US-009 — Aggregate wrapper + FakeAdapter | US-005, US-008 |
+| `bd_1-scaffolding-969` | US-010 — Request builder + regression suite | US-007, US-008, US-009 |
+| `bd_1-scaffolding-2fb` | US-011 — Public API + drift + AST scan | US-003 .. US-010 |
+| `bd_1-scaffolding-gx3` | US-012 — `docs/safety-ops.md` + README | US-001 .. US-011 |
+| `bd_1-scaffolding-8av` | US-013 — Quality Gate | US-001 .. US-012 |
+| `bd_1-scaffolding-51d` | US-014 — Patterns & Memory | US-013 |
 
-*(Phase 4 — populated after Refinement.)*
-
-## Beads Manifest
-
-*(Phase 7 — populated on devolve.)*
+`bd ready` confirms `bd_1-scaffolding-0ix` (US-001) is the single unblocked entry point. The DAG fans out from there. Cross-story `task → epic` parent-edges were rejected by beads' epic semantics ("tasks can only block other tasks, not epics"); all inter-task dependencies are wired and that is what Ralph traverses.
