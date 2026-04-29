@@ -54,4 +54,5 @@ markers = [
   "integration: tests exercising the full load() round-trip",
   "error: tests asserting an exception with its remediation",
   "bigquery: tests requiring BigQuery credentials (gated by SF_RUN_BQ=1)",
+  "safety: tests for the PII safety layer",
 ]
