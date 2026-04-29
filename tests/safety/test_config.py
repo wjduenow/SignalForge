@@ -51,6 +51,60 @@ def test_load_safety_config_no_file_default_redact_patterns(tmp_path: Path) -> N
     assert load_safety_config(tmp_path).redact_patterns == DEFAULT_REDACT_PATTERNS
 
 
+def test_load_safety_config_no_file_default_audit_path_is_inside_project(
+    tmp_path: Path,
+) -> None:
+    """Regression (Copilot PR #18 review): the default ``audit_path`` must be
+    canonicalised against ``project_dir`` even when no config file exists.
+    Without the fix, ``SafetyPolicy()``'s relative default
+    (``.signalforge/audit.jsonl``) makes the audit log resolve relative to
+    the orchestrator's CWD, not the project — silently writing the audit
+    record to the wrong place and bypassing the DEC-013 containment gate.
+    """
+    policy = load_safety_config(tmp_path)
+    # Resolve the project root the same way the loader does (canonicalise
+    # follows symlinks, so on macOS `/private/var/...` vs `/var/...`).
+    project_resolved = tmp_path.resolve()
+    assert policy.audit_path.is_absolute()
+    assert policy.audit_path.is_relative_to(project_resolved)
+    assert policy.audit_path.name == "audit.jsonl"
+    assert policy.audit_path.parent.name == ".signalforge"
+
+
+def test_load_safety_config_empty_file_default_audit_path_is_inside_project(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "signalforge.yml").write_bytes(b"")
+    policy = load_safety_config(tmp_path)
+    assert policy.audit_path.is_absolute()
+    assert policy.audit_path.is_relative_to(tmp_path.resolve())
+
+
+def test_load_safety_config_missing_safety_key_default_audit_path_is_inside_project(
+    tmp_path: Path,
+) -> None:
+    """Same regression as the no-file branch: when only an unrelated
+    top-level key is present (DEC-025 namespace reservation), the
+    ``audit_path`` default must still be canonicalised."""
+    (tmp_path / "signalforge.yml").write_text("llm:\n  model: x\n", encoding="utf-8")
+    policy = load_safety_config(tmp_path)
+    assert policy.audit_path.is_absolute()
+    assert policy.audit_path.is_relative_to(tmp_path.resolve())
+
+
+def test_load_safety_config_no_audit_path_in_yaml_canonicalises_default(
+    tmp_path: Path,
+) -> None:
+    """User authored ``signalforge.yml`` but didn't override ``audit_path`` —
+    the policy's audit_path must still be the canonicalised default, not the
+    relative ``Path('.signalforge/audit.jsonl')`` from ``SafetyPolicy``'s
+    field default."""
+    (tmp_path / "signalforge.yml").write_text("safety:\n  mode: schema-only\n", encoding="utf-8")
+    policy = load_safety_config(tmp_path)
+    assert policy.audit_path.is_absolute()
+    assert policy.audit_path.is_relative_to(tmp_path.resolve())
+
+
 def test_load_safety_config_empty_file_returns_defaults(tmp_path: Path) -> None:
     (tmp_path / "signalforge.yml").write_bytes(b"")
     policy = load_safety_config(tmp_path)
@@ -171,16 +225,70 @@ def test_load_safety_config_unknown_mode_fixture_raises(tmp_path: Path) -> None:
         load_safety_config(tmp_path)
 
 
-def test_load_safety_config_typo_fixture_raises(tmp_path: Path) -> None:
-    """The ``redacts:`` typo (rather than ``redact:``) under ``safety:`` —
-    the loader must surface a typed safety-layer error. The exact subclass
-    depends on whether the validator can map it to
-    :class:`UnknownConfigKeyError` or whether it falls through to the
-    Pydantic generic path; either way it must inherit from
-    :class:`SafetyError`.
-    """
+def test_load_safety_config_typo_fixture_raises_unknown_config_key_error(
+    tmp_path: Path,
+) -> None:
+    """Regression (Copilot PR #18 review): a ``redacts:`` typo (vs ``redact:``)
+    under ``safety:`` must surface as the typed
+    :class:`UnknownConfigKeyError`, not the generic
+    :class:`PolicyValidationError`. Pydantic's ``extra="forbid"`` raises
+    ``ValidationError`` with ``type=='extra_forbidden'``; the loader
+    translates that into our typed error so DEC-026 holds."""
+    from signalforge.safety.errors import UnknownConfigKeyError
+
     _copy_fixture("signalforge_typo.yml", tmp_path)
-    with pytest.raises(SafetyError):
+    with pytest.raises(UnknownConfigKeyError) as excinfo:
+        load_safety_config(tmp_path)
+    # The bad key surfaces in the error so users can find it.
+    assert "redacts" in str(excinfo.value)
+
+
+def test_load_safety_config_top_level_typo_raises_unknown_config_key_error(
+    tmp_path: Path,
+) -> None:
+    """Same translation applies to typos at any level inside ``safety:``."""
+    from signalforge.safety.errors import UnknownConfigKeyError
+
+    (tmp_path / "signalforge.yml").write_text("safety:\n  mode_: schema-only\n", encoding="utf-8")
+    with pytest.raises(UnknownConfigKeyError) as excinfo:
+        load_safety_config(tmp_path)
+    assert "mode_" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# audit_path type validation (Copilot PR #18 review)
+# ---------------------------------------------------------------------------
+
+
+def test_load_safety_config_audit_path_int_raises_invalid_config_error(
+    tmp_path: Path,
+) -> None:
+    """Regression: ``audit_path: 123`` previously crashed inside ``Path(123)``
+    with ``TypeError``, leaking a non-:class:`SafetyError` exception. Now
+    rejected at the type-validation gate with :class:`InvalidConfigError`."""
+    (tmp_path / "signalforge.yml").write_text("safety:\n  audit_path: 123\n", encoding="utf-8")
+    with pytest.raises(InvalidConfigError) as excinfo:
+        load_safety_config(tmp_path)
+    assert "audit_path" in str(excinfo.value)
+    assert "string or path-like" in str(excinfo.value)
+
+
+def test_load_safety_config_audit_path_list_raises_invalid_config_error(
+    tmp_path: Path,
+) -> None:
+    """Same gate — a YAML list like ``audit_path: [a, b]`` must fail loud."""
+    (tmp_path / "signalforge.yml").write_text(
+        "safety:\n  audit_path:\n    - a\n    - b\n", encoding="utf-8"
+    )
+    with pytest.raises(InvalidConfigError):
+        load_safety_config(tmp_path)
+
+
+def test_load_safety_config_audit_path_bool_raises_invalid_config_error(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "signalforge.yml").write_text("safety:\n  audit_path: true\n", encoding="utf-8")
+    with pytest.raises(InvalidConfigError):
         load_safety_config(tmp_path)
 
 

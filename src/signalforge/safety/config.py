@@ -33,6 +33,7 @@ construction tags and is unsafe for any input we don't fully control.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Final
 
@@ -48,7 +49,7 @@ from signalforge.safety.errors import (
     PolicyValidationError,
     UnknownConfigKeyError,
 )
-from signalforge.safety.policy import SafetyPolicy
+from signalforge.safety.policy import DEFAULT_AUDIT_PATH, SafetyPolicy
 
 _LOGGER: Final = logging.getLogger("signalforge.safety")
 _DEFAULT_CONFIG_FILENAME: Final = "signalforge.yml"
@@ -86,6 +87,15 @@ def load_safety_config(project_dir: Path, path: Path | None = None) -> SafetyPol
         PolicyValidationError: Generic Pydantic validation failure not
             covered by the more specific exceptions above.
     """
+    # Default audit_path is project-relative (`.signalforge/audit.jsonl`).
+    # Canonicalise against project_dir so every default-fallback branch ends
+    # up with the same absolute, symlink-hardened path the user-override
+    # branch produces. Without this, a user who omits `signalforge.yml`
+    # gets an audit log at CWD-relative `.signalforge/audit.jsonl` rather
+    # than `<project_dir>/.signalforge/audit.jsonl`. Reported by Copilot
+    # PR review.
+    default_audit_path = canonicalise_path(DEFAULT_AUDIT_PATH, project_dir)
+
     if path is not None:
         config_file = path
         if not config_file.exists():
@@ -93,12 +103,12 @@ def load_safety_config(project_dir: Path, path: Path | None = None) -> SafetyPol
     else:
         config_file = project_dir / _DEFAULT_CONFIG_FILENAME
         if not config_file.exists():
-            return SafetyPolicy()
+            return SafetyPolicy(audit_path=default_audit_path)
 
     raw_text = config_file.read_text(encoding="utf-8").strip()
     if not raw_text:
         _LOGGER.debug("safety config file %r is empty; using defaults", str(config_file))
-        return SafetyPolicy()
+        return SafetyPolicy(audit_path=default_audit_path)
 
     try:
         loaded = yaml.safe_load(raw_text)
@@ -109,7 +119,7 @@ def load_safety_config(project_dir: Path, path: Path | None = None) -> SafetyPol
 
     if loaded is None:
         # File parses to None (e.g. only comments) — same as empty.
-        return SafetyPolicy()
+        return SafetyPolicy(audit_path=default_audit_path)
 
     if not isinstance(loaded, dict):
         raise InvalidConfigError(
@@ -119,7 +129,7 @@ def load_safety_config(project_dir: Path, path: Path | None = None) -> SafetyPol
     safety_block = loaded.get("safety")
     if safety_block is None:
         # Missing safety: key — other top-level keys reserved per DEC-025.
-        return SafetyPolicy()
+        return SafetyPolicy(audit_path=default_audit_path)
 
     if not isinstance(safety_block, dict):
         raise InvalidConfigError(
@@ -132,6 +142,21 @@ def load_safety_config(project_dir: Path, path: Path | None = None) -> SafetyPol
     # then canonicalise + containment-check via the symlink-hardened helper.
     audit_path_raw = safety_block.get("audit_path")
     if audit_path_raw is not None:
+        # Validate the type up front. YAML can parse `audit_path: 123` to
+        # an int (or `audit_path:` to None — already filtered above) which
+        # would crash inside `Path(...)` with TypeError, leaking a
+        # non-SafetyError exception. Reported by Copilot PR review.
+        if not isinstance(audit_path_raw, (str, os.PathLike)):
+            raise InvalidConfigError(
+                message=(
+                    f"audit_path must be a string or path-like; "
+                    f"got {type(audit_path_raw).__name__} ({audit_path_raw!r})"
+                ),
+                remediation=(
+                    "Quote the value in signalforge.yml so YAML parses it as a string "
+                    "(default: .signalforge/audit.jsonl)."
+                ),
+            )
         candidate = Path(audit_path_raw)
         if any(part == ".." for part in candidate.parts):
             raise InvalidConfigError(
@@ -140,10 +165,17 @@ def load_safety_config(project_dir: Path, path: Path | None = None) -> SafetyPol
                     "Use a path inside the project directory (default: .signalforge/audit.jsonl)."
                 ),
             )
-        resolved = canonicalise_path(audit_path_raw, project_dir)
+        # `canonicalise_path` accepts `Path | str`; narrow `os.PathLike`
+        # input through `Path(...)` (already done as `candidate` above).
+        resolved = canonicalise_path(candidate, project_dir)
         # Replace the raw value with the resolved Path so SafetyPolicy
         # stores the canonical form.
         safety_block = {**safety_block, "audit_path": resolved}
+    else:
+        # User did not override audit_path — apply the canonicalised default
+        # so the policy's audit_path is always absolute (symmetric with the
+        # branches above).
+        safety_block = {**safety_block, "audit_path": default_audit_path}
 
     try:
         return SafetyPolicy.model_validate(safety_block)
@@ -172,6 +204,20 @@ def load_safety_config(project_dir: Path, path: Path | None = None) -> SafetyPol
                 ),
             ):
                 raise inner from exc
+        # Translate Pydantic's `extra_forbidden` into our typed
+        # UnknownConfigKeyError so DEC-026's contract holds: typos like
+        # `redacts:` (instead of `redact:`) at the top of the safety block
+        # surface as UnknownConfigKeyError, not the generic policy-validation
+        # error. Reported by Copilot PR review.
+        for err in exc.errors():
+            if err.get("type") == "extra_forbidden":
+                loc = err.get("loc", ())
+                if loc:
+                    bad_key = str(loc[-1])
+                    scope = (
+                        "safety." + ".".join(str(p) for p in loc[:-1]) if len(loc) > 1 else "safety"
+                    )
+                    raise UnknownConfigKeyError(key=bad_key, scope=scope) from exc
         # Last-resort wrap: surface the Pydantic failure as a typed
         # safety-layer error so callers can pattern-match.
         raise PolicyValidationError(

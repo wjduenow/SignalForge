@@ -63,11 +63,14 @@ RedactionReason = Literal[
 
 
 class RedactionRecord(BaseModel):
-    """One column's redaction outcome.
+    """One applied column redaction.
 
-    Emitted by the redactor for every column considered (whether kept or
-    dropped) so the audit log records the *full* decision surface, not just
-    the redactions actually applied.
+    Emitted only for columns the redactor actually drops or masks. Columns
+    that pass through unchanged do not produce a :class:`RedactionRecord`,
+    so audit/request payloads capture the redactions that were applied
+    rather than the full set of columns considered. The ``reason`` field is
+    a closed :data:`RedactionReason` literal so audit-log consumers can
+    pattern-match exhaustively on the seven possible signals.
     """
 
     model_config = _BASE_MODEL_CONFIG

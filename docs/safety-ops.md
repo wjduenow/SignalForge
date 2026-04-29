@@ -59,17 +59,22 @@ request = build_llm_request(model, adapter, policy)
 Column-level statistics — `count`, `distinct`, `nulls`, `min`, `max`,
 `data_type` — reach the LLM via the `aggregates` field. Calls
 `WarehouseAdapter.column_stats` once per non-redacted column inside a
-single `with adapter:` block. Redacted columns are still keyed in the
-dict, but the value is `None` keyed by their hashed name.
+single `with adapter:` block. Redacted columns still appear as entries
+in the returned tuple, but their statistic value is `None` and their
+column name is the hashed placeholder.
+
+`LLMRequest.aggregates` is a `tuple[tuple[str, ColumnStats | None], ...]`
+(not a dict) so `frozen=True` actually prevents mutation downstream
+(DEC-022 transitive immutability).
 
 ```python
 policy = SafetyPolicy(mode=SamplingMode.AGGREGATE_ONLY)
 request = build_llm_request(model, adapter, policy)
-# request.aggregates == {
-#     "customer_id": ColumnStats(count=42, distinct=42, nulls=0, ...),
-#     "col_a3f29c61": None,  # redacted
+# request.aggregates == (
+#     ("customer_id", ColumnStats(count=42, distinct=42, nulls=0, ...)),
+#     ("col_a3f29c61", None),  # redacted
 #     ...
-# }
+# )
 ```
 
 ### `sample`
