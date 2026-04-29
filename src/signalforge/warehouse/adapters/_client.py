@@ -23,6 +23,7 @@ lives in the adapter where the stage label is known.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Protocol
 
 
@@ -133,28 +134,55 @@ def map_bq_exception(exc: Exception, *, context: dict[str, Any] | None = None) -
         WarehouseAuthError,
     )
 
+    table_id = str(context["table"]) if context is not None and "table" in context else "<unknown>"
+
     if isinstance(exc, gae.Forbidden):
         return WarehouseAuthError(message=str(exc))
     if isinstance(exc, gae.NotFound):
         # Real BigQuery surfaces missing columns as ``BadRequest`` /
         # "Unrecognized name", not ``NotFound`` — so every ``NotFound``
-        # we see in production maps to a missing table.
-        return TableNotFoundError(table=str(exc))
+        # we see in production maps to a missing table. The caller threads
+        # ``context={"table": ref.qualified_name}`` so the typed
+        # ``.table`` field stays a stable identifier rather than a
+        # truncated google.api_core message.
+        return TableNotFoundError(table=table_id)
     if isinstance(exc, gae.BadRequest):
-        msg = str(exc).lower()
-        if "exceeded limit" in msg or "maximum bytes billed" in msg:
+        msg = str(exc)
+        msg_lower = msg.lower()
+        if "exceeded limit" in msg_lower or "maximum bytes billed" in msg_lower:
             limit = (
                 int(context["max_bytes_billed"])
                 if context is not None and "max_bytes_billed" in context
                 else 0
             )
             return BytesBilledExceededError(job_id=None, bytes_billed=None, limit=limit)
-        if "unrecognized name" in msg or ("name" in msg and "not found" in msg):
-            return ColumnNotFoundError(table="?", column=str(exc))
+        if "unrecognized name" in msg_lower or ("name" in msg_lower and "not found" in msg_lower):
+            column = _extract_unrecognized_column(msg)
+            return ColumnNotFoundError(table=table_id, column=column)
         # All other BadRequests bucket into "your SQL is malformed" — DEC-007
         # callers can distinguish via attribute access on the typed error.
-        return QuerySyntaxError(detail=str(exc))
+        return QuerySyntaxError(detail=msg)
     return exc
+
+
+_UNRECOGNIZED_COLUMN_RE = re.compile(
+    r"unrecognized name:\s*([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+
+
+def _extract_unrecognized_column(message: str) -> str:
+    """Best-effort pull of a column identifier out of BigQuery's
+    ``Unrecognized name: foo at [1:23]`` message.
+
+    Returns the bare identifier if found; otherwise the full message.
+    Falling back to the message keeps :class:`ColumnNotFoundError`'s
+    ``column`` field non-empty even when BigQuery's wording shifts.
+    """
+    m = _UNRECOGNIZED_COLUMN_RE.search(message)
+    if m:
+        return m.group(1)
+    return message
 
 
 def row_to_dict(row: Any) -> dict[str, Any]:

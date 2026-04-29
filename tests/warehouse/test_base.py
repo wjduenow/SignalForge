@@ -80,6 +80,24 @@ def test_from_profile_uses_default_max_bytes_when_unset() -> None:
     assert adapter._max_bytes_billed == 100_000_000
 
 
+def test_from_profile_honours_explicit_zero_max_bytes_billed() -> None:
+    """Only ``None`` triggers the default — an explicit ``0`` (or any other
+    falsy int) flows through verbatim. Regression for the ``or 100_000_000``
+    fallback that overrode explicit zeros (Copilot review feedback)."""
+    profile = DbtProfileTarget.model_validate(
+        {
+            "type": "bigquery",
+            "project": "my-gcp-project",
+            "maximum_bytes_billed": 0,
+        }
+    )
+
+    adapter = WarehouseAdapter.from_profile(profile)
+
+    assert isinstance(adapter, BigQueryAdapter)
+    assert adapter._max_bytes_billed == 0
+
+
 def test_from_profile_respects_profile_max_bytes_billed() -> None:
     """An explicit profile value must flow through verbatim — no clamping,
     no rounding, no silent override of user config."""

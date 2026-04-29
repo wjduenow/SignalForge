@@ -100,8 +100,13 @@ The BigQuery adapter is opinionated about cost on every query.
   takes a `max_bytes_billed=` kwarg; the dbt profile's
   `maximum_bytes_billed` field flows through `load_profile` and
   `from_profile` and overrides the default. Queries that exceed the cap
-  raise `BytesBilledExceededError`, which carries `job_id`, `bytes_billed`,
-  and `limit` so users can cross-link to the BigQuery job history.
+  raise `BytesBilledExceededError`. The exception's `limit` field always
+  carries the configured cap; `job_id` and `bytes_billed` are populated
+  only when BigQuery's `BadRequest` exposes them (it usually doesn't on
+  the pre-execution rejection path) and are otherwise `None`. The error
+  message and remediation are sufficient to act on without those fields;
+  v0.2 may revisit by surfacing the failed `QueryJob` so the IDs flow
+  through.
 - **`use_query_cache=False` on every query** (DEC-015). Architectural
   Commitment #5 — explainable diffs — requires that the same input
   produce the same prune decision; cached results break that contract.
@@ -203,13 +208,18 @@ call MUST be inside a `with adapter:` block (DEC-025); calling it
 outside one raises `RuntimeError`.
 
 **Flush semantics in v0.1.** Inside an active `with adapter:` block,
-each call to `adapter.column_stats(table, col)` issues one BigQuery
-query for that column. Calls are not lazily batched in v0.1 — DEC-008
-anticipated a lazy proxy on `ColumnStats`, but the v0.1 implementation
-flushes eagerly so the returned object is a fully-populated typed
-value. v0.2 will land the lazy proxy and batch all pending columns of
-a table into a single query when any field of any returned
-`ColumnStats` is read.
+calls to `adapter.column_stats(table, col)` accumulate per table. The
+**first** call for a given table flushes every column queued for that
+table in a single batched aggregate query, populating the cache;
+subsequent `column_stats(table, ...)` calls for columns already in the
+cache return without issuing another query. Columns queued *after* a
+flush are batched into the next flush when the first uncached column is
+requested.
+
+The returned `ColumnStats` is a fully-populated typed value (no lazy
+proxy). v0.2 may add a lazy proxy that defers the flush until a field is
+read, but the v0.1 contract is "first call flushes the queued batch" —
+predictable and easy to reason about at a `with`-block boundary.
 
 Use the recommended pattern below to keep call sites cheap to refactor
 when the lazy form lands:

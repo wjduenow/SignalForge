@@ -234,23 +234,24 @@ def load_profile(project_dir: Path, target: str | None = None) -> DbtProfileTarg
             :class:`DbtProfileTarget`.
     """
     profile_name = _read_dbt_project_profile_name(project_dir)
-    raw_profiles, _path = _find_and_load_profiles_yaml(project_dir)
+    raw_profiles, profiles_path = _find_and_load_profiles_yaml(project_dir)
 
     profile_block = raw_profiles.get(profile_name)
     if not isinstance(profile_block, dict):
         raise ProfileNotFoundError(
-            searched_paths=[Path(profile_name)],
+            searched_paths=[profiles_path],
             remediation=(
-                f"profiles.yml has no top-level `{profile_name}:` block. "
-                "Add a profile entry matching the name in dbt_project.yml."
+                f"profiles.yml at {profiles_path} has no top-level "
+                f"`{profile_name}:` block. Add a profile entry matching the "
+                "name in dbt_project.yml."
             ),
         )
 
     outputs = profile_block.get("outputs")
     if not isinstance(outputs, dict):
         raise ProfileNotFoundError(
-            searched_paths=[Path(profile_name)],
-            remediation=(f"Profile `{profile_name}` has no `outputs:` mapping in profiles.yml."),
+            searched_paths=[profiles_path],
+            remediation=(f"Profile `{profile_name}` at {profiles_path} has no `outputs:` mapping."),
         )
 
     selected_target: str | None
@@ -260,10 +261,13 @@ def load_profile(project_dir: Path, target: str | None = None) -> DbtProfileTarg
         default_target = profile_block.get("target")
         selected_target = default_target if isinstance(default_target, str) else None
 
+    available = sorted(outputs)
     if not selected_target or selected_target not in outputs:
         raise ProfileTargetNotFoundError(
             profile_name=profile_name,
             target=selected_target if selected_target else "<unset>",
+            available=available,
+            profiles_path=profiles_path,
         )
 
     target_block = outputs[selected_target]
@@ -271,6 +275,8 @@ def load_profile(project_dir: Path, target: str | None = None) -> DbtProfileTarg
         raise ProfileTargetNotFoundError(
             profile_name=profile_name,
             target=selected_target,
+            available=available,
+            profiles_path=profiles_path,
         )
 
     return DbtProfileTarget.model_validate(target_block)

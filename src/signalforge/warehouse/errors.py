@@ -146,18 +146,32 @@ class ProfileTargetNotFoundError(ProfileNotFoundError):
         profile_name: str,
         target: str,
         *,
+        available: list[str] | None = None,
+        profiles_path: Path | None = None,
         remediation: str | None = None,
     ) -> None:
         self.profile_name = profile_name
         self.target = target
+        self.available = list(available) if available is not None else []
+        self.profiles_path = profiles_path
         # Bypass ProfileNotFoundError.__init__ — we have a different message
         # shape — and call WarehouseError.__init__ directly.
         message = (
             f"Target {_format_value(target)} not found in profile {_format_value(profile_name)}."
         )
-        # Track searched_paths as empty list so the parent's contract holds
-        # for callers that introspect it.
-        self.searched_paths: list[Path] = []
+        if remediation is None:
+            available_str = (
+                ", ".join(_format_value(a) for a in self.available) if self.available else "(none)"
+            )
+            location = f" in {profiles_path}" if profiles_path is not None else ""
+            remediation = (
+                f"Available targets for profile `{profile_name}`{location}: "
+                f"[{available_str}]. Pass an explicit `target=` matching one "
+                "of these, or add the requested target to profiles.yml."
+            )
+        # Track searched_paths so the parent's contract holds for callers
+        # that introspect it.
+        self.searched_paths: list[Path] = [profiles_path] if profiles_path is not None else []
         WarehouseError.__init__(self, message, remediation=remediation)
 
 

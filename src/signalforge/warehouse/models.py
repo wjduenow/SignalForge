@@ -112,6 +112,17 @@ class TableRef:
         validate_identifier("dataset", self.dataset)
         validate_identifier("name", self.name)
 
+    @property
+    def qualified_name(self) -> str:
+        """Stable ``[project.]dataset.name`` identifier for error messages.
+
+        Dialect-neutral (no backticks); ``project`` is omitted when ``None``
+        so callers see the same shape they'd type into a console.
+        """
+        if self.project is None:
+            return f"{self.dataset}.{self.name}"
+        return f"{self.project}.{self.dataset}.{self.name}"
+
     @classmethod
     def from_model(cls, model: Model) -> TableRef:
         """Construct a ``TableRef`` from a manifest :class:`Model` (DEC-014).

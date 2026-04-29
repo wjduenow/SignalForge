@@ -52,13 +52,14 @@ When v0.2 adds Snowflake/Postgres adapters, each gets its own `_client.py` shim 
 Hand-rolled fakes only — `pytest-bigquery-mock` is unmaintained and `MagicMock`-style fakes auto-pass everything (violates `testing-signal.md`).
 
 ```python
-fake = FakeBigQueryClient()
-fake.expect_query(matching=re.compile(r"^SELECT COUNT"), returns=[FakeRow({"failures": 0})])
-fake.expect_get_table(table_ref=TableRef(project="p", dataset="d", name="t"), num_rows=1_000_000)
-fake.expect_list_rows(...)
+fake = FakeBigQueryClient(project="p")
+ref = TableRef(project="p", dataset="d", name="t")
+fake.expect_query(matching=r"^SELECT COUNT", returns=[{"failures": 0}])
+fake.expect_get_table(ref=ref, returns=FakeTable(num_rows=1_000_000, schema=[]))
+fake.expect_list_rows(ref=ref, returns=[{"a": 1}])
 adapter = BigQueryAdapter(client=fake, project="p")
 adapter.run_test_sql(...)
-fake.assert_no_remaining_expectations()
+fake.assert_all_expectations_met()
 ```
 
 Each call consumes one matching expectation; calls outside the canned set raise `AssertionError("unexpected query: ...")`. Silent mismatches surface loudly. The fake lives under `tests/warehouse/_fake.py` — never import it from production code.
@@ -124,7 +125,7 @@ US-014 evaluated extraction; the decision is to keep the duplication explicit. A
 
 ## No logging in stage-0 modules; one-line warnings only at adapter boundary
 
-Reader/parser modules (`profiles.py`, `_sql_safety.py`, `_path_safety.py`) emit no logs. Observability lives at the adapter boundary, where stage labels are known.
+Reader/parser modules emit no routine logs. The only exceptions are soft-threshold WARNINGs that signal the user is on a path likely to be slow or expensive — `profiles.py` emits one when `profiles.yml` exceeds the soft size cap (DEC-023); `_sql_safety.py` and `_path_safety.py` emit nothing. Observability beyond those soft warnings lives at the adapter boundary, where stage labels are known.
 
 The adapter emits sparing `WARNING`-level signal when behaviour deviates from the deterministic happy path:
 

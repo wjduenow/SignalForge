@@ -295,7 +295,13 @@ class BigQueryAdapter(WarehouseAdapter):
         try:
             meta = self._get_client().get_table(table)
         except Exception as exc:
-            mapped = map_bq_exception(exc, context={"max_bytes_billed": self._max_bytes_billed})
+            mapped = map_bq_exception(
+                exc,
+                context={
+                    "max_bytes_billed": self._max_bytes_billed,
+                    "table": table.qualified_name,
+                },
+            )
             if mapped is exc:
                 raise
             raise mapped from exc
@@ -338,19 +344,24 @@ class BigQueryAdapter(WarehouseAdapter):
         same prune decision) and works on views, MVs, wildcard tables,
         and CTEs — places where ``TABLESAMPLE`` does not.
         """
+        if n <= 0:
+            raise ValueError(f"sample_rows requires n > 0; got n={n}")
+
         meta = self._get_table(table)
         num_rows: int | None = getattr(meta, "num_rows", None)
 
         if num_rows is None or num_rows == 0:
             if partition_filter is None:
-                raise UnknownTableSizeError(table=str(table))
+                raise UnknownTableSizeError(table=table.qualified_name)
             bucket = 1000
             _LOGGER.debug(
                 "Sampling table with unknown num_rows; using bucket=1000 (table=%s)",
-                table,
+                table.qualified_name,
             )
         elif num_rows >= _LARGE_TABLE_THRESHOLD and partition_filter is None:
-            raise SamplingRequiresPartitionFilterError(table=str(table), num_rows=num_rows)
+            raise SamplingRequiresPartitionFilterError(
+                table=table.qualified_name, num_rows=num_rows
+            )
         else:
             bucket = max(num_rows // n, 1)
 
@@ -378,7 +389,13 @@ class BigQueryAdapter(WarehouseAdapter):
             )
             rows = list(job.result())
         except Exception as exc:
-            mapped = map_bq_exception(exc, context={"max_bytes_billed": self._max_bytes_billed})
+            mapped = map_bq_exception(
+                exc,
+                context={
+                    "max_bytes_billed": self._max_bytes_billed,
+                    "table": table.qualified_name,
+                },
+            )
             if mapped is exc:
                 raise
             raise mapped from exc
@@ -477,7 +494,13 @@ class BigQueryAdapter(WarehouseAdapter):
             )
             rows = list(job.result())
         except Exception as exc:
-            mapped = map_bq_exception(exc, context={"max_bytes_billed": self._max_bytes_billed})
+            mapped = map_bq_exception(
+                exc,
+                context={
+                    "max_bytes_billed": self._max_bytes_billed,
+                    "table": table.qualified_name,
+                },
+            )
             if mapped is exc:
                 raise
             raise mapped from exc

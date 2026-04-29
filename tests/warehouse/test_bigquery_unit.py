@@ -193,8 +193,25 @@ def test_sample_rows_unknown_size_raises_unknown_table_size(
         returns=FakeTable(num_rows=None, schema=[]),
     )
 
-    with pytest.raises(UnknownTableSizeError):
+    with pytest.raises(UnknownTableSizeError) as exc_info:
         adapter.sample_rows(table_ref, n=10)
+    # The typed ``.table`` field must be a stable qualified identifier,
+    # not the dataclass repr ``TableRef(project=..., dataset=..., name=...)``
+    # (Copilot review feedback).
+    assert exc_info.value.table == table_ref.qualified_name
+    assert "TableRef(" not in exc_info.value.table
+
+
+def test_sample_rows_rejects_non_positive_n(
+    adapter: BigQueryAdapter,
+    table_ref: TableRef,
+) -> None:
+    """``n <= 0`` would yield ``ZeroDivisionError`` or nonsensical SQL;
+    fail loud at the public boundary instead (Copilot review feedback)."""
+    with pytest.raises(ValueError, match="n > 0"):
+        adapter.sample_rows(table_ref, n=0)
+    with pytest.raises(ValueError, match="n > 0"):
+        adapter.sample_rows(table_ref, n=-5)
 
 
 def test_sample_rows_large_unfiltered_raises_sampling_requires_partition(
@@ -213,6 +230,8 @@ def test_sample_rows_large_unfiltered_raises_sampling_requires_partition(
         adapter.sample_rows(table_ref, n=10)
 
     assert exc_info.value.num_rows == 200_000_000
+    assert exc_info.value.table == table_ref.qualified_name
+    assert "TableRef(" not in exc_info.value.table
 
 
 def test_sample_rows_uses_bucket_n_for_unknown_size_with_filter(
@@ -654,8 +673,11 @@ def test_column_not_found_wraps_bq_bad_request(
         returns=BadRequest("Unrecognized name: foo at [3:8]"),
     )
 
-    with pytest.raises(ColumnNotFoundError):
+    with pytest.raises(ColumnNotFoundError) as exc_info:
         adapter.run_test_sql("SELECT foo FROM `p.d.t`")
+    # The typed ``.column`` field must hold the bare identifier, not
+    # the full ``BadRequest`` message text (Copilot review feedback).
+    assert exc_info.value.column == "foo"
 
 
 def test_query_syntax_error_wraps_bq_bad_request(
@@ -683,8 +705,11 @@ def test_table_not_found_wraps_bq_not_found(
         returns=NotFound("Table 'fake_project.analytics.dim_users' not found"),
     )
 
-    with pytest.raises(TableNotFoundError):
+    with pytest.raises(TableNotFoundError) as exc_info:
         adapter.sample_rows(table_ref, n=10)
+    # ``.table`` must be a stable qualified identifier, not the truncated
+    # google.api_core ``NotFound`` message (Copilot review feedback).
+    assert exc_info.value.table == table_ref.qualified_name
 
 
 def test_warehouse_auth_error_wraps_default_credentials_error(

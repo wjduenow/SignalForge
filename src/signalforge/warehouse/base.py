@@ -101,10 +101,18 @@ class WarehouseAdapter(abc.ABC):
             # injecting a fake client directly into a concrete adapter).
             from signalforge.warehouse.adapters.bigquery import BigQueryAdapter
 
+            # Explicit ``is None`` so a profile that pins
+            # ``maximum_bytes_billed: 0`` (or any other falsy int) is honoured
+            # rather than silently swapped for the default cap.
+            max_bytes_billed = (
+                100_000_000
+                if profile.maximum_bytes_billed is None
+                else profile.maximum_bytes_billed
+            )
             return BigQueryAdapter(
                 project=profile.project,
                 location=profile.location,
-                max_bytes_billed=profile.maximum_bytes_billed or 100_000_000,
+                max_bytes_billed=max_bytes_billed,
             )
         raise UnsupportedProfileTypeError(profile_type=profile.type)
 

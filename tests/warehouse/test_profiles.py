@@ -153,6 +153,16 @@ def test_load_profile_missing_target_raises(
         load_profile(project_dir)
     assert excinfo.value.target == "dev"
     assert excinfo.value.profile_name == "signalforge_test"
+    # Remediation must list the actually-available targets so users can
+    # fix the profile without opening the YAML (Copilot review feedback).
+    assert excinfo.value.available, "available targets list should be non-empty"
+    for available_target in excinfo.value.available:
+        assert available_target in str(excinfo.value)
+    # And the searched_paths must point at the real profiles.yml file,
+    # not at the profile *name* placeholder.
+    assert excinfo.value.profiles_path is not None
+    assert excinfo.value.profiles_path.name == "profiles.yml"
+    assert excinfo.value.searched_paths == [excinfo.value.profiles_path]
 
 
 # ---------------------------------------------------------------------------
