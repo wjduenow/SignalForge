@@ -98,6 +98,17 @@ def test_tableref_accepts_none_project() -> None:
 
 
 @pytest.mark.unit
+def test_tableref_qualified_name_renders_dotted_form() -> None:
+    """``qualified_name`` is the stable identifier used in error messages —
+    dialect-neutral, no backticks, ``project`` omitted when ``None``
+    (Copilot review feedback)."""
+    assert (
+        TableRef(project="my-proj-01", dataset="d", name="t").qualified_name == "my-proj-01.d.t"
+    )
+    assert TableRef(project=None, dataset="d", name="t").qualified_name == "d.t"
+
+
+@pytest.mark.unit
 def test_tableref_from_model_happy_path() -> None:
     """``from_model`` returns project/dataset/name from a populated Model."""
     model = Model.model_validate(_minimal_model_dict())
