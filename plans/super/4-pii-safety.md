@@ -5,7 +5,7 @@
 - **Ticket:** [#4](https://github.com/wjduenow/SignalForge/issues/4)
 - **Branch:** `feature/4-pii-safety` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/4-pii-safety` (created via `git worktree add`)
-- **Phase:** published (PR [#18](https://github.com/wjduenow/SignalForge/pull/18) draft; awaiting approval before devolve)
+- **Phase:** devolved (epic `bd_1-scaffolding-o6f` + 14 tasks live; PR [#18](https://github.com/wjduenow/SignalForge/pull/18) draft)
 - **Sessions:** 1 (started 2026-04-28)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.1 (deployment blocker for any team with PII concerns)
