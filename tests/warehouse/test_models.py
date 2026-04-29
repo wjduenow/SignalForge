@@ -102,9 +102,7 @@ def test_tableref_qualified_name_renders_dotted_form() -> None:
     """``qualified_name`` is the stable identifier used in error messages —
     dialect-neutral, no backticks, ``project`` omitted when ``None``
     (Copilot review feedback)."""
-    assert (
-        TableRef(project="my-proj-01", dataset="d", name="t").qualified_name == "my-proj-01.d.t"
-    )
+    assert TableRef(project="my-proj-01", dataset="d", name="t").qualified_name == "my-proj-01.d.t"
     assert TableRef(project=None, dataset="d", name="t").qualified_name == "d.t"
 
 
