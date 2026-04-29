@@ -11,7 +11,7 @@
   },
   "nodes": {
     "model.sf_demo.customers": {
-      "database": "dev",
+      "database": "sf-demo-proj",
       "schema": "main",
       "name": "customers",
       "resource_type": "model",
@@ -80,7 +80,7 @@
       "primary_key": []
     },
     "model.sf_demo.orders_pii_at_model": {
-      "database": "dev",
+      "database": "sf-demo-proj",
       "schema": "main",
       "name": "orders_pii_at_model",
       "resource_type": "model",
