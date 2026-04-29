@@ -5,7 +5,7 @@
 - **Ticket:** [#4](https://github.com/wjduenow/SignalForge/issues/4)
 - **Branch:** `feature/4-pii-safety` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/4-pii-safety` (created via `git worktree add`)
-- **Phase:** detailing (Phases 1–3 locked 2026-04-28 "use defaults"; ready to publish PR)
+- **Phase:** published (PR [#18](https://github.com/wjduenow/SignalForge/pull/18) draft; awaiting approval before devolve)
 - **Sessions:** 1 (started 2026-04-28)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.1 (deployment blocker for any team with PII concerns)
