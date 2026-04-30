@@ -5,7 +5,7 @@
 - **Ticket:** [#5](https://github.com/wjduenow/SignalForge/issues/5)
 - **Branch:** `feature/5-llm-draft-pipeline` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/5-llm-draft-pipeline` (created via `git worktree add`)
-- **Phase:** detailing (Phase 1–4 complete 2026-04-29; awaiting user review before Phase 5 PR publish)
+- **Phase:** devolved (epic + 18 tasks live in beads 2026-04-29; PR [#19](https://github.com/wjduenow/SignalForge/pull/19) draft)
 - **Sessions:** 1 (started 2026-04-29)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.1 (the first ticket that actually calls an LLM; locks the contract for prune #6, grader #7)
@@ -963,4 +963,63 @@ Eighteen stories. Architecture order: deps-and-fixtures → `llm/` errors → `l
 
 ## Beads Manifest
 
-*Pending Phase 7 (devolve).*
+Devolved 2026-04-29. Worktree: `/home/wesd/dev/worktrees/SignalForge/feature/5-llm-draft-pipeline` (branch `feature/5-llm-draft-pipeline`).
+
+**Epic:** `bd_1-scaffolding-7eq` — `5: LLM draft pipeline (epic)`
+
+**Tasks (18, all parented under the epic):**
+
+| Story | Beads ID | Title |
+|---|---|---|
+| US-001 | `bd_1-scaffolding-g11` | Subpackage scaffolding + anthropic dep + pytest markers |
+| US-002 | `bd_1-scaffolding-wsb` | Test fixtures (yml + manifest + golden response samples) |
+| US-003 | `bd_1-scaffolding-4e2` | signalforge.llm.errors hierarchy |
+| US-004 | `bd_1-scaffolding-zea` | signalforge.llm.models LLMResult |
+| US-005 | `bd_1-scaffolding-806` | signalforge.llm._client SDK shim (DEC-012 confinement) |
+| US-006 | `bd_1-scaffolding-hhn` | signalforge.llm.client.call_anthropic centralized seam |
+| US-007 | `bd_1-scaffolding-wwx` | signalforge.draft.errors with bad-JSON envelope |
+| US-008 | `bd_1-scaffolding-nlz` | signalforge.draft.models CandidateSchema family + schema_version |
+| US-009 | `bd_1-scaffolding-buv` | signalforge.draft.config DraftConfig + load_draft_config |
+| US-010 | `bd_1-scaffolding-0kq` | signalforge.draft.prompts in-code template + version hash + envelope + mode-varying section |
+| US-011 | `bd_1-scaffolding-g27` | signalforge.draft.parser JSON validation + anchor-contract validator |
+| US-012 | `bd_1-scaffolding-mtg` | signalforge.draft.audit LLMResponseEvent + fail-closed writer |
+| US-013 | `bd_1-scaffolding-9na` | signalforge.draft.schema integration + DraftOutcome + public API |
+| US-014 | `bd_1-scaffolding-n98` | Audit-completeness AST scans + drift detector + cache-stability snapshot + grep gate |
+| US-015 | `bd_1-scaffolding-eup` | Real-API smoke test (@pytest.mark.anthropic) |
+| US-016 | `bd_1-scaffolding-bhu` | docs/draft-ops.md + README + CLAUDE.md |
+| US-017 | `bd_1-scaffolding-273` | Quality Gate (4 code-review passes + CodeRabbit + validation) |
+| US-018 | `bd_1-scaffolding-x3t` | Patterns & Memory (.claude/rules/llm-drafter.md + bd remember) |
+
+**Dependency graph (dependencies wired via `bd dep add`):**
+
+```
+US-001  (ready)
+├─ US-002 ─┬─ US-008 ─┬─ US-010 ─────────┐
+│          │          ├─ US-011 ───────┐ │
+│          │          ├─ US-012 ─────┐ │ │
+│          ├─ US-009 ─┐              │ │ │
+├─ US-003 ─┬─ US-004 ─ US-005 ─ US-006│ │ │
+│                                     │ │ │
+└─ US-007 ─┬─ US-009 ─ US-013 ◄───────┴─┴─┴
+           ├─ US-011 ───────────────────┤
+           └─ US-012 ─ US-013 ◄─────────┤
+                                        │
+                                  US-014 ◄─┐
+                                        │   │
+                                  US-015 ◄──┤
+                                        │   │
+                                  US-016 ◄──┘
+                                        │
+                              US-017 (Quality Gate, depends on US-001..US-016)
+                                        │
+                              US-018 (Patterns & Memory, depends on US-017)
+```
+
+**Initial ready queue:** US-001 (`bd_1-scaffolding-g11`). All 17 other tasks blocked until US-001 closes.
+
+**Ralph entry command:**
+```bash
+cd /home/wesd/dev/worktrees/SignalForge/feature/5-llm-draft-pipeline
+bd ready              # confirm US-001 surfaced
+/ralph-run            # or claim manually: bd update bd_1-scaffolding-g11 --claim
+```
