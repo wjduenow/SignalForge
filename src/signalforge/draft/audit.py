@@ -41,11 +41,14 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from pydantic import BaseModel, ConfigDict
 
 from signalforge.draft.models import CandidateSchema
+
+if TYPE_CHECKING:
+    from signalforge.llm.models import LLMResult
 
 # POSIX guarantees ``write(2)`` is atomic only up to ``PIPE_BUF`` bytes
 # (typically 4096 on Linux). The 96-byte margin leaves room for trailing
@@ -123,6 +126,48 @@ def _compute_sent_sql_hash(raw_code: str) -> str:
     want to detect prompt drift, not paper over it.
     """
     return hashlib.blake2b(raw_code.encode("utf-8"), digest_size=8).hexdigest()
+
+
+def _build_response_event(
+    *,
+    timestamp: datetime,
+    model_unique_id: str,
+    candidate: CandidateSchema,
+    raw_text: str,
+    sent_sql: str,
+    result: LLMResult,
+    prompt_version: str,
+    signalforge_version: str,
+) -> LLMResponseEvent:
+    """Internal seam: construct an :class:`LLMResponseEvent` from the inputs.
+
+    DEC-013 (US-014) reserves direct ``LLMResponseEvent(...)`` construction
+    to this module — the AST-completeness scan rejects calls anywhere else
+    in :mod:`signalforge.draft`. The integration layer
+    (:mod:`signalforge.draft.schema`) calls this helper rather than
+    constructing the event itself, so the audit-write seam stays the only
+    code path that produces a record.
+
+    Hashes are computed via :func:`_compute_response_text_hash`,
+    :func:`_compute_parsed_schema_hash`, and :func:`_compute_sent_sql_hash`
+    so the audit log records 16-hex digests rather than the raw cleartext
+    (keeps records under the POSIX-atomic-append cap; avoids re-emitting
+    PII the LLM may have echoed from the prompt).
+    """
+    return LLMResponseEvent(
+        timestamp=timestamp,
+        model_unique_id=model_unique_id,
+        prompt_version=prompt_version,
+        response_text_hash=_compute_response_text_hash(raw_text),
+        parsed_schema_hash=_compute_parsed_schema_hash(candidate),
+        sent_sql_hash=_compute_sent_sql_hash(sent_sql),
+        cache_creation_input_tokens=result.cache_creation_input_tokens,
+        cache_read_input_tokens=result.cache_read_input_tokens,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        model=result.model,
+        signalforge_version=signalforge_version,
+    )
 
 
 def write_response_event(event: LLMResponseEvent, *, audit_path: Path) -> None:
