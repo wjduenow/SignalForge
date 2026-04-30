@@ -33,6 +33,7 @@ session, etc.) in tracebacks or logs.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -85,8 +86,50 @@ def _make_anthropic_client(
     return anthropic.Anthropic(api_key=api_key)  # type: ignore[no-any-return]
 
 
+@dataclass(frozen=True)
+class _AnthropicExceptionClasses:
+    """Bundle of SDK exception classes used by the retry loop in
+    :func:`signalforge.llm.client.call_anthropic`.
+
+    Each tuple is the ``except`` clause's catch surface for one branch
+    of the retry taxonomy (DEC-004). Wrapping them in a frozen dataclass
+    keeps the seam's import surface narrow and confines every Anthropic-
+    SDK ``# type: ignore`` to this module (DEC-012).
+    """
+
+    rate_limit: tuple[type[BaseException], ...]
+    api_status: tuple[type[BaseException], ...]
+    auth: tuple[type[BaseException], ...]
+    connection: tuple[type[BaseException], ...]
+
+
+def _load_anthropic_exception_classes() -> _AnthropicExceptionClasses:
+    """Lazy-import the SDK exception classes the retry loop catches.
+
+    Returning empty tuples on ``ImportError`` is a defensive fallback
+    only; ``anthropic`` is a hard dependency of the package. Lazy import
+    keeps tests that never reach the retry branch from paying the SDK
+    import cost.
+    """
+    try:
+        import anthropic  # type: ignore[import-not-found]
+    except ImportError:  # pragma: no cover - the SDK is a hard dep
+        empty: tuple[type[BaseException], ...] = ()
+        return _AnthropicExceptionClasses(
+            rate_limit=empty, api_status=empty, auth=empty, connection=empty
+        )
+    return _AnthropicExceptionClasses(
+        rate_limit=(anthropic.RateLimitError,),
+        api_status=(anthropic.APIStatusError,),
+        auth=(anthropic.AuthenticationError, anthropic.PermissionDeniedError),
+        connection=(anthropic.APIConnectionError,),
+    )
+
+
 __all__ = [
     "_AnthropicClientProtocol",
+    "_AnthropicExceptionClasses",
     "_AnthropicMessagesProtocol",
+    "_load_anthropic_exception_classes",
     "_make_anthropic_client",
 ]
