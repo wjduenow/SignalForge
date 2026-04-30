@@ -1,0 +1,76 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "project_name": "sf_smoke",
+    "generated_at": null,
+    "invocation_id": null,
+    "user_id": null,
+    "send_anonymous_usage_stats": null,
+    "adapter_type": null,
+    "env": {}
+  },
+  "nodes": {
+    "model.sf_smoke.simple_orders": {
+      "database": "sf-smoke-proj",
+      "schema": "main",
+      "name": "simple_orders",
+      "resource_type": "model",
+      "package_name": "sf_smoke",
+      "path": "marts/simple_orders.sql",
+      "original_file_path": "models/marts/simple_orders.sql",
+      "unique_id": "model.sf_smoke.simple_orders",
+      "alias": "simple_orders",
+      "config": {
+        "materialized": "table",
+        "tags": [],
+        "meta": {}
+      },
+      "tags": [],
+      "description": "A tiny order fact used only by the real-API smoke test.",
+      "meta": {},
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "data_type": "INT64",
+          "description": "Surrogate primary key for the order.",
+          "meta": {},
+          "tags": []
+        },
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "INT64",
+          "description": "Foreign key to the customer dimension.",
+          "meta": {},
+          "tags": []
+        },
+        "amount": {
+          "name": "amount",
+          "data_type": "FLOAT64",
+          "description": "Order total in the source currency.",
+          "meta": {},
+          "tags": []
+        },
+        "ordered_at": {
+          "name": "ordered_at",
+          "data_type": "TIMESTAMP",
+          "description": "Wall-clock timestamp the order was placed.",
+          "meta": {},
+          "tags": []
+        }
+      },
+      "depends_on": {
+        "macros": [],
+        "nodes": []
+      },
+      "refs": [],
+      "sources": [],
+      "raw_code": "select order_id, customer_id, amount, ordered_at from {{ source('raw', 'simple_orders') }}",
+      "language": "sql",
+      "access": "protected",
+      "version": null,
+      "latest_version": null,
+      "primary_key": ["order_id"]
+    }
+  },
+  "disabled": {}
+}
