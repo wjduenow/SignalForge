@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "name": "fct_orders",
+  "description": "Order fact table at one row per order, joining staged orders to the customer dimension.",
+  "rationale": "Grain is one row per order_id; columns mirror stg_orders with a normalised amount and a foreign key to dim_customers.",
+  "columns": [
+    {
+      "name": "order_id",
+      "description": "Surrogate primary key for the order.",
+      "rationale": "order_id is unique in stg_orders and propagates unchanged into fct_orders.",
+      "tests": [
+        {"type": "not_null", "column": "order_id", "rationale": "Primary keys must never be null."},
+        {"type": "unique", "column": "order_id", "rationale": "One row per order_id is the documented grain."}
+      ]
+    },
+    {
+      "name": "customer_id",
+      "description": "Foreign key to dim_customers.customer_id.",
+      "rationale": "Every order is attributed to exactly one customer via the staging join.",
+      "tests": [
+        {"type": "not_null", "column": "customer_id", "rationale": "Customer attribution is mandatory for downstream rollups."},
+        {"type": "relationships", "column": "customer_id", "to": "ref('dim_customers')", "field": "customer_id", "rationale": "Referential integrity to the customer dimension."}
+      ]
+    },
+    {
+      "name": "amount",
+      "description": "Order total in dollars (cents converted via /100.0).",
+      "rationale": "Renormalises the staged cents amount into a numeric dollars column for analytics consumers.",
+      "tests": []
+    },
+    {
+      "name": "ordered_at",
+      "description": "Timestamp the order was placed, in UTC.",
+      "rationale": "Carried through from stg_orders.ordered_at; load-bearing for the mart_orders_summary rollup.",
+      "tests": [
+        {"type": "accepted_values", "column": "ordered_at", "values": ["2024-01-01", "2024-02-01", "2024-03-01"], "rationale": "Sample fixture asserts the column is one of the seeded test dates."}
+      ]
+    }
+  ],
+  "tests": [
+    {"type": "unique", "column": "order_id", "rationale": "Re-asserts the per-order grain at the model level for explicit documentation."}
+  ]
+}
