@@ -60,15 +60,16 @@ def test_draft_error_renders_remediation() -> None:
 @pytest.mark.unit
 @pytest.mark.draft
 def test_all_is_sorted_and_complete() -> None:
-    """``__all__`` is alphabetically sorted and lists 8 classes total."""
+    """``__all__`` is alphabetically sorted and lists 9 classes total."""
     assert errors_module.__all__ == sorted(errors_module.__all__)
     # 1 base (DraftError) + 1 LLM-output base + 3 LLM-output subclasses
-    # (JSON / Validation / AnchorContract) + 1 audit-write +
+    # (JSON / Validation / AnchorContract) + 2 audit errors (US-012:
+    # LLMResponseAuditRecordTooLargeError / LLMResponseAuditWriteError) +
     # 2 config errors (US-009: DraftConfigNotFoundError /
-    # DraftConfigInvalidError) = 8.
-    assert len(errors_module.__all__) == 8, (
-        "US-007 + US-009 enumerate 7 typed subclasses + 1 base; update "
-        "tests and __all__ together if this changes."
+    # DraftConfigInvalidError) = 9.
+    assert len(errors_module.__all__) == 9, (
+        "US-007 + US-009 + US-012 enumerate 8 typed subclasses + 1 base; "
+        "update tests and __all__ together if this changes."
     )
 
 

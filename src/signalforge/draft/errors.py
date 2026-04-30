@@ -383,6 +383,42 @@ class DraftConfigInvalidError(DraftError):
         super().__init__(message, remediation=remediation)
 
 
+class LLMResponseAuditRecordTooLargeError(DraftError):
+    """A response-audit JSONL record would exceed the POSIX atomic-append size cap.
+
+    POSIX guarantees ``write(2)`` is atomic only for payloads up to
+    ``PIPE_BUF`` bytes (typically 4 KiB on Linux). The response-audit
+    writer (US-012) enforces a size cap to keep concurrent appends from
+    interleaving partial records. Mirrors safety's
+    :class:`signalforge.safety.errors.AuditRecordTooLargeError`.
+
+    Raised BEFORE any file is opened, so an oversize record leaves no
+    on-disk artefact — the caller (``draft_from_request`` in US-013)
+    sees the typed error and drops the partial response.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Response-audit records must stay under the configured byte limit "
+        "for atomic concurrent appends; the LLM emitted an unusually large "
+        "response. Consider tightening the prompt's format section, or "
+        "raising the limit in signalforge.draft.audit if 4 KB is genuinely "
+        "insufficient (note: 4 KB is the POSIX-atomic-append guarantee on "
+        "Linux — exceeding it makes concurrent writers unsafe)."
+    )
+
+    def __init__(self, size: int, limit: int, *, remediation: str | None = None) -> None:
+        self.size = size
+        self.limit = limit
+        message = f"Response audit record size {size} exceeds atomic-append limit {limit}."
+        if remediation is None:
+            remediation = (
+                f"Response-audit records must stay under {limit} bytes for "
+                "atomic concurrent appends; reduce response payload or "
+                "raise the limit if 4 KB is genuinely insufficient."
+            )
+        super().__init__(message, remediation=remediation)
+
+
 class LLMResponseAuditWriteError(DraftError):
     """The fail-closed response-audit writer (US-012) could not durably
     persist the response receipt.
@@ -424,5 +460,6 @@ __all__ = [
     "LLMOutputError",
     "LLMOutputJSONError",
     "LLMOutputValidationError",
+    "LLMResponseAuditRecordTooLargeError",
     "LLMResponseAuditWriteError",
 ]
