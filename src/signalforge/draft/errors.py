@@ -28,6 +28,7 @@ The hierarchy is two-tiered:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import ClassVar
 
 from pydantic import ValidationError
@@ -327,6 +328,61 @@ class LLMOutputAnchorContractError(LLMOutputError):
         )
 
 
+class DraftConfigNotFoundError(DraftError):
+    """An explicit ``path=`` argument pointed at a missing draft config file.
+
+    Raised only when the caller passed a path explicitly to
+    :func:`signalforge.draft.config.load_draft_config`; the implicit
+    default-discovery path (``<project_dir>/signalforge.yml``) is allowed to
+    be absent and falls back to built-in :class:`DraftConfig` defaults.
+
+    Mirrors :class:`signalforge.safety.errors.ConfigNotFoundError` (US-006).
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Verify the path is correct, or pass path=None to fall back to "
+        "<project_dir>/signalforge.yml or built-in DraftConfig defaults."
+    )
+
+    def __init__(self, path: Path, *, remediation: str | None = None) -> None:
+        self.path = path
+        message = f"Draft config not found at {_format_value(str(path))}."
+        super().__init__(message, remediation=remediation)
+
+
+class DraftConfigInvalidError(DraftError):
+    """The ``signalforge.yml`` ``llm:`` block failed schema validation.
+
+    Wraps either a YAML parse failure, a wrong-shape top level, or a
+    Pydantic :class:`pydantic.ValidationError` from
+    :class:`signalforge.draft.config.DraftConfig` (the config-shaped model
+    uses ``extra="forbid"`` per ``safety-layer.md`` DEC-015 so typos like
+    ``mdoel:`` instead of ``model:`` fail loud rather than silently no-op).
+
+    The original exception (if any) is preserved on ``cause`` so the CLI /
+    response audit can render a forensically-useful incident report without
+    sniffing message text.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Inspect the `llm:` block of signalforge.yml — likely a typo in a "
+        "key (config-shaped models use extra='forbid'), an unknown "
+        "`cache_ttl` value (must be '5m' or '1h'), or a non-positive "
+        "`max_output_tokens`. See docs/draft-config-ops.md for the field "
+        "reference."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: BaseException | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        self.cause = cause
+        super().__init__(message, remediation=remediation)
+
+
 class LLMResponseAuditWriteError(DraftError):
     """The fail-closed response-audit writer (US-012) could not durably
     persist the response receipt.
@@ -361,6 +417,8 @@ class LLMResponseAuditWriteError(DraftError):
 
 # Sorted alphabetically (verified by tests/draft/test_errors.py).
 __all__ = [
+    "DraftConfigInvalidError",
+    "DraftConfigNotFoundError",
     "DraftError",
     "LLMOutputAnchorContractError",
     "LLMOutputError",
