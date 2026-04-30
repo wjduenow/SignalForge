@@ -10,7 +10,12 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 readme = "README.md"
 authors = [{name = "wjduenow"}]
-dependencies = ["google-cloud-bigquery>=3.20,<4", "PyYAML>=6,<7", "pydantic>=2.5,<3"]
+dependencies = [
+  "google-cloud-bigquery>=3.20,<4",
+  "PyYAML>=6,<7",
+  "pydantic>=2.5,<3",
+  "anthropic>=0.50,<1.0",
+]
 
 [project.optional-dependencies]
 dev = ["ruff", "pyright", "pytest", "dbt-core>=1.8,<2", "types-PyYAML>=6,<7"]
@@ -46,7 +51,7 @@ testpaths = ["tests"]
 # `--import-mode=importlib` lets us share basenames across test dirs (e.g.
 # tests/manifest/test_errors.py and tests/warehouse/test_errors.py) without
 # adding tests/__init__.py — keeps `testing-signal.md`'s no-init rule intact.
-addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery'"
+addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery and not anthropic'"
 minversion = "7.0"
 strict_markers = true
 markers = [
@@ -55,4 +60,7 @@ markers = [
   "error: tests asserting an exception with its remediation",
   "bigquery: tests requiring BigQuery credentials (gated by SF_RUN_BQ=1)",
   "safety: tests for the PII safety layer",
+  "llm: tests for the centralized Anthropic SDK seam",
+  "draft: tests for the schema-drafting layer",
+  "anthropic: real-API smoke test (requires ANTHROPIC_API_KEY; excluded from default CI)",
 ]
