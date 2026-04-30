@@ -1,0 +1,370 @@
+"""Typed exception hierarchy for the schema-drafting layer.
+
+Implements US-007 (DEC-003 typed CandidateSchema + anchor-contract validator,
+DEC-006 response audit). Mirrors the style established by
+:mod:`signalforge.llm.errors` and :mod:`signalforge.safety.errors`: every
+error carries a class-level ``default_remediation`` that the base
+``__str__`` renders on a separate ``↳ Remediation:`` line, and every
+user-supplied string is rendered through :func:`_format_value` (i.e.
+``repr()``) so adversarial input — embedded quotes, control chars, ANSI
+escapes — cannot smuggle special characters into log viewers or error
+messages.
+
+The hierarchy is two-tiered:
+
+- :class:`DraftError` — base for everything in this layer.
+- :class:`LLMOutputError` — base for parse-time failures of the LLM's
+  textual response. Carries the bad-JSON envelope (``raw_text``,
+  ``parse_position``, ``prompt_version``, ``model``, ``cache_hit``,
+  ``input_tokens``, ``output_tokens``, ``excerpt``) so the CLI / response
+  audit can render a forensically-useful incident report without sniffing
+  message text. The full ``raw_text`` is preserved on the attribute even
+  though ``__str__`` truncates the rendering.
+- :class:`LLMResponseAuditWriteError` — fail-closed response-audit write
+  failure. Direct :class:`DraftError` subclass (parallel to safety's
+  :class:`signalforge.safety.errors.AuditWriteError`).
+"""
+
+from __future__ import annotations
+
+import json
+from typing import ClassVar
+
+from pydantic import ValidationError
+
+#: Maximum number of characters of ``raw_text`` rendered in
+#: :meth:`LLMOutputError.__str__`. The full ``raw_text`` is always preserved
+#: on the attribute — the cap only bounds error-message output to keep log
+#: lines reasonable. 4 KB matches the safety-layer audit-record cap.
+_RAW_TEXT_RENDER_LIMIT: int = 4000
+
+#: Window radius (chars) around ``parse_position`` captured into ``excerpt``.
+#: ``2 * _EXCERPT_RADIUS`` is the maximum excerpt length when the position is
+#: in the middle of the text.
+_EXCERPT_RADIUS: int = 80
+
+
+def _format_value(v: object) -> str:
+    """Quote a user-supplied value via ``repr()`` for safe inclusion in
+    error messages (DEC-022).
+
+    Embedding raw user input in error strings is a log-injection seam: a
+    crafted value like ``"foo'\\nINFO: spoofed log line"`` (or an ANSI
+    escape such as ``"\\x1b[31m"``) could pollute log viewers or stack
+    traces. Routing every user-controlled value through ``repr()`` quotes
+    the string, escapes control characters, and makes whitespace visible.
+    """
+    return repr(v)
+
+
+def _compute_excerpt(raw_text: str, parse_position: tuple[int, int] | None) -> str:
+    """Return a ``±_EXCERPT_RADIUS``-char window around ``parse_position``.
+
+    Falls back to the first ``2 * _EXCERPT_RADIUS`` chars of ``raw_text`` when
+    ``parse_position`` is ``None``. The position is converted from
+    1-indexed ``(line, column)`` into a 0-indexed character offset by
+    walking ``raw_text`` line-by-line — robust against multi-line responses.
+
+    A sentinel ``⟨HERE⟩`` marker is injected at the offending offset so a
+    reviewer can see exactly where parsing failed even when the surrounding
+    text is entirely valid-looking JSON.
+    """
+    if parse_position is None:
+        return raw_text[: 2 * _EXCERPT_RADIUS]
+
+    # Resolve (line, column) -> 0-indexed offset. JSONDecodeError uses
+    # 1-indexed lineno / colno; Pydantic ValidationError loc paths don't
+    # carry a position at all (we accept None for those). If line is past
+    # the end of raw_text, clamp to len(raw_text).
+    line, column = parse_position
+    offset = 0
+    current_line = 1
+    while current_line < line and offset < len(raw_text):
+        nl = raw_text.find("\n", offset)
+        if nl == -1:
+            offset = len(raw_text)
+            break
+        offset = nl + 1
+        current_line += 1
+    offset += max(column - 1, 0)
+    offset = max(0, min(offset, len(raw_text)))
+
+    start = max(0, offset - _EXCERPT_RADIUS)
+    end = min(len(raw_text), offset + _EXCERPT_RADIUS)
+
+    # Inject a sentinel at the offending offset so the reviewer can see
+    # exactly where parsing failed. The ⟨HERE⟩ marker is intentionally a
+    # rare unicode bracket pair that won't collide with anything an LLM
+    # is likely to emit verbatim.
+    rel = offset - start
+    window = raw_text[start:end]
+    return window[:rel] + " ⟨HERE⟩ " + window[rel:]
+
+
+class DraftError(Exception):
+    """Base class for all draft-layer errors.
+
+    Subclasses set a class-level ``default_remediation`` string; instances
+    may override it via the ``remediation=`` keyword argument. ``__str__``
+    renders the message and the remediation on separate lines so log output
+    and CLI output both read cleanly.
+    """
+
+    default_remediation: ClassVar[str] = "(no remediation set — this is the base class)"
+
+    def __init__(self, message: str, *, remediation: str | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.remediation = (
+            remediation if remediation is not None else type(self).default_remediation
+        )
+
+    def __str__(self) -> str:
+        return f"{self.message}\n  ↳ Remediation: {self.remediation}"
+
+
+class LLMOutputError(DraftError):
+    """Base for failures parsing the LLM's textual response.
+
+    Carries the bad-JSON envelope so the CLI / response audit can render a
+    forensically-useful incident report without sniffing message text:
+
+    - ``raw_text`` — the full LLM response. Preserved on the attribute even
+      when ``__str__`` truncates the rendering, because the response audit
+      (US-012) needs it intact.
+    - ``parse_position`` — 1-indexed ``(line, column)`` if known. ``None``
+      for failures (e.g. Pydantic validation, anchor-contract) where no
+      position-in-text applies.
+    - ``prompt_version``, ``model``, ``cache_hit``, ``input_tokens``,
+      ``output_tokens`` — provenance for "what produced this bad output."
+    - ``excerpt`` — a ``±80``-char window around ``parse_position``,
+      computed at construction time and rendered by ``__str__``. Inserts a
+      ``⟨HERE⟩`` sentinel at the offending offset.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Inspect the LLM's raw response (preserved on `raw_text`) and the "
+        "excerpt around the failure point. Re-run with a clearer manifest "
+        "summary or retry the call; the prompt may be too ambiguous."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        raw_text: str,
+        prompt_version: str,
+        model: str,
+        cache_hit: bool,
+        input_tokens: int,
+        output_tokens: int,
+        parse_position: tuple[int, int] | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        self.raw_text = raw_text
+        self.parse_position = parse_position
+        self.prompt_version = prompt_version
+        self.model = model
+        self.cache_hit = cache_hit
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.excerpt = _compute_excerpt(raw_text, parse_position)
+        super().__init__(message, remediation=remediation)
+
+    def __str__(self) -> str:
+        # We deliberately do NOT render the full raw_text — log lines
+        # explode. The excerpt + position tail is the forensic surface;
+        # the full raw_text lives on the attribute for the audit writer
+        # (US-012) to capture. The 4 KB cap is belt-and-braces in case a
+        # subclass ever decides to render raw_text directly.
+        head = f"{self.message}\n  ↳ Remediation: {self.remediation}"
+        if self.parse_position is not None:
+            line, col = self.parse_position
+            position_repr = f"line={line} col={col}"
+        else:
+            position_repr = "unknown"
+        tail = (
+            f"\n  ↳ Position: {position_repr} "
+            f"(model={_format_value(self.model)}, "
+            f"prompt_version={_format_value(self.prompt_version)})"
+        )
+        excerpt_render = self.excerpt
+        if len(excerpt_render) > _RAW_TEXT_RENDER_LIMIT:
+            excerpt_render = excerpt_render[:_RAW_TEXT_RENDER_LIMIT] + " …[truncated]"
+        return f"{head}\n  ↳ Excerpt: {_format_value(excerpt_render)}{tail}"
+
+
+class LLMOutputJSONError(LLMOutputError):
+    """The LLM's response was not valid JSON.
+
+    Auto-derives ``parse_position`` from the underlying
+    :class:`json.JSONDecodeError` so the excerpt window is centred on the
+    exact byte offset reported by the JSON parser.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Check the LLM's raw response for truncation or malformed JSON "
+        "(unbalanced braces, trailing comma, embedded prose). The model may "
+        "have hit `max_output_tokens`; raise the cap or simplify the prompt."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: json.JSONDecodeError,
+        raw_text: str,
+        prompt_version: str,
+        model: str,
+        cache_hit: bool,
+        input_tokens: int,
+        output_tokens: int,
+        remediation: str | None = None,
+    ) -> None:
+        self.cause = cause
+        super().__init__(
+            message,
+            raw_text=raw_text,
+            parse_position=(cause.lineno, cause.colno),
+            prompt_version=prompt_version,
+            model=model,
+            cache_hit=cache_hit,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            remediation=remediation,
+        )
+
+
+class LLMOutputValidationError(LLMOutputError):
+    """The LLM's response parsed as JSON but didn't match the
+    ``CandidateSchema`` shape.
+
+    The Pydantic :class:`ValidationError` is preserved on ``cause``;
+    ``parse_position`` is ``None`` because the failure is structural rather
+    than positional in the text.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The LLM produced JSON that did not match the CandidateSchema shape "
+        "— likely a field with the wrong type or a missing required field. "
+        "Inspect `cause.errors()` for the specific path; consider tightening "
+        "the prompt's format section."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: ValidationError,
+        raw_text: str,
+        prompt_version: str,
+        model: str,
+        cache_hit: bool,
+        input_tokens: int,
+        output_tokens: int,
+        parse_position: tuple[int, int] | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        self.cause = cause
+        super().__init__(
+            message,
+            raw_text=raw_text,
+            parse_position=parse_position,
+            prompt_version=prompt_version,
+            model=model,
+            cache_hit=cache_hit,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            remediation=remediation,
+        )
+
+
+class LLMOutputAnchorContractError(LLMOutputError):
+    """The LLM's response violated the anchor contract.
+
+    "Anchor contract" (DEC-003 / DEC-022): every column referenced by a
+    candidate test must exist on the input model. Violations include tests
+    citing nonexistent columns, model-level tests citing nonexistent
+    columns, and duplicate test names within a column.
+
+    ``violations`` carries one human-readable string per violation so a
+    reviewer can see the full picture in a single error rather than
+    iteratively re-running until each violation surfaces.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The LLM referenced columns that don't exist in the input model — "
+        "likely a hallucinated column name. Consider re-running with a "
+        "clearer manifest summary, or trim ambiguous neighbour models that "
+        "may have leaked column names into the LLM's context."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        violations: tuple[str, ...],
+        raw_text: str,
+        prompt_version: str,
+        model: str,
+        cache_hit: bool,
+        input_tokens: int,
+        output_tokens: int,
+        parse_position: tuple[int, int] | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        self.violations = violations
+        super().__init__(
+            message,
+            raw_text=raw_text,
+            parse_position=parse_position,
+            prompt_version=prompt_version,
+            model=model,
+            cache_hit=cache_hit,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            remediation=remediation,
+        )
+
+
+class LLMResponseAuditWriteError(DraftError):
+    """The fail-closed response-audit writer (US-012) could not durably
+    persist the response receipt.
+
+    Mirrors safety's :class:`signalforge.safety.errors.AuditWriteError`:
+    the writer catches **no** exceptions internally; any ``OSError`` /
+    ``PermissionError`` / encoding failure / size-cap violation propagates
+    out via this class. The drafter must NOT return a
+    :class:`signalforge.draft.models.CandidateSchema` whose response audit
+    didn't durably hit disk — an unaudited LLM response is, by definition,
+    output leaving without a receipt, exactly the failure mode the response
+    audit exists to prevent.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Verify the response-audit path is writable (permissions / disk "
+        "space / SELinux contexts) and re-run. The draft is intentionally "
+        "discarded when the audit write fails — re-running after fixing the "
+        "underlying I/O issue is the supported recovery path."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: BaseException,
+        remediation: str | None = None,
+    ) -> None:
+        self.cause = cause
+        super().__init__(message, remediation=remediation)
+
+
+# Sorted alphabetically (verified by tests/draft/test_errors.py).
+__all__ = [
+    "DraftError",
+    "LLMOutputAnchorContractError",
+    "LLMOutputError",
+    "LLMOutputJSONError",
+    "LLMOutputValidationError",
+    "LLMResponseAuditWriteError",
+]
