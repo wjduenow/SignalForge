@@ -58,14 +58,14 @@ def _ok_count_response() -> FakeCountTokensResponse:
     return FakeCountTokensResponse(input_tokens=_DEFAULT_CACHED_TOKENS)
 
 
-def _ok_message_response(*, cache_creation: int = 1234) -> FakeMessage:
+def _ok_message_response(*, cache_creation: int = 1234, cache_read: int = 0) -> FakeMessage:
     return FakeMessage(
         content=[FakeTextBlock(text="hello world")],
         usage=FakeUsage(
             input_tokens=42,
             output_tokens=7,
             cache_creation_input_tokens=cache_creation,
-            cache_read_input_tokens=0,
+            cache_read_input_tokens=cache_read,
         ),
     )
 
@@ -253,6 +253,36 @@ def test_call_anthropic_cache_no_op_emits_warning(
         "cached_block_size_tokens": _DEFAULT_CACHED_TOKENS,
         "min_required": 1024,
     }
+
+
+def test_call_anthropic_cache_hit_does_not_emit_no_op_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Quality-Gate fix (Issue 4): on a cache HIT (cache_creation == 0
+    AND cache_read > 0), the cache marker DID work — the cache was created
+    on a prior call. The no-op warning fires only when both creation AND
+    read are zero. Without this guard, every successful cache hit floods
+    the log with a spurious WARNING."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_ok_count_response())
+    fake.expect_messages_create(
+        matching={},
+        returns=_ok_message_response(cache_creation=0, cache_read=1500),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="signalforge.llm.client"):
+        call_anthropic(
+            system="sys",
+            cached_block="c",
+            dynamic_block="d",
+            model="claude-sonnet-4-6",
+            max_tokens=128,
+            prompt_version="v1",
+            client=fake,
+        )
+
+    no_op_records = [r for r in caplog.records if "cache marker no-op" in r.getMessage()]
+    assert len(no_op_records) == 0
 
 
 def test_call_anthropic_does_not_log_api_key(

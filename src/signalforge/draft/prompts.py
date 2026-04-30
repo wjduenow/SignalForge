@@ -315,8 +315,17 @@ def _render_dynamic_block(model: Model, request: LLMRequest) -> str:
     Wraps :attr:`Model.raw_code` in ``<MODEL_SQL>``/``</MODEL_SQL>`` tags
     (DEC-007); preserves SQL comments and unresolved Jinja exactly. The
     LLM client (US-007) stitches this directly onto the cached block.
+
+    Refuses to render if ``raw_code`` contains the literal ``</MODEL_SQL>``
+    closing tag — that would terminate the prompt-injection envelope early
+    and let downstream content escape the data fence. Raises
+    :class:`PromptEnvelopeBreachError`; the caller handles the typed error.
     """
+    from signalforge.draft.errors import PromptEnvelopeBreachError
+
     raw_code = model.raw_code or ""
+    if "</MODEL_SQL>" in raw_code:
+        raise PromptEnvelopeBreachError(model.unique_id)
     data_section = _render_data_section(request)
     return f"<MODEL_SQL>\n{raw_code}\n</MODEL_SQL>\n\n{data_section}"
 

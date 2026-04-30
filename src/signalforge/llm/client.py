@@ -365,10 +365,13 @@ def call_anthropic(
 
     # Cache-anomaly WARNING: the cached block had a marker AND was above
     # the model minimum (the pre-send check would have raised otherwise),
-    # yet the response reports zero cache-creation tokens. This can happen
-    # on load-balancer rerouting or partial cache miss; surface it so the
-    # operator knows the cache discount didn't land.
-    if cache_creation == 0:
+    # yet the response reports neither a cache write nor a cache read.
+    # This can happen on load-balancer rerouting or partial cache miss;
+    # surface it so the operator knows the cache discount didn't land.
+    # NB: ``cache_creation == 0`` alone is the *normal* cache-hit case
+    # (creation already happened on a prior call); we only warn when both
+    # creation AND read are zero — the genuine no-op signal.
+    if cache_creation == 0 and cache_read == 0:
         _LOGGER.warning(
             "cache marker no-op: %s",
             json.dumps(

@@ -94,9 +94,19 @@ def _validate_anchor_contract(
     """
     violations: list[str] = []
 
-    # Column-scoped tests: parent-column match + nonexistent-column
-    # check + duplicate not_null/unique check.
+    # Column-scoped tests: hallucinated-column check on the parent
+    # CandidateColumn name itself + parent-column-match + nonexistent-
+    # column check on each test + duplicate not_null/unique check.
     for column in candidate.columns:
+        # The CandidateColumn name itself must reference a real column.
+        # Without this check, an LLM could invent
+        # ``CandidateColumn(name="hallucinated", tests=[NotNull(column="hallucinated")])``
+        # and pass validation despite the system-prompt anchor contract.
+        if column.name not in model_columns:
+            violations.append(
+                f"CandidateColumn references nonexistent column {column.name!r} "
+                f"(available: {sorted(model_columns)})"
+            )
         not_null_count = 0
         unique_count = 0
         for test in column.tests:
@@ -104,7 +114,7 @@ def _validate_anchor_contract(
                 violations.append(
                     f"column test on column={column.name!r} references {test.column!r}"
                 )
-            elif test.column not in model_columns:
+            if test.column not in model_columns:
                 violations.append(
                     f"test references nonexistent column {test.column!r} "
                     f"(available: {sorted(model_columns)})"

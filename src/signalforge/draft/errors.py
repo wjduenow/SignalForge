@@ -383,6 +383,36 @@ class DraftConfigInvalidError(DraftError):
         super().__init__(message, remediation=remediation)
 
 
+class PromptEnvelopeBreachError(DraftError):
+    """A model's ``raw_code`` contains the closing ``</MODEL_SQL>`` literal,
+    breaking the prompt-injection envelope (DEC-007) before it can be sent.
+
+    The envelope is the documented defence against adversarial dbt content:
+    every byte between ``<MODEL_SQL>`` and ``</MODEL_SQL>`` is data, not
+    instructions. A ``raw_code`` containing the closing tag — whether placed
+    maliciously or by accident in a SQL comment — would terminate the fence
+    early and let everything after be read by the LLM as instructions.
+
+    Raised BEFORE any LLM call so a poisoned model never reaches Anthropic.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The model's raw SQL contains the literal '</MODEL_SQL>' which would "
+        "break the prompt-injection envelope. Inspect the model file (likely "
+        "a SQL comment); remove the literal or escape it. If this is "
+        "legitimate content (rare), open an issue — the envelope tag will "
+        "need to rotate to an unguessable nonce."
+    )
+
+    def __init__(self, model_unique_id: str, *, remediation: str | None = None) -> None:
+        self.model_unique_id = model_unique_id
+        message = (
+            f"Model {_format_value(model_unique_id)} contains the literal "
+            f"'</MODEL_SQL>' in raw_code — refusing to render the prompt."
+        )
+        super().__init__(message, remediation=remediation)
+
+
 class LLMResponseAuditRecordTooLargeError(DraftError):
     """A response-audit JSONL record would exceed the POSIX atomic-append size cap.
 
@@ -462,4 +492,5 @@ __all__ = [
     "LLMOutputValidationError",
     "LLMResponseAuditRecordTooLargeError",
     "LLMResponseAuditWriteError",
+    "PromptEnvelopeBreachError",
 ]

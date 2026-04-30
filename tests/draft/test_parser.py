@@ -129,7 +129,12 @@ def test_parse_draft_response_anchor_violation_model_level_test_raises() -> None
 
 
 def test_parse_draft_response_anchor_violation_collects_all_violations() -> None:
-    """Synthetic — two distinct violations must surface in one error."""
+    """Synthetic — multiple distinct violations must surface in one error.
+
+    The parent-column mismatch ALSO counts as a nonexistent-column reference
+    (Quality-Gate fix: parent-column-mismatch and nonexistent-column checks
+    are independent so a hallucinated column name surfaces both).
+    """
     candidate = CandidateSchema(
         name="fct_orders",
         description="...",
@@ -138,19 +143,23 @@ def test_parse_draft_response_anchor_violation_collects_all_violations() -> None
                 name="order_id",
                 description="pk",
                 tests=(
-                    # Violation 1: parent-column mismatch.
+                    # Violations: parent-column mismatch + nonexistent column.
                     CandidateTestNotNull(column="customer_id"),
                 ),
             ),
         ),
-        # Violation 2: model-level test on nonexistent column.
+        # Violation: model-level test on nonexistent column.
         tests=(CandidateTestNotNull(column="phantom_col"),),
     )
     raw = candidate.model_dump_json()
     with pytest.raises(LLMOutputAnchorContractError) as excinfo:
         parse_draft_response(raw, frozenset({"order_id"}), llm_result_meta=_meta())
     err = excinfo.value
-    assert len(err.violations) == 2
+    # Three: (1) parent-column mismatch, (2) nonexistent-column on the
+    # column-scoped test, (3) nonexistent-column on the model-level test.
+    assert len(err.violations) == 3
+    assert any("parent" in v.lower() or "references 'customer_id'" in v for v in err.violations)
+    assert any("phantom_col" in v for v in err.violations)
 
 
 def test_parse_draft_response_column_test_must_match_parent_column() -> None:
@@ -272,3 +281,29 @@ def test_parse_draft_response_multiple_relationships_tests_on_same_column_allowe
     )
     raw = candidate.model_dump_json()
     parse_draft_response(raw, frozenset({"customer_id"}), llm_result_meta=_meta())
+
+
+def test_parse_draft_response_hallucinated_candidate_column_name_raises() -> None:
+    """Quality-Gate fix (Issue 1): a CandidateColumn whose ``name`` is not
+    in ``model_columns`` is itself a violation, regardless of any tests it
+    carries. Without this check the LLM could invent a column name + tests
+    on it and pass anchor validation.
+    """
+    candidate = CandidateSchema(
+        name="fct_orders",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="hallucinated_col",
+                description="LLM made this up",
+                tests=(CandidateTestNotNull(column="hallucinated_col"),),
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(raw, frozenset({"order_id"}), llm_result_meta=_meta())
+    assert any(
+        "CandidateColumn references nonexistent column 'hallucinated_col'" in v
+        for v in excinfo.value.violations
+    )
