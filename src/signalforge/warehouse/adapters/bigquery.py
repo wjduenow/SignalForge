@@ -303,7 +303,7 @@ class BigQueryAdapter(WarehouseAdapter):
         if cache is not None and table in cache:
             return cache[table]
         try:
-            meta = self._get_client().get_table(table)
+            meta = self._get_client().get_table(table.qualified_name)
         except Exception as exc:
             mapped = map_bq_exception(
                 exc,
