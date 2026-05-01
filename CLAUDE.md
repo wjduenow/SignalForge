@@ -4,15 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-Pre-alpha. Five issues shipped:
+Pre-alpha. Six issues shipped:
 
 - **#1 (project scaffolding)** — `pyproject.toml` (Hatchling + src layout), `src/signalforge/__init__.py` with `__version__`, smoke test, ruff + pyright + pytest configs, GitHub Actions CI on PRs into `dev` and pushes to `main`, and `CONTRIBUTING.md`.
 - **#2 (manifest loader)** — `signalforge.manifest` subpackage: typed `Manifest` / `Model` (Pydantic v2), `load(project_dir, manifest_path=None) -> Manifest`, single-model resolver by `unique_id` or file path, schema-version tolerance v9–v12, symlink-hardened path canonicalisation, soft 200 MB warning. See `docs/manifest-loader-ops.md` for the operational reference.
 - **#3 (BigQuery warehouse adapter)** — `signalforge.warehouse` subpackage: `WarehouseAdapter` ABC + `from_profile` factory, `BigQueryAdapter` (the only v0.1 concrete adapter), `load_profile` for dbt `profiles.yml`, deterministic hash-mod sampling with fail-loud sizing checks, identifier-validation at construction time, `QueryJobConfig` defaults that pin `use_query_cache=False`. See `docs/warehouse-adapter-ops.md` for the operational reference.
 - **#4 (PII safety layer)** — `signalforge.safety` subpackage: schema-only-default sampling-mode policy, fail-closed audit JSONL writer (`O_APPEND` + `fsync` + size cap), column-name redaction via stable blake2b-4 hashes (DEC-010), four opt-out signals (column meta, model meta, `tags:[pii]`, `meta.contains_pii`) with documented precedence, AST audit-completeness scan rejecting direct `LLMRequest` construction, drift-detector test for `AuditEvent`. `signalforge.yml` config namespace `{ safety: { ... } }` reserved for the safety layer. See `docs/safety-ops.md` for the operational reference and `.claude/rules/safety-layer.md` for the rules distilled from this ticket.
 - **#5 (LLM draft pipeline)** — `signalforge.draft` + `signalforge.llm` subpackages: centralized `call_anthropic` SDK seam (full retry taxonomy via clauditor pattern), `draft_schema(model, adapter, policy, manifest, *, config)` end-to-end drafter, typed `CandidateSchema` + discriminated-union `CandidateTest`, anchor-contract validator (every test references a real column; whole-draft fail-loud), fail-closed `LLMResponseEvent` JSONL response audit adjacent to safety audit, `<MODEL_SQL>` prompt-injection envelope, deterministic `prompt_version` hash. See `docs/draft-ops.md`.
+- **#6 (test prune engine)** — `signalforge.prune` subpackage: `prune_tests(model, adapter, candidates, manifest, *, config=None, audit_path=None) -> PruneResult` end-to-end orchestrator. Compiles dbt-style tests (`not_null`, `unique`, `accepted_values`, `relationships`) to BigQuery failing-rows SQL via `Dialect.quote_char`-driven dispatch (so v0.2 Snowflake/Postgres slot in unchanged), routes outcomes through five `DropReason` literals (`always-passes`, `requires-future-data`, `failed-on-known-clean-data`, `kept`, `kept-without-evidence`), enforces a total wall-clock budget (DEC-011), emits a fail-closed `prune.jsonl` audit (mirrors safety / draft fail-closed semantics; AST-gated single construction seam). Trusted-models opt-in via `signalforge.yml prune.trusted_models: [...]`, validated against the manifest at orchestrator entry (DEC-008). See `docs/prune-ops.md` for the operational reference and `plans/super/6-prune-engine.md` for the design.
 
-Design is happening in the open on the `dev` branch; remaining feature work (prune logic #6, grader #7, diff renderer #8, CLI #9) lands next.
+Design is happening in the open on the `dev` branch; remaining feature work (grader #7, diff renderer #8, CLI #9) lands next.
 
 ## Public API surface (v0.1)
 
@@ -21,6 +22,7 @@ Design is happening in the open on the `dev` branch; remaining feature work (pru
 - `signalforge.safety.load_safety_config`, `SafetyPolicy`, `build_llm_request`, `aggregate_columns`, `redact_rows`, the typed shapes (`SamplingMode`, `RedactionReason`, `RedactionRecord`, `AuditEvent`, `LLMRequest`), and the `SafetyError` hierarchy (10 classes). Documented in `docs/safety-ops.md`.
 - `signalforge.llm.call_anthropic`, `LLMResult`, the `LLMError` hierarchy. Documented in `docs/draft-ops.md`.
 - `signalforge.draft.draft_schema`, `draft_from_request`, `DraftOutcome`, `CandidateSchema` family, `DraftConfig`, `load_draft_config`, the `DraftError` hierarchy. Documented in `docs/draft-ops.md`.
+- `signalforge.prune.prune_tests`, `PruneResult`, `PruneDecision`, `PruneConfig`, `load_prune_config`, `PruneEvent`, the typed literals (`DropReason`, `Scope`), and the `PruneError` hierarchy (six classes). Documented in `docs/prune-ops.md`.
 
 Internals (`_loader_helpers`, `_sql_safety`, `_path_safety`, `_test_result_repr`, `adapters/_client`, `_classify_column`, `_compute_policy_hash`, `_resolve_redact_patterns`, etc.) are `_`-prefixed and not part of the public contract.
 
