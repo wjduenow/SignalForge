@@ -236,6 +236,49 @@ empty. When US-004 lands, swap the inline dict construction for an
 `AuditEvent(...).model_dump_json()` call so drift in the typed model
 propagates here.
 
+# Draft fixtures (`draft/`)
+
+Hand-authored fixtures for the LLM draft pipeline (`signalforge.draft` + `signalforge.llm`,
+issue #5). Track DEC-006, DEC-009, DEC-018, and DEC-027 from
+[`plans/super/5-llm-draft-pipeline.md`](../../plans/super/5-llm-draft-pipeline.md).
+The candidate-schema fixture is hand-authored at first commit; US-014 will re-mint it
+from a real Anthropic round-trip via `regenerate.sh`.
+
+- `signalforge_llm_minimal.yml` — happy-path `signalforge.yml` with only `llm.model` set;
+  every other key takes its `DraftConfig` default. Round-trips through `load_draft_config`.
+- `signalforge_llm_full.yml` — every documented `llm:` knob set to a non-default value
+  (`max_output_tokens`, `cache_ttl: 1h`, `max_retries_429`). Round-trips through
+  `load_draft_config`.
+- `signalforge_llm_typo.yml` — `mdoel:` typo at the `llm:` level. Drives the
+  `extra="forbid"` test on `DraftConfig` (DEC-015 of `safety-layer.md` applies — config
+  shapes fail loud on typos).
+- `manifest_one_model_with_neighbours.json` — a v12 dbt manifest snippet shaped like
+  `safety/manifest_with_pii_meta.json`. One model under draft (`fct_orders`) with two
+  upstream neighbours (`stg_orders`, `dim_customers`) listed in `depends_on.nodes` and
+  `refs`, plus one downstream consumer (`mart_orders_summary`). Exercises DEC-009's
+  "model + direct neighbours only" prompt-summary scope.
+- `llm_response_valid.json` — a valid raw LLM response for `fct_orders` parseable as a
+  `CandidateSchema`: model description + 4 column entries (matching the manifest fixture
+  exactly — `order_id`, `customer_id`, `amount`, `ordered_at`) + the full discriminated
+  test set (`not_null`, `unique`, `accepted_values`, `relationships`), every artifact
+  carrying a `rationale`.
+- `llm_response_truncated.json` — `_valid` cut off mid-string mid-array; deliberately
+  unparseable. Exercises `LLMOutputJSONError`.
+- `llm_response_missing_field.json` — valid JSON but missing the required top-level
+  `description`. Exercises `LLMOutputValidationError`.
+- `llm_response_anchor_violation.json` — valid JSON, valid `CandidateSchema` shape, but
+  references a `customer_email` column absent from the `fct_orders` manifest entry.
+  Exercises `LLMOutputAnchorContractError`.
+- `llm_response_duplicate_test.json` — valid JSON, valid shape, two `not_null` tests on
+  the same column. Exercises the duplicate-test branch of the anchor-contract validator.
+- `candidate_schema_v1.json` — canonical `CandidateSchema.model_dump_json` for the drift
+  detector (DEC-018). Hand-authored at first commit (mirrors `llm_response_valid.json`);
+  re-minted by `regenerate.sh` once US-014's smoke test lands.
+- `llm_response_audit_sample.jsonl` — exactly one line of canonical `LLMResponseEvent`
+  shape per DEC-006, used by the response-audit drift detector.
+- `regenerate.sh` — placeholder; US-014 fills it in to drive the smoke test and capture
+  `candidate_schema_v1.json` from a real Anthropic call.
+
 ## See also
 
 - [`docs/manifest-loader-ops.md`](../../docs/manifest-loader-ops.md) — operational
@@ -246,3 +289,6 @@ propagates here.
 - [`plans/super/3-bigquery-adapter.md`](../../plans/super/3-bigquery-adapter.md) —
   warehouse-adapter plan; DEC-009 and DEC-017 set the contract the profile
   fixtures support.
+- [`plans/super/5-llm-draft-pipeline.md`](../../plans/super/5-llm-draft-pipeline.md) —
+  draft-pipeline plan; DEC-006, DEC-009, DEC-018, DEC-027 set the contracts the
+  draft fixtures support.

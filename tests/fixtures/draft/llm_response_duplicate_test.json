@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "name": "fct_orders",
+  "description": "Order fact table at one row per order, joining staged orders to the customer dimension.",
+  "rationale": "Grain is one row per order_id; columns mirror stg_orders with a normalised amount and a foreign key to dim_customers.",
+  "columns": [
+    {
+      "name": "order_id",
+      "description": "Surrogate primary key for the order.",
+      "rationale": "order_id is unique in stg_orders and propagates unchanged into fct_orders.",
+      "tests": [
+        {"type": "not_null", "column": "order_id", "rationale": "Primary keys must never be null."},
+        {"type": "not_null", "column": "order_id", "rationale": "Duplicate not_null on the same column — anchor-contract violation."},
+        {"type": "unique", "column": "order_id", "rationale": "One row per order_id is the documented grain."}
+      ]
+    },
+    {
+      "name": "customer_id",
+      "description": "Foreign key to dim_customers.customer_id.",
+      "rationale": "Every order is attributed to exactly one customer.",
+      "tests": [
+        {"type": "not_null", "column": "customer_id", "rationale": "Customer attribution is mandatory."}
+      ]
+    },
+    {
+      "name": "amount",
+      "description": "Order total in dollars.",
+      "rationale": "Renormalises the staged cents amount.",
+      "tests": []
+    },
+    {
+      "name": "ordered_at",
+      "description": "Timestamp the order was placed.",
+      "rationale": "Carried through from stg_orders.ordered_at.",
+      "tests": []
+    }
+  ],
+  "tests": []
+}

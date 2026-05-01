@@ -1,0 +1,267 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "project_name": "sf_demo",
+    "generated_at": null,
+    "invocation_id": null,
+    "user_id": null,
+    "send_anonymous_usage_stats": null,
+    "adapter_type": null,
+    "env": {}
+  },
+  "nodes": {
+    "model.sf_demo.stg_orders": {
+      "database": "sf-demo-proj",
+      "schema": "main",
+      "name": "stg_orders",
+      "resource_type": "model",
+      "package_name": "sf_demo",
+      "path": "staging/stg_orders.sql",
+      "original_file_path": "models/staging/stg_orders.sql",
+      "unique_id": "model.sf_demo.stg_orders",
+      "alias": "stg_orders",
+      "config": {
+        "materialized": "view",
+        "tags": [],
+        "meta": {}
+      },
+      "tags": [],
+      "description": "Staged orders pulled from the raw orders source.",
+      "meta": {},
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "data_type": "STRING",
+          "description": "Surrogate key from the source orders table.",
+          "meta": {},
+          "tags": []
+        },
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "STRING",
+          "description": "Foreign key to dim_customers.customer_id.",
+          "meta": {},
+          "tags": []
+        },
+        "amount_cents": {
+          "name": "amount_cents",
+          "data_type": "INT64",
+          "description": "Order total in cents.",
+          "meta": {},
+          "tags": []
+        },
+        "ordered_at": {
+          "name": "ordered_at",
+          "data_type": "TIMESTAMP",
+          "description": "Wall-clock timestamp the order was placed.",
+          "meta": {},
+          "tags": []
+        }
+      },
+      "depends_on": {
+        "macros": [],
+        "nodes": []
+      },
+      "refs": [],
+      "sources": [["raw", "orders"]],
+      "raw_code": "select order_id, customer_id, amount_cents, ordered_at from {{ source('raw', 'orders') }}",
+      "language": "sql",
+      "access": "protected",
+      "version": null,
+      "latest_version": null,
+      "primary_key": []
+    },
+    "model.sf_demo.dim_customers": {
+      "database": "sf-demo-proj",
+      "schema": "main",
+      "name": "dim_customers",
+      "resource_type": "model",
+      "package_name": "sf_demo",
+      "path": "marts/dim_customers.sql",
+      "original_file_path": "models/marts/dim_customers.sql",
+      "unique_id": "model.sf_demo.dim_customers",
+      "alias": "dim_customers",
+      "config": {
+        "materialized": "table",
+        "tags": [],
+        "meta": {}
+      },
+      "tags": [],
+      "description": "Customer dimension keyed by customer_id.",
+      "meta": {},
+      "columns": {
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "STRING",
+          "description": "Primary key for a customer.",
+          "meta": {},
+          "tags": []
+        },
+        "customer_name": {
+          "name": "customer_name",
+          "data_type": "STRING",
+          "description": "Display name for the customer.",
+          "meta": {},
+          "tags": []
+        },
+        "country_code": {
+          "name": "country_code",
+          "data_type": "STRING",
+          "description": "ISO 3166-1 alpha-2 country code.",
+          "meta": {},
+          "tags": []
+        },
+        "created_at": {
+          "name": "created_at",
+          "data_type": "TIMESTAMP",
+          "description": "Customer record creation timestamp.",
+          "meta": {},
+          "tags": []
+        }
+      },
+      "depends_on": {
+        "macros": [],
+        "nodes": []
+      },
+      "refs": [],
+      "sources": [["raw", "customers"]],
+      "raw_code": "select customer_id, customer_name, country_code, created_at from {{ source('raw', 'customers') }}",
+      "language": "sql",
+      "access": "protected",
+      "version": null,
+      "latest_version": null,
+      "primary_key": ["customer_id"]
+    },
+    "model.sf_demo.fct_orders": {
+      "database": "sf-demo-proj",
+      "schema": "main",
+      "name": "fct_orders",
+      "resource_type": "model",
+      "package_name": "sf_demo",
+      "path": "marts/fct_orders.sql",
+      "original_file_path": "models/marts/fct_orders.sql",
+      "unique_id": "model.sf_demo.fct_orders",
+      "alias": "fct_orders",
+      "config": {
+        "materialized": "table",
+        "tags": [],
+        "meta": {}
+      },
+      "tags": [],
+      "description": "Order fact table joined to the customer dimension.",
+      "meta": {},
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "data_type": "STRING",
+          "description": "",
+          "meta": {},
+          "tags": []
+        },
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "STRING",
+          "description": "",
+          "meta": {},
+          "tags": []
+        },
+        "amount": {
+          "name": "amount",
+          "data_type": "NUMERIC",
+          "description": "",
+          "meta": {},
+          "tags": []
+        },
+        "ordered_at": {
+          "name": "ordered_at",
+          "data_type": "TIMESTAMP",
+          "description": "",
+          "meta": {},
+          "tags": []
+        }
+      },
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.sf_demo.stg_orders",
+          "model.sf_demo.dim_customers"
+        ]
+      },
+      "refs": [
+        {"name": "stg_orders", "package": null, "version": null},
+        {"name": "dim_customers", "package": null, "version": null}
+      ],
+      "sources": [],
+      "raw_code": "select s.order_id, s.customer_id, s.amount_cents / 100.0 as amount, s.ordered_at from {{ ref('stg_orders') }} s join {{ ref('dim_customers') }} d on s.customer_id = d.customer_id",
+      "language": "sql",
+      "access": "protected",
+      "version": null,
+      "latest_version": null,
+      "primary_key": ["order_id"]
+    },
+    "model.sf_demo.mart_orders_summary": {
+      "database": "sf-demo-proj",
+      "schema": "main",
+      "name": "mart_orders_summary",
+      "resource_type": "model",
+      "package_name": "sf_demo",
+      "path": "marts/mart_orders_summary.sql",
+      "original_file_path": "models/marts/mart_orders_summary.sql",
+      "unique_id": "model.sf_demo.mart_orders_summary",
+      "alias": "mart_orders_summary",
+      "config": {
+        "materialized": "table",
+        "tags": [],
+        "meta": {}
+      },
+      "tags": [],
+      "description": "Per-customer order rollup built on fct_orders.",
+      "meta": {},
+      "columns": {
+        "customer_id": {
+          "name": "customer_id",
+          "data_type": "STRING",
+          "description": "Customer the rollup row applies to.",
+          "meta": {},
+          "tags": []
+        },
+        "order_count": {
+          "name": "order_count",
+          "data_type": "INT64",
+          "description": "Total orders placed by the customer.",
+          "meta": {},
+          "tags": []
+        },
+        "total_amount": {
+          "name": "total_amount",
+          "data_type": "NUMERIC",
+          "description": "Lifetime order amount sum.",
+          "meta": {},
+          "tags": []
+        },
+        "last_ordered_at": {
+          "name": "last_ordered_at",
+          "data_type": "TIMESTAMP",
+          "description": "Most recent order timestamp.",
+          "meta": {},
+          "tags": []
+        }
+      },
+      "depends_on": {
+        "macros": [],
+        "nodes": ["model.sf_demo.fct_orders"]
+      },
+      "refs": [
+        {"name": "fct_orders", "package": null, "version": null}
+      ],
+      "sources": [],
+      "raw_code": "select customer_id, count(*) as order_count, sum(amount) as total_amount, max(ordered_at) as last_ordered_at from {{ ref('fct_orders') }} group by 1",
+      "language": "sql",
+      "access": "protected",
+      "version": null,
+      "latest_version": null,
+      "primary_key": ["customer_id"]
+    }
+  },
+  "disabled": {}
+}

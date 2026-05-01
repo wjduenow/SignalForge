@@ -84,6 +84,44 @@ precedence, the `signalforge.yml` schema, the audit schema, debugging,
 and the typed-error reference — is in
 [docs/safety-ops.md](docs/safety-ops.md).
 
+## LLM drafting
+
+### How drafting works
+
+`signalforge.draft.draft_schema` takes a manifest model + warehouse
+adapter + safety policy and returns a `DraftOutcome` carrying the
+parsed `CandidateSchema`, the typed `LLMRequest` that was sent, and
+the `LLMResult` from the LLM. One LLM call per model; pre-send token
+counting, the full retry taxonomy, prompt caching, and a fail-closed
+response audit are all owned by the layer.
+
+```text
+Manifest + Model + LLMRequest (from safety layer)
+  -> render_prompt  (system + cached manifest summary + dynamic per-model SQL)
+  -> call_anthropic (1 SDK seam, full retry taxonomy, prompt caching)
+  -> parse_draft_response (JSON + anchor-contract validator)
+  -> write_response_event (fail-closed JSONL audit)
+  -> DraftOutcome(candidate, request, result)
+```
+
+### Auditability
+
+Two parallel audit streams sit under `policy.audit_path.parent`:
+
+- `audit.jsonl` (safety layer) records WHAT data went to the LLM —
+  columns sent, redactions applied, sampling mode in effect.
+- `llm_responses.jsonl` (draft layer) records WHAT the LLM produced —
+  hashes of the response text, the parsed schema, and the SQL sent;
+  token usage including cache creation/read; the `prompt_version`.
+
+Both streams are fail-closed: an audit-write failure aborts the call,
+the partial work is dropped, and an unaudited LLM call cannot
+silently happen. A reviewer correlates the two streams by
+`model_unique_id` + timestamp window. See
+[docs/draft-ops.md](docs/draft-ops.md) for the response-audit schema,
+the retry taxonomy, the cache pre-send checks, and the typed-error
+reference.
+
 ## Roadmap
 
 | Version | Scope                                                                              |
