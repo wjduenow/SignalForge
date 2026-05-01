@@ -55,7 +55,7 @@ Per-test timeout-ms threading
 v0.1 relies on the adapter's default :class:`QueryJobConfig` (no per-test
 timeout). Per-test budget enforcement requires an additional
 ``run_test_sql(..., timeout_ms=...)`` parameter, deferred to v0.2 — the
-existing ``make_query_job_config`` plumbing from US-002 is in place but
+existing ``_make_query_job_config`` plumbing from US-002 is in place but
 not exposed at :meth:`run_test_sql`. The ``kept-without-evidence``
 *outcome* is still emitted via two paths:
 
@@ -98,6 +98,7 @@ from signalforge.prune.config import PruneConfig
 from signalforge.prune.errors import (
     PruneAuditRecordTooLargeError,
     PruneAuditWriteError,
+    PruneError,
     PruneTrustedModelNotFoundError,
 )
 from signalforge.prune.models import PruneDecision, PruneResult, Scope
@@ -462,6 +463,79 @@ def _decide_kept_without_evidence_budget(
     )
 
 
+def _resolve_sample_bucket(
+    *,
+    adapter: WarehouseAdapter,
+    table_ref: TableRef,
+    scope: Scope,
+    sample_size: int,
+) -> int | None:
+    """Return the deterministic-sample bucket for ``scope=sample``,
+    or ``None`` when ``scope=full``.
+
+    The bucket is computed as ``max(num_rows // sample_size, 1)`` —
+    matches the warehouse adapter's :meth:`sample_rows` derivation
+    (DEC-006 of issue #3) so samples drawn through this seam align with
+    samples the adapter would draw on its own.
+
+    Reaches through the warehouse adapter's
+    :func:`signalforge.warehouse.adapters._client._get_client` path to
+    fetch ``Table.num_rows``. The adapter's own :meth:`sample_rows`
+    encapsulates this lookup but does not surface row count separately;
+    the prune layer needs the row count BEFORE issuing tests, so we
+    accept the minor encapsulation crack here. v0.2 may add an explicit
+    :meth:`WarehouseAdapter.get_table_metadata` seam.
+
+    Raises :class:`PruneError` when ``num_rows`` is unknown — sampling
+    against an unsized table would silently degrade to "every row" and
+    defeat US-003's cost model. The fail-loud signal lands in front of
+    the operator.
+    """
+    if scope != "sample":
+        return None
+    # Reach through the SDK shim to fetch row count. ``_get_client`` is
+    # the documented internal seam on the BigQuery adapter (DEC-019 of
+    # issue #3 — every SDK-noise comment lives in
+    # ``adapters/_client.py``); the abstract base does NOT declare it,
+    # so we route through ``getattr`` to keep pyright clean. v0.2 may
+    # add an explicit ``WarehouseAdapter.get_table_metadata`` seam to
+    # avoid the encapsulation crack; for now the prune layer needs
+    # ``num_rows`` BEFORE issuing tests and the adapter's public
+    # ``sample_rows`` does not surface it.
+    get_client = getattr(adapter, "_get_client", None)
+    if get_client is None:  # pragma: no cover - defensive; v0.1 only ships BigQuery
+        raise PruneError(
+            "sample-mode prune requires the adapter to expose `_get_client`; "
+            f"{type(adapter).__name__} does not.",
+            remediation=(
+                "Set `prune.scope: full` in signalforge.yml until the v0.2 "
+                "WarehouseAdapter.get_table_metadata seam lands."
+            ),
+        )
+    try:
+        client = get_client()
+        meta = client.get_table(table_ref)
+    except WarehouseError:
+        # Adapter mapped the SDK exception. Re-raise as PruneError so
+        # the caller's catch surface stays homogeneous: any failure to
+        # establish the deterministic-sample bucket is a prune-layer
+        # configuration / setup error.
+        raise
+    num_rows = getattr(meta, "num_rows", None)
+    if num_rows is None or num_rows == 0:
+        raise PruneError(
+            f"sample-mode prune requires Table.num_rows for "
+            f"{table_ref.qualified_name!r} but the warehouse returned None.",
+            remediation=(
+                "Verify the table is materialised and accessible. "
+                "If it is genuinely empty (or num_rows is unavailable on the "
+                "warehouse type), set `prune.scope: full` in signalforge.yml "
+                "to bypass the deterministic-sample CTE."
+            ),
+        )
+    return max(num_rows // sample_size, 1)
+
+
 def prune_tests(
     model: Model,
     adapter: WarehouseAdapter,
@@ -629,6 +703,18 @@ def prune_tests(
         resolved_config.model_dump_json(),
     )
 
+    # Resolve the deterministic-sample bucket once per run when
+    # scope=sample. The bucket is derived from ``num_rows / sample_size``
+    # so the wrapped CTE samples ~sample_size rows; deriving once and
+    # threading through every per-test compile keeps every test in the
+    # run targeting the same sampled row set.
+    sample_bucket = _resolve_sample_bucket(
+        adapter=adapter,
+        table_ref=table_ref,
+        scope=scope,
+        sample_size=resolved_config.sample_size,
+    )
+
     pairs = _iter_candidate_tests(candidates)
     decisions: list[PruneDecision] = []
     start_ms = _now_monotonic_ms()
@@ -663,7 +749,16 @@ def prune_tests(
         # Compile the candidate test to failing-rows SQL. Returns either
         # a string (the SELECT), a _RequiresFutureData sentinel, or an
         # _InvalidIdentifier sentinel.
-        compile_result = _compile_test(test, table_ref, dialect, manifest)
+        compile_result = _compile_test(
+            test,
+            table_ref,
+            dialect,
+            manifest,
+            scope=scope,
+            sample_size=resolved_config.sample_size if scope == "sample" else None,
+            sample_bucket=sample_bucket,
+            partition_filter=resolved_config.partition_filter,
+        )
         if isinstance(compile_result, _RequiresFutureData):
             decision = _decide_requires_future_data(
                 test=test,

@@ -48,7 +48,8 @@ from signalforge.prune.errors import (
 )
 from signalforge.warehouse.adapters.bigquery import BigQueryAdapter
 from signalforge.warehouse.errors import TableNotFoundError
-from tests.warehouse._fake import FakeBigQueryClient
+from signalforge.warehouse.models import PartitionFilter, TableRef
+from tests.warehouse._fake import FakeBigQueryClient, FakeTable
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -147,7 +148,7 @@ def test_prune_tests_always_passes_drops_test(tmp_path: Path) -> None:
     model = _make_orders_model()
     manifest = _make_manifest(model)
     candidates = _candidates_with_one_test("id")
-    config = PruneConfig(capture_failure_rows=0)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
 
     result = prune_tests(
         model,
@@ -187,7 +188,7 @@ def test_prune_tests_kept_for_real_failure_untrusted_model(tmp_path: Path) -> No
     model = _make_orders_model()
     manifest = _make_manifest(model)
     candidates = _candidates_with_one_test("id")
-    config = PruneConfig(capture_failure_rows=0)  # untrusted by default
+    config = PruneConfig(scope="full", capture_failure_rows=0)  # untrusted by default
 
     result = prune_tests(
         model,
@@ -220,6 +221,7 @@ def test_prune_tests_failed_on_known_clean_data_for_trusted_model(tmp_path: Path
     manifest = _make_manifest(model)
     candidates = _candidates_with_one_test("id")
     config = PruneConfig(
+        scope="full",
         trusted_models=(model.unique_id,),
         capture_failure_rows=0,
     )
@@ -272,7 +274,7 @@ def test_prune_tests_requires_future_data_for_unknown_relationships_parent(
             ),
         ),
     )
-    config = PruneConfig(capture_failure_rows=0)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
 
     result = prune_tests(
         model,
@@ -311,7 +313,7 @@ def test_prune_tests_warehouse_error_routes_to_kept_without_evidence(
     model = _make_orders_model()
     manifest = _make_manifest(model)
     candidates = _candidates_with_one_test("id")
-    config = PruneConfig(capture_failure_rows=0)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
 
     result = prune_tests(
         model,
@@ -347,7 +349,7 @@ def test_prune_tests_total_budget_exceeded_marks_remaining_kept_without_evidence
     model = _make_orders_model()
     manifest = _make_manifest(model)
     candidates = _candidates_with_n_tests(5)
-    config = PruneConfig(total_budget_seconds=1, capture_failure_rows=0)
+    config = PruneConfig(scope="full", total_budget_seconds=1, capture_failure_rows=0)
 
     # Stub `_now_monotonic_ms` so the second iteration sees the budget
     # exhausted (advances past 1000 ms after the first call). The clock
@@ -403,7 +405,7 @@ def test_prune_tests_trusted_models_validation_at_entry(tmp_path: Path) -> None:
     model = _make_orders_model()
     manifest = _make_manifest(model)
     candidates = _candidates_with_one_test("id")
-    config = PruneConfig(trusted_models=("model.shop.nonexistent",))
+    config = PruneConfig(scope="full", trusted_models=("model.shop.nonexistent",))
 
     with pytest.raises(PruneTrustedModelNotFoundError) as excinfo:
         prune_tests(
@@ -444,7 +446,7 @@ def test_prune_tests_audit_write_oserror_aborts_run(
     model = _make_orders_model()
     manifest = _make_manifest(model)
     candidates = _candidates_with_n_tests(3)
-    config = PruneConfig(capture_failure_rows=0)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
 
     call_count = {"n": 0}
     boom = OSError("disk full")
@@ -489,7 +491,7 @@ def test_prune_tests_audit_record_too_large_propagates(
     model = _make_orders_model()
     manifest = _make_manifest(model)
     candidates = _candidates_with_one_test("id")
-    config = PruneConfig(capture_failure_rows=0)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
 
     expected = PruneAuditRecordTooLargeError(size=5000, limit=4000)
 
@@ -557,7 +559,7 @@ def test_prune_tests_compute_config_hash_is_deterministic(tmp_path: Path) -> Non
     model = _make_orders_model()
     manifest = _make_manifest(model)
     candidates = _candidates_with_one_test("id")
-    config = PruneConfig(capture_failure_rows=0)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
 
     prune_tests(
         model,
@@ -610,7 +612,7 @@ def test_prune_tests_default_audit_path_resolves_relative_to_project_dir(
     model = _make_orders_model()
     manifest = _make_manifest(model)
     candidates = _candidates_with_one_test("id")
-    config = PruneConfig(capture_failure_rows=0)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
 
     prune_tests(
         model,
@@ -662,7 +664,7 @@ def test_prune_tests_audit_path_symlink_outside_project_raises(
     model = _make_orders_model()
     manifest = _make_manifest(model)
     candidates = _candidates_with_one_test("id")
-    config = PruneConfig(capture_failure_rows=0)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
 
     with pytest.raises(PruneAuditWriteError):
         prune_tests(
@@ -678,4 +680,268 @@ def test_prune_tests_audit_path_symlink_outside_project_raises(
     # The outside target was never created — canonicalisation aborts
     # before the writer opens any file.
     assert not outside_target.exists()
+    fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# PR #20 review fix: sampling / partition_filter wiring.
+#
+# Pre-fix behavior: ``decision.scope = config.scope`` was advisory-only —
+# every test ran against the FULL table regardless of ``prune.scope``.
+# These tests pin the post-fix wiring: scope, sample_size, and
+# partition_filter all reach the compiled SQL.
+# ---------------------------------------------------------------------------
+
+
+def test_prune_tests_sample_mode_wraps_sql_with_deterministic_sample_cte(
+    tmp_path: Path,
+) -> None:
+    """``config.scope="sample"`` wraps the failing-rows test in a
+    deterministic-sample CTE matching the warehouse adapter's
+    :meth:`sample_rows` shape.
+
+    The bucket is derived from ``num_rows / sample_size``. With
+    ``num_rows=1_000_000`` and ``sample_size=100_000`` the bucket is 10.
+    The compiled SQL the orchestrator dispatches must carry the CTE
+    AND the hash-mod predicate.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Engine fetches num_rows once before the test loop.
+    fake.expect_get_table(
+        ref=TableRef(project="fake_project", dataset="dataset", name="orders"),
+        returns=FakeTable(num_rows=1_000_000),
+    )
+    fake.expect_query(
+        matching=(
+            r"WITH sample AS \(SELECT \* FROM `fake_project\.dataset\.orders` "
+            r"AS t WHERE MOD\(ABS\(FARM_FINGERPRINT\(TO_JSON_STRING\(t\)\)\), "
+            r"10\) < 1 LIMIT 100000\)"
+        ),
+        returns=[{"failures": 0}],
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 1
+    assert result.decisions[0].decision == "dropped"
+    assert result.decisions[0].reason == "always-passes"
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_full_mode_does_not_wrap_with_cte(tmp_path: Path) -> None:
+    """``config.scope="full"`` (the default for this test) emits the
+    unwrapped failing-rows SELECT — no ``WITH sample`` CTE, no
+    deterministic-sample predicate, no ``get_table`` lookup.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Note: NO expect_get_table — full-mode skips num_rows lookup.
+    # The query expectation is anchored on a regex that REJECTS any
+    # CTE wrapping by requiring the SELECT to start without ``WITH``.
+    fake.expect_query(
+        matching=(
+            r"^SELECT COUNT\(\*\) AS failures FROM "
+            r"\(SELECT `id` FROM `fake_project\.dataset\.orders` "
+            r"WHERE `id` IS NULL\)"
+        ),
+        returns=[{"failures": 0}],
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_partition_filter_threads_through(tmp_path: Path) -> None:
+    """``config.partition_filter`` reaches the compiled SQL — verifies
+    the orchestrator threads the typed :class:`PartitionFilter` through
+    :func:`_compile_test`. Sample-mode + partition_filter renders both
+    predicates inside the deterministic-sample CTE.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_get_table(
+        ref=TableRef(project="fake_project", dataset="dataset", name="orders"),
+        returns=FakeTable(num_rows=1_000_000),
+    )
+    fake.expect_query(
+        matching=(
+            r"MOD\(ABS\(FARM_FINGERPRINT\(TO_JSON_STRING\(t\)\)\), 10\) < 1 "
+            r"AND `dt` >= '2026-01-01'"
+        ),
+        returns=[{"failures": 0}],
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        partition_filter=PartitionFilter(column="dt", op=">=", value="2026-01-01"),
+    )
+
+    prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_sample_mode_relationships_samples_child_only(
+    tmp_path: Path,
+) -> None:
+    """Sample-mode + relationships samples the CHILD only; the parent
+    table stays at full.
+
+    Documented asymmetry — an orphan detected in the child sample is not
+    a false positive caused by the parent's missing-from-sample row.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_get_table(
+        ref=TableRef(project="fake_project", dataset="dataset", name="orders"),
+        returns=FakeTable(num_rows=1_000_000),
+    )
+    # The query carries a sample CTE wrapping the child AND a LEFT JOIN
+    # against the full-qualified parent table (NOT another sample alias).
+    fake.expect_query(
+        matching=(
+            r"WITH sample AS .* SELECT child\.`customer_id` "
+            r"FROM sample AS child "
+            r"LEFT JOIN `fake_project\.dataset\.customers` AS parent"
+        ),
+        returns=[{"failures": 0}],
+    )
+    adapter = _make_adapter(fake)
+
+    # Build a manifest with both the orders model AND a customers parent.
+    orders = _make_orders_model()
+    customers = Model(
+        unique_id="model.shop.customers",
+        name="customers",
+        resource_type="model",
+        package_name="shop",
+        original_file_path="models/customers.sql",
+        path="customers.sql",
+        database="fake_project",
+        schema="dataset",  # type: ignore[call-arg]
+        columns={"id": Column(name="id")},
+        raw_code="select 1",
+    )
+    manifest = Manifest(
+        metadata={"dbt_schema_version": "v12"},
+        nodes={
+            orders.unique_id: orders,
+            customers.unique_id: customers,
+        },
+    )
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="customer_id",
+                description="FK to customers.",
+                tests=(
+                    CandidateTestRelationships(
+                        column="customer_id",
+                        to="customers",
+                        field="id",
+                    ),
+                ),
+            ),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+    )
+
+    prune_tests(
+        orders,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_sample_mode_unknown_num_rows_raises_prune_error(
+    tmp_path: Path,
+) -> None:
+    """Sample-mode requires ``Table.num_rows`` to size the deterministic
+    bucket. When the warehouse returns ``None`` the orchestrator raises
+    a typed :class:`PruneError` — silent degradation to "every row"
+    would defeat US-003's cost model.
+    """
+    from signalforge.prune.errors import PruneError
+
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_get_table(
+        ref=TableRef(project="fake_project", dataset="dataset", name="orders"),
+        returns=FakeTable(num_rows=None),
+    )
+    # No expect_query — the failure happens BEFORE any test dispatches.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(scope="sample", sample_size=100_000, capture_failure_rows=0)
+
+    with pytest.raises(PruneError):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
     fake.assert_all_expectations_met()

@@ -37,7 +37,7 @@ from signalforge.prune.compiler import (
     _RequiresFutureData,
 )
 from signalforge.warehouse._sql_safety import validate_test_sql
-from signalforge.warehouse.models import BIGQUERY_DIALECT, Dialect, TableRef
+from signalforge.warehouse.models import BIGQUERY_DIALECT, Dialect, PartitionFilter, TableRef
 
 _FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "prune" / "compiled_sql"
 
@@ -119,6 +119,160 @@ def test_compile_relationships_matches_snapshot() -> None:
     test = CandidateTestRelationships(column="customer_id", to="customers", field="id")
     actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
     assert actual == expected
+
+
+# ---------------------------------------------------------------------------
+# Sample-mode snapshot tests — pinned byte-exact output for each variant
+# wrapped in a deterministic-sample CTE. Confirms the post-PR-#20 review
+# wiring threads scope/sample_size/sample_bucket/partition_filter through
+# the compiler so ``prune.scope: sample`` actually samples in the SQL.
+# ---------------------------------------------------------------------------
+
+
+def test_compile_not_null_sample_mode_matches_snapshot() -> None:
+    expected = _read_fixture("not_null_sample.sql")
+    test = CandidateTestNotNull(column="customer_id")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+
+
+def test_compile_unique_sample_mode_matches_snapshot() -> None:
+    expected = _read_fixture("unique_sample.sql")
+    test = CandidateTestUnique(column="customer_id")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+
+
+def test_compile_accepted_values_sample_mode_matches_snapshot() -> None:
+    expected = _read_fixture("accepted_values_sample.sql")
+    test = CandidateTestAcceptedValues(column="status", values=("placed", "shipped", "cancelled"))
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+
+
+def test_compile_sample_mode_with_partition_filter_threads_predicate() -> None:
+    """``partition_filter`` is rendered into the deterministic-sample CTE
+    alongside the hash-mod predicate.
+
+    The orchestrator threads ``PruneConfig.partition_filter`` through
+    every per-test compile so the wrapped CTE matches the warehouse
+    adapter's :meth:`sample_rows` shape. Required by the warehouse
+    adapter for tables ≥ 100M rows.
+    """
+    test = CandidateTestNotNull(column="customer_id")
+    pf = PartitionFilter(column="event_dt", op=">=", value="2026-01-01")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+        partition_filter=pf,
+    )
+    assert isinstance(actual, str)
+    # The CTE carries both the hash-mod predicate AND the partition AND.
+    expected_predicate = (
+        "MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), 10) < 1 AND `event_dt` >= '2026-01-01'"
+    )
+    assert expected_predicate in actual
+    # Test still runs against the sample alias.
+    assert "FROM sample WHERE `customer_id` IS NULL" in actual
+
+
+def test_compile_full_mode_with_partition_filter_wraps_table_in_subquery() -> None:
+    """``scope="full"`` + ``partition_filter`` composes via derived table.
+
+    The test runs against a partition-filtered subquery rather than the
+    raw table. Composing via subquery (rather than editing the per-test
+    WHERE clause) is uniform across all four test shapes so the wrapper
+    stays a true wrapper.
+    """
+    test = CandidateTestNotNull(column="customer_id")
+    pf = PartitionFilter(column="event_dt", op=">=", value="2026-01-01")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        scope="full",
+        partition_filter=pf,
+    )
+    assert isinstance(actual, str)
+    # The original table was wrapped in a derived-table partition filter.
+    assert (
+        "FROM (SELECT * FROM `fake_project.dataset.orders` WHERE `event_dt` >= '2026-01-01')"
+        in actual
+    )
+    # No CTE — full mode does not wrap with WITH sample.
+    assert "WITH sample" not in actual
+
+
+def test_compile_full_mode_no_partition_filter_emits_unwrapped_sql() -> None:
+    """``scope="full"`` + no partition_filter is byte-identical to the
+    legacy unwrapped output. Snapshot fixtures pin the unwrapped shape.
+    """
+    test = CandidateTestNotNull(column="customer_id")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        scope="full",
+        partition_filter=None,
+    )
+    assert actual == _read_fixture("not_null.sql")
+
+
+def test_compile_relationships_sample_mode_matches_snapshot() -> None:
+    """Sample-mode relationships samples the CHILD table only.
+
+    The parent stays at full so an orphan detected in the child sample
+    is not a false positive caused by the parent's missing-from-sample
+    row. The pinned fixture asserts the WITH sample CTE wraps the child
+    only; the LEFT JOIN target stays at the qualified parent table.
+    """
+    expected = _read_fixture("relationships_sample.sql")
+    test = CandidateTestRelationships(column="customer_id", to="customers", field="id")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+    # Belt-and-braces: the parent table is NOT sampled — verify the
+    # full-qualified parent identifier survives the wrap.
+    assert isinstance(actual, str)
+    assert "LEFT JOIN `fake_project.dataset.customers` AS parent" in actual
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +406,54 @@ def test_relationships_returns_requires_future_data_when_parent_missing() -> Non
     )
     assert isinstance(result, _RequiresFutureData)
     assert "nonexistent_model" in result.reason
+
+
+def test_relationships_returns_requires_future_data_when_parent_ambiguous() -> None:
+    """Multiple manifest models sharing ``Model.name`` (e.g. cross-package
+    name collision) cannot be silently disambiguated by the compiler.
+
+    Picking the first match would let the prune layer issue a wrong-table
+    join — exactly the silent-failure mode the ``requires-future-data``
+    branch exists to prevent. The reason text quantifies the ambiguity
+    so the reviewer sees how many parents matched.
+    """
+    customers_a = Model(
+        unique_id="model.shop_a.customers",
+        name="customers",
+        resource_type="model",
+        package_name="shop_a",
+        original_file_path="models/customers.sql",
+        path="customers.sql",
+        database="fake_project",
+        schema="dataset_a",  # type: ignore[call-arg]
+        columns={"id": Column(name="id")},
+        raw_code="select 1",
+    )
+    customers_b = Model(
+        unique_id="model.shop_b.customers",
+        name="customers",
+        resource_type="model",
+        package_name="shop_b",
+        original_file_path="models/customers.sql",
+        path="customers.sql",
+        database="fake_project",
+        schema="dataset_b",  # type: ignore[call-arg]
+        columns={"id": Column(name="id")},
+        raw_code="select 1",
+    )
+    manifest = Manifest(
+        metadata={"dbt_schema_version": "v12"},
+        nodes={
+            "model.shop.orders": _make_orders_model(),
+            "model.shop_a.customers": customers_a,
+            "model.shop_b.customers": customers_b,
+        },
+    )
+    test = CandidateTestRelationships(column="customer_id", to="customers", field="id")
+    result = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, manifest)
+    assert isinstance(result, _RequiresFutureData)
+    assert "ambiguous" in result.reason
+    assert "2 models" in result.reason
 
 
 def test_relationships_resolves_parent_via_manifest_name_lookup() -> None:

@@ -51,6 +51,7 @@ See ``plans/super/6-prune-engine.md`` for the full design.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from hashlib import blake2b
 from typing import TYPE_CHECKING
 
@@ -63,10 +64,11 @@ from signalforge.draft.models import (
 )
 from signalforge.warehouse._sql_safety import escape_bq_string_literal, validate_identifier
 from signalforge.warehouse.errors import InvalidIdentifierError
-from signalforge.warehouse.models import TableRef
+from signalforge.warehouse.models import PartitionFilter, TableRef
 
 if TYPE_CHECKING:
     from signalforge.manifest.models import Manifest
+    from signalforge.prune.models import Scope
     from signalforge.warehouse.models import Dialect
 
 
@@ -106,6 +108,67 @@ class _InvalidIdentifier:
     reason: str
 
 
+def _render_partition_filter(pf: PartitionFilter, quote_char: str) -> str:
+    """Render a :class:`PartitionFilter` to a SQL fragment for the WHERE clause.
+
+    Mirrors :meth:`signalforge.warehouse.adapters.bigquery.BigQueryAdapter._render_partition_filter`
+    — the prune compiler reuses the same render rules so the partition
+    predicate the engine threads through the deterministic sample CTE
+    matches what the warehouse adapter would emit on its own
+    ``sample_rows`` path.
+
+    ``datetime`` → ``TIMESTAMP('…')``; ``date`` → ``DATE('…')``;
+    ``str`` is escaped via :func:`escape_bq_string_literal` for safe
+    inclusion inside a single-quoted BigQuery string literal. The column
+    name is already DEC-013-validated by :class:`PartitionFilter`'s
+    ``__post_init__``.
+    """
+    # ``datetime`` is a subclass of ``date``, so check it first.
+    if isinstance(pf.value, datetime):
+        rendered = f"TIMESTAMP('{pf.value.isoformat()}')"
+    elif isinstance(pf.value, date):
+        rendered = f"DATE('{pf.value.isoformat()}')"
+    else:
+        rendered = f"'{escape_bq_string_literal(str(pf.value))}'"
+    return f"{quote_char}{pf.column}{quote_char} {pf.op} {rendered}"
+
+
+def _render_sample_cte(
+    table: str,
+    *,
+    sample_size: int,
+    sample_bucket: int,
+    partition_filter: PartitionFilter | None,
+    quote_char: str,
+) -> str:
+    """Render a deterministic-sample CTE matching the adapter's
+    :meth:`signalforge.warehouse.adapters.bigquery.BigQueryAdapter.sample_rows`
+    SQL shape.
+
+    Every sample-mode failing-rows query is wrapped as::
+
+        WITH sample AS (
+            SELECT * FROM <table> AS t
+            WHERE MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), <bucket>) < 1
+              [AND <partition_filter>]
+            LIMIT <sample_size>
+        )
+        <test SQL targeting sample>
+
+    The hash-mod predicate is identical to the adapter's
+    ``sample_rows`` deterministic-sample shape (DEC-006 of issue #3) so
+    sampling decisions stay consistent between the adapter's internal
+    samples and the prune engine's wrapped tests.
+    """
+    where_clauses = [
+        f"MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), {sample_bucket}) < 1",
+    ]
+    if partition_filter is not None:
+        where_clauses.append(_render_partition_filter(partition_filter, quote_char))
+    where_sql = " AND ".join(where_clauses)
+    return f"WITH sample AS (SELECT * FROM {table} AS t WHERE {where_sql} LIMIT {sample_size})"
+
+
 def _quote(identifier: str, quote_char: str) -> str:
     """Wrap ``identifier`` in ``quote_char`` for SQL embedding.
 
@@ -134,10 +197,88 @@ def _qualified_table_name(table_ref: TableRef, quote_char: str) -> str:
     return f"{quote_char}{table_ref.project}.{table_ref.dataset}.{table_ref.name}{quote_char}"
 
 
+def _wrap_with_sample_or_partition(
+    *,
+    test_sql: str,
+    table_sql: str,
+    table_alias_sql: str,
+    scope: Scope,
+    sample_size: int | None,
+    sample_bucket: int | None,
+    partition_filter: PartitionFilter | None,
+    quote_char: str,
+) -> str:
+    """Apply scope/sample/partition_filter wrapping to a per-test SELECT.
+
+    ``test_sql`` is the failing-rows SELECT rendered against
+    ``table_alias_sql`` (typically the same string as ``table_sql`` for
+    the unwrapped path; substituted to ``sample`` when wrapping). The
+    function returns:
+
+    * ``scope == "sample"`` — a ``WITH sample AS (...) <test_sql>``
+      compound where the test targets the CTE rather than the raw table.
+      The deterministic-sample predicate matches the adapter's
+      :meth:`sample_rows` shape (DEC-006 of issue #3).
+    * ``scope == "full"`` AND ``partition_filter is not None`` — the
+      partition predicate is appended to the test's existing WHERE clause
+      (or added as a new WHERE when the test has none). The caller is
+      responsible for emitting a test SQL that already targets the raw
+      table with a ``WHERE`` clause; partition-only injection assumes the
+      caller never emits ``WHERE`` for ``unique`` (it does emit one for
+      ``not_null`` / ``accepted_values`` / ``relationships``). To avoid
+      that fragility this helper composes the predicate via subquery: the
+      caller's ``test_sql`` runs against a derived ``(SELECT * FROM
+      <table> WHERE <partition_filter>) AS t`` rather than the raw table.
+    * ``scope == "full"`` AND ``partition_filter is None`` — returns
+      ``test_sql`` unchanged.
+
+    The partition-via-subquery composition is uniform across all four
+    test shapes (no per-test ``WHERE``-clause surgery), which keeps the
+    helper a true wrapper.
+    """
+    del table_alias_sql  # currently unused — kept in signature for symmetry / future use
+    if scope == "sample":
+        if sample_size is None or sample_bucket is None:
+            # Defensive: the orchestrator must supply both when scope=sample.
+            # Falling back silently would defeat US-003's cost model.
+            raise ValueError(
+                "scope='sample' requires both sample_size and sample_bucket; "
+                "the orchestrator should have computed these before calling _compile_test."
+            )
+        cte = _render_sample_cte(
+            table_sql,
+            sample_size=sample_size,
+            sample_bucket=sample_bucket,
+            partition_filter=partition_filter,
+            quote_char=quote_char,
+        )
+        return f"{cte} {test_sql}"
+    # scope == "full"
+    if partition_filter is not None:
+        partition_sql = _render_partition_filter(partition_filter, quote_char)
+        # Compose via derived table so per-test WHERE-clause shapes don't
+        # have to be edited. Every per-test compiler emits exactly one
+        # ``FROM <table_sql>`` fragment for the primary (child) table.
+        # ``relationships`` emits a second ``LEFT JOIN <parent_table>``
+        # which is intentionally NOT rewritten: the partition filter
+        # applies to the model under prune (the child), not its
+        # referenced parent.
+        needle = f"FROM {table_sql}"
+        replacement = f"FROM (SELECT * FROM {table_sql} WHERE {partition_sql})"
+        if needle in test_sql:
+            return test_sql.replace(needle, replacement, 1)
+    return test_sql
+
+
 def _compile_not_null(
     test: CandidateTestNotNull,
     table_ref: TableRef,
     quote_char: str,
+    *,
+    scope: Scope,
+    sample_size: int | None,
+    sample_bucket: int | None,
+    partition_filter: PartitionFilter | None,
 ) -> str | _InvalidIdentifier:
     """Compile ``not_null(col)`` to ``SELECT col FROM t WHERE col IS NULL``."""
     try:
@@ -150,13 +291,29 @@ def _compile_not_null(
         )
     col = _quote(test.column, quote_char)
     table = _qualified_table_name(table_ref, quote_char)
-    return f"SELECT {col} FROM {table} WHERE {col} IS NULL"
+    target = "sample" if scope == "sample" else table
+    test_sql = f"SELECT {col} FROM {target} WHERE {col} IS NULL"
+    return _wrap_with_sample_or_partition(
+        test_sql=test_sql,
+        table_sql=table,
+        table_alias_sql=target,
+        scope=scope,
+        sample_size=sample_size,
+        sample_bucket=sample_bucket,
+        partition_filter=partition_filter,
+        quote_char=quote_char,
+    )
 
 
 def _compile_unique(
     test: CandidateTestUnique,
     table_ref: TableRef,
     quote_char: str,
+    *,
+    scope: Scope,
+    sample_size: int | None,
+    sample_bucket: int | None,
+    partition_filter: PartitionFilter | None,
 ) -> str | _InvalidIdentifier:
     """Compile ``unique(col)`` to a GROUP BY ... HAVING COUNT(*) > 1.
 
@@ -174,13 +331,31 @@ def _compile_unique(
         )
     col = _quote(test.column, quote_char)
     table = _qualified_table_name(table_ref, quote_char)
-    return f"SELECT {col} FROM {table} WHERE {col} IS NOT NULL GROUP BY {col} HAVING COUNT(*) > 1"
+    target = "sample" if scope == "sample" else table
+    test_sql = (
+        f"SELECT {col} FROM {target} WHERE {col} IS NOT NULL GROUP BY {col} HAVING COUNT(*) > 1"
+    )
+    return _wrap_with_sample_or_partition(
+        test_sql=test_sql,
+        table_sql=table,
+        table_alias_sql=target,
+        scope=scope,
+        sample_size=sample_size,
+        sample_bucket=sample_bucket,
+        partition_filter=partition_filter,
+        quote_char=quote_char,
+    )
 
 
 def _compile_accepted_values(
     test: CandidateTestAcceptedValues,
     table_ref: TableRef,
     quote_char: str,
+    *,
+    scope: Scope,
+    sample_size: int | None,
+    sample_bucket: int | None,
+    partition_filter: PartitionFilter | None,
 ) -> str | _InvalidIdentifier:
     """Compile ``accepted_values(col, values)`` to a ``NOT IN`` predicate.
 
@@ -203,8 +378,21 @@ def _compile_accepted_values(
         )
     col = _quote(test.column, quote_char)
     table = _qualified_table_name(table_ref, quote_char)
+    target = "sample" if scope == "sample" else table
     rendered_values = ", ".join(f"'{escape_bq_string_literal(v)}'" for v in test.values)
-    return f"SELECT {col} FROM {table} WHERE {col} IS NOT NULL AND {col} NOT IN ({rendered_values})"
+    test_sql = (
+        f"SELECT {col} FROM {target} WHERE {col} IS NOT NULL AND {col} NOT IN ({rendered_values})"
+    )
+    return _wrap_with_sample_or_partition(
+        test_sql=test_sql,
+        table_sql=table,
+        table_alias_sql=target,
+        scope=scope,
+        sample_size=sample_size,
+        sample_bucket=sample_bucket,
+        partition_filter=partition_filter,
+        quote_char=quote_char,
+    )
 
 
 def _resolve_parent_table_ref(
@@ -216,20 +404,36 @@ def _resolve_parent_table_ref(
     The drafter's :class:`CandidateTestRelationships.to` field carries
     only the parent model's :attr:`Model.name` (not a full ``unique_id``);
     :class:`Manifest` indexes by ``unique_id``, so the lookup scans
-    :attr:`Manifest.nodes` for a model whose :attr:`Model.name` matches.
+    :attr:`Manifest.nodes` for every model whose :attr:`Model.name`
+    matches.
 
-    Returns a :class:`_RequiresFutureData` sentinel when no match is
-    found (DEC-026). When a match is found, returns the parent's
+    Returns a :class:`_RequiresFutureData` sentinel when:
+
+    * No match is found (parent is absent from the manifest — DEC-026).
+    * Two or more models in the manifest share ``parent_name`` (e.g.
+      multiple packages with a ``customers`` model). The compiler does
+      not have enough information to disambiguate; routing to
+      ``requires-future-data`` ships the test to the operator with a
+      precise diagnostic rather than silently picking a parent.
+
+    When exactly one match is found, returns the parent's
     :class:`TableRef` via :meth:`TableRef.from_model`; that call may
     raise :class:`ManifestProjectNotFoundError` or
     :class:`ManifestSchemaNotFoundError` if the parent model lacks
     ``database`` / ``schema`` — those are manifest-shape problems and
     propagate, not prune problems to swallow.
     """
-    for parent_model in manifest.nodes.values():
-        if parent_model.name == parent_name:
-            return TableRef.from_model(parent_model)
-    return _RequiresFutureData(reason=f"relationships parent {parent_name!r} not in manifest")
+    matches = [m for m in manifest.nodes.values() if m.name == parent_name]
+    if not matches:
+        return _RequiresFutureData(reason=f"relationships parent {parent_name!r} not in manifest")
+    if len(matches) > 1:
+        return _RequiresFutureData(
+            reason=(
+                f"relationships parent {parent_name!r} ambiguous: "
+                f"matched {len(matches)} models in manifest"
+            )
+        )
+    return TableRef.from_model(matches[0])
 
 
 def _compile_relationships(
@@ -237,6 +441,11 @@ def _compile_relationships(
     table_ref: TableRef,
     quote_char: str,
     manifest: Manifest,
+    *,
+    scope: Scope,
+    sample_size: int | None,
+    sample_bucket: int | None,
+    partition_filter: PartitionFilter | None,
 ) -> str | _RequiresFutureData | _InvalidIdentifier:
     """Compile ``relationships(child_col, to=parent, field=parent_col)``.
 
@@ -253,6 +462,12 @@ def _compile_relationships(
     routes that to ``kept-without-evidence``. ``to`` is NOT shape-checked
     here — it's a model name resolved via :func:`_resolve_parent_table_ref`
     and a missing parent yields the ``_RequiresFutureData`` branch.
+
+    Sample-mode asymmetry: when ``scope == "sample"``, only the CHILD
+    table is sampled. The parent stays at full so an orphan detected in
+    the child sample is not a false positive caused by the parent's
+    missing-from-sample row. ``partition_filter`` likewise applies only
+    to the child (the model under prune).
     """
     try:
         validate_identifier("CandidateTestRelationships.column", test.column)
@@ -272,12 +487,23 @@ def _compile_relationships(
     parent_col = _quote(test.field, quote_char)
     child_table = _qualified_table_name(table_ref, quote_char)
     parent_table = _qualified_table_name(parent_table_ref, quote_char)
-    return (
+    child_target = "sample" if scope == "sample" else child_table
+    test_sql = (
         f"SELECT child.{child_col} "
-        f"FROM {child_table} AS child "
+        f"FROM {child_target} AS child "
         f"LEFT JOIN {parent_table} AS parent "
         f"ON child.{child_col} = parent.{parent_col} "
         f"WHERE child.{child_col} IS NOT NULL AND parent.{parent_col} IS NULL"
+    )
+    return _wrap_with_sample_or_partition(
+        test_sql=test_sql,
+        table_sql=child_table,
+        table_alias_sql=child_target,
+        scope=scope,
+        sample_size=sample_size,
+        sample_bucket=sample_bucket,
+        partition_filter=partition_filter,
+        quote_char=quote_char,
     )
 
 
@@ -286,6 +512,11 @@ def _compile_test(
     table_ref: TableRef,
     dialect: Dialect,
     manifest: Manifest,
+    *,
+    scope: Scope = "full",
+    sample_size: int | None = None,
+    sample_bucket: int | None = None,
+    partition_filter: PartitionFilter | None = None,
 ) -> str | _RequiresFutureData | _InvalidIdentifier:
     """Render a candidate test as a failing-rows SELECT.
 
@@ -304,16 +535,66 @@ def _compile_test(
     a test whose ``column`` / ``field`` fails the SQL-identifier shape
     check returns :class:`_InvalidIdentifier`; the orchestrator
     distinguishes the three return shapes via :func:`isinstance`.
+
+    Sampling and partition-filter wiring (post-PR-#20 review fix):
+
+    * ``scope="sample"`` — wraps the test in a deterministic-sample CTE
+      (``WITH sample AS (SELECT * FROM <table> AS t WHERE
+      MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), <bucket>) < 1
+      [AND <partition>] LIMIT <size>) <test_sql>``). The orchestrator
+      derives ``sample_bucket`` from ``num_rows / sample_size`` and
+      passes both kwargs in.
+    * ``scope="full"`` — emits the test SQL against the raw table; when
+      ``partition_filter`` is supplied the predicate is composed via
+      derived table (``FROM (SELECT * FROM <table> WHERE
+      <partition>)``).
+    * ``relationships`` in sample mode samples the CHILD table only;
+      the parent stays at full so an orphan detected in the child
+      sample is not a false positive of the parent's missing-from-sample
+      row. ``partition_filter`` likewise applies to the child only.
     """
     quote_char = dialect.quote_char
     if isinstance(test, CandidateTestNotNull):
-        return _compile_not_null(test, table_ref, quote_char)
+        return _compile_not_null(
+            test,
+            table_ref,
+            quote_char,
+            scope=scope,
+            sample_size=sample_size,
+            sample_bucket=sample_bucket,
+            partition_filter=partition_filter,
+        )
     if isinstance(test, CandidateTestUnique):
-        return _compile_unique(test, table_ref, quote_char)
+        return _compile_unique(
+            test,
+            table_ref,
+            quote_char,
+            scope=scope,
+            sample_size=sample_size,
+            sample_bucket=sample_bucket,
+            partition_filter=partition_filter,
+        )
     if isinstance(test, CandidateTestAcceptedValues):
-        return _compile_accepted_values(test, table_ref, quote_char)
+        return _compile_accepted_values(
+            test,
+            table_ref,
+            quote_char,
+            scope=scope,
+            sample_size=sample_size,
+            sample_bucket=sample_bucket,
+            partition_filter=partition_filter,
+        )
     # Only CandidateTestRelationships remains in the discriminated union.
-    return _compile_relationships(test, table_ref, quote_char, manifest)
+    return _compile_relationships(
+        test,
+        table_ref,
+        quote_char,
+        manifest,
+        scope=scope,
+        sample_size=sample_size,
+        sample_bucket=sample_bucket,
+        partition_filter=partition_filter,
+    )
 
 
 def _compute_compiled_sql_hash(sql: str) -> str:
