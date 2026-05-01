@@ -157,28 +157,55 @@ cost approximately 24 MB / approximately one tenth of one US cent
 assumed only the column under test would be read; the worst case is
 50–500x that figure.
 
-**Verified figure (US-003): pending in-environment run.** The diagnostic
-probe at `tests/warehouse/test_sample_cost_probe.py` runs against
-`bigquery-public-data.iowa_liquor_sales.sales` and records
-`total_bytes_billed` for a 100k-row deterministic sample. To run it:
+**Verified figure (US-003): 9,924,771,840 bytes (≈9.92 GB), run 2026-05-01
+against `bigquery-public-data.iowa_liquor_sales.sales` (~30M rows, ~24
+columns), 100k-row deterministic sample.** AR-B1 confirmed: the
+`TO_JSON_STRING(t)` predicate triggers a full-row scan, and the actual
+cost is **~99× the Phase-1 estimate** (24 MB) and ~2× the probe's 5 GB
+sanity ceiling. The figure is BigQuery's pre-execution analyzer estimate;
+the adapter's 100 MB `maximum_bytes_billed` cap (DEC-005) blocked the
+query before execution, so this is the cost the user would pay if the
+cap were lifted, not a measured `total_bytes_billed` off a completed
+job. The pre-execution estimate matches what BQ would bill on a real
+prune run (the analyzer reads the same statistics the billing pipeline
+uses).
+
+To reproduce:
 
 ```bash
 gcloud auth application-default login
 SF_RUN_BQ=1 pytest -m bigquery tests/warehouse/test_sample_cost_probe.py -s
 ```
 
-Probe thresholds (constants in the test):
+The probe currently fails (rather than `xfail`s) on the
+`bytesBilledLimitExceeded` path because the assertion ceiling and the
+adapter cap are decoupled. Refining the probe to detect the BigQuery
+reason code `bytesBilledLimitExceeded` (which appears in the error
+message regardless of HTTP status) and `xfail` cleanly is tracked as a
+follow-up. Note the SDK exception class is unstable on this path: the
+adapter's `map_bq_exception` (`adapters/_client.py`) catches
+`google.api_core.exceptions.BadRequest` (HTTP 400), but the live run
+on 2026-05-01 with `google-cloud-bigquery==3.41.0` raised
+`google.api_core.exceptions.InternalServerError` (HTTP 500). The reason
+code is the durable identifier; match on substring rather than the
+exception class. The 9.92 GB figure is captured directly from the
+error message: `Query exceeded limit for bytes billed: 100000000.
+9924771840 or higher required.`
+
+**Q4=A is NOT adequate for v0.1 sample-mode on wide tables.** Issue #22
+tracks Q4=C escalation (temp-table-materialised sample) for v0.2. In the
+meantime, sample-mode prune runs on tables wider than ~10 columns will
+either trip the adapter's 100 MB cap and fail, or — if a maintainer
+raises the cap via the profile-level `maximum_bytes_billed` field
+(`load_profile`, see `docs/warehouse-adapter-ops.md`) — bill at roughly
+`(rows × bytes_per_row)` for **every test** in the candidate set.
+Schema-only mode remains the v0.1 default precisely because the cost
+model for sample-mode is not where we want it.
+
+Probe thresholds (constants in the test, kept for the post-Q4=C run):
 
 - `_BYTES_WARN_AT = 500_000_000` (500 MB) — soft WARNING fires above this.
 - `_BYTES_CEILING = 5_000_000_000` (5 GB) — assertion fires above this; the test fails.
-
-Outcome interpretation:
-
-- **`bytes_billed < 500 MB`** → Q4=A (one-query-per-test) is viable for v0.1 unchanged. The Phase-1 plan's cost target holds.
-- **`bytes_billed >= 500 MB`** → adopt Q4=C (temp-table-materialised sample) in v0.2 so the per-test cost amortises across the candidate set rather than re-paying the full-row scan for every test.
-
-Update this section once a maintainer with BigQuery credentials runs the
-probe.
 
 ## Audit JSONL schema
 

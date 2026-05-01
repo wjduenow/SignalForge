@@ -164,4 +164,16 @@ class FakeBigQueryClient:
 
 
 def _coerce_to_tableref(ref: Any) -> TableRef:
+    if isinstance(ref, str):
+        parts = ref.split(".")
+        if len(parts) == 3:
+            project, dataset, name = parts
+            return TableRef(project=project, dataset=dataset, name=name)
+        if len(parts) == 2:
+            dataset, name = parts
+            return TableRef(project=None, dataset=dataset, name=name)
+        raise AssertionError(
+            "table reference strings must be 'dataset.table' or "
+            f"'project.dataset.table', got: {ref!r}"
+        )
     return TableRef(project=ref.project, dataset=ref.dataset_id, name=ref.table_id)

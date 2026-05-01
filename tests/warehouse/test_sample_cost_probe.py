@@ -131,7 +131,7 @@ def _issue_sample_capture_bytes_billed(
     process emitting the same ``signalforge_stage`` label).
     """
     client = adapter._get_client()  # noqa: SLF001  # documented seam
-    table = client.get_table(target)
+    table = client.get_table(target.qualified_name)
     num_rows = getattr(table, "num_rows", None)
     if not num_rows:
         # Public dataset; this is a defensive guard rather than a
