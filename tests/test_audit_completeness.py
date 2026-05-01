@@ -32,6 +32,7 @@ _SAFETY_DIR = _REPO_ROOT / "src" / "signalforge" / "safety"
 _LLM_DIR = _REPO_ROOT / "src" / "signalforge" / "llm"
 _DRAFT_DIR = _REPO_ROOT / "src" / "signalforge" / "draft"
 _PRUNE_DIR = _REPO_ROOT / "src" / "signalforge" / "prune"
+_GRADE_DIR = _REPO_ROOT / "src" / "signalforge" / "grade"
 
 
 # ---------------------------------------------------------------------------
@@ -362,6 +363,60 @@ def test_prune_event_construction_in_prune_audit_module_is_present() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Scan 6 — GradeEvent only in grade.audit
+# ---------------------------------------------------------------------------
+
+
+# DEC-029 of #7 / US-009: GradeEvent is the grading-decision audit record;
+# constructing it anywhere other than the audit-write seam is a bug — the
+# corresponding event will never reach disk and the grade decision becomes
+# unauditable. Mirrors Scan 5 (PruneEvent only in prune.audit).
+_GRADE_EVENT_EXCLUSIONS: set[str] = {
+    # audit.py is the sole audit-write seam: ``_build_grade_event``
+    # constructs the GradeEvent and ``write_grade_event`` is the
+    # fail-closed JSONL writer (mirrors safety/audit.py from #4,
+    # draft/audit.py from #5, and prune/audit.py from #6).
+    "audit.py",
+}
+
+
+def test_grade_event_construction_only_in_grade_audit_module() -> None:
+    """DEC-029 of #7: direct ``GradeEvent(...)`` outside
+    ``signalforge.grade.audit`` bypasses the fail-closed JSONL writer —
+    the event would never reach disk and the grade decision would be
+    unauditable.
+    """
+    hits = _scan_dir_for_name_calls(
+        _GRADE_DIR,
+        target="GradeEvent",
+        excluded_relpaths=_GRADE_EVENT_EXCLUSIONS,
+    )
+    formatted = "\n".join(f"  {p}:{line}" for p, line in hits)
+    assert not hits, (
+        "GradeEvent constructed outside signalforge.grade.audit:\n"
+        f"{formatted}\n"
+        "Construct only via _build_grade_event — direct construction "
+        "bypasses the fail-closed JSONL audit writer."
+    )
+
+
+def test_grade_event_construction_in_grade_audit_module_is_present() -> None:
+    """Sanity: at least one ``GradeEvent(...)`` in
+    ``signalforge.grade.audit``. If this fails the scan above is no longer
+    load-bearing.
+    """
+    audit_path = _GRADE_DIR / "audit.py"
+    tree = ast.parse(audit_path.read_text(encoding="utf-8"))
+    finder = _NameCallFinder("GradeEvent")
+    finder.visit(tree)
+    assert finder.calls, (
+        "Expected GradeEvent(...) call in signalforge.grade.audit — "
+        "the AST-scan above is no longer load-bearing if the legitimate "
+        "constructor disappears."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Negative test: confirm the AST visitors detect planted violations
 # ---------------------------------------------------------------------------
 
@@ -390,3 +445,8 @@ def test_scan_visitors_catch_planted_violations() -> None:
     prune_finder = _NameCallFinder("PruneEvent")
     prune_finder.visit(ast.parse(prune_src))
     assert len(prune_finder.calls) == 1
+
+    grade_src = "def make():\n    return GradeEvent(model_unique_id='x')\n"
+    grade_finder = _NameCallFinder("GradeEvent")
+    grade_finder.visit(ast.parse(grade_src))
+    assert len(grade_finder.calls) == 1
