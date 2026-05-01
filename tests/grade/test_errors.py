@@ -197,11 +197,22 @@ def test_subclass_inheritance_chain() -> None:
 
 def test_signalforge_grade_subpackage_imports() -> None:
     """The ``signalforge.grade`` subpackage itself imports successfully
-    (US-001 acceptance criterion — subpackage importable)."""
+    (US-001 acceptance criterion — subpackage importable).
+
+    The public re-exports landed in US-008; this test now asserts that
+    the documented surface (matching the ``__all__`` declared in
+    :file:`signalforge/grade/__init__.py`) is non-empty and contains the
+    error hierarchy the original US-001 stub committed to.
+    """
     import signalforge.grade
 
-    # __all__ is intentionally empty in US-001 — public re-exports land in
-    # US-008 once models / orchestrator exist. Asserting the empty tuple
-    # documents the contract and fails loud if a future story
-    # accidentally pre-exports.
-    assert signalforge.grade.__all__ == ()
+    # US-008 ships the full public surface — error hierarchy + typed
+    # value objects + orchestrator + config loader. Sentinel a few
+    # load-bearing names to fail loud if the surface accidentally
+    # contracts; the full list is enforced by the per-name imports
+    # above.
+    assert "GradeError" in signalforge.grade.__all__
+    assert "grade_artifacts" in signalforge.grade.__all__
+    assert "GradingReport" in signalforge.grade.__all__
+    assert "DEFAULT_RUBRIC" in signalforge.grade.__all__
+    assert len(signalforge.grade.__all__) > 0

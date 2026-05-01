@@ -23,4 +23,47 @@ See ``plans/super/7-quality-grader.md`` for the full design and the DEC log.
 
 from __future__ import annotations
 
-__all__: tuple[str, ...] = ()
+from signalforge.grade.config import GradeConfig, load_grade_config
+from signalforge.grade.engine import grade_artifacts
+from signalforge.grade.errors import (
+    GradeAuditRecordTooLargeError,
+    GradeAuditWriteError,
+    GradeBudgetExceededError,
+    GradeConfigError,
+    GradeError,
+    GradeLLMError,
+    GradeOutputError,
+    GradeOutputViolationType,
+    GradePromptEnvelopeBreachError,
+    GradeRubricError,
+)
+from signalforge.grade.models import GradeEvent, GradingReport, GradingResult
+from signalforge.grade.rubric import (
+    DEFAULT_RUBRIC,
+    Criterion,
+    GradeThresholds,
+    Rubric,
+)
+
+__all__ = (
+    "Criterion",
+    "DEFAULT_RUBRIC",
+    "GradeAuditRecordTooLargeError",
+    "GradeAuditWriteError",
+    "GradeBudgetExceededError",
+    "GradeConfig",
+    "GradeConfigError",
+    "GradeError",
+    "GradeEvent",
+    "GradeLLMError",
+    "GradeOutputError",
+    "GradeOutputViolationType",
+    "GradePromptEnvelopeBreachError",
+    "GradeRubricError",
+    "GradeThresholds",
+    "GradingReport",
+    "GradingResult",
+    "Rubric",
+    "grade_artifacts",
+    "load_grade_config",
+)
