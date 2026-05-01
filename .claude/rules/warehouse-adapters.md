@@ -134,6 +134,19 @@ The adapter emits sparing `WARNING`-level signal when behaviour deviates from th
 
 `INFO` and `DEBUG` are reserved for the prune/grade stages where signal-vs-volume tradeoffs surface. Don't add adapter-level INFO logging in v0.1.
 
+## Don't pass our `TableRef` straight into vendor SDK methods (issue #21 lesson)
+
+Third-party SDK methods that "take a table reference" accept a fixed set of vendor types — `bigquery.Client.get_table()` accepts `str | bigquery.TableReference | Table | TableListItem` and explodes on `AttributeError: 'TableRef' object has no attribute 'path'` when handed our Pydantic value object. Our `TableRef` has the same field names but is not duck-compatible with the SDK's internal type checks.
+
+Always pass the **stringified form** (`ref.qualified_name`) to vendor SDK call sites. Two-part `dataset.table` (when `project=None`) is a valid `qualified_name` shape; the BQ SDK resolves the project from the client's billing project. The rule applies symmetrically in tests: `FakeBigQueryClient._coerce_to_tableref` accepts both `str` (parsed) and `TableReference`-shape (duck-typed via `.dataset_id` / `.table_id`).
+
+This bug shipped silently in the BigQuery adapter (#3) for two issues' worth of work because every test that exercised `_get_table` used `FakeBigQueryClient`, which matched on `TableRef` equality and never noticed the production path was wrong. The integration tests at `tests/warehouse/test_bigquery_integration.py` had the same defect and were never run live. Issue #21's AR-B1 cost probe was the first code path that touched a real BQ client and broke.
+
+Two takeaways for future adapter work:
+
+1. Every public adapter method that calls `client.<method>(ref, ...)` needs a live integration test that runs against the real SDK, not just the fake. The fake is for behaviour assertions; only the real SDK enforces input-type contracts. Gate the live test on `SF_RUN_BQ=1` (or per-vendor equivalent) so default CI stays free, but require maintainers to run it before declaring an adapter "done."
+2. When the fake's coercion helper has a special case for accepting strings, that's a load-bearing signal that the production path passes strings — don't accept non-string forms in the fake without a paired test that proves the real SDK accepts them too.
+
 ## Reference
 
 `plans/super/3-bigquery-adapter.md` — DEC-001 … DEC-028. `src/signalforge/warehouse/` — current implementation. `tests/warehouse/_fake.py` — `FakeBigQueryClient` + `expect_*` API. `docs/warehouse-adapter-ops.md` — operational reference.
