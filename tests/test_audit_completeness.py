@@ -31,6 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SAFETY_DIR = _REPO_ROOT / "src" / "signalforge" / "safety"
 _LLM_DIR = _REPO_ROOT / "src" / "signalforge" / "llm"
 _DRAFT_DIR = _REPO_ROOT / "src" / "signalforge" / "draft"
+_PRUNE_DIR = _REPO_ROOT / "src" / "signalforge" / "prune"
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +308,60 @@ def test_llm_response_event_construction_in_draft_audit_module_is_present() -> N
 
 
 # ---------------------------------------------------------------------------
+# Scan 5 — PruneEvent only in prune.audit
+# ---------------------------------------------------------------------------
+
+
+# DEC-018: PruneEvent is the prune-decision audit record; constructing it
+# anywhere other than the audit-write seam is a bug — the corresponding
+# event will never reach disk and the prune decision becomes unauditable.
+# Mirrors Scan 4 (LLMResponseEvent only in draft.audit).
+_PRUNE_EVENT_EXCLUSIONS: set[str] = {
+    # audit.py is the sole audit-write seam: ``_build_prune_event``
+    # constructs the PruneEvent and ``_write_prune_event`` is the
+    # fail-closed JSONL writer (mirrors safety/audit.py from #4 and
+    # draft/audit.py from #5).
+    "audit.py",
+}
+
+
+def test_prune_event_construction_only_in_prune_audit_module() -> None:
+    """DEC-018: direct ``PruneEvent(...)`` outside
+    ``signalforge.prune.audit`` bypasses the fail-closed JSONL writer —
+    the event would never reach disk and the prune decision would be
+    unauditable.
+    """
+    hits = _scan_dir_for_name_calls(
+        _PRUNE_DIR,
+        target="PruneEvent",
+        excluded_relpaths=_PRUNE_EVENT_EXCLUSIONS,
+    )
+    formatted = "\n".join(f"  {p}:{line}" for p, line in hits)
+    assert not hits, (
+        "PruneEvent constructed outside signalforge.prune.audit:\n"
+        f"{formatted}\n"
+        "Construct only via _build_prune_event — direct construction "
+        "bypasses the fail-closed JSONL audit writer."
+    )
+
+
+def test_prune_event_construction_in_prune_audit_module_is_present() -> None:
+    """Sanity: at least one ``PruneEvent(...)`` in
+    ``signalforge.prune.audit``. If this fails the scan above is no longer
+    load-bearing.
+    """
+    audit_path = _PRUNE_DIR / "audit.py"
+    tree = ast.parse(audit_path.read_text(encoding="utf-8"))
+    finder = _NameCallFinder("PruneEvent")
+    finder.visit(tree)
+    assert finder.calls, (
+        "Expected PruneEvent(...) call in signalforge.prune.audit — "
+        "the AST-scan above is no longer load-bearing if the legitimate "
+        "constructor disappears."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Negative test: confirm the AST visitors detect planted violations
 # ---------------------------------------------------------------------------
 
@@ -330,3 +385,8 @@ def test_scan_visitors_catch_planted_violations() -> None:
     response_finder = _NameCallFinder("LLMResponseEvent")
     response_finder.visit(ast.parse(response_src))
     assert len(response_finder.calls) == 1
+
+    prune_src = "def make():\n    return PruneEvent(model_unique_id='x')\n"
+    prune_finder = _NameCallFinder("PruneEvent")
+    prune_finder.visit(ast.parse(prune_src))
+    assert len(prune_finder.calls) == 1
