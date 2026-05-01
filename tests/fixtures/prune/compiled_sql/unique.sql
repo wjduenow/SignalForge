@@ -1,0 +1,1 @@
+SELECT `customer_id` FROM `fake_project.dataset.orders` WHERE `customer_id` IS NOT NULL GROUP BY `customer_id` HAVING COUNT(*) > 1

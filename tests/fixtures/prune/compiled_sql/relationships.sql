@@ -1,0 +1,1 @@
+SELECT child.`customer_id` FROM `fake_project.dataset.orders` AS child LEFT JOIN `fake_project.dataset.customers` AS parent ON child.`customer_id` = parent.`id` WHERE child.`customer_id` IS NOT NULL AND parent.`id` IS NULL
