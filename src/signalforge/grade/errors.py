@@ -36,7 +36,32 @@ See ``plans/super/7-quality-grader.md`` for the full design.
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, Literal
+
+GradeOutputViolationType = Literal[
+    "json_parse",
+    "missing_required_field",
+    "missing_criterion_id",
+    "criterion_id_mismatch",
+    "score_out_of_range",
+    "score_not_a_number",
+    "passed_not_a_bool",
+    "unknown_artifact_id",
+    "ambiguous_artifact_id",
+]
+"""Locked taxonomy for :attr:`GradeOutputError.violation_type` (US-006).
+
+Mirrors the drafter's anchor-contract precedent (#5 DEC-003 / DEC-022) —
+the violation discriminator is a finite ``Literal`` so audit-log
+consumers / orchestrator branches can pattern-match exhaustively rather
+than sniffing message text. The first seven entries are produced by
+:func:`signalforge.grade.parser.parse_grade_response`; the trailing two
+(``unknown_artifact_id``, ``ambiguous_artifact_id``) are produced by
+:func:`signalforge.grade.prompts.extract_artifact_text` (US-005) and are
+preserved here verbatim — adding a tenth literal in v0.2 requires
+updating production, the drift-detector strict mirror, and the
+docs/grade-ops.md table in the same change.
+"""
 
 
 def _format_value(v: object) -> str:
@@ -241,10 +266,10 @@ class GradeOutputError(GradeError):
         self,
         message: str,
         *,
-        violation_type: str,
+        violation_type: GradeOutputViolationType,
         remediation: str | None = None,
     ) -> None:
-        self.violation_type = violation_type
+        self.violation_type: GradeOutputViolationType = violation_type
         super().__init__(message, remediation=remediation)
 
 
@@ -336,6 +361,7 @@ __all__ = [
     "GradeError",
     "GradeLLMError",
     "GradeOutputError",
+    "GradeOutputViolationType",
     "GradePromptEnvelopeBreachError",
     "GradeRubricError",
 ]
