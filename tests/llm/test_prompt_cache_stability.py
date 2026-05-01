@@ -10,9 +10,12 @@ canonical fixture (the load-bearing part for cache stability).
 On mismatch, the assertion message includes a :func:`difflib.unified_diff`
 so the regression is reviewable in PR.
 
-Pinned ``_PROMPT_VERSION``: ``4800590d3d749955`` (US-010). If this rotates,
-update both :data:`_EXPECTED_PROMPT_VERSION` and :data:`_CACHED_BLOCK_GOLDEN`
-in lockstep — the rotation is the signal that the templates changed.
+Pinned ``_PROMPT_VERSION``: ``1c55806467984090`` (rotated during PR-#19
+quality-gate review when the rationale claim was softened — DEC-026 +
+the spec/impl mismatch flagged by Copilot/CodeRabbit). If this rotates
+again, update both :data:`_EXPECTED_PROMPT_VERSION` and
+:data:`_CACHED_BLOCK_GOLDEN` in lockstep — the rotation is the signal
+that the templates changed.
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ _FIXTURE_PATH = (
 )
 
 
-_EXPECTED_PROMPT_VERSION: str = "4800590d3d749955"
+_EXPECTED_PROMPT_VERSION: str = "1c55806467984090"
 
 
 # Captured once via ``render_prompt`` against the canonical fixture below.

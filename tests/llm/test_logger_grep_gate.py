@@ -23,11 +23,15 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _LLM_DIR = _REPO_ROOT / "src" / "signalforge" / "llm"
 _DRAFT_DIR = _REPO_ROOT / "src" / "signalforge" / "draft"
 
-# Matches ``_LOGGER.<method>(f"...`` on a single line. The regex is
-# deliberately loose on the method name (any word chars after the dot)
-# because adding new logging methods (e.g. critical) shouldn't silently
-# escape the gate.
-_F_STRING_LOGGER_RE = re.compile(r'_LOGGER\.\w+\(f"')
+# Matches ``_LOGGER.<method>(f"...``, ``_LOGGER.<method>(f'...``,
+# ``_LOGGER.<method>( f"...``, ``_LOGGER.<method>(rf"...``,
+# ``_LOGGER.<method>(fr'...``, etc. on a single line.
+#
+# Catches every Python f-string form: any prefix permutation of `f` and
+# `r` (case-insensitive), single OR double OR triple quotes, optional
+# whitespace after the opening paren. Without this breadth a contributor
+# could trivially bypass the DEC-011 gate by switching quote style.
+_F_STRING_LOGGER_RE = re.compile(r"""_LOGGER\.\w+\(\s*(?:[fF][rR]?|[rR][fF])['"]""")
 
 
 def _scan_for_f_string_logger_calls(root: Path) -> list[tuple[Path, int, str]]:
@@ -63,11 +67,27 @@ def test_no_f_string_logger_calls_in_llm_or_draft_modules() -> None:
 
 
 def test_grep_gate_regex_matches_planted_violation() -> None:
-    """Self-check: the regex catches the canonical bad pattern. Without
+    """Self-check: the regex catches every f-string form. Without
     this we'd not notice if a refactor broke the regex silently.
     """
-    bad = '_LOGGER.info(f"x={x}")'
-    assert _F_STRING_LOGGER_RE.search(bad)
+    bad_cases = (
+        '_LOGGER.info(f"x={x}")',
+        "_LOGGER.info(f'x={x}')",
+        '_LOGGER.info( f"x={x}")',  # whitespace after paren
+        '_LOGGER.info(rf"x={x}")',
+        "_LOGGER.info(rf'x={x}')",
+        '_LOGGER.info(fr"x={x}")',
+        '_LOGGER.warning(F"x={x}")',  # uppercase F
+    )
+    for bad in bad_cases:
+        assert _F_STRING_LOGGER_RE.search(bad), f"regex missed: {bad!r}"
 
-    good = '_LOGGER.info("x: %s", json.dumps({"x": x}))'
-    assert not _F_STRING_LOGGER_RE.search(good)
+    good_cases = (
+        '_LOGGER.info("x: %s", json.dumps({"x": x}))',
+        '_LOGGER.info("plain string with no interpolation")',
+        # Don't match a random `_LOGGER.x(...)` followed by an f-string
+        # NOT inside the call (this is implementation-dependent — the
+        # regex is line-scoped so the first match wins).
+    )
+    for good in good_cases:
+        assert not _F_STRING_LOGGER_RE.search(good), f"regex spurious-matched: {good!r}"

@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 # Regenerate draft-pipeline fixtures.
 #
-# Placeholder for v0.1 — the smoke test (US-015) that captures fresh
-# CandidateSchema output from the real Anthropic API has not landed yet.
-# Once it does, this script will run that test and rewrite
-# candidate_schema_v1.json from its parsed output.
+# v0.1 — the smoke test (US-015) is a wire test that stops at
+# LLMCacheTooSmallError before any messages.create call (the smoke
+# manifest's cached block is ~106 tokens, far below Haiku's 2048-token
+# minimum). So real-API CandidateSchema capture is still manual.
+#
+# When the smoke fixture grows past the cache minimums (~1024 tokens for
+# Sonnet, ~2048 for Haiku) and the smoke test exercises the full
+# round-trip, replace the exit-1 below with capture of the parsed
+# CandidateSchema (e.g. via a pytest plugin that dumps DraftOutcome).
 #
 # Until then, candidate_schema_v1.json is hand-authored and edited
 # manually when the CandidateSchema model shape changes (the
@@ -19,10 +24,11 @@ fi
 
 cd "$(dirname "$0")/../../.."
 
-# Will run the real-API smoke test once US-015 lands. Today the file does
-# not yet exist; this command will fail loudly so the maintainer notices.
+# Run the wire smoke test (US-015). Proves SDK auth + transport but
+# does not yet capture a CandidateSchema — see header.
 pytest -m anthropic tests/draft/test_smoke_real_api.py -v
 
-echo "TODO: Refreshing the fixture is a manual step in v0.1." >&2
-echo "Add the smoke test (US-015) and reroute this script to capture its output." >&2
+echo "TODO: Refreshing candidate_schema_v1.json is still a manual step in v0.1." >&2
+echo "When the smoke fixture grows past cache minimums, replace this exit with" >&2
+echo "capture of the parsed CandidateSchema." >&2
 exit 1

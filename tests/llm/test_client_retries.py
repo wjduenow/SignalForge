@@ -305,10 +305,18 @@ def test_call_anthropic_each_retry_emits_warning(
     record = retry_records[0]
     assert record.levelno == logging.WARNING
     payload = json.loads(record.getMessage().split(": ", 1)[1])
-    assert set(payload.keys()) == {"attempt", "delay", "error_class", "model"}
+    # The 4 baseline keys are always present; per-class branches also
+    # carry exactly one ``class_attempt_<429|5xx|conn>`` key (PR #19
+    # quality-gate fix from CodeRabbit) so reviewers can see which retry
+    # budget the failure consumed.
+    base_keys = {"attempt", "delay", "error_class", "model"}
+    assert base_keys.issubset(payload.keys())
+    class_keys = {k for k in payload if k.startswith("class_attempt_")}
+    assert class_keys == {"class_attempt_429"}
     assert payload["error_class"] == "RateLimitError"
     assert payload["model"] == "claude-sonnet-4-6"
     assert payload["attempt"] == 0
+    assert payload["class_attempt_429"] == 0
     assert payload["delay"] == 1.0  # 2**0 * 1.0 with the pinned _rand_uniform
 
 
@@ -352,3 +360,50 @@ def test_call_anthropic_jitter_bounded_by_rand_uniform_aliases(
         2**0 * 0.75,  # first retry: attempt index 0
         2**1 * 1.25,  # second retry: attempt index 1
     ]
+
+
+def test_call_anthropic_per_class_budgets_do_not_cross_consume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quality-Gate fix (CodeRabbit on PR #19): one failure class must
+    NOT consume another class's retry budget.
+
+    Sequence: 1 connection error (consumes the conn budget of 1) THEN 3
+    rate-limit errors (consumes the 429 budget of 3). Before the fix,
+    the shared `attempt` counter would have raised LLMRateLimitError
+    after only 2 retries because the connection retry already consumed
+    one slot. After the fix, per-class counters allow the full 3+1
+    retry budget.
+    """
+    monkeypatch.setattr(client_module, "_sleep", lambda _: None)
+    monkeypatch.setattr(client_module, "_rand_uniform", lambda _a, _b: 1.0)
+
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_ok_count())
+    # 1 conn failure (consumes conn budget)
+    fake.expect_messages_create(matching={}, returns=_connection_error())
+    # 3 rate-limit failures (each consumes a 429-budget slot; max 3)
+    fake.expect_messages_create(matching={}, returns=_rate_limit_error())
+    fake.expect_messages_create(matching={}, returns=_rate_limit_error())
+    fake.expect_messages_create(matching={}, returns=_rate_limit_error())
+    # 4th 429 finally exhausts the 429 budget
+    fake.expect_messages_create(matching={}, returns=_rate_limit_error())
+
+    with pytest.raises(LLMRateLimitError) as exc_info:
+        call_anthropic(
+            system="sys",
+            cached_block="c",
+            dynamic_block="d",
+            model="claude-sonnet-4-6",
+            max_tokens=128,
+            prompt_version="v1",
+            max_retries_429=3,
+            max_retries_5xx=1,
+            max_retries_conn=1,
+            client=fake,
+        )
+    # Five total create calls: 1 conn + 3 retried 429s + 1 final 429.
+    assert len(fake.create_calls) == 5
+    # The error reports 429-class attempts (3), NOT the total (which
+    # would include the conn retry).
+    assert exc_info.value.attempts == 3

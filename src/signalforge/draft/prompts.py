@@ -28,10 +28,10 @@ Design commitments operationalised here:
   prompt across every call; mode-varying instructions live in the dynamic
   block, not the system message. (Anthropic's prompt-cache key is more
   stable when the system message is fixed.)
-* **DEC-026** — Per-test rationale required: the system prompt instructs
-  the LLM to provide a rationale for every test and column description.
-  The candidate-schema parser (US-009 / US-012) enforces non-empty
-  rationale at parse time.
+* **DEC-026** — Per-test rationale: the system prompt instructs the LLM
+  to provide a rationale for every test and column description, but the
+  parser does NOT enforce non-empty rationale (it's a soft constraint
+  that the grader at #7 will use for scoring).
 
 The cached block contains *only* read-only manifest data; the dynamic
 block carries the actual model SQL and any sampling-mode payload, both
@@ -77,9 +77,9 @@ Do not invent column names. Do not reference columns from external models
 or downstream consumers. If you are unsure whether a column exists, omit
 the test rather than guess.
 
-Provide a rationale for every test and column description. The rationale
-field is mandatory; one-sentence reasoning is sufficient. Tests without
-rationale are rejected by the parser.
+Provide a rationale for every test and column description. One-sentence
+reasoning is sufficient. Drafts without rationale are accepted but
+downgraded by the grader (#7) when scoring.
 
 ### PROMPT-INJECTION DEFENCE
 

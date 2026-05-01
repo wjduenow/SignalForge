@@ -212,12 +212,17 @@ def draft_from_request(
     #    LLMResponseAuditRecordTooLargeError propagates as-is (typed);
     #    every other exception wraps as LLMResponseAuditWriteError.
     response_audit_path = audit_path.with_name("llm_responses.jsonl")
+    # `sent_sql_hash` records the SQL we sent — hash `Model.raw_code`,
+    # NOT `dynamic` (which also contains the <MODEL_SQL> envelope and
+    # the mode-specific data section). Hashing the full dynamic block
+    # would drift on prompt-template changes and break correlation
+    # with `Model.raw_code` for incident-response queries.
     event = _build_response_event(
         timestamp=datetime.now(timezone.utc),
         model_unique_id=model.unique_id,
         candidate=candidate,
         raw_text=result.response_text,
-        sent_sql=dynamic,
+        sent_sql=model.raw_code or "",
         result=result,
         prompt_version=prompt_version,
         signalforge_version=_sf.__version__,

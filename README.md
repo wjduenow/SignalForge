@@ -95,7 +95,7 @@ the `LLMResult` from the LLM. One LLM call per model; pre-send token
 counting, the full retry taxonomy, prompt caching, and a fail-closed
 response audit are all owned by the layer.
 
-```
+```text
 Manifest + Model + LLMRequest (from safety layer)
   -> render_prompt  (system + cached manifest summary + dynamic per-model SQL)
   -> call_anthropic (1 SDK seam, full retry taxonomy, prompt caching)

@@ -312,9 +312,14 @@ def test_call_anthropic_does_not_log_api_key(
 def test_logger_calls_use_json_dumps_no_f_string() -> None:
     """DEC-022 / DEC-011 grep gate: every ``_LOGGER.<level>(...)`` call
     in ``client.py`` must use a non-f-string literal as its first
-    argument. Catches accidental ANSI-escape injection paths."""
+    argument. Catches accidental ANSI-escape injection paths.
+
+    Pattern matches every Python f-string form (any case + raw prefix
+    permutation, single/double quotes, optional whitespace after paren)
+    so a contributor can't bypass the gate by switching quote style.
+    """
     src = Path(client_module.__file__).read_text(encoding="utf-8")
-    pattern = re.compile(r'_LOGGER\.\w+\(f"')
+    pattern = re.compile(r"""_LOGGER\.\w+\(\s*(?:[fF][rR]?|[rR][fF])['"]""")
     matches = pattern.findall(src)
     assert matches == [], (
         f"Found f-string interpolation in _LOGGER calls: {matches}. "

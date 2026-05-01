@@ -52,38 +52,74 @@ class _NameCallFinder(ast.NodeVisitor):
 
 
 class _AttributeCallFinder(ast.NodeVisitor):
-    """Records every ``Call(func=Attribute(value=Name(id=<obj>), attr=<attr>))``.
+    """Records every ``Call(func=Attribute(value=Name(id=<obj>), attr=<attr>))``,
+    accounting for `import <obj> as <alias>` aliasing AND
+    `from <obj> import <attr>` direct-symbol imports.
 
     Used by Scan 3 to detect ``anthropic.Anthropic(...)`` — the SDK
     construction call shape that DEC-012 confines to ``_client.py``.
+    Without alias-tracking the test could be bypassed by:
+    ``import anthropic as a; a.Anthropic(...)`` or
+    ``from anthropic import Anthropic; Anthropic(...)``.
     """
 
     def __init__(self, obj_name: str, attr_name: str) -> None:
         self._obj_name = obj_name
         self._attr_name = attr_name
+        # Names that bind to ``<obj>`` in this module's scope. Always
+        # includes the canonical name so unaliased imports work.
+        self._obj_aliases: set[str] = {obj_name}
+        # Names that bind directly to ``<obj>.<attr>`` in this module's
+        # scope (via ``from <obj> import <attr>`` or its aliases).
+        self._direct_aliases: set[str] = set()
         self.calls: list[tuple[int, int]] = []
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802 — ast API
+        for alias in node.names:
+            if alias.name == self._obj_name:
+                self._obj_aliases.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802 — ast API
+        if node.module == self._obj_name:
+            for alias in node.names:
+                if alias.name == self._attr_name:
+                    self._direct_aliases.add(alias.asname or alias.name)
+        self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 — ast API
         func = node.func
+        # Attribute form: <obj_or_alias>.<attr>(...)
         if (
-            isinstance(func, ast.Attribute)
-            and func.attr == self._attr_name
-            and isinstance(func.value, ast.Name)
-            and func.value.id == self._obj_name
+            (
+                isinstance(func, ast.Attribute)
+                and func.attr == self._attr_name
+                and isinstance(func.value, ast.Name)
+                and func.value.id in self._obj_aliases
+            )
+            or isinstance(func, ast.Name)
+            and func.id in self._direct_aliases
         ):
             self.calls.append((node.lineno, node.col_offset))
         self.generic_visit(node)
 
 
 def _scan_dir_for_name_calls(
-    root: Path, *, target: str, excluded_filenames: set[str]
+    root: Path, *, target: str, excluded_relpaths: set[str]
 ) -> list[tuple[Path, int]]:
     """Walk ``root.rglob('*.py')``; collect ``Call(func=Name(id=target))``
-    hits except in any file whose ``.name`` is in ``excluded_filenames``.
+    hits except in any file whose path relative to ``root`` (POSIX form)
+    is in ``excluded_relpaths``.
+
+    Path-based exclusion (vs basename) prevents accidental shadowing if
+    a future nested module happens to share a name with a sanctioned
+    seam (e.g. a hypothetical ``signalforge/safety/draft/request.py``
+    must not auto-inherit the ``request.py`` exclusion).
     """
     hits: list[tuple[Path, int]] = []
     for path in root.rglob("*.py"):
-        if path.name in excluded_filenames:
+        rel = path.relative_to(root).as_posix()
+        if rel in excluded_relpaths:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         finder = _NameCallFinder(target)
@@ -98,14 +134,16 @@ def _scan_dir_for_attribute_calls(
     *,
     obj_name: str,
     attr_name: str,
-    excluded_filenames: set[str],
+    excluded_relpaths: set[str],
 ) -> list[tuple[Path, int]]:
-    """Walk ``root.rglob('*.py')``; collect ``<obj>.<attr>(...)`` hits
-    except in any file whose ``.name`` is in ``excluded_filenames``.
+    """Walk ``root.rglob('*.py')``; collect ``<obj>.<attr>(...)`` hits —
+    accounting for import aliasing — except in any file whose path
+    relative to ``root`` (POSIX form) is in ``excluded_relpaths``.
     """
     hits: list[tuple[Path, int]] = []
     for path in root.rglob("*.py"):
-        if path.name in excluded_filenames:
+        rel = path.relative_to(root).as_posix()
+        if rel in excluded_relpaths:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         finder = _AttributeCallFinder(obj_name, attr_name)
@@ -136,7 +174,7 @@ def test_audit_event_construction_only_in_safety_request_module() -> None:
     seam. The AST scan rejects any other location.
     """
     hits = _scan_dir_for_name_calls(
-        _SAFETY_DIR, target="AuditEvent", excluded_filenames=_SAFETY_AUDIT_EVENT_EXCLUSIONS
+        _SAFETY_DIR, target="AuditEvent", excluded_relpaths=_SAFETY_AUDIT_EVENT_EXCLUSIONS
     )
     formatted = "\n".join(f"  {p}:{line}" for p, line in hits)
     assert not hits, (
@@ -190,7 +228,7 @@ def test_anthropic_client_construction_only_in_llm_client_shim() -> None:
         _LLM_DIR,
         obj_name="anthropic",
         attr_name="Anthropic",
-        excluded_filenames=_LLM_ANTHROPIC_EXCLUSIONS,
+        excluded_relpaths=_LLM_ANTHROPIC_EXCLUSIONS,
     )
     formatted = "\n".join(f"  {p}:{line}" for p, line in hits)
     assert not hits, (
@@ -241,7 +279,7 @@ def test_llm_response_event_construction_only_in_draft_audit_module() -> None:
     hits = _scan_dir_for_name_calls(
         _DRAFT_DIR,
         target="LLMResponseEvent",
-        excluded_filenames=_DRAFT_RESPONSE_EVENT_EXCLUSIONS,
+        excluded_relpaths=_DRAFT_RESPONSE_EVENT_EXCLUSIONS,
     )
     formatted = "\n".join(f"  {p}:{line}" for p, line in hits)
     assert not hits, (

@@ -184,7 +184,7 @@ class CandidateSchema(BaseModel):
 
     model_config = _BASE_CONFIG
 
-    schema_version: int = 1
+    schema_version: Literal[1] = 1
     name: str
     description: str
     rationale: str | None = None

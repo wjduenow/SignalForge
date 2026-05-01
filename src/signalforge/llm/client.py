@@ -230,11 +230,45 @@ def call_anthropic(
 
     # Pre-send token-count check (DEC-024). Issue against system + the
     # cached block only — that's the surface the cache marker covers.
-    count_response = client.messages.count_tokens(
-        model=model,
-        system=system,
-        messages=[{"role": "user", "content": [block_1]}],
-    )
+    #
+    # count_tokens errors are MAPPED to typed LLMError subclasses (so
+    # raw Anthropic exceptions don't leak past the seam), but they are
+    # NOT retried: count_tokens is a cheap probe; consuming the
+    # messages.create retry budget on a probe failure would let one
+    # transient blip exhaust the retry budget before the real call.
+    try:
+        count_response = client.messages.count_tokens(
+            model=model,
+            system=system,
+            messages=[{"role": "user", "content": [block_1]}],
+        )
+    except auth_cls as exc:
+        raise LLMAuthError(
+            "Anthropic count_tokens rejected the request with an auth error.",
+            cause=exc,
+        ) from exc
+    except rate_limit_cls as exc:
+        raise LLMRateLimitError(
+            "Anthropic count_tokens hit a rate limit (no retry on the probe call).",
+            attempts=0,
+            cause=exc,
+        ) from exc
+    except connection_cls as exc:
+        raise LLMConnectionError(
+            "Anthropic count_tokens connection failed (no retry on the probe call).",
+            cause=exc,
+        ) from exc
+    except api_status_cls as exc:
+        if _is_5xx(exc):
+            raise LLMServerError(
+                "Anthropic count_tokens 5xx (no retry on the probe call).",
+                cause=exc,
+            ) from exc
+        raise LLMHelperError(
+            "Anthropic count_tokens returned a non-5xx error status.",
+            cause=exc,
+        ) from exc
+
     cached_block_tokens = getattr(count_response, "input_tokens", None)
     if not isinstance(cached_block_tokens, int):
         raise LLMResponseFormatError(
@@ -253,8 +287,17 @@ def call_anthropic(
             cap=_CACHED_BLOCK_CAP_TOKENS,
         )
 
-    # Retry loop — clauditor pattern.
-    attempt = 0
+    # Retry loop — clauditor pattern with per-class budgets.
+    #
+    # Each failure class (429 / 5xx / connection) carries its own
+    # counter so one class can't consume another's budget. A single
+    # `total_attempts` drives the backoff math + WARNING log so delays
+    # remain monotonic across mixed failure types — but per-class
+    # exhaustion is what raises the typed error.
+    attempt_429 = 0
+    attempt_5xx = 0
+    attempt_conn = 0
+    total_attempts = 0
     while True:
         try:
             response = client.messages.create(
@@ -272,18 +315,19 @@ def call_anthropic(
                 cause=exc,
             ) from exc
         except rate_limit_cls as exc:
-            if attempt >= max_retries_429:
+            if attempt_429 >= max_retries_429:
                 raise LLMRateLimitError(
-                    f"Rate-limit retry budget exhausted after {attempt} retries.",
-                    attempts=attempt,
+                    f"Rate-limit retry budget exhausted after {attempt_429} retries.",
+                    attempts=attempt_429,
                     cause=exc,
                 ) from exc
-            delay = (2**attempt) * _rand_uniform(0.75, 1.25)
+            delay = (2**total_attempts) * _rand_uniform(0.75, 1.25)
             _LOGGER.warning(
                 "retry attempt: %s",
                 json.dumps(
                     {
-                        "attempt": attempt,
+                        "attempt": total_attempts,
+                        "class_attempt_429": attempt_429,
                         "delay": delay,
                         "error_class": exc.__class__.__name__,
                         "model": model,
@@ -291,20 +335,22 @@ def call_anthropic(
                 ),
             )
             _sleep(delay)
-            attempt += 1
+            attempt_429 += 1
+            total_attempts += 1
             continue
         except connection_cls as exc:
-            if attempt >= max_retries_conn:
+            if attempt_conn >= max_retries_conn:
                 raise LLMConnectionError(
-                    f"Connection retry budget exhausted after {attempt} retries.",
+                    f"Connection retry budget exhausted after {attempt_conn} retries.",
                     cause=exc,
                 ) from exc
-            delay = (2**attempt) * _rand_uniform(0.75, 1.25)
+            delay = (2**total_attempts) * _rand_uniform(0.75, 1.25)
             _LOGGER.warning(
                 "retry attempt: %s",
                 json.dumps(
                     {
-                        "attempt": attempt,
+                        "attempt": total_attempts,
+                        "class_attempt_conn": attempt_conn,
                         "delay": delay,
                         "error_class": exc.__class__.__name__,
                         "model": model,
@@ -312,22 +358,24 @@ def call_anthropic(
                 ),
             )
             _sleep(delay)
-            attempt += 1
+            attempt_conn += 1
+            total_attempts += 1
             continue
         except api_status_cls as exc:
             # 5xx: retry. 4xx (non-auth, non-429): no retry.
             if _is_5xx(exc):
-                if attempt >= max_retries_5xx:
+                if attempt_5xx >= max_retries_5xx:
                     raise LLMServerError(
-                        f"Server-error retry budget exhausted after {attempt} retries.",
+                        f"Server-error retry budget exhausted after {attempt_5xx} retries.",
                         cause=exc,
                     ) from exc
-                delay = (2**attempt) * _rand_uniform(0.75, 1.25)
+                delay = (2**total_attempts) * _rand_uniform(0.75, 1.25)
                 _LOGGER.warning(
                     "retry attempt: %s",
                     json.dumps(
                         {
-                            "attempt": attempt,
+                            "attempt": total_attempts,
+                            "class_attempt_5xx": attempt_5xx,
                             "delay": delay,
                             "error_class": exc.__class__.__name__,
                             "model": model,
@@ -335,7 +383,8 @@ def call_anthropic(
                     ),
                 )
                 _sleep(delay)
-                attempt += 1
+                attempt_5xx += 1
+                total_attempts += 1
                 continue
             if _is_4xx_non_auth(exc):
                 # 400 / 404 / 422 etc. — request is malformed in some way
