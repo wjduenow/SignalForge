@@ -1,0 +1,11 @@
+safety:
+  mode: schema-only
+prune:
+  scope: full
+  sample_size: 50000
+  test_timeout_seconds: 60
+  total_budget_seconds: 1200
+  capture_failure_rows: 5
+  trusted_models:
+    - model.shop.dim_customers
+    - model.shop.fact_orders
