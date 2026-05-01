@@ -151,10 +151,14 @@ class GradeConfig(BaseModel):
     typed :class:`Criterion`."""
 
     fail_on_below_threshold: bool = False
-    """Reserved for v0.2 enforcement (DEC-005). v0.1 always reports —
-    a below-threshold rubric does not fail the run; the operator's diff
-    surfaces the verdict. Flipping this to ``True`` in v0.2 will make
-    the CLI exit non-zero on a below-threshold report."""
+    """Reserved for v0.2 enforcement (DEC-005). **v0.1 NOTE: this field
+    is currently a no-op — `grade_artifacts` does not read it.** Setting
+    ``True`` has no effect in v0.1; below-threshold rubrics do not fail
+    the run, the operator's diff surfaces the verdict. v0.2 will wire
+    this into the CLI exit-code path so a below-threshold run exits
+    non-zero. The field ships now to lock the YAML namespace + type
+    surface so v0.2's enforcement is a behaviour change, not an
+    API-break."""
 
     @field_validator("model")
     @classmethod

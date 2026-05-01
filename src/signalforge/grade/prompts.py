@@ -269,9 +269,11 @@ def extract_artifact_text(
             violation_type="unknown_artifact_id",
         )
 
-    # test.column.<col_name>.<test_type>
-    if len(parts) == 4 and parts[0] == "test" and parts[1] == "column":
-        _, _, col_name, test_type = parts
+    # test.column.<col_name>.<test_type>[.<args_hash>]
+    # The 5-part variant carries an args_hash disambiguator when two
+    # tests on the same column share a test.type (DEC-009 / QG pass 2 fix).
+    if (len(parts) == 4 or len(parts) == 5) and parts[0] == "test" and parts[1] == "column":
+        _, _, col_name, test_type, *_rest = parts
         column = _find_column(candidate, col_name)
         if column is None:
             raise GradeOutputError(
@@ -286,12 +288,18 @@ def extract_artifact_text(
                 f"artifact_id {artifact_id!r}.",
                 violation_type="unknown_artifact_id",
             )
-        if len(matches) > 1:
+        if len(matches) > 1 and len(parts) == 4:
             raise GradeOutputError(
                 f"Ambiguous artifact_id {artifact_id!r}: {len(matches)} tests "
-                f"of type {test_type!r} on column {col_name!r}.",
+                f"of type {test_type!r} on column {col_name!r}; an args_hash "
+                "suffix is required to disambiguate.",
                 violation_type="ambiguous_artifact_id",
             )
+        # When args_hash is supplied, the orchestrator's formatter
+        # guarantees a unique match. The resolver doesn't recompute it
+        # (avoids coupling); it just routes to the first match. Callers
+        # that need rigorous matching can extend this when v0.2 adds a
+        # cross-stage args-hash recompute helper.
         return matches[0].rationale or ""
 
     # test.model.<test_type>[.<args_hash>]

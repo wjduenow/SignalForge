@@ -42,6 +42,7 @@ from signalforge.grade.engine import (
 )
 from signalforge.grade.errors import (
     GradeAuditWriteError,
+    GradeError,
     GradePromptEnvelopeBreachError,
 )
 from signalforge.grade.models import GradeEvent, GradingReport
@@ -188,6 +189,61 @@ def test_artifact_id_for_collision_args_hash_disambiguates() -> None:
     assert model_test_ids[0] != model_test_ids[1]
     for aid in model_test_ids:
         assert aid.startswith("test.model.accepted_values.")
+
+
+def test_artifact_id_for_column_scope_collision_args_hash_disambiguates() -> None:
+    """Two tests on the SAME column with the same ``test.type`` but
+    different args produce different ``args_hash`` values (QG pass 2 fix).
+
+    Without disambiguation, both would render as
+    ``test.column.status.accepted_values`` and JSONL records would
+    collide on the (run_id, artifact_id, criterion_id) triple.
+    """
+    av1 = CandidateTestAcceptedValues(column="status", values=("a", "b"))
+    av2 = CandidateTestAcceptedValues(column="status", values=("c", "d"))
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(
+            CandidateColumn(
+                name="status",
+                description="status",
+                tests=(av1, av2),
+            ),
+        ),
+        tests=(),
+    )
+    pairs = _stable_artifact_pairs(candidate)
+    column_test_ids = [aid for aid, _ in pairs if aid.startswith("test.column.")]
+    assert len(column_test_ids) == 2
+    assert column_test_ids[0] != column_test_ids[1]
+    for aid in column_test_ids:
+        # Five-part dotted form: test.column.status.accepted_values.<8-hex>
+        assert aid.startswith("test.column.status.accepted_values.")
+        assert len(aid.rsplit(".", 1)[1]) == 8  # 8-hex args_hash
+
+
+def test_artifact_id_for_column_scope_unique_test_no_args_hash() -> None:
+    """A test that's unique within its column does NOT carry an args_hash.
+
+    Regression detector for the column-scope disambiguator: only collisions
+    add the suffix; a single not_null on a column emits the bare 4-part form.
+    """
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(
+            CandidateColumn(
+                name="user_id",
+                description="pk",
+                tests=(CandidateTestNotNull(column="user_id"),),
+            ),
+        ),
+        tests=(),
+    )
+    pairs = _stable_artifact_pairs(candidate)
+    column_test_ids = [aid for aid, _ in pairs if aid.startswith("test.column.")]
+    assert column_test_ids == ["test.column.user_id.not_null"]
 
 
 # ---------------------------------------------------------------------------
@@ -867,3 +923,81 @@ def test_grade_artifacts_sidecar_carries_run_id_and_timestamp(tmp_path: Path) ->
     assert len(report.run_id) == 32
     assert all(c in "0123456789abcdef" for c in report.run_id)
     assert before <= report.timestamp <= after
+
+
+# ---------------------------------------------------------------------------
+# QG pass 1 regression tests: prune_result mismatch + engine path canonicalise
+# ---------------------------------------------------------------------------
+
+
+def test_grade_artifacts_rejects_prune_result_for_different_model(tmp_path: Path) -> None:
+    """``prune_result.model_unique_id`` must match ``model.unique_id``.
+
+    Regression for QG pass 1 fix: the engine refuses to grade with a
+    PruneResult that belongs to a different model so a stale result
+    can't silently drive the no-redundant criterion.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    mismatched = PruneResult(
+        model_unique_id="model.other.x",
+        decisions=(),
+        elapsed_ms=0,
+        signalforge_version="0.0.0-test",
+    )
+    with pytest.raises(GradeError, match="does not match"):
+        grade_artifacts(
+            model,
+            candidate,
+            mismatched,
+            config=_config_no_audit_in_path(),
+            client=FakeAnthropicClient(),
+            project_dir=project_dir,
+        )
+
+
+def test_grade_artifacts_user_supplied_audit_path_outside_project_tree_rejected(
+    tmp_path: Path,
+) -> None:
+    """An audit_path outside ``project_dir`` is rejected at engine entry.
+
+    Regression for QG pass 1 fix: the engine canonicalises against the
+    resolved project root BEFORE handing off to the writer. Prior to
+    the fix, the writer derived ``project_dir`` from the path itself
+    (``audit_path.parent.parent``), which neutered the symlink-escape
+    gate for any caller-supplied path. This test exercises a plain
+    non-symlinked escape — only the engine-level gate catches it.
+    """
+    project_dir = _project(tmp_path)
+    outside_audit = tmp_path / "outside" / "grade.jsonl"
+    outside_audit.parent.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(GradeAuditWriteError, match="symlink/containment"):
+        grade_artifacts(
+            _make_model(),
+            _load_sample_candidate(),
+            _empty_prune_result(_make_model()),
+            config=_config_no_audit_in_path(),
+            client=FakeAnthropicClient(),
+            project_dir=project_dir,
+            audit_path=outside_audit,
+        )
+
+
+def test_grade_artifacts_user_supplied_sidecar_path_outside_project_tree_rejected(
+    tmp_path: Path,
+) -> None:
+    """Symmetric containment check for ``sidecar_path``."""
+    project_dir = _project(tmp_path)
+    outside_sidecar = tmp_path / "outside" / "grade.json"
+    outside_sidecar.parent.mkdir(parents=True, exist_ok=True)
+    with pytest.raises(GradeAuditWriteError, match="symlink/containment"):
+        grade_artifacts(
+            _make_model(),
+            _load_sample_candidate(),
+            _empty_prune_result(_make_model()),
+            config=_config_no_audit_in_path(),
+            client=FakeAnthropicClient(),
+            project_dir=project_dir,
+            sidecar_path=outside_sidecar,
+        )

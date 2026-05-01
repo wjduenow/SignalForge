@@ -188,12 +188,17 @@ class GradeBudgetExceededError(GradeError):
     DEC-011): when the total wall-clock budget trips, the orchestrator
     routes any un-evaluated ``(artefact, criterion)`` pair to a degraded
     :class:`signalforge.grade.models.GradingResult` (DEC-015) rather than
-    silently dropping it. This typed error surfaces from
-    :func:`signalforge.grade.grade_artifacts` only when the budget trips
-    *before* any criterion has been graded (a hard "the run did nothing"
-    failure); a partial run completes normally with a
-    :class:`signalforge.grade.models.GradingReport` whose
-    ``aggregate_complete`` flag is ``False``.
+    silently dropping it.
+
+    **v0.1 NOTE: This typed error is reserved for v0.2 and is NEVER
+    raised by production code.** The v0.1 orchestrator unconditionally
+    degrades remaining pairs and returns the partial
+    :class:`signalforge.grade.models.GradingReport`; the
+    ``aggregate_complete`` flag is the v0.1 signal for a budget-curtailed
+    run. v0.2 will add a hard-fail path (e.g. when the budget trips
+    before any pair has been graded) that raises this error class. The
+    class ships now to lock the public API surface and let callers
+    pre-write ``except GradeBudgetExceededError:`` blocks.
     """
 
     default_remediation: ClassVar[str] = (

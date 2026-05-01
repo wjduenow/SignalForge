@@ -94,6 +94,15 @@ class GradeThresholds(BaseModel):
     values raise a Pydantic ``ValidationError`` at construction time —
     ``GradeConfig`` (US-004) wraps this as ``GradeConfigError`` so the
     operator gets a remediation line instead of a raw Pydantic trace.
+
+    **v0.1 NOTE: This typed object is exported for forward-compat but
+    is not currently consumed by production code.** ``GradeConfig``
+    carries the same defaults as flat ``min_pass_rate`` /
+    ``min_mean_score`` fields, and ``GradingReport.thresholds`` is a
+    bare ``tuple[float, float]``. v0.2 will wire ``GradeThresholds`` as
+    the canonical container so callers can pass one in instead of two
+    flat scalars; the class ships now so the type-alias surface is
+    stable across the v0.1 → v0.2 migration.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)

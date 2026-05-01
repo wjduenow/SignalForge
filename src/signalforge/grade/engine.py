@@ -118,6 +118,8 @@ from signalforge.llm.client import call_anthropic
 from signalforge.llm.errors import LLMError
 from signalforge.manifest.models import Model
 from signalforge.prune.models import PruneResult
+from signalforge.warehouse._path_safety import canonicalise_path
+from signalforge.warehouse.errors import ProfileNotFoundError as _PathContainmentError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -193,8 +195,11 @@ def _artifact_id_for(
     * ``model.description`` — model doc (``scope="model"``,
       ``field="description"``).
     * ``model.rationale`` — model rationale.
-    * ``test.column.<col>.<test.type>`` — column-scoped test
-      (``scope="column"``, ``column_name=...``, ``test=...``).
+    * ``test.column.<col>.<test.type>`` (or ``...<.args_hash>``) —
+      column-scoped test (``scope="column"``, ``column_name=...``,
+      ``test=...``; ``args_hash`` required when two tests on the same
+      column share a ``test.type``, e.g. two ``accepted_values`` with
+      different ``values`` lists).
     * ``test.model.<test.type>`` (or ``...<.args_hash>``) —
       model-level test (``scope="model"``, ``test=...``;
       ``args_hash`` required when two model-level tests share a
@@ -215,6 +220,8 @@ def _artifact_id_for(
                     "This is a programming error in the orchestrator."
                 ),
             )
+        if args_hash is not None:
+            return f"test.column.{column_name}.{test.type}.{args_hash}"
         return f"test.column.{column_name}.{test.type}"
 
     # test-shaped artifact_ids — model scope.
@@ -258,24 +265,45 @@ def _artifact_id_for(
 # ---------------------------------------------------------------------------
 
 
-def _model_test_args_hashes(candidate: CandidateSchema) -> dict[int, str | None]:
-    """Pre-compute per-model-test args hashes, marking the disambiguators.
+def _test_args_hashes(candidate: CandidateSchema) -> dict[int, str | None]:
+    """Pre-compute per-test args hashes, marking the disambiguators.
 
     Returns a dict keyed by ``id(test)`` carrying the args_hash string
-    when the test's ``test.type`` collides with another model-level
-    test, or ``None`` when the bare ``test.model.<type>`` form is
-    unique. Computed once per run so the orchestrator's iteration loop
-    and the GradeEvent construction agree on artifact_id shape.
+    when the test's ``test.type`` collides with another test in the
+    SAME scope (model-level OR same-column), or ``None`` when the bare
+    ``test.<scope>.<...>.<type>`` form is unique. Computed once per
+    run so the orchestrator's iteration loop and the GradeEvent
+    construction agree on artifact_id shape.
+
+    Collision rules (DEC-009 + QG pass 2 fix):
+
+    * Two model-level tests with the same ``test.type`` collide
+      regardless of args (e.g. two ``accepted_values`` on different
+      columns).
+    * Two tests on the SAME column with the same ``test.type``
+      collide (e.g. two ``accepted_values`` on ``status`` with
+      different ``values`` lists).
+    * A model-level test does NOT collide with a column-scope test
+      because the artifact_id prefix differs (``test.model.`` vs
+      ``test.column.``).
     """
-    type_counts: dict[str, int] = {}
-    for test in candidate.tests:
-        type_counts[test.type] = type_counts.get(test.type, 0) + 1
     out: dict[int, str | None] = {}
+
+    # Model-level: collide on shared test.type.
+    model_type_counts: dict[str, int] = {}
     for test in candidate.tests:
-        if type_counts[test.type] > 1:
-            out[id(test)] = _model_test_args_hash(test)
-        else:
-            out[id(test)] = None
+        model_type_counts[test.type] = model_type_counts.get(test.type, 0) + 1
+    for test in candidate.tests:
+        out[id(test)] = _model_test_args_hash(test) if model_type_counts[test.type] > 1 else None
+
+    # Column-level: collide on shared (column, test.type).
+    for column in candidate.columns:
+        per_col_counts: dict[str, int] = {}
+        for test in column.tests:
+            per_col_counts[test.type] = per_col_counts.get(test.type, 0) + 1
+        for test in column.tests:
+            out[id(test)] = _model_test_args_hash(test) if per_col_counts[test.type] > 1 else None
+
     return out
 
 
@@ -314,12 +342,17 @@ def _stable_artifact_pairs(
     pairs.append((_artifact_id_for(scope="model", field="description"), candidate.description))
     pairs.append((_artifact_id_for(scope="model", field="rationale"), candidate.rationale or ""))
 
+    args_map = _test_args_hashes(candidate)
     for column in columns:
         for test in column.tests:
-            artifact_id = _artifact_id_for(scope="column", column_name=column.name, test=test)
+            artifact_id = _artifact_id_for(
+                scope="column",
+                column_name=column.name,
+                test=test,
+                args_hash=args_map[id(test)],
+            )
             pairs.append((artifact_id, test.rationale or ""))
 
-    args_map = _model_test_args_hashes(candidate)
     for test in candidate.tests:
         artifact_id = _artifact_id_for(scope="model", test=test, args_hash=args_map[id(test)])
         pairs.append((artifact_id, test.rationale or ""))
@@ -689,6 +722,44 @@ def grade_artifacts(
     # Ensure project_dir exists for canonicalise_path's strict-resolve.
     resolved_project_dir.mkdir(parents=True, exist_ok=True)
 
+    # Symlink-harden audit/sidecar paths against the orchestrator-resolved
+    # project root (DEC-006/012; mirrors prune.engine). The writers also
+    # canonicalise as defence-in-depth, but they derive project_dir from
+    # the path itself — sufficient for the default <project>/.signalforge/
+    # path but unsafe for caller-supplied paths that escape the tree. The
+    # ENGINE is the place that knows the true project root; canonicalising
+    # here is the load-bearing gate. Failures wrap as GradeAuditWriteError
+    # before any I/O, so the writer never sees an escape-attempt path.
+    try:
+        resolved_audit_path = canonicalise_path(raw_audit_path, resolved_project_dir)
+    except _PathContainmentError as exc:
+        raise GradeAuditWriteError(
+            f"Grade audit path {raw_audit_path!r} failed symlink/containment validation.",
+            cause=exc,
+        ) from exc
+    try:
+        resolved_sidecar_path = canonicalise_path(raw_sidecar_path, resolved_project_dir)
+    except _PathContainmentError as exc:
+        raise GradeAuditWriteError(
+            f"Grade sidecar path {raw_sidecar_path!r} failed symlink/containment validation.",
+            cause=exc,
+        ) from exc
+
+    # Bug 3 (QG pass 1): assert prune_result corresponds to the same model
+    # to prevent stale-result-passed-to-grader. The parameter is reserved
+    # for v0.2 (no-redundant criterion will consume dropped_decisions),
+    # but the model-unique-id linkage is the boundary contract today.
+    if prune_result.model_unique_id != model.unique_id:
+        raise GradeError(
+            f"prune_result.model_unique_id ({prune_result.model_unique_id!r}) does not "
+            f"match model.unique_id ({model.unique_id!r}); refusing to grade with a "
+            f"prune result that belongs to a different model.",
+            remediation=(
+                "Pass the PruneResult produced by prune_tests(model, ...) for the "
+                "SAME model you are grading."
+            ),
+        )
+
     # 2. Validate the resolved rubric (no-empty / no-duplicate-id).
     #    config.rubric was already validated at config load; the
     #    explicit ``rubric=`` kwarg path may not have been, and
@@ -790,7 +861,7 @@ def grade_artifacts(
         # Audit-write per pair (DEC-006 fail-closed). On
         # GradeAuditRecordTooLargeError / GradeAuditWriteError we
         # propagate; the run aborts.
-        _write_event_or_abort(event, audit_path=raw_audit_path)
+        _write_event_or_abort(event, audit_path=resolved_audit_path)
         results.append(grading_result)
         iter_index += 1
 
@@ -808,7 +879,7 @@ def grade_artifacts(
     )
 
     try:
-        write_grading_report(report, sidecar_path=raw_sidecar_path)
+        write_grading_report(report, sidecar_path=resolved_sidecar_path)
     except GradeAuditRecordTooLargeError:
         raise
     except (KeyboardInterrupt, SystemExit):
