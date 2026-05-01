@@ -1,4 +1,4 @@
-"""``timeout_ms`` plumbing on ``make_query_job_config`` / ``_default_job_config``.
+"""``timeout_ms`` plumbing on ``_make_query_job_config`` / ``_default_job_config``.
 
 Issue #6 US-002 (DEC-013, AR-B2) extends the single-seam ``QueryJobConfig``
 factory with a ``timeout_ms`` kwarg threaded into
@@ -16,7 +16,7 @@ value as ``int`` doesn't silently flip the contract.
 from __future__ import annotations
 
 from signalforge.warehouse import BigQueryAdapter
-from signalforge.warehouse.adapters._client import make_query_job_config
+from signalforge.warehouse.adapters._client import _make_query_job_config
 from tests.warehouse._fake import FakeBigQueryClient
 
 
@@ -27,7 +27,7 @@ def test_make_query_job_config_no_timeout_leaves_unset() -> None:
     ``run_test_sql``) supply no ``timeout_ms``; their behaviour must
     not change. The BigQuery SDK exposes an unset timeout as ``None``.
     """
-    cfg = make_query_job_config(max_bytes_billed=100_000_000, stage="warehouse_test")
+    cfg = _make_query_job_config(max_bytes_billed=100_000_000, stage="warehouse_test")
     assert cfg.job_timeout_ms is None
 
 
@@ -39,7 +39,7 @@ def test_make_query_job_config_explicit_timeout_propagates() -> None:
     both shapes so a future SDK upgrade that keeps the value as ``int``
     doesn't silently flip the contract.
     """
-    cfg = make_query_job_config(
+    cfg = _make_query_job_config(
         max_bytes_billed=100_000_000,
         stage="warehouse_test",
         timeout_ms=30_000,

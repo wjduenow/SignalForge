@@ -10,11 +10,11 @@ The prune layer sits between the LLM-drafting pipeline (#5) and the quality grad
 
 - `"always-passes"` — test ran, returned zero failing rows on a representative sample, scope was sufficient. Drop.
 - `"failed-on-known-clean-data"` — test ran against a `trusted_models` opt-in target and returned non-zero failing rows. The model is known clean; the test is wrong. Drop.
-- `"requires-future-data"` — test compiled to a sentinel (e.g. `relationships(to: <unknown>)` where the target model is absent from the manifest). Cannot evaluate; ship it for the operator to revisit when the dependency lands. Kept.
+- `"requires-future-data"` — test compiled to a sentinel (e.g. `relationships(to: <unknown>)` where the target model is absent from the manifest). Cannot evaluate; the operator revisits when the dependency lands. Dropped (no warehouse call issued; the structured drop reason carries the diagnostic that surfaces in the diff).
 - `"kept"` — test ran and returned non-zero failing rows on an untrusted model. Real signal. Kept.
 - `"kept-without-evidence"` — total budget elapsed before this test ran, the test SQL was rejected by `validate_identifier`, the warehouse call raised, or any other "cannot positively evaluate" outcome. Kept.
 
-The decision matrix lives in `engine.py::_classify_decision`. The load-bearing invariant: **kept-without-evidence routes to `decision="kept"`, not `decision="dropped"`.** SignalForge ships tests it cannot evaluate; the LLM proposed them, and absent contradicting warehouse evidence the operator gets to make the call. Dropping a test silently because we couldn't reach the warehouse is exactly the failure mode this commitment exists to prevent.
+The decision matrix lives in `engine.py::_decide_from_test_result` (the routing helper the orchestrator dispatches to once a `TestResult` lands). The load-bearing invariant: **kept-without-evidence routes to `decision="kept"`, not `decision="dropped"`.** SignalForge ships tests it cannot evaluate; the LLM proposed them, and absent contradicting warehouse evidence the operator gets to make the call. Dropping a test silently because we couldn't reach the warehouse is exactly the failure mode this commitment exists to prevent.
 
 If you add a sixth `DropReason` literal in v0.2 (e.g. `"sample-too-small"`), update production `DropReason` AND `StrictPruneDecision` (the drift detector) AND the fixture at `tests/fixtures/prune/prune_event_v1.jsonl` AND the decision-matrix table in `docs/prune-ops.md` in the same change.
 
@@ -115,7 +115,7 @@ The CLI (#9) and any future orchestrator wants one calling convention; new stage
 
 ## `signalforge.yml` top-level namespace: `prune:` (DEC-020)
 
-The prune-stage block is `{ prune: { audit_path, mode, total_budget_seconds, test_timeout_seconds, partition_filter, trusted_models, ... } }`. Sibling top-level keys (`safety:`, `llm:`, future `grade:`/`diff:`) are reserved for other stages and silently ignored by the prune loader.
+The prune-stage block is `{ prune: { scope, sample_size, test_timeout_seconds, total_budget_seconds, capture_failure_rows, trusted_models, partition_filter } }`. Sibling top-level keys (`safety:`, `llm:`, future `grade:`/`diff:`) are reserved for other stages and silently ignored by the prune loader.
 
 `PruneConfig` uses `extra="forbid"` (config-shaped; typos fail loud). The wrapping `_PruneConfigFile` uses `extra="ignore"` at the top level so unknown sibling stages don't break the loader. Mirrors `llm-drafter.md` DEC-027 / `safety-layer.md` DEC-025 verbatim.
 

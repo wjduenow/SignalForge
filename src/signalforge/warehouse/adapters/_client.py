@@ -73,7 +73,7 @@ def make_real_client(
         raise WarehouseAuthError(message=str(exc)) from exc
 
 
-def make_query_job_config(
+def _make_query_job_config(
     *,
     max_bytes_billed: int,
     stage: str,
@@ -229,7 +229,7 @@ def row_to_dict(row: Any) -> dict[str, Any]:
 
 __all__ = [
     "_BQClientProtocol",
-    "make_query_job_config",
+    "_make_query_job_config",
     "make_real_client",
     "map_bq_exception",
     "row_to_dict",

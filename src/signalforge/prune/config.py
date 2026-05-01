@@ -96,10 +96,20 @@ class PruneConfig(BaseModel):
 
     trusted_models: tuple[str, ...] = ()
     """Manifest ``unique_id``s whose data is treated as known-clean
-    (Q1=B, opt-in only). A failure on a trusted model surfaces as a real
-    failure rather than the "drop on clean-data failure" branch.
+    (Q1=B, opt-in only).
+
+    Routing semantics — a non-zero failure count on a candidate test:
+
+    * **trusted model** (``model.unique_id`` in this tuple): the data
+      is presumed clean, so the test is presumed buggy → drop with
+      ``reason="failed-on-known-clean-data"``.
+    * **untrusted model** (default): the data may be wrong, ship the
+      test for review → keep with ``reason="kept"``.
+
     Validated against the manifest at :func:`prune_tests` entry per
-    DEC-008 — NOT here."""
+    DEC-008 — NOT here. A typo'd ``unique_id`` raises
+    :class:`signalforge.prune.errors.PruneTrustedModelNotFoundError`
+    BEFORE any warehouse call is issued."""
 
     partition_filter: PartitionFilter | None = None
     """Optional :class:`PartitionFilter` scoping every sample query

@@ -41,7 +41,7 @@ Import from `signalforge.prune`. The 14 names exported by `__all__`:
 
 ### Orchestrator
 
-- **`prune_tests(model, adapter, candidates, manifest, *, config=None, audit_path=None) -> PruneResult`** — End-to-end orchestrator. Compiles every `CandidateTest`, runs each through the warehouse adapter, writes one JSONL audit record per decision, returns the aggregate `PruneResult`. Mirrors `signalforge.draft.draft_schema` so the CLI / wrapper layers see one consistent end-to-end shape across pipeline stages. `audit_path` defaults to `<cwd>/.signalforge/prune.jsonl`.
+- **`prune_tests(model, adapter, candidates, manifest, *, config=None, project_dir=None, audit_path=None) -> PruneResult`** — End-to-end orchestrator. Compiles every `CandidateTest`, runs each through the warehouse adapter, writes one JSONL audit record per decision, returns the aggregate `PruneResult`. Mirrors `signalforge.draft.draft_schema` so the CLI / wrapper layers see one consistent end-to-end shape across pipeline stages. `project_dir` defaults to `Path.cwd()`. `audit_path` defaults to `<project_dir>/.signalforge/prune.jsonl`.
 
 ### Result shapes
 
@@ -111,7 +111,7 @@ Field-by-field:
 
 - **`scope`** — `"sample"` | `"full"`. Default `"sample"`. Whether candidate tests run against a deterministic warehouse sample or a full table scan. Switch to `"full"` only when the model is small enough that `sample_size` would scan most of it anyway.
 - **`sample_size`** — Integer row count for sample scope. Default `100_000`. Passed to `WarehouseAdapter.sample_rows`. Increase when the always-pass false-positive rate on small samples hides real signal; decrease to cap query bytes on very wide tables (column-pruning does NOT apply through `FARM_FINGERPRINT(TO_JSON_STRING(t))` — see [Cost model](#cost-model-us-003-verification)).
-- **`test_timeout_seconds`** — Per-test wall-clock budget. Default `30`. v0.1 sets the timeout on the adapter's `QueryJobConfig` but does NOT yet thread it through `WarehouseAdapter.run_test_sql` per call (deferred to v0.2; see [v0.2 deferrals](#v02-deferrals)).
+- **`test_timeout_seconds`** — Per-test wall-clock budget. Default `30`. **Reserved for v0.2** — the adapter's `_default_job_config(timeout_ms=...)` plumbing exists (US-002 of issue #3) but `WarehouseAdapter.run_test_sql` does not yet accept a per-call timeout kwarg, so v0.1 does not enforce this knob. Per-test wall-clock control in v0.1 comes implicitly from `total_budget_seconds` plus the `WarehouseError` catch path: a test that exceeds the warehouse's own budget surfaces as a typed error → `kept-without-evidence`. See [v0.2 deferrals](#v02-deferrals).
 - **`total_budget_seconds`** — Whole-run wall-clock budget. Default `600`. Once exceeded, every remaining test drains to `kept-without-evidence` with `why="Total prune budget (Ns) exceeded before evaluation."` (DEC-011). Conservative bias — no test is silently dropped because the run ran long.
 - **`capture_failure_rows`** — Number of failing rows recorded on the `PruneDecision.sample_failures` field per failed test. Default `3`. Set to `0` to omit row-level evidence entirely (the audit record stays compact for very wide tables).
 - **`trusted_models`** — List of manifest `unique_id`s whose data is treated as known-clean. A failure on a trusted model surfaces as `failed-on-known-clean-data` (drop, presumed buggy test) rather than `kept`. Opt-in only (Q1=B). Validated against the manifest at `prune_tests` entry — typos raise `PruneTrustedModelNotFoundError` BEFORE any warehouse call (DEC-008).

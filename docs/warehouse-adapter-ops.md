@@ -113,13 +113,13 @@ The BigQuery adapter is opinionated about cost on every query.
   v0.2 may re-enable caching behind an explicit opt-in; in v0.1 it is
   unconditionally off.
 - **Per-call `timeout_ms`** (DEC-013 of issue #6): pass an integer to
-  `_default_job_config(timeout_ms=...)` to set
+  `_default_job_config(stage="...", timeout_ms=...)` to set
   `QueryJobConfig.job_timeout_ms`; BigQuery cancels the job
   server-side at expiry. Bytes-scanned through the cancellation point
-  still bill — set conservatively. Default `None` (no timeout). The
-  prune layer (#6) uses this for per-test budget enforcement; the
-  adapter's own `sample_rows` / `column_stats` / `run_test_sql` paths
-  leave it unset.
+  still bill — set conservatively. Default `None` (no timeout).
+  Reserved for v0.2 prune layer integration (issue #6 ships with
+  `total_budget_seconds` enforcement only; v0.1 has no public
+  `WarehouseAdapter.run_test_sql` kwarg for per-test timeouts).
 - **BigQuery job labels are auto-set** on every query:
   - `signalforge_stage` — the pipeline stage that issued the query.
     Values are `warehouse_sample` (from `sample_rows`), `warehouse_stats`

@@ -113,9 +113,9 @@ def test_make_query_job_config_sets_use_query_cache_false() -> None:
     from google.cloud import bigquery
 
     from signalforge import __version__
-    from signalforge.warehouse.adapters._client import make_query_job_config
+    from signalforge.warehouse.adapters._client import _make_query_job_config
 
-    cfg = make_query_job_config(stage="warehouse_sample", max_bytes_billed=12345)
+    cfg = _make_query_job_config(stage="warehouse_sample", max_bytes_billed=12345)
 
     assert isinstance(cfg, bigquery.QueryJobConfig)
     assert cfg.use_query_cache is False
