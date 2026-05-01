@@ -33,6 +33,7 @@ from signalforge.manifest.models import Column, Manifest, Model
 from signalforge.prune.compiler import (
     _compile_test,
     _compute_compiled_sql_hash,
+    _InvalidIdentifier,
     _RequiresFutureData,
 )
 from signalforge.warehouse._sql_safety import validate_test_sql
@@ -346,3 +347,90 @@ def test_validate_identifier_already_done_at_table_ref_construction() -> None:
 
     with pytest.raises(InvalidIdentifierError):
         TableRef(project="fake_project", dataset="dataset", name="orders; DROP TABLE x")
+
+
+# ---------------------------------------------------------------------------
+# QG fix-up: defence-in-depth — adversarial column/field identifiers on
+# CandidateTest variants return _InvalidIdentifier rather than producing
+# a malformed SQL string.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_column",
+    [
+        "col with space",
+        'col"-injection',
+        "col`-backtick",
+        "col;DROP",
+    ],
+)
+def test_compile_not_null_rejects_adversarial_column(bad_column: str) -> None:
+    """``CandidateTestNotNull.column`` failing the SQL-identifier shape
+    check returns ``_InvalidIdentifier`` rather than producing SQL that
+    breaks out of the backtick quoting."""
+    test = CandidateTestNotNull(column=bad_column)
+    result = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(result, _InvalidIdentifier)
+    assert "invalid identifier" in result.reason
+
+
+@pytest.mark.parametrize(
+    "bad_column",
+    [
+        "col with space",
+        'col"-injection',
+        "col`-backtick",
+        "col;DROP",
+    ],
+)
+def test_compile_unique_rejects_adversarial_column(bad_column: str) -> None:
+    test = CandidateTestUnique(column=bad_column)
+    result = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(result, _InvalidIdentifier)
+
+
+@pytest.mark.parametrize(
+    "bad_column",
+    [
+        "col with space",
+        'col"-injection',
+        "col`-backtick",
+        "col;DROP",
+    ],
+)
+def test_compile_accepted_values_rejects_adversarial_column(bad_column: str) -> None:
+    test = CandidateTestAcceptedValues(column=bad_column, values=("a",))
+    result = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(result, _InvalidIdentifier)
+
+
+@pytest.mark.parametrize(
+    "bad_field",
+    [
+        "field with space",
+        'field"-injection',
+        "field`-backtick",
+        "field;DROP",
+    ],
+)
+def test_compile_relationships_rejects_adversarial_field(bad_field: str) -> None:
+    """``CandidateTestRelationships.field`` is interpolated into a
+    backtick-quoted identifier; an adversarial value must short-circuit
+    via ``_InvalidIdentifier`` rather than reach the SQL string."""
+    test = CandidateTestRelationships(column="customer_id", to="customers", field=bad_field)
+    result = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(result, _InvalidIdentifier)
+    # The field name is what's offending; the reason should reflect that.
+    assert "field" in result.reason
+
+
+def test_compile_relationships_rejects_adversarial_column() -> None:
+    test = CandidateTestRelationships(
+        column="child`-backtick",
+        to="customers",
+        field="id",
+    )
+    result = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(result, _InvalidIdentifier)
+    assert "column" in result.reason

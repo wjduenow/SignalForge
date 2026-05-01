@@ -61,7 +61,8 @@ from signalforge.draft.models import (
     CandidateTestRelationships,
     CandidateTestUnique,
 )
-from signalforge.warehouse._sql_safety import escape_bq_string_literal
+from signalforge.warehouse._sql_safety import escape_bq_string_literal, validate_identifier
+from signalforge.warehouse.errors import InvalidIdentifierError
 from signalforge.warehouse.models import TableRef
 
 if TYPE_CHECKING:
@@ -77,6 +78,29 @@ class _RequiresFutureData:
     The orchestrator routes the sentinel to ``drop_reason=requires-future-data``
     without issuing a warehouse call. The :attr:`reason` field carries the
     human-readable why-line that surfaces in the prune diff (DEC-026).
+    """
+
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _InvalidIdentifier:
+    """Sentinel returned by :func:`_compile_test` when a candidate test's
+    identifier (``column``, ``field``) fails the DEC-013 SQL-identifier shape.
+
+    Defence-in-depth: ``CandidateTest.column`` / ``.field`` arrive from
+    the LLM drafter via the anchor-contract validator (which checks the
+    name exists in the manifest model) but are NOT shape-validated against
+    the SQL-identifier regex. A malformed identifier would be backtick-
+    quoted into the failing-rows SELECT and could break out of the
+    quoting (e.g. an embedded backtick or whitespace).
+
+    The orchestrator routes this sentinel to ``kept-without-evidence``
+    (decision="kept") with the ``reason`` text in ``why`` so a reviewer
+    sees the malformed identifier and can fix the prompt or model
+    upstream. Treating it as "could not evaluate" rather than "drop" is
+    conservative — a malformed test MAY still be signal-bearing once
+    fixed.
     """
 
     reason: str
@@ -114,8 +138,16 @@ def _compile_not_null(
     test: CandidateTestNotNull,
     table_ref: TableRef,
     quote_char: str,
-) -> str:
+) -> str | _InvalidIdentifier:
     """Compile ``not_null(col)`` to ``SELECT col FROM t WHERE col IS NULL``."""
+    try:
+        validate_identifier("CandidateTestNotNull.column", test.column)
+    except InvalidIdentifierError:
+        return _InvalidIdentifier(
+            reason=(
+                f"candidate test references an invalid identifier shape: column={test.column!r}"
+            )
+        )
     col = _quote(test.column, quote_char)
     table = _qualified_table_name(table_ref, quote_char)
     return f"SELECT {col} FROM {table} WHERE {col} IS NULL"
@@ -125,13 +157,21 @@ def _compile_unique(
     test: CandidateTestUnique,
     table_ref: TableRef,
     quote_char: str,
-) -> str:
+) -> str | _InvalidIdentifier:
     """Compile ``unique(col)`` to a GROUP BY ... HAVING COUNT(*) > 1.
 
     DEC-023 NULL-exclusion: ``IS NOT NULL`` filters NULL rows out of the
     grouped set, matching dbt-core (multiple NULLs in a column do not
     violate uniqueness in dbt's convention).
     """
+    try:
+        validate_identifier("CandidateTestUnique.column", test.column)
+    except InvalidIdentifierError:
+        return _InvalidIdentifier(
+            reason=(
+                f"candidate test references an invalid identifier shape: column={test.column!r}"
+            )
+        )
     col = _quote(test.column, quote_char)
     table = _qualified_table_name(table_ref, quote_char)
     return f"SELECT {col} FROM {table} WHERE {col} IS NOT NULL GROUP BY {col} HAVING COUNT(*) > 1"
@@ -141,7 +181,7 @@ def _compile_accepted_values(
     test: CandidateTestAcceptedValues,
     table_ref: TableRef,
     quote_char: str,
-) -> str:
+) -> str | _InvalidIdentifier:
     """Compile ``accepted_values(col, values)`` to a ``NOT IN`` predicate.
 
     Each value goes through
@@ -153,6 +193,14 @@ def _compile_accepted_values(
     adversarial inputs (the entire injection attempt stays inside the
     quoted string).
     """
+    try:
+        validate_identifier("CandidateTestAcceptedValues.column", test.column)
+    except InvalidIdentifierError:
+        return _InvalidIdentifier(
+            reason=(
+                f"candidate test references an invalid identifier shape: column={test.column!r}"
+            )
+        )
     col = _quote(test.column, quote_char)
     table = _qualified_table_name(table_ref, quote_char)
     rendered_values = ", ".join(f"'{escape_bq_string_literal(v)}'" for v in test.values)
@@ -189,7 +237,7 @@ def _compile_relationships(
     table_ref: TableRef,
     quote_char: str,
     manifest: Manifest,
-) -> str | _RequiresFutureData:
+) -> str | _RequiresFutureData | _InvalidIdentifier:
     """Compile ``relationships(child_col, to=parent, field=parent_col)``.
 
     Renders a LEFT JOIN orphan-detection SELECT: rows in the child where
@@ -199,7 +247,23 @@ def _compile_relationships(
     model is not in the manifest (DEC-026); the orchestrator routes
     that to the ``requires-future-data`` drop reason without issuing a
     warehouse call.
+
+    Returns an :class:`_InvalidIdentifier` sentinel when ``column`` or
+    ``field`` fails the SQL-identifier shape check; the orchestrator
+    routes that to ``kept-without-evidence``. ``to`` is NOT shape-checked
+    here — it's a model name resolved via :func:`_resolve_parent_table_ref`
+    and a missing parent yields the ``_RequiresFutureData`` branch.
     """
+    try:
+        validate_identifier("CandidateTestRelationships.column", test.column)
+        validate_identifier("CandidateTestRelationships.field", test.field)
+    except InvalidIdentifierError as exc:
+        return _InvalidIdentifier(
+            reason=(
+                f"candidate test references an invalid identifier shape: {exc.field}={exc.value!r}"
+            )
+        )
+
     parent_table_ref = _resolve_parent_table_ref(test.to, manifest)
     if isinstance(parent_table_ref, _RequiresFutureData):
         return parent_table_ref
@@ -222,7 +286,7 @@ def _compile_test(
     table_ref: TableRef,
     dialect: Dialect,
     manifest: Manifest,
-) -> str | _RequiresFutureData:
+) -> str | _RequiresFutureData | _InvalidIdentifier:
     """Render a candidate test as a failing-rows SELECT.
 
     The returned string is a SELECT whose rows are violations: zero rows
@@ -237,8 +301,9 @@ def _compile_test(
 
     A ``relationships`` test whose parent is not in the manifest returns
     :class:`_RequiresFutureData` rather than raising (DEC-006, DEC-026);
-    the orchestrator distinguishes the two return shapes via
-    :func:`isinstance`.
+    a test whose ``column`` / ``field`` fails the SQL-identifier shape
+    check returns :class:`_InvalidIdentifier`; the orchestrator
+    distinguishes the three return shapes via :func:`isinstance`.
     """
     quote_char = dialect.quote_char
     if isinstance(test, CandidateTestNotNull):

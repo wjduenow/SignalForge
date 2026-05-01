@@ -1,2 +1,0 @@
-prune:
-  scope: !!python/object/apply:os.system ["echo pwned"]

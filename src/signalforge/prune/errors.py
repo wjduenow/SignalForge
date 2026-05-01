@@ -111,12 +111,19 @@ class PruneTrustedModelNotFoundError(PruneConfigError):
 class PruneTimeoutError(PruneError):
     """The prune run exceeded its ``total_budget_seconds`` budget.
 
-    Wraps adapter cancellation when the orchestrator pulls the plug on an
-    in-flight test. DEC-011: the orchestrator catches this internally and
-    routes the in-flight + every remaining un-started test to
-    ``kept-without-evidence`` with ``why="total prune budget exceeded
-    before evaluation"``. Callers of :func:`signalforge.prune.prune_tests`
-    do NOT see this exception; it is an internal control-flow signal.
+    Reserved for v0.2 — currently never raised. v0.1's ``DEC-011`` budget
+    enforcement converts the exhaustion signal directly into
+    ``kept-without-evidence`` :class:`PruneDecision` rows; the typed
+    error is listed on the public surface and re-exported from
+    :mod:`signalforge.prune` so v0.2 callers can write
+    ``except PruneTimeoutError`` ahead of the feature landing without a
+    breaking-change to the public API. When the v0.2 per-test timeout
+    plumbing lands, the in-flight test that exhausts the budget will
+    raise this error from the adapter; the orchestrator will catch it
+    internally and route the remaining tests to
+    ``kept-without-evidence`` (mirroring how the
+    :class:`signalforge.warehouse.errors.WarehouseError` branch works in
+    v0.1).
     """
 
     default_remediation: ClassVar[str] = (

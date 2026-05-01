@@ -91,6 +91,7 @@ from signalforge.prune.audit import (
 from signalforge.prune.compiler import (
     _compile_test,
     _compute_compiled_sql_hash,
+    _InvalidIdentifier,
     _RequiresFutureData,
 )
 from signalforge.prune.config import PruneConfig
@@ -100,8 +101,9 @@ from signalforge.prune.errors import (
     PruneTrustedModelNotFoundError,
 )
 from signalforge.prune.models import PruneDecision, PruneResult, Scope
+from signalforge.warehouse._path_safety import canonicalise_path
 from signalforge.warehouse.base import WarehouseAdapter
-from signalforge.warehouse.errors import WarehouseError
+from signalforge.warehouse.errors import ProfileNotFoundError, WarehouseError
 from signalforge.warehouse.models import TableRef, TestResult
 
 _LOGGER = logging.getLogger(__name__)
@@ -360,6 +362,40 @@ def _decide_requires_future_data(
     )
 
 
+def _decide_kept_without_evidence_invalid_identifier(
+    *,
+    test: CandidateTest,
+    test_anchor: str,
+    sentinel: _InvalidIdentifier,
+    elapsed_ms: int,
+    scope: Scope,
+) -> PruneDecision:
+    """Build a :class:`PruneDecision` for a test whose ``column`` /
+    ``field`` failed the SQL-identifier shape check (defence-in-depth).
+
+    No warehouse call has been issued; ``compiled_sql`` is empty and
+    ``compiled_sql_hash`` is the stable hash of the empty string. Routed
+    to ``kept-without-evidence`` (decision="kept") rather than
+    ``"dropped"`` because a malformed identifier MAY still be
+    signal-bearing once the operator fixes the upstream prompt /
+    manifest — conservative default avoids silently losing the test.
+    """
+    return PruneDecision(
+        test_anchor=test_anchor,
+        test=test,
+        decision="kept",
+        reason="kept-without-evidence",
+        failures=0,
+        sampled_rows=None,
+        scope=scope,
+        elapsed_ms=elapsed_ms,
+        compiled_sql_hash=_build_compiled_sql_hash_or_empty(""),
+        compiled_sql="",
+        why=sentinel.reason,
+        sample_failures=None,
+    )
+
+
 def _decide_kept_without_evidence_warehouse_error(
     *,
     test: CandidateTest,
@@ -434,6 +470,7 @@ def prune_tests(
     *,
     config: PruneConfig | None = None,
     audit_path: Path | None = None,
+    project_dir: Path | None = None,
 ) -> PruneResult:
     """Drop always-pass and known-clean-fail candidate tests.
 
@@ -504,8 +541,21 @@ def prune_tests(
             responsible for loading from disk via
             :func:`load_prune_config`.
         audit_path: optional override for the prune-audit JSONL path.
-            ``None`` resolves to ``cwd / ".signalforge" / "prune.jsonl"``;
-            the parent directory is created if missing.
+            ``None`` resolves to
+            ``<project_dir> / ".signalforge" / "prune.jsonl"`` (default
+            ``project_dir`` is :func:`pathlib.Path.cwd`); the parent
+            directory is created if missing. The resolved path is
+            symlink-hardened via
+            :func:`signalforge.warehouse._path_safety.canonicalise_path`
+            before any write so a symlinked
+            ``<project>/.signalforge/prune.jsonl`` cannot redirect
+            writes outside the project tree (DEC-016).
+        project_dir: optional project-root override used to resolve the
+            default ``audit_path``. ``None`` resolves to
+            :func:`pathlib.Path.cwd`. Mirrors the other layers'
+            project-relative resolution so the prune audit lands in the
+            right place regardless of which sub-directory the CLI
+            invokes from.
 
     Returns:
         A :class:`PruneResult` carrying every per-test
@@ -536,14 +586,41 @@ def prune_tests(
     is_trusted = model.unique_id in resolved_config.trusted_models
     scope: Scope = resolved_config.scope
 
-    # Resolve audit path. Default: cwd/.signalforge/prune.jsonl. Create
-    # the parent directory if missing — the writer itself does not
-    # mkdir (it expects the parent to exist; the orchestrator owns that
-    # contract per the writer's docstring).
-    resolved_audit_path = (
-        audit_path if audit_path is not None else Path.cwd() / ".signalforge" / "prune.jsonl"
+    # Resolve audit path. Default: <project_dir>/.signalforge/prune.jsonl
+    # (project_dir defaults to cwd). Resolving relative to project_dir
+    # rather than cwd matches the safety + draft layers — when the CLI
+    # is invoked from a sub-directory, the audit lands next to the
+    # project, not next to wherever the user happened to be.
+    resolved_project_dir = project_dir if project_dir is not None else Path.cwd()
+    raw_audit_path = (
+        audit_path
+        if audit_path is not None
+        else resolved_project_dir / ".signalforge" / "prune.jsonl"
     )
-    resolved_audit_path.parent.mkdir(parents=True, exist_ok=True)
+    # Create the parent directory if missing — the writer itself does
+    # not mkdir (it expects the parent to exist; the orchestrator owns
+    # that contract per the writer's docstring). mkdir runs BEFORE
+    # canonicalise_path so the directory exists for the resolve(strict).
+    raw_audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Symlink-harden the audit path (DEC-016) — a symlinked
+    # `.signalforge/prune.jsonl` pointing outside the project tree
+    # could redirect writes to an attacker-controlled location.
+    # ``canonicalise_path`` requires project_dir to exist; it raises
+    # ``ProfileNotFoundError`` (the warehouse-layer escape) on cycle /
+    # missing-dir / containment-violation. Wrap as
+    # ``PruneAuditWriteError`` so the prune layer's catch surface stays
+    # homogeneous — every "we couldn't durably persist the audit"
+    # condition raises a single typed error.
+    resolved_project_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        resolved_audit_path = canonicalise_path(raw_audit_path, resolved_project_dir)
+    except ProfileNotFoundError as exc:
+        raise PruneAuditWriteError(
+            "Prune-audit path failed symlink-hardened canonicalisation; "
+            "refusing to write outside the project tree.",
+            cause=exc,
+        ) from exc
 
     # Compute the config hash once per run so every audit row in this
     # run shares a single config_hash; mirrors the safety-layer
@@ -584,10 +661,28 @@ def prune_tests(
             continue
 
         # Compile the candidate test to failing-rows SQL. Returns either
-        # a string (the SELECT) or a _RequiresFutureData sentinel.
+        # a string (the SELECT), a _RequiresFutureData sentinel, or an
+        # _InvalidIdentifier sentinel.
         compile_result = _compile_test(test, table_ref, dialect, manifest)
         if isinstance(compile_result, _RequiresFutureData):
             decision = _decide_requires_future_data(
+                test=test,
+                test_anchor=test_anchor,
+                sentinel=compile_result,
+                elapsed_ms=0,
+                scope=scope,
+            )
+            _write_audit_or_abort(
+                decision,
+                model_unique_id=model.unique_id,
+                config_hash=config_hash,
+                audit_path=resolved_audit_path,
+            )
+            decisions.append(decision)
+            continue
+
+        if isinstance(compile_result, _InvalidIdentifier):
+            decision = _decide_kept_without_evidence_invalid_identifier(
                 test=test,
                 test_anchor=test_anchor,
                 sentinel=compile_result,

@@ -56,6 +56,8 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from signalforge.prune.errors import PruneConfigError
 from signalforge.warehouse.models import PartitionFilter
 
+_DEFAULT_CONFIG_FILENAME = "signalforge.yml"
+
 
 class PruneConfig(BaseModel):
     """User-facing knobs for the prune layer (DEC-009).
@@ -134,16 +136,27 @@ class _PruneConfigFile(BaseModel):
     prune: PruneConfig | None = None
 
 
-def load_prune_config(path: Path | str | None = None) -> PruneConfig:
+def load_prune_config(project_dir: Path, path: Path | None = None) -> PruneConfig:
     """Load a :class:`PruneConfig` from ``signalforge.yml``.
 
-    See module docstring for the full resolution order and error
-    contract.
+    Mirrors :func:`signalforge.draft.config.load_draft_config` and
+    :func:`signalforge.safety.config.load_safety_config` so the CLI (#9)
+    sees one calling convention across stages: ``(project_dir, path=None)``.
+
+    Resolution:
+
+    * ``path is None``: look for ``<project_dir>/signalforge.yml``.
+      Missing → :class:`PruneConfig` defaults silently.
+    * ``path is not None``: use that exact path. Missing → defaults
+      silently (parity with the prior single-arg behaviour and with how
+      the CLI threads an optional ``--config`` flag).
 
     Args:
-        path: Optional explicit config-file path. ``None`` or a path that
-            does not exist returns :class:`PruneConfig` defaults
-            silently.
+        project_dir: Project root used as the base for the default
+            config-file lookup (``<project_dir>/signalforge.yml``).
+        path: Optional explicit config path. ``None`` falls back to the
+            project-relative default; a missing explicit path returns
+            defaults silently.
 
     Returns:
         A fully-validated :class:`PruneConfig`. When the file is absent,
@@ -159,10 +172,8 @@ def load_prune_config(path: Path | str | None = None) -> PruneConfig:
             original :class:`pydantic.ValidationError` (if any) is
             preserved on ``__cause__``.
     """
-    if path is None:
-        return PruneConfig()
+    config_file = project_dir / _DEFAULT_CONFIG_FILENAME if path is None else path
 
-    config_file = Path(path)
     if not config_file.exists():
         return PruneConfig()
 

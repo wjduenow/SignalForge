@@ -25,6 +25,7 @@ because the test ships, conservatively, when we cannot evaluate it):
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -155,6 +156,7 @@ def test_prune_tests_always_passes_drops_test(tmp_path: Path) -> None:
         manifest,
         config=config,
         audit_path=audit_path,
+        project_dir=tmp_path,
     )
 
     assert result.total_tests == 1
@@ -194,6 +196,7 @@ def test_prune_tests_kept_for_real_failure_untrusted_model(tmp_path: Path) -> No
         manifest,
         config=config,
         audit_path=audit_path,
+        project_dir=tmp_path,
     )
 
     decision = result.decisions[0]
@@ -228,6 +231,7 @@ def test_prune_tests_failed_on_known_clean_data_for_trusted_model(tmp_path: Path
         manifest,
         config=config,
         audit_path=audit_path,
+        project_dir=tmp_path,
     )
 
     decision = result.decisions[0]
@@ -277,6 +281,7 @@ def test_prune_tests_requires_future_data_for_unknown_relationships_parent(
         manifest,
         config=config,
         audit_path=audit_path,
+        project_dir=tmp_path,
     )
 
     decision = result.decisions[0]
@@ -315,6 +320,7 @@ def test_prune_tests_warehouse_error_routes_to_kept_without_evidence(
         manifest,
         config=config,
         audit_path=audit_path,
+        project_dir=tmp_path,
     )
 
     decision = result.decisions[0]
@@ -365,6 +371,7 @@ def test_prune_tests_total_budget_exceeded_marks_remaining_kept_without_evidence
         manifest,
         config=config,
         audit_path=audit_path,
+        project_dir=tmp_path,
     )
 
     assert result.total_tests == 5
@@ -406,6 +413,7 @@ def test_prune_tests_trusted_models_validation_at_entry(tmp_path: Path) -> None:
             manifest,
             config=config,
             audit_path=audit_path,
+            project_dir=tmp_path,
         )
 
     assert excinfo.value.unique_id == "model.shop.nonexistent"
@@ -456,6 +464,7 @@ def test_prune_tests_audit_write_oserror_aborts_run(
             manifest,
             config=config,
             audit_path=audit_path,
+            project_dir=tmp_path,
         )
 
     # The OSError surfaces as the cause on the typed wrapper.
@@ -497,6 +506,7 @@ def test_prune_tests_audit_record_too_large_propagates(
             manifest,
             config=config,
             audit_path=audit_path,
+            project_dir=tmp_path,
         )
 
     # Same object — NOT wrapped.
@@ -556,6 +566,7 @@ def test_prune_tests_compute_config_hash_is_deterministic(tmp_path: Path) -> Non
         manifest,
         config=config,
         audit_path=audit_a,
+        project_dir=tmp_path,
     )
     prune_tests(
         model,
@@ -564,6 +575,7 @@ def test_prune_tests_compute_config_hash_is_deterministic(tmp_path: Path) -> Non
         manifest,
         config=config,
         audit_path=audit_b,
+        project_dir=tmp_path,
     )
 
     rows_a = _read_audit_lines(audit_a)
@@ -572,3 +584,98 @@ def test_prune_tests_compute_config_hash_is_deterministic(tmp_path: Path) -> Non
     assert rows_a[0]["config_hash"] == rows_b[0]["config_hash"]
     # 16-hex-char convention (same as policy_hash / config_hash elsewhere).
     assert len(rows_a[0]["config_hash"]) == 16
+
+
+# ---------------------------------------------------------------------------
+# QG fix-up: audit-path symlink-hardening (DEC-016) and project_dir-relative
+# default resolution (mirrors the safety/draft layers' fix).
+# ---------------------------------------------------------------------------
+
+
+def test_prune_tests_default_audit_path_resolves_relative_to_project_dir(
+    tmp_path: Path,
+) -> None:
+    """``audit_path=None`` resolves to
+    ``<project_dir>/.signalforge/prune.jsonl`` (NOT cwd-relative).
+
+    Regression guard for the same defect the safety + draft layers
+    fixed: when the CLI is invoked from a sub-directory, the audit
+    lands next to the project, not next to wherever the user happened
+    to be.
+    """
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(capture_failure_rows=0)
+
+    prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        project_dir=tmp_path,
+    )
+
+    expected_audit = tmp_path / ".signalforge" / "prune.jsonl"
+    assert expected_audit.exists()
+    rows = _read_audit_lines(expected_audit)
+    assert len(rows) == 1
+    assert rows[0]["model_unique_id"] == "model.shop.orders"
+    fake.assert_all_expectations_met()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink semantics differ on Windows")
+def test_prune_tests_audit_path_symlink_outside_project_raises(
+    tmp_path: Path,
+) -> None:
+    """A symlinked ``audit_path`` whose target escapes ``project_dir``
+    raises :class:`PruneAuditWriteError` BEFORE any write hits disk
+    (DEC-016).
+
+    Defence-in-depth: a malicious or misconfigured
+    ``.signalforge/prune.jsonl`` symlink could redirect writes to
+    ``/etc/passwd`` or any other attacker-controlled location. The
+    canonicalisation gate at orchestrator entry catches this and
+    surfaces a typed prune error rather than a raw OSError.
+    """
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    audit_dir = project_dir / ".signalforge"
+    audit_dir.mkdir()
+
+    outside_target = tmp_path / "outside" / "evil.jsonl"
+    outside_target.parent.mkdir()
+    # Symlink the audit file to a target outside the project tree.
+    audit_symlink = audit_dir / "prune.jsonl"
+    audit_symlink.symlink_to(outside_target)
+
+    fake = FakeBigQueryClient(project="fake_project")
+    # No expectations registered — the canonicalisation gate must fire
+    # before any warehouse call.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(capture_failure_rows=0)
+
+    with pytest.raises(PruneAuditWriteError):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_symlink,
+            project_dir=project_dir,
+        )
+
+    # The outside target was never created — canonicalisation aborts
+    # before the writer opens any file.
+    assert not outside_target.exists()
+    fake.assert_all_expectations_met()

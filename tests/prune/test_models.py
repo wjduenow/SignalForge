@@ -132,3 +132,45 @@ def test_prune_decision_carries_typed_candidate_test() -> None:
     # discriminator dispatched the right concrete subclass
     assert isinstance(av_round.test, CandidateTestAcceptedValues)
     assert av_round.test.values == ("placed", "shipped")
+
+
+def test_prune_result_repr_redacts_sql_and_sample_failures() -> None:
+    """DEC-022: PruneResult repr must NOT leak compiled_sql or sample rows.
+
+    An accidental ``_LOGGER.warning("result: %s", result)`` with the
+    default Pydantic repr would dump the full per-decision payload —
+    including compiled SQL and any sampled-failure rows (which may
+    contain PII) — into log sinks. The custom repr restricts output to
+    top-level identity + count aggregates.
+    """
+    decision = PruneDecision(
+        test_anchor="column.email",
+        test=CandidateTestNotNull(column="email"),
+        decision="kept",
+        reason="kept",
+        failures=3,
+        sampled_rows=100,
+        scope="sample",
+        elapsed_ms=42,
+        compiled_sql_hash="abc123",
+        compiled_sql="SELECT secret_column FROM internal_table WHERE 1=1",
+        why="3 failures",
+        sample_failures=({"secret_column": "leaked-pii-value"},),
+    )
+    result = PruneResult(
+        model_unique_id="model.shop.users",
+        decisions=(decision,),
+        elapsed_ms=42,
+        signalforge_version="0.1.0.dev0",
+    )
+    rendered = repr(result)
+    # Allowed (top-level identity + counts):
+    assert "model.shop.users" in rendered
+    assert "kept_count=1" in rendered
+    assert "dropped_count=0" in rendered
+    # Forbidden (sensitive bodies):
+    assert "secret_column" not in rendered
+    assert "internal_table" not in rendered
+    assert "leaked-pii-value" not in rendered
+    assert "compiled_sql" not in rendered
+    assert "sample_failures" not in rendered

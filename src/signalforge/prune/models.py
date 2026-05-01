@@ -154,6 +154,26 @@ class PruneResult(BaseModel):
     def total_tests(self) -> int:
         return len(self.decisions)
 
+    def __repr__(self) -> str:
+        """Redacted repr — omits per-decision SQL and sample-failure rows.
+
+        DEC-022: Pydantic's default ``__repr__`` would interpolate every
+        field including ``decisions[i].compiled_sql``, ``decisions[i].why``,
+        and ``decisions[i].sample_failures`` into a single line. An
+        accidental ``_LOGGER.warning("result: %s", result)`` would dump
+        compiled SQL plus sampled rows (which may contain PII) into log
+        sinks. The custom repr collapses to the top-level identity and
+        the two count aggregates so log lines stay safe by default;
+        callers that genuinely need the full body call
+        :meth:`pydantic.BaseModel.model_dump` explicitly.
+        """
+        return (
+            f"PruneResult(model_unique_id={self.model_unique_id!r}, "
+            f"kept_count={self.kept_count}, "
+            f"dropped_count={self.dropped_count}, "
+            f"elapsed_ms={self.elapsed_ms})"
+        )
+
 
 __all__ = (
     "DropReason",

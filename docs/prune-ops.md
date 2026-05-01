@@ -53,7 +53,7 @@ Import from `signalforge.prune`. The 14 names exported by `__all__`:
 
 - **`PruneConfig`** — User-facing knobs. Frozen Pydantic model with `extra="forbid"` (config-shaped per DEC-015 — typos fail loud). Field reference: see [Configuration](#configuration-signalforgeyml-prune-block) below.
 
-- **`load_prune_config(path=None) -> PruneConfig`** — Loads the `prune:` block from `signalforge.yml`. Returns defaults when `path` is `None`, missing, empty, or the `prune:` key is absent. Raises `PruneConfigError` on parse / schema failures.
+- **`load_prune_config(project_dir, path=None) -> PruneConfig`** — Loads the `prune:` block from `signalforge.yml`. Resolves to `<project_dir>/signalforge.yml` when `path` is `None`. Returns defaults when the file is missing, empty, or the `prune:` key is absent. Raises `PruneConfigError` on parse / schema failures. Mirrors `load_safety_config` / `load_draft_config` so the CLI sees one calling convention across stages.
 
 ### Discriminator literals
 
