@@ -1,0 +1,15 @@
+# signalforge.yml — grade stage configuration (v0.1)
+grade:
+  model: claude-sonnet-4-6        # Anthropic model id (default)
+  cache_ttl: 1h                   # Prompt-cache TTL ('5m' or '1h')
+  max_output_tokens: 256          # Per-criterion JSON response cap
+  max_retries_429: 3              # Rate-limit retry budget
+  max_retries_5xx: 1
+  max_retries_conn: 1
+  total_budget_seconds: 300       # Wall-clock budget across the whole run
+  min_pass_rate: 0.7              # Aggregate threshold: fraction of passed criteria
+  min_mean_score: 0.5             # Aggregate threshold: mean score across criteria
+  fail_on_below_threshold: false  # v0.1 always false (flag-only); v0.2 will gate exit code
+  # rubric:                       # Optional override; omitted = use DEFAULT_RUBRIC
+  #   - id: clarity
+  #     criterion: "..."

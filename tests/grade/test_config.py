@@ -400,6 +400,23 @@ def test_load_grade_config_explicit_path_takes_precedence(tmp_path: Path) -> Non
     assert cfg.model == "from-explicit-path"
 
 
+def test_load_grade_config_doc_example_round_trips(tmp_path: Path) -> None:
+    """The example YAML in docs/grade-ops.md round-trips through
+    load_grade_config without errors."""
+    fixture = Path(__file__).parent.parent / "fixtures" / "grade" / "example_config.yml"
+    target = tmp_path / "signalforge.yml"
+    target.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+    config = load_grade_config(tmp_path)
+    # Assert all fields are populated (smoke).
+    assert config.model == "claude-sonnet-4-6"
+    assert config.cache_ttl == "1h"
+    assert config.max_output_tokens == 256
+    assert config.total_budget_seconds == 300
+    assert config.min_pass_rate == 0.7
+    assert config.min_mean_score == 0.5
+    assert config.fail_on_below_threshold is False
+
+
 def test_load_grade_config_full_well_formed_block(tmp_path: Path) -> None:
     """End-to-end happy path: every field set to a non-default value
     round-trips through the loader."""
