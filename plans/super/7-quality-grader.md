@@ -5,7 +5,7 @@
 - **Ticket:** [#7](https://github.com/wjduenow/SignalForge/issues/7)
 - **Branch:** `feature/7-quality-grader` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/7-quality-grader` (created via `git worktree add`)
-- **Phase:** published (awaiting PR review + approval)
+- **Phase:** devolved (epic + 13 tasks in beads 2026-05-01; PR [#24](https://github.com/wjduenow/SignalForge/pull/24) draft)
 - **Sessions:** 1 (started 2026-05-01)
 - **PR:** [#24](https://github.com/wjduenow/SignalForge/pull/24) (draft)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
@@ -737,4 +737,26 @@ Stories follow the natural Python pipeline-stage ordering: scaffold → typed mo
 
 ## Beads Manifest
 
-*(empty)*
+Devolved 2026-05-01. Worktree: `/home/wesd/dev/worktrees/SignalForge/feature/7-quality-grader`.
+
+**Epic:** `bd_1-scaffolding-dgv` — 7: Quality grader (rubric scoring of surviving artifacts).
+
+**Tasks (parent = epic):**
+
+| Story | Beads ID | Depends on |
+|---|---|---|
+| US-001 | `bd_1-scaffolding-dgv.1` | (none — entry point) |
+| US-002 | `bd_1-scaffolding-dgv.2` | US-001 |
+| US-003 | `bd_1-scaffolding-dgv.3` | US-001, US-002 |
+| US-004 | `bd_1-scaffolding-dgv.4` | US-002, US-003 |
+| US-005 | `bd_1-scaffolding-dgv.5` | US-003 |
+| US-006 | `bd_1-scaffolding-dgv.6` | US-001, US-002 |
+| US-007 | `bd_1-scaffolding-dgv.7` | US-001, US-002 |
+| US-008 | `bd_1-scaffolding-dgv.8` | US-001..US-007 |
+| US-009 | `bd_1-scaffolding-dgv.9` | US-007, US-008 |
+| US-010 | `bd_1-scaffolding-dgv.10` | US-008 |
+| US-011 | `bd_1-scaffolding-dgv.11` | US-004, US-008 |
+| US-012 (Quality Gate) | `bd_1-scaffolding-dgv.12` | US-001..US-011 |
+| US-013 (Patterns & Memory) | `bd_1-scaffolding-dgv.13` | US-012 |
+
+**Initial ready set:** `bd_1-scaffolding-dgv.1` (US-001 — scaffold). Confirmed via `bd ready`.
