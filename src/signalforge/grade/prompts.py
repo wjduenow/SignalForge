@@ -207,6 +207,70 @@ def _find_column(candidate: CandidateSchema, column_name: str):  # type: ignore[
     return None
 
 
+def _resolve_test_match(
+    *,
+    matches: list,  # type: ignore[type-arg]
+    supplied_hash: str | None,
+    artifact_id: str,
+    scope_label: str,
+):
+    """Resolve a (artifact_id-supplied) test match to a single CandidateTest.
+
+    Per DEC-009 and the QG pass-2 fix, when two tests in the same scope
+    (model-level or same-column) share a ``test.type``, the canonical
+    artifact_id appends an ``args_hash`` suffix to disambiguate. The
+    formatter is :func:`signalforge.grade.engine._model_test_args_hash`;
+    this resolver re-runs the same hash on every candidate match and
+    keeps only the one whose hash agrees with ``supplied_hash``.
+
+    Lazy-imports ``_model_test_args_hash`` from :mod:`signalforge.grade.engine`
+    inside the function to avoid the prompts → engine import cycle at
+    module load time. The cycle is structural — engine consumes prompts
+    for its rendering helpers — so the hash stays in engine; this
+    resolver pays a one-call attribute lookup to use it.
+
+    Returns the matched test's ``rationale`` (empty string when ``None``).
+    Raises :class:`GradeOutputError` with ``unknown_artifact_id`` when no
+    test matches and ``ambiguous_artifact_id`` when the hash is missing
+    against multiple candidates or doesn't agree with any candidate.
+    """
+    if not matches:
+        raise GradeOutputError(
+            f"No {scope_label} test for artifact_id {artifact_id!r}.",
+            violation_type="unknown_artifact_id",
+        )
+    if len(matches) == 1:
+        return matches[0].rationale or ""
+    if supplied_hash is None:
+        raise GradeOutputError(
+            f"Ambiguous artifact_id {artifact_id!r}: {len(matches)} {scope_label} "
+            "tests of this type; an args_hash suffix is required to disambiguate.",
+            violation_type="ambiguous_artifact_id",
+        )
+    # Multiple matches + supplied hash — re-run the canonical hash and
+    # keep only the test(s) whose hash agrees with the suffix in
+    # artifact_id. Exact duplicates carry an ordinal suffix (``<hash>:<n>``)
+    # in the artifact_id; strip it to compare against the bare hash and
+    # then return any matching test (exact duplicates have identical
+    # rationale text by definition).
+    from signalforge.grade.engine import _model_test_args_hash  # noqa: PLC0415
+
+    base_hash = supplied_hash.split(":", 1)[0]
+    filtered = [t for t in matches if _model_test_args_hash(t) == base_hash]
+    if not filtered:
+        raise GradeOutputError(
+            f"No {scope_label} test in artifact_id {artifact_id!r} matches the "
+            f"supplied args_hash {supplied_hash!r}.",
+            violation_type="unknown_artifact_id",
+        )
+    # Multiple matches at this point means exact duplicates (same type,
+    # same args → identical hash). Their rationale is identical, so
+    # returning the first match is correct. The orchestrator's
+    # ``_test_args_hashes`` ordinal suffix keeps JSONL records unique
+    # even though the resolver can't distinguish them on read.
+    return filtered[0].rationale or ""
+
+
 def extract_artifact_text(
     artifact_id: str,
     candidate: CandidateSchema,
@@ -273,7 +337,8 @@ def extract_artifact_text(
     # The 5-part variant carries an args_hash disambiguator when two
     # tests on the same column share a test.type (DEC-009 / QG pass 2 fix).
     if (len(parts) == 4 or len(parts) == 5) and parts[0] == "test" and parts[1] == "column":
-        _, _, col_name, test_type, *_rest = parts
+        _, _, col_name, test_type, *rest = parts
+        supplied_hash: str | None = rest[0] if rest else None
         column = _find_column(candidate, col_name)
         if column is None:
             raise GradeOutputError(
@@ -282,58 +347,23 @@ def extract_artifact_text(
                 violation_type="unknown_artifact_id",
             )
         matches = [t for t in column.tests if t.type == test_type]
-        if not matches:
-            raise GradeOutputError(
-                f"No test of type {test_type!r} on column {col_name!r} for "
-                f"artifact_id {artifact_id!r}.",
-                violation_type="unknown_artifact_id",
-            )
-        if len(matches) > 1 and len(parts) == 4:
-            raise GradeOutputError(
-                f"Ambiguous artifact_id {artifact_id!r}: {len(matches)} tests "
-                f"of type {test_type!r} on column {col_name!r}; an args_hash "
-                "suffix is required to disambiguate.",
-                violation_type="ambiguous_artifact_id",
-            )
-        # When args_hash is supplied, the orchestrator's formatter
-        # guarantees a unique match. The resolver doesn't recompute it
-        # (avoids coupling); it just routes to the first match. Callers
-        # that need rigorous matching can extend this when v0.2 adds a
-        # cross-stage args-hash recompute helper.
-        return matches[0].rationale or ""
+        return _resolve_test_match(
+            matches=matches,
+            supplied_hash=supplied_hash,
+            artifact_id=artifact_id,
+            scope_label=f"column {col_name!r}",
+        )
 
     # test.model.<test_type>[.<args_hash>]
     if (len(parts) == 3 or len(parts) == 4) and parts[0] == "test" and parts[1] == "model":
         test_type = parts[2]
-        # args_hash (parts[3]) is informational at this resolver — a
-        # uniqueness disambiguator. The canonical formatter ships in
-        # US-008; v0.1 just routes by (scope, test_type) and surfaces
-        # ambiguity loudly.
+        supplied_hash = parts[3] if len(parts) == 4 else None
         matches = [t for t in candidate.tests if t.type == test_type]
-        if not matches:
-            raise GradeOutputError(
-                f"No model-level test of type {test_type!r} for artifact_id {artifact_id!r}.",
-                violation_type="unknown_artifact_id",
-            )
-        if len(matches) > 1 and len(parts) == 3:
-            raise GradeOutputError(
-                f"Ambiguous artifact_id {artifact_id!r}: {len(matches)} "
-                f"model-level tests of type {test_type!r}; an args_hash "
-                "suffix is required to disambiguate.",
-                violation_type="ambiguous_artifact_id",
-            )
-        # When args_hash is supplied, US-008's formatter guarantees a
-        # unique match — but US-005's resolver doesn't compute it, so we
-        # accept the first matching test if there's only one.
-        if len(matches) == 1:
-            return matches[0].rationale or ""
-        # len > 1 with args_hash: v0.1 cannot disambiguate without the
-        # formatter; surface as ambiguous. US-008 will tighten this once
-        # _artifact_id_for(...) ships.
-        raise GradeOutputError(
-            f"Ambiguous artifact_id {artifact_id!r}: cannot resolve "
-            "args_hash suffix without the canonical formatter (US-008).",
-            violation_type="ambiguous_artifact_id",
+        return _resolve_test_match(
+            matches=matches,
+            supplied_hash=supplied_hash,
+            artifact_id=artifact_id,
+            scope_label="model-level",
         )
 
     raise GradeOutputError(

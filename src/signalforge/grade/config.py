@@ -63,6 +63,7 @@ construction tags and is unsafe for any input we don't fully control.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Literal
 
@@ -184,6 +185,11 @@ class GradeConfig(BaseModel):
     @field_validator("min_pass_rate", "min_mean_score")
     @classmethod
     def _bounded_unit(cls, v: float) -> float:
+        # NaN and infinities slip through the bare ``<`` / ``>`` comparisons
+        # (NaN is unordered; both `nan < 0.0` and `nan > 1.0` are False),
+        # so reject non-finite values up-front.
+        if not math.isfinite(v):
+            raise ValueError("must be a finite number in the closed interval [0.0, 1.0]")
         if v < 0.0 or v > 1.0:
             raise ValueError("must be in the closed interval [0.0, 1.0]")
         return v

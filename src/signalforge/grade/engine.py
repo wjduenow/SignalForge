@@ -275,7 +275,7 @@ def _test_args_hashes(candidate: CandidateSchema) -> dict[int, str | None]:
     run so the orchestrator's iteration loop and the GradeEvent
     construction agree on artifact_id shape.
 
-    Collision rules (DEC-009 + QG pass 2 fix):
+    Collision rules (DEC-009 + QG pass 2 fix + post-PR-review fix):
 
     * Two model-level tests with the same ``test.type`` collide
       regardless of args (e.g. two ``accepted_values`` on different
@@ -286,23 +286,44 @@ def _test_args_hashes(candidate: CandidateSchema) -> dict[int, str | None]:
     * A model-level test does NOT collide with a column-scope test
       because the artifact_id prefix differs (``test.model.`` vs
       ``test.column.``).
+    * **Exact duplicates** (same type, same args → identical
+      blake2b-4 hash) get an ordinal suffix appended to the hash
+      (``<hash>:<n>``) so artifact_ids stay globally unique even when
+      a candidate carries two semantically identical tests. Without
+      this, the JSONL ``(run_id, artifact_id, criterion_id)`` triple
+      would collide and the diff renderer (#8) couldn't distinguish
+      the records.
     """
     out: dict[int, str | None] = {}
 
-    # Model-level: collide on shared test.type.
-    model_type_counts: dict[str, int] = {}
-    for test in candidate.tests:
-        model_type_counts[test.type] = model_type_counts.get(test.type, 0) + 1
-    for test in candidate.tests:
-        out[id(test)] = _model_test_args_hash(test) if model_type_counts[test.type] > 1 else None
+    def _assign(
+        tests: tuple[CandidateTest, ...],
+    ) -> None:
+        """Assign args_hash (with ordinal disambiguator on collision)
+        to every test in ``tests`` whose type appears more than once.
+        """
+        type_counts: dict[str, int] = {}
+        for test in tests:
+            type_counts[test.type] = type_counts.get(test.type, 0) + 1
+        # Track per-(type, hash) ordinals so exact duplicates get suffixed.
+        seen: dict[tuple[str, str], int] = {}
+        for test in tests:
+            if type_counts[test.type] <= 1:
+                out[id(test)] = None
+                continue
+            base_hash = _model_test_args_hash(test)
+            key = (test.type, base_hash)
+            seen[key] = seen.get(key, 0) + 1
+            ordinal = seen[key]
+            # First occurrence keeps the bare hash; second+ gets
+            # ":1", ":2", ... suffix. The first occurrence is the
+            # common case (no exact duplicate) and we want its
+            # artifact_id to read as just the base hash.
+            out[id(test)] = base_hash if ordinal == 1 else f"{base_hash}:{ordinal - 1}"
 
-    # Column-level: collide on shared (column, test.type).
+    _assign(candidate.tests)
     for column in candidate.columns:
-        per_col_counts: dict[str, int] = {}
-        for test in column.tests:
-            per_col_counts[test.type] = per_col_counts.get(test.type, 0) + 1
-        for test in column.tests:
-            out[id(test)] = _model_test_args_hash(test) if per_col_counts[test.type] > 1 else None
+        _assign(column.tests)
 
     return out
 

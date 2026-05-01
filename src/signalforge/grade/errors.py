@@ -133,12 +133,11 @@ class GradeRubricError(GradeError):
     """
 
     default_remediation: ClassVar[str] = (
-        "Inspect the rubric YAML referenced by `grade.rubric_path`. Common "
-        "causes: duplicate `criterion_id`, a criterion entry given as a bare "
-        "string instead of a mapping, an unsupported `rubric_schema_version`. "
-        "Each criterion must be a mapping with at least `id`, `description`, "
-        "and `weight`. See docs/grade-ops.md for the rubric schema reference "
-        "once US-003 lands."
+        "Inspect the `grade.rubric` block in signalforge.yml (or the explicit "
+        "`rubric=` argument to `grade_artifacts`). Each criterion must be a "
+        "mapping with non-empty `id` and `criterion` fields (DEC-017). Common "
+        "causes: duplicate `id`, bare-string entries, an empty rubric. See "
+        "docs/grade-ops.md for the rubric schema reference."
     )
 
 
@@ -295,11 +294,13 @@ class GradeAuditWriteError(GradeError):
     """
 
     default_remediation: ClassVar[str] = (
-        "Verify the grade-audit path (<project>/.signalforge/grade.jsonl) is "
-        "writable (permissions / disk space / SELinux contexts) and re-run. "
-        "The grade run is intentionally aborted when the audit write fails — "
-        "re-running after fixing the underlying I/O issue is the supported "
-        "recovery path."
+        "Verify the target audit file is writable (permissions / disk space / "
+        "SELinux contexts) and re-run. Two writers share this error class: "
+        "the per-decision JSONL audit (default <project>/.signalforge/"
+        "grade.jsonl) and the end-of-run sidecar JSON (default <project>/"
+        ".signalforge/grade.json). The grade run is intentionally aborted "
+        "when either write fails — re-running after fixing the underlying "
+        "I/O issue is the supported recovery path."
     )
 
     def __init__(
@@ -349,11 +350,22 @@ class GradeAuditRecordTooLargeError(GradeError):
         self.limit = limit
         message = f"Grade audit record size {size} exceeds atomic-append limit {limit}."
         if remediation is None:
-            remediation = (
-                f"Grade-audit records must stay under {limit} bytes for "
-                "atomic concurrent appends; reduce the reasoning payload or "
-                "trim the one_line_why summary."
-            )
+            # Two writers share this error class with different caps:
+            #   * JSONL writer  → 4 000 bytes (POSIX-atomic-append guarantee)
+            #   * Sidecar JSON  → 1 000 000 bytes (single-doc; no concurrent-append contract)
+            # Branch the remediation so the operator gets actionable advice.
+            if limit == 4000:
+                remediation = (
+                    f"Grade-audit JSONL records must stay under {limit} bytes for "
+                    "atomic concurrent appends (POSIX PIPE_BUF). Reduce the "
+                    "reasoning payload or trim the one_line_why summary."
+                )
+            else:
+                remediation = (
+                    f"The grade sidecar JSON exceeded its {limit}-byte cap. "
+                    "Trim oversized reasoning/evidence fields on per-criterion "
+                    "results, or split the run across smaller candidates."
+                )
         super().__init__(message, remediation=remediation)
 
 

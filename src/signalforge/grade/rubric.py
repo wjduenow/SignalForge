@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections import Counter
 from typing import Final, TypeAlias
 
@@ -78,6 +79,13 @@ class Criterion(BaseModel):
         # message specific enough to localise the bad field.
         if not v or not v.strip():
             raise ValueError("must be a non-empty, non-whitespace string")
+        # NUL bytes would create separator collisions in
+        # ``signalforge.grade.prompts.criterion_prompt_hash`` (which uses
+        # ``"\x00"`` as a domain separator between id / criterion / envelope
+        # tags). Rejecting NUL at the validator boundary keeps the hash
+        # contract honest without requiring a separate-arena hash.
+        if "\x00" in v:
+            raise ValueError("must not contain NUL bytes")
         return v
 
 
@@ -116,7 +124,10 @@ class GradeThresholds(BaseModel):
         # The aggregate scoring lives on a [0.0, 1.0] scale (see
         # GradingReport's pass_rate / mean_score computed fields). A
         # threshold outside that range is a configuration error, not a
-        # surprising-but-valid request.
+        # surprising-but-valid request. NaN/inf slip through bare
+        # comparisons (NaN unordered) so reject non-finite up-front.
+        if not math.isfinite(v):
+            raise ValueError("must be a finite number in the closed interval [0.0, 1.0]")
         if v < 0.0 or v > 1.0:
             raise ValueError("must be in the closed interval [0.0, 1.0]")
         return v

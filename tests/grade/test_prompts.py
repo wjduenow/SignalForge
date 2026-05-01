@@ -504,3 +504,90 @@ def test_extract_artifact_text_ambiguous_model_level_test_raises() -> None:
             _PRUNE_SENTINEL,  # type: ignore[arg-type]
         )
     assert excinfo.value.violation_type == "ambiguous_artifact_id"
+
+
+# ---------------------------------------------------------------------------
+# PR-review fix: extract_artifact_text filters by args_hash (round-trip)
+# ---------------------------------------------------------------------------
+
+
+def test_extract_artifact_text_filters_by_args_hash_for_model_collision() -> None:
+    """Two model-level accepted_values tests with different values
+    produce distinct artifact_ids (engine adds args_hash). The resolver
+    re-runs the same hash and routes to the right test by content.
+
+    Regression for PR #24 review (Copilot/CodeRabbit): the resolver
+    previously returned ``matches[0]`` blindly when len(matches) > 1
+    and an args_hash was supplied — breaking the orchestrator's
+    formatter → resolver round-trip claim.
+    """
+    from signalforge.grade.engine import _model_test_args_hash, _stable_artifact_pairs
+
+    av1 = CandidateTestAcceptedValues(column="status", values=("a", "b"), rationale="rat-1")
+    av2 = CandidateTestAcceptedValues(column="region", values=("us", "eu"), rationale="rat-2")
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(CandidateColumn(name="status", description="status"),),
+        tests=(av1, av2),
+    )
+    pairs = dict(_stable_artifact_pairs(candidate))
+    aid_1 = f"test.model.accepted_values.{_model_test_args_hash(av1)}"
+    aid_2 = f"test.model.accepted_values.{_model_test_args_hash(av2)}"
+    assert aid_1 in pairs and aid_2 in pairs
+    text_1 = extract_artifact_text(aid_1, candidate, _PRUNE_SENTINEL)  # type: ignore[arg-type]
+    text_2 = extract_artifact_text(aid_2, candidate, _PRUNE_SENTINEL)  # type: ignore[arg-type]
+    assert text_1 == "rat-1"
+    assert text_2 == "rat-2"
+
+
+def test_extract_artifact_text_filters_by_args_hash_for_column_collision() -> None:
+    """Same round-trip property at column scope (QG pass 2 fix)."""
+    from signalforge.grade.engine import _model_test_args_hash, _stable_artifact_pairs
+
+    av1 = CandidateTestAcceptedValues(column="status", values=("a", "b"), rationale="col-rat-1")
+    av2 = CandidateTestAcceptedValues(column="status", values=("c", "d"), rationale="col-rat-2")
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(CandidateColumn(name="status", description="s", tests=(av1, av2)),),
+        tests=(),
+    )
+    pairs = dict(_stable_artifact_pairs(candidate))
+    aid_1 = f"test.column.status.accepted_values.{_model_test_args_hash(av1)}"
+    aid_2 = f"test.column.status.accepted_values.{_model_test_args_hash(av2)}"
+    assert aid_1 in pairs and aid_2 in pairs
+    text_1 = extract_artifact_text(aid_1, candidate, _PRUNE_SENTINEL)  # type: ignore[arg-type]
+    text_2 = extract_artifact_text(aid_2, candidate, _PRUNE_SENTINEL)  # type: ignore[arg-type]
+    assert text_1 == "col-rat-1"
+    assert text_2 == "col-rat-2"
+
+
+def test_stable_artifact_pairs_exact_duplicate_tests_get_ordinal_suffix() -> None:
+    """Two semantically identical tests on the same column produce
+    distinct artifact_ids via the ordinal-suffix disambiguator
+    (``<hash>:<n>``). Without this, the JSONL ``(run_id, artifact_id,
+    criterion_id)`` triple would collide for exact duplicates.
+
+    Regression for PR #24 review (CodeRabbit): "Exact duplicate tests
+    still collide after args_hash disambiguation."
+    """
+    from signalforge.grade.engine import _stable_artifact_pairs
+
+    # Two semantically identical accepted_values on the same column.
+    av1 = CandidateTestAcceptedValues(column="status", values=("a", "b"))
+    av2 = CandidateTestAcceptedValues(column="status", values=("a", "b"))
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(CandidateColumn(name="status", description="s", tests=(av1, av2)),),
+        tests=(),
+    )
+    pairs = _stable_artifact_pairs(candidate)
+    column_test_ids = [aid for aid, _ in pairs if aid.startswith("test.column.")]
+    assert len(column_test_ids) == 2
+    # Distinct (no collision) and second one carries the ordinal suffix.
+    assert column_test_ids[0] != column_test_ids[1]
+    bare, ordinal = column_test_ids
+    assert ":" not in bare
+    assert ordinal.endswith(":1")

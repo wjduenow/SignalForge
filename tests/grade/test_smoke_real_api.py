@@ -70,7 +70,10 @@ def test_grade_artifacts_real_api_smoke(tmp_path: Path) -> None:
     :func:`signalforge.grade.grade_artifacts` and asserts only that
     the typed sidecar parses cleanly and the JSONL audit landed.
     """
-    if "ANTHROPIC_API_KEY" not in os.environ:
+    # Treat empty / whitespace-only env values as "unset" — an empty
+    # ANTHROPIC_API_KEY would still pass ``"in os.environ"`` but produce
+    # a noisy auth failure on the live call. Skip cleanly in that case.
+    if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
         pytest.skip("ANTHROPIC_API_KEY not set")
 
     # Tiny manifest model — only the fields the grader's pipeline reads.
