@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import pytest
 
-from signalforge.errors import SignalForgeError
 from signalforge.prune.errors import (
     PruneAuditRecordTooLargeError,
     PruneAuditWriteError,
@@ -105,8 +104,9 @@ def test_prune_audit_record_too_large_error_carries_size_and_limit() -> None:
 
 
 def test_subclass_inheritance_chain() -> None:
-    """Every prune error subclasses ``PruneError`` (and through it,
-    :class:`signalforge.errors.SignalForgeError`).
+    """Every prune error subclasses :class:`PruneError`, which itself
+    subclasses ``Exception`` directly — same per-layer pattern as
+    ``SafetyError``, ``DraftError``, ``WarehouseError``, ``ManifestError``.
 
     ``PruneTrustedModelNotFoundError`` is a :class:`PruneConfigError`
     subclass so callers that catch "any config-shaped failure" get
@@ -117,4 +117,4 @@ def test_subclass_inheritance_chain() -> None:
     assert issubclass(PruneTimeoutError, PruneError)
     assert issubclass(PruneAuditWriteError, PruneError)
     assert issubclass(PruneAuditRecordTooLargeError, PruneError)
-    assert issubclass(PruneError, SignalForgeError)
+    assert issubclass(PruneError, Exception)

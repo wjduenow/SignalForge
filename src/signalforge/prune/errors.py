@@ -27,8 +27,6 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from signalforge.errors import SignalForgeError
-
 
 def _format_value(v: object) -> str:
     """Quote a user-supplied value via ``repr()`` for safe inclusion in
@@ -44,7 +42,7 @@ def _format_value(v: object) -> str:
     return repr(v)
 
 
-class PruneError(SignalForgeError):
+class PruneError(Exception):
     """Base class for all prune-layer errors.
 
     Subclasses set a class-level ``default_remediation`` string; instances
