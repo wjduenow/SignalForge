@@ -1,16 +1,54 @@
-"""SignalForge prune layer.
+"""SignalForge prune layer — drop always-pass and known-clean-fail
+candidate tests against warehouse data.
 
-The signal-vs-volume gate. Runs every candidate test from the drafter against
-real warehouse data via the warehouse adapter and drops the ones with no
-signal: tests that always pass on warehouse samples, tests that fail on
-known-clean data, and tests whose required parent data does not yet exist.
-Conservative defaults keep tests we cannot evaluate (`kept-without-evidence`)
-rather than silently dropping them, and every kept/dropped test ships with a
-structured `PruneDecision` carrying the drop reason, failure count, scope, and
-the literal compiled SQL so downstream stages (#7 grader, #8 diff renderer) can
-explain every artifact.
+Public API (issue #6 ticket; ``v0.1``):
 
-Public API lands in US-013; this module currently re-exports nothing.
+* :func:`prune_tests` — orchestrator; runs every candidate test against
+  the warehouse and emits a :class:`PruneResult` with kept/dropped
+  decisions and per-decision rationale.
+* :class:`PruneResult`, :class:`PruneDecision` — typed result shapes.
+* :class:`PruneConfig`, :func:`load_prune_config` — user config.
+* :data:`DropReason`, :data:`Scope` — discriminator literals.
+* :class:`PruneEvent` — fail-closed JSONL audit record (constructed
+  ONLY by ``signalforge.prune.audit``; AST-gated per DEC-018).
+* :class:`PruneError` and the five concrete error classes.
 
-See plans/super/6-prune-engine.md for the full design.
+See ``plans/super/6-prune-engine.md`` for the full design.
 """
+
+from signalforge.prune.audit import PruneEvent
+from signalforge.prune.config import PruneConfig, load_prune_config
+from signalforge.prune.engine import prune_tests
+from signalforge.prune.errors import (
+    PruneAuditRecordTooLargeError,
+    PruneAuditWriteError,
+    PruneConfigError,
+    PruneError,
+    PruneTimeoutError,
+    PruneTrustedModelNotFoundError,
+)
+from signalforge.prune.models import (
+    DropReason,
+    PruneDecision,
+    PruneResult,
+    Scope,
+)
+
+__all__ = (
+    # Public API
+    "prune_tests",
+    "PruneResult",
+    "PruneDecision",
+    "PruneConfig",
+    "load_prune_config",
+    "DropReason",
+    "Scope",
+    "PruneEvent",
+    # Errors
+    "PruneError",
+    "PruneConfigError",
+    "PruneTrustedModelNotFoundError",
+    "PruneTimeoutError",
+    "PruneAuditWriteError",
+    "PruneAuditRecordTooLargeError",
+)
