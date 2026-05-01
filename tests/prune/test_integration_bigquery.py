@@ -51,8 +51,20 @@ from signalforge.warehouse.adapters.bigquery import BigQueryAdapter
 _SF_RUN_BQ_REASON = "requires SF_RUN_BQ=1 and ADC"
 
 
+def _bq_runs_enabled() -> bool:
+    """Return ``True`` when the user opted into BigQuery integration runs.
+
+    Restricts the set of "truthy" ``SF_RUN_BQ`` values to the explicit
+    affirmatives. The naive ``not os.environ.get("SF_RUN_BQ")`` would
+    treat ``SF_RUN_BQ=0``, ``SF_RUN_BQ=false``, ``SF_RUN_BQ=no`` as
+    truthy (any non-empty string) — surprising behaviour for a user
+    trying to turn the runs OFF.
+    """
+    return os.environ.get("SF_RUN_BQ", "").lower() in {"1", "true", "yes", "on"}
+
+
 @pytest.mark.bigquery
-@pytest.mark.skipif(not os.environ.get("SF_RUN_BQ"), reason=_SF_RUN_BQ_REASON)
+@pytest.mark.skipif(not _bq_runs_enabled(), reason=_SF_RUN_BQ_REASON)
 def test_prune_iowa_liquor_sales(tmp_path: Path) -> None:
     """End-to-end: two candidate tests against the public sales table.
 

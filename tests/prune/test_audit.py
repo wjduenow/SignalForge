@@ -242,6 +242,63 @@ def test_write_prune_event_concurrent_appends_atomic(tmp_path: Path) -> None:
         json.loads(line)
 
 
+def test_write_prune_event_loops_on_short_writes(tmp_path: Path) -> None:
+    """``os.write`` may return fewer bytes than requested (EINTR or
+    short-write semantics on some filesystems). The writer loops until
+    the full payload lands; the on-disk record must contain every byte.
+
+    Pre-fix behavior: a single ``os.write(fd, encoded)`` call assumed
+    the full payload was written. A short return would silently truncate
+    the JSONL line, leaving a torn audit record. Post-fix: loop while
+    ``written < len(encoded)``; raise on a zero-byte return (disk full
+    or unrecoverable I/O failure).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    real_write = os.write
+    call_count = {"n": 0}
+
+    def short_write(fd: int, data: bytes) -> int:
+        call_count["n"] += 1
+        # First call: write only half the bytes. Second call: write the
+        # remainder. Mirrors real-world EINTR / partial-write recovery.
+        if call_count["n"] == 1:
+            half = len(data) // 2
+            return real_write(fd, data[:half])
+        return real_write(fd, data)
+
+    with patch("signalforge.prune.audit.os.write", side_effect=short_write):
+        _write_prune_event(_make_event(), audit_path)
+
+    # The on-disk file carries the FULL JSONL line — nothing torn.
+    contents = audit_path.read_text(encoding="utf-8")
+    assert contents.endswith("\n")
+    assert len(contents.splitlines()) == 1
+    payload = json.loads(contents.splitlines()[0])
+    assert payload["audit_schema_version"] == 1
+    # The loop ran (at least two ``os.write`` calls — one short, one to
+    # complete).
+    assert call_count["n"] >= 2
+
+
+def test_write_prune_event_short_write_zero_bytes_raises(tmp_path: Path) -> None:
+    """A persistent zero-byte return from ``os.write`` raises ``OSError``
+    rather than spinning forever — the writer guards against an
+    infinite loop on a wedged file descriptor.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+
+    def stuck_write(fd: int, data: bytes) -> int:
+        return 0
+
+    with (
+        patch("signalforge.prune.audit.os.write", side_effect=stuck_write),
+        pytest.raises(OSError) as excinfo,
+    ):
+        _write_prune_event(_make_event(), audit_path)
+
+    assert "returned 0" in str(excinfo.value) or "disk full" in str(excinfo.value)
+
+
 def test_compute_config_hash_is_deterministic_and_16_hex() -> None:
     """:func:`_compute_config_hash` returns 16 hex characters and is
     deterministic across calls — matches safety's ``policy_hash`` (DEC-005).

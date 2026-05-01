@@ -34,12 +34,12 @@ WARNING fires at 500 MB so the figure shows up in the test log even on
 a successful run. US-014 (``docs/prune-ops.md``) folds the recorded
 figure into the cost-model section.
 
-If the post-call ``INFORMATION_SCHEMA.JOBS_BY_USER`` lookup fails (IAM,
-region availability, eventual-consistency lag, etc.), the test marks
-itself ``xfail`` with the documented reason rather than failing the
-suite — exposing ``total_bytes_billed`` cleanly via the adapter is a
-v0.2 concern (DEC-027 of issue #6, ``plans/super/6-prune-engine.md``)
-and out of scope for this story.
+The probe captures ``total_bytes_billed`` directly off the
+``QueryJob`` instance returned by ``client.query(...)`` — no
+``INFORMATION_SCHEMA.JOBS_BY_USER`` round-trip, no race against
+concurrent prune-stage jobs labelled with the same
+``signalforge_stage`` tag. The deliberate departure from the adapter's
+public ``sample_rows`` path is documented inline.
 """
 
 from __future__ import annotations
@@ -88,94 +88,81 @@ reviewer can decide whether v0.2 should escalate to Q4=C
 _LOGGER = logging.getLogger("signalforge.warehouse.test.cost_probe")
 
 
+def _bq_runs_enabled() -> bool:
+    """Return ``True`` when the user opted into BigQuery integration runs.
+
+    Restricts the set of "truthy" ``SF_RUN_BQ`` values to the explicit
+    affirmatives. The naive ``not os.environ.get("SF_RUN_BQ")`` would
+    treat ``SF_RUN_BQ=0``, ``SF_RUN_BQ=false``, ``SF_RUN_BQ=no`` as
+    truthy (any non-empty string) — surprising behaviour for a user
+    trying to turn the runs OFF.
+    """
+    return os.environ.get("SF_RUN_BQ", "").lower() in {"1", "true", "yes", "on"}
+
+
 # ---------------------------------------------------------------------------
 # Helpers.
 # ---------------------------------------------------------------------------
 
 
-def _adapter_billing_project(adapter: BigQueryAdapter) -> str:
-    """Return the billing project the adapter resolves to.
-
-    ``BigQueryAdapter`` does not expose its underlying client publicly;
-    we reach through the private ``_get_client`` to read ``project``
-    because the probe needs a region-qualified
-    ``INFORMATION_SCHEMA.JOBS_BY_USER`` lookup. This is test-only access
-    — production code routes through the adapter API.
-    """
-    # Accessing a private member is intentional: the probe is a
-    # diagnostic that lives outside the adapter's public contract.
-    client = adapter._get_client()  # noqa: SLF001
-    return str(client.project)
-
-
-def _lookup_total_bytes_billed(
+def _issue_sample_capture_bytes_billed(
     adapter: BigQueryAdapter,
     *,
-    started_after_epoch_s: float,
-) -> int | None:
-    """Query ``INFORMATION_SCHEMA.JOBS_BY_USER`` for the most recent
-    ``warehouse_sample`` job and return its ``total_bytes_billed``.
+    target: TableRef,
+    sample_size: int,
+) -> tuple[list[dict[str, Any]], int]:
+    """Issue the deterministic sample directly through the SDK shim and
+    return ``(rows, total_bytes_billed)``.
 
-    Returns ``None`` if no matching job is found (eventual-consistency
-    lag) or if the lookup itself fails for any reason — the caller then
-    ``xfail``s with the documented reason. We deliberately do NOT
-    propagate the exception: a probe that hard-fails on environmental
-    quirks (regional dataset availability, missing
-    ``bigquery.jobs.list`` permission, etc.) is worse than no probe.
+    The probe deliberately bypasses the adapter's public
+    :meth:`signalforge.warehouse.adapters.bigquery.BigQueryAdapter.sample_rows`
+    so it can read ``QueryJob.total_bytes_billed`` after the job
+    completes. The adapter's public surface drops the ``QueryJob``
+    after iterating its rows; widening the public API to expose job
+    stats is a v0.2 concern (DEC-027 of issue #6).
 
-    The query filters on the ``signalforge_stage`` label that
-    ``BigQueryAdapter._default_job_config`` stamps on every job
-    (DEC-015 of issue #3). Filtering by label scopes the result to the
-    sample we just issued without needing the job-id round-trip.
+    The probe replicates the adapter's deterministic-sample SQL shape
+    (DEC-006 of issue #3) byte-for-byte so the figure recorded matches
+    what production prune-stage runs will spend. Reading
+    ``total_bytes_billed`` straight off the ``QueryJob`` instance
+    eliminates the previous race where the
+    ``INFORMATION_SCHEMA.JOBS_BY_USER`` lookup could have attributed
+    bytes to the wrong job (a leftover prune-stage run, or a concurrent
+    process emitting the same ``signalforge_stage`` label).
     """
-    project = _adapter_billing_project(adapter)
-    # ``INFORMATION_SCHEMA.JOBS_BY_USER`` is region-qualified. We
-    # default to US (the multi-region the public ``bigquery-public-data``
-    # tables live in) when the adapter has no explicit location.
-    region = adapter._location or "US"  # noqa: SLF001
-    region_qualifier = f"region-{region.lower()}"
+    client = adapter._get_client()  # noqa: SLF001  # documented seam
+    table = client.get_table(target)
+    num_rows = getattr(table, "num_rows", None)
+    if not num_rows:
+        # Public dataset; this is a defensive guard rather than a
+        # production-relevant path. If ever it fires the probe
+        # short-circuits via xfail in the caller.
+        raise RuntimeError(
+            f"sample probe: public table {target.qualified_name!r} returned "
+            f"unknown num_rows; cannot derive bucket"
+        )
+    bucket = max(num_rows // sample_size, 1)
 
-    # ``creation_time`` is a TIMESTAMP; the probe records monotonic
-    # epoch seconds and we compare against TIMESTAMP_SECONDS at lookup.
     sql = (
-        f"SELECT total_bytes_billed "
-        f"FROM `{project}.{region_qualifier}.INFORMATION_SCHEMA.JOBS_BY_USER` "
-        f"WHERE creation_time >= TIMESTAMP_SECONDS(@since) "
-        f"AND EXISTS (SELECT 1 FROM UNNEST(labels) AS l "
-        f"WHERE l.key = 'signalforge_stage' AND l.value = 'warehouse_sample') "
-        f"ORDER BY creation_time DESC LIMIT 1"
+        f"SELECT * FROM `{target.qualified_name}` AS t "
+        f"WHERE MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), {bucket}) < 1 "
+        f"LIMIT {sample_size}"
     )
 
-    try:
-        # Build an ad-hoc query-parameterised job. We bypass the
-        # adapter's ``run_test_sql`` because the probe SQL is not a
-        # failing-rows test — it's a metadata read.
-        from google.cloud import bigquery  # type: ignore[import-not-found]
-
-        client = adapter._get_client()  # noqa: SLF001
-        job_config = bigquery.QueryJobConfig(
-            query_parameters=[
-                bigquery.ScalarQueryParameter("since", "INT64", int(started_after_epoch_s)),
-            ],
-            use_query_cache=False,
-        )
-        rows = list(client.query(sql, job_config=job_config).result())
-    except Exception as exc:  # pragma: no cover - environment-dependent
-        _LOGGER.info(
-            "INFORMATION_SCHEMA lookup failed; the probe will xfail. error_class=%s",
-            type(exc).__name__,
-        )
-        return None
-
-    if not rows:
-        return None
-    bytes_billed = getattr(rows[0], "total_bytes_billed", None)
-    if bytes_billed is None:
-        # The row exists but the column is null — for a non-dry-run
-        # query this should not happen, but treat as "unknown" rather
-        # than zero so the xfail path engages cleanly.
-        return None
-    return int(bytes_billed)
+    job = client.query(
+        sql,
+        job_config=adapter._default_job_config(stage="warehouse_sample"),  # noqa: SLF001
+    )
+    rows = list(job.result())  # consume to ensure completion
+    total_bytes_billed = getattr(job, "total_bytes_billed", None)
+    if total_bytes_billed is None:  # pragma: no cover - environment-dependent
+        # Non-dry-run jobs always populate this; if absent treat as
+        # unknown via -1 so the caller can xfail cleanly.
+        total_bytes_billed = -1
+    rows_dict: list[dict[str, Any]] = [
+        dict(r.items()) if hasattr(r, "items") else dict(r) for r in rows
+    ]
+    return rows_dict, int(total_bytes_billed)
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +172,7 @@ def _lookup_total_bytes_billed(
 
 @pytest.mark.bigquery
 @pytest.mark.skipif(
-    not os.environ.get("SF_RUN_BQ"),
+    not _bq_runs_enabled(),
     reason="set SF_RUN_BQ=1 to run BigQuery integration probes",
 )
 def test_sample_rows_bytes_billed_within_budget(
@@ -200,18 +187,23 @@ def test_sample_rows_bytes_billed_within_budget(
     * If ``bytes_billed >= 500 MB``, a WARNING fires carrying the figure
       so the run log records it for ``docs/prune-ops.md``.
 
-    If the post-call ``INFORMATION_SCHEMA`` lookup yields no row
-    (eventual-consistency lag) or fails for any other reason, the test
-    marks itself ``xfail`` with the documented reason. The probe is
-    documentation-grade: a missing figure is acceptable; a wrong figure
-    is not.
+    Uses the SDK seam directly (rather than the adapter's public
+    ``sample_rows``) so the ``QueryJob.total_bytes_billed`` figure can
+    be read off the just-issued job — no ``INFORMATION_SCHEMA``
+    round-trip, no race against concurrent prune-stage jobs labelled
+    with the same ``signalforge_stage`` tag. Adapter-side bytes_billed
+    exposure on the public surface remains a v0.2 concern (DEC-027 of
+    issue #6).
     """
     adapter = BigQueryAdapter()
 
-    started_at_epoch_s = time.time()
     started_at_monotonic = time.monotonic()
     with adapter:
-        rows: list[dict[str, Any]] = adapter.sample_rows(_TARGET, _SAMPLE_SIZE)
+        rows, bytes_billed = _issue_sample_capture_bytes_billed(
+            adapter,
+            target=_TARGET,
+            sample_size=_SAMPLE_SIZE,
+        )
     elapsed_s = time.monotonic() - started_at_monotonic
 
     # Belt-and-suspenders: the sampler must actually return rows. If
@@ -219,13 +211,12 @@ def test_sample_rows_bytes_billed_within_budget(
     assert rows, "expected at least one sampled row from a 30M-row table"
     assert len(rows) <= _SAMPLE_SIZE
 
-    bytes_billed = _lookup_total_bytes_billed(adapter, started_after_epoch_s=started_at_epoch_s)
-    if bytes_billed is None:
+    if bytes_billed < 0:  # pragma: no cover - environment-dependent
         pytest.xfail(
-            "bytes-billed retrieval via INFORMATION_SCHEMA.JOBS_BY_USER did "
-            "not return a matching row (IAM, regional availability, or "
-            "eventual-consistency lag). Adapter-side bytes_billed exposure "
-            "is a v0.2 concern (DEC-027 of issue #6)."
+            "QueryJob.total_bytes_billed was unavailable on the just-issued "
+            "sample job (rare; non-dry-run jobs populate this field). "
+            "Adapter-side bytes_billed exposure is a v0.2 concern (DEC-027 of "
+            "issue #6)."
         )
 
     _LOGGER.info(
