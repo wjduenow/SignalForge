@@ -73,7 +73,13 @@ def make_real_client(
         raise WarehouseAuthError(message=str(exc)) from exc
 
 
-def make_query_job_config(*, max_bytes_billed: int, stage: str, version: str | None = None) -> Any:
+def make_query_job_config(
+    *,
+    max_bytes_billed: int,
+    stage: str,
+    version: str | None = None,
+    timeout_ms: int | None = None,
+) -> Any:
     """Build a ``QueryJobConfig`` with DEC-015 defaults.
 
     ``use_query_cache=False`` is non-negotiable — Architectural Commitment
@@ -86,6 +92,21 @@ def make_query_job_config(*, max_bytes_billed: int, stage: str, version: str | N
     every ``.`` with ``_``. When ``version`` is omitted, the helper
     resolves the running ``signalforge.__version__`` so the unit test
     can call this function without an integration-tier ``version=`` kwarg.
+
+    ``timeout_ms`` (DEC-013 of issue #6, AR-B2): when not ``None``, set
+    ``QueryJobConfig.job_timeout_ms`` so BigQuery cancels the job
+    server-side at expiry. The default ``None`` leaves
+    ``job_timeout_ms`` unset (no server-side timeout). BigQuery cancels
+    at the timeout, but bytes scanned through the cancellation point
+    still bill — set conservatively. Used by the prune layer (#6) for
+    per-test budget enforcement; the warehouse adapter itself never
+    sets a timeout for its own ``sample_rows`` / ``column_stats`` /
+    ``run_test_sql`` calls.
+
+    The pyright-noise comment for the loosely-typed ``job_timeout_ms``
+    SDK attribute stays confined to this file (DEC-019 / DEC-012
+    convention — ``_client.py`` is the single SDK-noise-confinement
+    seam). The rest of the warehouse subpackage stays type-clean.
     """
     from google.cloud import bigquery  # type: ignore[import-not-found]
 
@@ -94,7 +115,7 @@ def make_query_job_config(*, max_bytes_billed: int, stage: str, version: str | N
 
         version = _pkg_version
 
-    return bigquery.QueryJobConfig(  # type: ignore[no-any-return]
+    job_config = bigquery.QueryJobConfig(  # type: ignore[no-any-return]
         use_query_cache=False,
         maximum_bytes_billed=max_bytes_billed,
         labels={
@@ -102,6 +123,12 @@ def make_query_job_config(*, max_bytes_billed: int, stage: str, version: str | N
             "signalforge_version": version.replace(".", "_"),
         },
     )
+    if timeout_ms is not None:
+        # The BigQuery SDK's QueryJobConfig.job_timeout_ms is loosely typed
+        # (str | int property under the hood); the type-ignore stays
+        # confined to this seam.
+        job_config.job_timeout_ms = timeout_ms  # pyright: ignore[reportAttributeAccessIssue]
+    return job_config
 
 
 def map_bq_exception(exc: Exception, *, context: dict[str, Any] | None = None) -> Exception:
