@@ -1,0 +1,1 @@
+SELECT `customer_id` FROM `fake_project.dataset.orders` WHERE `customer_id` IS NULL
