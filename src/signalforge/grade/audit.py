@@ -56,7 +56,7 @@ from typing import Final
 
 from signalforge import __version__ as _SIGNALFORGE_VERSION
 from signalforge.grade.errors import GradeAuditRecordTooLargeError, GradeAuditWriteError
-from signalforge.grade.models import GradeEvent
+from signalforge.grade.models import GradeEvent, GradingReport
 from signalforge.warehouse._path_safety import canonicalise_path
 from signalforge.warehouse.errors import ProfileNotFoundError
 
@@ -70,6 +70,14 @@ _LOGGER = logging.getLogger(__name__)
 # ``signalforge.draft.audit._RESPONSE_AUDIT_RECORD_LIMIT_BYTES``, and
 # ``signalforge.prune.audit._PRUNE_AUDIT_RECORD_LIMIT_BYTES`` by design.
 _GRADE_AUDIT_RECORD_LIMIT_BYTES: Final[int] = 4000
+
+# The sidecar JSON is end-of-run only — single document per run, no
+# concurrent-append contract — so the cap is much larger than the JSONL
+# audit's ``PIPE_BUF``-bound 4 KiB limit. 1 MiB keeps a runaway report
+# (e.g. an LLM that returned multi-paragraph reasoning for thousands of
+# pairs) from quietly filling the project tree, but is wide enough that
+# every realistic v0.1 ``GradingReport`` lands well under the cap.
+_GRADE_SIDECAR_RECORD_LIMIT_BYTES: Final[int] = 1_000_000
 
 
 def _build_grade_event(
@@ -258,9 +266,98 @@ def write_grade_event(event: GradeEvent, *, audit_path: Path) -> None:
             os.close(fd)
 
 
+def write_grading_report(report: GradingReport, *, sidecar_path: Path) -> None:
+    """Write the per-run sidecar JSON document. Fail-closed (DEC-012).
+
+    Mirrors :func:`write_grade_event` shape — pre-flight size check,
+    symlink-hardened path canonicalisation, ``mkdir -p`` of the parent
+    directory, ``os.open`` + single ``os.write`` (looped on short
+    returns) + ``os.fsync`` + ``os.close``. The differences from the
+    JSONL writer:
+
+    * Single-document overwrite, not append. Uses ``O_WRONLY | O_CREAT
+      | O_TRUNC`` so a re-run replaces the prior sidecar atomically
+      (subject to the platform's truncate semantics).
+    * Larger size cap (:data:`_GRADE_SIDECAR_RECORD_LIMIT_BYTES`) — a
+      sidecar can carry many results' worth of evidence / reasoning;
+      the JSONL writer's 4 KiB ``PIPE_BUF`` constraint does not apply
+      since there is no concurrent-append contract.
+    * Called once per run by the orchestrator (US-008) at the end of
+      iteration.
+
+    Failure semantics are identical to the JSONL writer:
+
+    * Oversize → :class:`GradeAuditRecordTooLargeError` BEFORE any
+      file open. No on-disk artefact.
+    * Path symlink-escape / cycle → :class:`GradeAuditWriteError`
+      wrapping the underlying :class:`ProfileNotFoundError`.
+    * All other I/O failures (``OSError`` /
+      ``PermissionError`` / encoding failures) propagate raw — the
+      orchestrator wraps them in its own :class:`GradeAuditWriteError`
+      with the run-context-specific message.
+
+    Args:
+        report: the :class:`GradingReport` to persist.
+        sidecar_path: target sidecar path. Conventionally
+            ``<project>/.signalforge/grade.json`` (DEC-012). Must reside
+            inside the project tree (``sidecar_path.parent.parent``);
+            the writer refuses paths that escape via symlink.
+    """
+    # Serialise via Pydantic's JSON serialiser so ``datetime`` /
+    # computed fields render correctly. Trailing newline keeps the
+    # document POSIX-newline-terminated for downstream tooling.
+    body = report.model_dump_json(by_alias=True) + "\n"
+    encoded = body.encode("utf-8")
+
+    # Size check BEFORE any file open. Mirrors the JSONL writer.
+    if len(encoded) > _GRADE_SIDECAR_RECORD_LIMIT_BYTES:
+        raise GradeAuditRecordTooLargeError(
+            size=len(encoded),
+            limit=_GRADE_SIDECAR_RECORD_LIMIT_BYTES,
+        )
+
+    # Path canonicalisation BEFORE any file open. Project root is
+    # ``sidecar_path.parent.parent`` (matches the JSONL writer's
+    # convention — sidecar lives at <project>/.signalforge/grade.json).
+    sidecar_path = Path(sidecar_path)
+    project_dir = sidecar_path.parent.parent
+    try:
+        canonical_path = canonicalise_path(sidecar_path, project_dir=project_dir)
+    except ProfileNotFoundError as exc:
+        raise GradeAuditWriteError(
+            (f"Grade sidecar path {sidecar_path!r} failed symlink/containment validation."),
+            cause=exc,
+        ) from exc
+
+    # Ensure the parent directory exists. Idempotent.
+    canonical_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Single-document overwrite. ``O_TRUNC`` zero-lengths the file on
+    # open; ``0o600`` keeps ownership owner-only. No try/except — any
+    # syscall failure propagates so the caller wraps with run-context.
+    fd = os.open(
+        str(canonical_path),
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    try:
+        written = 0
+        while written < len(encoded):
+            n = os.write(fd, encoded[written:])
+            if n == 0:
+                raise OSError("os.write returned 0 — disk full or other I/O failure")
+            written += n
+        os.fsync(fd)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
 # Sorted alphabetically (mirrors the convention enforced by sibling modules).
 __all__ = (
     "_GRADE_AUDIT_RECORD_LIMIT_BYTES",
+    "_GRADE_SIDECAR_RECORD_LIMIT_BYTES",
     "_build_grade_event",
     "write_grade_event",
+    "write_grading_report",
 )

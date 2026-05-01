@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "orders",
+  "description": "Order events emitted by the storefront checkout pipeline.",
+  "rationale": "Each row is one completed checkout, keyed on order_id. Documenting model-level shape so downstream marts have a stable contract.",
+  "columns": [
+    {
+      "name": "order_id",
+      "description": "Surrogate primary key for one completed checkout.",
+      "rationale": "Required by every downstream join; proposing not_null + unique to lock the contract.",
+      "tests": [
+        {
+          "type": "not_null",
+          "column": "order_id",
+          "rationale": "Primary key cannot be null."
+        }
+      ]
+    },
+    {
+      "name": "customer_id",
+      "description": "Foreign key to dim_customers.customer_id.",
+      "rationale": "FKs that reference dim_customers are checked in every mart; codifying here.",
+      "tests": []
+    }
+  ],
+  "tests": []
+}
