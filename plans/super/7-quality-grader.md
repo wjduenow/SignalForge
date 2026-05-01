@@ -5,8 +5,9 @@
 - **Ticket:** [#7](https://github.com/wjduenow/SignalForge/issues/7)
 - **Branch:** `feature/7-quality-grader` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/7-quality-grader` (created via `git worktree add`)
-- **Phase:** detailing (awaiting approval)
+- **Phase:** published (awaiting PR review + approval)
 - **Sessions:** 1 (started 2026-05-01)
+- **PR:** [#24](https://github.com/wjduenow/SignalForge/pull/24) (draft)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.1 (encodes Architectural Commitment #2 — evaluation in the loop; gates #8 diff renderer and #9 CLI)
 - **Labels:** `llm`, `evaluation`
