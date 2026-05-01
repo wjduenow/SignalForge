@@ -56,8 +56,6 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from signalforge.prune.errors import PruneConfigError
 from signalforge.warehouse.models import PartitionFilter
 
-_DEFAULT_CONFIG_FILENAME = "signalforge.yml"
-
 
 class PruneConfig(BaseModel):
     """User-facing knobs for the prune layer (DEC-009).
