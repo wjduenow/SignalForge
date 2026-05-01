@@ -5,7 +5,7 @@
 - **Ticket:** [#6](https://github.com/wjduenow/SignalForge/issues/6)
 - **Branch:** `feature/6-prune-engine` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/6-prune-engine` (created via `git worktree add`)
-- **Phase:** published (PR [#20](https://github.com/wjduenow/SignalForge/pull/20) draft; awaiting review)
+- **Phase:** devolved (epic + 16 tasks live in beads 2026-04-30; PR [#20](https://github.com/wjduenow/SignalForge/pull/20) draft)
 - **Sessions:** 1 (started 2026-04-30)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.1 (the **load-bearing** ticket — Architectural Commitment #1; gates #7 grader and #8 diff renderer)
@@ -560,16 +560,30 @@ Each story embeds **TDD** where the surface is logic-shaped (compiler, engine, a
 
 ## Beads Manifest
 
-_Pending Phase 7 (devolve)._
+Devolved 2026-04-30. Epic + 14 implementation tasks + Quality Gate + Patterns & Memory.
 
-## Refinement Log
+- **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/6-prune-engine`
+- **Branch:** `feature/6-prune-engine` (off `dev`)
+- **PR:** [#20](https://github.com/wjduenow/SignalForge/pull/20) (draft, plan only)
 
-_Pending Phase 3._
+| Story | Beads ID |
+|-------|----------|
+| Epic — 6: Test prune engine | `bd_1-scaffolding-y8y` |
+| US-001 Subpackage scaffold | `bd_1-scaffolding-y8y.1` |
+| US-002 Adapter `timeout_ms` plumbing | `bd_1-scaffolding-y8y.2` |
+| US-003 Diagnostic cost probe | `bd_1-scaffolding-y8y.3` |
+| US-004 `PruneResult` / `PruneDecision` / primitives | `bd_1-scaffolding-y8y.4` |
+| US-005 `PruneConfig` + `load_prune_config` | `bd_1-scaffolding-y8y.5` |
+| US-006 `PruneError` hierarchy | `bd_1-scaffolding-y8y.6` |
+| US-007 Compiler — failing-rows SQL × 4 | `bd_1-scaffolding-y8y.7` |
+| US-008 Audit — `prune.jsonl` + AST scan | `bd_1-scaffolding-y8y.8` |
+| US-009 Engine — `prune_tests` orchestrator | `bd_1-scaffolding-y8y.9` |
+| US-010 Drift detectors | `bd_1-scaffolding-y8y.10` |
+| US-011 Logger grep gate extension | `bd_1-scaffolding-y8y.11` |
+| US-012 BQ integration test | `bd_1-scaffolding-y8y.12` |
+| US-013 Public re-exports | `bd_1-scaffolding-y8y.13` |
+| US-014 `docs/prune-ops.md` | `bd_1-scaffolding-y8y.14` |
+| QG Quality Gate | `bd_1-scaffolding-y8y.15` |
+| PM Patterns & Memory | `bd_1-scaffolding-y8y.16` |
 
-## Detailed Breakdown
-
-_Pending Phase 4._
-
-## Beads Manifest
-
-_Pending Phase 7 (devolve)._
+Dependencies wired so `bd ready` returns only the epic + US-001 at start; subsequent tasks unblock as predecessors close.
