@@ -1,0 +1,36 @@
+{
+  "grade_schema_version": 1,
+  "signalforge_version": "0.1.0.dev0",
+  "run_id": "a1b2c3d4e5f6478890aabbccddeeff00",
+  "timestamp": "2026-05-01T17:42:13.123456Z",
+  "duration_seconds": 12.473,
+  "model_unique_id": "model.shop.dim_customers",
+  "rubric_hash": "0123456789abcdef",
+  "thresholds": [0.7, 0.5],
+  "results": [
+    {
+      "artifact_id": "column.email.description",
+      "criterion_id": "clarity",
+      "score": 0.8,
+      "passed": true,
+      "evidence": "The description states 'Email address of the customer at the time of order'.",
+      "reasoning": "The description is clear and specific about which email is captured. It would be improved by noting whether the value is normalised, but the meaning is unambiguous as written."
+    },
+    {
+      "artifact_id": "column.email.description",
+      "criterion_id": "consistency",
+      "score": 0.6,
+      "passed": true,
+      "evidence": "Column uses 'email'; the model description uses 'email_address'.",
+      "reasoning": "Terminology differs slightly between the column name and the model description; not severe but worth aligning."
+    },
+    {
+      "artifact_id": "test.column.email.not_null",
+      "criterion_id": "rationale",
+      "score": null,
+      "passed": false,
+      "evidence": "",
+      "reasoning": "LLM call retries exhausted: APITimeoutError"
+    }
+  ]
+}
