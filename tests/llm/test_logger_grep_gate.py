@@ -1,7 +1,8 @@
 """ANSI-safe lazy-format logger grep gate (US-014 / DEC-011).
 
 Mirrors the safety layer's DEC-022 grep gate, extended to
-:mod:`signalforge.llm` and :mod:`signalforge.draft`. Every
+:mod:`signalforge.llm`, :mod:`signalforge.draft`, and
+:mod:`signalforge.prune`. Every
 ``_LOGGER.{info,warning,debug,error}`` call in those subpackages must
 use lazy ``%s``-formatting with :func:`json.dumps` for any
 user-controlled string — never f-string interpolation. A column name
@@ -22,6 +23,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _LLM_DIR = _REPO_ROOT / "src" / "signalforge" / "llm"
 _DRAFT_DIR = _REPO_ROOT / "src" / "signalforge" / "draft"
+_PRUNE_DIR = _REPO_ROOT / "src" / "signalforge" / "prune"
 
 # Matches ``_LOGGER.<method>(f"...``, ``_LOGGER.<method>(f'...``,
 # ``_LOGGER.<method>( f"...``, ``_LOGGER.<method>(rf"...``,
@@ -46,20 +48,25 @@ def _scan_for_f_string_logger_calls(root: Path) -> list[tuple[Path, int, str]]:
     return hits
 
 
-def test_no_f_string_logger_calls_in_llm_or_draft_modules() -> None:
+def test_no_f_string_logger_calls_in_llm_draft_or_prune_modules() -> None:
     """DEC-011: no f-string-interpolated ``_LOGGER`` calls in
-    :mod:`signalforge.llm` or :mod:`signalforge.draft`.
+    :mod:`signalforge.llm`, :mod:`signalforge.draft`, or
+    :mod:`signalforge.prune`.
 
     Use lazy ``%s`` formatting with :func:`json.dumps` for any
     user-controlled string. ANSI escapes in column names / model ids
     inject directly into log viewers when interpolated via f-string;
     JSON encoding escapes them safely.
     """
-    hits = _scan_for_f_string_logger_calls(_LLM_DIR) + _scan_for_f_string_logger_calls(_DRAFT_DIR)
+    hits = (
+        _scan_for_f_string_logger_calls(_LLM_DIR)
+        + _scan_for_f_string_logger_calls(_DRAFT_DIR)
+        + _scan_for_f_string_logger_calls(_PRUNE_DIR)
+    )
     formatted = "\n".join(f"  {p}:{line}: {content}" for p, line, content in hits)
     assert not hits, (
         "Found f-string-interpolated _LOGGER calls in signalforge.llm / "
-        "signalforge.draft (DEC-011 violation):\n"
+        "signalforge.draft / signalforge.prune (DEC-011 violation):\n"
         f"{formatted}\n"
         "Use lazy-format with json.dumps instead, e.g.:\n"
         '  _LOGGER.info("audit event: %s", json.dumps({"unique_id": ...}))'

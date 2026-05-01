@@ -45,6 +45,18 @@ from signalforge.warehouse.models import TableRef
 _SF_RUN_BQ_REASON = "requires SF_RUN_BQ=1 and ADC"
 
 
+def _bq_runs_enabled() -> bool:
+    """Return ``True`` when the user opted into BigQuery integration runs.
+
+    Restricts the set of "truthy" ``SF_RUN_BQ`` values to the explicit
+    affirmatives. The naive ``not os.environ.get("SF_RUN_BQ")`` would
+    treat ``SF_RUN_BQ=0``, ``SF_RUN_BQ=false``, ``SF_RUN_BQ=no`` as
+    truthy (any non-empty string) — surprising behaviour for a user
+    trying to turn the runs OFF.
+    """
+    return os.environ.get("SF_RUN_BQ", "").lower() in {"1", "true", "yes", "on"}
+
+
 def _shakespeare_ref() -> TableRef:
     """Build the Shakespeare ``TableRef`` for the integration tests.
 
@@ -56,7 +68,7 @@ def _shakespeare_ref() -> TableRef:
 
 
 @pytest.mark.bigquery
-@pytest.mark.skipif(not os.environ.get("SF_RUN_BQ"), reason=_SF_RUN_BQ_REASON)
+@pytest.mark.skipif(not _bq_runs_enabled(), reason=_SF_RUN_BQ_REASON)
 def test_int_sample_rows_returns_n_rows_from_shakespeare() -> None:
     """Sampling Shakespeare with n=10 must return at most 10 rows whose
     schema matches the public dataset (``word``, ``word_count``, ``corpus``,
@@ -73,7 +85,7 @@ def test_int_sample_rows_returns_n_rows_from_shakespeare() -> None:
 
 
 @pytest.mark.bigquery
-@pytest.mark.skipif(not os.environ.get("SF_RUN_BQ"), reason=_SF_RUN_BQ_REASON)
+@pytest.mark.skipif(not _bq_runs_enabled(), reason=_SF_RUN_BQ_REASON)
 def test_int_column_stats_returns_correct_count_for_corpus() -> None:
     """``column_stats`` on Shakespeare's ``word`` column must report a
     positive ``count`` and ``distinct``, and a ``data_type`` that BigQuery
@@ -91,7 +103,7 @@ def test_int_column_stats_returns_correct_count_for_corpus() -> None:
 
 
 @pytest.mark.bigquery
-@pytest.mark.skipif(not os.environ.get("SF_RUN_BQ"), reason=_SF_RUN_BQ_REASON)
+@pytest.mark.skipif(not _bq_runs_enabled(), reason=_SF_RUN_BQ_REASON)
 def test_int_run_test_sql_passes_for_known_clean_query() -> None:
     """``WHERE FALSE`` always returns zero rows — the adapter must report
     ``passed=True`` and ``failure_count=0``."""
@@ -105,7 +117,7 @@ def test_int_run_test_sql_passes_for_known_clean_query() -> None:
 
 
 @pytest.mark.bigquery
-@pytest.mark.skipif(not os.environ.get("SF_RUN_BQ"), reason=_SF_RUN_BQ_REASON)
+@pytest.mark.skipif(not _bq_runs_enabled(), reason=_SF_RUN_BQ_REASON)
 def test_int_run_test_sql_fails_for_known_dirty_query() -> None:
     """A test-SQL that intentionally returns rows must report
     ``passed=False``, a positive ``failure_count``, and a non-empty
@@ -124,7 +136,7 @@ def test_int_run_test_sql_fails_for_known_dirty_query() -> None:
 
 
 @pytest.mark.bigquery
-@pytest.mark.skipif(not os.environ.get("SF_RUN_BQ"), reason=_SF_RUN_BQ_REASON)
+@pytest.mark.skipif(not _bq_runs_enabled(), reason=_SF_RUN_BQ_REASON)
 def test_int_max_bytes_billed_blocks_oversize_query() -> None:
     """A 1-byte ``max_bytes_billed`` cap must trip BigQuery's pre-flight
     estimator and surface as :class:`BytesBilledExceededError` (DEC-015,
@@ -137,7 +149,7 @@ def test_int_max_bytes_billed_blocks_oversize_query() -> None:
 
 
 @pytest.mark.bigquery
-@pytest.mark.skipif(not os.environ.get("SF_RUN_BQ"), reason=_SF_RUN_BQ_REASON)
+@pytest.mark.skipif(not _bq_runs_enabled(), reason=_SF_RUN_BQ_REASON)
 def test_int_adc_unconfigured_raises_typed_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

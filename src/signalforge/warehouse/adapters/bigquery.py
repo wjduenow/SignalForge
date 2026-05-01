@@ -56,7 +56,7 @@ from typing import Any
 from signalforge.warehouse._sql_safety import validate_identifier, validate_test_sql
 from signalforge.warehouse.adapters._client import (
     _BQClientProtocol,
-    make_query_job_config,
+    _make_query_job_config,
     make_real_client,
     map_bq_exception,
     row_to_dict,
@@ -218,7 +218,7 @@ class BigQueryAdapter(WarehouseAdapter):
             self._client = make_real_client(self._project, self._location)
         return self._client
 
-    def _default_job_config(self, stage: str) -> Any:
+    def _default_job_config(self, *, stage: str, timeout_ms: int | None = None) -> Any:
         """Build the DEC-015 job config for ``stage``.
 
         Always:
@@ -227,13 +227,23 @@ class BigQueryAdapter(WarehouseAdapter):
         * ``maximum_bytes_billed`` set to the adapter's configured cap.
         * ``labels={"signalforge_stage": stage, "signalforge_version": …}``
           for v0.2 cost attribution.
+
+        ``timeout_ms`` (DEC-013 of issue #6, AR-B2): when not ``None``,
+        threaded through to :func:`_make_query_job_config` so the
+        underlying ``QueryJobConfig.job_timeout_ms`` is set. Currently
+        used only by tests; the prune layer (issue #6) reserves this
+        for v0.2 budget enforcement and does NOT thread a non-None
+        value through ``run_test_sql`` in v0.1. The warehouse adapter's
+        own ``sample_rows`` / ``column_stats`` / ``run_test_sql`` paths
+        leave it ``None``.
         """
         from signalforge import __version__
 
-        return make_query_job_config(
+        return _make_query_job_config(
             max_bytes_billed=self._max_bytes_billed,
             stage=stage,
             version=__version__,
+            timeout_ms=timeout_ms,
         )
 
     def _quote(self, ref: TableRef) -> str:
@@ -385,7 +395,7 @@ class BigQueryAdapter(WarehouseAdapter):
 
         try:
             job = self._get_client().query(
-                sql, job_config=self._default_job_config("warehouse_sample")
+                sql, job_config=self._default_job_config(stage="warehouse_sample")
             )
             rows = list(job.result())
         except Exception as exc:
@@ -490,7 +500,7 @@ class BigQueryAdapter(WarehouseAdapter):
 
         try:
             job = self._get_client().query(
-                sql, job_config=self._default_job_config("warehouse_stats")
+                sql, job_config=self._default_job_config(stage="warehouse_stats")
             )
             rows = list(job.result())
         except Exception as exc:
@@ -557,7 +567,7 @@ class BigQueryAdapter(WarehouseAdapter):
 
         try:
             job = self._get_client().query(
-                wrapped, job_config=self._default_job_config("warehouse_test")
+                wrapped, job_config=self._default_job_config(stage="warehouse_test")
             )
             rows = list(job.result())
         except Exception as exc:

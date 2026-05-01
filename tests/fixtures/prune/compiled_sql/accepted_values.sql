@@ -1,0 +1,1 @@
+SELECT `status` FROM `fake_project.dataset.orders` WHERE `status` IS NOT NULL AND `status` NOT IN ('placed', 'shipped', 'cancelled')

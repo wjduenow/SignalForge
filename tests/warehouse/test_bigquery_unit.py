@@ -76,14 +76,14 @@ def test_init_accepts_injected_client(fake_client: FakeBigQueryClient) -> None:
 def test_query_job_config_use_query_cache_false(adapter: BigQueryAdapter) -> None:
     """DEC-015: every QueryJobConfig must carry ``use_query_cache=False``
     for reproducibility (Architectural Commitment #5: explainable diffs)."""
-    cfg = adapter._default_job_config("warehouse_sample")
+    cfg = adapter._default_job_config(stage="warehouse_sample")
     assert cfg.use_query_cache is False
 
 
 def test_query_job_config_labels_set(adapter: BigQueryAdapter) -> None:
     """DEC-015: labels must include ``signalforge_stage`` and
     ``signalforge_version`` for v0.2 cost attribution."""
-    cfg = adapter._default_job_config("warehouse_sample")
+    cfg = adapter._default_job_config(stage="warehouse_sample")
     labels = dict(cfg.labels)
     assert "signalforge_stage" in labels
     assert labels["signalforge_stage"] == "warehouse_sample"
@@ -95,13 +95,13 @@ def test_query_job_config_labels_set(adapter: BigQueryAdapter) -> None:
 def test_query_job_config_max_bytes_billed_set(adapter: BigQueryAdapter) -> None:
     """DEC-015: ``maximum_bytes_billed`` on the job config must reflect the
     adapter's configured cap so BigQuery rejects oversize queries."""
-    cfg = adapter._default_job_config("warehouse_sample")
+    cfg = adapter._default_job_config(stage="warehouse_sample")
     assert cfg.maximum_bytes_billed == adapter._max_bytes_billed
 
 
 def test_query_job_config_stage_label_threads_through(adapter: BigQueryAdapter) -> None:
     """A different ``stage`` argument should yield a different label."""
-    cfg = adapter._default_job_config("warehouse_test")
+    cfg = adapter._default_job_config(stage="warehouse_test")
     assert dict(cfg.labels)["signalforge_stage"] == "warehouse_test"
 
 
@@ -113,9 +113,9 @@ def test_make_query_job_config_sets_use_query_cache_false() -> None:
     from google.cloud import bigquery
 
     from signalforge import __version__
-    from signalforge.warehouse.adapters._client import make_query_job_config
+    from signalforge.warehouse.adapters._client import _make_query_job_config
 
-    cfg = make_query_job_config(stage="warehouse_sample", max_bytes_billed=12345)
+    cfg = _make_query_job_config(stage="warehouse_sample", max_bytes_billed=12345)
 
     assert isinstance(cfg, bigquery.QueryJobConfig)
     assert cfg.use_query_cache is False
