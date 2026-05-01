@@ -5,7 +5,7 @@
 - **Ticket:** [#6](https://github.com/wjduenow/SignalForge/issues/6)
 - **Branch:** `feature/6-prune-engine` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/6-prune-engine` (created via `git worktree add`)
-- **Phase:** detailing (Phases 1–3 complete; awaiting story-set sign-off)
+- **Phase:** published (PR [#20](https://github.com/wjduenow/SignalForge/pull/20) draft; awaiting review)
 - **Sessions:** 1 (started 2026-04-30)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.1 (the **load-bearing** ticket — Architectural Commitment #1; gates #7 grader and #8 diff renderer)
