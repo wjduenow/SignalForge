@@ -179,17 +179,25 @@ SF_RUN_BQ=1 pytest -m bigquery tests/warehouse/test_sample_cost_probe.py -s
 
 The probe currently fails (rather than `xfail`s) on the
 `bytesBilledLimitExceeded` path because the assertion ceiling and the
-adapter cap are decoupled — refining the probe to extract the estimate
-from the `InternalServerError` message and `xfail` cleanly is tracked as
-a follow-up. The 9.92 GB figure is captured directly from the error:
-`Query exceeded limit for bytes billed: 100000000. 9924771840 or higher
-required.`
+adapter cap are decoupled. Refining the probe to detect the BigQuery
+reason code `bytesBilledLimitExceeded` (which appears in the error
+message regardless of HTTP status) and `xfail` cleanly is tracked as a
+follow-up. Note the SDK exception class is unstable on this path: the
+adapter's `map_bq_exception` (`adapters/_client.py`) catches
+`google.api_core.exceptions.BadRequest` (HTTP 400), but the live run
+on 2026-05-01 with `google-cloud-bigquery==3.41.0` raised
+`google.api_core.exceptions.InternalServerError` (HTTP 500). The reason
+code is the durable identifier; match on substring rather than the
+exception class. The 9.92 GB figure is captured directly from the
+error message: `Query exceeded limit for bytes billed: 100000000.
+9924771840 or higher required.`
 
 **Q4=A is NOT adequate for v0.1 sample-mode on wide tables.** Issue #22
 tracks Q4=C escalation (temp-table-materialised sample) for v0.2. In the
 meantime, sample-mode prune runs on tables wider than ~10 columns will
 either trip the adapter's 100 MB cap and fail, or — if a maintainer
-raises the cap via `cost_limit_bytes` per-call — bill at roughly
+raises the cap via the profile-level `maximum_bytes_billed` field
+(`load_profile`, see `docs/warehouse-adapter-ops.md`) — bill at roughly
 `(rows × bytes_per_row)` for **every test** in the candidate set.
 Schema-only mode remains the v0.1 default precisely because the cost
 model for sample-mode is not where we want it.
