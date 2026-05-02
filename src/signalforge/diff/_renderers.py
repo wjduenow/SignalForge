@@ -803,4 +803,45 @@ class MarkdownRenderer(Renderer):
         )
 
 
-__all__ = ("AnsiRenderer", "MarkdownRenderer", "Renderer")
+# ---------------------------------------------------------------------------
+# JsonRenderer — sidecar-shaped JSON concrete (US-010).
+# ---------------------------------------------------------------------------
+
+
+class JsonRenderer(Renderer):
+    """Render a :class:`DiffReport` to indented JSON text (US-010).
+
+    Output is exactly :meth:`pydantic.BaseModel.model_dump_json` with
+    ``indent=2`` and ``by_alias=True`` — the same shape the sidecar
+    writer (US-007) persists to ``<project>/.signalforge/diff.json``.
+    The orchestrator (US-010) selects this concrete when
+    :attr:`DiffConfig.render_kind == "json"`; the sidecar always uses
+    this shape regardless of the configured render kind (DEC-004).
+
+    This renderer does not call :func:`strip_ansi_escapes` on report
+    fields. Defence-in-depth against ANSI smuggling for the JSON
+    surface is unnecessary: :func:`json.dumps` (which Pydantic uses
+    internally for ``model_dump_json``) escapes every byte outside the
+    JSON string-literal grammar — ``\\x1b`` lands in the on-disk
+    artefact as the four-byte literal ``\\u001b``, not as a smuggled
+    SGR sequence.
+
+    Args:
+        none. The renderer is stateless; no constructor kwargs.
+    """
+
+    def render(self, report: DiffReport) -> str:
+        """Render ``report`` to indented JSON text.
+
+        Mirrors the sidecar writer's exact serialisation
+        (``by_alias=True``, ``indent=2``) so the rendered text is
+        byte-equal to the sidecar JSON when ``output_path`` and
+        ``sidecar_path`` would point at the same file. The trailing
+        newline is omitted here — the orchestrator decides whether
+        to append one when piping to stdout, mirroring the contract
+        documented on :meth:`Renderer.render`.
+        """
+        return report.model_dump_json(by_alias=True, indent=2)
+
+
+__all__ = ("AnsiRenderer", "JsonRenderer", "MarkdownRenderer", "Renderer")
