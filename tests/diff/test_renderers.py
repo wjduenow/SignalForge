@@ -23,7 +23,7 @@ import abc
 
 import pytest
 
-from signalforge.diff._renderers import AnsiRenderer, Renderer
+from signalforge.diff._renderers import AnsiRenderer, MarkdownRenderer, Renderer
 from signalforge.diff.config import DiffConfig
 from signalforge.diff.models import DiffEntry, DiffReport
 
@@ -444,3 +444,262 @@ def test_model_unique_id_stripped_in_header(default_config: DiffConfig) -> None:
     output = renderer.render(report)
     assert "model.proj.customers" in output
     assert "\x1b[31m" not in output
+
+
+# ---------------------------------------------------------------------------
+# MarkdownRenderer tests (US-009).
+# ---------------------------------------------------------------------------
+
+
+def test_markdown_renderer_subclass_of_renderer(default_config: DiffConfig) -> None:
+    """MarkdownRenderer derives from the Renderer ABC and ``render``
+    returns ``str``."""
+    renderer = MarkdownRenderer(config=default_config)
+    assert isinstance(renderer, Renderer)
+    output = renderer.render(_make_report(entries=(_kept_entry(),)))
+    assert isinstance(output, str)
+
+
+def test_markdown_renderer_emits_pipe_table(default_config: DiffConfig) -> None:
+    """The kept/dropped/flagged table is rendered as a GFM pipe-table:
+    header + divider + one row per entry."""
+    renderer = MarkdownRenderer(config=default_config)
+    report = _make_report(entries=(_kept_entry(), _dropped_entry()))
+    output = renderer.render(report)
+    # Header row.
+    assert "| Tier | Artifact | Test | Reason | Score | Why |" in output
+    # Divider row — exactly six segments.
+    assert "| --- | --- | --- | --- | --- | --- |" in output
+    # Each entry's artifact_id appears in a cell.
+    assert "column.customer_id.description" in output
+    assert "test.column.email.not_null" in output
+
+
+def test_markdown_renderer_emits_fenced_diff_block(default_config: DiffConfig) -> None:
+    """The unified-diff body is wrapped in a ```diff fenced block."""
+    renderer = MarkdownRenderer(config=default_config)
+    diff_body = "@@ -1,2 +1,2 @@\n-old: value\n+new: value\n"
+    report = _make_report(unified_diff=diff_body)
+    output = renderer.render(report)
+    assert "```diff\n" in output
+    assert "@@ -1,2 +1,2 @@" in output
+    assert "+new: value" in output
+    # The fence closes.
+    assert output.rstrip().endswith("```")
+
+
+def test_markdown_renderer_omits_diff_block_when_empty(default_config: DiffConfig) -> None:
+    """An empty unified_diff suppresses the entire ```diff block."""
+    renderer = MarkdownRenderer(config=default_config)
+    # Provide at least one entry so the table renders for verification
+    # alongside the omitted diff block.
+    report = _make_report(unified_diff="", entries=(_kept_entry(),))
+    output = renderer.render(report)
+    assert "```diff" not in output
+    # The table still renders.
+    assert "| Tier | Artifact" in output
+
+
+def test_markdown_renderer_escapes_pipe_in_cell(default_config: DiffConfig) -> None:
+    """A ``why`` containing a literal pipe is HTML-entity encoded so
+    the column count survives (DEC-008 in_table_cell mode)."""
+    renderer = MarkdownRenderer(config=default_config)
+    why = "left | right"
+    entry = _dropped_entry(why=why)
+    output = renderer.render(_make_report(entries=(entry,)))
+    # The literal pipe is encoded; it must not appear raw in the cell.
+    assert "&#124;" in output
+    # The table layout was preserved — the row still has six cells
+    # (5 separators + 2 outer pipes = 7 `|` characters before the
+    # encoded pipe within the cell). Verify by checking the row line.
+    row_line = next(line for line in output.splitlines() if "left" in line and "right" in line)
+    # Row begins and ends with '|' and has the cell count separator.
+    assert row_line.startswith("| ")
+    assert row_line.endswith(" |")
+    # Six cells = 7 unencoded '|' characters in the row.
+    assert row_line.count("|") == 7
+
+
+def test_markdown_renderer_escapes_backtick_in_cell(default_config: DiffConfig) -> None:
+    """A ``why`` containing a backtick is backslash-escaped in the cell
+    so it cannot open an inline-code span (DEC-008)."""
+    renderer = MarkdownRenderer(config=default_config)
+    why = "uses `metric` column"
+    entry = _kept_entry(why=why)
+    output = renderer.render(_make_report(entries=(entry,)))
+    # Backslash-escaped backtick.
+    assert "\\`metric\\`" in output
+
+
+def test_markdown_renderer_fence_passes_through_raw_diff_content(
+    default_config: DiffConfig,
+) -> None:
+    """A diff body containing what would look like a Markdown header
+    or a pipe character passes through inside the fenced ```diff block
+    untouched. The fence is the defence; markdown-escaping inside the
+    fence would ship literal backslashes to the operator."""
+    renderer = MarkdownRenderer(config=default_config)
+    # Diff content that includes pipes, backticks, and a #-header.
+    diff_body = "@@ -1,2 +1,2 @@\n-# old: a | b `c`\n+# new: x | y `z`\n"
+    report = _make_report(unified_diff=diff_body)
+    output = renderer.render(report)
+    # The diff body is rendered raw inside the fence.
+    assert "-# old: a | b `c`" in output
+    assert "+# new: x | y `z`" in output
+    # No HTML entity for pipe inside the fenced block.
+    fence_start = output.index("```diff")
+    fence_end = output.rindex("```")
+    fenced_section = output[fence_start:fence_end]
+    assert "&#124;" not in fenced_section
+
+
+def test_markdown_renderer_table_escapes_diff_like_content(
+    default_config: DiffConfig,
+) -> None:
+    """The same pipe / header content that passes through inside the
+    fence is escaped when it appears in a table cell. The table cell
+    is the regulated sink; the fence is the unregulated sink."""
+    renderer = MarkdownRenderer(config=default_config)
+    why = "# heading-shape | with pipe"
+    entry = _dropped_entry(why=why)
+    output = renderer.render(_make_report(entries=(entry,)))
+    # Table cell — pipe encoded.
+    assert "&#124;" in output
+
+
+def test_markdown_renderer_truncates_at_last_complete_hunk(
+    default_config: DiffConfig,
+) -> None:
+    """Body exceeding ``markdown_max_diff_chars`` is truncated at the
+    last complete hunk boundary (DEC-005)."""
+    # Use a small cap so we can drive the truncation deterministically.
+    cfg = DiffConfig(markdown_max_diff_chars=200)
+    renderer = MarkdownRenderer(config=cfg)
+
+    # Three hunks of distinct sizes. Hunks 1 + 2 fit inside 200 chars;
+    # adding hunk 3 overflows. The truncator should keep hunks 1 + 2
+    # only.
+    hunk1 = "@@ -1,2 +1,2 @@\n-a: 1\n+a: 2"
+    hunk2 = "@@ -10,2 +10,2 @@\n-b: 1\n+b: 2"
+    hunk3 = "@@ -20,2 +20,2 @@\n" + ("+long " * 50)
+    body = "\n".join([hunk1, hunk2, hunk3])
+    assert len(body) > 200  # sanity
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+
+    # Hunks 1 and 2 should survive.
+    assert "+a: 2" in output
+    assert "+b: 2" in output
+    # Hunk 3 content (the runaway "+long " repetition) should be gone.
+    assert "+long +long" not in output
+    # Truncation footer present, with a non-zero dropped-line count
+    # and the project_dir placeholder reference.
+    assert "more lines truncated" in output
+    assert "<project_dir>/.signalforge/diff.json" in output
+
+
+def test_markdown_renderer_truncation_footer_inside_fence(
+    default_config: DiffConfig,
+) -> None:
+    """The truncation footer appears INSIDE the ```diff fenced block."""
+    cfg = DiffConfig(markdown_max_diff_chars=120)
+    renderer = MarkdownRenderer(config=cfg)
+    hunk1 = "@@ -1,2 +1,2 @@\n-a: 1\n+a: 2"
+    hunk2 = "@@ -10,2 +10,2 @@\n" + ("+long " * 50)
+    body = "\n".join([hunk1, hunk2])
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+
+    # The closing ``` must come AFTER the footer.
+    assert "more lines truncated" in output
+    footer_idx = output.index("more lines truncated")
+    closing_fence_idx = output.rindex("```")
+    assert closing_fence_idx > footer_idx
+
+
+def test_markdown_renderer_truncation_dropped_line_count(
+    default_config: DiffConfig,
+) -> None:
+    """The footer reports the number of *lines* dropped, not bytes."""
+    cfg = DiffConfig(markdown_max_diff_chars=40)
+    renderer = MarkdownRenderer(config=cfg)
+    # Hunk 1 fits (~25 chars); hunk 2 has 5 lines that get dropped.
+    hunk1 = "@@ -1,2 +1,2 @@\n-a: 1\n+a: 2"
+    # 5 dropped lines: header + 4 content lines.
+    hunk2 = "@@ -10,4 +10,4 @@\n-b: 1\n-c: 1\n+b: 2\n+c: 2"
+    body = "\n".join([hunk1, hunk2])
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+    # Look for the bracket "(N more lines truncated" — N must be > 0.
+    import re
+
+    match = re.search(r"\((\d+) more lines truncated", output)
+    assert match is not None
+    dropped = int(match.group(1))
+    assert dropped > 0
+
+
+def test_markdown_renderer_no_truncation_when_under_cap(
+    default_config: DiffConfig,
+) -> None:
+    """A small unified_diff renders without a truncation footer."""
+    renderer = MarkdownRenderer(config=default_config)
+    body = "@@ -1,2 +1,2 @@\n-old: 1\n+new: 2"
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+    assert "more lines truncated" not in output
+    assert "+new: 2" in output
+
+
+def test_markdown_renderer_project_dir_renders_in_footer(
+    default_config: DiffConfig,
+) -> None:
+    """An explicit ``project_dir`` constructor arg renders into the
+    truncation footer in place of the placeholder."""
+    cfg = DiffConfig(markdown_max_diff_chars=120)
+    renderer = MarkdownRenderer(config=cfg, project_dir="/repo/myproj")
+    hunk1 = "@@ -1,2 +1,2 @@\n-a: 1\n+a: 2"
+    hunk2 = "@@ -10,2 +10,2 @@\n" + ("+long " * 50)
+    body = "\n".join([hunk1, hunk2])
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+    assert "/repo/myproj/.signalforge/diff.json" in output
+    assert "<project_dir>" not in output
+
+
+def test_markdown_renderer_strips_ansi_in_table_cell(
+    default_config: DiffConfig,
+) -> None:
+    """User-content escapes are stripped before markdown escaping
+    (DEC-007 + DEC-008 compose)."""
+    renderer = MarkdownRenderer(config=default_config)
+    evil_why = "\x1b[31mEVIL\x1b[0m"
+    entry = _dropped_entry(why=evil_why)
+    output = renderer.render(_make_report(entries=(entry,)))
+    assert "EVIL" in output
+    assert "\x1b[31m" not in output
+
+
+def test_markdown_renderer_strips_ansi_in_diff_body(
+    default_config: DiffConfig,
+) -> None:
+    """ANSI escapes in the unified-diff body are stripped before the
+    body is wrapped in the fenced block."""
+    renderer = MarkdownRenderer(config=default_config)
+    diff_body = "@@ -1,1 +1,1 @@\n-\x1b[31mevil\x1b[0m: 1\n+safe: 1"
+    report = _make_report(unified_diff=diff_body)
+    output = renderer.render(report)
+    assert "-evil: 1" in output
+    assert "\x1b[31m" not in output
+
+
+def test_markdown_renderer_no_entries_emits_placeholder(
+    default_config: DiffConfig,
+) -> None:
+    """When there are no entries, the table renders an italic placeholder
+    rather than a malformed empty pipe-table."""
+    renderer = MarkdownRenderer(config=default_config)
+    output = renderer.render(_make_report(entries=()))
+    assert "_(no candidate artifacts)_" in output
+    # No table header in the empty-entries case.
+    assert "| Tier |" not in output

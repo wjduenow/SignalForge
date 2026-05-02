@@ -83,6 +83,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from signalforge.diff._ansi_safety import strip_ansi_escapes
+from signalforge.diff._markdown_safety import escape_markdown_scalar
 from signalforge.diff.config import DiffConfig
 
 if TYPE_CHECKING:
@@ -470,4 +471,336 @@ class AnsiRenderer(Renderer):
         return "\n".join(clean_lines)
 
 
-__all__ = ("AnsiRenderer", "Renderer")
+# ---------------------------------------------------------------------------
+# MarkdownRenderer — GitHub-flavored Markdown concrete (US-009).
+# ---------------------------------------------------------------------------
+
+
+# DEC-005 fallback. The locked v0.1 default is also held on
+# :attr:`DiffConfig.markdown_max_diff_chars` (US-003). We mirror it here
+# as a fallback constant only because :class:`DiffConfig` is the source
+# of truth — if a future refactor drops the field, the renderer should
+# refuse to silently render an unbounded body.
+_DEFAULT_MARKDOWN_MAX_DIFF_CHARS = 60_000
+
+
+class MarkdownRenderer(Renderer):
+    """Render a :class:`DiffReport` to GitHub-flavored Markdown (US-009).
+
+    Output structure:
+
+    1. ``# Diff: <model_unique_id>`` heading (escaped via
+       :func:`escape_markdown_scalar`; ANSI escapes from upstream
+       content stripped per DEC-007).
+    2. Count summary line (``kept=… dropped=… flagged=…``).
+    3. GFM pipe-table of kept/dropped/flagged entries. Every cell value
+       runs through
+       :func:`signalforge.diff._markdown_safety.escape_markdown_scalar`
+       with ``in_table_cell=True`` (DEC-008): backticks /
+       backslashes / pipes / row-breaking control characters are
+       neutralised so a ``why`` containing ``|`` cannot terminate the
+       cell early or shift subsequent columns.
+    4. Fenced ``` ```diff ``` block carrying the unified diff verbatim.
+       The diff body is **not** Markdown-escaped — the fence is the
+       defence; backticks / pipes / HTML in the body are inert inside
+       a fenced block.
+
+    DEC-005 — The fenced block is hard-capped at
+    ``config.markdown_max_diff_chars`` (default 60 000 — leaves
+    head-room under GitHub's 65 536-char comment cap). When the body
+    would exceed the cap, the renderer truncates at the **last complete
+    hunk boundary** (a hunk starts with ``@@`` and runs until the next
+    ``@@`` or EOF) and appends a footer of the form::
+
+        ... (N more lines truncated — see <project_dir>/.signalforge/diff.json for full diff)
+
+    The footer lives **inside** the fenced ``` ```diff ``` block so the
+    whole rendered Markdown remains a single well-formed code-block
+    boundary. ``N`` counts the dropped lines (not bytes) so a reader
+    can immediately gauge the magnitude of what's missing.
+
+    DEC-007 — :func:`signalforge.diff._ansi_safety.strip_ansi_escapes`
+    runs UNCONDITIONALLY on every user-content field (``model_unique_id``,
+    ``artifact_id``, ``why``, ``drop_reason``, ``test_type``, and the
+    unified-diff body) BEFORE markdown-escaping or fence-wrapping.
+    The two passes compose: strip first (defence against smuggled SGR),
+    escape second (defence against smuggled markdown structure).
+
+    Args:
+        config: The :class:`DiffConfig` knob block. Used for
+            :attr:`DiffConfig.markdown_max_diff_chars` (DEC-005) and
+            :attr:`DiffConfig.max_why_chars` (truncation cap on the
+            ``why`` cell).
+        project_dir: Optional explicit project directory rendered into
+            the truncation footer. The diff layer's
+            :class:`signalforge.diff.models.DiffReport` does not carry
+            ``project_dir`` (it's an orchestrator-level value), so the
+            renderer accepts it here. When ``None`` (the default), the
+            footer renders the literal placeholder
+            ``<project_dir>/.signalforge/diff.json`` — the operator
+            still understands the path, and the placeholder is stable
+            across snapshots.
+    """
+
+    def __init__(
+        self,
+        *,
+        config: DiffConfig,
+        project_dir: str | None = None,
+    ) -> None:
+        self._config = config
+        self._project_dir = project_dir
+
+    def render(self, report: DiffReport) -> str:
+        """Render ``report`` to a GitHub-flavored Markdown string.
+
+        See the class docstring for the four-section structure
+        (heading + summary + pipe-table + fenced diff) and the DEC-005
+        truncation contract.
+        """
+        chunks: list[str] = []
+        chunks.append(self._render_heading(report))
+        chunks.append("")
+        chunks.append(self._render_summary(report))
+        chunks.append("")
+        chunks.append(self._render_table(report))
+
+        diff_block = self._render_diff_block(report)
+        if diff_block:
+            chunks.append("")
+            chunks.append(diff_block)
+
+        return "\n".join(chunks)
+
+    # ------------------------------------------------------------------
+    # Section helpers.
+    # ------------------------------------------------------------------
+
+    def _render_heading(self, report: DiffReport) -> str:
+        """Render the ``# Diff: <model_unique_id>`` heading.
+
+        ``model_unique_id`` is upstream-controlled (manifest field), so
+        the strip-then-escape composition applies. Outside a table cell
+        the escaper uses the non-table-cell mode so a manifest id
+        containing ``|`` becomes ``\\|`` rather than the HTML entity.
+        """
+        clean_id = strip_ansi_escapes(report.model_unique_id)
+        escaped_id = escape_markdown_scalar(clean_id, in_table_cell=False)
+        return f"# Diff: {escaped_id}"
+
+    def _render_summary(self, report: DiffReport) -> str:
+        """Render the per-tier count summary line.
+
+        Static integer counts — no user content, no escaping required.
+        Bold via ``**…**`` so the counts stand out in a Markdown viewer.
+        """
+        return (
+            f"**kept={report.kept_count}**  "
+            f"**dropped={report.dropped_count}**  "
+            f"**flagged={report.flagged_count}**"
+        )
+
+    def _render_table(self, report: DiffReport) -> str:
+        """Render the kept/dropped/flagged entries as a GFM pipe-table.
+
+        The header row, divider row, and every data cell follow the
+        DEC-008 escaping contract (``escape_markdown_scalar`` with
+        ``in_table_cell=True``). When the report has no entries the
+        function emits an italic placeholder line instead of an empty
+        table — an empty table renders as a syntax-error in some
+        Markdown dialects.
+        """
+        if not report.entries:
+            return "_(no candidate artifacts)_"
+
+        header_cells = ("Tier", "Artifact", "Test", "Reason", "Score", "Why")
+        divider_cells = ("---",) * len(header_cells)
+        lines: list[str] = []
+        lines.append("| " + " | ".join(header_cells) + " |")
+        lines.append("| " + " | ".join(divider_cells) + " |")
+        for entry in report.entries:
+            lines.append(self._render_table_row(entry))
+        return "\n".join(lines)
+
+    def _render_table_row(self, entry: DiffEntry) -> str:
+        """Render a single GFM table row for ``entry``.
+
+        Strip-then-escape applies to every user-content cell. ``why``
+        is truncated at :attr:`DiffConfig.max_why_chars` *before* the
+        markdown escape so the per-row width stays bounded; the escape
+        adds at most a small constant overhead (entity encodings) on
+        top of the truncated form.
+        """
+        clean_artifact = strip_ansi_escapes(entry.artifact_id)
+        clean_test_type = strip_ansi_escapes(entry.test_type or "")
+        clean_drop_reason = strip_ansi_escapes(entry.drop_reason or "")
+        clean_why_full = strip_ansi_escapes(entry.why)
+        clean_why = _truncate(clean_why_full, self._config.max_why_chars)
+
+        score_text = "—" if entry.score is None else f"{entry.score:.2f}"
+
+        cells = (
+            escape_markdown_scalar(entry.tier, in_table_cell=True),
+            escape_markdown_scalar(clean_artifact, in_table_cell=True),
+            escape_markdown_scalar(clean_test_type, in_table_cell=True),
+            escape_markdown_scalar(clean_drop_reason, in_table_cell=True),
+            escape_markdown_scalar(score_text, in_table_cell=True),
+            escape_markdown_scalar(clean_why, in_table_cell=True),
+        )
+        return "| " + " | ".join(cells) + " |"
+
+    # ------------------------------------------------------------------
+    # Fenced diff block + DEC-005 truncation.
+    # ------------------------------------------------------------------
+
+    def _render_diff_block(self, report: DiffReport) -> str:
+        """Render the fenced ``` ```diff ``` block, applying DEC-005
+        truncation if the body exceeds
+        :attr:`DiffConfig.markdown_max_diff_chars`.
+
+        The diff body is upstream-controlled (it embeds YAML from the
+        existing schema and LLM-drafted artifact text). DEC-007 strip
+        applies line-by-line; the fence itself protects the body from
+        Markdown structural injection (backticks / pipes inside a
+        fenced block are inert).
+
+        Returns the empty string when the report's ``unified_diff`` is
+        empty — the caller suppresses the leading blank line and the
+        rendered output omits the diff block entirely.
+        """
+        body = report.unified_diff
+        if not body:
+            return ""
+
+        # DEC-007 strip applied line-by-line, identical to AnsiRenderer.
+        clean_lines = [strip_ansi_escapes(line) for line in body.splitlines()]
+        clean_body = "\n".join(clean_lines)
+
+        limit = self._markdown_max_diff_chars()
+        if len(clean_body) <= limit:
+            return f"```diff\n{clean_body}\n```"
+
+        truncated_body, dropped_line_count = self._truncate_at_last_hunk(clean_body, limit)
+        footer = self._truncation_footer(dropped_line_count)
+        # The footer lives INSIDE the fenced block (DEC-005). One trailing
+        # newline before the footer keeps the rendered Markdown tidy
+        # regardless of whether the truncated body ends in a newline.
+        if truncated_body and not truncated_body.endswith("\n"):
+            truncated_body += "\n"
+        return f"```diff\n{truncated_body}{footer}\n```"
+
+    def _markdown_max_diff_chars(self) -> int:
+        """Return the active markdown body cap (DEC-005).
+
+        Reads :attr:`DiffConfig.markdown_max_diff_chars`. Falls back to
+        the module-level :data:`_DEFAULT_MARKDOWN_MAX_DIFF_CHARS` when
+        the config field is somehow missing — a defence against a
+        future refactor accidentally dropping the field.
+        """
+        # TODO: drop the fallback once US-003's `markdown_max_diff_chars`
+        # field is locked permanent on `DiffConfig`. Today (2026-05-02)
+        # the field exists; the fallback is paranoia, not need.
+        return getattr(self._config, "markdown_max_diff_chars", _DEFAULT_MARKDOWN_MAX_DIFF_CHARS)
+
+    def _truncate_at_last_hunk(self, body: str, limit: int) -> tuple[str, int]:
+        """Truncate ``body`` to the last complete hunk that fits in ``limit`` chars.
+
+        A hunk starts with ``@@`` (typical unified-diff hunk header) and
+        runs until the next ``@@`` or EOF. The truncation finds the
+        latest hunk-start whose end position is ``<= limit``; everything
+        beyond that point is dropped.
+
+        When the body has no ``@@`` markers (e.g. it's a header-only
+        prefix from :func:`difflib.unified_diff`), or the first hunk
+        already exceeds ``limit``, the truncation falls back to a
+        line-boundary cut: keep complete lines up to but not past the
+        cap. The caller still receives a footer with the dropped line
+        count so the operator knows content was elided.
+
+        Returns:
+            ``(truncated_body, dropped_line_count)``. The truncated
+            body never ends with a partial hunk header. The dropped
+            line count is computed against the original line count of
+            the input body.
+        """
+        original_lines = body.split("\n")
+        original_line_count = len(original_lines)
+
+        # Find the byte-offset of every "@@" hunk header. We treat any
+        # line that begins with `@@` as a hunk start (matches the
+        # difflib output shape; `git`-style `@@ -1,4 +1,5 @@` and the
+        # bare-`@@` markers difflib emits both qualify).
+        hunk_starts: list[int] = []
+        offset = 0
+        for line in original_lines:
+            if line.startswith("@@"):
+                hunk_starts.append(offset)
+            offset += len(line) + 1  # +1 for the rejoining '\n'.
+
+        if not hunk_starts:
+            # No hunks — line-boundary cut.
+            return self._truncate_at_line_boundary(body, limit, original_line_count)
+
+        # Find the latest hunk-start such that the slice [0:next_hunk_start)
+        # (or [0:end) if it's the last hunk) is <= limit. We want the
+        # previous hunk's end, which is `next_hunk_start_offset` for the
+        # next hunk (or len(body) for the last one).
+        boundaries = [*hunk_starts[1:], len(body)]
+        chosen_end = -1
+        for boundary in boundaries:
+            if boundary <= limit:
+                chosen_end = boundary
+            else:
+                break
+
+        if chosen_end <= 0:
+            # Even the first hunk is too big — fall back to line-cut.
+            return self._truncate_at_line_boundary(body, limit, original_line_count)
+
+        truncated = body[:chosen_end].rstrip("\n")
+        kept_line_count = truncated.count("\n") + 1 if truncated else 0
+        dropped = original_line_count - kept_line_count
+        return truncated, max(dropped, 0)
+
+    def _truncate_at_line_boundary(
+        self, body: str, limit: int, original_line_count: int
+    ) -> tuple[str, int]:
+        """Fallback truncation when the body has no hunk markers.
+
+        Keeps as many complete leading lines as fit under ``limit``; a
+        partial trailing line is dropped entirely so the truncated body
+        ends cleanly before the footer is appended.
+        """
+        kept_lines: list[str] = []
+        running_len = 0
+        for line in body.split("\n"):
+            # +1 for the joining newline; the very first line doesn't
+            # cost a join newline but adding one anyway is a safe
+            # over-estimate (we'd undercount one char, not overshoot).
+            cost = len(line) + 1
+            if running_len + cost > limit:
+                break
+            kept_lines.append(line)
+            running_len += cost
+
+        truncated = "\n".join(kept_lines)
+        dropped = original_line_count - len(kept_lines)
+        return truncated, max(dropped, 0)
+
+    def _truncation_footer(self, dropped_line_count: int) -> str:
+        """Render the DEC-005 truncation footer.
+
+        ``project_dir`` is rendered as the literal placeholder
+        ``<project_dir>`` when not provided to the constructor — the
+        operator still understands the meaning, and the placeholder is
+        stable across snapshot fixtures (no orchestrator-supplied path
+        bleeds into golden output).
+        """
+        project_dir = self._project_dir if self._project_dir is not None else "<project_dir>"
+        return (
+            f"... ({dropped_line_count} more lines truncated — "
+            f"see {project_dir}/.signalforge/diff.json for full diff)"
+        )
+
+
+__all__ = ("AnsiRenderer", "MarkdownRenderer", "Renderer")
