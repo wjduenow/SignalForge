@@ -5,7 +5,7 @@
 - **Ticket:** [#8](https://github.com/wjduenow/SignalForge/issues/8)
 - **Branch:** `feature/8-diff-renderer` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/8-diff-renderer` (created via `git worktree add`)
-- **Phase:** published (awaiting PR approval)
+- **Phase:** devolved (epic + 14 tasks in beads 2026-05-02; PR [#25](https://github.com/wjduenow/SignalForge/pull/25) draft)
 - **PR:** [#25](https://github.com/wjduenow/SignalForge/pull/25) (draft)
 - **Sessions:** 1 (started 2026-05-01)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
@@ -1069,7 +1069,30 @@ Algorithm:
 
 ## Beads Manifest
 
-*To be filled at devolve time (post-PR-approval).*
+Created 2026-05-02. Worktree: `/home/wesd/dev/worktrees/SignalForge/feature/8-diff-renderer`.
+
+**Epic:** `bd_1-scaffolding-htq` — *8: Diff renderer (epic)* (P2)
+
+**Tasks (all P2, parented to the epic):**
+
+| Bead ID | Story | Depends on |
+|---|---|---|
+| `bd_1-scaffolding-htq.1` | US-001 — Error hierarchy | — |
+| `bd_1-scaffolding-htq.2` | US-002 — Result models | `.1` |
+| `bd_1-scaffolding-htq.3` | US-003 — DiffConfig + loader | `.1` |
+| `bd_1-scaffolding-htq.4` | US-004 — Safety helpers | — |
+| `bd_1-scaffolding-htq.5` | US-005 — YAML emitter | — |
+| `bd_1-scaffolding-htq.6` | US-006 — Artifact-id formatter | — |
+| `bd_1-scaffolding-htq.7` | US-007 — Sidecar writer | `.1`, `.2` |
+| `bd_1-scaffolding-htq.8` | US-008 — AnsiRenderer | `.2`, `.4` |
+| `bd_1-scaffolding-htq.9` | US-009 — MarkdownRenderer | `.2`, `.4` |
+| `bd_1-scaffolding-htq.10` | US-010 — Orchestrator + JsonRenderer | `.1`–`.9` |
+| `bd_1-scaffolding-htq.11` | US-011 — Snapshot fixtures + regen + drift | `.8`, `.9`, `.10` |
+| `bd_1-scaffolding-htq.12` | US-012 — Public API + docs + grep gate | `.1`–`.11` |
+| `bd_1-scaffolding-htq.13` | US-013 — Quality Gate | `.1`–`.12` |
+| `bd_1-scaffolding-htq.14` | US-014 — Patterns & Memory | `.13` |
+
+**Initially ready (no active blockers):** `.1`, `.4`, `.5`, `.6` — four leaves Ralph can pick up in parallel.
 
 ## Beads Manifest
 
