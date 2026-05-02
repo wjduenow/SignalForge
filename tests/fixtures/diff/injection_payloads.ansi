@@ -1,0 +1,18 @@
+[1mdiff: model.shop.dim_customers[0m  [32mkept=1[0m  [31mdropped=1[0m  [33mflagged=1[0m
+
+[1mTIER      ARTIFACT                      TEST            REASON                  SCORE    WHY[0m
+[32mkept    [0m  column.customer_id.descript…                                          0.85     Has EVIL ANSI escape; ```triple``` backticks.
+[31mdropped [0m  test.column.region.accepted…  accepted_valu…  always-passes           —        Has </details> HTML and col | name pipe.
+[33mflagged [0m  column.email.description                                              0.45     YAML edge content: --- and !tag stay inert.
+
+--- a/models/dim_customers.yml
++++ b/models/dim_customers.yml
+@@ -1,5 +1,8 @@
+ version: 2
+ models:
+   - name: dim_customers
+     columns:
+       - name: customer_id
++        description: Surrogate key.
++        tests:
++          - not_null
