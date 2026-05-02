@@ -1,0 +1,9 @@
+{
+  "artifact_id": "test.column.customer_id.unique",
+  "test_type": "unique",
+  "tier": "dropped",
+  "drop_reason": "always-passes",
+  "why": "Test returned zero failing rows on the representative sample.",
+  "score": null,
+  "passed": null
+}
