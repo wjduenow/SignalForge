@@ -638,7 +638,7 @@ def render_diff(
             ) from exc
         try:
             _write_rendered_text(rendered_text, output_path=canonical_output_path)
-        except (DiffSidecarRecordTooLargeError, KeyboardInterrupt, SystemExit):
+        except (KeyboardInterrupt, SystemExit):
             raise
         except BaseException as exc:
             raise DiffSidecarWriteError(
@@ -664,6 +664,7 @@ def render_diff(
                 report,
                 sidecar_path=canonical_sidecar_path,
                 project_dir=resolved_project_dir,
+                size_limit_bytes=resolved_config.sidecar_size_limit_bytes,
             )
         except (DiffSidecarRecordTooLargeError, DiffSidecarWriteError):
             raise

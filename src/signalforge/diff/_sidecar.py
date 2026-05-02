@@ -71,6 +71,7 @@ def write_sidecar(
     *,
     sidecar_path: Path,
     project_dir: Path,
+    size_limit_bytes: int | None = None,
 ) -> None:
     """Write ``report`` to ``sidecar_path`` as a single JSON document. Fail-closed.
 
@@ -155,11 +156,17 @@ def write_sidecar(
     encoded = body.encode("utf-8")
 
     # Size check BEFORE any file open so an oversize record leaves no
-    # on-disk artefact. Mirrors safety / draft / prune / grade.
-    if len(encoded) > _DIFF_SIDECAR_RECORD_LIMIT_BYTES:
+    # on-disk artefact. Mirrors safety / draft / prune / grade. The
+    # ``size_limit_bytes`` kwarg lets the orchestrator thread
+    # ``DiffConfig.sidecar_size_limit_bytes`` through; absent that
+    # override, the module-level constant applies.
+    effective_limit = (
+        size_limit_bytes if size_limit_bytes is not None else _DIFF_SIDECAR_RECORD_LIMIT_BYTES
+    )
+    if len(encoded) > effective_limit:
         raise DiffSidecarRecordTooLargeError(
             size=len(encoded),
-            limit=_DIFF_SIDECAR_RECORD_LIMIT_BYTES,
+            limit=effective_limit,
         )
 
     # Path canonicalisation BEFORE any file open. The caller-supplied

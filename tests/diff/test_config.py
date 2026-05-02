@@ -25,6 +25,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from signalforge.diff.config import DiffConfig, load_diff_config
 from signalforge.diff.errors import DiffError
@@ -210,8 +211,8 @@ def test_diff_config_defaults_match_dec_010() -> None:
     assert cfg.max_why_chars == 80
     assert cfg.narrow_terminal_threshold == 60
     assert cfg.markdown_max_diff_chars == 60_000
-    assert cfg.existing_schema_size_limit_bytes == 1_000_000
-    assert cfg.existing_schema_warn_at_bytes == 10_485_760
+    assert cfg.existing_schema_size_limit_bytes == 10_485_760
+    assert cfg.existing_schema_warn_at_bytes == 1_000_000
     assert cfg.sidecar_size_limit_bytes == 10_000_000
     assert cfg.render_kind == "ansi"
     assert cfg.respect_no_color_env is True
@@ -238,8 +239,8 @@ def test_load_diff_config_populates_all_nine_fields(tmp_path: Path) -> None:
         "  max_why_chars: 100\n"
         "  narrow_terminal_threshold: 40\n"
         "  markdown_max_diff_chars: 30000\n"
-        "  existing_schema_size_limit_bytes: 2000000\n"
-        "  existing_schema_warn_at_bytes: 5242880\n"
+        "  existing_schema_size_limit_bytes: 5242880\n"
+        "  existing_schema_warn_at_bytes: 2000000\n"
         "  sidecar_size_limit_bytes: 5000000\n"
         "  render_kind: markdown\n"
         "  respect_no_color_env: false\n",
@@ -250,8 +251,8 @@ def test_load_diff_config_populates_all_nine_fields(tmp_path: Path) -> None:
     assert cfg.max_why_chars == 100
     assert cfg.narrow_terminal_threshold == 40
     assert cfg.markdown_max_diff_chars == 30_000
-    assert cfg.existing_schema_size_limit_bytes == 2_000_000
-    assert cfg.existing_schema_warn_at_bytes == 5_242_880
+    assert cfg.existing_schema_size_limit_bytes == 5_242_880
+    assert cfg.existing_schema_warn_at_bytes == 2_000_000
     assert cfg.sidecar_size_limit_bytes == 5_000_000
     assert cfg.render_kind == "markdown"
     assert cfg.respect_no_color_env is False
@@ -299,6 +300,33 @@ def test_diff_config_sidecar_size_limit_negative_rejected(tmp_path: Path) -> Non
     )
     with pytest.raises(DiffError):
         load_diff_config(tmp_path)
+
+
+def test_diff_config_warn_at_must_be_below_size_limit(tmp_path: Path) -> None:
+    """The DEC-014 soft-warn fires only when a payload exceeds
+    ``existing_schema_warn_at_bytes`` but stays below the hard cap.
+    A config with ``warn_at >= size_limit`` makes the warning dead
+    code; reject at config-load time. Mirrors the
+    ``safety-layer.md`` DEC-018 pattern (validators must run on every
+    factory, including ``signalforge.yml``)."""
+    config_path = tmp_path / "signalforge.yml"
+    config_path.write_text(
+        "diff:\n"
+        "  existing_schema_size_limit_bytes: 1000000\n"
+        "  existing_schema_warn_at_bytes: 5000000\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(DiffError):
+        load_diff_config(tmp_path)
+
+
+def test_diff_config_warn_at_equal_to_size_limit_rejected() -> None:
+    """Strict less-than: warn-at == size-limit is also dead code."""
+    with pytest.raises(ValidationError):
+        DiffConfig(
+            existing_schema_size_limit_bytes=1_000_000,
+            existing_schema_warn_at_bytes=1_000_000,
+        )
 
 
 # ----- render_kind literal validator -----

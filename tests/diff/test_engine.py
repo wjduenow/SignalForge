@@ -43,6 +43,7 @@ from signalforge.diff.errors import (
     DiffGradingReportModelMismatchError,
     DiffInputTooLargeError,
     DiffPruneResultModelMismatchError,
+    DiffSidecarRecordTooLargeError,
     DiffSidecarWriteError,
 )
 from signalforge.diff.models import DiffReport
@@ -232,7 +233,10 @@ def test_existing_schema_oversize_raises_before_safe_load(project_dir: Path) -> 
     model = _make_model()
     candidate = _make_candidate()
     prune_result = _make_prune_result()
-    config = DiffConfig(existing_schema_size_limit_bytes=100)
+    config = DiffConfig(
+        existing_schema_size_limit_bytes=100,
+        existing_schema_warn_at_bytes=50,
+    )
     # 1000 bytes of YAML — well above the configured 100-byte cap.
     big_payload = "version: 2\n" + "# pad\n" * 200
     assert len(big_payload.encode("utf-8")) > 100
@@ -413,6 +417,34 @@ def test_sidecar_write_happens_when_path_provided(project_dir: Path) -> None:
     assert sidecar.exists()
     parsed = json.loads(sidecar.read_text(encoding="utf-8"))
     assert parsed["model_unique_id"] == model.unique_id
+
+
+def test_sidecar_oversize_raises_via_orchestrator(project_dir: Path) -> None:
+    """End-to-end: ``render_diff(..., sidecar_path=...)`` with a config
+    whose ``sidecar_size_limit_bytes`` is below the serialised report size
+    surfaces :class:`DiffSidecarRecordTooLargeError` from the writer up
+    through the orchestrator. Pins the wiring of
+    ``DiffConfig.sidecar_size_limit_bytes`` (post-QG fix; the knob was
+    silently ignored in the original implementation)."""
+    model = _make_model()
+    candidate = _make_candidate()
+    prune_result = _make_prune_result()
+    sidecar = project_dir / ".signalforge" / "diff.json"
+    # 100-byte cap is well below any non-trivial report payload.
+    config = DiffConfig(sidecar_size_limit_bytes=100)
+
+    with pytest.raises(DiffSidecarRecordTooLargeError):
+        render_diff(
+            model,
+            candidate,
+            prune_result,
+            config=config,
+            sidecar_path=sidecar,
+            project_dir=project_dir,
+        )
+
+    # Pre-write size check fires BEFORE any os.open — no on-disk artefact.
+    assert not sidecar.exists()
 
 
 def test_sidecar_not_written_when_path_omitted(project_dir: Path) -> None:

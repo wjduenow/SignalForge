@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from signalforge.diff.errors import DiffError
 
@@ -108,17 +108,20 @@ class DiffConfig(BaseModel):
     the diff section (preserving complete hunks where possible) and
     appends a truncation marker."""
 
-    existing_schema_size_limit_bytes: int = 1_000_000
+    existing_schema_size_limit_bytes: int = 10_485_760  # 10 MB
     """Hard cap on ``existing_schema`` YAML byte length, enforced
     BEFORE any ``yaml.safe_load`` call (DEC-006). Defends against
     billion-laughs / deep-nesting attacks. Above this cap raises
     :class:`signalforge.diff.errors.DiffInputTooLargeError`."""
 
-    existing_schema_warn_at_bytes: int = 10_485_760  # 10 MB
+    existing_schema_warn_at_bytes: int = 1_000_000  # 1 MB
     """Soft warning threshold for ``existing_schema`` YAML byte
     length (DEC-014). The renderer emits one ``WARNING`` log line
-    before the hard cap (:attr:`existing_schema_size_limit_bytes`) trips.
-    Mirrors :mod:`signalforge.warehouse.profiles` DEC-023."""
+    when the payload exceeds this threshold but stays below the hard cap
+    (:attr:`existing_schema_size_limit_bytes`). Must be strictly less
+    than the hard cap; the model validator enforces this invariant
+    so a typo at config-load time fails loud rather than silently
+    disabling DEC-014."""
 
     sidecar_size_limit_bytes: int = 10_000_000
     """Hard cap on the diff sidecar JSON byte length, enforced BEFORE
@@ -156,6 +159,22 @@ class DiffConfig(BaseModel):
         if v <= 0:
             raise ValueError("must be positive")
         return v
+
+    @model_validator(mode="after")
+    def _warn_below_limit(self) -> DiffConfig:
+        # The DEC-014 soft-warn fires when a payload exceeds
+        # ``existing_schema_warn_at_bytes`` but stays below
+        # ``existing_schema_size_limit_bytes``. If warn-at is >= the hard
+        # cap, the warning is dead code — fail loud at config-load time
+        # rather than silently disabling the contract.
+        if self.existing_schema_warn_at_bytes >= self.existing_schema_size_limit_bytes:
+            raise ValueError(
+                "existing_schema_warn_at_bytes "
+                f"({self.existing_schema_warn_at_bytes}) must be strictly less "
+                f"than existing_schema_size_limit_bytes "
+                f"({self.existing_schema_size_limit_bytes})"
+            )
+        return self
 
 
 class _DiffConfigFile(BaseModel):
