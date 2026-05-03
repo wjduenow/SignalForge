@@ -28,7 +28,7 @@ If you add a fourth `Tier` literal in v0.2 (e.g. `"warning"`, `"deferred"`), upd
 
 3. **Single-document overwrite, not append.** End-of-run only; every `render_diff` call replaces the prior sidecar atomically via `O_TRUNC`. Concurrent runs against the same `sidecar_path` produce different `run_id`s and last-writer-wins (mirrors grade-layer.md). Operators are expected to use a per-run path or accept overwrite semantics.
 
-The sidecar path is opt-in (`sidecar_path=None` skips the write entirely) — unlike safety / prune / grade, the diff layer does not require a durable on-disk artefact for every invocation. The CLI (#9) will wire a default; library callers can render in-process without ever touching the disk.
+The sidecar is **on by default** (`write_sidecar=True`). When `sidecar_path=None` and `write_sidecar=True`, the sidecar lands at `<project_dir>/.signalforge/diff.json` (mirrors grade's always-write posture for the durable hand-off). To skip the write entirely, pass `write_sidecar=False` — useful for library callers rendering in-process without a disk artefact. The original "opt-in only" semantics shipped briefly during US-007 development; Q1=A on the second-pass review locked the default-on shape so the diff sidecar matches grade / prune's always-durable contract.
 
 ## Symlink-hardened path canonicalisation at the orchestrator (mirrors grade post-QG fix)
 
@@ -62,7 +62,7 @@ The pattern: every user-overridable cap on a config block must have one path fro
 
 ## ANSI strip runs UNCONDITIONALLY on user content (DEC-007)
 
-`signalforge.diff._ansi_safety.strip_ansi_escapes(text)` — strict regex `r'\x1b\[[0-9;]*[a-zA-Z]'` covers SGR plus all CSI. Both `AnsiRenderer` and `MarkdownRenderer` invoke this on every user-content field (`description`, `rationale`, `evidence`, `reasoning`, `why`, `drop_reason`, `artifact_id`) BEFORE the renderer's own colour codes / Markdown escapes are added.
+`signalforge.diff._ansi_safety.strip_ansi_escapes(text)` — full ECMA-48 / ISO 6429 CSI regex `r'\x1b\[[0-?]*[ -/]*[@-~]'` (broadened from the original `\x1b\[[0-9;]*[a-zA-Z]` during US-014 because the narrow form missed tilde-terminated key/mode sequences such as `\x1b[3~` (Delete) and bracketed-paste markers `\x1b[200~` / `\x1b[201~`). Covers SGR (colour/style — `\x1b[31m`, `\x1b[1;31;4m`, reset `\x1b[0m`), cursor-movement / screen-clearing (`\x1b[2J`, `\x1b[H`), and the tilde-terminated and intermediate-byte CSI variants. Both `AnsiRenderer` and `MarkdownRenderer` invoke this on every user-content field (`description`, `rationale`, `evidence`, `reasoning`, `why`, `drop_reason`, `artifact_id`) BEFORE the renderer's own colour codes / Markdown escapes are added.
 
 The load-bearing invariant: **the strip is unconditional, not gated on the colour-precedence chain (DEC-021).** A malicious manifest field carrying `\x1b[31mEVIL\x1b[0m` renders as the literal text `EVIL` even when colour is forced ON via `respect_no_color_env=False` or `FORCE_COLOR=1`. The colour precedence only governs whether the renderer's *own* sanctioned SGR codes get emitted; user-content stripping is the security boundary.
 

@@ -73,7 +73,7 @@ Import from `signalforge.diff`. The names exported by `__all__`:
 
 ### Orchestrator
 
-- **`render_diff(model, candidate, prune_result, *, grading_report=None, existing_schema=None, config=None, output_path=None, sidecar_path=None, project_dir=None) -> DiffReport`** — End-to-end orchestrator. Boundary-checks the inputs, computes the canonical proposed YAML, builds the unified diff, builds the per-row entry tuple (assigning `tier="kept" | "dropped" | "flagged"` per DEC-012), computes the three reproducibility hashes, dispatches to the configured renderer, optionally writes the rendered text to `output_path` and the JSON sidecar to `sidecar_path`. Mirrors `signalforge.grade.grade_artifacts` and `signalforge.prune.prune_tests` in calling-convention shape: keyword-only optionals, model-front-paired, sequential execution. `project_dir` defaults to `Path.cwd()` and is used for symlink-hardened canonicalisation of `output_path` / `sidecar_path` (DEC-016 of `prune-engine.md`).
+- **`render_diff(model, candidate, prune_result, *, grading_report=None, existing_schema=None, config=None, output_path=None, sidecar_path=None, write_sidecar=True, project_dir=None) -> DiffReport`** — End-to-end orchestrator. Boundary-checks the inputs, computes the canonical proposed YAML, builds the unified diff, builds the per-row entry tuple (assigning `tier="kept" | "dropped" | "flagged"` per DEC-012), computes the three reproducibility hashes, dispatches to the configured renderer, optionally writes the rendered text to `output_path` and the JSON sidecar to `sidecar_path`. Mirrors `signalforge.grade.grade_artifacts` and `signalforge.prune.prune_tests` in calling-convention shape: keyword-only optionals, model-front-paired, sequential execution. `project_dir` defaults to `Path.cwd()` and is used for symlink-hardened canonicalisation of `output_path` / `sidecar_path` (DEC-016 of `prune-engine.md`). The sidecar is **on by default** (`write_sidecar=True`); when `sidecar_path` is omitted the sidecar lands at `<project_dir>/.signalforge/diff.json`. Pass `write_sidecar=False` to skip the sidecar entirely (library callers running in-process without a durable artefact).
 
 ### Result shapes
 
@@ -189,15 +189,21 @@ return value.
 
 ## Sidecar JSON schema
 
-Optional end-of-run write — `render_diff(..., sidecar_path=...)` is the
-opt-in. Unlike grade / prune (which always write), the diff sidecar is
-**caller-controlled**: the renderer's stdout output is the primary
-consumption surface; the sidecar is the durable hand-off for cases
-where the operator needs structured access (CI, PR comments, dashboards,
-reproducibility checks).
+End-of-run write — **on by default** (`render_diff(..., write_sidecar=True)`
+is the default; pass `write_sidecar=False` to skip). When
+`sidecar_path` is `None` and `write_sidecar=True`, the sidecar lands at
+`<project_dir>/.signalforge/diff.json`. Mirrors grade / prune's
+"always-write" posture for the durable hand-off; library callers that
+need an in-process render without a disk artefact opt out via
+`write_sidecar=False`.
 
-When written, the file lives at `sidecar_path` (caller-supplied; the
-default convention is `<project_dir>/.signalforge/diff.json`).
+The sidecar is the durable hand-off for cases where the operator needs
+structured access (CI, PR comments, dashboards, reproducibility
+checks); the renderer's stdout output is the primary human-facing
+surface.
+
+When written, the file lives at `sidecar_path` (caller-supplied) or at
+`<project_dir>/.signalforge/diff.json` (the default convention).
 Single-document overwrite via `O_WRONLY | O_CREAT | O_TRUNC` (DEC-009);
 a re-run replaces the prior sidecar atomically (subject to platform
 truncate semantics). The sidecar size cap is 10 MB

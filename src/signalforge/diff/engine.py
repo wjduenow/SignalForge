@@ -164,8 +164,10 @@ def _structural_key(*, scope: str, column: str | None, test: CandidateTest) -> _
     return (scope, column, test.type, _model_test_args_hash(test))
 
 
-def _structural_args_hashes(candidate: CandidateSchema) -> dict[_StructuralKey, str | None]:
-    """Pre-compute args_hash values keyed by structural fingerprint.
+def _structural_args_hashes(
+    candidate: CandidateSchema,
+) -> dict[_StructuralKey, list[str | None]]:
+    """Pre-compute args_hash queues keyed by structural fingerprint.
 
     Mirrors :func:`compute_args_hashes` semantics but keyed structurally
     so a :class:`PruneDecision` whose ``test`` was JSON-rehydrated (a
@@ -173,8 +175,21 @@ def _structural_args_hashes(candidate: CandidateSchema) -> dict[_StructuralKey, 
     collision rule as the grade engine: two tests in the same scope
     sharing a ``test.type`` get an 8-hex args_hash suffix; exact
     duplicates get an additional ``:<n>`` ordinal.
+
+    Exact duplicates (same scope, same type, identical args → identical
+    blake2b-4 hash) collapse onto the same :class:`_StructuralKey`. To
+    avoid last-assignment-wins (which would silently de-duplicate
+    artifact_ids across distinct duplicate tests in
+    ``prune_result.decisions``), we record a **list** of args_hash
+    values per key in the same order the grade engine would assign
+    them — first occurrence keeps the bare hash; second+ gets
+    ``:1`` / ``:2`` / ... suffixes. The decision walker
+    (:func:`_consume_args_hash`) pops from the front of each queue in
+    ``prune_result.decisions`` order, which matches
+    ``signalforge.prune.engine._iter_candidate_tests`` (columns in
+    declared order, then model-level tests).
     """
-    out: dict[_StructuralKey, str | None] = {}
+    out: dict[_StructuralKey, list[str | None]] = {}
 
     def _assign(scope: str, column: str | None, tests: tuple[CandidateTest, ...]) -> None:
         type_counts: dict[str, int] = {}
@@ -184,53 +199,84 @@ def _structural_args_hashes(candidate: CandidateSchema) -> dict[_StructuralKey, 
         for test in tests:
             key = _structural_key(scope=scope, column=column, test=test)
             if type_counts[test.type] <= 1:
-                out[key] = None
+                out.setdefault(key, []).append(None)
                 continue
             base_hash = _model_test_args_hash(test)
             ord_key = (test.type, base_hash)
             seen[ord_key] = seen.get(ord_key, 0) + 1
             ordinal = seen[ord_key]
-            # When two tests share both type AND args (exact duplicates),
-            # later occurrences carry an ordinal suffix. The structural
-            # key already collides between those tests — we can only
-            # store one entry, so the LAST assignment wins. The diff
-            # renderer's join-by-structural-key in this exact-duplicate
-            # case can't disambiguate further; this is a known limit of
-            # using structural keys after JSON rehydration. The
-            # in-memory id()-based path could disambiguate; we trade
-            # that for cross-stage parity. Document the limit; tests
-            # exercise the (more common) distinct-args case.
-            out[key] = base_hash if ordinal == 1 else f"{base_hash}:{ordinal - 1}"
+            # Exact-duplicate disambiguation: first occurrence keeps
+            # the bare hash; later occurrences get ``:<n - 1>`` ordinal
+            # suffix matching grade engine
+            # (:func:`signalforge.grade.engine._test_args_hashes`).
+            # Each duplicate gets its own slot in the queue so the
+            # decision walker can disambiguate by position.
+            out.setdefault(key, []).append(
+                base_hash if ordinal == 1 else f"{base_hash}:{ordinal - 1}"
+            )
 
-    _assign("model", None, candidate.tests)
+    # Iteration order MUST match
+    # ``signalforge.prune.engine._iter_candidate_tests``: columns first
+    # (in declared order; tests within a column in declared order),
+    # then model-level tests. This way the queue's pop order aligns
+    # with ``prune_result.decisions`` order.
     for column in candidate.columns:
         _assign("column", column.name, column.tests)
+    _assign("model", None, candidate.tests)
 
     return out
 
 
+def _consume_args_hash(
+    queues: dict[_StructuralKey, list[str | None]],
+    *,
+    key: _StructuralKey,
+) -> str | None:
+    """Pop the next args_hash for ``key`` from the per-call queue map.
+
+    The queues are constructed in candidate iteration order (matching
+    :func:`signalforge.prune.engine._iter_candidate_tests`); decisions
+    walk in the same order, so the ``i``-th decision matching ``key``
+    consumes the ``i``-th queued args_hash. Falls back to ``None`` when
+    the queue is empty (decision references a test that wasn't in the
+    candidate — should be impossible given the prune layer's anchor
+    contract, but the fallback keeps the renderer from KeyError'ing).
+    """
+    queue = queues.get(key)
+    if not queue:
+        return None
+    return queue.pop(0)
+
+
 def _resolve_test_artifact_id(
     decision: PruneDecision,
-    args_hashes: dict[_StructuralKey, str | None],
+    args_hashes: dict[_StructuralKey, list[str | None]],
 ) -> str:
     """Translate a :class:`PruneDecision` into a canonical ``artifact_id``.
 
     Uses :func:`signalforge.diff._artifact_id.artifact_id_for`, joining
     via a structural ``(scope, column, test_type, args_hash)`` key
-    against the pre-computed table from
+    against the pre-computed queue map from
     :func:`_structural_args_hashes`. Mirrors the join-by-anchor pattern
     in :mod:`signalforge.diff._emitter._kept_fingerprints` but uses
     structural identity rather than :func:`id`, so a
     :class:`PruneDecision` whose inner :class:`CandidateTest` was
     rehydrated from JSON (different object identity, same content)
-    still produces the byte-equal artifact_id. Cross-stage parity with
-    :mod:`signalforge.grade.engine` is the load-bearing invariant.
+    still produces the byte-equal artifact_id.
+
+    Mutates ``args_hashes`` by popping the front entry of the matching
+    queue (matches the per-decision ordinal consumption pattern from
+    grade engine's ``id()``-keyed table). Caller MUST pass a
+    fresh-per-call queue map built by :func:`_structural_args_hashes`
+    so two diff renders against the same candidate are independent.
+    Cross-stage parity with :mod:`signalforge.grade.engine` is the
+    load-bearing invariant.
     """
     anchor = decision.test_anchor
     if anchor.startswith("column."):
         column_name = anchor[len("column.") :]
         key = _structural_key(scope="column", column=column_name, test=decision.test)
-        args_hash = args_hashes.get(key)
+        args_hash = _consume_args_hash(args_hashes, key=key)
         return artifact_id_for(
             scope="column",
             column_name=column_name,
@@ -240,7 +286,7 @@ def _resolve_test_artifact_id(
     # Treat any non-column anchor (the literal "model" plus any
     # forward-compatible sentinel) as model-scoped.
     key = _structural_key(scope="model", column=None, test=decision.test)
-    args_hash = args_hashes.get(key)
+    args_hash = _consume_args_hash(args_hashes, key=key)
     return artifact_id_for(
         scope="model",
         test=decision.test,
@@ -344,7 +390,7 @@ def _flagged_why(failing: GradingResult, *, max_chars: int) -> str:
 
 def _entry_for_test(
     decision: PruneDecision,
-    args_hashes: dict[_StructuralKey, str | None],
+    args_hashes: dict[_StructuralKey, list[str | None]],
     grading_index: dict[str, list[GradingResult]],
     *,
     max_why_chars: int,
@@ -799,13 +845,15 @@ def render_diff(
     run_id = uuid.uuid4().hex
 
     # Construct the report with a placeholder duration; we'll refresh
-    # it post-write so the captured value reflects the full wall-clock
-    # including renderer + writes (post-QG fix #6).
+    # it after rendering + the optional output_path write but BEFORE
+    # the sidecar write, so the persisted sidecar carries the same
+    # duration_seconds as the returned report and the INFO log
+    # (post-second-pass review fix).
     report = DiffReport(
         signalforge_version=_sf.__version__,
         model_unique_id=model.unique_id,
         run_id=run_id,
-        duration_seconds=time.monotonic() - started_at,
+        duration_seconds=0.0,
         proposed_yaml=proposed_yaml,
         existing_yaml=existing_schema,
         unified_diff=unified_diff,
@@ -876,7 +924,17 @@ def render_diff(
                 cause=exc,
             ) from exc
 
-    # 11. Optional sidecar write (symlink-hardened at the orchestrator).
+    # 11. Refresh duration BEFORE the sidecar write so the persisted
+    # JSON carries the same wall-clock value as the returned report
+    # and the INFO log (post-second-pass review fix). The sidecar's
+    # ``duration_seconds`` previously reflected the early-stamped
+    # placeholder; the fix is to move both the refresh and the
+    # sidecar-write block down here, so the three surfaces (return
+    # value, sidecar JSON, INFO log) agree byte-for-byte.
+    duration_seconds = time.monotonic() - started_at
+    report = report.model_copy(update={"duration_seconds": duration_seconds})
+
+    # 12. Optional sidecar write (symlink-hardened at the orchestrator).
     if effective_sidecar_path is not None:
         # Post-QG fix #1: wrap mkdir as DiffSidecarWriteError too. A
         # parent that's an existing FILE (rather than a directory)
@@ -920,11 +978,9 @@ def render_diff(
                 cause=exc,
             ) from exc
 
-    # 12. Capture the full wall-clock duration (post-QG fix #6 — moved
-    # immediately before the INFO log so the captured value reflects
-    # the full pipeline including renderer + writes). One INFO log per
-    # invocation. Lazy-format JSON per DEC-015.
-    duration_seconds = time.monotonic() - started_at
+    # 13. One INFO log per invocation. Lazy-format JSON per DEC-015.
+    # The ``duration_seconds`` field matches the value persisted on the
+    # returned report and the sidecar JSON.
     _LOGGER.info(
         "rendered diff: %s",
         json.dumps(

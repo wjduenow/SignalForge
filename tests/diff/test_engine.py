@@ -279,7 +279,11 @@ def test_existing_schema_soft_warn_emitted(
             project_dir=project_dir,
         )
 
-    warns = [rec for rec in caplog.records if rec.levelname == "WARNING"]
+    warns = [
+        rec
+        for rec in caplog.records
+        if rec.name == "signalforge.diff.engine" and rec.levelno == logging.WARNING
+    ]
     assert len(warns) == 1
     # Lazy-format payload: the second positional arg is the JSON body.
     msg = warns[0].getMessage()
@@ -550,7 +554,11 @@ def test_info_log_emitted_at_happy_path_end(
     with caplog.at_level(logging.INFO, logger="signalforge.diff.engine"):
         render_diff(model, candidate, prune_result, project_dir=project_dir)
 
-    infos = [rec for rec in caplog.records if rec.levelname == "INFO"]
+    infos = [
+        rec
+        for rec in caplog.records
+        if rec.name == "signalforge.diff.engine" and rec.levelno == logging.INFO
+    ]
     assert len(infos) == 1
     msg = infos[0].getMessage()
     assert "rendered diff: " in msg
@@ -984,11 +992,283 @@ def test_info_log_duration_includes_write_phase(
     prune_result = _make_prune_result()
 
     with caplog.at_level(logging.INFO, logger="signalforge.diff.engine"):
-        render_diff(model, candidate, prune_result, project_dir=project_dir)
+        report = render_diff(model, candidate, prune_result, project_dir=project_dir)
 
-    infos = [rec for rec in caplog.records if rec.levelname == "INFO"]
+    infos = [
+        rec
+        for rec in caplog.records
+        if rec.name == "signalforge.diff.engine" and rec.levelno == logging.INFO
+    ]
     assert len(infos) == 1
     payload_json = infos[0].getMessage().split("rendered diff: ", 1)[1]
     parsed = json.loads(payload_json)
     assert isinstance(parsed["duration_seconds"], float)
     assert parsed["duration_seconds"] >= 0.0
+    # Regression: the persisted report's duration matches the logged
+    # value byte-for-byte; the sidecar JSON shares the same value
+    # because the sidecar write happens after the duration refresh.
+    assert report.duration_seconds == parsed["duration_seconds"]
+
+
+# ---------------------------------------------------------------------------
+# 11. Exact-duplicate test artifact_id parity (post-second-pass review fix)
+# ---------------------------------------------------------------------------
+
+
+def test_exact_duplicate_not_null_tests_get_distinct_artifact_ids(project_dir: Path) -> None:
+    """Two byte-identical ``not_null`` tests on the same column must
+    produce distinct artifact_ids — the first keeps the bare hash; the
+    second gets a ``:1`` ordinal suffix matching grade engine's
+    :func:`signalforge.grade.engine._test_args_hashes`.
+
+    Without this, the JSONL ``(run_id, artifact_id, criterion_id)``
+    triple would collide and the diff renderer / grade-sidecar join
+    would silently drop duplicate rows.
+    """
+    nn1 = CandidateTestNotNull(column="order_id")
+    nn2 = CandidateTestNotNull(column="order_id")  # exact duplicate
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact",
+        rationale="grain: per order",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="surrogate key",
+                rationale="primary identifier",
+                tests=(nn1, nn2),
+            ),
+        ),
+    )
+    decisions = (
+        PruneDecision(
+            test_anchor="column.order_id",
+            test=nn1,
+            decision="kept",
+            reason="kept",
+            failures=1,
+            sampled_rows=100,
+            scope="sample",
+            elapsed_ms=1,
+            compiled_sql_hash="0" * 16,
+            compiled_sql="select 1",
+            why="ran on 100 sample, 1 failing row",
+        ),
+        PruneDecision(
+            test_anchor="column.order_id",
+            test=nn2,
+            decision="kept",
+            reason="kept",
+            failures=2,
+            sampled_rows=100,
+            scope="sample",
+            elapsed_ms=1,
+            compiled_sql_hash="0" * 16,
+            compiled_sql="select 1",
+            why="ran on 100 sample, 2 failing rows",
+        ),
+    )
+    model = Model(
+        unique_id="model.shop.orders",
+        name="orders",
+        resource_type="model",
+        package_name="shop",
+        original_file_path="models/orders.sql",
+        path="orders.sql",
+        database="fake_project",
+        schema="dataset",  # type: ignore[call-arg]
+        columns={"order_id": Column(name="order_id")},
+        raw_code="select 1",
+    )
+    prune_result = _make_prune_result(decisions=decisions)
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+    test_aids = [e.artifact_id for e in report.entries if e.test_type == "not_null"]
+    # Two distinct artifact_ids — one for each duplicate.
+    assert len(test_aids) == 2
+    assert len(set(test_aids)) == 2
+    # First keeps the bare hash; second gets ``:1`` ordinal.
+    assert any(":1" in aid for aid in test_aids)
+
+
+def test_exact_duplicate_accepted_values_get_distinct_artifact_ids(project_dir: Path) -> None:
+    """Same as the not_null case but for accepted_values with identical
+    values lists — exact duplicates must still get distinct
+    artifact_ids via the ``:1`` ordinal suffix."""
+    from signalforge.draft.models import CandidateTestAcceptedValues
+
+    av1 = CandidateTestAcceptedValues(column="status", values=("a", "b"))
+    av2 = CandidateTestAcceptedValues(column="status", values=("a", "b"))  # exact duplicate
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact",
+        rationale="grain: per order",
+        columns=(
+            CandidateColumn(
+                name="status",
+                description="status enum",
+                rationale="state machine",
+                tests=(av1, av2),
+            ),
+        ),
+    )
+    decisions = (
+        PruneDecision(
+            test_anchor="column.status",
+            test=av1,
+            decision="kept",
+            reason="kept",
+            failures=1,
+            sampled_rows=100,
+            scope="sample",
+            elapsed_ms=1,
+            compiled_sql_hash="0" * 16,
+            compiled_sql="select 1",
+            why="ran on 100 sample, 1 failing row",
+        ),
+        PruneDecision(
+            test_anchor="column.status",
+            test=av2,
+            decision="dropped",
+            reason="always-passes",
+            failures=0,
+            sampled_rows=100,
+            scope="sample",
+            elapsed_ms=1,
+            compiled_sql_hash="0" * 16,
+            compiled_sql="select 1",
+            why="ran on 100 sample, 0 failing rows",
+        ),
+    )
+    model = Model(
+        unique_id="model.shop.orders",
+        name="orders",
+        resource_type="model",
+        package_name="shop",
+        original_file_path="models/orders.sql",
+        path="orders.sql",
+        database="fake_project",
+        schema="dataset",  # type: ignore[call-arg]
+        columns={"status": Column(name="status")},
+        raw_code="select 1",
+    )
+    prune_result = _make_prune_result(decisions=decisions)
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+    test_aids = [e.artifact_id for e in report.entries if e.test_type == "accepted_values"]
+    assert len(test_aids) == 2
+    assert len(set(test_aids)) == 2
+    assert any(":1" in aid for aid in test_aids)
+
+
+def test_exact_duplicate_cross_stage_parity_with_grade_engine(project_dir: Path) -> None:
+    """The diff engine's exact-duplicate artifact_ids match what the
+    grade engine produces byte-for-byte. This is the load-bearing
+    invariant that guarantees the diff / grade JSONL join survives
+    duplicate-test scenarios."""
+    from signalforge.grade.engine import (
+        _artifact_id_for as _grade_artifact_id_for,
+    )
+    from signalforge.grade.engine import (
+        _test_args_hashes as _grade_test_args_hashes,
+    )
+
+    nn1 = CandidateTestNotNull(column="order_id")
+    nn2 = CandidateTestNotNull(column="order_id")  # exact duplicate
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact",
+        rationale="grain: per order",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="surrogate key",
+                rationale="primary identifier",
+                tests=(nn1, nn2),
+            ),
+        ),
+    )
+    # Grade-side: id()-keyed; iterate column tests in declared order.
+    grade_args = _grade_test_args_hashes(candidate)
+    grade_aids = [
+        _grade_artifact_id_for(
+            scope="column",
+            column_name="order_id",
+            test=nn1,
+            args_hash=grade_args[id(nn1)],
+        ),
+        _grade_artifact_id_for(
+            scope="column",
+            column_name="order_id",
+            test=nn2,
+            args_hash=grade_args[id(nn2)],
+        ),
+    ]
+
+    # Diff-side: structural-key queue; build matching prune decisions.
+    decisions = (
+        PruneDecision(
+            test_anchor="column.order_id",
+            test=nn1,
+            decision="kept",
+            reason="kept",
+            failures=1,
+            sampled_rows=100,
+            scope="sample",
+            elapsed_ms=1,
+            compiled_sql_hash="0" * 16,
+            compiled_sql="select 1",
+            why="ran on 100 sample, 1 failing row",
+        ),
+        PruneDecision(
+            test_anchor="column.order_id",
+            test=nn2,
+            decision="kept",
+            reason="kept",
+            failures=2,
+            sampled_rows=100,
+            scope="sample",
+            elapsed_ms=1,
+            compiled_sql_hash="0" * 16,
+            compiled_sql="select 1",
+            why="ran on 100 sample, 2 failing rows",
+        ),
+    )
+    model = Model(
+        unique_id="model.shop.orders",
+        name="orders",
+        resource_type="model",
+        package_name="shop",
+        original_file_path="models/orders.sql",
+        path="orders.sql",
+        database="fake_project",
+        schema="dataset",  # type: ignore[call-arg]
+        columns={"order_id": Column(name="order_id")},
+        raw_code="select 1",
+    )
+    prune_result = _make_prune_result(decisions=decisions)
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+    diff_aids = [e.artifact_id for e in report.entries if e.test_type == "not_null"]
+    # Set equality: both stages produce the same artifact_id pair.
+    assert set(diff_aids) == set(grade_aids), (
+        f"Cross-stage parity break: diff={diff_aids!r} grade={grade_aids!r}"
+    )
