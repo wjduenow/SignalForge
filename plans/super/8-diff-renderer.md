@@ -264,15 +264,15 @@ Five parallel reviews ran 2026-05-02 (security, performance, data-model + API de
 | AR-2 | API design | Drift detectors mandatory for every `extra="ignore"` read-back model (`prune-engine.md` DEC-010, `grade-layer.md` DEC-010). Locked plan didn't enumerate them. | **blocker** | `tests/diff/test_drift_detector.py` + committed fixtures (`diff_report_v1.json`, `diff_entry_v1.json`). |
 | AR-3 | API design | Public API surface in `signalforge.diff.__init__.py` not specified — particularly: are the three renderer classes (`AnsiRenderer`, `MarkdownRenderer`, `JsonRenderer`) public or `_`-prefixed? | **blocker** | Decide in refinement (see Q-AR-3). |
 | AR-4 | Performance | GitHub PR-comment 65k-char limit. A typical 100-column model produces a unified diff well over 120k chars in Markdown form. Q6 → C (always-emit sidecar) helps but the Markdown body still needs a truncation strategy so the v0.3 GH Action can post a comment that doesn't fail. | concern | MarkdownRenderer truncates the diff body to ≤ 60k chars; appends `(N more lines — see sidecar diff.json)` footer; sidecar carries the full diff. Decide in refinement (see Q-AR-4). |
-| AR-5 | Security | YAML deserialisation: `yaml.safe_load(existing_schema)` has no input-size cap. Billion-laughs and deeply-nested attacks pass through. | concern | `_EXISTING_SCHEMA_SIZE_LIMIT_BYTES = 1_000_000` (1 MB). Cap before `safe_load`. Typed `DiffInputTooLargeError`. |
+| AR-5 | Security | YAML deserialisation: `yaml.safe_load(existing_schema)` has no input-size cap. Billion-laughs and deeply-nested attacks pass through. | concern | `_EXISTING_SCHEMA_SIZE_LIMIT_BYTES = 10_485_760` (10 MB; post-QG fix swapped from the original 1 MB hard cap to keep room for legitimately large schema files while the 1 MB soft warning fires earlier). Cap before `safe_load`. Typed `DiffInputTooLargeError`. |
 | AR-6 | Security | ANSI escape injection in user-visible output. LLM-generated `description` / `why` / `evidence` strings can contain `\x1b[...m` and inject directly into terminal output (the logger gate does not apply to stdout). | concern | `_strip_ansi_escapes(text: str) -> str` helper; apply at AnsiRenderer entry to every user-content field BEFORE colorising. Test with `\x1b[31mEVIL\x1b[0m` payload. |
 | AR-7 | Security | Markdown injection in PR-comment output (triple-backticks closing the fenced block; `</details>`; raw HTML; `[text](javascript:...)`). | concern | `_escape_markdown_scalar(text: str) -> str` — escape backticks, pipes, backslashes; no raw HTML pass-through. Test with all four payloads. |
 | AR-8 | Security | Sidecar JSON size cap. Grade uses `_GRADE_SIDECAR_RECORD_LIMIT_BYTES = 1_000_000` for evidence-only payloads; diff sidecar contains the unified diff text which can be larger. | concern | `_DIFF_SIDECAR_RECORD_LIMIT_BYTES = 10_000_000` (10 MB; text-only — no warehouse rows). Pre-write check; typed `DiffSidecarRecordTooLargeError`. |
 | AR-9 | Security | YAML emit edge cases: descriptions starting with `---`, `!`, embedding triple-backticks or newlines may emit ambiguously. | concern | Snapshot tests exercise each edge case; verify `yaml.safe_load(yaml.safe_dump(payload))` round-trips. |
 | AR-10 | Performance | Terminal-width handling for `< 80` cols / piped output. The 120-char `why` cap from grade overflows narrow TTYs. | concern | AnsiRenderer detects narrow TTY (`<= 60` cols) and switches to compact mode: drop `why` column from table; emit each `why` as a follow-up line below the row it belongs to. |
-| AR-11 | Performance | Soft warning when `len(existing_schema) > 10 MB` (mirrors `warehouse-adapters.md` DEC-023 profiles.yml warning at 1 MB). | concern | `_EXISTING_SCHEMA_WARN_AT = 10 * 1024 * 1024`; lazy-format JSON `WARNING` log. |
+| AR-11 | Performance | Soft warning when `len(existing_schema) > 1 MB` (mirrors `warehouse-adapters.md` DEC-023 profiles.yml warning at 1 MB). | concern | `_EXISTING_SCHEMA_WARN_AT = 1_000_000` (1 MB; post-QG fix swapped from 10 MB so the warning fires below the 10 MB hard cap rather than above it); lazy-format JSON `WARNING` log. |
 | AR-12 | API design | Orchestrator kwarg order: `existing_schema` is a data input, not a config knob, but currently lives mid-kwarg-block. | concern | Re-shape: `render_diff(model, candidate, prune_result, *, grading_report=None, existing_schema=None, config=None, output_path=None, sidecar_path=None, project_dir=None) -> DiffReport`. Keep all optionals keyword-only (consistent with grade); document that data inputs come first within the kw-only block. |
-| AR-13 | API design | DiffConfig field set undefined; needs `extra="forbid"`. | concern | `context_lines: int = 3`, `max_why_chars: int = 80`, `narrow_terminal_threshold: int = 60`, `existing_schema_size_limit_bytes: int = 1_000_000`, `existing_schema_warn_at_bytes: int = 10_485_760`, `sidecar_size_limit_bytes: int = 10_000_000`. No mid-config nested types — single flat block. |
+| AR-13 | API design | DiffConfig field set undefined; needs `extra="forbid"`. | concern | `context_lines: int = 3`, `max_why_chars: int = 80`, `narrow_terminal_threshold: int = 60`, `existing_schema_size_limit_bytes: int = 10_485_760`, `existing_schema_warn_at_bytes: int = 1_000_000`, `sidecar_size_limit_bytes: int = 10_000_000`. No mid-config nested types — single flat block. (Post-QG fix swapped `existing_schema_*` defaults so the 1 MB soft warning fires below the 10 MB hard cap.) |
 | AR-14 | API design | Renderer ABC signature: pure-return vs. streamed. Snapshot tests want `str` return for byte-for-byte assertion. | concern | `Renderer.render(report: DiffReport) -> str`. Orchestrator wires stdout / sidecar I/O. |
 | AR-15 | API design | Tier modelling on `DiffEntry`: `Literal["kept", "dropped", "flagged"]` mirrors `prune.PruneDecision.decision` literal pattern. | concern | Adopt Literal. Reserve `flagged` only when `grading_report` is provided. |
 | AR-16 | Observability | Log event policy: which events INFO vs. DEBUG vs. WARNING? | concern | INFO: "rendering diff for model X; N kept, M flagged"; INFO: "(no schema changes)" outcome; DEBUG: sidecar path/size; **no separate WARN before raising typed errors** (mirrors grade — exception IS the signal). |
@@ -348,7 +348,7 @@ def render_diff(
 
 **DEC-005 — Markdown body truncation (resolves AR-4, Q-AR-4 → B).** `DiffConfig.markdown_max_diff_chars: int = 60_000`. When the rendered Markdown diff body exceeds the cap, MarkdownRenderer truncates the diff section (preserving complete hunks where possible) and appends:
 
-```
+```text
 ... (N more lines truncated — see <project_dir>/.signalforge/diff.json for full diff)
 ```
 
@@ -356,7 +356,7 @@ Kept/dropped/flagged table always renders fully (one line per artifact; small).
 
 **Why.** GitHub PR comments are 65 536 chars. The 60 000 cap leaves room for the table, the prelude, and the truncation footer.
 
-**DEC-006 — YAML deserialisation safety (resolves AR-5).** `_EXISTING_SCHEMA_SIZE_LIMIT_BYTES = 1_000_000` (1 MB). `render_diff` checks `len(existing_schema.encode("utf-8")) <= limit` BEFORE calling `yaml.safe_load`. Oversize raises `DiffInputTooLargeError(size, limit)`.
+**DEC-006 — YAML deserialisation safety (resolves AR-5).** `_EXISTING_SCHEMA_SIZE_LIMIT_BYTES = 10_485_760` (10 MB; post-QG fix swapped from the original 1 MB hard cap so the soft-warn at `existing_schema_warn_at_bytes = 1_000_000` fires below the hard cap rather than above it). `render_diff` checks `len(existing_schema.encode("utf-8")) <= limit` BEFORE calling `yaml.safe_load`. Oversize raises `DiffInputTooLargeError(size, limit)`.
 
 **Why.** Pre-load size cap defends against billion-laughs / deep-nesting attacks regardless of `safe_load`'s constructor restrictions. Mirrors safety-layer / grade-layer "size cap before any open" pattern.
 
@@ -379,14 +379,14 @@ context_lines: int = 3              # difflib.unified_diff(n=...)
 max_why_chars: int = 80             # truncation cap on per-row "why"
 narrow_terminal_threshold: int = 60 # cols below which compact mode kicks in
 markdown_max_diff_chars: int = 60_000
-existing_schema_size_limit_bytes: int = 1_000_000
-existing_schema_warn_at_bytes: int = 10_485_760  # 10 MB
+existing_schema_size_limit_bytes: int = 10_485_760  # 10 MB hard cap (post-QG fix)
+existing_schema_warn_at_bytes: int = 1_000_000      # 1 MB soft warning (post-QG fix)
 sidecar_size_limit_bytes: int = 10_000_000
 render_kind: Literal["ansi", "markdown", "json"] = "ansi"
 respect_no_color_env: bool = True
 ```
 
-`_DiffConfigFile` top-level → `extra="ignore"` (sibling stages); inner `diff:` content → `extra="forbid"` (typos like `contxt_lines` fail loud).
+`_DiffConfigFile` top-level → `extra="ignore"` (sibling stages); inner `diff:` content → `extra="forbid"` (typos like `contxt_lines` fail loud). The original plan had the `existing_schema_*` defaults inverted (hard cap 1 MB, soft warn 10 MB) — the post-QG fix swapped them so the warning fires below the hard cap rather than as dead code above it.
 
 **Why.** Single flat config block per `prune-engine.md` DEC-020 / `grade-layer.md` DEC-029. Each cap is user-overridable downward only; the renderer doesn't read above its own defaults.
 
@@ -479,7 +479,7 @@ Companion regen script at `tests/fixtures/diff/regenerate.sh` (mirrors `tests/fi
 Fourteen stories: 12 implementation + Quality Gate + Patterns & Memory. Validation command (per `CLAUDE.md`) appears in every implementation story's acceptance criteria:
 
 ```bash
-ruff check . && ruff format --check . && pyright && pytest
+pip install -e ".[dev]" && ruff check . && ruff format --check . && pyright && pytest
 ```
 
 Stories are ordered backend-first → orchestration → rendering surfaces → tests → public API → QG → memory, mirroring #7's super-plan ordering. Each story is sized for one Ralph context window.
@@ -599,8 +599,8 @@ context_lines: int = 3
 max_why_chars: int = 80
 narrow_terminal_threshold: int = 60
 markdown_max_diff_chars: int = 60_000
-existing_schema_size_limit_bytes: int = 1_000_000
-existing_schema_warn_at_bytes: int = 10_485_760
+existing_schema_size_limit_bytes: int = 10_485_760  # 10 MB hard cap (post-QG fix)
+existing_schema_warn_at_bytes: int = 1_000_000      # 1 MB soft warning (post-QG fix)
 sidecar_size_limit_bytes: int = 10_000_000
 render_kind: Literal["ansi", "markdown", "json"] = "ansi"
 respect_no_color_env: bool = True
@@ -641,7 +641,7 @@ respect_no_color_env: bool = True
 **Functions:**
 
 - `strip_ansi_escapes(text: str) -> str` — applies `re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', text)`. Covers SGR + all CSI.
-- `escape_markdown_scalar(text: str, *, in_table_cell: bool = False) -> str` — escapes ` ``` ` → `\`\`\``, `|` → `\|`, `\` → `\\`. When `in_table_cell=True`, additionally HTML-entity-encodes `<` → `&lt;` and `>` → `&gt;` to neutralise raw HTML.
+- `escape_markdown_scalar(text: str, *, in_table_cell: bool = False) -> str` — escapes triple-backticks → `\`\`\``, `|` → `\|`, `\` → `\\`. When `in_table_cell=True`, additionally HTML-entity-encodes `<` → `&lt;` and `>` → `&gt;` to neutralise raw HTML.
 
 **Acceptance criteria:**
 
@@ -696,7 +696,7 @@ Algorithm:
 **TDD:**
 
 - Determinism test: two calls return identical bytes.
-- Round-trip test for each of: `"---"`, `"!custom"`, `"\`\`\`code\`\`\`"`, `"multi\nline"`, `"plain text"`.
+- Round-trip test for each of: `"---"`, `"!custom"`, ``"```code```"``, `"multi\nline"`, `"plain text"`.
 - Filtered tests: a candidate with 5 tests where prune dropped 2 → emitted YAML has 3 tests in canonical order.
 - Column order: candidate has columns `[a, b, c]` → emitted YAML has them in same order regardless of test-sort.
 
@@ -1093,7 +1093,3 @@ Created 2026-05-02. Worktree: `/home/wesd/dev/worktrees/SignalForge/feature/8-di
 | `bd_1-scaffolding-htq.14` | US-014 — Patterns & Memory | `.13` |
 
 **Initially ready (no active blockers):** `.1`, `.4`, `.5`, `.6` — four leaves Ralph can pick up in parallel.
-
-## Beads Manifest
-
-*To be filled at devolve time.*

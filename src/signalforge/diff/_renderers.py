@@ -484,6 +484,30 @@ class AnsiRenderer(Renderer):
 _DEFAULT_MARKDOWN_MAX_DIFF_CHARS = 60_000
 
 
+def _longest_backtick_run(text: str) -> int:
+    """Return the length of the longest consecutive ````` run in ``text``.
+
+    Used to size the dynamic fence (post-QG fix): a static
+    triple-backtick fence can be terminated prematurely by an
+    unchanged YAML line in the diff body that itself contains exactly
+    three consecutive backticks. The fence emitted by the renderer
+    must be longer than any backtick run inside the body.
+
+    ``text`` containing no backticks → ``0`` (the renderer floors at
+    a 3-char fence). Empty string → ``0``.
+    """
+    longest = 0
+    current = 0
+    for ch in text:
+        if ch == "`":
+            current += 1
+            if current > longest:
+                longest = current
+        else:
+            current = 0
+    return longest
+
+
 class MarkdownRenderer(Renderer):
     """Render a :class:`DiffReport` to GitHub-flavored Markdown (US-009).
 
@@ -664,6 +688,15 @@ class MarkdownRenderer(Renderer):
         Markdown structural injection (backticks / pipes inside a
         fenced block are inert).
 
+        The fence length is chosen dynamically (post-QG fix). A static
+        triple-backtick fence can be closed prematurely by an
+        unchanged YAML line that itself contains exactly three
+        consecutive backticks. The renderer scans the body for the
+        longest run of consecutive backticks and emits an opening
+        fence with one extra backtick (CommonMark allows fences of
+        3+ backticks; the closing fence must be the same length or
+        longer). The closing fence matches the opening length.
+
         Returns the empty string when the report's ``unified_diff`` is
         empty — the caller suppresses the leading blank line and the
         rendered output omits the diff block entirely.
@@ -676,18 +709,42 @@ class MarkdownRenderer(Renderer):
         clean_lines = [strip_ansi_escapes(line) for line in body.splitlines()]
         clean_body = "\n".join(clean_lines)
 
-        limit = self._markdown_max_diff_chars()
-        if len(clean_body) <= limit:
-            return f"```diff\n{clean_body}\n```"
+        # Fence length must exceed the longest consecutive-backtick run
+        # in the body so a YAML payload containing ``` cannot close the
+        # outer fence early.
+        fence = "`" * max(3, _longest_backtick_run(clean_body) + 1)
+        opening = f"{fence}diff\n"
+        closing = f"\n{fence}"
 
-        truncated_body, dropped_line_count = self._truncate_at_last_hunk(clean_body, limit)
+        limit = self._markdown_max_diff_chars()
+        # DEC-005 cap applies to the WHOLE rendered diff block, not just
+        # ``clean_body``. Subtract the opening fence + language tag,
+        # the leading newline of the closing fence, and the closing
+        # fence itself before deriving the body budget. Without this
+        # subtraction the post-truncation block can exceed the cap by
+        # the constant overhead of fence + footer.
+        # ``opening`` already carries the trailing newline; ``closing``
+        # carries its leading newline; the rendered shape is
+        # ``opening + body + closing`` (no extra separators).
+        envelope_overhead = len(opening) + len(closing)
+        body_budget = limit - envelope_overhead
+        if len(clean_body) <= body_budget:
+            return f"{opening}{clean_body}{closing}"
+
+        # The truncator also has to leave room for the footer line
+        # itself plus a trailing newline that separates the footer
+        # from the closing fence.
+        footer_overhead = len(self._truncation_footer(0)) + 1  # +1 for "\n"
+        truncated_body, dropped_line_count = self._truncate_at_last_hunk(
+            clean_body, body_budget - footer_overhead
+        )
         footer = self._truncation_footer(dropped_line_count)
         # The footer lives INSIDE the fenced block (DEC-005). One trailing
         # newline before the footer keeps the rendered Markdown tidy
         # regardless of whether the truncated body ends in a newline.
         if truncated_body and not truncated_body.endswith("\n"):
             truncated_body += "\n"
-        return f"```diff\n{truncated_body}{footer}\n```"
+        return f"{opening}{truncated_body}{footer}{closing}"
 
     def _markdown_max_diff_chars(self) -> int:
         """Return the active markdown body cap (DEC-005).
@@ -710,20 +767,37 @@ class MarkdownRenderer(Renderer):
         latest hunk-start whose end position is ``<= limit``; everything
         beyond that point is dropped.
 
-        When the body has no ``@@`` markers (e.g. it's a header-only
-        prefix from :func:`difflib.unified_diff`), or the first hunk
-        already exceeds ``limit``, the truncation falls back to a
-        line-boundary cut: keep complete lines up to but not past the
-        cap. The caller still receives a footer with the dropped line
-        count so the operator knows content was elided.
+        Two edge cases the post-QG fix handles deliberately:
+
+        * **Body ending with a trailing newline.** ``body.split("\\n")``
+          on a string ending in ``\\n`` produces a trailing empty
+          segment. The original line-count derivation included that
+          empty segment, off-by-one'ing the ``dropped_line_count``
+          rendered into the footer. The fix strips the trailing empty
+          segment before counting.
+
+        * **First hunk already exceeds ``limit``.** Falling back to a
+          mid-hunk character cut produces a malformed unified-diff
+          body (a half-emitted ``@@`` header or a torn context line)
+          that breaks downstream tooling (Recce, GitHub's diff viewer).
+          The fix emits ONLY the file-header lines (``---``/``+++``)
+          followed by no hunk content; the truncation footer then
+          carries the dropped-line count and the operator follows the
+          footer link to the sidecar JSON for the full diff.
 
         Returns:
             ``(truncated_body, dropped_line_count)``. The truncated
             body never ends with a partial hunk header. The dropped
             line count is computed against the original line count of
-            the input body.
+            the input body, with trailing empty segments excluded.
         """
         original_lines = body.split("\n")
+        # ``body.split("\n")`` produces a trailing empty segment when
+        # ``body`` ends with ``"\n"``; strip it before counting so the
+        # footer's ``N more lines truncated`` matches the operator's
+        # mental model of "lines of content".
+        if original_lines and original_lines[-1] == "":
+            original_lines = original_lines[:-1]
         original_line_count = len(original_lines)
 
         # Find the byte-offset of every "@@" hunk header. We treat any
@@ -754,8 +828,19 @@ class MarkdownRenderer(Renderer):
                 break
 
         if chosen_end <= 0:
-            # Even the first hunk is too big — fall back to line-cut.
-            return self._truncate_at_line_boundary(body, limit, original_line_count)
+            # Even the first hunk is too big — emit ONLY the file
+            # header lines (``---``, ``+++``) so the resulting body
+            # remains a valid (albeit content-free) unified-diff
+            # prefix. The line-boundary fallback would emit a
+            # mid-hunk character cut and break downstream parsers.
+            header_lines: list[str] = []
+            for line in original_lines:
+                if line.startswith("@@"):
+                    break
+                header_lines.append(line)
+            truncated = "\n".join(header_lines)
+            dropped = original_line_count - len(header_lines)
+            return truncated, max(dropped, 0)
 
         truncated = body[:chosen_end].rstrip("\n")
         kept_line_count = truncated.count("\n") + 1 if truncated else 0

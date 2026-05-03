@@ -5,7 +5,7 @@
 | Tier | Artifact | Test | Reason | Score | Why |
 | --- | --- | --- | --- | --- | --- |
 | kept | column.customer_id.description |  |  | 0.85 | Has EVIL ANSI escape; \`\`\`triple\`\`\` backticks. |
-| dropped | test.column.region.accepted_values | accepted_values | always-passes | — | Has </details> HTML and col &#124; name pipe. |
+| dropped | test.column.region.accepted_values | accepted_values | always-passes | — | Has &lt;/details&gt; HTML and col &#124; name pipe. |
 | flagged | column.email.description |  |  | 0.45 | YAML edge content: --- and !tag stay inert. |
 
 ```diff

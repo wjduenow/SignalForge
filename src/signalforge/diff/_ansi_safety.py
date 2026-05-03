@@ -20,14 +20,23 @@ from __future__ import annotations
 
 import re
 
-_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 """ANSI CSI (Control Sequence Introducer) regex.
 
-Matches ESC ``[`` followed by zero-or-more semicolon-separated decimal
-parameters, terminated by an ASCII letter (the final byte). Covers
-SGR (color/style — ``\\x1b[31m``, ``\\x1b[1;31;4m``, reset
-``\\x1b[0m``), cursor-movement (``\\x1b[2J``, ``\\x1b[H``), and the
-rest of the CSI family.
+Matches ESC ``[`` followed by zero-or-more parameter bytes
+(``0x30-0x3F`` — digits plus ``;<=>?``), zero-or-more intermediate
+bytes (``0x20-0x2F`` — space plus ``!"#$%&'()*+,-./``), terminated by
+exactly one final byte in ``0x40-0x7E`` (``@A...Z[\\]^_`a...z{|}~``).
+
+This is the full ECMA-48 / ISO 6429 CSI grammar. Covers:
+
+* SGR (color/style — ``\\x1b[31m``, ``\\x1b[1;31;4m``, reset
+  ``\\x1b[0m``).
+* Cursor-movement and screen-clearing (``\\x1b[2J``, ``\\x1b[H``).
+* Tilde-terminated key/mode sequences such as ``\\x1b[3~`` (Delete)
+  and bracketed-paste markers ``\\x1b[200~`` / ``\\x1b[201~`` —
+  these terminate with ``~`` (``0x7E``), which the older
+  letter-only regex missed.
 
 Does NOT cover OSC (``\\x1b]...``), DCS (``\\x1bP...``), or other
 non-CSI escapes — those are out of scope for v0.1 because the

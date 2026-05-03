@@ -49,6 +49,29 @@ def test_idempotent_on_already_stripped_text() -> None:
     assert once == twice == plain
 
 
+def test_strips_tilde_terminated_key_sequence() -> None:
+    # ``\x1b[3~`` is the Delete-key sequence; the broadened CSI regex
+    # (final byte in ``@-~``, not just ``a-zA-Z``) covers tilde
+    # terminators.
+    assert strip_ansi_escapes("a\x1b[3~b") == "ab"
+
+
+def test_strips_bracketed_paste_markers() -> None:
+    # Bracketed-paste mode delimits pasted text with ``\x1b[200~``
+    # (start) and ``\x1b[201~`` (end). Both must be stripped — a
+    # smuggled ``[200~`` from upstream content could otherwise put a
+    # downstream terminal into bracketed-paste mode.
+    text = "\x1b[200~pasted\x1b[201~"
+    assert strip_ansi_escapes(text) == "pasted"
+
+
+def test_strips_csi_with_intermediate_byte() -> None:
+    # Intermediate bytes (``0x20-0x2F``) are valid in the CSI grammar
+    # — e.g. ``\x1b[1 q`` (cursor-shape DECSCUSR with a space
+    # intermediate). Confirm the broadened regex covers it.
+    assert strip_ansi_escapes("a\x1b[1 qb") == "ab"
+
+
 def test_does_not_strip_lone_escape_byte() -> None:
     # A bare ESC without ``[`` is not a CSI sequence and is left alone.
     # The terminal will still render it weirdly — that's a separate

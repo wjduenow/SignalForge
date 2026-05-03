@@ -364,3 +364,48 @@ def test_diff_config_is_frozen() -> None:
     cfg = DiffConfig()
     with pytest.raises(Exception):  # noqa: B017 — Pydantic raises ValidationError
         cfg.context_lines = 99  # type: ignore[misc]
+
+
+# ----- Read-error wrapping (post-QG fix) -----
+
+
+def test_load_diff_config_directory_at_config_path_raises_diff_error(
+    tmp_path: Path,
+) -> None:
+    """When the candidate ``signalforge.yml`` path is a directory rather
+    than a regular file, the loader wraps the resulting ``IsADirectoryError``
+    as :class:`DiffError` rather than letting the OS error escape.
+    """
+    # Create a directory at the config-file location.
+    (tmp_path / "signalforge.yml").mkdir()
+    with pytest.raises(DiffError) as exc_info:
+        load_diff_config(tmp_path)
+    # The original OS error is chained.
+    assert exc_info.value.__cause__ is not None
+
+
+# ----- Symlink-hardening (post-QG fix) -----
+
+
+def test_load_diff_config_symlink_escaping_project_dir_raises_diff_error(
+    tmp_path: Path,
+) -> None:
+    """A ``signalforge.yml`` symlinked to a target outside the project
+    directory must be rejected at load time. Mirrors the
+    orchestrator-level canonicalisation applied to ``output_path`` /
+    ``sidecar_path``.
+    """
+    # Build two sibling directories: a project tree and an
+    # outside-the-project config file.
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    real_config = outside_dir / "real.yml"
+    real_config.write_text("diff:\n  context_lines: 5\n", encoding="utf-8")
+    # Symlink ``<project>/signalforge.yml -> ../outside/real.yml``.
+    link = project_dir / "signalforge.yml"
+    link.symlink_to(real_config)
+
+    with pytest.raises(DiffError):
+        load_diff_config(project_dir)

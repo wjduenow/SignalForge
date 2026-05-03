@@ -61,6 +61,8 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from signalforge.diff.errors import DiffError
+from signalforge.warehouse._path_safety import canonicalise_path
+from signalforge.warehouse.errors import ProfileNotFoundError
 
 _DEFAULT_CONFIG_FILENAME = "signalforge.yml"
 
@@ -249,7 +251,35 @@ def load_diff_config(project_dir: Path, path: Path | None = None) -> DiffConfig:
         if not config_file.exists():
             return DiffConfig()
 
-    raw_text = config_file.read_text(encoding="utf-8").strip()
+    # Symlink-harden the resolved config path BEFORE reading it.
+    # Mirrors the orchestrator-level canonicalisation applied to
+    # ``output_path`` / ``sidecar_path`` (post-QG fix; see
+    # ``.claude/rules/diff-renderer.md``). A symlinked
+    # ``signalforge.yml`` pointing outside ``project_dir`` (or a
+    # cycle) is rejected here, well before
+    # :meth:`pathlib.Path.read_text`.
+    try:
+        canonical = canonicalise_path(config_file, project_dir)
+    except ProfileNotFoundError as exc:
+        raise DiffError(
+            f"signalforge diff config path failed canonicalisation: {config_file!r}",
+            remediation=(
+                "The config path resolved outside <project_dir> or "
+                "contains a symlink loop. Verify <project_dir> and the "
+                "config file's symlink target."
+            ),
+        ) from exc
+
+    try:
+        raw_text = canonical.read_text(encoding="utf-8").strip()
+    except (OSError, IsADirectoryError, PermissionError) as exc:
+        raise DiffError(
+            f"signalforge.yml could not be read: {exc}",
+            remediation=(
+                "Verify the config file is a regular file, readable by "
+                "the current user, and not locked by another process."
+            ),
+        ) from exc
     if not raw_text:
         return DiffConfig()
 

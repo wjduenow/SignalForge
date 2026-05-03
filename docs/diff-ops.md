@@ -48,7 +48,7 @@ The layer is fail-closed on three boundaries:
   must match `model.unique_id`. Mismatch raises a typed
   `Diff*ModelMismatchError` BEFORE any rendering work.
 * **Existing-schema size cap (DEC-006).** `existing_schema` is checked
-  against a 1 MB byte cap BEFORE any `yaml.safe_load`. Defends against
+  against a 10 MB byte cap BEFORE any `yaml.safe_load`. Defends against
   billion-laughs / deep-nesting attacks regardless of `safe_load`'s
   constructor restrictions.
 * **Sidecar size cap (DEC-009).** The serialised JSON is checked
@@ -99,7 +99,7 @@ on a `↳ Remediation:` line by `__str__`.
 - **`DiffCandidateModelMismatchError`** — `candidate.name` does not match `model.name` (DEC-002). Raised at orchestrator entry BEFORE any rendering work.
 - **`DiffPruneResultModelMismatchError`** — `prune_result.model_unique_id` does not match `model.unique_id` (DEC-002). Same fail-fast posture as the candidate boundary check.
 - **`DiffGradingReportModelMismatchError`** — `grading_report.model_unique_id` does not match `model.unique_id` (DEC-002). Only raised when `grading_report` is provided.
-- **`DiffInputTooLargeError`** — `existing_schema` byte length exceeded `existing_schema_size_limit_bytes` (default 1 MB). Refused BEFORE any `yaml.safe_load` to defend against billion-laughs / deep-nesting attacks (DEC-006).
+- **`DiffInputTooLargeError`** — `existing_schema` byte length exceeded `existing_schema_size_limit_bytes` (default 10 MB). Refused BEFORE any `yaml.safe_load` to defend against billion-laughs / deep-nesting attacks (DEC-006).
 - **`DiffSidecarRecordTooLargeError`** — Serialised sidecar JSON exceeded `sidecar_size_limit_bytes` (default 10 MB). Refused BEFORE any `os.open` so an oversize payload leaves no on-disk artefact (DEC-009).
 - **`DiffSidecarWriteError`** — Fail-closed wrapper around OS errors raised inside the sidecar writer (`OSError` / `PermissionError` / encoding / `fsync` / symlink containment failure). Original cause exposed via `.cause` and `__cause__`.
 
@@ -121,8 +121,8 @@ diff:
   max_why_chars: 80                     # per-row "why" truncation cap
   narrow_terminal_threshold: 60         # cols below which AnsiRenderer compacts
   markdown_max_diff_chars: 60000        # Markdown body truncation cap (DEC-005)
-  existing_schema_size_limit_bytes: 1000000     # 1 MB hard cap (DEC-006)
-  existing_schema_warn_at_bytes: 10485760       # 10 MB soft warning (DEC-014)
+  existing_schema_size_limit_bytes: 10485760    # 10 MB hard cap (DEC-006)
+  existing_schema_warn_at_bytes: 1000000        # 1 MB soft warning (DEC-014)
   sidecar_size_limit_bytes: 10000000    # 10 MB sidecar JSON cap (DEC-009)
   render_kind: ansi                     # ansi | markdown | json (DEC-004)
   respect_no_color_env: true            # honour NO_COLOR / FORCE_COLOR / isatty (DEC-021)
@@ -138,8 +138,8 @@ Field-by-field:
 - **`max_why_chars`** — Hard truncation cap on the per-row `why` column in the kept/dropped table. Beyond this, the renderer truncates with an ellipsis. Default `80`. Keeps the table readable at any terminal width without forcing the upstream layers (prune, grade) to second-guess display constraints.
 - **`narrow_terminal_threshold`** — Below this column count, the `AnsiRenderer` drops the `why` column from the kept/dropped table and emits each `why` as a wrapped follow-up line below its row (DEC-013). Default `60`. Tested against a 40-col snapshot fixture.
 - **`markdown_max_diff_chars`** — Truncation cap on the rendered Markdown diff body (DEC-005). Default `60_000`. GitHub PR comments are 65_536 chars; the 60_000 cap leaves room for the table, the prelude, and the truncation footer (`... (N more lines truncated — see <project_dir>/.signalforge/diff.json for full diff)`). The kept/dropped/flagged table always renders fully (one line per artifact; small).
-- **`existing_schema_size_limit_bytes`** — Hard cap on `existing_schema` YAML byte length, enforced BEFORE any `yaml.safe_load` call (DEC-006). Default `1_000_000` (1 MB). Defends against billion-laughs / deep-nesting attacks regardless of `safe_load`'s constructor restrictions. Above the cap raises `DiffInputTooLargeError`.
-- **`existing_schema_warn_at_bytes`** — Soft warning threshold for `existing_schema` YAML byte length (DEC-014). Default `10_485_760` (10 MB). The renderer emits one `WARNING` log line below the hard cap; mirrors `signalforge.warehouse.profiles` DEC-023 ("operators get a heads-up before the hard cap trips").
+- **`existing_schema_size_limit_bytes`** — Hard cap on `existing_schema` YAML byte length, enforced BEFORE any `yaml.safe_load` call (DEC-006). Default `10_485_760` (10 MB). Defends against billion-laughs / deep-nesting attacks regardless of `safe_load`'s constructor restrictions. Above the cap raises `DiffInputTooLargeError`.
+- **`existing_schema_warn_at_bytes`** — Soft warning threshold for `existing_schema` YAML byte length (DEC-014). Default `1_000_000` (1 MB). The renderer emits one `WARNING` log line when the payload exceeds this threshold but stays below the hard cap; mirrors `signalforge.warehouse.profiles` DEC-023 ("operators get a heads-up before the hard cap trips").
 - **`sidecar_size_limit_bytes`** — Hard cap on the diff sidecar JSON byte length, enforced BEFORE any `os.open` (DEC-009). Default `10_000_000` (10 MB — an order of magnitude above the grade sidecar's 1 MB cap because diff text is naturally larger). Above the cap raises `DiffSidecarRecordTooLargeError`.
 - **`render_kind`** — `Literal["ansi", "markdown", "json"]`. Default `"ansi"`. Selects which renderer concrete drives stdout output (DEC-004). The sidecar always uses the JSON renderer regardless of this setting; `render_kind` only governs the human-facing output. See [Renderer kinds](#renderer-kinds-dec-004) below.
 - **`respect_no_color_env`** — When `True` (the default), the AnsiRenderer honours `NO_COLOR` and `FORCE_COLOR` environment variables along with `sys.stdout.isatty()` (DEC-021). When `False`, colour is forced regardless — useful for tests and non-tty pipelines that want ANSI output.
@@ -302,26 +302,31 @@ The writer's own `canonicalise_path` call stays as defence-in-depth.
 
 `render_diff` emits one `WARNING` log line when
 `len(existing_schema.encode("utf-8")) > existing_schema_warn_at_bytes`
-(default 10 MB):
+(default 1 MB):
 
-```
-WARNING signalforge.diff.engine: large existing schema.yml: {"bytes": 12345678, "model_unique_id": "model.shop.dim_customers", "warn_at": 10485760}
+```text
+WARNING signalforge.diff.engine: large existing schema.yml: {"bytes": 1234567, "model_unique_id": "model.shop.dim_customers", "warn_at": 1000000}
 ```
 
-Lazy-format JSON per DEC-014 — never f-string. The hard cap
-(`existing_schema_size_limit_bytes`, default 1 MB) raises a typed
-error well above this warning level, so the warning is the heads-up
-before the hard cap trips.
+Lazy-format JSON per DEC-014 — never f-string. The soft warning
+(default 1 MB) fires below the hard cap
+(`existing_schema_size_limit_bytes`, default 10 MB), giving operators
+a heads-up before the hard cap trips and a typed
+`DiffInputTooLargeError` is raised.
 
 ### Log event policy (DEC-015)
 
 Two `_LOGGER` events in the entire diff layer — both lazy-format JSON:
 
 1. **INFO** — One line at the end of every `render_diff` happy path:
-   ```
+
+   ```text
    INFO signalforge.diff.engine: rendered diff: {"model_unique_id": "...", "kept": 8, "dropped": 2, "flagged": 1, "has_existing_schema": true, "duration_seconds": 0.041}
    ```
-2. **WARNING** — The DEC-014 large-schema warning (above).
+2. **WARNING** — The DEC-014 large-schema warning (above). One line per
+   `render_diff` call when `existing_schema` exceeds
+   `existing_schema_warn_at_bytes` (default 1 MB) but stays below the
+   hard cap (default 10 MB).
 
 No separate `WARNING` before raising typed errors — the exception IS
 the signal (mirrors grade DEC-006). The diff layer never logs full
@@ -425,7 +430,7 @@ as `.cause` and on `__cause__`. Common causes:
 | `DiffCandidateModelMismatchError`      | `candidate.name != model.name` (DEC-002).                                                         | `render_diff` orchestrator entry.       | Confirm the candidate the drafter produced was for `model`. Stale `CandidateSchema` from a different draft = rebuild.   |
 | `DiffPruneResultModelMismatchError`    | `prune_result.model_unique_id != model.unique_id` (DEC-002).                                      | `render_diff` orchestrator entry.       | Confirm `prune_tests` ran against the same model. A stale `PruneResult` from a sibling model is the usual cause.        |
 | `DiffGradingReportModelMismatchError`  | `grading_report.model_unique_id != model.unique_id` (DEC-002).                                    | `render_diff` orchestrator entry.       | Confirm `grade_artifacts` ran against the same model.                                                                   |
-| `DiffInputTooLargeError`               | `existing_schema` byte length exceeded the cap (default 1 MB; DEC-006).                           | `render_diff` orchestrator (pre-`yaml.safe_load`). | Trim the existing `schema.yml` (likely a runaway dbt-osmosis or codegen output). Or raise the cap if the YAML is legitimately large. |
+| `DiffInputTooLargeError`               | `existing_schema` byte length exceeded the cap (default 10 MB; DEC-006).                          | `render_diff` orchestrator (pre-`yaml.safe_load`). | Trim the existing `schema.yml` (likely a runaway dbt-osmosis or codegen output). Or raise the cap if the YAML is legitimately large. |
 | `DiffSidecarRecordTooLargeError`       | Serialised sidecar JSON exceeded the cap (default 10 MB; DEC-009).                                | `write_sidecar` (pre-`os.open`).        | Investigate the candidate / prune payload — a sidecar above 10 MB suggests a 1000-column model with hostile descriptions. |
 | `DiffSidecarWriteError`                | Path containment failure or any underlying I/O failure on the write path.                         | `write_sidecar` and `_write_rendered_text` (wrapped at orchestrator entry). | Verify `<project_dir>/.signalforge/` is writable, has disk space, and is not a symlink escaping the project tree. Inspect `.cause`. |
 

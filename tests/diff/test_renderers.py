@@ -703,3 +703,151 @@ def test_markdown_renderer_no_entries_emits_placeholder(
     assert "_(no candidate artifacts)_" in output
     # No table header in the empty-entries case.
     assert "| Tier |" not in output
+
+
+# ---------------------------------------------------------------------------
+# MarkdownRenderer post-QG fixes (4 separate bugs).
+# ---------------------------------------------------------------------------
+
+
+def test_markdown_renderer_dropped_line_count_excludes_trailing_newline() -> None:
+    """A unified_diff body ending in ``\\n`` produces a trailing empty
+    segment under ``split("\\n")``; the dropped-line count must not
+    include it (post-QG fix 3a)."""
+    cfg = DiffConfig(markdown_max_diff_chars=200)
+    renderer = MarkdownRenderer(config=cfg)
+    hunk1 = "@@ -1,2 +1,2 @@\n-a: 1\n+a: 2"
+    hunk2 = "@@ -10,2 +10,2 @@\n" + ("+long " * 50)
+    # Important: trailing newline mirrors what difflib.unified_diff
+    # produces.
+    body = "\n".join([hunk1, hunk2]) + "\n"
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+
+    import re
+
+    match = re.search(r"\((\d+) more lines truncated", output)
+    assert match is not None
+    dropped = int(match.group(1))
+    # The body has hunk1 (3 lines) + hunk2 (1 line; the hunk2 content is
+    # all on one line because it's not split by '\n'). Only the kept
+    # part of the body is hunk1 (3 lines); dropped = body lines - 3.
+    body_lines = body.split("\n")
+    if body_lines and body_lines[-1] == "":
+        body_lines = body_lines[:-1]
+    expected_total = len(body_lines)
+    assert dropped == expected_total - 3, (
+        f"trailing-newline bug: dropped={dropped}, expected={expected_total - 3}"
+    )
+
+
+def test_markdown_renderer_full_block_within_cap() -> None:
+    """The WHOLE rendered diff block (fence + body + footer + closing
+    fence) must fit under ``markdown_max_diff_chars`` (post-QG fix 3b).
+    Originally only ``clean_body`` was checked, so the post-truncation
+    block could exceed the cap by the constant fence + footer overhead.
+    """
+    cfg = DiffConfig(markdown_max_diff_chars=200)
+    renderer = MarkdownRenderer(config=cfg)
+    hunk1 = "@@ -1,2 +1,2 @@\n-a: 1\n+a: 2"
+    hunk2 = "@@ -10,2 +10,2 @@\n" + ("+long " * 50)
+    body = "\n".join([hunk1, hunk2])
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+
+    # Extract just the fenced block from the rendered output. The
+    # block starts at the first ``` and ends at the last ```.
+    first_fence = output.index("```")
+    last_fence = output.rindex("```")
+    rendered_block = output[first_fence : last_fence + 3]
+    assert len(rendered_block) <= cfg.markdown_max_diff_chars, (
+        f"diff block size {len(rendered_block)} exceeds cap {cfg.markdown_max_diff_chars}"
+    )
+
+
+def test_markdown_renderer_first_hunk_too_big_emits_only_file_headers(
+    default_config: DiffConfig,
+) -> None:
+    """When the first hunk alone exceeds the cap, the renderer must NOT
+    emit a mid-hunk character cut (which produces a malformed
+    unified-diff body). It emits ONLY the ``---``/``+++`` file-header
+    lines followed by the truncation footer (post-QG fix 3c)."""
+    # Pick a cap small enough that even the first hunk overflows but
+    # the file-header lines + footer fit comfortably.
+    cfg = DiffConfig(markdown_max_diff_chars=400)
+    renderer = MarkdownRenderer(config=cfg)
+    body = (
+        "--- a/models/m.yml\n"
+        "+++ b/models/m.yml\n"
+        "@@ -1,2 +1,2 @@\n" + ("+long content line here\n" * 200)  # huge first hunk
+    )
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+
+    # The truncation footer must be present.
+    assert "more lines truncated" in output
+    # File-header lines survive.
+    assert "--- a/models/m.yml" in output
+    assert "+++ b/models/m.yml" in output
+    # The hunk header itself was either kept on its own (if it fits) or
+    # dropped — but a partial mid-hunk cut would manifest as a
+    # truncated content line. Verify no half-emitted hunk content
+    # appears: the body between the file-header lines and the footer
+    # has no ``+long content`` text.
+    fence_open = output.index("```diff")
+    footer_idx = output.index("more lines truncated")
+    block_pre_footer = output[fence_open:footer_idx]
+    assert "+long content" not in block_pre_footer, (
+        "first-hunk-too-big fallback emitted a mid-hunk content cut"
+    )
+
+
+def test_markdown_renderer_dynamic_fence_when_body_contains_triple_backticks(
+    default_config: DiffConfig,
+) -> None:
+    """An unchanged YAML line containing ``` (a triple-backtick run)
+    must NOT close the outer fenced block prematurely (post-QG fix 3d).
+    The renderer dynamically sizes the fence to one more backtick than
+    the longest run inside the body."""
+    renderer = MarkdownRenderer(config=default_config)
+    # Body contains a line that is exactly ``` (CommonMark would treat
+    # this as a closing fence inside a 3-backtick fence).
+    body = (
+        "@@ -1,3 +1,3 @@\n"
+        " line 1\n"
+        " ```\n"  # this line would close a 3-backtick fence
+        " line 3\n"
+    )
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+
+    # The outer fence must be at least 4 backticks (longest run in body
+    # is 3, so fence is 4). Look for the first occurrence of a fence
+    # followed by ``diff``.
+    import re
+
+    fence_match = re.search(r"^(`{4,})diff$", output, re.MULTILINE)
+    assert fence_match is not None, "expected a 4+-backtick opening fence; got:\n" + output
+    fence = fence_match.group(1)
+    # The closing fence must be the same length.
+    closing_count = output.count(f"\n{fence}\n") + (1 if output.endswith(fence) else 0)
+    assert closing_count >= 1
+    # Confirm the body's literal ``` line is preserved verbatim
+    # (not consumed by an early fence-close).
+    assert " ```" in output
+
+
+def test_markdown_renderer_dynamic_fence_floor_at_three_backticks(
+    default_config: DiffConfig,
+) -> None:
+    """Body without any backticks → fence floors at 3 backticks (the
+    standard ``` ```diff ``` shape). Regression guard against the
+    dynamic-fence helper accidentally emitting a 4-fence on
+    backtick-free input."""
+    renderer = MarkdownRenderer(config=default_config)
+    body = "@@ -1,1 +1,1 @@\n-a: 1\n+a: 2"
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+    assert "```diff\n" in output
+    # No 4+-backtick fence present.
+    assert "````diff" not in output

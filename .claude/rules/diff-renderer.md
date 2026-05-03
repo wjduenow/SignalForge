@@ -87,7 +87,7 @@ The pattern: escape at the sink. Markdown is one sink; the JSON sidecar uses Pyd
 
 GitHub PR comments are 65 536 chars. `DiffConfig.markdown_max_diff_chars: int = 60_000` leaves room for the table, the prelude, and the truncation footer. When the rendered Markdown diff body exceeds the cap, `MarkdownRenderer` truncates the diff section and appends:
 
-```
+```text
 ... (N more lines truncated — see <project_dir>/.signalforge/diff.json for full diff)
 ```
 

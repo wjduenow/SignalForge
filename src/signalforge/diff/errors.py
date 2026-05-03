@@ -198,11 +198,11 @@ class DiffInputTooLargeError(DiffError):
     """
 
     default_remediation: ClassVar[str] = (
-        "The existing schema.yml exceeded the 1 MB safety cap applied before "
-        "yaml.safe_load. Inspect the file for accidental bloat (large embedded "
-        "docs, copy-pasted dumps) or for an attempted billion-laughs / "
-        "deeply-nested-anchor payload. Trim the schema or split it into "
-        "multiple files."
+        "The existing schema.yml exceeded the configured byte safety cap "
+        "(default 10 MB) applied before yaml.safe_load. Inspect the file for "
+        "accidental bloat (large embedded docs, copy-pasted dumps) or for an "
+        "attempted billion-laughs / deeply-nested-anchor payload. Trim the "
+        "schema or split it into multiple files."
     )
 
     def __init__(self, size: int, limit: int, *, remediation: str | None = None) -> None:
