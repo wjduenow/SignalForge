@@ -1,0 +1,705 @@
+"""Tests for ``signalforge.diff._renderers`` (US-008 of issue #8).
+
+Covers the :class:`Renderer` ABC + the :class:`AnsiRenderer` concrete:
+
+1. **Renderer ABC** — :class:`AnsiRenderer` is a subclass; the abstract
+   :meth:`Renderer.render` cannot be instantiated without override.
+2. **Wide-TTY 6-column table** — header, 5 row cells, ``why`` cell;
+   ANSI escapes from user content stripped (DEC-007).
+3. **Narrow-TTY compact mode (DEC-013)** — when terminal width below
+   :attr:`DiffConfig.narrow_terminal_threshold`, the ``why`` column is
+   dropped and a follow-up indented line carries the prose.
+4. **Colour-precedence (DEC-021)** — six unit tests, one per chain
+   position. Each higher-priority signal must beat every lower one.
+5. **Unconditional ANSI stripping (DEC-007)** — a malicious ``why``
+   field carrying ``\\x1b[31mEVIL\\x1b[0m`` renders the literal text
+   ``EVIL`` and never ships the smuggled escape codes, in BOTH the
+   coloured and the non-coloured output.
+"""
+
+from __future__ import annotations
+
+import abc
+
+import pytest
+
+from signalforge.diff._renderers import AnsiRenderer, MarkdownRenderer, Renderer
+from signalforge.diff.config import DiffConfig
+from signalforge.diff.models import DiffEntry, DiffReport
+
+# ---------------------------------------------------------------------------
+# Test fixtures.
+# ---------------------------------------------------------------------------
+
+
+def _make_report(
+    *,
+    entries: tuple[DiffEntry, ...] = (),
+    unified_diff: str = "",
+    model_unique_id: str = "model.proj.customers",
+) -> DiffReport:
+    """Construct a minimal :class:`DiffReport` for renderer tests."""
+    kept = sum(1 for e in entries if e.tier == "kept")
+    dropped = sum(1 for e in entries if e.tier == "dropped")
+    flagged = sum(1 for e in entries if e.tier == "flagged")
+    return DiffReport(
+        signalforge_version="0.0.0-test",
+        model_unique_id=model_unique_id,
+        run_id="r" * 32,
+        duration_seconds=0.0,
+        proposed_yaml="",
+        existing_yaml=None,
+        unified_diff=unified_diff,
+        entries=entries,
+        kept_count=kept,
+        dropped_count=dropped,
+        flagged_count=flagged,
+        has_existing_schema=False,
+        candidate_hash="0" * 16,
+        prune_result_hash="0" * 16,
+        grading_report_hash=None,
+    )
+
+
+def _kept_entry(
+    *,
+    artifact_id: str = "column.customer_id.description",
+    why: str = "kept by default",
+    score: float | None = 0.95,
+) -> DiffEntry:
+    return DiffEntry(
+        artifact_id=artifact_id,
+        test_type=None,
+        tier="kept",
+        drop_reason=None,
+        why=why,
+        score=score,
+        passed=True if score is not None else None,
+    )
+
+
+def _dropped_entry(
+    *,
+    artifact_id: str = "test.column.email.not_null",
+    drop_reason: str = "always-passes",
+    why: str = "ran on 1k sample, 0 failing rows",
+) -> DiffEntry:
+    return DiffEntry(
+        artifact_id=artifact_id,
+        test_type="not_null",
+        tier="dropped",
+        drop_reason=drop_reason,  # type: ignore[arg-type]
+        why=why,
+        score=None,
+        passed=None,
+    )
+
+
+@pytest.fixture
+def default_config() -> DiffConfig:
+    return DiffConfig()
+
+
+# ---------------------------------------------------------------------------
+# 1. Renderer ABC contract.
+# ---------------------------------------------------------------------------
+
+
+def test_renderer_is_abc() -> None:
+    """The :class:`Renderer` base is an ABC (DEC-004)."""
+    assert isinstance(Renderer, type)
+    assert issubclass(Renderer, abc.ABC)
+
+
+def test_ansi_renderer_subclass_of_renderer(default_config: DiffConfig) -> None:
+    """AnsiRenderer derives from the Renderer ABC."""
+    renderer = AnsiRenderer(config=default_config)
+    assert isinstance(renderer, Renderer)
+
+
+def test_renderer_abstract_method_raises_when_unimplemented(
+    default_config: DiffConfig,
+) -> None:
+    """A subclass that doesn't override :meth:`Renderer.render` cannot
+    be instantiated — Python's ABC machinery raises ``TypeError``.
+    """
+
+    class IncompleteRenderer(Renderer):
+        # No render() override — should be flagged abstract.
+        pass
+
+    with pytest.raises(TypeError, match=r"abstract"):
+        IncompleteRenderer()  # type: ignore[abstract]
+
+
+# ---------------------------------------------------------------------------
+# 2. Wide-TTY 6-column table.
+# ---------------------------------------------------------------------------
+
+
+def test_wide_tty_table_renders_six_columns(default_config: DiffConfig) -> None:
+    """At wide terminal width the table header carries 6 column labels."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=200)
+    report = _make_report(
+        entries=(
+            _kept_entry(),
+            _dropped_entry(),
+        )
+    )
+    output = renderer.render(report)
+    # The header row carries the WHY label only in wide mode.
+    assert "WHY" in output
+    # Five fixed labels — TIER, ARTIFACT, TEST, REASON, SCORE.
+    for label in ("TIER", "ARTIFACT", "TEST", "REASON", "SCORE"):
+        assert label in output
+
+
+def test_wide_tty_table_emits_each_entry_row(default_config: DiffConfig) -> None:
+    """Each row's artifact_id appears in the rendered output."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=200)
+    entries = (
+        _kept_entry(artifact_id="column.id.description"),
+        _dropped_entry(artifact_id="test.column.email.not_null"),
+    )
+    output = renderer.render(report=_make_report(entries=entries))
+    assert "column.id.description" in output
+    assert "test.column.email.not_null" in output
+
+
+def test_wide_tty_header_carries_counts(default_config: DiffConfig) -> None:
+    """The header line surfaces kept/dropped/flagged counts."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=200)
+    report = _make_report(entries=(_kept_entry(), _dropped_entry()))
+    output = renderer.render(report)
+    assert "kept=1" in output
+    assert "dropped=1" in output
+    assert "flagged=0" in output
+
+
+def test_no_entries_renders_placeholder(default_config: DiffConfig) -> None:
+    """When the report has no entries, the table shows a placeholder."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=200)
+    output = renderer.render(report=_make_report(entries=()))
+    assert "no candidate artifacts" in output
+
+
+# ---------------------------------------------------------------------------
+# 3. Narrow-TTY compact mode (DEC-013).
+# ---------------------------------------------------------------------------
+
+
+def test_narrow_tty_drops_why_column(default_config: DiffConfig) -> None:
+    """Below the threshold, the table header omits the WHY label."""
+    # Default narrow_terminal_threshold = 60; 40 cols is well below.
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=40)
+    report = _make_report(entries=(_kept_entry(why="prose explanation"),))
+    output = renderer.render(report)
+    # The table header in narrow mode omits the WHY label.
+    header_line = next(
+        line for line in output.splitlines() if "TIER" in line and "ARTIFACT" in line
+    )
+    assert "WHY" not in header_line
+
+
+def test_narrow_tty_emits_follow_up_why_line(default_config: DiffConfig) -> None:
+    """The dropped ``why`` re-appears below each row as an indented
+    follow-up line in narrow mode (DEC-013)."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=40)
+    why_text = "ran on 1k sample, 0 failing rows"
+    report = _make_report(entries=(_dropped_entry(why=why_text),))
+    output = renderer.render(report)
+    assert "└─" in output
+    assert why_text in output
+
+
+def test_narrow_tty_skips_follow_up_for_empty_why(
+    default_config: DiffConfig,
+) -> None:
+    """An entry with empty ``why`` does not get a follow-up line."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=40)
+    report = _make_report(entries=(_kept_entry(why=""),))
+    output = renderer.render(report)
+    assert "└─" not in output
+
+
+def test_wide_tty_does_not_emit_follow_up_lines(default_config: DiffConfig) -> None:
+    """In wide mode the follow-up indented line is suppressed (the
+    why is in the row's own cell)."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=200)
+    report = _make_report(entries=(_kept_entry(why="hello prose"),))
+    output = renderer.render(report)
+    assert "└─" not in output
+
+
+# ---------------------------------------------------------------------------
+# 4. Colour-precedence chain (DEC-021).
+# ---------------------------------------------------------------------------
+
+
+def test_color_precedence_respect_no_color_env_false_forces_color_on(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Position 1: ``respect_no_color_env=False`` beats every other
+    signal — colour ON even with NO_COLOR set + no TTY + force_color=False."""
+    monkeypatch.setenv("NO_COLOR", "1")
+    # `respect_no_color_env=False` MUST win over every lower signal.
+    renderer = AnsiRenderer(
+        config=default_config,
+        respect_no_color_env=False,
+        force_color=False,
+        terminal_width=200,
+    )
+    report = _make_report(entries=(_kept_entry(),))
+    output = renderer.render(report)
+    # The renderer's own SGR codes (e.g. \x1b[32m for the green tier
+    # cell) are present.
+    assert "\x1b[" in output
+
+
+def test_color_precedence_force_color_false_beats_force_color_env(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Position 2: ``force_color=False`` beats FORCE_COLOR env."""
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    renderer = AnsiRenderer(
+        config=default_config,
+        force_color=False,
+        terminal_width=200,
+    )
+    output = renderer.render(_make_report(entries=(_kept_entry(),)))
+    # No renderer-emitted SGR codes.
+    assert "\x1b[" not in output
+
+
+def test_color_precedence_force_color_true_beats_no_color_env(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Position 3: ``force_color=True`` beats NO_COLOR env."""
+    monkeypatch.setenv("NO_COLOR", "1")
+    renderer = AnsiRenderer(
+        config=default_config,
+        force_color=True,
+        terminal_width=200,
+    )
+    output = renderer.render(_make_report(entries=(_kept_entry(),)))
+    assert "\x1b[" in output
+
+
+def test_color_precedence_force_color_env_beats_no_color_env(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Position 4: FORCE_COLOR env beats NO_COLOR env (when no
+    constructor override pins the answer)."""
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("NO_COLOR", "1")
+    renderer = AnsiRenderer(
+        config=default_config,
+        force_color=None,
+        terminal_width=200,
+    )
+    output = renderer.render(_make_report(entries=(_kept_entry(),)))
+    assert "\x1b[" in output
+
+
+def test_color_precedence_no_color_env_beats_isatty(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Position 5: NO_COLOR env beats isatty() — colour OFF even when
+    stdout claims to be a terminal."""
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    # Force isatty() → True via a stub.
+    class _ForceTTY:
+        @staticmethod
+        def isatty() -> bool:
+            return True
+
+    monkeypatch.setattr("sys.stdout", _ForceTTY())
+    renderer = AnsiRenderer(config=default_config, force_color=None, terminal_width=200)
+    output = renderer.render(_make_report(entries=(_kept_entry(),)))
+    assert "\x1b[" not in output
+
+
+def test_color_precedence_isatty_is_terminal_signal(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Position 6: with no env / no kwarg, the renderer follows
+    :meth:`sys.stdout.isatty`. ``isatty()=False`` → colour OFF."""
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+    class _NotTTY:
+        @staticmethod
+        def isatty() -> bool:
+            return False
+
+    monkeypatch.setattr("sys.stdout", _NotTTY())
+    renderer = AnsiRenderer(config=default_config, force_color=None, terminal_width=200)
+    output = renderer.render(_make_report(entries=(_kept_entry(),)))
+    assert "\x1b[" not in output
+
+
+# ---------------------------------------------------------------------------
+# 5. Unconditional ANSI stripping (DEC-007).
+# ---------------------------------------------------------------------------
+
+
+def test_strip_ansi_runs_when_color_disabled(default_config: DiffConfig) -> None:
+    """A malicious ``why`` carrying SGR codes renders as plain text
+    when colour is OFF — strip is unconditional."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=200)
+    evil_why = "\x1b[31mGOTCHA\x1b[0m"
+    report = _make_report(entries=(_dropped_entry(why=evil_why),))
+    output = renderer.render(report)
+    assert "GOTCHA" in output
+    # The smuggled red SGR is gone, and since color is OFF the
+    # renderer adds none of its own — output carries no ESC at all.
+    assert "\x1b[" not in output
+
+
+def test_strip_ansi_runs_when_color_forced_on(default_config: DiffConfig) -> None:
+    """The DEC-007 strip runs even when the renderer itself is
+    emitting colour codes — the only ESC sequences in the output come
+    from the renderer's own code, never from user content."""
+    renderer = AnsiRenderer(config=default_config, force_color=True, terminal_width=200)
+    evil_why = "\x1b[31mGOTCHA\x1b[0m"
+    report = _make_report(entries=(_dropped_entry(why=evil_why),))
+    output = renderer.render(report)
+    assert "GOTCHA" in output
+    # The user's smuggled "\x1b[31m...GOTCHA...\x1b[0m" sequence is
+    # gone — verify the literal escape that wraps GOTCHA is absent.
+    assert "\x1b[31mGOTCHA" not in output
+
+
+def test_strip_ansi_runs_on_artifact_id(default_config: DiffConfig) -> None:
+    """The ``artifact_id`` user-content field also runs through
+    :func:`strip_ansi_escapes` (DEC-007). Adversarial manifest content
+    can't smuggle escapes via the dotted-path identifier."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=200)
+    evil_id = "column.\x1b[31mevil\x1b[0m.description"
+    report = _make_report(entries=(_kept_entry(artifact_id=evil_id),))
+    output = renderer.render(report)
+    assert "column.evil.description" in output
+    assert "\x1b[" not in output
+
+
+def test_strip_ansi_runs_on_unified_diff_body(default_config: DiffConfig) -> None:
+    """The ``unified_diff`` body also runs through ``strip_ansi_escapes``
+    line-by-line — manifest YAML + LLM-drafted artifact text are the
+    upstream sources, both adversarial-content-bearing."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=200)
+    diff_body = "+ \x1b[31mevil\x1b[0m: nope\n- safe: yes"
+    report = _make_report(unified_diff=diff_body)
+    output = renderer.render(report)
+    assert "+ evil: nope" in output
+    assert "- safe: yes" in output
+    assert "\x1b[" not in output
+
+
+def test_strip_ansi_runs_on_narrow_follow_up_why(
+    default_config: DiffConfig,
+) -> None:
+    """The narrow-mode follow-up line also strips user-content
+    escapes — same DEC-007 strip applies there as in the wide-mode
+    cell."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=40)
+    evil_why = "\x1b[31mEVIL_FOLLOW_UP\x1b[0m"
+    report = _make_report(entries=(_dropped_entry(why=evil_why),))
+    output = renderer.render(report)
+    assert "EVIL_FOLLOW_UP" in output
+    assert "\x1b[" not in output
+
+
+# ---------------------------------------------------------------------------
+# 6. Smaller polish — diff section, score formatting, model id strip.
+# ---------------------------------------------------------------------------
+
+
+def test_empty_diff_emits_identical_marker(default_config: DiffConfig) -> None:
+    """When ``unified_diff`` is empty, the diff section emits a
+    placeholder explaining the schemas are identical."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=200)
+    output = renderer.render(_make_report(unified_diff=""))
+    assert "identical" in output
+
+
+def test_score_none_renders_em_dash(default_config: DiffConfig) -> None:
+    """An entry with ``score=None`` renders an em-dash in the SCORE
+    column rather than a numeric formatter — the column should never
+    fail when the grade layer reported a graceful-degrade null."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=200)
+    entry = _kept_entry(score=None)
+    output = renderer.render(_make_report(entries=(entry,)))
+    assert "—" in output
+
+
+def test_model_unique_id_stripped_in_header(default_config: DiffConfig) -> None:
+    """``model_unique_id`` runs through ``strip_ansi_escapes`` in
+    the header (DEC-007 — every user-content field, not only the
+    table cells)."""
+    renderer = AnsiRenderer(config=default_config, force_color=False, terminal_width=200)
+    evil_model_id = "model.\x1b[31mproj\x1b[0m.customers"
+    report = _make_report(model_unique_id=evil_model_id)
+    output = renderer.render(report)
+    assert "model.proj.customers" in output
+    assert "\x1b[31m" not in output
+
+
+# ---------------------------------------------------------------------------
+# MarkdownRenderer tests (US-009).
+# ---------------------------------------------------------------------------
+
+
+def test_markdown_renderer_subclass_of_renderer(default_config: DiffConfig) -> None:
+    """MarkdownRenderer derives from the Renderer ABC and ``render``
+    returns ``str``."""
+    renderer = MarkdownRenderer(config=default_config)
+    assert isinstance(renderer, Renderer)
+    output = renderer.render(_make_report(entries=(_kept_entry(),)))
+    assert isinstance(output, str)
+
+
+def test_markdown_renderer_emits_pipe_table(default_config: DiffConfig) -> None:
+    """The kept/dropped/flagged table is rendered as a GFM pipe-table:
+    header + divider + one row per entry."""
+    renderer = MarkdownRenderer(config=default_config)
+    report = _make_report(entries=(_kept_entry(), _dropped_entry()))
+    output = renderer.render(report)
+    # Header row.
+    assert "| Tier | Artifact | Test | Reason | Score | Why |" in output
+    # Divider row — exactly six segments.
+    assert "| --- | --- | --- | --- | --- | --- |" in output
+    # Each entry's artifact_id appears in a cell.
+    assert "column.customer_id.description" in output
+    assert "test.column.email.not_null" in output
+
+
+def test_markdown_renderer_emits_fenced_diff_block(default_config: DiffConfig) -> None:
+    """The unified-diff body is wrapped in a ```diff fenced block."""
+    renderer = MarkdownRenderer(config=default_config)
+    diff_body = "@@ -1,2 +1,2 @@\n-old: value\n+new: value\n"
+    report = _make_report(unified_diff=diff_body)
+    output = renderer.render(report)
+    assert "```diff\n" in output
+    assert "@@ -1,2 +1,2 @@" in output
+    assert "+new: value" in output
+    # The fence closes.
+    assert output.rstrip().endswith("```")
+
+
+def test_markdown_renderer_omits_diff_block_when_empty(default_config: DiffConfig) -> None:
+    """An empty unified_diff suppresses the entire ```diff block."""
+    renderer = MarkdownRenderer(config=default_config)
+    # Provide at least one entry so the table renders for verification
+    # alongside the omitted diff block.
+    report = _make_report(unified_diff="", entries=(_kept_entry(),))
+    output = renderer.render(report)
+    assert "```diff" not in output
+    # The table still renders.
+    assert "| Tier | Artifact" in output
+
+
+def test_markdown_renderer_escapes_pipe_in_cell(default_config: DiffConfig) -> None:
+    """A ``why`` containing a literal pipe is HTML-entity encoded so
+    the column count survives (DEC-008 in_table_cell mode)."""
+    renderer = MarkdownRenderer(config=default_config)
+    why = "left | right"
+    entry = _dropped_entry(why=why)
+    output = renderer.render(_make_report(entries=(entry,)))
+    # The literal pipe is encoded; it must not appear raw in the cell.
+    assert "&#124;" in output
+    # The table layout was preserved — the row still has six cells
+    # (5 separators + 2 outer pipes = 7 `|` characters before the
+    # encoded pipe within the cell). Verify by checking the row line.
+    row_line = next(line for line in output.splitlines() if "left" in line and "right" in line)
+    # Row begins and ends with '|' and has the cell count separator.
+    assert row_line.startswith("| ")
+    assert row_line.endswith(" |")
+    # Six cells = 7 unencoded '|' characters in the row.
+    assert row_line.count("|") == 7
+
+
+def test_markdown_renderer_escapes_backtick_in_cell(default_config: DiffConfig) -> None:
+    """A ``why`` containing a backtick is backslash-escaped in the cell
+    so it cannot open an inline-code span (DEC-008)."""
+    renderer = MarkdownRenderer(config=default_config)
+    why = "uses `metric` column"
+    entry = _kept_entry(why=why)
+    output = renderer.render(_make_report(entries=(entry,)))
+    # Backslash-escaped backtick.
+    assert "\\`metric\\`" in output
+
+
+def test_markdown_renderer_fence_passes_through_raw_diff_content(
+    default_config: DiffConfig,
+) -> None:
+    """A diff body containing what would look like a Markdown header
+    or a pipe character passes through inside the fenced ```diff block
+    untouched. The fence is the defence; markdown-escaping inside the
+    fence would ship literal backslashes to the operator."""
+    renderer = MarkdownRenderer(config=default_config)
+    # Diff content that includes pipes, backticks, and a #-header.
+    diff_body = "@@ -1,2 +1,2 @@\n-# old: a | b `c`\n+# new: x | y `z`\n"
+    report = _make_report(unified_diff=diff_body)
+    output = renderer.render(report)
+    # The diff body is rendered raw inside the fence.
+    assert "-# old: a | b `c`" in output
+    assert "+# new: x | y `z`" in output
+    # No HTML entity for pipe inside the fenced block.
+    fence_start = output.index("```diff")
+    fence_end = output.rindex("```")
+    fenced_section = output[fence_start:fence_end]
+    assert "&#124;" not in fenced_section
+
+
+def test_markdown_renderer_table_escapes_diff_like_content(
+    default_config: DiffConfig,
+) -> None:
+    """The same pipe / header content that passes through inside the
+    fence is escaped when it appears in a table cell. The table cell
+    is the regulated sink; the fence is the unregulated sink."""
+    renderer = MarkdownRenderer(config=default_config)
+    why = "# heading-shape | with pipe"
+    entry = _dropped_entry(why=why)
+    output = renderer.render(_make_report(entries=(entry,)))
+    # Table cell — pipe encoded.
+    assert "&#124;" in output
+
+
+def test_markdown_renderer_truncates_at_last_complete_hunk(
+    default_config: DiffConfig,
+) -> None:
+    """Body exceeding ``markdown_max_diff_chars`` is truncated at the
+    last complete hunk boundary (DEC-005)."""
+    # Use a small cap so we can drive the truncation deterministically.
+    cfg = DiffConfig(markdown_max_diff_chars=200)
+    renderer = MarkdownRenderer(config=cfg)
+
+    # Three hunks of distinct sizes. Hunks 1 + 2 fit inside 200 chars;
+    # adding hunk 3 overflows. The truncator should keep hunks 1 + 2
+    # only.
+    hunk1 = "@@ -1,2 +1,2 @@\n-a: 1\n+a: 2"
+    hunk2 = "@@ -10,2 +10,2 @@\n-b: 1\n+b: 2"
+    hunk3 = "@@ -20,2 +20,2 @@\n" + ("+long " * 50)
+    body = "\n".join([hunk1, hunk2, hunk3])
+    assert len(body) > 200  # sanity
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+
+    # Hunks 1 and 2 should survive.
+    assert "+a: 2" in output
+    assert "+b: 2" in output
+    # Hunk 3 content (the runaway "+long " repetition) should be gone.
+    assert "+long +long" not in output
+    # Truncation footer present, with a non-zero dropped-line count
+    # and the project_dir placeholder reference.
+    assert "more lines truncated" in output
+    assert "<project_dir>/.signalforge/diff.json" in output
+
+
+def test_markdown_renderer_truncation_footer_inside_fence(
+    default_config: DiffConfig,
+) -> None:
+    """The truncation footer appears INSIDE the ```diff fenced block."""
+    cfg = DiffConfig(markdown_max_diff_chars=120)
+    renderer = MarkdownRenderer(config=cfg)
+    hunk1 = "@@ -1,2 +1,2 @@\n-a: 1\n+a: 2"
+    hunk2 = "@@ -10,2 +10,2 @@\n" + ("+long " * 50)
+    body = "\n".join([hunk1, hunk2])
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+
+    # The closing ``` must come AFTER the footer.
+    assert "more lines truncated" in output
+    footer_idx = output.index("more lines truncated")
+    closing_fence_idx = output.rindex("```")
+    assert closing_fence_idx > footer_idx
+
+
+def test_markdown_renderer_truncation_dropped_line_count(
+    default_config: DiffConfig,
+) -> None:
+    """The footer reports the number of *lines* dropped, not bytes."""
+    cfg = DiffConfig(markdown_max_diff_chars=40)
+    renderer = MarkdownRenderer(config=cfg)
+    # Hunk 1 fits (~25 chars); hunk 2 has 5 lines that get dropped.
+    hunk1 = "@@ -1,2 +1,2 @@\n-a: 1\n+a: 2"
+    # 5 dropped lines: header + 4 content lines.
+    hunk2 = "@@ -10,4 +10,4 @@\n-b: 1\n-c: 1\n+b: 2\n+c: 2"
+    body = "\n".join([hunk1, hunk2])
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+    # Look for the bracket "(N more lines truncated" — N must be > 0.
+    import re
+
+    match = re.search(r"\((\d+) more lines truncated", output)
+    assert match is not None
+    dropped = int(match.group(1))
+    assert dropped > 0
+
+
+def test_markdown_renderer_no_truncation_when_under_cap(
+    default_config: DiffConfig,
+) -> None:
+    """A small unified_diff renders without a truncation footer."""
+    renderer = MarkdownRenderer(config=default_config)
+    body = "@@ -1,2 +1,2 @@\n-old: 1\n+new: 2"
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+    assert "more lines truncated" not in output
+    assert "+new: 2" in output
+
+
+def test_markdown_renderer_project_dir_renders_in_footer(
+    default_config: DiffConfig,
+) -> None:
+    """An explicit ``project_dir`` constructor arg renders into the
+    truncation footer in place of the placeholder."""
+    cfg = DiffConfig(markdown_max_diff_chars=120)
+    renderer = MarkdownRenderer(config=cfg, project_dir="/repo/myproj")
+    hunk1 = "@@ -1,2 +1,2 @@\n-a: 1\n+a: 2"
+    hunk2 = "@@ -10,2 +10,2 @@\n" + ("+long " * 50)
+    body = "\n".join([hunk1, hunk2])
+    report = _make_report(unified_diff=body)
+    output = renderer.render(report)
+    assert "/repo/myproj/.signalforge/diff.json" in output
+    assert "<project_dir>" not in output
+
+
+def test_markdown_renderer_strips_ansi_in_table_cell(
+    default_config: DiffConfig,
+) -> None:
+    """User-content escapes are stripped before markdown escaping
+    (DEC-007 + DEC-008 compose)."""
+    renderer = MarkdownRenderer(config=default_config)
+    evil_why = "\x1b[31mEVIL\x1b[0m"
+    entry = _dropped_entry(why=evil_why)
+    output = renderer.render(_make_report(entries=(entry,)))
+    assert "EVIL" in output
+    assert "\x1b[31m" not in output
+
+
+def test_markdown_renderer_strips_ansi_in_diff_body(
+    default_config: DiffConfig,
+) -> None:
+    """ANSI escapes in the unified-diff body are stripped before the
+    body is wrapped in the fenced block."""
+    renderer = MarkdownRenderer(config=default_config)
+    diff_body = "@@ -1,1 +1,1 @@\n-\x1b[31mevil\x1b[0m: 1\n+safe: 1"
+    report = _make_report(unified_diff=diff_body)
+    output = renderer.render(report)
+    assert "-evil: 1" in output
+    assert "\x1b[31m" not in output
+
+
+def test_markdown_renderer_no_entries_emits_placeholder(
+    default_config: DiffConfig,
+) -> None:
+    """When there are no entries, the table renders an italic placeholder
+    rather than a malformed empty pipe-table."""
+    renderer = MarkdownRenderer(config=default_config)
+    output = renderer.render(_make_report(entries=()))
+    assert "_(no candidate artifacts)_" in output
+    # No table header in the empty-entries case.
+    assert "| Tier |" not in output

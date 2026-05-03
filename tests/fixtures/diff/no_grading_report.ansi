@@ -1,0 +1,18 @@
+[1mdiff: model.shop.dim_customers[0m  [32mkept=2[0m  [31mdropped=1[0m  [33mflagged=0[0m
+
+[1mTIER      ARTIFACT                      TEST            REASON                  SCORE    WHY[0m
+[32mkept    [0m  column.customer_id.descript…                                          —        Description added.
+[32mkept    [0m  test.column.customer_id.not…  not_null                                —        Test returned non-zero failing rows on the warehouse sample.
+[31mdropped [0m  test.column.customer_id.uni…  unique          always-passes           —        Test returned zero failing rows on the representative sample.
+
+--- a/models/dim_customers.yml
++++ b/models/dim_customers.yml
+@@ -1,5 +1,8 @@
+ version: 2
+ models:
+   - name: dim_customers
+     columns:
+       - name: customer_id
++        description: Surrogate key.
++        tests:
++          - not_null
