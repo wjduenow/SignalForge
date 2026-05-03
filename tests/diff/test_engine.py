@@ -447,15 +447,39 @@ def test_sidecar_oversize_raises_via_orchestrator(project_dir: Path) -> None:
     assert not sidecar.exists()
 
 
-def test_sidecar_not_written_when_path_omitted(project_dir: Path) -> None:
-    """No ``sidecar_path`` arg means no sidecar lands on disk."""
+def test_sidecar_default_path_used_when_path_omitted(project_dir: Path) -> None:
+    """``sidecar_path is None`` and ``write_sidecar=True`` (default) lands
+    the sidecar at ``<project_dir>/.signalforge/diff.json`` (post-QG fix
+    #5, Q1=A — the diff sidecar is now an always-on durable record).
+    """
     model = _make_model()
     candidate = _make_candidate()
     prune_result = _make_prune_result()
 
     render_diff(model, candidate, prune_result, project_dir=project_dir)
 
-    # Default sidecar path the writer would land at.
+    sidecar = project_dir / ".signalforge" / "diff.json"
+    assert sidecar.exists()
+    parsed = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert parsed["model_unique_id"] == model.unique_id
+
+
+def test_sidecar_disabled_via_write_sidecar_false(project_dir: Path) -> None:
+    """``write_sidecar=False`` skips the sidecar regardless of
+    ``sidecar_path`` (post-QG fix #5).
+    """
+    model = _make_model()
+    candidate = _make_candidate()
+    prune_result = _make_prune_result()
+
+    render_diff(
+        model,
+        candidate,
+        prune_result,
+        write_sidecar=False,
+        project_dir=project_dir,
+    )
+
     sidecar = project_dir / ".signalforge" / "diff.json"
     assert not sidecar.exists()
 
@@ -547,7 +571,10 @@ def test_info_log_emitted_at_happy_path_end(
     ):
         assert key in parsed
     assert parsed["model_unique_id"] == model.unique_id
-    assert parsed["kept"] == 1
+    # The candidate carries 6 doc rows (model + 2 columns × 2 fields)
+    # plus 1 kept prune decision; post-QG fix #2 surfaces every doc
+    # row as ``tier=kept``.
+    assert parsed["kept"] == 7
     assert parsed["dropped"] == 0
     assert parsed["has_existing_schema"] is False
 
@@ -668,3 +695,300 @@ def test_unused_helpers_smoke() -> None:
     assert "os" not in engine.__all__
     # Defence against accidental re-exports of internals.
     _ = os
+
+
+# ---------------------------------------------------------------------------
+# 9. Post-QG fix #1 — mkdir wraps as DiffSidecarWriteError
+# ---------------------------------------------------------------------------
+
+
+def test_output_path_mkdir_failure_raises_diff_sidecar_write_error(tmp_path: Path) -> None:
+    """When ``project_dir``'s parent is an existing FILE (not a
+    directory), ``mkdir(parents=True, exist_ok=True)`` raises
+    ``FileExistsError``. Post-QG fix #1: that error is wrapped as
+    :class:`DiffSidecarWriteError` so callers branch on the diff-layer
+    error type rather than catching a raw ``OSError``.
+    """
+    # tmp_path/blocker is a regular file; project_dir = tmp_path/blocker/proj
+    # — mkdir(parents=True) will fail because blocker is a file.
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    project_dir = blocker / "proj"
+
+    model = _make_model()
+    candidate = _make_candidate()
+    prune_result = _make_prune_result()
+    output = project_dir / "diff.txt"
+
+    with pytest.raises(DiffSidecarWriteError):
+        render_diff(
+            model,
+            candidate,
+            prune_result,
+            output_path=output,
+            project_dir=project_dir,
+            write_sidecar=False,
+        )
+
+
+def test_sidecar_path_mkdir_failure_raises_diff_sidecar_write_error(tmp_path: Path) -> None:
+    """Same as above for the sidecar-path branch (post-QG fix #1)."""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("not a directory", encoding="utf-8")
+    project_dir = blocker / "proj"
+
+    model = _make_model()
+    candidate = _make_candidate()
+    prune_result = _make_prune_result()
+    sidecar = project_dir / ".signalforge" / "diff.json"
+
+    with pytest.raises(DiffSidecarWriteError):
+        render_diff(
+            model,
+            candidate,
+            prune_result,
+            sidecar_path=sidecar,
+            project_dir=project_dir,
+        )
+
+
+# ---------------------------------------------------------------------------
+# 10. Post-QG fix #2 — doc artifacts always emit DiffEntry
+# ---------------------------------------------------------------------------
+
+
+def test_doc_artifacts_always_emit_entry_without_grading(project_dir: Path) -> None:
+    """Per Architectural Commitment #5 (one-line "why" per artifact),
+    every present description / rationale field on the candidate
+    produces a :class:`DiffEntry` even when ``grading_report=None``
+    (post-QG fix #2). The fallback ``why`` is ``"kept (no grading)"``.
+    """
+    model = _make_model()
+    candidate = _make_candidate()  # has model + 2 column descriptions / rationales
+    prune_result = _make_prune_result()
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        grading_report=None,
+        project_dir=project_dir,
+    )
+
+    artifact_ids = {e.artifact_id for e in report.entries}
+    # Model-level doc rows.
+    assert "model.description" in artifact_ids
+    assert "model.rationale" in artifact_ids
+    # Per-column doc rows for both columns the candidate carries.
+    assert "column.order_id.description" in artifact_ids
+    assert "column.order_id.rationale" in artifact_ids
+    assert "column.customer_id.description" in artifact_ids
+    assert "column.customer_id.rationale" in artifact_ids
+
+    # Every doc row is tier=kept with score=None, passed=None,
+    # why="kept (no grading)".
+    doc_rows = [e for e in report.entries if e.test_type is None]
+    assert len(doc_rows) == 6
+    for row in doc_rows:
+        assert row.tier == "kept"
+        assert row.score is None
+        assert row.passed is None
+        assert row.why == "kept (no grading)"
+
+
+# ---------------------------------------------------------------------------
+# 11. Post-QG fix #3 — flagged-tier why reflects grading reason
+# ---------------------------------------------------------------------------
+
+
+def test_flagged_tier_why_uses_grading_reason_not_prune_reason(project_dir: Path) -> None:
+    """When a kept artifact is flipped to ``tier="flagged"`` because of a
+    failing :class:`GradingResult`, the row's ``why`` reflects the
+    GRADING reason — never the prune ``decision.why`` (post-QG fix #3).
+    """
+    model = _make_model()
+    candidate = _make_candidate()
+    prune_result = _make_prune_result(decisions=(_kept_decision_for(),))
+    grading_report = _grading_report_for(
+        results=(
+            GradingResult(
+                artifact_id="test.column.order_id.not_null",
+                criterion_id="clarity",
+                score=0.4,
+                passed=False,
+                evidence="",
+                reasoning="vague description; reword to add explicit FK semantics",
+            ),
+        )
+    )
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        grading_report=grading_report,
+        project_dir=project_dir,
+    )
+
+    flagged_entries = [e for e in report.entries if e.tier == "flagged"]
+    assert len(flagged_entries) == 1
+    flagged = flagged_entries[0]
+    assert flagged.artifact_id == "test.column.order_id.not_null"
+    # The flagged-tier why comes from grading, not from the prune
+    # decision — the kept decision's ``why`` was "ran on 1k sample, 42
+    # failing rows", which must NOT appear here.
+    assert "ran on 1k sample" not in flagged.why
+    assert "42 failing rows" not in flagged.why
+    # The grading-derived why mentions the criterion + reasoning.
+    assert "failed grading" in flagged.why
+    assert "clarity" in flagged.why
+    assert "vague description" in flagged.why
+
+
+# ---------------------------------------------------------------------------
+# 12. Post-QG fix #4 — structural args_hash join survives JSON rehydration
+# ---------------------------------------------------------------------------
+
+
+def test_structural_keying_survives_prune_result_json_roundtrip(project_dir: Path) -> None:
+    """A :class:`PruneResult` round-tripped through JSON (so its
+    inner :class:`CandidateTest` objects are NEW instances — different
+    ``id()``) must produce the same artifact_ids in the rendered diff
+    as the in-memory case (post-QG fix #4). Cross-stage parity with the
+    grade engine is the load-bearing invariant.
+    """
+    model = _make_model()
+    candidate = _make_candidate()
+    prune_result = _make_prune_result(decisions=(_kept_decision_for(),))
+
+    in_memory_report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+    in_memory_ids = {e.artifact_id for e in in_memory_report.entries}
+
+    # Round-trip through JSON: dump, load, validate as a new PruneResult.
+    rehydrated_prune = PruneResult.model_validate_json(prune_result.model_dump_json())
+    # Sanity: the inner CandidateTest is a fresh object (different id()).
+    assert id(rehydrated_prune.decisions[0].test) != id(prune_result.decisions[0].test)
+
+    rehydrated_report = render_diff(
+        model,
+        candidate,
+        rehydrated_prune,
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+    rehydrated_ids = {e.artifact_id for e in rehydrated_report.entries}
+
+    assert in_memory_ids == rehydrated_ids
+    assert "test.column.order_id.not_null" in rehydrated_ids
+
+
+def test_distinct_accepted_values_get_distinct_artifact_ids(project_dir: Path) -> None:
+    """Two ``accepted_values`` tests on the SAME column with different
+    ``values`` lists collide on (scope, column, type); the
+    args_hash suffix disambiguates them so the artifact_ids stay
+    distinct (post-QG fix #4 collision rule).
+    """
+    from signalforge.draft.models import CandidateTestAcceptedValues
+
+    # Candidate carries two accepted_values tests on order_id with
+    # different values — same type, different args.
+    test_a = CandidateTestAcceptedValues(column="order_id", values=("a", "b"))
+    test_b = CandidateTestAcceptedValues(column="order_id", values=("c", "d"))
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact",
+        rationale="grain: per order",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="surrogate key",
+                rationale="primary identifier",
+                tests=(test_a, test_b),
+            ),
+            CandidateColumn(
+                name="customer_id",
+                description="FK",
+                rationale="links",
+            ),
+        ),
+    )
+    decisions = (
+        PruneDecision(
+            test_anchor="column.order_id",
+            test=test_a,
+            decision="kept",
+            reason="kept",
+            failures=1,
+            sampled_rows=100,
+            scope="sample",
+            elapsed_ms=1,
+            compiled_sql_hash="0" * 16,
+            compiled_sql="select 1",
+            why="ran on 100 sample, 1 failing row",
+        ),
+        PruneDecision(
+            test_anchor="column.order_id",
+            test=test_b,
+            decision="kept",
+            reason="kept",
+            failures=2,
+            sampled_rows=100,
+            scope="sample",
+            elapsed_ms=1,
+            compiled_sql_hash="0" * 16,
+            compiled_sql="select 1",
+            why="ran on 100 sample, 2 failing rows",
+        ),
+    )
+    prune_result = _make_prune_result(decisions=decisions)
+
+    model = _make_model()
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+    test_artifact_ids = [e.artifact_id for e in report.entries if e.test_type == "accepted_values"]
+    # The two accepted_values tests must surface with distinct
+    # artifact_ids — the args_hash suffix disambiguates.
+    assert len(test_artifact_ids) == 2
+    assert test_artifact_ids[0] != test_artifact_ids[1]
+    # Both carry the args_hash suffix shape (5 dotted parts).
+    for aid in test_artifact_ids:
+        assert aid.startswith("test.column.order_id.accepted_values.")
+
+
+# ---------------------------------------------------------------------------
+# 13. Post-QG fix #6 — duration_seconds captured AFTER writes
+# ---------------------------------------------------------------------------
+
+
+def test_info_log_duration_includes_write_phase(
+    project_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The INFO-log ``duration_seconds`` field is captured AFTER the
+    sidecar write completes (post-QG fix #6), so it reflects the full
+    wall-clock including renderer + writes. Sanity check: duration is
+    a non-negative float.
+    """
+    model = _make_model()
+    candidate = _make_candidate()
+    prune_result = _make_prune_result()
+
+    with caplog.at_level(logging.INFO, logger="signalforge.diff.engine"):
+        render_diff(model, candidate, prune_result, project_dir=project_dir)
+
+    infos = [rec for rec in caplog.records if rec.levelname == "INFO"]
+    assert len(infos) == 1
+    payload_json = infos[0].getMessage().split("rendered diff: ", 1)[1]
+    parsed = json.loads(payload_json)
+    assert isinstance(parsed["duration_seconds"], float)
+    assert parsed["duration_seconds"] >= 0.0

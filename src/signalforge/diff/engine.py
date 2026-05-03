@@ -62,7 +62,10 @@ from pathlib import Path
 import yaml
 
 import signalforge as _sf
-from signalforge.diff._artifact_id import artifact_id_for, compute_args_hashes
+from signalforge.diff._artifact_id import (
+    _model_test_args_hash,
+    artifact_id_for,
+)
 from signalforge.diff._emitter import emit_proposed_yaml
 from signalforge.diff._renderers import (
     AnsiRenderer,
@@ -70,7 +73,7 @@ from signalforge.diff._renderers import (
     MarkdownRenderer,
     Renderer,
 )
-from signalforge.diff._sidecar import write_sidecar
+from signalforge.diff._sidecar import write_sidecar as _write_sidecar
 from signalforge.diff.config import DiffConfig
 from signalforge.diff.errors import (
     DiffCandidateModelMismatchError,
@@ -146,21 +149,88 @@ def _decision_to_drop_reason(decision: PruneDecision) -> DropReason | None:
     return decision.reason
 
 
+_StructuralKey = tuple[str, str | None, str, str]
+
+
+def _structural_key(*, scope: str, column: str | None, test: CandidateTest) -> _StructuralKey:
+    """Return a structural fingerprint identifying a candidate test.
+
+    Matches the ``(scope, column, test_type, args_hash)`` shape used by
+    :mod:`signalforge.diff._emitter._fingerprint`. Stable across object
+    identity — two semantically-equivalent :class:`CandidateTest`
+    instances (e.g., one from the in-memory candidate, one rehydrated
+    from JSON) produce identical keys.
+    """
+    return (scope, column, test.type, _model_test_args_hash(test))
+
+
+def _structural_args_hashes(candidate: CandidateSchema) -> dict[_StructuralKey, str | None]:
+    """Pre-compute args_hash values keyed by structural fingerprint.
+
+    Mirrors :func:`compute_args_hashes` semantics but keyed structurally
+    so a :class:`PruneDecision` whose ``test`` was JSON-rehydrated (a
+    new object) still finds its disambiguation suffix. Apply the same
+    collision rule as the grade engine: two tests in the same scope
+    sharing a ``test.type`` get an 8-hex args_hash suffix; exact
+    duplicates get an additional ``:<n>`` ordinal.
+    """
+    out: dict[_StructuralKey, str | None] = {}
+
+    def _assign(scope: str, column: str | None, tests: tuple[CandidateTest, ...]) -> None:
+        type_counts: dict[str, int] = {}
+        for test in tests:
+            type_counts[test.type] = type_counts.get(test.type, 0) + 1
+        seen: dict[tuple[str, str], int] = {}
+        for test in tests:
+            key = _structural_key(scope=scope, column=column, test=test)
+            if type_counts[test.type] <= 1:
+                out[key] = None
+                continue
+            base_hash = _model_test_args_hash(test)
+            ord_key = (test.type, base_hash)
+            seen[ord_key] = seen.get(ord_key, 0) + 1
+            ordinal = seen[ord_key]
+            # When two tests share both type AND args (exact duplicates),
+            # later occurrences carry an ordinal suffix. The structural
+            # key already collides between those tests — we can only
+            # store one entry, so the LAST assignment wins. The diff
+            # renderer's join-by-structural-key in this exact-duplicate
+            # case can't disambiguate further; this is a known limit of
+            # using structural keys after JSON rehydration. The
+            # in-memory id()-based path could disambiguate; we trade
+            # that for cross-stage parity. Document the limit; tests
+            # exercise the (more common) distinct-args case.
+            out[key] = base_hash if ordinal == 1 else f"{base_hash}:{ordinal - 1}"
+
+    _assign("model", None, candidate.tests)
+    for column in candidate.columns:
+        _assign("column", column.name, column.tests)
+
+    return out
+
+
 def _resolve_test_artifact_id(
     decision: PruneDecision,
-    args_hashes: dict[int, str | None],
+    args_hashes: dict[_StructuralKey, str | None],
 ) -> str:
     """Translate a :class:`PruneDecision` into a canonical ``artifact_id``.
 
     Uses :func:`signalforge.diff._artifact_id.artifact_id_for`, joining
-    via the test's ``id()`` against the pre-computed ``args_hashes``
-    table from :func:`compute_args_hashes`. Mirrors the join-by-anchor
-    pattern in :mod:`signalforge.diff._emitter._kept_fingerprints`.
+    via a structural ``(scope, column, test_type, args_hash)`` key
+    against the pre-computed table from
+    :func:`_structural_args_hashes`. Mirrors the join-by-anchor pattern
+    in :mod:`signalforge.diff._emitter._kept_fingerprints` but uses
+    structural identity rather than :func:`id`, so a
+    :class:`PruneDecision` whose inner :class:`CandidateTest` was
+    rehydrated from JSON (different object identity, same content)
+    still produces the byte-equal artifact_id. Cross-stage parity with
+    :mod:`signalforge.grade.engine` is the load-bearing invariant.
     """
     anchor = decision.test_anchor
-    args_hash = args_hashes.get(id(decision.test))
     if anchor.startswith("column."):
         column_name = anchor[len("column.") :]
+        key = _structural_key(scope="column", column=column_name, test=decision.test)
+        args_hash = args_hashes.get(key)
         return artifact_id_for(
             scope="column",
             column_name=column_name,
@@ -169,6 +239,8 @@ def _resolve_test_artifact_id(
         )
     # Treat any non-column anchor (the literal "model" plus any
     # forward-compatible sentinel) as model-scoped.
+    key = _structural_key(scope="model", column=None, test=decision.test)
+    args_hash = args_hashes.get(key)
     return artifact_id_for(
         scope="model",
         test=decision.test,
@@ -234,10 +306,48 @@ def _tier_for_kept(score: float | None, passed: bool | None) -> Tier:
     return "kept"
 
 
+def _first_failing_grading(
+    results: list[GradingResult],
+) -> GradingResult | None:
+    """Return the first failing :class:`GradingResult`, or ``None``.
+
+    A failing result is either ``passed is False`` OR a graceful-degrade
+    null score (``score is None``). Iteration order matches the
+    grading run's per-criterion sequence (the orchestrator preserves
+    rubric order), so "first failing" is deterministic across runs.
+    """
+    for result in results:
+        if result.passed is False or result.score is None:
+            return result
+    return None
+
+
+def _flagged_why(failing: GradingResult, *, max_chars: int) -> str:
+    """Render the per-row "why" for a flagged tier (DEC-012 + post-QG fix #3).
+
+    Format: ``failed grading: <criterion_id> — <reasoning_truncated>``.
+    The reasoning is truncated to ``max_chars`` to keep the table cell
+    one-line. The dash is the en-dash ``—`` (U+2014) used elsewhere in
+    the renderer's per-row why output for consistency with the grade
+    sidecar's reasoning summarisation.
+    """
+    reasoning = failing.reasoning or ""
+    # Reserve space for the prefix; if the reserved budget is non-positive
+    # (very narrow ``max_chars``), return the prefix as-is.
+    prefix = f"failed grading: {failing.criterion_id} — "
+    if max_chars <= 0:
+        return prefix.rstrip()
+    if len(reasoning) > max_chars:
+        reasoning = reasoning[: max_chars - 1].rstrip() + "…"
+    return f"{prefix}{reasoning}".rstrip()
+
+
 def _entry_for_test(
     decision: PruneDecision,
-    args_hashes: dict[int, str | None],
+    args_hashes: dict[_StructuralKey, str | None],
     grading_index: dict[str, list[GradingResult]],
+    *,
+    max_why_chars: int,
 ) -> DiffEntry:
     """Build a :class:`DiffEntry` for one :class:`PruneDecision`."""
     artifact_id = _resolve_test_artifact_id(decision, args_hashes)
@@ -256,15 +366,37 @@ def _entry_for_test(
     grading_results = grading_index.get(artifact_id, [])
     score, passed = _aggregate_grading(grading_results)
     tier: Tier = _tier_for_kept(score, passed)
+    # Post-QG fix #3: a flipped-to-flagged row's why must reflect the
+    # GRADING reason, not the prune reason — the row is flagged because
+    # of a failing rubric criterion, and surfacing the prune why
+    # ("ran on 1k sample, 0 failing rows") is misleading.
+    if tier == "flagged":
+        failing = _first_failing_grading(grading_results)
+        why = (
+            _flagged_why(failing, max_chars=max_why_chars) if failing is not None else decision.why
+        )
+    else:
+        why = decision.why
     return DiffEntry(
         artifact_id=artifact_id,
         test_type=decision.test.type,
         tier=tier,
         drop_reason=None,
-        why=decision.why,
+        why=why,
         score=score,
         passed=passed,
     )
+
+
+# Canonical fallback "why" string when a doc artifact has no grading
+# attached (prune-only run, or grading report omitted this artifact).
+# Keep the literal short and grep-able — operators reading the per-row
+# why should be able to scan for "no grading" to spot the un-graded
+# rows. Per Architectural Commitment #5 ("explainable diffs"), every
+# present description / rationale produces a DiffEntry — silent
+# omission of doc rows on prune-only runs would defeat the
+# one-line-why-per-artifact contract.
+_DOC_KEPT_NO_GRADING_WHY = "kept (no grading)"
 
 
 def _entries_for_doc(
@@ -272,27 +404,49 @@ def _entries_for_doc(
     artifact_id: str,
     description: str,
     grading_index: dict[str, list[GradingResult]],
-) -> DiffEntry | None:
-    """Build a :class:`DiffEntry` for a doc / rationale artifact, or
-    ``None`` if there is no grading attached to the artifact (doc rows
-    only surface when a grading report supplied per-criterion signal).
+    max_why_chars: int,
+) -> DiffEntry:
+    """Build a :class:`DiffEntry` for a doc / rationale artifact.
 
-    The diff layer's kept/dropped/flagged table surfaces only artifacts
-    with positive evidence — every prune decision (kept or dropped),
-    plus every doc artifact a grading run scored. Doc artifacts without
-    a grading report stay out of the table; their content is visible
-    in the unified-diff section, which is the operator's primary signal
-    for descriptions.
+    Post-QG fix #2: ALWAYS emit an entry per present description /
+    rationale field. Architectural Commitment #5 requires a one-line
+    "why" per artifact in the diff; silently dropping doc rows when
+    no grading attached produced zero rows for prune-only runs. Now
+    the absence of grading is itself the signal — the row appears
+    with ``tier="kept"``, ``score=None``, ``passed=None``,
+    ``why="kept (no grading)"``.
+
+    When grading IS attached:
+
+    * The aggregate ``(score, passed)`` flips the tier to ``flagged``
+      iff the rubric thresholds tripped (per :func:`_tier_for_kept`).
+    * The why is derived from the first failing criterion (mirroring
+      :func:`_flagged_why`) when flagged, or the first criterion's
+      reasoning when kept.
     """
     grading_results = grading_index.get(artifact_id, [])
     if not grading_results:
-        return None
+        return DiffEntry(
+            artifact_id=artifact_id,
+            test_type=None,
+            tier="kept",
+            drop_reason=None,
+            why=_DOC_KEPT_NO_GRADING_WHY,
+            score=None,
+            passed=None,
+        )
     score, passed = _aggregate_grading(grading_results)
     tier: Tier = _tier_for_kept(score, passed)
-    # Use the first criterion's reasoning as the row "why"; the diff
-    # layer's per-row why is intentionally one-line. The full
-    # per-criterion record stays in the grade sidecar.
-    why = grading_results[0].reasoning or description
+    if tier == "flagged":
+        failing = _first_failing_grading(grading_results)
+        if failing is not None:
+            why = _flagged_why(failing, max_chars=max_why_chars)
+        else:  # pragma: no cover — defensive; flagged ⇒ at least one failing
+            why = grading_results[0].reasoning or description
+    else:
+        # Kept with grading — surface the first criterion's reasoning,
+        # falling back to the description when reasoning is empty.
+        why = grading_results[0].reasoning or description
     return DiffEntry(
         artifact_id=artifact_id,
         test_type=None,
@@ -308,61 +462,86 @@ def _build_entries(
     candidate: CandidateSchema,
     prune_result: PruneResult,
     grading_report: GradingReport | None,
+    *,
+    max_why_chars: int,
 ) -> tuple[DiffEntry, ...]:
     """Walk every artifact and return the per-row tuple.
 
     Order:
 
-    1. Model-level doc / rationale (when graded).
-    2. Per-column doc / rationale (when graded), in the candidate's
-       column declaration order.
+    1. Model-level doc / rationale (always when present).
+    2. Per-column doc / rationale (always when present), in the
+       candidate's column declaration order.
     3. All prune decisions (kept + dropped) in their decision order.
 
-    Graded doc artifacts only land in the table when grading is
-    present — otherwise the unified diff body carries the doc-text
-    signal and we don't surface a redundant row.
+    Per Architectural Commitment #5 (post-QG fix #2), every present
+    description / rationale field produces a :class:`DiffEntry`
+    regardless of grading. When grading is absent or no matching
+    result exists, the entry carries ``tier="kept"``, ``score=None``,
+    ``passed=None``, and ``why="kept (no grading)"``.
+
+    Test-shape :class:`DiffEntry` rows use a structural
+    ``(scope, column, test_type, args_hash)`` key to look up the
+    args_hash disambiguator (post-QG fix #4); a JSON-rehydrated
+    :class:`PruneResult` produces byte-equal artifact_ids vs. the
+    in-memory case.
     """
-    args_hashes = compute_args_hashes(candidate)
+    # Compute structural args_hashes (post-QG fix #4 — replaces the
+    # id()-based table from :func:`compute_args_hashes`). The
+    # id()-based table stays available for emitter consumers that hold
+    # the in-memory candidate; the diff engine does the join across
+    # stages, so it must use structural identity to survive
+    # JSON-rehydration of the prune result.
+    args_hashes = _structural_args_hashes(candidate)
     grading_index = _grading_index(grading_report)
 
     rows: list[DiffEntry] = []
 
     # Model-level doc artifacts.
     for field in ("description", "rationale"):
-        artifact_id = artifact_id_for(scope="model", field=field)  # type: ignore[arg-type]
         text = getattr(candidate, field, None)
         if text is None:
             continue
-        entry = _entries_for_doc(
-            artifact_id=artifact_id,
-            description=text,
-            grading_index=grading_index,
+        artifact_id = artifact_id_for(scope="model", field=field)  # type: ignore[arg-type]
+        rows.append(
+            _entries_for_doc(
+                artifact_id=artifact_id,
+                description=text,
+                grading_index=grading_index,
+                max_why_chars=max_why_chars,
+            )
         )
-        if entry is not None:
-            rows.append(entry)
 
     # Column-level doc artifacts.
     for column in candidate.columns:
         for field in ("description", "rationale"):
+            text = getattr(column, field, None)
+            if text is None:
+                continue
             artifact_id = artifact_id_for(
                 scope="column",
                 column_name=column.name,
                 field=field,  # type: ignore[arg-type]
             )
-            text = getattr(column, field, None)
-            if text is None:
-                continue
-            entry = _entries_for_doc(
-                artifact_id=artifact_id,
-                description=text,
-                grading_index=grading_index,
+            rows.append(
+                _entries_for_doc(
+                    artifact_id=artifact_id,
+                    description=text,
+                    grading_index=grading_index,
+                    max_why_chars=max_why_chars,
+                )
             )
-            if entry is not None:
-                rows.append(entry)
 
     # Prune decisions (kept + dropped).
     for decision in prune_result.decisions:
-        rows.append(_entry_for_test(decision, args_hashes, grading_index))
+        rows.append(
+            _entry_for_test(
+                decision,
+                args_hashes,
+                grading_index,
+                max_why_chars=max_why_chars,
+            )
+        )
 
     return tuple(rows)
 
@@ -449,6 +628,7 @@ def render_diff(
     config: DiffConfig | None = None,
     output_path: Path | None = None,
     sidecar_path: Path | None = None,
+    write_sidecar: bool = True,
     project_dir: Path | None = None,
 ) -> DiffReport:
     """Build and render a :class:`DiffReport` for ``model``.
@@ -463,7 +643,9 @@ def render_diff(
     Pipeline:
 
     1. Resolve every optional argument (config defaults, ``project_dir``
-       defaults to :func:`pathlib.Path.cwd`).
+       defaults to :func:`pathlib.Path.cwd`; ``sidecar_path`` defaults
+       to ``<project_dir>/.signalforge/diff.json`` when
+       ``write_sidecar=True``).
     2. Boundary checks (DEC-002): mismatched ids raise typed errors
        BEFORE any other work.
     3. ``existing_schema`` size check (DEC-006); soft-warn (DEC-014);
@@ -475,9 +657,11 @@ def render_diff(
     6. Build the per-row :class:`DiffEntry` tuple.
     7. Compute reproducibility hashes (DEC-016).
     8. Construct the :class:`DiffReport`.
-    9. Dispatch to the selected renderer (DEC-004).
+    9. Dispatch to the selected renderer (DEC-004) — skipped when no
+       consumer (no ``output_path`` and ``write_sidecar=False``).
     10. (Optional) Write rendered text to ``output_path``.
-    11. (Optional) Write the JSON sidecar via :func:`write_sidecar`.
+    11. (Optional) Write the JSON sidecar via
+        :func:`signalforge.diff._sidecar.write_sidecar`.
     12. Emit one INFO log per DEC-015.
 
     Args:
@@ -495,10 +679,17 @@ def render_diff(
             is expected to receive the rendered text via the
             :class:`DiffReport` (or to call the renderer themselves).
         sidecar_path: optional override for the sidecar JSON path.
-            ``None`` means no sidecar is written. (Note: the diff
-            sidecar default is opt-in, unlike the grade/prune
-            audits — the diff layer does not always need a durable
-            on-disk artefact.)
+            When ``write_sidecar=True`` and ``sidecar_path is None``,
+            the sidecar lands at
+            ``<project_dir>/.signalforge/diff.json`` (post-QG fix #5,
+            Q1=A — the diff sidecar is now an always-on durable record,
+            mirroring the grade / prune audit precedent). To DISABLE
+            the sidecar entirely, pass ``write_sidecar=False``.
+        write_sidecar: when ``True`` (default), the JSON sidecar is
+            written to ``sidecar_path`` (or the
+            ``<project_dir>/.signalforge/diff.json`` default). When
+            ``False``, no sidecar is written regardless of
+            ``sidecar_path``. Post-QG fix #5 (Q1=A).
         project_dir: optional project-root override used to resolve
             symlink-hardened path canonicalisation for ``output_path``
             and ``sidecar_path``. ``None`` resolves to
@@ -588,7 +779,12 @@ def render_diff(
     )
 
     # 6. Build per-row entries.
-    entries = _build_entries(candidate, prune_result, grading_report)
+    entries = _build_entries(
+        candidate,
+        prune_result,
+        grading_report,
+        max_why_chars=resolved_config.max_why_chars,
+    )
 
     # 7. Reproducibility hashes (DEC-016).
     candidate_hash = _hash_pydantic(candidate)
@@ -600,14 +796,16 @@ def render_diff(
     dropped_count = sum(1 for e in entries if e.tier == "dropped")
     flagged_count = sum(1 for e in entries if e.tier == "flagged")
     has_existing_schema = existing_schema is not None
-    duration_seconds = time.monotonic() - started_at
     run_id = uuid.uuid4().hex
 
+    # Construct the report with a placeholder duration; we'll refresh
+    # it post-write so the captured value reflects the full wall-clock
+    # including renderer + writes (post-QG fix #6).
     report = DiffReport(
         signalforge_version=_sf.__version__,
         model_unique_id=model.unique_id,
         run_id=run_id,
-        duration_seconds=duration_seconds,
+        duration_seconds=time.monotonic() - started_at,
         proposed_yaml=proposed_yaml,
         existing_yaml=existing_schema,
         unified_diff=unified_diff,
@@ -621,14 +819,43 @@ def render_diff(
         grading_report_hash=grading_report_hash,
     )
 
-    # 9. Dispatch to renderer.
-    renderer = _build_renderer(resolved_config, project_dir=resolved_project_dir)
-    rendered_text = renderer.render(report)
+    # 9–11. Resolve the effective sidecar path (post-QG fix #5, Q1=A):
+    # default to ``<project_dir>/.signalforge/diff.json`` when
+    # ``write_sidecar=True`` and the caller didn't override.
+    effective_sidecar_path: Path | None
+    if write_sidecar:
+        effective_sidecar_path = (
+            sidecar_path
+            if sidecar_path is not None
+            else resolved_project_dir / ".signalforge" / "diff.json"
+        )
+    else:
+        effective_sidecar_path = None
+
+    # 9. Dispatch to renderer — skipped when no consumer (post-QG fix #6,
+    # Q3=A). The sidecar serialises the :class:`DiffReport` directly via
+    # :func:`signalforge.diff._sidecar.write_sidecar`, NOT via the
+    # rendered text, so a sidecar-only run can skip rendering. The
+    # ``output_path`` branch is the only consumer of the rendered text.
+    rendered_text: str | None = None
+    if output_path is not None:
+        renderer = _build_renderer(resolved_config, project_dir=resolved_project_dir)
+        rendered_text = renderer.render(report)
 
     # 10. Optional output_path write (symlink-hardened at the orchestrator).
     if output_path is not None:
-        # Ensure project_dir exists for canonicalise_path's strict-resolve.
-        resolved_project_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure project_dir exists for canonicalise_path's strict-resolve
+        # (post-QG fix #1: wrap mkdir as DiffSidecarWriteError too).
+        try:
+            resolved_project_dir.mkdir(parents=True, exist_ok=True)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            raise DiffSidecarWriteError(
+                f"Failed to prepare project_dir {resolved_project_dir!r} "
+                f"for diff output path canonicalisation.",
+                cause=exc,
+            ) from exc
         try:
             canonical_output_path = canonicalise_path(output_path, resolved_project_dir)
         except _PathContainmentError as exc:
@@ -636,6 +863,9 @@ def render_diff(
                 f"Diff output path {output_path!r} failed symlink/containment validation.",
                 cause=exc,
             ) from exc
+        # ``rendered_text`` is non-None here because we entered the
+        # render block on the same ``output_path is not None`` branch.
+        assert rendered_text is not None
         try:
             _write_rendered_text(rendered_text, output_path=canonical_output_path)
         except (KeyboardInterrupt, SystemExit):
@@ -647,20 +877,34 @@ def render_diff(
             ) from exc
 
     # 11. Optional sidecar write (symlink-hardened at the orchestrator).
-    if sidecar_path is not None:
-        resolved_project_dir.mkdir(parents=True, exist_ok=True)
+    if effective_sidecar_path is not None:
+        # Post-QG fix #1: wrap mkdir as DiffSidecarWriteError too. A
+        # parent that's an existing FILE (rather than a directory)
+        # raises FileExistsError here; without the wrap the caller
+        # gets an untyped OSError leaking out of the diff layer.
         try:
-            canonical_sidecar_path = canonicalise_path(sidecar_path, resolved_project_dir)
+            resolved_project_dir.mkdir(parents=True, exist_ok=True)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            raise DiffSidecarWriteError(
+                f"Failed to prepare project_dir {resolved_project_dir!r} "
+                f"for diff sidecar path canonicalisation.",
+                cause=exc,
+            ) from exc
+        try:
+            canonical_sidecar_path = canonicalise_path(effective_sidecar_path, resolved_project_dir)
         except _PathContainmentError as exc:
             raise DiffSidecarWriteError(
-                f"Diff sidecar path {sidecar_path!r} failed symlink/containment validation.",
+                f"Diff sidecar path {effective_sidecar_path!r} "
+                f"failed symlink/containment validation.",
                 cause=exc,
             ) from exc
         # The writer has its own canonicalise as defence-in-depth, but
         # the load-bearing gate is the orchestrator's. Pass the
         # already-canonicalised path through.
         try:
-            write_sidecar(
+            _write_sidecar(
                 report,
                 sidecar_path=canonical_sidecar_path,
                 project_dir=resolved_project_dir,
@@ -676,7 +920,11 @@ def render_diff(
                 cause=exc,
             ) from exc
 
-    # 12. One INFO log per invocation. Lazy-format JSON per DEC-015.
+    # 12. Capture the full wall-clock duration (post-QG fix #6 — moved
+    # immediately before the INFO log so the captured value reflects
+    # the full pipeline including renderer + writes). One INFO log per
+    # invocation. Lazy-format JSON per DEC-015.
+    duration_seconds = time.monotonic() - started_at
     _LOGGER.info(
         "rendered diff: %s",
         json.dumps(
