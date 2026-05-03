@@ -5,8 +5,8 @@
 - **Ticket:** [#9](https://github.com/wjduenow/SignalForge/issues/9)
 - **Branch:** `feature/9-cli-entrypoint` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/9-cli-entrypoint`
-- **Phase:** detailing (in progress)
-- **PR:** _not yet created_
+- **Phase:** published (PR #26 draft; awaiting approval)
+- **PR:** [#26](https://github.com/wjduenow/SignalForge/pull/26) (draft)
 - **Sessions:** 1 (started 2026-05-03)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.1 (the user-facing entry point — the LAST v0.1 ticket; ships the runnable `signalforge` command)
