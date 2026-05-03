@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "audit_schema_version": 1,
+  "signalforge_version": "0.1.0.dev0",
+  "model_unique_id": "model.shop.dim_customers",
+  "run_id": "f0e1d2c3b4a5968778695a4b3c2d1e0f",
+  "duration_seconds": 1.847,
+  "proposed_yaml": "version: 2\nmodels:\n  - name: dim_customers\n    columns:\n      - name: customer_id\n        description: Surrogate key.\n        tests:\n          - not_null\n          - unique\n",
+  "existing_yaml": "version: 2\nmodels:\n  - name: dim_customers\n    columns:\n      - name: customer_id\n",
+  "unified_diff": "--- a/models/dim_customers.yml\n+++ b/models/dim_customers.yml\n@@ -1,4 +1,8 @@\n version: 2\n models:\n   - name: dim_customers\n     columns:\n       - name: customer_id\n+        description: Surrogate key.\n+        tests:\n+          - not_null\n+          - unique\n",
+  "entries": [
+    {
+      "artifact_id": "column.customer_id.description",
+      "test_type": null,
+      "tier": "kept",
+      "drop_reason": null,
+      "why": "Description added; passed all grading criteria.",
+      "score": 0.85,
+      "passed": true
+    },
+    {
+      "artifact_id": "test.column.customer_id.not_null",
+      "test_type": "not_null",
+      "tier": "kept",
+      "drop_reason": null,
+      "why": "Test returned non-zero failing rows on the warehouse sample.",
+      "score": null,
+      "passed": null
+    },
+    {
+      "artifact_id": "test.column.customer_id.unique",
+      "test_type": "unique",
+      "tier": "dropped",
+      "drop_reason": "always-passes",
+      "why": "Test returned zero failing rows on the representative sample.",
+      "score": null,
+      "passed": null
+    },
+    {
+      "artifact_id": "column.email.description",
+      "test_type": null,
+      "tier": "flagged",
+      "drop_reason": null,
+      "why": "Grading score 0.45 below threshold 0.50.",
+      "score": 0.45,
+      "passed": false
+    }
+  ],
+  "kept_count": 2,
+  "dropped_count": 1,
+  "flagged_count": 1,
+  "has_existing_schema": true,
+  "candidate_hash": "0123456789abcdef",
+  "prune_result_hash": "fedcba9876543210",
+  "grading_report_hash": "1122334455667788"
+}
