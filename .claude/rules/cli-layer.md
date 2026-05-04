@@ -57,6 +57,44 @@ Belt-and-braces: `_safe_excepthook` is installed via `sys.excepthook = _safe_exc
 
 The "no traceback" assertion is the floor of every CLI test: every test asserts `"Traceback" not in capsys.readouterr().err`. New tests inherit this assertion — a panic-path regression breaks the test loudly.
 
+## `os.environ` mutation pattern for process-scoped flags (DEC-023)
+
+Two CLI flags mutate `os.environ` for the current process to wire signal into libraries that read from it: `--no-color` sets `NO_COLOR=1` so any downstream library honouring the [no-color.org](https://no-color.org) convention strips colour, and `--profiles-dir <PATH>` sets `DBT_PROFILES_DIR=<resolved-path>` so the warehouse profile loader picks the operator-supplied path even on import paths the CLI does not directly invoke.
+
+**The mutation is one-shot, not scoped.** v0.1 deliberately does NOT wrap the env mutation in `try / finally` to restore the prior value at command exit. The CLI is a one-process-per-invocation surface — `main()` returns an int, the console-script wrapper calls `sys.exit(...)`, the process dies. There is no parent process whose env we'd be polluting; the OS reaps it. Adding `try / finally` restoration would be dead code in v0.1 AND a footgun if a future maintainer assumed it worked across calls.
+
+This is reserved as a v0.2 refinement when an in-process batch runner (multiple `main()` calls in one Python process — e.g., a notebook-driven pipeline) lands. At that point, `os.environ` mutation needs explicit save / restore, and a context-manager helper (`with _env_override(NO_COLOR="1"):`) becomes the right shape. Don't pre-emptively wrap in v0.1 — the QG passes 2 + 4 specifically validated the unwrapped pattern.
+
+When introducing a new CLI flag that needs to signal a downstream library via env vars (likely candidates: `LOG_LEVEL`, `DBT_TARGET`, future cache-control vars), follow the same pattern: mutate at the start of `cmd_<name>`, document the v0.2 in-process-batch reservation, do NOT add restoration. The single source of truth for the v0.1-vs-v0.2 split is `docs/cli-ops.md` § "Flag reference" — keep its phrasing aligned with this rule (per the multi-surface parity rule below).
+
+## `_EXCEPTION_TO_EXIT_CODE` mapping table convention (DEC-024)
+
+The exit-code mapping is a `dict[type[BaseException], int]` keyed by exception class **identity**, not name. `map_exception_to_exit_code(exc)` walks `type(exc).__mro__` so a subclass inherits its registered parent's tier — adding a new subclass under an existing base is zero-config; adding a new top-level error class requires an entry.
+
+Three load-bearing invariants:
+
+1. **One entry per concrete error class.** Every concrete `class <Name>Error(...):` declaration in any `src/signalforge/*/errors.py` module gets exactly one entry in the table. Adding multiple entries (the same class registered at two tiers) is a typo — the dict semantics keep only the last one and the test won't notice.
+2. **Abstract bases land in `_EXCEPTION_MAPPING_EXCLUDED_BASES`, not the table.** The nine per-stage abstract bases (`ManifestError`, `WarehouseError`, `SafetyError`, `LLMError`, `LLMHelperError`, `DraftError`, `PruneError`, `GradeError`, `DiffError`, `CliError` — eight pipeline stages plus the CLI base) are listed in the frozenset constant and excluded by the AST scan. Subclasses inherit via the MRO walk; registering an abstract base directly would make `map_exception_to_exit_code(exc_with_unrelated_concrete_base)` accidentally return the abstract-base tier, defeating the per-class precision.
+3. **An unregistered concrete class falls to tier 1 via the panic path.** `map_exception_to_exit_code` returns `1` for any class without an MRO match, mirroring `signalforge.cli._helpers._safe_excepthook`'s tier-1 default for bare `Exception`. The 7th AST scan ensures unregistered concretes are caught at test time, not runtime — but the runtime fallback is the safety net.
+
+If v0.2 introduces a new intermediate abstract base (e.g., a `WarehouseTransientError` that sits between `WarehouseError` and the concrete `WarehouseRateLimitError`), add it to `_EXCEPTION_MAPPING_EXCLUDED_BASES` AND document the addition. The exclusion list is a contract surface, not a convenience cache. The same rule applies if a new pipeline subpackage ships its own `errors.py` (a tenth stage, e.g., `signalforge.cache`): the companion test `test_scan_7_discovers_every_per_stage_errors_module` asserts the scan walks exactly nine `errors.py` files, so the count must be bumped in lockstep with the new stage's abstract base getting added to the excluded-bases set.
+
+## Multi-surface parity for behaviour changes (QG pass-3 lesson)
+
+A behaviour change in the CLI touches **five surfaces**. The QG pass-3 review caught a `--min-score` contract drift where the help text and the docstring agreed but the ops doc and the test docstring disagreed about what the flag actually drove (it gates `cmd_generate`'s exit code via `GradeBelowThresholdError`, not the diff renderer's tier classification). Pass 4 caught a similar drift where the env-mutation phrasing in `--profiles-dir` / `--no-color` was correct in code + helpers but stale in `docs/cli-ops.md`.
+
+When changing a flag's contract or a stderr message shape, update **all five surfaces in the same commit**:
+
+1. **The argparse help string** (`add_argument(..., help=...)`) — what the operator sees on `signalforge generate --help`.
+2. **The handler / helper docstring** — what an editor / IDE / `pydoc` shows; what a future maintainer reads first.
+3. **The ops doc** — `docs/cli-ops.md` § "Flag reference" or § "Exit codes" or § "Stderr shapes". This is the surface external CI parsers and downstream tooling key on.
+4. **The test name** — `test_generate_min_score_below_threshold_returns_exit_2` should match the contract; renaming / re-targeting the test on a contract change is part of the change.
+5. **The test docstring AND the DEC in `plans/super/9-cli-entrypoint.md`** — the ADR-style record of why the contract is what it is. Don't leave the plan stale relative to shipped behaviour.
+
+The pass-3 / pass-4 lessons are: surfaces 3 and 5 are the ones most often forgotten because they sit furthest from the code change. Codify the 5-surface parity check into every flag-modifying or stderr-shape-modifying PR's review checklist. The single source of truth is wherever the contract is most precisely stated (usually the DEC); the other four surfaces paraphrase from there.
+
+When introducing a new flag, write surfaces 1-3 first (help / docstring / ops doc), then write the test (surface 4) against those, then back-fill the DEC (surface 5) with the rationale. The DEC is the load-bearing surface for v0.2 reviewers asking "why does this flag work this way" — keeping it aligned with the other four is the difference between a self-documenting CLI and a forensic exercise.
+
 ## Path canonicalisation at the orchestrator (DEC-007, DEC-027)
 
 Every user-supplied path the CLI accepts (`--config`, `--manifest`, `--profiles-dir`, eventually `--output`, `--sidecar-path`) flows through `signalforge.cli._helpers.canonicalise_user_path(raw, project_dir)`, which wraps `signalforge.warehouse._path_safety.canonicalise_path` and re-raises as `CliPathError` so the CLI's own catch surface stays homogeneous.
