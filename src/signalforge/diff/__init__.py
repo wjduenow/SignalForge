@@ -45,7 +45,7 @@ See ``docs/diff-ops.md`` for the operational reference and
 from __future__ import annotations
 
 from signalforge.diff.config import DiffConfig, load_diff_config
-from signalforge.diff.engine import render_diff
+from signalforge.diff.engine import render_diff, render_to_text
 from signalforge.diff.errors import (
     DiffCandidateModelMismatchError,
     DiffError,
@@ -60,6 +60,7 @@ from signalforge.diff.models import DiffEntry, DiffReport, Tier
 __all__ = [
     # Orchestrator
     "render_diff",
+    "render_to_text",
     # Config
     "DiffConfig",
     "load_diff_config",

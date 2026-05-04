@@ -13,7 +13,7 @@ commitment at the grader's failure surface; every distinct failure mode the
 grader can produce gets a typed exception so the orchestrator / CLI / diff
 renderer can pattern-match on type rather than sniffing message text.
 
-The nine classes (DEC-028):
+The ten classes (DEC-028 + #9 US-002 graduation):
 
 1. :class:`GradeError` — base.
 2. :class:`GradeConfigError` — config load / parse / validation failures.
@@ -30,8 +30,14 @@ The nine classes (DEC-028):
 8. :class:`GradeAuditWriteError` — fail-closed audit propagation.
 9. :class:`GradeAuditRecordTooLargeError` — size cap exceeded before
    file open.
+10. :class:`GradeBelowThresholdError` — opt-in threshold-fail raise
+    graduated from v0.2 reservation to v0.1 wiring in #9 (US-002,
+    DEC-021). Raised AFTER the sidecar is durably persisted so the
+    operator has a complete ``grade.json`` for diagnosis.
 
-See ``plans/super/7-quality-grader.md`` for the full design.
+See ``plans/super/7-quality-grader.md`` for the full design and
+``plans/super/9-cli-entrypoint.md`` US-002 for the threshold-fail
+graduation.
 """
 
 from __future__ import annotations
@@ -369,10 +375,86 @@ class GradeAuditRecordTooLargeError(GradeError):
         super().__init__(message, remediation=remediation)
 
 
+class GradeBelowThresholdError(GradeError):
+    """The :class:`signalforge.grade.GradingReport` aggregate verdict
+    fell below the configured ``min_pass_rate`` and/or ``min_mean_score``
+    thresholds AND the operator opted into hard-fail behaviour by
+    setting :attr:`signalforge.grade.GradeConfig.fail_on_below_threshold`
+    to ``True``.
+
+    Graduated from v0.2 reservation to v0.1 wiring in #9 (US-002,
+    DEC-021). The raise lands AFTER
+    :func:`signalforge.grade.audit.write_grading_report` returns
+    successfully and BEFORE :func:`signalforge.grade.grade_artifacts`
+    returns the report — load-bearing ordering: a threshold-fail run
+    leaves a complete ``grade.json`` sidecar (and the per-pair
+    ``grade.jsonl`` audit) on disk so the operator can diagnose *why*
+    the run fell below threshold. Raising before the sidecar write
+    would defeat the durable hand-off.
+
+    The default :attr:`signalforge.grade.GradeConfig.fail_on_below_threshold`
+    is ``False`` — v0.1 ships the report-only posture by default; this
+    error class is opt-in. The CLI wires the raise into an exit-code
+    tier (forward reference to :file:`docs/cli-ops.md`) so a CI run
+    against ``signalforge generate`` can gate on threshold compliance.
+
+    Carries the five aggregate fields (``pass_rate``, ``mean_score``,
+    ``min_pass_rate``, ``min_mean_score``, ``aggregate_complete``) so a
+    caller catching the error can render a diagnostic without
+    reaching back to the report (which is on disk at the sidecar
+    path).
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The grade run produced a GradingReport that did not satisfy the "
+        "configured `min_pass_rate` and/or `min_mean_score` thresholds, and "
+        "`fail_on_below_threshold=True` opted into hard-fail behaviour. The "
+        "complete sidecar JSON has been written to disk — inspect "
+        "<project_dir>/.signalforge/grade.json (or the explicit "
+        "`sidecar_path`) for per-criterion verdicts. Either lower the "
+        "thresholds in signalforge.yml `grade:` (deliberately accept lower "
+        "quality), regenerate the underlying drafted artefacts (improve "
+        "quality), or set `fail_on_below_threshold: false` to revert to "
+        "report-only posture."
+    )
+
+    def __init__(
+        self,
+        *,
+        pass_rate: float,
+        mean_score: float,
+        min_pass_rate: float,
+        min_mean_score: float,
+        aggregate_complete: bool,
+        remediation: str | None = None,
+    ) -> None:
+        self.pass_rate = pass_rate
+        self.mean_score = mean_score
+        self.min_pass_rate = min_pass_rate
+        self.min_mean_score = min_mean_score
+        self.aggregate_complete = aggregate_complete
+        # Identify the failing axes in the message so the operator's CLI
+        # output / log line names the specific threshold that tripped
+        # rather than reading "below threshold" generically.
+        failing: list[str] = []
+        if pass_rate < min_pass_rate:
+            failing.append(f"pass_rate {pass_rate:.3f} < min_pass_rate {min_pass_rate:.3f}")
+        if mean_score < min_mean_score:
+            failing.append(f"mean_score {mean_score:.3f} < min_mean_score {min_mean_score:.3f}")
+        detail = (
+            "; ".join(failing) if failing else ("report.passed=False (aggregate-incomplete run)")
+        )
+        message = (
+            f"Grade report below threshold: {detail} (aggregate_complete={aggregate_complete})."
+        )
+        super().__init__(message, remediation=remediation)
+
+
 # Sorted alphabetically (mirrors safety / draft / prune / warehouse error modules).
 __all__ = [
     "GradeAuditRecordTooLargeError",
     "GradeAuditWriteError",
+    "GradeBelowThresholdError",
     "GradeBudgetExceededError",
     "GradeConfigError",
     "GradeError",

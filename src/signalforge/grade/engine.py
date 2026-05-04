@@ -92,6 +92,7 @@ from signalforge.grade.config import GradeConfig
 from signalforge.grade.errors import (
     GradeAuditRecordTooLargeError,
     GradeAuditWriteError,
+    GradeBelowThresholdError,
     GradeError,
     GradeLLMError,
     GradeOutputError,
@@ -718,6 +719,17 @@ def grade_artifacts(
         GradeAuditWriteError: any other I/O / encoding failure in
             either audit writer. Aborts the run; wraps the underlying
             exception on ``cause``.
+        GradeBelowThresholdError: raised when
+            ``config.fail_on_below_threshold=True`` AND the aggregate
+            ``GradingReport.passed`` is False (i.e. ``pass_rate``
+            below ``min_pass_rate`` or ``mean_score`` below
+            ``min_mean_score``). The exception carries ``pass_rate``,
+            ``mean_score``, ``min_pass_rate``, ``min_mean_score``, and
+            ``aggregate_complete``. Raised AFTER ``write_grading_report``
+            returns so the sidecar JSON lands on disk first — operators
+            need that durable hand-off to diagnose threshold failures
+            (DEC-021 of the CLI ticket; graduated from the v0.2
+            reservation in #7).
     """
     # 1. Resolve every optional argument.
     resolved_config: GradeConfig = config if config is not None else GradeConfig()
@@ -927,6 +939,25 @@ def grade_artifacts(
             }
         ),
     )
+
+    # 8. Threshold-fail graduation (#9 US-002 / DEC-021). When the
+    # operator opts into hard-fail behaviour AND the aggregate verdict
+    # falls below threshold, raise AFTER the sidecar JSON is durably
+    # persisted (step 6 above) and AFTER the INFO log fires. Order is
+    # load-bearing: the operator gets a complete `grade.json` on disk
+    # for diagnosis even on a threshold-fail run; the JSONL audit (step
+    # 5) is also complete. Raising before the sidecar would defeat the
+    # durable hand-off; pinned by
+    # ``test_grade_below_threshold_writes_sidecar_before_raising``.
+    if resolved_config.fail_on_below_threshold and not report.passed:
+        min_pass_rate, min_mean_score = report.thresholds
+        raise GradeBelowThresholdError(
+            pass_rate=report.pass_rate,
+            mean_score=report.mean_score,
+            min_pass_rate=min_pass_rate,
+            min_mean_score=min_mean_score,
+            aggregate_complete=report.aggregate_complete,
+        )
 
     return report
 

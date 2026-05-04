@@ -20,6 +20,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["ruff", "pyright", "pytest", "dbt-core>=1.8,<2", "types-PyYAML>=6,<7"]
 
+[project.scripts]
+signalforge = "signalforge.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/wjduenow/SignalForge"
 Issues = "https://github.com/wjduenow/SignalForge/issues"
@@ -51,7 +54,7 @@ testpaths = ["tests"]
 # `--import-mode=importlib` lets us share basenames across test dirs (e.g.
 # tests/manifest/test_errors.py and tests/warehouse/test_errors.py) without
 # adding tests/__init__.py — keeps `testing-signal.md`'s no-init rule intact.
-addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery and not anthropic'"
+addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery and not anthropic and not cli_subprocess'"
 minversion = "7.0"
 strict_markers = true
 markers = [
@@ -63,4 +66,5 @@ markers = [
   "llm: tests for the centralized Anthropic SDK seam",
   "draft: tests for the schema-drafting layer",
   "anthropic: real-API smoke test (requires ANTHROPIC_API_KEY; excluded from default CI)",
+  "cli_subprocess: belt-and-braces subprocess-driven CLI smoke (skipped by default; run with -m cli_subprocess)",
 ]

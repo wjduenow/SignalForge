@@ -4,13 +4,21 @@ Walks Python source via :mod:`ast` and rejects forbidden construction
 patterns that would bypass the audit-write seam in each layer. The
 existing :func:`tests.safety.test_public_api.test_llm_request_construction_only_in_request_module`
 covers Scan 1 (``LLMRequest`` outside ``signalforge.safety.request``);
-this module adds the three remaining scans:
+this module adds the remaining scans:
 
 * **Scan 2** — ``AuditEvent(...)`` outside ``signalforge.safety.request``.
 * **Scan 3** — ``anthropic.Anthropic(...)`` outside
   ``signalforge.llm._client``.
 * **Scan 4** — ``LLMResponseEvent(...)`` outside
   ``signalforge.draft.audit``.
+* **Scan 5** — ``PruneEvent(...)`` outside ``signalforge.prune.audit``.
+* **Scan 6** — ``GradeEvent(...)`` outside ``signalforge.grade.audit``.
+* **Scan 7** — every ``class <Name>Error(...):`` in
+  ``src/signalforge/*/errors.py`` (and ``src/signalforge/cli/errors.py``)
+  appears as a key in
+  :data:`signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE` — the
+  load-bearing test that turns the four-tier exit-code taxonomy from a
+  guideline into a contract (DEC-024 of #9).
 
 Each scan is its own test with an explicit, justified exclusion list. The
 scans are deterministic and cheap: each ``.py`` is read once via
@@ -33,6 +41,7 @@ _LLM_DIR = _REPO_ROOT / "src" / "signalforge" / "llm"
 _DRAFT_DIR = _REPO_ROOT / "src" / "signalforge" / "draft"
 _PRUNE_DIR = _REPO_ROOT / "src" / "signalforge" / "prune"
 _GRADE_DIR = _REPO_ROOT / "src" / "signalforge" / "grade"
+_SIGNALFORGE_DIR = _REPO_ROOT / "src" / "signalforge"
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +422,186 @@ def test_grade_event_construction_in_grade_audit_module_is_present() -> None:
         "Expected GradeEvent(...) call in signalforge.grade.audit — "
         "the AST-scan above is no longer load-bearing if the legitimate "
         "constructor disappears."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scan 7 — every ``*Error`` class declared in any
+# ``src/signalforge/*/errors.py`` (plus ``src/signalforge/cli/errors.py``)
+# must appear in
+# :data:`signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE` (DEC-024 of #9).
+# ---------------------------------------------------------------------------
+#
+# The four-tier exit-code taxonomy (DEC-008/DEC-019) is enforced by a
+# single mapping table in ``signalforge.cli._helpers``. This scan walks
+# every per-stage ``errors.py`` plus the CLI's own ``errors.py``,
+# collects every ``class <Name>Error(<base>):`` declaration, and asserts
+# the class is registered.
+#
+# Scan target verified: ``grep -rln '^class.*Error' src/signalforge/
+# --include='*.py'`` returns exactly the eight per-stage ``errors.py``
+# files (manifest, warehouse, safety, llm, draft, prune, grade, diff)
+# plus the CLI's own ``errors.py`` (nine total — DEC-024).
+#
+# Excluded: the abstract per-stage base each layer's leaves inherit
+# from. These bases exist as the typed-error catch-all but the mapping
+# table relies on Python's MRO walk in
+# :func:`map_exception_to_exit_code` to resolve a forward-compat
+# subclass to its parent's tier — registering the bases is *also* fine
+# (and the table currently does so), but the AST scan does not require
+# them to be present, only that every concrete leaf is. If v0.2 adds a
+# new abstract intermediate, extend this exclude list with a comment
+# citing the design note.
+_EXCEPTION_MAPPING_EXCLUDED_BASES: frozenset[str] = frozenset(
+    {
+        "ManifestError",
+        "WarehouseError",
+        "SafetyError",
+        "LLMError",
+        # NOTE: ``LLMHelperError`` is NOT excluded — even though it lives
+        # one level below ``LLMError`` in the inheritance tree, it is
+        # raised directly in ``signalforge.llm.client`` (three sites as of
+        # #9), so it is a concrete leaf for taxonomy purposes and must
+        # appear in ``_EXCEPTION_TO_EXIT_CODE``. Treating it as an
+        # excluded base would create a gap where direct instantiations
+        # have no defined exit code.
+        "DraftError",
+        "PruneError",
+        "GradeError",
+        "DiffError",
+        "CliError",
+    }
+)
+
+
+def _collect_error_class_declarations(
+    paths: list[Path],
+) -> list[tuple[Path, str]]:
+    """Walk each ``.py`` in ``paths``; return ``(file, class_name)`` for
+    every ``class <Name>Error(...):`` declaration. The class name is
+    just the AST-level identifier — no module-attribute resolution
+    happens here (the Scan-7 test does that against the live mapping).
+    """
+    found: list[tuple[Path, str]] = []
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name.endswith("Error"):
+                found.append((path, node.name))
+    return found
+
+
+def _enumerate_error_module_paths() -> list[Path]:
+    """The exact set of files Scan 7 walks: every per-stage
+    ``errors.py`` under ``src/signalforge/*/errors.py`` plus the CLI's
+    own ``errors.py``.
+    """
+    # ``Path.glob`` is non-recursive on the directory level here — every
+    # stage's errors module lives one level under ``signalforge/``.
+    paths = sorted(_SIGNALFORGE_DIR.glob("*/errors.py"))
+    # ``cli/errors.py`` is already covered by the glob above (the CLI is
+    # a stage subpackage), but assert defensively in case the layout
+    # changes and a contributor moves the CLI to a sibling location.
+    cli_errors = _SIGNALFORGE_DIR / "cli" / "errors.py"
+    assert cli_errors in paths, (
+        "Expected src/signalforge/cli/errors.py to be discovered by the "
+        "*/errors.py glob — Scan 7 relies on every per-stage errors "
+        "module being one level under src/signalforge/."
+    )
+    return paths
+
+
+def test_every_typed_error_is_in_exit_code_mapping_table() -> None:
+    """DEC-024 of #9: every ``*Error`` class declared in any
+    ``src/signalforge/*/errors.py`` must appear as a key in
+    :data:`signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE`.
+
+    The scan parses each errors module's AST, collects every
+    ``class <Name>Error(...):`` declaration, and asserts the class is
+    registered in the mapping. The mapping itself is class-identity
+    keyed (``dict[type[BaseException], int]``); the AST sees only
+    names, so the assertion compares by ``__name__`` string against the
+    set of mapped class names. This is sufficient because every
+    ``*Error`` declared in the project has a unique class name across
+    stages — the AST scan itself enforces that a name introduced in any
+    ``errors.py`` lands in the mapping, so a duplicate-name regression
+    would surface as a missing-mapping failure for one of the two and
+    fail loud.
+
+    Excluded: the per-stage abstract base classes — see
+    :data:`_EXCEPTION_MAPPING_EXCLUDED_BASES`. Subclasses of these
+    bases inherit their tier via the MRO walk in
+    :func:`map_exception_to_exit_code`, so registering the bases is
+    optional for correctness; the scan only requires every concrete
+    leaf to be explicitly listed.
+    """
+    from signalforge.cli._helpers import _EXCEPTION_TO_EXIT_CODE
+
+    mapped_names = {cls.__name__ for cls in _EXCEPTION_TO_EXIT_CODE}
+    error_paths = _enumerate_error_module_paths()
+    declarations = _collect_error_class_declarations(error_paths)
+
+    missing: list[tuple[Path, str]] = []
+    for path, class_name in declarations:
+        if class_name in _EXCEPTION_MAPPING_EXCLUDED_BASES:
+            continue
+        if class_name not in mapped_names:
+            missing.append((path, class_name))
+
+    if missing:
+        formatted = "\n".join(f"  {path}: {cls}" for path, cls in missing)
+        raise AssertionError(
+            "The following typed exception classes are missing from "
+            "signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE:\n"
+            f"{formatted}\n"
+            "Add each class to the mapping with the correct exit-code "
+            "tier (1=load, 2=input, 3=API). See DEC-024 of "
+            "plans/super/9-cli-entrypoint.md for the taxonomy and "
+            ".claude/rules/cli-layer.md when it lands. The four-tier "
+            "exit-code contract is load-bearing — the AST scan exists "
+            "exactly to catch this drift."
+        )
+
+
+def test_exit_code_mapping_has_at_least_one_entry_per_tier() -> None:
+    """Sanity: each of the three tiers (1, 2, 3) has at least one entry
+    in :data:`_EXCEPTION_TO_EXIT_CODE`. Guards against a mass-rename
+    accidentally collapsing the taxonomy to a single tier.
+    """
+    from signalforge.cli._helpers import _EXCEPTION_TO_EXIT_CODE
+
+    tiers = set(_EXCEPTION_TO_EXIT_CODE.values())
+    assert tiers >= {1, 2, 3}, (
+        f"Expected at least one entry for each tier in {{1, 2, 3}}; got "
+        f"tiers={sorted(tiers)}. The four-tier exit-code taxonomy "
+        "(DEC-008/DEC-019) requires all three error tiers to be "
+        "represented."
+    )
+
+
+def test_scan_7_discovers_every_per_stage_errors_module() -> None:
+    """Sanity: ``_enumerate_error_module_paths`` finds every per-stage
+    ``errors.py`` in the project. If a future stage forgets to ship
+    ``errors.py`` the scan would still pass (because there'd be nothing
+    to walk for that stage); this test pins the expected set of nine
+    modules.
+    """
+    paths = _enumerate_error_module_paths()
+    rel_names = sorted(p.relative_to(_SIGNALFORGE_DIR).as_posix() for p in paths)
+    assert rel_names == [
+        "cli/errors.py",
+        "diff/errors.py",
+        "draft/errors.py",
+        "grade/errors.py",
+        "llm/errors.py",
+        "manifest/errors.py",
+        "prune/errors.py",
+        "safety/errors.py",
+        "warehouse/errors.py",
+    ], (
+        "Expected exactly nine per-stage errors.py modules (one per "
+        "stage); got: "
+        f"{rel_names}. If this changes, update Scan 7's expected set."
     )
 
 

@@ -9,6 +9,7 @@ from signalforge.llm.errors import (
     LLMError,
     LLMHelperError,
     LLMRateLimitError,
+    LLMResponseFormatError,
     LLMServerError,
 )
 from signalforge.llm.models import LLMResult
@@ -21,6 +22,7 @@ __all__ = (
     "LLMError",
     "LLMHelperError",
     "LLMRateLimitError",
+    "LLMResponseFormatError",
     "LLMResult",
     "LLMServerError",
     "call_anthropic",

@@ -2,7 +2,7 @@
 
 > LLM-drafted dbt schema.yml, tests, and docs — pruned against real warehouse data so only signal-bearing tests ship.
 
-**Status:** Pre-alpha. Designing in the open on the `dev` branch.
+**Status:** v0.1 alpha. Nine issues shipped — single-model draft + warehouse prune, BigQuery adapter, `signalforge` CLI. Designing in the open on the `dev` branch.
 
 ## Why this exists
 
@@ -35,19 +35,44 @@ SignalForge generates the same artifacts, then asks a different question: **does
 
 The grading layer reuses [clauditor](https://github.com/wjduenow/clauditor)'s LLM-as-judge methodology, applied to a new artifact class.
 
-> **Status (v0.1, in progress):** Not yet on PyPI. The CLI shape below is the
-> intended target — library API lands first (`signalforge.manifest`); the CLI
-> ships in a later v0.1 ticket. Today the package installs from a clone with
-> `pip install -e ".[dev]"`.
+> **Status (v0.1):** Not yet on PyPI. Today the package installs from a
+> clone with `pip install -e ".[dev]"` (quote the extras — `[dev]` is a
+> glob in zsh).
 
 ## Quick start
 
-> ```bash
-> pip install signalforge
-> signalforge generate models/marts/customer_lifetime_value.sql
-> ```
+```bash
+git clone https://github.com/wjduenow/SignalForge.git
+cd SignalForge
+pip install -e ".[dev]"
+signalforge generate models/marts/customer_lifetime_value.sql
+```
 
-A first runnable version is targeted for v0.1 (single-model draft + warehouse prune, BigQuery adapter, CLI only).
+(SignalForge is not yet published on PyPI — once v0.1 ships there,
+`pip install signalforge` will replace the clone-and-editable-install
+incantation above.)
+
+The CLI walks up from the current working directory to find
+`dbt_project.yml`, loads the manifest, drafts candidate `schema.yml`
+artefacts via the LLM, prunes always-pass / known-clean-fail tests
+against warehouse samples, grades the survivors against a configurable
+rubric, and prints the diff. The full per-flag reference, the
+four-tier exit-code taxonomy, environment variables, and a worked
+example are in [docs/cli-ops.md](docs/cli-ops.md).
+
+## CLI
+
+Three subcommands ship in v0.1:
+
+```bash
+signalforge generate <model>   # full pipeline; --mode, --min-score, --write/--dry-run, --format
+signalforge lint               # validate signalforge.yml config blocks
+signalforge version            # print the SignalForge version
+```
+
+`signalforge --help` prints the top-level help; each subcommand has its
+own `--help` page. See [docs/cli-ops.md](docs/cli-ops.md) for the full
+reference.
 
 ## Configuration
 
@@ -63,7 +88,7 @@ cost-asterisk), `PartitionFilter` use, and the typed-error reference.
 
 Schema-only is the default. The LLM never sees row data unless you
 explicitly opt in via `safety.mode: sample` in `signalforge.yml` (or
-the post-#9 `--mode` CLI flag). Even column *names* that match the
+the `--mode sample` CLI flag). Even column *names* that match the
 built-in PII patterns (`*email`, `*phone`, `*ssn`) — or that you flag
 via dbt `tags: ["pii"]` / `meta.contains_pii: true` /
 `meta.signalforge.sample: false` — are replaced with stable hashed

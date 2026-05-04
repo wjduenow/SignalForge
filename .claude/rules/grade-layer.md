@@ -146,11 +146,11 @@ When introducing a new pipeline-stage config, claim its own top-level key. Don't
 
 ## v0.2 reservations (forward-compat surface, currently no-op)
 
-Three exported names ship in v0.1 but are not consumed:
+Two exported names ship in v0.1 but are not consumed:
 
 - `GradeBudgetExceededError` — never raised in v0.1; v0.2 will raise it on a hard "the run did nothing" failure (e.g., budget trips before the first pair).
 - `GradeThresholds` — exported but `GradeConfig` carries the flat `min_pass_rate`/`min_mean_score` fields and `GradingReport.thresholds` is a bare `tuple[float, float]`. v0.2 will wire `GradeThresholds` as the canonical container.
-- `GradeConfig.fail_on_below_threshold` — currently a no-op. v0.2 will wire it into the CLI exit-code path.
+- `GradeConfig.fail_on_below_threshold` — **Graduated in #9 (US-002, DEC-021) — raises `GradeBelowThresholdError`.** Default remains `False` (report-only posture); operators that want hard-fail-on-threshold opt in. The raise lands AFTER `write_grading_report(...)` returns and BEFORE `grade_artifacts(...)` returns the report so the operator has a complete `grade.json` on disk for diagnosis. Pinned by `test_grade_below_threshold_writes_sidecar_before_raising`. The CLI (#9) maps the raise to its `INPUT` exit-code tier (exit 2).
 
 Document these explicitly in their docstrings. The pattern: ship the surface in v0.1 so v0.2 is a behaviour change, not an API break.
 

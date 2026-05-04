@@ -24,10 +24,11 @@ SignalForge generates AND grades; competitors only generate.
 
 ## Default posture
 
-The grader is **report-only** in v0.1. A below-threshold rubric does not
-fail the run; the operator's diff surfaces the verdict and the operator
-decides. `fail_on_below_threshold` is reserved for v0.2 enforcement
-(DEC-005).
+The grader is **report-only by default**. A below-threshold rubric does
+not fail the run; the operator's diff surfaces the verdict and the
+operator decides. Operators that want hard-fail-on-threshold behaviour
+opt in by setting `fail_on_below_threshold: true` in `signalforge.yml`
+(see [Threshold-fail behaviour](#threshold-fail-behaviour) below).
 
 The layer is fail-closed on the audit-write boundary: any I/O error
 from `GradeEvent` JSONL persistence or from the end-of-run sidecar
@@ -123,7 +124,7 @@ grade:
   total_budget_seconds: 300       # Wall-clock budget across the whole run
   min_pass_rate: 0.7              # Aggregate threshold: fraction of passed criteria
   min_mean_score: 0.5             # Aggregate threshold: mean score across criteria
-  fail_on_below_threshold: false  # v0.1 always false (flag-only); v0.2 will gate exit code
+  fail_on_below_threshold: false  # opt-in hard-fail; default report-only
   # rubric:                       # Optional override; omitted = use DEFAULT_RUBRIC
   #   - id: clarity
   #     criterion: "..."
@@ -162,12 +163,72 @@ Field-by-field:
 - **`total_budget_seconds`** — Whole-run wall-clock budget. Default `300` (5 minutes — ~3× safety on 60 calls × 1s p50). Mirrors `PruneConfig.total_budget_seconds` semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped. **Crucially** the LLM-layer retry budget does NOT count against this — `total_budget_seconds` is a top-of-loop wall-clock check; an in-flight call is allowed to complete before the next iteration's check fires.
 - **`min_pass_rate`** — Floor on the fraction of `(artefact, criterion)` pairs that scored `passed=True` for the rubric to count as passed overall. Default `0.7`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_pass_rate`.
 - **`min_mean_score`** — Floor on the mean numeric score across non-null verdicts. Default `0.5`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_mean_score`.
-- **`fail_on_below_threshold`** — Reserved for v0.2 enforcement. v0.1 always reports — a below-threshold rubric does not fail the run; the operator's diff surfaces the verdict. Flipping to `True` in v0.2 will make the CLI exit non-zero on a below-threshold report.
+- **`fail_on_below_threshold`** — Hard-fail switch for the aggregate threshold check. Default `false` — v0.1 ships report-only posture by default. When `true`, `grade_artifacts(...)` raises `GradeBelowThresholdError` once the aggregate `GradingReport.passed` is `False` (`pass_rate < min_pass_rate` and/or `mean_score < min_mean_score`). The raise lands AFTER the sidecar JSON is durably persisted so the operator has a complete `grade.json` for diagnosis. See [Threshold-fail behaviour](#threshold-fail-behaviour) below for the full ordering invariant. Graduated from v0.2 reservation to v0.1 wiring in #9 (US-002).
 - **`rubric`** — Optional rubric override. `None` (the default) means the orchestrator falls back to `DEFAULT_RUBRIC`. When provided, must be a non-empty list of mappings, each with non-empty `id` and `criterion` strings; duplicate `id` values raise `GradeRubricError`. Override is **wholesale**, not merge.
 
 Unknown keys under `grade:` raise `GradeConfigError` (Pydantic
 `extra="forbid"`). Typos like `mdoel:` or `total_budget_secnds:` fail
 loud at load time rather than silently no-op'ing.
+
+## Threshold-fail behaviour
+
+Default posture is report-only — `grade_artifacts(...)` always returns a
+`GradingReport`, and the operator inspects `report.passed` /
+`report.pass_rate` / `report.mean_score` to decide what to do with the
+verdict. Setting `fail_on_below_threshold: true` in `signalforge.yml`
+opts the run into hard-fail behaviour: when the aggregate report does
+not meet **both** `min_pass_rate` AND `min_mean_score`,
+`grade_artifacts(...)` raises `GradeBelowThresholdError` instead of
+returning the report.
+
+The raise lands **after** the fail-closed sidecar write
+(`write_grading_report(...)`) and the per-pair JSONL audit are durably
+on disk, and **before** `grade_artifacts(...)` returns. Order is
+load-bearing (DEC-021):
+
+1. Iterate every `(criterion, artefact)` pair → write one
+   `grade.jsonl` line per decision.
+2. Build the aggregate `GradingReport` from the per-pair results.
+3. Write the `grade.json` sidecar (fail-closed; `O_TRUNC` overwrite).
+4. Emit the single INFO log per invocation (`grade completed: …`).
+5. **If** `fail_on_below_threshold=True` AND `report.passed=False`,
+   raise `GradeBelowThresholdError` carrying `pass_rate`, `mean_score`,
+   `min_pass_rate`, `min_mean_score`, `aggregate_complete`.
+6. Otherwise return the report.
+
+Pinned by `tests/grade/test_engine.py::test_grade_below_threshold_writes_sidecar_before_raising`
+— a threshold-fail run leaves a complete `grade.json` on disk so the
+operator can diagnose **why** the run fell below threshold (which
+criterion failed, which artefact's score dragged the mean down, the
+full evidence/reasoning text). Raising before the sidecar would defeat
+the durable hand-off; the test catches the raise then asserts the
+sidecar exists and round-trips through `GradingReport.model_validate_json`.
+
+`GradeBelowThresholdError` carries the five aggregate fields so a
+caller catching the error can render a diagnostic without reaching back
+to the report:
+
+```python
+from signalforge.grade import GradeBelowThresholdError, grade_artifacts
+
+try:
+    report = grade_artifacts(
+        model, candidate, prune_result,
+        config=load_grade_config(project_dir),
+        project_dir=project_dir,
+    )
+except GradeBelowThresholdError as exc:
+    # Sidecar JSON is on disk at <project_dir>/.signalforge/grade.json.
+    log.error(
+        "grade below threshold: pass_rate=%.3f (min %.3f), mean_score=%.3f (min %.3f)",
+        exc.pass_rate, exc.min_pass_rate, exc.mean_score, exc.min_mean_score,
+    )
+    sys.exit(2)
+```
+
+The CLI (#9) wires the raise into its `INPUT` exit-code tier (exit 2);
+see [`docs/cli-ops.md`](cli-ops.md) for the full exit-code table once
+US-009 lands.
 
 ## Decision matrix
 
@@ -558,9 +619,14 @@ The `signalforge generate` CLI will load the grade config via
 prune step completes; the diff renderer (#8) consumes the returned
 `GradingReport` to render per-criterion stars + per-artefact
 `one_line_why` lines (Architectural Commitment #5 — explainable
-diffs). The CLI will also surface `GradingReport.passed` /
-`aggregate_complete` to the operator, but **will not** gate exit code
-on it in v0.1 — `fail_on_below_threshold` is reserved for v0.2.
+diffs). When `fail_on_below_threshold: true` is set in `signalforge.yml`,
+the CLI catches the resulting `GradeBelowThresholdError` and exits with
+the `INPUT` exit-code tier (exit 2) — see
+[Threshold-fail behaviour](#threshold-fail-behaviour) above and
+[`docs/cli-ops.md`](cli-ops.md) once US-009 lands. The default
+posture (report-only) is preserved: a below-threshold run with the
+default `fail_on_below_threshold: false` returns the report and the
+CLI exits 0 once the diff renders.
 
 ## References
 
@@ -581,7 +647,7 @@ on it in v0.1 — `fail_on_below_threshold` is reserved for v0.2.
 Cross-reference DECs: DEC-001 (public API surface), DEC-002 (per-pair
 score shape + threshold-AND aggregate), DEC-004 (per-criterion
 fan-out — one LLM call per `(artefact, criterion)` pair), DEC-005
-(`fail_on_below_threshold` v0.2-reserved), DEC-006 (fail-closed JSONL
+(`fail_on_below_threshold` graduated in #9 / US-002 / DEC-021), DEC-006 (fail-closed JSONL
 audit), DEC-007 (locked default rubric), DEC-009 (canonical
 `artifact_id` dotted-path format), DEC-010 (`rubric_hash`
 reproducibility), DEC-011 (`Rubric` as `TypeAlias`), DEC-012

@@ -32,6 +32,7 @@ import signalforge.diff as diff_pkg
 _DOCUMENTED_PUBLIC = (
     # Orchestrator
     "render_diff",
+    "render_to_text",
     # Config
     "DiffConfig",
     "load_diff_config",
@@ -92,6 +93,7 @@ def test_each_public_name_is_importable_via_from_signalforge_diff() -> None:
         Tier,
         load_diff_config,
         render_diff,
+        render_to_text,
     )
 
 
