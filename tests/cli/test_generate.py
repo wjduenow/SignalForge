@@ -26,10 +26,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from signalforge.cli import main
+from signalforge.diff import DiffConfig
 from signalforge.draft.errors import LLMOutputAnchorContractError
+from signalforge.grade import GradeConfig
 from signalforge.grade.errors import GradeBelowThresholdError
 from signalforge.llm.errors import LLMRateLimitError
 from signalforge.manifest.errors import ModelNotFoundError
+from signalforge.safety import SafetyPolicy, SamplingMode
 from tests.cli._factories import (
     make_candidate,
     make_diff_report,
@@ -435,3 +438,270 @@ def test_generate_profiles_dir_sets_env(
     captured = capsys.readouterr()
     assert code == 0, f"stderr={captured.err}"
     assert os.environ.get("DBT_PROFILES_DIR") == str(profiles_dir.resolve())
+
+
+# ---------------------------------------------------------------------------
+# US-006 — Generate flags (--mode, --min-score, --write/--dry-run, --format)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "mode_str,enum_value",
+    [
+        ("schema-only", SamplingMode.SCHEMA_ONLY),
+        ("aggregate-only", SamplingMode.AGGREGATE_ONLY),
+        ("sample", SamplingMode.SAMPLE),
+    ],
+)
+def test_generate_mode_overrides_safety_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    mode_str: str,
+    enum_value: SamplingMode,
+) -> None:
+    """``--mode`` flag flows through SafetyPolicy.with_mode (DEC-002).
+
+    The override applies AFTER ``load_safety_config`` so the precedence
+    chain is flag > signalforge.yml > library default. Asserts the
+    policy reaching ``draft_schema`` carries the overridden mode.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    # The default SafetyPolicy(mode=SCHEMA_ONLY) is what
+    # load_safety_config returns when no signalforge.yml is present.
+    mocks["load_safety_config"].return_value = SafetyPolicy()
+
+    code = main(["generate", "model.shop.customers", "--mode", mode_str])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    # The policy that reached ``draft_schema`` is the override-applied one.
+    draft_call = mocks["draft_schema"].call_args
+    forwarded_policy = draft_call.args[2]  # signature: (model, adapter, policy, manifest)
+    assert isinstance(forwarded_policy, SafetyPolicy)
+    assert forwarded_policy.mode is enum_value
+
+
+def test_generate_mode_invalid_exits_two(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Argparse rejects ``--mode bogus`` → exit 2 with usage error."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+
+    code = main(["generate", "model.shop.customers", "--mode", "bogus"])
+    captured = capsys.readouterr()
+    assert code == 2
+    # argparse usage error references the rejected choice.
+    assert "bogus" in captured.err or "invalid choice" in captured.err.lower()
+
+
+def test_generate_min_score_drives_flagged_tier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--min-score`` overrides ``grade.min_mean_score`` on the
+    GradeConfig that reaches ``grade_artifacts`` (DEC-004).
+
+    Reporting-only: the override changes the threshold the diff renderer
+    reads to classify the ``flagged`` tier; it does NOT flip
+    ``fail_on_below_threshold`` (which lives on signalforge.yml only).
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    # Start from a real, default GradeConfig so the override path
+    # exercises ``model_validate`` rather than touching a MagicMock.
+    mocks["load_grade_config"].return_value = GradeConfig()
+
+    code = main(["generate", "model.shop.customers", "--min-score", "0.95"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    grade_call = mocks["grade_artifacts"].call_args
+    forwarded_config = grade_call.kwargs["config"]
+    assert isinstance(forwarded_config, GradeConfig)
+    assert forwarded_config.min_mean_score == pytest.approx(0.95)
+    # Reporting-only: ``fail_on_below_threshold`` stays at its default
+    # (``False``) — the flag must NOT enable it.
+    assert forwarded_config.fail_on_below_threshold is False
+
+
+def test_generate_min_score_out_of_range_exits_two(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--min-score 1.5`` → exit 2 (CliInputError tier) with remediation."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--min-score", "1.5"])
+    captured = capsys.readouterr()
+    assert code == 2, f"stderr={captured.err}"
+    assert "0.0" in captured.err and "1.0" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_generate_write_writes_schema_yml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--write`` passes ``output_path = <project>/<model_dir>/schema.yml``
+    to ``render_diff`` and keeps the sidecar enabled (DEC-002 default-on)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--write"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    render_call = mocks["render_diff"].call_args
+    output_path = render_call.kwargs["output_path"]
+    assert output_path is not None
+    # ``make_model`` sets original_file_path = "models/customers.sql" so
+    # the schema.yml lands beside it.
+    assert Path(output_path) == project_dir / "models" / "schema.yml"
+    # ``--write`` keeps the default-on sidecar.
+    assert render_call.kwargs["write_sidecar"] is True
+
+
+def test_generate_default_no_write_passes_no_output_path_keeps_sidecar(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Neither flag (default): ``output_path=None`` and
+    ``write_sidecar=True`` (default-on per DEC-002)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    render_call = mocks["render_diff"].call_args
+    assert render_call.kwargs["output_path"] is None
+    assert render_call.kwargs["write_sidecar"] is True
+
+
+def test_generate_dry_run_writes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--dry-run`` runs the full pipeline but writes nothing —
+    neither schema.yml nor the sidecar (DEC-010)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--dry-run"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    render_call = mocks["render_diff"].call_args
+    assert render_call.kwargs["output_path"] is None
+    assert render_call.kwargs["write_sidecar"] is False
+    # Pipeline still ran end-to-end → diff still on stdout.
+    assert "--- DIFF OUTPUT MARKER ---" in captured.out
+
+
+def test_generate_write_and_dry_run_mutex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--write --dry-run`` is rejected by argparse mutex group → exit 2."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--write", "--dry-run"])
+    captured = capsys.readouterr()
+    assert code == 2
+    # argparse usage error mentions one of the conflicting options.
+    err_low = captured.err.lower()
+    assert "--write" in err_low or "--dry-run" in err_low or "not allowed" in err_low
+
+
+def test_generate_format_default_ansi(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No ``--format`` flag: ``DiffConfig.render_kind`` stays ``"ansi"`` (the
+    default), and the config that reaches ``render_diff`` matches."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    mocks["load_diff_config"].return_value = DiffConfig()
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    diff_config_used = mocks["render_diff"].call_args.kwargs["config"]
+    assert isinstance(diff_config_used, DiffConfig)
+    assert diff_config_used.render_kind == "ansi"
+
+
+def test_generate_format_markdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--format markdown`` re-validates the frozen DiffConfig with
+    ``render_kind="markdown"``."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    mocks["load_diff_config"].return_value = DiffConfig()
+
+    code = main(["generate", "model.shop.customers", "--format", "markdown"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    diff_config_used = mocks["render_diff"].call_args.kwargs["config"]
+    assert isinstance(diff_config_used, DiffConfig)
+    assert diff_config_used.render_kind == "markdown"
+    # ``render_to_text`` saw the same config (so stdout dispatched
+    # through MarkdownRenderer).
+    rtt_config = mocks["render_to_text"].call_args.kwargs["config"]
+    assert rtt_config.render_kind == "markdown"
+
+
+def test_generate_format_json_routes_through_render_to_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--format json`` flips ``DiffConfig.render_kind`` to ``"json"``;
+    ``render_to_text`` then dispatches to JsonRenderer for stdout."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    mocks["load_diff_config"].return_value = DiffConfig()
+
+    code = main(["generate", "model.shop.customers", "--format", "json"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    diff_config_used = mocks["render_diff"].call_args.kwargs["config"]
+    assert diff_config_used.render_kind == "json"
+    rtt_config = mocks["render_to_text"].call_args.kwargs["config"]
+    assert rtt_config.render_kind == "json"

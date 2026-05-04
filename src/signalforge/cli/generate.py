@@ -1,12 +1,20 @@
-"""``signalforge generate <model>`` subcommand (US-005).
+"""``signalforge generate <model>`` subcommand (US-005 / US-006).
 
 Wires the v0.1 pipeline end-to-end: manifest → safety → draft → prune →
 grade → diff. This is the CLI's reason to exist; everything else
 (version, lint) is scaffolding around this entry point.
 
-US-005 ships the core orchestration only. The runtime knob flags
-(``--mode``, ``--min-score``, ``--write``, ``--dry-run``, ``--format``)
-land in US-006; the observability flags (``--quiet``, ``--verbose``,
+US-005 shipped the core orchestration. US-006 layered five runtime-knob
+flags onto that orchestration: ``--mode`` (overrides safety policy via
+:meth:`signalforge.safety.SafetyPolicy.with_mode` so validators re-run —
+DEC-002), ``--min-score`` (reporting-only override of
+:attr:`signalforge.grade.GradeConfig.min_mean_score`; never affects exit
+code by itself per DEC-004), ``--write`` (writes the proposed
+``schema.yml`` to disk), ``--dry-run`` (full pipeline but writes
+nothing — overrides DEC-002's default-on sidecar per DEC-010), and
+``--format`` (selects :attr:`signalforge.diff.DiffConfig.render_kind` —
+DEC-020). ``--write`` and ``--dry-run`` are mutually exclusive at the
+argparse level. The observability flags (``--quiet``, ``--verbose``,
 ``--no-color``, progress) land in US-007. The exit-code AST scan that
 verifies every typed exception in the layer maps to exactly one tier
 lands in US-008.
@@ -55,7 +63,7 @@ from signalforge.cli._helpers import (
     format_error_to_stderr,
     map_exception_to_exit_code,
 )
-from signalforge.cli.errors import CliPathError
+from signalforge.cli.errors import CliInputError, CliPathError
 from signalforge.llm._client import _AnthropicClientProtocol
 from signalforge.warehouse.base import WarehouseAdapter
 
@@ -73,9 +81,10 @@ _LOGGER = logging.getLogger("signalforge.cli")
 def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
     """Register the ``generate`` subcommand on the top-level parser.
 
-    US-005 ships only the positional + project-discovery flags. Knob
-    flags (US-006) and observability flags (US-007) extend this parser
-    in subsequent stories.
+    US-005 shipped the positional + project-discovery flags. US-006
+    extends with the runtime knob flags (``--mode``, ``--min-score``,
+    ``--write``/``--dry-run`` mutex, ``--format``). Observability flags
+    (``--quiet``, ``--verbose``, ``--no-color``) follow in US-007.
     """
     parser = subparsers.add_parser(
         "generate",
@@ -124,6 +133,68 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "Override the default profiles.yml search location. Mirrors "
             "dbt-core's --profiles-dir flag. Sets DBT_PROFILES_DIR for "
             "the duration of the run."
+        ),
+    )
+    # US-006 / DEC-002 — safety mode override. Argparse-level choices
+    # rejection produces exit 2 (the argparse default).
+    parser.add_argument(
+        "--mode",
+        choices=("schema-only", "aggregate-only", "sample"),
+        default=None,
+        help=(
+            "Override the safety sampling mode. Precedence: flag > "
+            "safety.mode in signalforge.yml > library default. Applied "
+            "via SafetyPolicy.with_mode so validators re-run."
+        ),
+    )
+    # US-006 / DEC-004 — reporting-only min-score override. Out-of-range
+    # validation runs inside ``cmd_generate`` because argparse cannot
+    # natively range-check ``type=float``.
+    parser.add_argument(
+        "--min-score",
+        metavar="N",
+        type=float,
+        default=None,
+        help=(
+            "Override grade.min_mean_score (closed [0.0, 1.0]). Drives "
+            "the diff renderer's flagged tier; reporting-only — does "
+            "NOT enable fail-on-below-threshold (that knob is "
+            "grade.fail_on_below_threshold in signalforge.yml)."
+        ),
+    )
+    # US-006 / DEC-002 / DEC-010 — write/dry-run mutex. Argparse rejects
+    # the both-flags combination with its own usage error → exit 2.
+    write_group = parser.add_mutually_exclusive_group()
+    write_group.add_argument(
+        "--write",
+        action="store_true",
+        help=(
+            "Write the proposed schema.yml to disk under "
+            "<project_dir>/<model_dir>/schema.yml. Sidecar JSON is "
+            "still written to <project_dir>/.signalforge/diff.json."
+        ),
+    )
+    write_group.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help=(
+            "Run the full pipeline (LLM + warehouse + grade) and print "
+            "the diff to stdout, but write nothing — neither the "
+            "schema.yml nor the .signalforge/diff.json sidecar. "
+            "Overrides the default-on sidecar (DEC-010)."
+        ),
+    )
+    # US-006 / DEC-020 — diff renderer kind selection.
+    parser.add_argument(
+        "--format",
+        dest="format",
+        choices=("ansi", "markdown", "json"),
+        default="ansi",
+        help=(
+            "Select the diff renderer. ANSI: coloured terminal output "
+            "(default). Markdown: GitHub-friendly report. JSON: stdout "
+            "receives the JSON sidecar's contents."
         ),
     )
     parser.set_defaults(func=cmd_generate)
@@ -234,6 +305,22 @@ def cmd_generate(args: argparse.Namespace) -> int:
     ``tests/cli/test_generate.py`` pins this contract.
     """
     try:
+        # US-006 — explicit range-check on ``--min-score``. Argparse's
+        # ``type=float`` cannot natively bound-check; do it here so an
+        # out-of-range value lands at exit 2 (CliInputError tier) BEFORE
+        # any project-root resolution / file IO. ``None`` means
+        # "fall back to grade.min_mean_score" — leave alone.
+        min_score_override = getattr(args, "min_score", None)
+        if min_score_override is not None and not (0.0 <= min_score_override <= 1.0):
+            raise CliInputError(
+                f"--min-score {min_score_override!r} is outside the closed interval [0.0, 1.0]",
+                remediation=(
+                    "Pass a float between 0.0 and 1.0 inclusive. The flag "
+                    "overrides grade.min_mean_score and drives the diff "
+                    "renderer's `flagged` tier."
+                ),
+            )
+
         project_dir = _resolve_project_dir(args)
 
         manifest_override = canonicalise_user_path(args.manifest, project_dir)
@@ -256,8 +343,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
         adapter = _make_warehouse_adapter(profile)
 
         # 3. Safety policy (the first stage in the documented pipeline
-        #    order — DEC-025 / CLAUDE.md "Pipeline shape").
+        #    order — DEC-025 / CLAUDE.md "Pipeline shape"). US-006:
+        #    apply ``--mode`` via :meth:`SafetyPolicy.with_mode` so the
+        #    validators (notably the sample-mode WARNING DEC-021 of
+        #    ``safety-layer.md``) re-run on the override.
         policy = safety_module.load_safety_config(project_dir)
+        mode_override = getattr(args, "mode", None)
+        if mode_override is not None:
+            policy = policy.with_mode(safety_module.SamplingMode(mode_override))
 
         # 4. Draft.
         draft_config = draft_module.load_draft_config(project_dir)
@@ -282,8 +375,16 @@ def cmd_generate(args: argparse.Namespace) -> int:
             project_dir=project_dir,
         )
 
-        # 6. Grade.
+        # 6. Grade. US-006 / DEC-004 — apply ``--min-score`` by re-validating
+        #    the frozen :class:`GradeConfig` with the override. Reporting-only:
+        #    we do NOT flip ``fail_on_below_threshold`` — the operator's
+        #    ``signalforge.yml`` owns that knob (DEC-011 path through the
+        #    grader's :class:`GradeBelowThresholdError`).
         grade_config = grade_module.load_grade_config(project_dir)
+        if min_score_override is not None:
+            grade_config = grade_module.GradeConfig.model_validate(
+                {**grade_config.model_dump(), "min_mean_score": min_score_override}
+            )
         grade_report = grade_module.grade_artifacts(
             model,
             draft_outcome.candidate,
@@ -293,20 +394,51 @@ def cmd_generate(args: argparse.Namespace) -> int:
             project_dir=project_dir,
         )
 
-        # 7. Diff.
+        # 7. Diff. US-006 / DEC-020 — apply ``--format`` by re-validating
+        #    the frozen :class:`DiffConfig` with the override (mirrors
+        #    ``SafetyPolicy.with_mode``: re-runs validators including the
+        #    soft-warn / hard-cap invariant).
         diff_config = diff_module.load_diff_config(project_dir)
+        format_override = getattr(args, "format", None)
+        if format_override is not None and format_override != diff_config.render_kind:
+            diff_config = diff_module.DiffConfig.model_validate(
+                {**diff_config.model_dump(), "render_kind": format_override}
+            )
+
+        # US-006 / DEC-002 / DEC-010 — write/dry-run plumbing. Default
+        # (neither flag): write sidecar to <project_dir>/.signalforge/diff.json,
+        # do NOT write schema.yml. ``--write``: pass ``output_path``
+        # pointing at <project_dir>/<model_dir>/schema.yml (next to the
+        # model's .sql file). ``--dry-run``: ``write_sidecar=False`` AND
+        # no ``output_path`` — pipeline runs, diff prints to stdout, but
+        # nothing lands on disk. The argparse mutex group already
+        # forbids ``--write --dry-run`` together.
+        dry_run = getattr(args, "dry_run", False)
+        write = getattr(args, "write", False)
+        output_path: Path | None = None
+        if write:
+            # ``model.original_file_path`` is the dbt-relative path to
+            # the model's ``.sql`` file (e.g. ``models/marts/customers.sql``).
+            # ``schema.yml`` lives in the same directory as the model.
+            model_relpath = Path(model.original_file_path)
+            output_path = (project_dir / model_relpath).parent / "schema.yml"
+
         diff_report = diff_module.render_diff(
             model,
             draft_outcome.candidate,
             prune_result,
             grading_report=grade_report,
             config=diff_config,
+            output_path=output_path,
+            write_sidecar=not dry_run,
             project_dir=project_dir,
         )
 
         # 8. Render to stdout via the in-process helper (DEC-015). The
-        #    JSON sidecar is already on disk via
-        #    ``render_diff(write_sidecar=True)`` (default).
+        #    JSON sidecar (when not ``--dry-run``) was written by
+        #    :func:`render_diff` above. ``--format json`` routes through
+        #    the same :func:`render_to_text` helper because it dispatches
+        #    on ``diff_config.render_kind``.
         rendered = diff_module.render_to_text(
             diff_report, config=diff_config, project_dir=project_dir
         )
