@@ -4,9 +4,10 @@ Covers the eight cases from the US-004 acceptance criteria:
 
 * happy path with all 5 blocks valid → exit 0
 * happy path with no ``signalforge.yml`` at all → exit 0
-* invalid ``safety:`` block → exit 1, stderr names the block
-* invalid ``prune:`` block → exit 1
-* multiple invalid blocks → exit 1, stderr in DEC-008 header+bullets shape
+* invalid ``safety:`` block → exit 2 (input tier — bad mode value)
+* invalid ``prune:`` block → exit 1 (load tier — config validation)
+* multiple invalid blocks → exit max(per-failure tier), stderr in
+  DEC-008 header+bullets shape
 * ``--config /nonexistent.yml`` → exit 1 with path-not-found error
 * ``--help`` → exit 0
 * sub-second performance smoke
@@ -130,14 +131,22 @@ def test_lint_invalid_safety_block_exits_one(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A single bad ``safety.mode`` → exit 1; stderr names the block / mode."""
+    """A single bad ``safety.mode`` → exit 2; stderr names the block / mode.
+
+    ``InvalidSamplingModeError`` maps to tier 2 (input invariant) — the
+    operator gave a bogus value, not a load-time problem with the file —
+    and ``cmd_lint`` routes loader failures through
+    ``map_exception_to_exit_code`` so the tier matches what the same
+    exception would produce from ``cmd_generate`` (DEC-008 four-tier
+    contract; PR #26 review feedback).
+    """
     project_dir = make_fake_dbt_project(tmp_path)
     _write_signalforge_yml(project_dir, _INVALID_SAFETY_MODE)
 
     code = main(["lint", "--project-dir", str(project_dir)])
     _out, err = _capture(capsys)
 
-    assert code == 1, f"expected exit 1; got {code}; stderr={err!r}"
+    assert code == 2, f"expected exit 2 (input tier); got {code}; stderr={err!r}"
     assert err.startswith("ERROR:"), f"stderr did not start with ERROR:; got {err!r}"
     # Single-error shape is the canonical ``ERROR: <message>`` line; the
     # safety loader's typed error mentions the bad mode value.
@@ -169,14 +178,22 @@ def test_lint_multiple_invalid_blocks_lists_all(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Three bad blocks → exit 1; stderr matches the DEC-008 header+bullets shape."""
+    """Three bad blocks → exit max(per-failure tier); stderr matches the
+    DEC-008 header+bullets shape.
+
+    The three failures are: invalid ``safety.mode`` (tier 2 — input),
+    negative ``prune.test_timeout_seconds`` (tier 1 — load), and zero
+    ``grade.total_budget_seconds`` (tier 1 — load). ``cmd_lint`` returns
+    ``max(...)`` of the per-failure tiers so the most severe wins —
+    here the bad mode lifts the run to tier 2 (PR #26 review feedback).
+    """
     project_dir = make_fake_dbt_project(tmp_path)
     _write_signalforge_yml(project_dir, _THREE_BAD_BLOCKS)
 
     code = main(["lint", "--project-dir", str(project_dir)])
     _out, err = _capture(capsys)
 
-    assert code == 1, f"expected exit 1; got {code}; stderr={err!r}"
+    assert code == 2, f"expected exit 2 (max per-failure tier); got {code}; stderr={err!r}"
     # Header + 3 bullets shape per DEC-008 (multi-error). The regex pins
     # "ERROR: signalforge.yml has 3 validation errors:" + at least three
     # ``  - <block>: <msg>`` bullets, each with a non-empty message body.

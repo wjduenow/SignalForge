@@ -143,9 +143,6 @@ __all__ = [
 ]
 
 
-_LOGGER = logging.getLogger("signalforge.cli")
-
-
 # ---------------------------------------------------------------------------
 # Exit-code taxonomy (DEC-008, DEC-019)
 # ---------------------------------------------------------------------------
@@ -433,6 +430,10 @@ def format_elapsed(elapsed_seconds: float) -> str:
         return f"{elapsed_seconds:.1f}s"
     minutes = int(elapsed_seconds // 60)
     seconds = int(round(elapsed_seconds - minutes * 60))
+    if seconds == 60:
+        # Carry the rounded second so 59.5s → 1m 0s, never 0m 60s.
+        minutes += 1
+        seconds = 0
     return f"{minutes}m {seconds}s"
 
 
@@ -473,10 +474,12 @@ def _safe_excepthook(
     its panic path; the CLI's own boundary already handled the typed
     cases).
     """
-    del traceback  # explicitly unused
     if issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
         # Preserve Python's default semantics for these — they're the
-        # operator hitting Ctrl-C or the CLI itself exiting cleanly.
-        sys.__excepthook__(exc_type, exc_value, None)
+        # operator hitting Ctrl-C or the CLI itself exiting cleanly. The
+        # traceback is forwarded unchanged so debuggers / log scrapers
+        # see the actual frame.
+        sys.__excepthook__(exc_type, exc_value, traceback)
         return
+    del traceback  # explicitly unused on the strip path
     print(f"ERROR: {exc_value}", file=sys.stderr)

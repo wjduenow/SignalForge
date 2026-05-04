@@ -15,7 +15,6 @@ subsequent commands rely on.
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 
 import signalforge
@@ -41,9 +40,6 @@ __all__ = [
     "map_exception_to_exit_code",
     "setup_logging",
 ]
-
-
-_LOGGER = logging.getLogger("signalforge.cli")
 
 
 def _build_parser() -> argparse.ArgumentParser:

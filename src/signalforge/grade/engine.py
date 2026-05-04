@@ -719,6 +719,17 @@ def grade_artifacts(
         GradeAuditWriteError: any other I/O / encoding failure in
             either audit writer. Aborts the run; wraps the underlying
             exception on ``cause``.
+        GradeBelowThresholdError: raised when
+            ``config.fail_on_below_threshold=True`` AND the aggregate
+            ``GradingReport.passed`` is False (i.e. ``pass_rate``
+            below ``min_pass_rate`` or ``mean_score`` below
+            ``min_mean_score``). The exception carries ``pass_rate``,
+            ``mean_score``, ``min_pass_rate``, ``min_mean_score``, and
+            ``aggregate_complete``. Raised AFTER ``write_grading_report``
+            returns so the sidecar JSON lands on disk first — operators
+            need that durable hand-off to diagnose threshold failures
+            (DEC-021 of the CLI ticket; graduated from the v0.2
+            reservation in #7).
     """
     # 1. Resolve every optional argument.
     resolved_config: GradeConfig = config if config is not None else GradeConfig()

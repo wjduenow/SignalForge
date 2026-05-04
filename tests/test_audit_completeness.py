@@ -458,7 +458,13 @@ _EXCEPTION_MAPPING_EXCLUDED_BASES: frozenset[str] = frozenset(
         "WarehouseError",
         "SafetyError",
         "LLMError",
-        "LLMHelperError",  # intermediate base inside the LLM hierarchy
+        # NOTE: ``LLMHelperError`` is NOT excluded — even though it lives
+        # one level below ``LLMError`` in the inheritance tree, it is
+        # raised directly in ``signalforge.llm.client`` (three sites as of
+        # #9), so it is a concrete leaf for taxonomy purposes and must
+        # appear in ``_EXCEPTION_TO_EXIT_CODE``. Treating it as an
+        # excluded base would create a gap where direct instantiations
+        # have no defined exit code.
         "DraftError",
         "PruneError",
         "GradeError",
@@ -511,10 +517,16 @@ def test_every_typed_error_is_in_exit_code_mapping_table() -> None:
     :data:`signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE`.
 
     The scan parses each errors module's AST, collects every
-    ``class <Name>Error(...):`` declaration, and asserts the class
-    object is registered in the mapping. The mapping uses class
-    identity, so the assertion compares by class object (resolved via
-    the live import) rather than name string.
+    ``class <Name>Error(...):`` declaration, and asserts the class is
+    registered in the mapping. The mapping itself is class-identity
+    keyed (``dict[type[BaseException], int]``); the AST sees only
+    names, so the assertion compares by ``__name__`` string against the
+    set of mapped class names. This is sufficient because every
+    ``*Error`` declared in the project has a unique class name across
+    stages — the AST scan itself enforces that a name introduced in any
+    ``errors.py`` lands in the mapping, so a duplicate-name regression
+    would surface as a missing-mapping failure for one of the two and
+    fail loud.
 
     Excluded: the per-stage abstract base classes — see
     :data:`_EXCEPTION_MAPPING_EXCLUDED_BASES`. Subclasses of these

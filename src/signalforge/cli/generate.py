@@ -306,9 +306,7 @@ def _resolve_project_dir(args: argparse.Namespace) -> Path:
     cwd = Path.cwd().resolve()
     current: Path | None = cwd
     # ``Path.parents`` does not include the path itself — walk explicitly.
-    visited: list[Path] = []
     while current is not None:
-        visited.append(current)
         if (current / "dbt_project.yml").is_file():
             _LOGGER.debug(
                 "resolved project_dir: %s",
@@ -487,7 +485,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 {**grade_config.model_dump(), "min_mean_score": min_score_override}
             )
         kept_count = prune_result.kept_count
-        criteria_count = len(DEFAULT_RUBRIC)
+        # Honour ``GradeConfig.rubric`` overrides — the operator may
+        # ship a custom rubric in ``signalforge.yml grade:`` (or via
+        # ``--config``) that has a different criterion count than the
+        # default. ``rubric is None`` means "use DEFAULT_RUBRIC" per
+        # ``grade-layer.md`` DEC-016, so the progress count matches the
+        # rubric the LLM judge will actually iterate over.
+        active_rubric = grade_config.rubric or DEFAULT_RUBRIC
+        criteria_count = len(active_rubric)
         total_calls = kept_count * criteria_count
         if progress_on:
             emit_progress_entry(

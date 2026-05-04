@@ -42,9 +42,15 @@ The grading layer reuses [clauditor](https://github.com/wjduenow/clauditor)'s LL
 ## Quick start
 
 ```bash
-pip install signalforge
+git clone https://github.com/wjduenow/SignalForge.git
+cd SignalForge
+pip install -e ".[dev]"
 signalforge generate models/marts/customer_lifetime_value.sql
 ```
+
+(SignalForge is not yet published on PyPI — once v0.1 ships there,
+`pip install signalforge` will replace the clone-and-editable-install
+incantation above.)
 
 The CLI walks up from the current working directory to find
 `dbt_project.yml`, loads the manifest, drafts candidate `schema.yml`

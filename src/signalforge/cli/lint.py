@@ -164,18 +164,21 @@ def _resolve_project_dir(args: argparse.Namespace) -> Path:
 def cmd_lint(args: argparse.Namespace) -> int:
     """Validate every config block and report all failures in one run.
 
-    Returns the integer exit code:
+    Returns the integer exit code per the four-tier CLI taxonomy
+    (DEC-008). Every loader failure routes through
+    :func:`map_exception_to_exit_code` so the tier matches what the same
+    exception would produce from ``cmd_generate``:
 
     * ``0`` — every loader returned cleanly (or returned defaults silently
       because the block / file was absent).
-    * ``1`` — at least one loader raised. Multi-error reporting (DEC-008)
-      collects every failure rather than short-circuiting on the first.
-    * ``1`` — project-root / path-canonicalisation failures from the CLI
-      layer itself (CliPathError).
-
-    The single-error and project-root paths route through
-    :func:`format_error_to_stderr` + :func:`map_exception_to_exit_code`
-    so the stderr shape and exit-code tier match the rest of the CLI.
+    * single failure → :func:`map_exception_to_exit_code` of the
+      exception (typically tier 1 for ``*ConfigNotFoundError`` /
+      ``*ConfigInvalidError``; tier 2 for ``CliInputError``).
+    * multiple failures → ``max(...)`` of the per-failure tiers, rendered
+      with the multi-error header + bullets shape (DEC-008).
+    * project-root / path-canonicalisation failures from the CLI layer
+      itself route through the same mapper (typically tier 1 for
+      ``CliPathError``, tier 2 for ``CliInputError``).
     """
     try:
         project_dir = _resolve_project_dir(args)
@@ -203,10 +206,13 @@ def cmd_lint(args: argparse.Namespace) -> int:
     if len(failures) == 1:
         # Single-error shape: reuse the canonical CLI formatter so
         # remediation footers render uniformly with the rest of the CLI.
+        # Route through ``map_exception_to_exit_code`` so the tier
+        # matches what ``cmd_generate`` would produce for the same
+        # exception (DEC-008 four-tier contract).
         _block_name, exc = failures[0]
         message = format_error_to_stderr(exc)
         print(message, file=sys.stderr)
-        return 1
+        return map_exception_to_exit_code(exc)
 
     # Multi-error shape (DEC-008 header + bullets). Each bullet names
     # the failing block AND a one-line summary of the error message.
@@ -229,4 +235,8 @@ def cmd_lint(args: argparse.Namespace) -> int:
         msg = " ".join(msg.split())
         bullets.append(f"  - {block_name}: {msg}")
     print(header + "\n" + "\n".join(bullets), file=sys.stderr)
-    return 1
+    # Multi-error exit code = max of the per-failure tiers. Loader
+    # failures are typically tier 1 (load), but a CliInputError that
+    # bubbles up from a deeper validator surfaces as tier 2 — picking
+    # the most-severe keeps the four-tier contract honest (DEC-008).
+    return max(map_exception_to_exit_code(exc) for _, exc in failures)
