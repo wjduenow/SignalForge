@@ -209,10 +209,14 @@ When v0.2 adds a custom renderer (e.g., `HtmlRenderer` for a web preview), promo
 
 ## v0.2 reservations (forward-compat surface, currently no-op)
 
-Two surface decisions ship in v0.1 but are reserved for v0.2:
+One surface decision ships in v0.1 but is reserved for v0.2:
 
-- `DiffConfig.render_kind: Literal["ansi", "markdown", "json"] = "ansi"` — exported but the CLI hasn't wired the selection flag yet. v0.2's CLI (#9) will map `--format` to `render_kind`; library callers can already select via the config.
 - `DiffReport.audit_schema_version: int = 1` — frozen; v0.2 readers gate on this when the sidecar JSON shape evolves.
+
+Graduated in #9 (CLI entrypoint):
+
+- `DiffConfig.render_kind: Literal["ansi", "markdown", "json"] = "ansi"` — **Graduated in #9 — `--format {ansi,markdown,json}` wires `render_kind`** (DEC-020 of `plans/super/9-cli-entrypoint.md`). The CLI re-validates `DiffConfig` with the override via `DiffConfig.model_validate({**dump, "render_kind": override})` so the soft-warn / hard-cap invariant validator re-runs (mirrors `SafetyPolicy.with_mode` from `safety-layer.md` DEC-018).
+- `signalforge.diff.render_to_text` — **Graduated in #9 — `signalforge.diff.render_to_text(report, *, config=None, project_dir=None) -> str` is the public stdout helper** (DEC-015 / DEC-022 of `plans/super/9-cli-entrypoint.md`). Internally calls the existing `signalforge.diff.engine._build_renderer(config or DiffConfig(), project_dir=project_dir)` then `renderer.render(report)`. Keeps DEC-004 ("renderers are private") intact while giving the CLI a one-liner for stdout. `DiffReport` does not carry the config used by the original `render_diff` call — the helper does NOT introspect the report; the caller supplies config explicitly OR accepts `DiffConfig()` defaults.
 
 Document these explicitly in their docstrings. The pattern: ship the surface in v0.1 so v0.2 is a behaviour change, not an API break.
 
