@@ -5,7 +5,8 @@
 - **Ticket:** [#27](https://github.com/wjduenow/SignalForge/issues/27) — `enhancement`
 - **Branch:** `feature/27-codecov-coverage` (off `dev`)
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/27-codecov-coverage`
-- **Phase:** discovery (in progress)
+- **Phase:** published (awaiting approval) — discovery + architecture + refinement + detailing complete; plan doc at PR [#28](https://github.com/wjduenow/SignalForge/pull/28)
+- **PR:** [#28](https://github.com/wjduenow/SignalForge/pull/28) (draft)
 - **Sessions:** 1 (started 2026-05-04)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.1 (post-CLI infra polish — first ticket after the v0.1 feature surface closed at #9)
