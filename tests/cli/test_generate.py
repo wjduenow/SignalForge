@@ -705,3 +705,255 @@ def test_generate_format_json_routes_through_render_to_text(
     assert diff_config_used.render_kind == "json"
     rtt_config = mocks["render_to_text"].call_args.kwargs["config"]
     assert rtt_config.render_kind == "json"
+
+
+# ---------------------------------------------------------------------------
+# US-007 — Generate observability (--quiet, --verbose, --no-color, progress)
+# ---------------------------------------------------------------------------
+
+
+def _force_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch ``sys.stderr.isatty`` and ``sys.stdout.isatty`` to return True
+    so the TTY-gated progress lines fire under ``capsys``.
+    """
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+
+
+def test_generate_emits_progress_to_stderr_in_tty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Default TTY: five `[N/5] <stage>: ...` entry lines and five
+    paired `done in <X>` lines on stderr (DEC-014 / DEC-026)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+    _force_tty(monkeypatch)
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    # One entry line per stage (5) + one done line per stage (5).
+    _stage_prefixes = ("[1/5]", "[2/5]", "[3/5]", "[4/5]", "[5/5]")
+    entry_lines = [line for line in captured.err.splitlines() if line.startswith(_stage_prefixes)]
+    done_lines = [line for line in entry_lines if "done in" in line]
+    body_lines = [line for line in entry_lines if "done in" not in line]
+    assert len(body_lines) == 5, f"expected 5 entry lines, got {body_lines}"
+    assert len(done_lines) == 5, f"expected 5 done lines, got {done_lines}"
+
+    # Stage names appear in documented order.
+    assert "safety:" in body_lines[0]
+    assert "draft:" in body_lines[1]
+    assert "prune:" in body_lines[2]
+    assert "grade:" in body_lines[3]
+    assert "diff:" in body_lines[4]
+    # Live values plumbed through.
+    joined = "\n".join(body_lines)
+    assert "criteria" in joined
+    assert "calls" in joined
+
+
+def test_generate_no_progress_in_non_tty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Default capsys (non-TTY): no `[N/5]` progress lines on stderr."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+    # Do NOT force TTY — capsys produces non-tty streams.
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    progress_lines = [
+        line
+        for line in captured.err.splitlines()
+        if line.startswith(("[1/5]", "[2/5]", "[3/5]", "[4/5]", "[5/5]"))
+    ]
+    assert progress_lines == [], f"unexpected progress lines: {progress_lines}"
+
+
+def test_generate_quiet_suppresses_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--quiet`` + TTY → no progress lines emitted."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+    _force_tty(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--quiet"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert "[1/5]" not in captured.err
+    assert "[5/5]" not in captured.err
+
+
+def test_generate_verbose_shows_progress_and_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--verbose`` forces progress on regardless of TTY AND skips
+    installing ``_safe_excepthook`` so an unexpected raise leaves a
+    traceback path available (DEC-016)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+    # Capture sys.excepthook so we can assert verbose did NOT replace it.
+    import sys as _sys
+
+    original_hook = _sys.excepthook
+
+    code = main(["generate", "model.shop.customers", "--verbose"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    # Progress lines appeared even though capsys streams are not TTYs.
+    assert "[1/5]" in captured.err
+    assert "[5/5]" in captured.err
+
+    # ``--verbose`` left the default excepthook untouched (the CLI's
+    # entry point only installs the strip when verbose is False).
+    assert _sys.excepthook is original_hook
+    # Sanity — happy path still ran.
+    assert mocks["render_to_text"].call_count == 1
+
+
+def test_generate_default_run_installs_safe_excepthook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Without ``--verbose`` the CLI installs ``_safe_excepthook`` so
+    Python's panic path strips tracebacks (DEC-016)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+    import sys as _sys
+
+    from signalforge.cli._helpers import _safe_excepthook
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert _sys.excepthook is _safe_excepthook
+    # Restore so the rest of the run isn't affected.
+    _sys.excepthook = _sys.__excepthook__
+
+
+def test_generate_quiet_and_verbose_mutex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--quiet --verbose`` is rejected by argparse mutex group → exit 2."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--quiet", "--verbose"])
+    captured = capsys.readouterr()
+    assert code == 2, f"stderr={captured.err}"
+    err_low = captured.err.lower()
+    assert "--quiet" in err_low or "--verbose" in err_low or "not allowed" in err_low
+
+
+def test_generate_no_color_sets_NO_COLOR_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--no-color`` sets ``NO_COLOR=1`` in the environment by the time
+    ``render_diff`` runs (DEC-023)."""
+    import os as _os
+
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    mocks = _install_happy_patches(monkeypatch)
+
+    captured_env: dict[str, str | None] = {}
+
+    def _record_env(*_args: Any, **_kwargs: Any) -> Any:
+        captured_env["NO_COLOR"] = _os.environ.get("NO_COLOR")
+        captured_env["FORCE_COLOR"] = _os.environ.get("FORCE_COLOR")
+        return mocks["render_diff"].return_value
+
+    mocks["render_diff"].side_effect = _record_env
+
+    code = main(["generate", "model.shop.customers", "--no-color"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert captured_env["NO_COLOR"] == "1"
+    # Belt-and-braces: FORCE_COLOR was cleared so it cannot defeat the
+    # operator's explicit opt-out.
+    assert captured_env["FORCE_COLOR"] is None
+
+
+def test_generate_NO_COLOR_env_strips_ansi_without_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``NO_COLOR=1`` in the environment alone (no flag) keeps the
+    AnsiRenderer's precedence chain in plain-text mode."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+
+    # Use the real renderer dispatch by going through render_to_text;
+    # the patched render_diff still returns a typed DiffReport so we
+    # can call render_to_text against it.
+    mocks = _install_happy_patches(monkeypatch)
+
+    # Restore the real render_to_text so the AnsiRenderer's precedence
+    # chain actually fires against the diff_report fixture.
+    from signalforge.cli import generate as gen_mod
+    from signalforge.diff import render_to_text as real_render_to_text
+
+    monkeypatch.setattr(gen_mod.diff_module, "render_to_text", real_render_to_text)
+    # Use a real, default DiffConfig so render_to_text dispatches to AnsiRenderer.
+    mocks["load_diff_config"].return_value = DiffConfig()
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    # No raw ANSI escape bytes leaked into stdout.
+    assert "\x1b[" not in captured.out
+
+
+def test_generate_progress_uses_live_values_not_hardcoded_hints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """DEC-026: progress lines must NOT carry hardcoded duration hints
+    like ``"30s"`` or ``"few minutes"`` or ``"this can take"``."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+    _force_tty(monkeypatch)
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    forbidden = ("30s", "few minutes", "this can take", "may take", "could take")
+    body_lines = [
+        line
+        for line in captured.err.splitlines()
+        if line.startswith(("[1/5]", "[2/5]", "[3/5]", "[4/5]", "[5/5]")) and "done in" not in line
+    ]
+    for line in body_lines:
+        for needle in forbidden:
+            assert needle not in line, f"forbidden hint {needle!r} in {line!r}"

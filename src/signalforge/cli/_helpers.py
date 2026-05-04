@@ -133,9 +133,13 @@ from signalforge.warehouse._path_safety import canonicalise_path
 
 __all__ = [
     "canonicalise_user_path",
+    "emit_progress_done",
+    "emit_progress_entry",
+    "format_elapsed",
     "format_error_to_stderr",
     "map_exception_to_exit_code",
     "setup_logging",
+    "should_emit_progress",
 ]
 
 
@@ -396,6 +400,60 @@ def format_error_to_stderr(exc: Exception) -> str:
     # includes the ``↳ Remediation:`` line (when set) thanks to the
     # uniform layer-base pattern.
     return f"ERROR: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# Progress lines (US-007 / DEC-014 / DEC-026)
+# ---------------------------------------------------------------------------
+
+
+def should_emit_progress(quiet: bool, verbose: bool) -> bool:
+    """Return True iff stage-progress lines should be emitted to stderr.
+
+    DEC-014: TTY-gated by default (both stderr AND stdout must be
+    terminals). DEC-026: ``--quiet`` suppresses regardless of TTY;
+    ``--verbose`` forces progress on regardless of TTY (the operator
+    explicitly opted in).
+    """
+    if quiet:
+        return False
+    if verbose:
+        return True
+    try:
+        return bool(sys.stderr.isatty()) and bool(sys.stdout.isatty())
+    except (AttributeError, ValueError):  # pragma: no cover — defensive
+        return False
+
+
+def format_elapsed(elapsed_seconds: float) -> str:
+    """Format a wall-clock duration for the ``done in <X>`` progress
+    line. ``X.Xs`` below 60s; ``Xm Ys`` at or above 60s (DEC-026).
+    """
+    if elapsed_seconds < 60.0:
+        return f"{elapsed_seconds:.1f}s"
+    minutes = int(elapsed_seconds // 60)
+    seconds = int(round(elapsed_seconds - minutes * 60))
+    return f"{minutes}m {seconds}s"
+
+
+def emit_progress_entry(stage_n: int, stage_name: str, body: str) -> None:
+    """Emit a single ``[N/5] <stage>: <body>`` line to stderr.
+
+    Callers are responsible for the TTY gate via
+    :func:`should_emit_progress`; this helper unconditionally writes when
+    invoked. The callsite-level gate keeps the helper trivial and lets
+    the orchestrator make a single decision once at startup.
+    """
+    print(f"[{stage_n}/5] {stage_name}: {body}", file=sys.stderr, flush=True)
+
+
+def emit_progress_done(stage_n: int, stage_name: str, elapsed_seconds: float) -> None:
+    """Emit the paired ``[N/5] <stage>: done in <X>`` line."""
+    print(
+        f"[{stage_n}/5] {stage_name}: done in {format_elapsed(elapsed_seconds)}",
+        file=sys.stderr,
+        flush=True,
+    )
 
 
 def _safe_excepthook(

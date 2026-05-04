@@ -22,6 +22,7 @@ import signalforge
 from signalforge.cli import generate as generate_cmd
 from signalforge.cli import version as version_cmd
 from signalforge.cli._helpers import (
+    _safe_excepthook,
     canonicalise_user_path,
     format_error_to_stderr,
     map_exception_to_exit_code,
@@ -114,5 +115,14 @@ def main(argv: list[str] | None = None) -> int:
     if func is None:  # pragma: no cover — defensive; every subcommand sets func
         parser.print_help(sys.stderr)
         return 2
+
+    # US-007 / DEC-016 — install the no-traceback excepthook unless the
+    # operator explicitly asked for ``--verbose``. ``--verbose`` is a
+    # subcommand-level flag (not every subcommand has one); ``getattr``
+    # with a ``False`` default makes the install path correct for the
+    # ``version`` subcommand (which never raises and doesn't expose the
+    # flag) AND for the ``generate`` subcommand (where the flag exists).
+    if not getattr(args, "verbose", False):
+        sys.excepthook = _safe_excepthook
 
     return func(args)

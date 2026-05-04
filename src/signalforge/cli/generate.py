@@ -48,7 +48,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
+import time
 from pathlib import Path
 
 from signalforge import diff as diff_module
@@ -60,10 +62,15 @@ from signalforge import safety as safety_module
 from signalforge import warehouse as warehouse_module
 from signalforge.cli._helpers import (
     canonicalise_user_path,
+    emit_progress_done,
+    emit_progress_entry,
     format_error_to_stderr,
     map_exception_to_exit_code,
+    setup_logging,
+    should_emit_progress,
 )
 from signalforge.cli.errors import CliInputError, CliPathError
+from signalforge.grade.rubric import DEFAULT_RUBRIC
 from signalforge.llm._client import _AnthropicClientProtocol
 from signalforge.warehouse.base import WarehouseAdapter
 
@@ -197,6 +204,39 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "receives the JSON sidecar's contents."
         ),
     )
+    # US-007 / DEC-014 / DEC-016 — observability flags. ``--quiet`` and
+    # ``--verbose`` are mutually exclusive at argparse time (combining
+    # them is a usage error → exit 2). ``--no-color`` flips the
+    # ``NO_COLOR`` env var inside ``cmd_generate`` so the AnsiRenderer's
+    # existing precedence chain (DEC-021 of #8) emits plain text;
+    # ``DiffConfig`` carries no ``force_color`` field per DEC-023.
+    verbosity_group = parser.add_mutually_exclusive_group()
+    verbosity_group.add_argument(
+        "--quiet",
+        action="store_true",
+        help=(
+            "Suppress per-stage stderr progress lines and raise the log "
+            "level to WARNING. Mutually exclusive with --verbose."
+        ),
+    )
+    verbosity_group.add_argument(
+        "--verbose",
+        action="store_true",
+        help=(
+            "Raise the log level to DEBUG and surface panic-path "
+            "tracebacks for unexpected errors. Mutually exclusive with "
+            "--quiet."
+        ),
+    )
+    parser.add_argument(
+        "--no-color",
+        dest="no_color",
+        action="store_true",
+        help=(
+            "Strip ANSI colour codes from stdout. Equivalent to setting "
+            "NO_COLOR=1 in the environment for the duration of the run."
+        ),
+    )
     parser.set_defaults(func=cmd_generate)
 
 
@@ -304,6 +344,22 @@ def cmd_generate(args: argparse.Namespace) -> int:
     diff`` (DEC-005). The stage-order test in
     ``tests/cli/test_generate.py`` pins this contract.
     """
+    # US-007 — observability: configure logging and the progress gate
+    # BEFORE any pipeline work. ``--quiet`` and ``--verbose`` are mutex
+    # at argparse time so at most one is True. ``--no-color`` flips the
+    # ``NO_COLOR`` env var so the AnsiRenderer's existing precedence
+    # chain (DEC-021 of #8) emits plain text. ``FORCE_COLOR`` is
+    # cleared belt-and-braces so an environmental override doesn't
+    # defeat the operator's explicit opt-out.
+    quiet = bool(getattr(args, "quiet", False))
+    verbose = bool(getattr(args, "verbose", False))
+    no_color = bool(getattr(args, "no_color", False))
+    setup_logging(verbose=verbose, quiet=quiet)
+    if no_color:
+        os.environ["NO_COLOR"] = "1"
+        os.environ.pop("FORCE_COLOR", None)
+    progress_on = should_emit_progress(quiet=quiet, verbose=verbose)
+
     try:
         # US-006 — explicit range-check on ``--min-score``. Argparse's
         # ``type=float`` cannot natively bound-check; do it here so an
@@ -330,8 +386,6 @@ def cmd_generate(args: argparse.Namespace) -> int:
         if args.profiles_dir is not None:
             profiles_dir_resolved = canonicalise_user_path(args.profiles_dir, project_dir)
             if profiles_dir_resolved is not None:
-                import os
-
                 os.environ["DBT_PROFILES_DIR"] = str(profiles_dir_resolved)
 
         # 1. Manifest load + model selection.
@@ -342,19 +396,35 @@ def cmd_generate(args: argparse.Namespace) -> int:
         profile = warehouse_module.load_profile(project_dir)
         adapter = _make_warehouse_adapter(profile)
 
-        # 3. Safety policy (the first stage in the documented pipeline
-        #    order — DEC-025 / CLAUDE.md "Pipeline shape"). US-006:
-        #    apply ``--mode`` via :meth:`SafetyPolicy.with_mode` so the
-        #    validators (notably the sample-mode WARNING DEC-021 of
-        #    ``safety-layer.md``) re-run on the override.
+        # ---- 1/5: safety -----------------------------------------------
+        # US-007 / DEC-014 / DEC-026 — progress lines wrap each stage
+        # entry/exit with live values + a paired ``done in <X>`` measurement.
+        # No hardcoded duration hints; the progress fact for each stage
+        # is computed from objects already in scope (model id, candidate
+        # test count, kept_count × criteria_count) so the operator sees
+        # the size of the work that's about to happen rather than a
+        # stale estimate.
+        if progress_on:
+            emit_progress_entry(1, "safety", "building LLM request...")
+        _t0 = time.monotonic()
+        # Safety policy (the first stage in the documented pipeline
+        # order — DEC-025 / CLAUDE.md "Pipeline shape"). US-006: apply
+        # ``--mode`` via :meth:`SafetyPolicy.with_mode` so the
+        # validators (notably the sample-mode WARNING DEC-021 of
+        # ``safety-layer.md``) re-run on the override.
         policy = safety_module.load_safety_config(project_dir)
         mode_override = getattr(args, "mode", None)
         if mode_override is not None:
             policy = policy.with_mode(safety_module.SamplingMode(mode_override))
+        if progress_on:
+            emit_progress_done(1, "safety", time.monotonic() - _t0)
 
-        # 4. Draft.
+        # ---- 2/5: draft -------------------------------------------------
         draft_config = draft_module.load_draft_config(project_dir)
         client = _make_anthropic_client()
+        if progress_on:
+            emit_progress_entry(2, "draft", f"calling LLM (model {draft_config.model})...")
+        _t0 = time.monotonic()
         draft_outcome = draft_module.draft_schema(
             model,
             adapter,
@@ -363,9 +433,20 @@ def cmd_generate(args: argparse.Namespace) -> int:
             config=draft_config,
             _client=client,
         )
+        if progress_on:
+            emit_progress_done(2, "draft", time.monotonic() - _t0)
 
-        # 5. Prune.
+        # ---- 3/5: prune -------------------------------------------------
         prune_config = prune_module.load_prune_config(project_dir)
+        candidate = draft_outcome.candidate
+        candidate_test_count = sum(len(c.tests) for c in candidate.columns) + len(candidate.tests)
+        if progress_on:
+            emit_progress_entry(
+                3,
+                "prune",
+                f"running {candidate_test_count} candidate tests against warehouse...",
+            )
+        _t0 = time.monotonic()
         prune_result = prune_module.prune_tests(
             model,
             adapter,
@@ -374,17 +455,33 @@ def cmd_generate(args: argparse.Namespace) -> int:
             config=prune_config,
             project_dir=project_dir,
         )
+        if progress_on:
+            emit_progress_done(3, "prune", time.monotonic() - _t0)
 
-        # 6. Grade. US-006 / DEC-004 — apply ``--min-score`` by re-validating
-        #    the frozen :class:`GradeConfig` with the override. Reporting-only:
-        #    we do NOT flip ``fail_on_below_threshold`` — the operator's
-        #    ``signalforge.yml`` owns that knob (DEC-011 path through the
-        #    grader's :class:`GradeBelowThresholdError`).
+        # ---- 4/5: grade -------------------------------------------------
+        # US-006 / DEC-004 — apply ``--min-score`` by re-validating the
+        # frozen :class:`GradeConfig` with the override. Reporting-only:
+        # we do NOT flip ``fail_on_below_threshold`` — the operator's
+        # ``signalforge.yml`` owns that knob (DEC-011 path through the
+        # grader's :class:`GradeBelowThresholdError`).
         grade_config = grade_module.load_grade_config(project_dir)
         if min_score_override is not None:
             grade_config = grade_module.GradeConfig.model_validate(
                 {**grade_config.model_dump(), "min_mean_score": min_score_override}
             )
+        kept_count = prune_result.kept_count
+        criteria_count = len(DEFAULT_RUBRIC)
+        total_calls = kept_count * criteria_count
+        if progress_on:
+            emit_progress_entry(
+                4,
+                "grade",
+                (
+                    f"scoring {kept_count} artifacts × {criteria_count} "
+                    f"criteria ({total_calls} calls)..."
+                ),
+            )
+        _t0 = time.monotonic()
         grade_report = grade_module.grade_artifacts(
             model,
             draft_outcome.candidate,
@@ -393,11 +490,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
             client=client,
             project_dir=project_dir,
         )
+        if progress_on:
+            emit_progress_done(4, "grade", time.monotonic() - _t0)
 
-        # 7. Diff. US-006 / DEC-020 — apply ``--format`` by re-validating
-        #    the frozen :class:`DiffConfig` with the override (mirrors
-        #    ``SafetyPolicy.with_mode``: re-runs validators including the
-        #    soft-warn / hard-cap invariant).
+        # ---- 5/5: diff --------------------------------------------------
+        # US-006 / DEC-020 — apply ``--format`` by re-validating the
+        # frozen :class:`DiffConfig` with the override (mirrors
+        # ``SafetyPolicy.with_mode``: re-runs validators including the
+        # soft-warn / hard-cap invariant).
         diff_config = diff_module.load_diff_config(project_dir)
         format_override = getattr(args, "format", None)
         if format_override is not None and format_override != diff_config.render_kind:
@@ -423,6 +523,9 @@ def cmd_generate(args: argparse.Namespace) -> int:
             model_relpath = Path(model.original_file_path)
             output_path = (project_dir / model_relpath).parent / "schema.yml"
 
+        if progress_on:
+            emit_progress_entry(5, "diff", "rendering...")
+        _t0 = time.monotonic()
         diff_report = diff_module.render_diff(
             model,
             draft_outcome.candidate,
@@ -433,8 +536,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
             write_sidecar=not dry_run,
             project_dir=project_dir,
         )
+        if progress_on:
+            emit_progress_done(5, "diff", time.monotonic() - _t0)
 
-        # 8. Render to stdout via the in-process helper (DEC-015). The
+        # 6. Render to stdout via the in-process helper (DEC-015). The
         #    JSON sidecar (when not ``--dry-run``) was written by
         #    :func:`render_diff` above. ``--format json`` routes through
         #    the same :func:`render_to_text` helper because it dispatches
