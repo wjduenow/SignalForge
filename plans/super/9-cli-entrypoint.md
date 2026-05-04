@@ -502,6 +502,20 @@ User confirmed all four blocker decisions and accepted reviewer recommendations 
 | **DEC-019** | AR-T2 | Add 7th AST scan in `tests/test_audit_completeness.py` enforcing every `class *Error(Exception):` under `src/signalforge/*/errors.py` is referenced by the CLI's exception → exit-code mapping table. Parametrized companion test in `tests/cli/test_exit_codes.py` raises each error at the CLI boundary and asserts the right exit code + stderr shape | Makes the four-tier taxonomy a contract, not a guideline. Mirrors the existing AST-scan pattern (six scans as of #7) |
 | **DEC-020** | AR-S4 | `--format {ansi,markdown,json}` flag wires `DiffConfig.render_kind` (DEC-021 of #8 graduation). Default = `ansi` (matches `DiffConfig.render_kind` default). `json` format prints the JSON sidecar's contents to stdout instead of the rendered diff (the sidecar is still written by default per DEC-002) | Diff layer was already ready; CLI just adds the argparse flag and a config passthrough |
 
+### Session 2 — 2026-05-03 (post-publish review refinements)
+
+External plan-review pass against `plans/super/9-cli-entrypoint.md` surfaced seven concrete issues (4 substantive, 3 nice-to-haves). All seven verified against the actual codebase before resolving — see notes in each row. Resolutions captured as DEC-021 through DEC-027 and folded into US-001, US-002, US-005, US-007, and US-008.
+
+| ID | Issue | Resolution | Verified against |
+|---|---|---|---|
+| **DEC-021** | US-002 raise-vs-sidecar ordering ambiguous | The `GradeBelowThresholdError` raise lands AFTER `write_grading_report(...)` returns and BEFORE `return report`. New test `test_grade_below_threshold_writes_sidecar_before_raising` pins the invariant. Operator gets a complete `grade.json` for diagnosis even on threshold-fail | `src/signalforge/grade/engine.py:889-931` — current flow is build → write_sidecar → log → return; insertion point is between log and return |
+| **DEC-022** | `render_to_text` referenced a nonexistent `_pick_renderer` and a nonexistent `report.config_used` | Helper uses the existing `signalforge.diff.engine._build_renderer(config or DiffConfig(), project_dir=project_dir)` dispatcher. Caller supplies config explicitly OR accepts `DiffConfig()` defaults. Helper does NOT introspect the report; `DiffReport` carries no config | `src/signalforge/diff/models.py:144` (no `config_used`), `src/signalforge/diff/engine.py:600` (`_build_renderer` is the actual symbol) |
+| **DEC-023** | `--no-color` plan claimed `force_color=False` field that doesn't exist | `--no-color` sets `os.environ["NO_COLOR"] = "1"` for the call; `DiffConfig.respect_no_color_env=True` (default) honours it via the diff layer's existing precedence chain (DEC-021 of #8). The unconditional ANSI strip on user-content fields is unaffected — that's the security boundary, not a UX knob | `src/signalforge/diff/config.py:139` — only `respect_no_color_env: bool = True` exists; no `force_color` field |
+| **DEC-024** | AST-scan target unclear about exclude list | Scan walks `src/signalforge/*/errors.py` (verified — every typed exception in the project lives in an `errors.py` module). Explicit exclude list is the 9 abstract base classes: `ManifestError`, `WarehouseError`, `SafetyError`, `LLMError`, `DraftError`, `PruneError`, `GradeError`, `DiffError`, `CliError`. The exclude constant is the seam for v0.2 if a new abstract intermediate lands | `grep -rln "^class.*Error" src/signalforge/ --include="*.py"` returns exactly the 8 stage `errors.py` files |
+| **DEC-025** | US-005 missing pipeline-order test | Add `test_generate_calls_stages_in_documented_order` — `MagicMock` parent with `mock_calls` ordering assertion against the documented `safety → draft → prune → grade → diff` shape from CLAUDE.md "Pipeline shape" | CLAUDE.md `## Pipeline shape (per README)` |
+| **DEC-026** | DEC-014 progress lines hardcoded duration hints ("30s", "few minutes") | Drop the predictions; replace with live values (`(model claude-sonnet-4-6)`, `(32 calls)`) plus a paired post-hoc `done in 4.2s` line at stage exit. Real measurement after the fact, not stale estimate | n/a — pure UX call |
+| **DEC-027** | DEC-001 `--project-dir` interaction with walk-up under-specified | When `--project-dir <PATH>` is supplied the CLI does NOT walk up from `<PATH>` — the override is an absolute assertion and exits 1 if `<PATH>/dbt_project.yml` is missing. Walk-up is only the unflagged default. Two new tests pin both arms | n/a — explicit choice |
+
 ### Implications synthesised across decisions
 
 - **Public-surface plumbing in scope.** DEC-013 + DEC-015 add 9 public symbols (8 exception re-exports + `render_to_text`). One small story up front so the CLI's imports work cleanly.
@@ -544,13 +558,13 @@ US-002 (grade graduation)  ────────┤
 
 **Description.** Tighten the public surface so the CLI can import everything it needs without sneaking through private modules. Re-exports 8 typed exceptions (DEC-013) and adds the new `signalforge.diff.render_to_text(report, *, config, project_dir) -> str` public helper (DEC-015).
 
-**Traces to:** DEC-013, DEC-015.
+**Traces to:** DEC-013, DEC-015, DEC-022.
 
 **Acceptance criteria:**
 
 - `from signalforge.draft import DraftConfigNotFoundError, DraftConfigInvalidError, LLMOutputJSONError, LLMOutputValidationError, LLMOutputAnchorContractError, PromptEnvelopeBreachError, LLMResponseAuditRecordTooLargeError, LLMResponseAuditWriteError` works.
 - `from signalforge.llm import LLMResponseFormatError` works.
-- `from signalforge.diff import render_to_text` works; signature `render_to_text(report: DiffReport, *, config: DiffConfig | None = None, project_dir: Path | None = None) -> str`. Returns the same text that `render_diff(..., output_path=...)` would have written. Internally calls `_pick_renderer(config or report.config_used)` and `renderer.render(report)`.
+- `from signalforge.diff import render_to_text` works; signature `render_to_text(report: DiffReport, *, config: DiffConfig | None = None, project_dir: Path | None = None) -> str`. Returns the same text that `render_diff(..., output_path=...)` would have written. Internally calls the existing `signalforge.diff.engine._build_renderer(config or DiffConfig(), project_dir=project_dir)` then `renderer.render(report)`. **`DiffReport` does not carry the config used by the original `render_diff` call** (verified against `src/signalforge/diff/models.py:144` — the model has `unified_diff`, hashes, counts, but no `config_used` field), so the caller must supply config explicitly OR accept `DiffConfig()` defaults; the helper does NOT reach into the report. `MarkdownRenderer` requires `project_dir` — when `render_kind="markdown"` and `project_dir is None`, fall through to the renderer's existing handling (passes `None` through; the renderer already tolerates it).
 - `tests/draft/test_public_api.py` (or equivalent) is updated to assert all 8 new public-surface names; `tests/llm/test_public_api.py` updated for `LLMResponseFormatError`; `tests/diff/test_public_api.py` updated for `render_to_text`.
 - New unit test `tests/diff/test_render_to_text.py` asserts: byte-equal output to `render_diff(output_path=tmpfile).read_text()` for ANSI / Markdown / JSON renderers.
 - `pip install -e ".[dev]" && ruff check . && ruff format --check . && pyright && pytest` passes.
@@ -562,7 +576,7 @@ US-002 (grade graduation)  ────────┤
 - `src/signalforge/draft/__init__.py` — add 7 re-exports.
 - `src/signalforge/llm/__init__.py` — add 1 re-export.
 - `src/signalforge/diff/__init__.py` — add `render_to_text` re-export.
-- `src/signalforge/diff/engine.py` — add public `render_to_text` function (small wrapper around the existing `_pick_renderer` + `renderer.render(report)` pair).
+- `src/signalforge/diff/engine.py` — add public `render_to_text` function (small wrapper around the existing `_build_renderer` + `renderer.render(report)` pair).
 - `tests/draft/test_public_api.py` — extend.
 - `tests/llm/test_public_api.py` — extend (or create if absent).
 - `tests/diff/test_public_api.py` — extend.
@@ -583,13 +597,13 @@ US-002 (grade graduation)  ────────┤
 
 **Description.** Graduate `GradeConfig.fail_on_below_threshold` from v0.2 reservation no-op to v0.1 wiring. Add `GradeBelowThresholdError`; raise inside `grade_artifacts(...)` when `config.fail_on_below_threshold=True` AND the produced `GradingReport.passed=False`. Update doc and rule cascade.
 
-**Traces to:** DEC-011.
+**Traces to:** DEC-011, DEC-021.
 
 **Acceptance criteria:**
 
 - New `GradeBelowThresholdError(GradeError)` defined in `src/signalforge/grade/errors.py`. Carries `pass_rate: float`, `mean_score: float`, `min_pass_rate: float`, `min_mean_score: float`, `aggregate_complete: bool` as fields. Renders a remediation that names the failing thresholds.
 - `GradeBelowThresholdError` re-exported from `signalforge.grade.__init__` (in the `GradeError` family list).
-- `grade_artifacts(...)` checks `config.fail_on_below_threshold and not report.passed` AFTER the report is built; raises `GradeBelowThresholdError` instead of returning. The audit JSONL has already been flushed by then (the raise happens after the per-pair write loop completes).
+- `grade_artifacts(...)` checks `config.fail_on_below_threshold and not report.passed` AFTER the report is built AND the sidecar JSON is written, but BEFORE the function returns. **Order is load-bearing** — verified against `src/signalforge/grade/engine.py:889-931`, the existing flow is `build report` → `write_grading_report(...)` → `_LOGGER.info(...)` → `return report`. The new raise lands between the sidecar write and the return: a threshold-fail run leaves both a complete `grade.jsonl` (per-pair audit) AND a complete `grade.json` (sidecar) on disk so the operator can diagnose *why* the run fell below threshold. Raising before the sidecar would defeat that durable hand-off.
 - `GradeConfig.fail_on_below_threshold` docstring updated: removes "v0.1 no-op" language; explains the raise behaviour; cites #9 as the consumer.
 - `.claude/rules/grade-layer.md` — `## v0.2 reservations` block updated. The entry for `fail_on_below_threshold` is rewritten as "Graduated in #9 — raises `GradeBelowThresholdError`." Remaining v0.2 reservations (`GradeBudgetExceededError` is already raised; `GradeThresholds` is still a forward-compat shape) stay listed.
 - `docs/grade-ops.md` — adds a section "Threshold-fail behaviour" describing the config knob, the raise, and the CLI's exit-2 mapping (forward reference to docs/cli-ops.md).
@@ -599,6 +613,7 @@ US-002 (grade graduation)  ────────┤
   - `test_fail_on_below_threshold_true_failing_mean_score` — `mean_score < min_mean_score`, `fail_on_below_threshold=True` → raises.
   - `test_fail_on_below_threshold_false_failing` — `passed=False`, `fail_on_below_threshold=False` → returns report (default behaviour preserved).
   - `test_grade_below_threshold_error_carries_aggregate_complete_flag` — partial-aggregate (graceful-degrade) report still raises with `aggregate_complete=False` correctly populated.
+  - `test_grade_below_threshold_writes_sidecar_before_raising` — invokes `grade_artifacts` with `fail_on_below_threshold=True` against a failing report; catches the raise; asserts the sidecar JSON exists at `resolved_sidecar_path` and parses to a `GradingReport` whose `passed=False`. Pins the load-bearing ordering invariant.
 - The grade-layer drift detector (`tests/grade/test_drift_detector.py`) is already extra-forbid for `GradeConfig`; existing behaviour continues to pass.
 - Validation suite green.
 
@@ -730,13 +745,13 @@ US-002 (grade graduation)  ────────┤
 
 **Description.** The big one. `signalforge generate <model>` wires manifest → safety → draft → prune → grade → diff. Walks up to find `dbt_project.yml` (DEC-001). Accepts `--manifest`, `--profiles-dir`, `--project-dir`. No flag knobs yet — those land in US-006/US-007.
 
-**Traces to:** DEC-001, DEC-007, DEC-008, DEC-011, DEC-013 (catches every typed exception at the boundary), DEC-015 (reads diff output via `render_to_text`), DEC-016, DEC-017.
+**Traces to:** DEC-001, DEC-007, DEC-008, DEC-011, DEC-013 (catches every typed exception at the boundary), DEC-015 (reads diff output via `render_to_text`), DEC-016, DEC-017, DEC-025 (stage-order test), DEC-027 (project-dir override semantics).
 
 **Acceptance criteria:**
 
 - `signalforge generate <model>` runs the full pipeline against a fixture manifest + `FakeAnthropicClient` + `FakeBigQueryClient`. Exits 0 on the happy path.
 - The `<model>` arg accepts both forms: a dbt `unique_id` (`"model.proj.customers"`) and a file path (`"models/marts/customers.sql"`). Routes to `Manifest.get_model(key)`.
-- Project root: walks up from cwd to the nearest dir containing `dbt_project.yml`. `--project-dir <PATH>` overrides; `_LOGGER.debug` notes the discovered dir (DEC-001). If neither walk-up nor override finds it, exit 1 with remediation.
+- Project root: walks up from cwd to the nearest dir containing `dbt_project.yml`. `--project-dir <PATH>` overrides — when supplied, the CLI **does not walk up from the override**; it treats the override as an absolute assertion that `<PATH>/dbt_project.yml` exists, and exits 1 with remediation if it doesn't. (Walk-up is the convenience for unflagged invocations; the explicit flag is the precise mode.) `_LOGGER.debug` notes the discovered or asserted dir (DEC-001). If neither walk-up nor override finds it, exit 1 with remediation. New tests: `test_generate_project_dir_override_missing_dbt_project_yml_exits_one` and `test_generate_no_project_dir_walks_up_from_subdirectory`.
 - `--manifest <PATH>` overrides `<project_dir>/target/manifest.json`. `--profiles-dir <PATH>` overrides the default profiles search. Both flow through `canonicalise_user_path` (DEC-007).
 - Pipeline order is the documented `safety → draft → prune → grade → diff`; no skipping (DEC-005), no reordering.
 - The diff is rendered to stdout via the new `signalforge.diff.render_to_text(report, ...)` (DEC-015). The JSON sidecar lands at `<project_dir>/.signalforge/diff.json` per `render_diff(write_sidecar=True)` default (DEC-002).
@@ -751,6 +766,7 @@ US-002 (grade graduation)  ────────┤
   - `LLMRateLimitError` raised by the draft seam → CLI exits 3.
   - `LLMOutputAnchorContractError` with three violations → CLI exits 2 with header + 3 bullets (DEC-008 + DEC-017).
   - panic path: an untyped `Exception` raised by the LLM client → CLI exits 1 with no traceback in stderr (DEC-016).
+  - `test_generate_calls_stages_in_documented_order` — patches every stage entry point (`load_safety_config`, `draft_schema`, `prune_tests`, `grade_artifacts`, `render_diff` — or, more precisely, the boundaries the CLI itself crosses) with `unittest.mock.MagicMock`s sharing a single parent mock; calls `main(["generate", "<model>"])`; asserts `parent.mock_calls` matches the documented `safety → draft → prune → grade → diff` ordering. Pins the CLAUDE.md "Pipeline shape" commitment as a contract — a future refactor that reorders stages fails this test loudly.
 - Validation suite green.
 
 **Done when:** end-to-end happy path runs against fakes; six representative exit-code scenarios pass; no traceback leaks.
@@ -819,21 +835,22 @@ US-002 (grade graduation)  ────────┤
 
 **Description.** Layer in the user-experience knobs. Stderr progress lines per stage (DEC-014); `--quiet` suppresses them; `--verbose` raises log level to DEBUG and surfaces panic-path tracebacks (DEC-016); `--no-color` flows through to `DiffConfig.respect_no_color_env`.
 
-**Traces to:** DEC-014, DEC-016.
+**Traces to:** DEC-014, DEC-016, DEC-023 (`--no-color` wiring), DEC-026 (progress-line shape).
 
 **Acceptance criteria:**
 
-- Default (TTY): one stderr line per stage entry. Format `[N/M] <stage>: <verb>...` where `N` is the stage number (1–5) and `M=5` (number of pipeline stages). Examples:
+- Default (TTY): one stderr line per stage entry. Format `[N/M] <stage>: <verb> <fact>...` where `N` is the stage number (1–5), `M=5` (number of pipeline stages), and `<fact>` is a value derived from the live run — never a hardcoded duration hint (those rot as model speeds and warehouse sizes change). Examples:
   - `[1/5] safety: building LLM request...`
-  - `[2/5] draft: calling LLM (this can take 30s)...`
+  - `[2/5] draft: calling LLM (model claude-sonnet-4-6)...`
   - `[3/5] prune: running 12 candidate tests against warehouse...`
-  - `[4/5] grade: scoring 8 artifacts × 4 criteria (32 calls, this can take a few minutes)...`
+  - `[4/5] grade: scoring 8 artifacts × 4 criteria (32 calls)...`
   - `[5/5] diff: rendering...`
+- Each progress line is paired with a final stderr line at stage exit reporting wall-clock duration: `[N/M] <stage>: done in 4.2s` (truncated to one decimal). This is the post-hoc signal of "did that stage actually take a long time?" — replaces the deleted "this can take Xs" prediction with a real measurement after the fact.
 - Default (non-TTY: piped, redirected): no progress lines. Detected via `sys.stderr.isatty()` AND `sys.stdout.isatty()` (both must be terminals to emit progress; either being a pipe disables).
 - `--quiet` suppresses progress lines AND raises log level to `WARNING` (only hard errors hit `_LOGGER`).
 - `--verbose` does NOT add MORE progress lines (default is already informative); it raises log level to `DEBUG` and surfaces panic-path tracebacks via `sys.excepthook` (don't install the strip in `--verbose` mode).
-- `--no-color` sets `DiffConfig.respect_no_color_env=False` AND `force_color=False` so the renderer emits plain text. The unconditional ANSI strip on user-content fields (DEC-007 of #8) still runs regardless.
-- Honor `NO_COLOR` env var: empty stdout color when set (precedence: `--no-color` > `NO_COLOR` > `FORCE_COLOR` > TTY).
+- `--no-color` strips ANSI from stdout. **Wiring (verified against `src/signalforge/diff/config.py:139` — `DiffConfig` exposes only `respect_no_color_env: bool = True`; there is no `force_color` field):** when `--no-color` is passed, the CLI sets `os.environ["NO_COLOR"] = "1"` for the duration of the `cmd_generate` call and leaves `DiffConfig.respect_no_color_env=True` (the default) so the AnsiRenderer's existing precedence chain (DEC-021 of #8) honours the env var. The unconditional ANSI strip on user-content fields (DEC-007 of #8) still runs regardless of this flag — that's the security boundary, not a UX knob.
+- Honor `NO_COLOR` env var without the flag: precedence chain is the diff layer's existing one (`NO_COLOR` > `FORCE_COLOR` > TTY when `respect_no_color_env=True`); `--no-color` is just a CLI-side ergonomic equivalent to setting `NO_COLOR=1` in the environment.
 - Tests in `tests/cli/test_generate.py`:
   - `test_generate_emits_progress_to_stderr_in_tty` — patch `sys.stderr.isatty()` to return `True`; assert stderr contains five progress lines.
   - `test_generate_no_progress_in_non_tty` — default capsys (non-TTY); assert stderr has no progress lines.
@@ -866,11 +883,11 @@ US-002 (grade graduation)  ────────┤
 
 **Description.** The load-bearing tests that make the four-tier exit-code taxonomy a contract. Adds a 7th AST scan in `tests/test_audit_completeness.py` enforcing every `class *Error(Exception):` has a tier mapping. Adds `tests/cli/test_exit_codes.py` parametrizing over every typed exception and asserting the right exit code + stderr shape.
 
-**Traces to:** DEC-008, DEC-019.
+**Traces to:** DEC-008, DEC-019, DEC-024 (AST-scan target + exclude list).
 
 **Acceptance criteria:**
 
-- New scan in `tests/test_audit_completeness.py`: AST-walks every `src/signalforge/*/errors.py` file, collects every `class <Name>Error(<base>):` declaration, and asserts `<Name>Error` appears as a key in `signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE` (or whatever the canonical mapping table is named). Excludes the base `*Error` classes per stage (those are abstract). A new typed exception lands without a mapping → test fails loud.
+- New scan in `tests/test_audit_completeness.py`: AST-walks every `src/signalforge/*/errors.py` file, collects every `class <Name>Error(<base>):` declaration, and asserts `<Name>Error` appears as a key in `signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE` (or whatever the canonical mapping table is named). **Scan target verified:** every typed exception in the project lives in an `errors.py` module — confirmed by `grep -rln "^class.*Error" src/signalforge/ --include="*.py"` returning exactly the 8 per-stage `errors.py` files (manifest, warehouse, safety, llm, draft, prune, grade, diff). The CLI's own `errors.py` makes nine. **Explicit excludes** (the `_EXCLUDED_BASES: frozenset[str]` in the scan): the abstract base per stage that subclasses inherit from — `ManifestError`, `WarehouseError`, `SafetyError`, `LLMError`, `DraftError`, `PruneError`, `GradeError`, `DiffError`, plus the new `CliError`. Plus any `*Error` class that is itself abstract/intermediate (none today, but the constant is the seam if v0.2 introduces one). A new typed exception lands without a mapping → test fails loud.
 - Sanity test: at least one entry exists in the mapping table for each tier (1, 2, 3) — guards against accidental mass-rename.
 - New parametrized tests in `tests/cli/test_exit_codes.py`:
   - For each typed exception in the mapping table, raise it from a synthetic stage call (using `unittest.mock.patch` to make the relevant orchestrator function raise it), call `main(["generate", "<model>"])` against the fakes, and assert:
