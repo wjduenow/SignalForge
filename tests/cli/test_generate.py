@@ -440,6 +440,45 @@ def test_generate_profiles_dir_sets_env(
     assert os.environ.get("DBT_PROFILES_DIR") == str(profiles_dir.resolve())
 
 
+def test_generate_profiles_dir_accepts_out_of_tree_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--profiles-dir`` may live outside the project tree (e.g. ``~/.dbt``).
+
+    Regression: pass-1 quality gate caught that a containment-gated
+    ``canonicalise_user_path`` call rejected every realistic profiles
+    location (the dbt convention places ``profiles.yml`` at ``~/.dbt/``,
+    which is intentionally outside the project tree). The flag now
+    bypasses the project-dir containment gate; it still applies
+    ``expanduser`` + ``resolve`` for symlink-loop safety, and the
+    warehouse loader retains its own existence/shape gate on the
+    resolved file.
+    """
+    import os
+
+    project_dir = make_fake_dbt_project(tmp_path)
+    # Sibling directory of project_dir — definitely outside the tree.
+    out_of_tree = tmp_path / "external_profiles"
+    out_of_tree.mkdir()
+    monkeypatch.chdir(project_dir)
+    monkeypatch.delenv("DBT_PROFILES_DIR", raising=False)
+
+    _install_happy_patches(monkeypatch)
+    code = main(
+        [
+            "generate",
+            "model.shop.customers",
+            "--profiles-dir",
+            str(out_of_tree),
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert os.environ.get("DBT_PROFILES_DIR") == str(out_of_tree.resolve())
+
+
 # ---------------------------------------------------------------------------
 # US-006 — Generate flags (--mode, --min-score, --write/--dry-run, --format)
 # ---------------------------------------------------------------------------

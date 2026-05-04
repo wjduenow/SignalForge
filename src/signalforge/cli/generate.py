@@ -382,11 +382,22 @@ def cmd_generate(args: argparse.Namespace) -> int:
         manifest_override = canonicalise_user_path(args.manifest, project_dir)
         # ``--profiles-dir`` becomes an env var for the duration of the
         # call; the warehouse loader's three-path resolution honours
-        # ``DBT_PROFILES_DIR`` first.
+        # ``DBT_PROFILES_DIR`` first. It is intentionally NOT routed
+        # through ``canonicalise_user_path`` — the dbt convention places
+        # ``profiles.yml`` at ``~/.dbt/`` which lives outside the project
+        # tree, and the symlink-containment gate would reject every
+        # realistic value. Apply ``expanduser`` + ``resolve`` for
+        # symlink-loop safety; ``profiles.yml`` itself is parsed by the
+        # warehouse loader which has its own existence/shape gate.
         if args.profiles_dir is not None:
-            profiles_dir_resolved = canonicalise_user_path(args.profiles_dir, project_dir)
-            if profiles_dir_resolved is not None:
-                os.environ["DBT_PROFILES_DIR"] = str(profiles_dir_resolved)
+            try:
+                profiles_dir_resolved = Path(args.profiles_dir).expanduser().resolve(strict=False)
+            except (OSError, RuntimeError) as exc:
+                raise CliPathError(
+                    f"--profiles-dir {args.profiles_dir!r} could not be resolved: {exc}",
+                    remediation="Pass an absolute or ~-prefixed path that exists.",
+                ) from exc
+            os.environ["DBT_PROFILES_DIR"] = str(profiles_dir_resolved)
 
         # 1. Manifest load + model selection.
         manifest = manifest_module.load(project_dir, manifest_path=manifest_override)
