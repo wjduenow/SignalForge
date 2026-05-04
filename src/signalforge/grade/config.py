@@ -152,14 +152,26 @@ class GradeConfig(BaseModel):
     typed :class:`Criterion`."""
 
     fail_on_below_threshold: bool = False
-    """Reserved for v0.2 enforcement (DEC-005). **v0.1 NOTE: this field
-    is currently a no-op — `grade_artifacts` does not read it.** Setting
-    ``True`` has no effect in v0.1; below-threshold rubrics do not fail
-    the run, the operator's diff surfaces the verdict. v0.2 will wire
-    this into the CLI exit-code path so a below-threshold run exits
-    non-zero. The field ships now to lock the YAML namespace + type
-    surface so v0.2's enforcement is a behaviour change, not an
-    API-break."""
+    """Hard-fail switch for the aggregate threshold check.
+
+    Default ``False`` — v0.1 ships report-only posture by default; a
+    below-threshold rubric does not fail the run, the operator's diff
+    surfaces the verdict and the operator decides.
+
+    When ``True``, :func:`signalforge.grade.grade_artifacts` raises
+    :class:`signalforge.grade.GradeBelowThresholdError` once the
+    aggregate :class:`signalforge.grade.GradingReport.passed` is
+    ``False`` (i.e. ``pass_rate < min_pass_rate`` and/or
+    ``mean_score < min_mean_score``). The raise lands AFTER the
+    fail-closed sidecar JSON write so the operator has a complete
+    ``grade.json`` on disk for diagnosis (DEC-021 ordering invariant —
+    pinned by
+    ``test_grade_below_threshold_writes_sidecar_before_raising``).
+
+    Graduated from v0.2 reservation to v0.1 wiring in #9 (US-002).
+    The CLI (#9) maps the raise to a non-zero exit code so a
+    ``signalforge generate`` invocation in CI can gate on threshold
+    compliance — see ``docs/cli-ops.md`` for the exit-code tier."""
 
     @field_validator("model")
     @classmethod

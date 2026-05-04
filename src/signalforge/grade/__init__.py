@@ -28,6 +28,7 @@ from signalforge.grade.engine import grade_artifacts
 from signalforge.grade.errors import (
     GradeAuditRecordTooLargeError,
     GradeAuditWriteError,
+    GradeBelowThresholdError,
     GradeBudgetExceededError,
     GradeConfigError,
     GradeError,
@@ -50,6 +51,7 @@ __all__ = (
     "DEFAULT_RUBRIC",
     "GradeAuditRecordTooLargeError",
     "GradeAuditWriteError",
+    "GradeBelowThresholdError",
     "GradeBudgetExceededError",
     "GradeConfig",
     "GradeConfigError",

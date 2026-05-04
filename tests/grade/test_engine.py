@@ -42,6 +42,7 @@ from signalforge.grade.engine import (
 )
 from signalforge.grade.errors import (
     GradeAuditWriteError,
+    GradeBelowThresholdError,
     GradeError,
     GradePromptEnvelopeBreachError,
 )
@@ -1001,3 +1002,266 @@ def test_grade_artifacts_user_supplied_sidecar_path_outside_project_tree_rejecte
             project_dir=project_dir,
             sidecar_path=outside_sidecar,
         )
+
+
+# ---------------------------------------------------------------------------
+# Threshold-fail graduation (#9 US-002 / DEC-021)
+# ---------------------------------------------------------------------------
+
+
+def _failing_scores(
+    rubric: Rubric,
+    candidate: CandidateSchema,
+    *,
+    score: float,
+    passed: bool,
+) -> dict[tuple[str, str], tuple[float | None, bool, str, str]]:
+    """Build a ``scores`` dict for :func:`expect_grade_responses` that
+    overrides every ``(artifact, criterion)`` pair with the given score
+    and passed flag.
+    """
+    pairs = _stable_artifact_pairs(candidate)
+    out: dict[tuple[str, str], tuple[float | None, bool, str, str]] = {}
+    for criterion in rubric:
+        for artifact_id, _ in pairs:
+            out[(artifact_id, criterion.id)] = (score, passed, "evidence", "reasoning")
+    return out
+
+
+def _config_with_threshold_fail(
+    *, fail_on_below_threshold: bool, min_pass_rate: float = 0.7, min_mean_score: float = 0.5
+) -> GradeConfig:
+    return GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=60,
+        min_pass_rate=min_pass_rate,
+        min_mean_score=min_mean_score,
+        fail_on_below_threshold=fail_on_below_threshold,
+    )
+
+
+def test_fail_on_below_threshold_true_passing(tmp_path: Path) -> None:
+    """Passing report + ``fail_on_below_threshold=True`` → returns cleanly.
+
+    The default ``expect_grade_responses`` scoring (score=0.5, passed=True)
+    yields ``pass_rate=1.0 >= 0.7`` and ``mean_score=0.5 >= 0.5`` which
+    passes the threshold-AND. The new raise must NOT fire.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_with_threshold_fail(fail_on_below_threshold=True),
+        client=fake,
+        project_dir=project_dir,
+    )
+    assert report.passed is True
+
+
+def test_fail_on_below_threshold_true_failing_pass_rate(tmp_path: Path) -> None:
+    """``pass_rate < min_pass_rate`` + opt-in → raises.
+
+    All pairs scored with ``passed=False`` while keeping the score at
+    0.6 (above the mean threshold) so the failing axis is unambiguously
+    the pass-rate.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(
+        fake,
+        rubric=rubric,
+        candidate=candidate,
+        scores=_failing_scores(rubric, candidate, score=0.6, passed=False),
+    )
+
+    with pytest.raises(GradeBelowThresholdError) as excinfo:
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=_config_with_threshold_fail(fail_on_below_threshold=True),
+            client=fake,
+            project_dir=project_dir,
+        )
+    err = excinfo.value
+    assert err.pass_rate == 0.0
+    assert err.mean_score == pytest.approx(0.6)
+    assert err.min_pass_rate == 0.7
+    assert err.min_mean_score == 0.5
+    assert err.aggregate_complete is True
+    # Message names the failing axis.
+    assert "pass_rate" in str(err)
+
+
+def test_fail_on_below_threshold_true_failing_mean_score(tmp_path: Path) -> None:
+    """``mean_score < min_mean_score`` + opt-in → raises.
+
+    All pairs scored with ``passed=True`` (so pass_rate=1.0 >= 0.7) but
+    score=0.1 (so mean=0.1 < 0.5) — the failing axis is unambiguously
+    mean_score.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(
+        fake,
+        rubric=rubric,
+        candidate=candidate,
+        scores=_failing_scores(rubric, candidate, score=0.1, passed=True),
+    )
+
+    with pytest.raises(GradeBelowThresholdError) as excinfo:
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=_config_with_threshold_fail(fail_on_below_threshold=True),
+            client=fake,
+            project_dir=project_dir,
+        )
+    err = excinfo.value
+    assert err.pass_rate == 1.0
+    assert err.mean_score == pytest.approx(0.1)
+    assert err.aggregate_complete is True
+    assert "mean_score" in str(err)
+
+
+def test_fail_on_below_threshold_false_failing(tmp_path: Path) -> None:
+    """Default ``fail_on_below_threshold=False`` preserves report-only
+    posture: a below-threshold report is returned, never raised.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(
+        fake,
+        rubric=rubric,
+        candidate=candidate,
+        scores=_failing_scores(rubric, candidate, score=0.1, passed=False),
+    )
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_with_threshold_fail(fail_on_below_threshold=False),
+        client=fake,
+        project_dir=project_dir,
+    )
+    assert report.passed is False
+    # Sanity: the operator's diff still surfaces the failing aggregate.
+    assert report.pass_rate == 0.0
+    assert report.mean_score == pytest.approx(0.1)
+
+
+def test_grade_below_threshold_error_carries_aggregate_complete_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Graceful-degrade run (some ``score=None``) still raises with
+    ``aggregate_complete=False`` correctly populated.
+
+    A budget-exhausted run lands every remaining pair as ``score=None,
+    passed=False``. `pass_rate` is 0.0 (no scored results pass) and
+    `mean_score` is 0.0 (no scored results) — both under threshold;
+    `aggregate_complete=False` because no result has a score.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    # Trip the budget at the first iteration so every pair degrades.
+    times = iter([0.0] + [999.0] * 200)
+    monkeypatch.setattr(engine_module.time, "monotonic", lambda: next(times))
+
+    with pytest.raises(GradeBelowThresholdError) as excinfo:
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=_config_with_threshold_fail(fail_on_below_threshold=True),
+            client=fake,
+            project_dir=project_dir,
+        )
+    err = excinfo.value
+    assert err.aggregate_complete is False
+    assert err.pass_rate == 0.0
+    assert err.mean_score == 0.0
+    assert err.min_pass_rate == 0.7
+    assert err.min_mean_score == 0.5
+
+
+def test_grade_below_threshold_writes_sidecar_before_raising(tmp_path: Path) -> None:
+    """**Load-bearing DEC-021 ordering invariant.**
+
+    Even when ``grade_artifacts`` raises ``GradeBelowThresholdError``,
+    the sidecar JSON must be on disk: the operator needs the durable
+    hand-off to diagnose *why* the run fell below threshold. Raising
+    before the sidecar write would defeat the explainable-diffs
+    commitment at the threshold-fail boundary.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(
+        fake,
+        rubric=rubric,
+        candidate=candidate,
+        scores=_failing_scores(rubric, candidate, score=0.1, passed=False),
+    )
+
+    sidecar_path = project_dir / ".signalforge" / "grade.json"
+    audit_path = project_dir / ".signalforge" / "grade.jsonl"
+
+    with pytest.raises(GradeBelowThresholdError):
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=_config_with_threshold_fail(fail_on_below_threshold=True),
+            client=fake,
+            project_dir=project_dir,
+            sidecar_path=sidecar_path,
+            audit_path=audit_path,
+        )
+
+    # Sidecar exists AND round-trips through GradingReport.
+    assert sidecar_path.exists()
+    raw = sidecar_path.read_text(encoding="utf-8").strip()
+    round_tripped = GradingReport.model_validate_json(raw)
+    assert round_tripped.passed is False
+    assert round_tripped.model_unique_id == model.unique_id
+    # The per-pair JSONL audit is also durably on disk — every pair
+    # evaluated produced a JSONL record (the partial-audit guarantee
+    # established for prune / grade in DEC-006).
+    rows = _read_jsonl(audit_path)
+    assert len(rows) == len(round_tripped.results)

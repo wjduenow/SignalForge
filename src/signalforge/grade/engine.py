@@ -92,6 +92,7 @@ from signalforge.grade.config import GradeConfig
 from signalforge.grade.errors import (
     GradeAuditRecordTooLargeError,
     GradeAuditWriteError,
+    GradeBelowThresholdError,
     GradeError,
     GradeLLMError,
     GradeOutputError,
@@ -927,6 +928,25 @@ def grade_artifacts(
             }
         ),
     )
+
+    # 8. Threshold-fail graduation (#9 US-002 / DEC-021). When the
+    # operator opts into hard-fail behaviour AND the aggregate verdict
+    # falls below threshold, raise AFTER the sidecar JSON is durably
+    # persisted (step 6 above) and AFTER the INFO log fires. Order is
+    # load-bearing: the operator gets a complete `grade.json` on disk
+    # for diagnosis even on a threshold-fail run; the JSONL audit (step
+    # 5) is also complete. Raising before the sidecar would defeat the
+    # durable hand-off; pinned by
+    # ``test_grade_below_threshold_writes_sidecar_before_raising``.
+    if resolved_config.fail_on_below_threshold and not report.passed:
+        min_pass_rate, min_mean_score = report.thresholds
+        raise GradeBelowThresholdError(
+            pass_rate=report.pass_rate,
+            mean_score=report.mean_score,
+            min_pass_rate=min_pass_rate,
+            min_mean_score=min_mean_score,
+            aggregate_complete=report.aggregate_complete,
+        )
 
     return report
 
