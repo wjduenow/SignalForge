@@ -93,12 +93,18 @@ Runtime knob flags:
   the sample-mode warning from `safety-layer.md` DEC-021) re-run
   on the override. Argparse rejects unknown values → exit 2.
 - `--min-score N` — Override `grade.min_mean_score` (closed
-  interval `[0.0, 1.0]`). Drives the diff renderer's `flagged`
-  tier. **Reporting-only** — does NOT affect the exit code by
-  itself (that knob is `grade.fail_on_below_threshold` in
-  `signalforge.yml`; see [Threshold-fail
-  behaviour](#threshold-fail-behaviour) below). Out-of-range
-  values exit 2.
+  interval `[0.0, 1.0]`). This is the **aggregate-verdict**
+  threshold: it is consumed by `GradingReport.passed` (and, when
+  `grade.fail_on_below_threshold=true`, by `GradeBelowThresholdError`).
+  **Reporting-only by default** — does NOT affect the exit code
+  by itself; the threshold-fail consequence lives in
+  `signalforge.yml` (see [Threshold-fail
+  behaviour](#threshold-fail-behaviour) below). The diff renderer's
+  `flagged` tier is driven by per-criterion `GradingResult.passed`
+  (set verbatim by the LLM judge), not by `min_mean_score`, so this
+  flag does not change the kept/dropped/flagged counts in the diff
+  table — it only changes the aggregate verdict and (opt-in) exit
+  code. Out-of-range values exit 2.
 - `--write` — Write the proposed `schema.yml` to disk under
   `<project_dir>/<model_dir>/schema.yml`. The JSON sidecar is
   still written to `<project_dir>/.signalforge/diff.json`.
@@ -281,9 +287,15 @@ sidecar write would defeat that durable hand-off (graduated in #9
 US-002 / DEC-021 from the grade layer's v0.2 reservation).
 
 `--min-score N` is reporting-only and never affects the exit code by
-itself. The two surfaces are deliberately layered: the flag drives
-the diff's `flagged` tier; the config knob drives the exit code.
-Operators can have one without the other.
+itself. The two surfaces are deliberately layered: the flag overrides
+the aggregate-verdict threshold (`grade.min_mean_score`) consumed by
+`GradingReport.passed`; the config knob (`grade.fail_on_below_threshold`)
+turns that aggregate signal into an exit-code consequence. The diff
+renderer's `flagged` tier is driven by per-criterion
+`GradingResult.passed` (set by the LLM judge) — separate from the
+aggregate threshold. Operators can have any combination of the three
+signals (per-criterion pass/fail in the diff, aggregate pass/fail in
+the report, exit-code consequence) without the others.
 
 ## Environment variables
 

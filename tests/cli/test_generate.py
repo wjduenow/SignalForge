@@ -540,7 +540,7 @@ def test_generate_mode_invalid_exits_two(
     assert "bogus" in captured.err or "invalid choice" in captured.err.lower()
 
 
-def test_generate_min_score_drives_flagged_tier(
+def test_generate_min_score_overrides_aggregate_threshold(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -548,9 +548,13 @@ def test_generate_min_score_drives_flagged_tier(
     """``--min-score`` overrides ``grade.min_mean_score`` on the
     GradeConfig that reaches ``grade_artifacts`` (DEC-004).
 
-    Reporting-only: the override changes the threshold the diff renderer
-    reads to classify the ``flagged`` tier; it does NOT flip
-    ``fail_on_below_threshold`` (which lives on signalforge.yml only).
+    Reporting-only: the override changes the **aggregate-verdict**
+    threshold consumed by ``GradingReport.passed`` (and, when
+    ``grade.fail_on_below_threshold=true`` in ``signalforge.yml``,
+    by ``GradeBelowThresholdError``). It does NOT flip
+    ``fail_on_below_threshold`` itself, and it does NOT drive the diff
+    renderer's ``flagged`` tier — that's a per-criterion signal set by
+    the LLM judge, separate from the aggregate threshold.
     """
     project_dir = make_fake_dbt_project(tmp_path)
     monkeypatch.chdir(project_dir)

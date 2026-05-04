@@ -516,6 +516,15 @@ External plan-review pass against `plans/super/9-cli-entrypoint.md` surfaced sev
 | **DEC-026** | DEC-014 progress lines hardcoded duration hints ("30s", "few minutes") | Drop the predictions; replace with live values (`(model claude-sonnet-4-6)`, `(32 calls)`) plus a paired post-hoc `done in 4.2s` line at stage exit. Real measurement after the fact, not stale estimate | n/a — pure UX call |
 | **DEC-027** | DEC-001 `--project-dir` interaction with walk-up under-specified | When `--project-dir <PATH>` is supplied the CLI does NOT walk up from `<PATH>` — the override is an absolute assertion and exits 1 if `<PATH>/dbt_project.yml` is missing. Walk-up is only the unflagged default. Two new tests pin both arms | n/a — explicit choice |
 
+### Session 3 — 2026-05-04 (Quality Gate corrections — US-011)
+
+QG passes 1–3 surfaced two genuine defects across the implementation. Both fixed in standalone commits with regression tests; no follow-up work needed.
+
+| ID | Pass | Issue | Resolution |
+|---|---|---|---|
+| **QG-001** | Pass 1 | `--profiles-dir` was routed through `canonicalise_user_path`, which contains paths inside `project_dir`. The dbt convention places `profiles.yml` at `~/.dbt/` (intentionally outside the project tree), so every realistic `--profiles-dir` value would have exited 1 with `CliPathError`. The existing test masked the bug by placing the profiles dir inside the project | Bypass the project-dir containment gate for `--profiles-dir`; apply `expanduser` + `resolve(strict=False)` for symlink-loop safety; the warehouse loader retains its own existence/shape gate on the resolved file. New test `test_generate_profiles_dir_accepts_out_of_tree_path` pins the corrected behaviour |
+| **QG-002** | Pass 3 | DEC-004 / DEC-002 / US-006 all claimed `--min-score` "drives the diff renderer's `flagged` tier", but the code only mutates `grade_config.min_mean_score`, an **aggregate-verdict** threshold consumed by `GradingReport.passed` and (when `fail_on_below_threshold=true`) by `GradeBelowThresholdError`. The diff renderer's `flagged` tier flips on per-criterion `GradingResult.passed`, set verbatim by the LLM judge — never reads `min_mean_score`. The flag works as implemented; the documented contract was wrong | DEC-004 corrected: `--min-score` is a reporting-only override of the aggregate-verdict threshold, not a driver of the per-criterion `flagged` classification. Help text, module docstring, ops doc (two locations), test name (`test_generate_min_score_overrides_aggregate_threshold`), and test docstring updated to match the actual code semantics. Adding a per-criterion threshold override would be a v0.2 feature, not a doc fix |
+
 ### Implications synthesised across decisions
 
 - **Public-surface plumbing in scope.** DEC-013 + DEC-015 add 9 public symbols (8 exception re-exports + `render_to_text`). One small story up front so the CLI's imports work cleanly.

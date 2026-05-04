@@ -8,8 +8,12 @@ US-005 shipped the core orchestration. US-006 layered five runtime-knob
 flags onto that orchestration: ``--mode`` (overrides safety policy via
 :meth:`signalforge.safety.SafetyPolicy.with_mode` so validators re-run —
 DEC-002), ``--min-score`` (reporting-only override of
-:attr:`signalforge.grade.GradeConfig.min_mean_score`; never affects exit
-code by itself per DEC-004), ``--write`` (writes the proposed
+:attr:`signalforge.grade.GradeConfig.min_mean_score`, the aggregate-verdict
+threshold consumed by ``GradingReport.passed`` and (when
+``grade.fail_on_below_threshold=true``) ``GradeBelowThresholdError``; never
+affects exit code by itself per DEC-004 — the diff renderer's
+``flagged`` tier is driven by per-criterion ``GradingResult.passed``,
+not the aggregate threshold), ``--write`` (writes the proposed
 ``schema.yml`` to disk), ``--dry-run`` (full pipeline but writes
 nothing — overrides DEC-002's default-on sidecar per DEC-010), and
 ``--format`` (selects :attr:`signalforge.diff.DiffConfig.render_kind` —
@@ -163,10 +167,11 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
         type=float,
         default=None,
         help=(
-            "Override grade.min_mean_score (closed [0.0, 1.0]). Drives "
-            "the diff renderer's flagged tier; reporting-only — does "
-            "NOT enable fail-on-below-threshold (that knob is "
-            "grade.fail_on_below_threshold in signalforge.yml)."
+            "Override grade.min_mean_score (closed [0.0, 1.0]). Sets the "
+            "aggregate-verdict threshold consumed by GradingReport.passed "
+            "and (when grade.fail_on_below_threshold=true in signalforge.yml) "
+            "by GradeBelowThresholdError. Reporting-only by default — does "
+            "NOT enable fail-on-below-threshold by itself."
         ),
     )
     # US-006 / DEC-002 / DEC-010 — write/dry-run mutex. Argparse rejects
@@ -373,8 +378,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 f"--min-score {min_score_override!r} is outside the closed interval [0.0, 1.0]",
                 remediation=(
                     "Pass a float between 0.0 and 1.0 inclusive. The flag "
-                    "overrides grade.min_mean_score and drives the diff "
-                    "renderer's `flagged` tier."
+                    "overrides grade.min_mean_score, the aggregate-verdict "
+                    "threshold for GradingReport.passed."
                 ),
             )
 
