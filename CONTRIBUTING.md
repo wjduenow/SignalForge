@@ -44,6 +44,19 @@ File issues at https://github.com/wjduenow/SignalForge/issues. v0.1 is design-in
 
 `bark`, `/super-plan`, and `bd` are internal tooling, not contributor expectations. Tracked under #13.
 
+## CLI subprocess smoke
+
+`tests/cli/test_subprocess_smoke.py` runs `signalforge --version` via
+`subprocess.run` to catch console-script wiring drift that the
+in-process `main(argv)` tests cannot. It is gated behind
+`@pytest.mark.cli_subprocess` (filtered out by default `addopts`).
+Maintainers should run it once before declaring a CLI PR ready
+(mirrors the `bigquery` integration-test gate):
+
+```bash
+pytest -m cli_subprocess
+```
+
 ## BigQuery integration tests
 
 A small set of tests under `tests/warehouse/test_bigquery_integration.py`
