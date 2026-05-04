@@ -82,7 +82,7 @@ Path / project-discovery flags:
   against the resolved project_dir.
 - `--profiles-dir PATH` — Override the default `profiles.yml`
   search location. Mirrors dbt-core's `--profiles-dir` flag.
-  Sets `DBT_PROFILES_DIR` for the duration of the run.
+  Sets `DBT_PROFILES_DIR` in the current process environment.
 
 Runtime knob flags:
 
@@ -126,9 +126,9 @@ Observability flags:
 - `--verbose` — Raise the log level to `DEBUG` and surface
   panic-path tracebacks for unexpected errors. Mutually exclusive
   with `--quiet`.
-- `--no-color` — Strip ANSI colour codes from stdout. Equivalent
-  to setting `NO_COLOR=1` in the environment for the duration of
-  the run.
+- `--no-color` — Strip ANSI colour codes from stdout. Sets
+  `NO_COLOR=1` in the current process environment so the AnsiRenderer's
+  existing precedence chain emits plain text.
 
 The flag → config precedence chain is uniform across knobs: **CLI
 flag > `signalforge.yml` block > library default**. Library defaults
@@ -313,9 +313,9 @@ The CLI honours three environment variables:
   belt-and-braces so an environmental override doesn't defeat the
   operator's explicit opt-out.
 - **`DBT_PROFILES_DIR`** — read by the warehouse profile loader. The
-  `--profiles-dir <PATH>` flag sets this for the duration of the run
-  (DEC-007); a pre-existing value is honoured when the flag is
-  omitted.
+  `--profiles-dir <PATH>` flag sets this in the current process
+  environment (DEC-007); a pre-existing value is honoured when the
+  flag is omitted.
 
 There is no env-var override for `--project-dir`, `--mode`, or
 `--min-score`. Project-discovery is the walk-up convention; the
