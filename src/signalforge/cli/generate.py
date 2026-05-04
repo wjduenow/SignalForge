@@ -138,8 +138,8 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
         default=None,
         help=(
             "Override the default profiles.yml search location. Mirrors "
-            "dbt-core's --profiles-dir flag. Sets DBT_PROFILES_DIR for "
-            "the duration of the run."
+            "dbt-core's --profiles-dir flag. Sets DBT_PROFILES_DIR in "
+            "the current process environment."
         ),
     )
     # US-006 / DEC-002 — safety mode override. Argparse-level choices
@@ -233,8 +233,9 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
         dest="no_color",
         action="store_true",
         help=(
-            "Strip ANSI colour codes from stdout. Equivalent to setting "
-            "NO_COLOR=1 in the environment for the duration of the run."
+            "Strip ANSI colour codes from stdout. Sets NO_COLOR=1 in the "
+            "current process environment so the AnsiRenderer's existing "
+            "precedence chain emits plain text."
         ),
     )
     parser.set_defaults(func=cmd_generate)
