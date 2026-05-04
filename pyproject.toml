@@ -20,6 +20,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["ruff", "pyright", "pytest", "dbt-core>=1.8,<2", "types-PyYAML>=6,<7"]
 
+[project.scripts]
+signalforge = "signalforge.cli:main"
+
 [project.urls]
 Homepage = "https://github.com/wjduenow/SignalForge"
 Issues = "https://github.com/wjduenow/SignalForge/issues"
