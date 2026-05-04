@@ -5,7 +5,7 @@
 - **Ticket:** [#9](https://github.com/wjduenow/SignalForge/issues/9)
 - **Branch:** `feature/9-cli-entrypoint` (off `dev`)
 - **Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/9-cli-entrypoint`
-- **Phase:** published (PR #26 draft; awaiting approval)
+- **Phase:** devolved (PR #26 ready-for-review; epic `bd_1-scaffolding-9vj` + 12 stories live in beads)
 - **PR:** [#26](https://github.com/wjduenow/SignalForge/pull/26) (draft)
 - **Sessions:** 1 (started 2026-05-03)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
@@ -1053,22 +1053,29 @@ US-002 (grade graduation)  ────────┤
 
 ## Beads Manifest
 
-_(pending Phase 7 — devolve)_
+Phase 7 devolve completed 2026-05-04 (session 3).
 
----
+**Worktree:** `/home/wesd/dev/worktrees/SignalForge/feature/9-cli-entrypoint`
+**Branch:** `feature/9-cli-entrypoint`
+**PR:** [#26](https://github.com/wjduenow/SignalForge/pull/26) (ready-for-review)
 
-## Refinement Log
+**Epic:** `bd_1-scaffolding-9vj` — `9: CLI entrypoint`
 
-_(pending Phase 3)_
+| Story | Bead ID | Priority | Depends on |
+|---|---|---|---|
+| US-001 — Public-surface plumbing | `bd_1-scaffolding-9vj.1` | P2 | (none) |
+| US-002 — Grade-layer graduation: `GradeBelowThresholdError` | `bd_1-scaffolding-9vj.2` | P2 | (none) |
+| US-003 — CLI scaffold + `version` + logger gate ext | `bd_1-scaffolding-9vj.3` | P2 | US-001 |
+| US-004 — `cli/lint.py` config-only validator | `bd_1-scaffolding-9vj.4` | P2 | US-003 |
+| US-005 — `cli/generate.py` core orchestration | `bd_1-scaffolding-9vj.5` | P2 | US-001, US-002, US-003 |
+| US-006 — Generate flags: `--mode`/`--min-score`/`--write`/`--dry-run`/`--format` | `bd_1-scaffolding-9vj.6` | P2 | US-005 |
+| US-007 — Generate observability: `--quiet`/`--verbose`/`--no-color`/progress | `bd_1-scaffolding-9vj.7` | P2 | US-005, US-006 |
+| US-008 — Exit-code AST scan + parametrized tests | `bd_1-scaffolding-9vj.8` | P2 | US-001, US-005 |
+| US-009 — Subprocess-gated smoke test | `bd_1-scaffolding-9vj.9` | P2 | US-003 |
+| US-010 — Documentation: `cli-ops.md` + README + `cli-layer.md` | `bd_1-scaffolding-9vj.10` | P2 | US-001..US-009 |
+| US-011 — Quality Gate (code reviewer ×4 + CodeRabbit + validation) | `bd_1-scaffolding-9vj.11` | P2 | US-001..US-010 |
+| US-012 — Patterns & Memory | `bd_1-scaffolding-9vj.12` | P3 | US-011 |
 
----
+**Initial ready set (no blockers):** US-001, US-002 — both can start in parallel. US-003 unblocks once US-001 lands; US-005 unblocks once US-001/US-002/US-003 all land; the rest cascade per the dependency graph.
 
-## Detailed Breakdown
-
-_(pending Phase 4)_
-
----
-
-## Beads Manifest
-
-_(pending Phase 7)_
+**Verify with:** `bd ready` from any worktree on this repo (bd is worktree-aware).
