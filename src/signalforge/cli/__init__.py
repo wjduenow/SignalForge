@@ -19,6 +19,7 @@ import logging
 import sys
 
 import signalforge
+from signalforge.cli import generate as generate_cmd
 from signalforge.cli import version as version_cmd
 from signalforge.cli._helpers import (
     canonicalise_user_path,
@@ -70,6 +71,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="<command>",
     )
     version_cmd.add_parser(subparsers)
+    generate_cmd.add_parser(subparsers)
     return parser
 
 
