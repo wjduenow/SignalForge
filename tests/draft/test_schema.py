@@ -443,7 +443,17 @@ def test_draft_schema_wrapper_propagates_safety_audit_write_error(
 
 
 def test_public_api_imports_match_dec_020() -> None:
-    """Both subpackage ``__all__`` tuples match the canonical DEC-020 spec."""
+    """Both subpackage ``__all__`` tuples match the canonical surface.
+
+    Originally pinned the DEC-020 surface from #5; expanded by US-001
+    of #9 (DEC-013) to add the eight tier-mappable :class:`DraftError`
+    subclasses to ``signalforge.draft.__all__`` and the one
+    :class:`LLMResponseFormatError` re-export to
+    ``signalforge.llm.__all__``. Per-subpackage public-API drift is
+    pinned by :mod:`tests.draft.test_public_api` and
+    :mod:`tests.llm.test_public_api`; this test is the cross-cutting
+    smoke check that retains the original DEC-020 framing.
+    """
     import signalforge.draft as draft_pkg
     import signalforge.llm as llm_pkg
 
@@ -452,10 +462,18 @@ def test_public_api_imports_match_dec_020() -> None:
         "CandidateSchema",
         "CandidateTest",
         "DraftConfig",
+        "DraftConfigInvalidError",
+        "DraftConfigNotFoundError",
         "DraftError",
         "DraftOutcome",
+        "LLMOutputAnchorContractError",
         "LLMOutputError",
+        "LLMOutputJSONError",
+        "LLMOutputValidationError",
+        "LLMResponseAuditRecordTooLargeError",
+        "LLMResponseAuditWriteError",
         "LLMResponseEvent",
+        "PromptEnvelopeBreachError",
         "draft_from_request",
         "draft_schema",
         "load_draft_config",
@@ -468,6 +486,7 @@ def test_public_api_imports_match_dec_020() -> None:
         "LLMError",
         "LLMHelperError",
         "LLMRateLimitError",
+        "LLMResponseFormatError",
         "LLMResult",
         "LLMServerError",
         "call_anthropic",

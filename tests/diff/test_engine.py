@@ -692,12 +692,12 @@ def test_existing_schema_supplied_appears_in_report(project_dir: Path) -> None:
 
 
 def test_unused_helpers_smoke() -> None:
-    """Sanity check: the engine module exposes only ``render_diff``
-    publicly per DEC-001 of #8.
+    """Sanity check: the engine module exposes ``render_diff`` plus
+    the ``render_to_text`` in-process helper added in US-001 of #9.
     """
     from signalforge.diff import engine
 
-    assert engine.__all__ == ("render_diff",)
+    assert engine.__all__ == ("render_diff", "render_to_text")
     # The os module import isn't part of the public surface; this test
     # only confirms the public surface stayed minimal.
     assert "os" not in engine.__all__

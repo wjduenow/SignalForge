@@ -1003,10 +1003,48 @@ def render_diff(
     return report
 
 
+def render_to_text(
+    report: DiffReport,
+    *,
+    config: DiffConfig | None = None,
+    project_dir: Path | None = None,
+) -> str:
+    """Render an existing :class:`DiffReport` to text in-process.
+
+    Returns the same bytes :func:`render_diff` would have written to
+    ``output_path``. Internally calls :func:`_build_renderer` (the
+    private dispatcher consumed by :func:`render_diff`) with
+    ``config`` (or :class:`DiffConfig` defaults when ``config is None``)
+    and ``project_dir``, then invokes ``renderer.render(report)``.
+
+    DEC-022 of ``plans/super/9-cli-entrypoint.md``: :class:`DiffReport`
+    does NOT carry the :class:`DiffConfig` used by the original
+    :func:`render_diff` call (verified against
+    :file:`src/signalforge/diff/models.py` — the model has
+    ``unified_diff``, hashes, counts, but no ``config_used`` field), so
+    the caller must supply ``config`` explicitly OR accept
+    :class:`DiffConfig` defaults; this helper does NOT reach into the
+    report. The CLI (#9) is the v0.1 consumer and threads its own
+    resolved :class:`DiffConfig` through.
+
+    The :class:`MarkdownRenderer` requires ``project_dir``; when
+    ``config.render_kind == "markdown"`` and ``project_dir is None`` the
+    helper falls through to the renderer's existing handling (passes
+    ``None`` through; the renderer already tolerates it).
+
+    Note: this function is a pure in-process helper — it does NOT touch
+    disk. The fail-closed write seam stays scoped to
+    :func:`_write_rendered_text` inside :func:`render_diff`.
+    """
+    resolved = config if config is not None else DiffConfig()
+    renderer = _build_renderer(resolved, project_dir=project_dir)
+    return renderer.render(report)
+
+
 # Suppress pyright's "unused import" warnings for symbols that exist
 # purely as part of the type-checked surface — they're documented in
 # the docstrings and consumed by the test layer.
 _ = (CandidateColumn, CandidateTest, DiffEntry)
 
 
-__all__ = ("render_diff",)
+__all__ = ("render_diff", "render_to_text")
