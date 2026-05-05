@@ -102,10 +102,11 @@ pip install -e ".[dev]" && ruff check . && ruff format --check . && pyright && p
 ```
 
 To skip the coverage gate temporarily (e.g., during a focused TDD loop),
-override addopts:
+use `--no-cov`:
 
 ```bash
-pytest -o "addopts=-ra --strict-markers --import-mode=importlib -m 'not bigquery and not anthropic and not cli_subprocess'"
+pytest --no-cov
 ```
 
-This drops the `--cov*` flags while preserving markers and strict mode.
+This disables all coverage instrumentation including the `--cov-fail-under`
+gate while preserving markers, strict mode, and all other `addopts` flags.

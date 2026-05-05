@@ -256,7 +256,7 @@ The default `pytest` invocation skips warehouse-touching tests via
 `addopts = -m 'not bigquery'` (DEC-021). To run them locally:
 
 ```bash
-SF_RUN_BQ=1 pytest -m bigquery
+SF_RUN_BQ=1 pytest -m bigquery --no-cov
 ```
 
 The `SF_RUN_BQ=1` env-var gate lives on top of the marker so even an

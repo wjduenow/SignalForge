@@ -421,7 +421,7 @@ The CLI ships one belt-and-braces test gated behind the
 `cli_subprocess` pytest marker (DEC-018):
 
 ```bash
-pytest -m cli_subprocess
+pytest -m cli_subprocess --no-cov
 ```
 
 The marker is registered in `pyproject.toml` and
@@ -429,7 +429,7 @@ The marker is registered in `pyproject.toml` and
 and not cli_subprocess'`). Mirrors the `bigquery` and `anthropic`
 integration-test gates from
 [`docs/warehouse-adapter-ops.md`](warehouse-adapter-ops.md). Maintainers
-should run `pytest -m cli_subprocess` once before declaring a CLI PR
+should run `pytest -m cli_subprocess --no-cov` once before declaring a CLI PR
 ready — the in-process `main(argv)` tests that run on every default
 suite cannot catch a typo in `pyproject.toml`'s `[project.scripts]`
 entry or a console-script wrapper regression after a wheel rebuild.

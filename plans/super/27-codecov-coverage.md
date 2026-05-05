@@ -271,7 +271,7 @@ Use `v5` major (current stable; matches clauditor; action's own docs recommend v
 
 **Decision:** Append to existing `addopts` (NOT replace): `--cov=signalforge --cov-report=xml --cov-report=term-missing --cov-fail-under=<N>` where `<N>` is set per DEC-001. Result:
 
-```
+```toml
 addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery and not anthropic and not cli_subprocess' --cov=signalforge --cov-report=xml --cov-report=term-missing --cov-fail-under=<N>"
 ```
 
@@ -311,7 +311,7 @@ No TDD sections — this ticket is pure CI/config plumbing; there's no business 
 
 **Acceptance criteria:**
 - `pyproject.toml` line 21 ends with `... "types-PyYAML>=6,<7", "pytest-cov>=5.0"]` (preserve classic `[project.optional-dependencies]` shape; do NOT migrate to `[dependency-groups]`).
-- `pyproject.toml` `addopts` (line 57) appends ` --cov=signalforge --cov-report=xml --cov-report=term-missing --cov-fail-under=<N>` where `<N>` is `floor(min(run_1_pct, run_2_pct, 80))` from the baseline procedure below.
+- `pyproject.toml` `addopts` (line 57) appends `--cov=signalforge --cov-report=xml --cov-report=term-missing --cov-fail-under=<N>` where `<N>` is `floor(min(run_1_pct, run_2_pct, 80))` from the baseline procedure below.
 - Two-run baseline procedure executed by the implementer:
   1. From the worktree: `pip install -e ".[dev]"` (pulls in `pytest-cov`).
   2. `pytest --cov=signalforge --cov-report=term` — record total coverage % as `run_1_pct`.
