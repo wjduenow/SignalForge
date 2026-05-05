@@ -20,6 +20,8 @@ Validate before pushing:
 ruff check . && ruff format --check . && pyright && pytest
 ```
 
+**Coverage:** see [`docs/codecov-ops.md`](docs/codecov-ops.md) for Codecov setup, badge interpretation, and threshold bumps.
+
 ## Test markers
 
 Tests are tagged with `@pytest.mark.{unit, integration, error}` (declared in
