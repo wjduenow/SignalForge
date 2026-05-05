@@ -40,6 +40,28 @@ Saves runner minutes and surfaces the latest result faster.
 
 DEC-003: lock to one Python version (currently `3.11`) for v0.1 CI. Widen the matrix when the package has real users running on multiple versions.
 
+## Codecov coverage upload
+
+Established by issue #27 (DEC-006, DEC-007). The upload step follows the same SHA-pinning rule as other third-party actions:
+
+```yaml
+- name: Upload coverage to Codecov
+  uses: codecov/codecov-action@<40-char-sha>  # v5.X.Y
+  with:
+    files: coverage.xml
+    fail_ci_if_error: false
+  env:
+    CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+```
+
+Three load-bearing details:
+
+1. **SHA-pin the action** — same `gh api repos/codecov/codecov-action/git/refs/tags/v5` lookup as other actions. Dereference annotated tags. The trailing `# v5.X.Y` comment is for reviewers; the SHA is what executes.
+2. **`fail_ci_if_error: false`** — required for fork-safe CI. Fork PRs via `pull_request` do not receive `secrets.CODECOV_TOKEN` (GitHub strips repository secrets from fork-originated workflows). The upload silently fails; `fail_ci_if_error: false` prevents CI failure on the missing token. This is expected behaviour, not a bug.
+3. **No `if:` gate** — single-Python CI (DEC-003) means no matrix, so no `if: matrix.python-version == '3.13'`-style gate is needed. The upload step runs unconditionally after the pytest step.
+
+The step must land AFTER the pytest step. `coverage.xml` is produced by `--cov-report=xml` in `pyproject.toml` `addopts` — no workflow-level `--cov` flag is needed.
+
 ## Reference
 
-`plans/super/1-project-scaffolding.md` — DEC-003, DEC-009. `.github/workflows/ci.yml` — current implementation.
+`plans/super/1-project-scaffolding.md` — DEC-003, DEC-009. `plans/super/27-codecov-coverage.md` — DEC-006, DEC-007. `.github/workflows/ci.yml` — current implementation.
