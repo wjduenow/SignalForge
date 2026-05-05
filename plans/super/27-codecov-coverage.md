@@ -5,7 +5,7 @@
 - **Ticket:** [#27](https://github.com/wjduenow/SignalForge/issues/27) — `enhancement`
 - **Branch:** `feature/27-codecov-coverage` (off `dev`)
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/27-codecov-coverage`
-- **Phase:** published (awaiting approval) — discovery + architecture + refinement + detailing complete; plan doc at PR [#28](https://github.com/wjduenow/SignalForge/pull/28)
+- **Phase:** devolved — approved 2026-05-04; beads epic + 6 tasks created with dependencies
 - **PR:** [#28](https://github.com/wjduenow/SignalForge/pull/28) (draft)
 - **Sessions:** 1 (started 2026-05-04)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
@@ -452,13 +452,21 @@ No TDD sections — this ticket is pure CI/config plumbing; there's no business 
 
 | Run | Command | Coverage % |
 |-----|---------|------------|
-| 1   | `pytest --cov=signalforge --cov-report=term` | _TBD_ |
-| 2   | `pytest --cov=signalforge --cov-report=term` | _TBD_ |
-| Picked `<N>` | `floor(min(run_1, run_2, 80))` | _TBD_ |
+| 1   | `pytest --cov=signalforge --cov-report=term` | 95% |
+| 2   | `pytest --cov=signalforge --cov-report=term` | 95% |
+| Picked `<N>` | `floor(min(95, 95, 80))` | **80** |
 
 ---
 
 ## Beads manifest
 
-(To be filled at Phase 7 — devolve.)
+- **Epic:** `SignalForge-8qq` — 27: Codecov coverage reporting
+- **Tasks:**
+  - `SignalForge-8qq.1` — US-001: pyproject.toml: add pytest-cov, cov flags, measure baseline
+  - `SignalForge-8qq.2` — US-002: ci.yml: add SHA-pinned codecov/codecov-action upload step (depends on .1)
+  - `SignalForge-8qq.3` — US-003: README.md: Codecov badge at top, branch dev
+  - `SignalForge-8qq.4` — US-004: docs/codecov-ops.md + CONTRIBUTING.md pointer
+  - `SignalForge-8qq.5` — US-005: Quality Gate: code review x4 + canonical validation (depends on .1-.4)
+  - `SignalForge-8qq.6` — US-006: Patterns & Memory: update ci-supply-chain.md + testing-signal.md (depends on .5)
+- **Devolved:** 2026-05-04
 

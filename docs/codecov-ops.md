@@ -71,6 +71,16 @@ script spawning) are not instrumented in the coverage report. v0.2 may add
 a gated coverage-append job that merges marker-gated runs into the main
 report.
 
+Because `--cov-fail-under` is in `addopts`, marker-specific runs (e.g.,
+`pytest -m cli_subprocess` or `pytest -m bigquery`) will fail the coverage
+gate — only a small fraction of the codebase is exercised. Use `--no-cov`
+to disable coverage instrumentation for these runs:
+
+```bash
+pytest -m cli_subprocess --no-cov
+SF_RUN_BQ=1 pytest -m bigquery --no-cov
+```
+
 ## Fork-PR upload failures
 
 Fork PRs triggered via `pull_request` do not receive `secrets.CODECOV_TOKEN`
