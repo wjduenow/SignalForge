@@ -40,6 +40,36 @@ Pin the tool version in dev-deps for the *latest* schema only — older versions
 
 If a parser uses `extra="ignore"` in production (forward-compat), pair it with a test that constructs a one-off `StrictModel(BaseModel)` with `extra="forbid"` and validates a known-current fixture against it. Adding a key to the fixture without updating the model breaks the test loudly. Reference: `tests/manifest/test_models.py::test_drift_detector_extra_forbid`.
 
+## Coverage measurement
+
+Established by issue #27 (DEC-001, DEC-004, DEC-009). Coverage instrumentation runs both locally and in CI via `--cov*` flags in `pyproject.toml` `addopts`.
+
+### `--cov-fail-under` runs locally too
+
+The `--cov-fail-under=<N>` gate lives in `addopts`, so every local `pytest` invocation enforces the coverage floor. This is deliberate — the canonical validation command (`ruff check . && ruff format --check . && pyright && pytest`) catches coverage regressions before push, not just in CI.
+
+### Two-run baseline procedure (DEC-001)
+
+When bumping the threshold:
+
+1. `pytest --cov=signalforge --cov-report=term` — record total %.
+2. Repeat — record second total %.
+3. If `|run_1 - run_2| > 1`, investigate (likely a non-deterministic test).
+4. Pick `floor(min(run_1, run_2, 80))`. The cap of 80 matches clauditor's precedent and prevents aspirational thresholds that cause churn.
+
+Revisit when actual coverage exceeds `<N> + 5` for two consecutive `dev` builds.
+
+### Known gap: excluded markers (DEC-004)
+
+Coverage measures only the default pytest set. Tests gated behind `bigquery`, `anthropic`, and `cli_subprocess` markers are excluded by addopts (`-m 'not bigquery and not anthropic and not cli_subprocess'`). Those code paths are exercised via fakes in unit tests; the real-network paths are not instrumented.
+
+Because `--cov-fail-under` is in `addopts`, marker-specific runs (`pytest -m cli_subprocess`, `pytest -m bigquery`) will fail the coverage gate. Use `--no-cov` for these runs:
+
+```bash
+pytest -m cli_subprocess --no-cov
+SF_RUN_BQ=1 pytest -m bigquery --no-cov
+```
+
 ## Reference
 
-`plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh` — current implementations.
+`plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `plans/super/27-codecov-coverage.md` — DEC-001, DEC-004, DEC-009. `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh` — current implementations.

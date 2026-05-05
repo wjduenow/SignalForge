@@ -174,7 +174,7 @@ To reproduce:
 
 ```bash
 gcloud auth application-default login
-SF_RUN_BQ=1 pytest -m bigquery tests/warehouse/test_sample_cost_probe.py -s
+SF_RUN_BQ=1 pytest -m bigquery tests/warehouse/test_sample_cost_probe.py -s --no-cov
 ```
 
 The probe currently fails (rather than `xfail`s) on the
@@ -273,7 +273,7 @@ filter; opt-in requires both the marker and an `SF_RUN_BQ=1` env var.
 
 ```bash
 gcloud auth application-default login
-SF_RUN_BQ=1 pytest -m bigquery
+SF_RUN_BQ=1 pytest -m bigquery --no-cov
 ```
 
 The prune-layer integration test (`tests/prune/test_integration_bigquery.py`)

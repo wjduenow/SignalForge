@@ -325,7 +325,7 @@ jq -r '.prompt_version' .signalforge/llm_responses.jsonl | sort -u
 ## Real-API smoke test
 
 ```bash
-ANTHROPIC_API_KEY=sk-... pytest -m anthropic
+ANTHROPIC_API_KEY=sk-... pytest -m anthropic --no-cov
 ```
 
 The `anthropic` marker is excluded from the default CI run via

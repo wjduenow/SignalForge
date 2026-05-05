@@ -20,6 +20,8 @@ Validate before pushing:
 ruff check . && ruff format --check . && pyright && pytest
 ```
 
+**Coverage:** see [`docs/codecov-ops.md`](docs/codecov-ops.md) for Codecov setup, badge interpretation, and threshold bumps.
+
 ## Test markers
 
 Tests are tagged with `@pytest.mark.{unit, integration, error}` (declared in
@@ -54,7 +56,7 @@ Maintainers should run it once before declaring a CLI PR ready
 (mirrors the `bigquery` integration-test gate):
 
 ```bash
-pytest -m cli_subprocess
+pytest -m cli_subprocess --no-cov
 ```
 
 ## BigQuery integration tests
@@ -74,7 +76,7 @@ SF_RUN_BQ)`.
 
 2. Run with the gate:
    ```bash
-   SF_RUN_BQ=1 pytest -m bigquery
+   SF_RUN_BQ=1 pytest -m bigquery --no-cov
    ```
 
 The tests query `bigquery-public-data.samples.shakespeare` (164K rows,

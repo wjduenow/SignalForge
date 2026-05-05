@@ -1,3 +1,5 @@
+[![codecov](https://codecov.io/gh/wjduenow/SignalForge/branch/dev/graph/badge.svg)](https://codecov.io/gh/wjduenow/SignalForge)
+
 # SignalForge
 
 > LLM-drafted dbt schema.yml, tests, and docs — pruned against real warehouse data so only signal-bearing tests ship.
