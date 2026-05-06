@@ -139,9 +139,9 @@ The blocker surface collapses to four genuinely independent items; the rest are 
 
 - **DEC-001 — Compiled-SQL determinism via seeded run_id (R1=B).** `run_id = blake2b-12(model.unique_id + signalforge_version + sample_size + canonical_json(partition_filter))` (16-hex output). Temp-table name = `_sf_sample_<run_id>`. Same input → byte-equal compiled SQL across runs; `compiled_sql_hash` invariant preserved unchanged. Rationale: simpler than snapshot normalisation; sessions provide namespace isolation so two concurrent runs on the same model don't collide on the temp-table identifier.
 
-- **DEC-002 — BigQuery session lifecycle is adapter state (Option X internal).** `BigQueryAdapter` carries `self._active_session_id: str | None` for the duration of the prune run. `materialise_sample` mints a fresh `uuid4().hex` session_id, runs `CREATE TEMP TABLE` inside it, stores the id, returns the temp `TableRef`. Subsequent `run_test_sql` calls use the same session_id via `connection_properties=[ConnectionProperty(key="session_id", value=...)]` so they can read `_SESSION._sf_sample_<run_id>`. The session expires after `ttl_seconds` (1h default — BigQuery-side cleanup); `BigQueryAdapter.__exit__` does NOT explicitly close in v0.2 (graduated to v0.3 if real-world incident demands it). The ABC stays clean: no `session_id` kwarg on `run_test_sql`, no BQ-isms in `signalforge.prune`.
+- **DEC-002 — BigQuery session lifecycle is adapter state (Option X internal).** `BigQueryAdapter` carries `self._active_session_id: str | None` for the duration of the prune run. `materialise_sample` mints a fresh `uuid4().hex` session_id, runs `CREATE TEMP TABLE` inside it, stores the id, returns the temp `TableRef`. Subsequent `run_test_sql` calls use the same session_id via `connection_properties=[ConnectionProperty(key="session_id", value=...)]` so they can read `_SESSION._sf_sample_<run_id>`. **`BigQueryAdapter.__exit__` belt-and-braces closes the session explicitly via `CALL BQ.ABORT_SESSION()`** (DEC-013) — happy path runs, normal-error paths, and KeyboardInterrupt all fire `__exit__`. Session TTL (1h default) is the durable fallback for hard process death (SIGKILL, OOM) where `__exit__` cannot fire. The ABC stays clean: no `session_id` kwarg on `run_test_sql`, no BQ-isms in `signalforge.prune`.
 
-- **DEC-003 — Session-id never leaves the adapter.** Logs emit `session_id_hash = blake2b-4(session_id).hexdigest()` (8 hex chars). Raw session_id stays in `BigQueryAdapter._active_session_id` and the BQ `QueryJobConfig.connection_properties`; no audit JSONL field, no error message, no `__repr__` exposure. Mirrors `safety-layer.md` DEC-010 column-name redaction.
+- **DEC-003 — Session-id redacted on the happy path; surfaced raw only in the cleanup-failure WARNING.** Logs emit `session_id_hash = blake2b-4(session_id).hexdigest()` (8 hex chars) for every normal-operation event. Raw session_id stays in `BigQueryAdapter._active_session_id`, in the BQ `QueryJobConfig.connection_properties`, and in the **DEC-014 cleanup-failure WARNING** (the one narrow user-facing exception). Never in audit JSONL, never in error messages on the happy path, never in `__repr__` (DEC-022 of #3 unchanged). Mirrors `safety-layer.md` DEC-010 column-name redaction with one documented break.
 
 - **DEC-004 — ABC method signature: `materialise_sample(table, n, *, partition_filter=None, ttl_seconds=3600) -> TableRef`** (R2=A). Optional `partition_filter` mirrors `sample_rows` parity; size-check enforcement lives in the BigQuery override (DEC-024 of #3).
 
@@ -160,6 +160,28 @@ The blocker surface collapses to four genuinely independent items; the rest are 
 - **DEC-011 — `signalforge generate` exposes `--scope {sample,full}` and `--sample-strategy {oneshot,materialised}` flags** (revised 2026-05-05). Reverses the prior "config-only" position. Operators flipping between thorough (`--scope full`) and cheap (`--sample-strategy materialised`, the default) modes per-run no longer need to edit `signalforge.yml`. Config file remains the durable default; flags are per-invocation overrides; both flags optional and independent (set one, the other, both, or neither).
 
 - **DEC-012 — CLI override mechanism re-validates the config.** `cmd_generate` applies overrides via `PruneConfig.model_validate({**config.model_dump(), "scope": override_or_existing, "sample_strategy": override_or_existing})` so every Pydantic validator re-runs (typos still fail loud; field validators on the new field re-fire). Mirrors `safety-layer.md` DEC-018 (`SafetyPolicy.with_mode`) and the `DiffConfig.render_kind` graduation in #9 — the canonical project pattern for "CLI flag overrides config-file value." Don't use `model_copy(update=...)` here; that path silently skips `@model_validator(mode="after")`.
+
+- **DEC-013 — Explicit cleanup via `BQ.ABORT_SESSION()` in `__exit__`; TTL is the safety net.** `BigQueryAdapter.__exit__` checks `self._active_session_id`; if non-`None`, it issues `client.query("CALL BQ.ABORT_SESSION();", job_config=QueryJobConfig(connection_properties=[ConnectionProperty(key="session_id", value=self._active_session_id)]))` to immediately tear down the session and every `_SESSION.*` table inside it. Best-effort: any exception from the abort itself is **swallowed** (cleanup never blocks the user; their actual work succeeded). On success, one `INFO` log: `"session closed"` with `{"session_id_hash": ..., "ttl_remaining_seconds": ...}`. On failure, the DEC-014 cleanup-failure WARNING fires. `self._active_session_id = None` always set in a `finally` block so subsequent `__exit__` calls are no-ops. Session TTL (default 3600s) handles the hard-death case where `__exit__` doesn't fire (SIGKILL, OOM, segfault).
+
+- **DEC-014 — Cleanup-failure WARNING is operator-facing and contains the raw session_id.** When `BQ.ABORT_SESSION()` fails, the adapter emits a single `_LOGGER.warning(...)` with this exact multi-line shape (lazy %s positional, NOT f-string — passes the grep gate):
+
+  ```
+  BigQuery session cleanup failed; session will auto-expire in <N>s (BigQuery TTL).
+    Session ID: <raw session_id>
+    Reason: <exception class name>
+    To clean up immediately:
+      bq query --connection_property=session_id=<raw> --use_legacy_sql=false "CALL BQ.ABORT_SESSION();"
+  ```
+
+  Three reasons the raw session_id appears here (deliberate exception to DEC-003):
+
+  1. **It's the only piece of info the operator needs to act.** Without it, the manual `bq` command is unconstructable. A hash defeats the purpose.
+  2. **Audience is the same principal who owns the session.** BigQuery rejects `BQ.ABORT_SESSION()` calls from other identities — the session_id is only useful to its owner, who is the user reading their own stderr.
+  3. **The surface is bounded.** Raw session_id leaks ONLY on the cleanup-failure path, never on the happy path, never in audit JSONL, never in `__repr__`. Bulk log aggregators receive at most one such WARNING per failed cleanup, not per query.
+
+  `<N>` is `max(1, int(ttl_seconds - elapsed_in_session))`. Floor at 1 avoids "auto-expire in 0s" confusion; if the session has actually expired, the abort would have succeeded with "session not found" and the WARNING wouldn't fire.
+
+  The WARNING surfaces to stderr automatically via the CLI's `setup_logging` (default level is INFO; WARNING always shown unless `--quiet`). No special CLI plumbing required — Python's logging hierarchy handles it.
 
 ---
 
@@ -228,11 +250,11 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 
 ---
 
-### US-003 — `BigQueryAdapter.materialise_sample` implementation (sessions + temp table)
+### US-003 — `BigQueryAdapter.materialise_sample` implementation (sessions + temp table + cleanup)
 
-**Description.** Override `materialise_sample` on `BigQueryAdapter`. Mint a fresh BQ session via `uuid4().hex`; run `CREATE TEMP TABLE _sf_sample_<run_id> AS SELECT * FROM \`<source>\` WHERE MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), <bucket>) < 1 [AND <partition_filter>]` inside the session via `connection_properties=[ConnectionProperty(key="session_id", value=session_id)]`. Compute `run_id = blake2b-12(model.unique_id + signalforge_version + sample_size + canonical_json(partition_filter))` for snapshot determinism (DEC-001). Validate temp-table name via `validate_identifier`. Route through `_default_job_config(stage="warehouse_sample_materialise")`. On success: store `self._active_session_id = session_id`; return `TableRef(project=client.project, dataset="_SESSION", name="_sf_sample_<run_id>")`. On failure: wrap as `MaterialisationFailedError(cause=...)`. Extend `run_test_sql` to honour `_active_session_id` when set (passes the same `connection_properties` so per-test queries can resolve `_SESSION._sf_sample_<run_id>`). Emit one `INFO` log via lazy-format JSON: `{"model": ..., "sample_rows": ..., "session_id_hash": blake2b-4(...), "duration_ms": ...}`. Never log raw `session_id`.
+**Description.** Override `materialise_sample` on `BigQueryAdapter`. Mint a fresh BQ session via `uuid4().hex`; run `CREATE TEMP TABLE _sf_sample_<run_id> AS SELECT * FROM \`<source>\` WHERE MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), <bucket>) < 1 [AND <partition_filter>]` inside the session via `connection_properties=[ConnectionProperty(key="session_id", value=session_id)]`. Compute `run_id = blake2b-12(model.unique_id + signalforge_version + sample_size + canonical_json(partition_filter))` for snapshot determinism (DEC-001). Validate temp-table name via `validate_identifier`. Route through `_default_job_config(stage="warehouse_sample_materialise")`. On success: store `self._active_session_id = session_id`, store `self._session_started_at = monotonic()`, store `self._session_ttl_seconds = ttl_seconds`; return `TableRef(project=client.project, dataset="_SESSION", name="_sf_sample_<run_id>")`. On failure: wrap as `MaterialisationFailedError(cause=...)`. Extend `run_test_sql` to honour `_active_session_id` when set (passes the same `connection_properties` so per-test queries can resolve `_SESSION._sf_sample_<run_id>`). Emit one `INFO` log via lazy-format JSON on success: `{"model": ..., "sample_rows": ..., "session_id_hash": blake2b-4(...), "duration_ms": ...}`. **Implement `__exit__` cleanup per DEC-013/DEC-014:** if `_active_session_id` is set, issue `CALL BQ.ABORT_SESSION()` in the same session; on success, `INFO` log `{"session_id_hash": ..., "ttl_remaining_seconds": ...}` and reset state; on failure, emit the DEC-014 multi-line WARNING (raw session_id + manual `bq query` command + TTL fallback note), swallow the exception, reset state in `finally`. Never log raw `session_id` outside the DEC-014 WARNING.
 
-**Traces to.** Q1/Q2/Q5, B3, DEC-001, DEC-002, DEC-003, R-DM-2.
+**Traces to.** Q1/Q2/Q5, B3, DEC-001, DEC-002, DEC-003, DEC-013, DEC-014, R-DM-2.
 
 **TDD.**
 - `test_materialise_sample_returns_tableref_with_session_dataset` — `dataset="_SESSION"`, `name="_sf_sample_<16-hex>"`.
@@ -247,12 +269,25 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 - `test_run_test_sql_uses_active_session_id_after_materialise` — sets `adapter._active_session_id`; asserts subsequent `run_test_sql` query carries the session id.
 - `test_materialise_sample_logs_session_id_hash_not_raw` — capture log records; assert `session_id_hash` key present, raw session_id absent (regex search for any 32-hex value matching the minted id).
 - `test_materialise_sample_default_job_config_use_query_cache_is_false` — DEC-015 of #3 invariant preserved.
+- `test_bigquery_adapter_exit_closes_active_session` — set `_active_session_id`, call `__exit__`; assert `CALL BQ.ABORT_SESSION();` issued in the same session.
+- `test_bigquery_adapter_exit_no_op_when_no_active_session` — `__exit__` without prior materialise; assert no abort call.
+- `test_bigquery_adapter_exit_runs_after_materialise_failure_set_session_state` — induce a partial materialise that sets `_active_session_id` then raises `MaterialisationFailedError`; assert `__exit__` still issues abort.
+- `test_bigquery_adapter_exit_swallows_close_errors` — fake's abort raises `google.api_core.exceptions.NotFound`; `__exit__` does not propagate; `_active_session_id` is `None` after.
+- `test_bigquery_adapter_exit_logs_warning_with_raw_session_id_on_failure` — assert WARNING body contains the raw 32-hex session_id (deliberate DEC-014 break).
+- `test_bigquery_adapter_exit_warning_contains_manual_kill_command` — assert WARNING body contains `bq query --connection_property=session_id=<raw> --use_legacy_sql=false "CALL BQ.ABORT_SESSION();"` with raw session_id substituted.
+- `test_bigquery_adapter_exit_warning_mentions_ttl_fallback` — assert WARNING body contains `auto-expire in <N>s` with `N >= 1`.
+- `test_bigquery_adapter_exit_warning_mentions_exception_class_name` — exception class name in WARNING body.
+- `test_bigquery_adapter_exit_resets_session_state_in_finally_even_on_close_failure` — assert `_active_session_id` is `None` after `__exit__` regardless of whether abort succeeded.
+- `test_bigquery_adapter_exit_success_logs_session_id_hash_only` — happy-path `INFO` log uses `session_id_hash`, never raw (DEC-003 happy-path invariant).
+- `test_bigquery_adapter_exit_success_does_not_emit_warning` — happy-path emits no WARNING (only INFO).
 
 **Done when.**
 - [ ] `BigQueryAdapter.materialise_sample` implemented per DEC-001/DEC-002.
 - [ ] `BigQueryAdapter.run_test_sql` honours `_active_session_id`.
-- [ ] One `INFO` log per call, lazy-format JSON, session_id_hash only.
-- [ ] All twelve new tests pass.
+- [ ] `BigQueryAdapter.__exit__` implements DEC-013 explicit cleanup + DEC-014 failure WARNING.
+- [ ] One `INFO` log per materialise + one INFO per successful close; both use `session_id_hash` only.
+- [ ] On close failure: one WARNING with raw session_id + manual command + TTL note; no exception propagated.
+- [ ] All twenty-two new tests pass.
 - [ ] Logger grep gate (`tests/llm/test_logger_grep_gate.py`) still passes.
 - [ ] AST audit-completeness scans still pass.
 - [ ] Validation command passes.
@@ -267,20 +302,27 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 
 ---
 
-### US-004 — `FakeBigQueryClient.expect_materialise_sample` helper
+### US-004 — `FakeBigQueryClient` helpers: `expect_materialise_sample` + `expect_abort_session`
 
-**Description.** Extend `tests/warehouse/_fake.py` with explicit `expect_materialise_sample(source_ref, sample_size, partition_filter=None, *, returns: TableRef | Exception) -> None` helper, mirroring the established `expect_query` / `expect_get_table` / `expect_list_rows` API. Each call consumes one matching expectation; non-matching calls raise `AssertionError("unexpected materialise_sample: ...")`. `Exception` returns propagate.
+**Description.** Extend `tests/warehouse/_fake.py` with two explicit helpers, mirroring the established `expect_query` / `expect_get_table` / `expect_list_rows` API. Each call consumes one matching expectation; non-matching calls raise `AssertionError("unexpected ...: ...")`. `Exception` returns propagate.
 
-**Traces to.** R-TEST-3.
+1. `expect_materialise_sample(source_ref, sample_size, partition_filter=None, *, returns: TableRef | Exception) -> None` — registers an expectation for the materialise path.
+2. `expect_abort_session(session_id, *, returns: None | Exception = None) -> None` — registers an expectation for the cleanup path. `returns=None` simulates successful abort; `returns=Exception(...)` simulates abort failure (drives DEC-014 WARNING in US-003 tests).
+
+**Traces to.** R-TEST-3, DEC-013.
 
 **TDD.**
 - `test_expect_materialise_sample_consumes_one_call` — register one expectation; one call passes; second call raises.
 - `test_expect_materialise_sample_returns_exception_propagates` — register `returns=MaterialisationFailedError(...)`; calling raises.
 - `test_expect_materialise_sample_assert_all_expectations_met` — registered-but-not-called fails the assertion.
+- `test_expect_abort_session_consumes_one_call` — register one expectation keyed by session_id; one call passes; second call raises.
+- `test_expect_abort_session_session_id_mismatch_raises` — registering for `session_a` and calling with `session_b` fails loudly.
+- `test_expect_abort_session_returns_exception_propagates` — register `returns=NotFound(...)`; calling raises (drives the swallow-and-warn path in US-003).
+- `test_expect_abort_session_returns_none_succeeds` — happy-path simulation.
 
 **Done when.**
-- [ ] `expect_materialise_sample` helper added to `FakeBigQueryClient`.
-- [ ] Three new tests pass.
+- [ ] Both helpers added to `FakeBigQueryClient` (matched against `client.query(...)` calls with the relevant SQL pattern + session_id).
+- [ ] Seven new tests pass.
 - [ ] Validation command passes.
 
 **Files.**
@@ -386,28 +428,29 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 
 ---
 
-### US-008 — Probe re-run scaffolding (split into oneshot baseline + materialised target)
+### US-008 — Probe re-run scaffolding + cleanup verification
 
-**Description.** Restructure `tests/warehouse/test_sample_cost_probe.py` into two `@pytest.mark.bigquery` tests (DEC-007): `test_sample_rows_cost_baseline_oneshot` (asserts the 9.92 GB AR-B1 measurement under `sample_strategy=oneshot` — regression guard for the legacy path) and `test_sample_rows_cost_materialised` (asserts the per-test bytes drop below 100 MB under `sample_strategy=materialised`). Each test sets `os.environ["SF_RUN_BQ"]` gate; both use `_BYTES_CEILING` and `_BYTES_WARN_AT` constants. Tests stay marker-gated; default CI does NOT run them. Maintainer runs `SF_RUN_BQ=1 pytest -m bigquery tests/warehouse/test_sample_cost_probe.py --no-cov` before declaring the PR ready.
+**Description.** Restructure `tests/warehouse/test_sample_cost_probe.py` into three `@pytest.mark.bigquery` tests (DEC-007 + DEC-013): `test_sample_rows_cost_baseline_oneshot` (asserts the 9.92 GB AR-B1 measurement under `sample_strategy=oneshot` — regression guard for the legacy path), `test_sample_rows_cost_materialised` (asserts the per-test bytes drop below 100 MB under `sample_strategy=materialised`), and `test_materialised_session_cleaned_up_after_exit` (positive proof of cleanup: after `BigQueryAdapter.__exit__` fires, querying the temp table by name fails with "session not found" / "table not found"). All three set `os.environ["SF_RUN_BQ"]` gate; tests stay marker-gated; default CI does NOT run them. Maintainer runs `SF_RUN_BQ=1 pytest -m bigquery tests/warehouse/test_sample_cost_probe.py --no-cov` before declaring the PR ready.
 
-**Traces to.** DEC-007, R-PERF-4, R-OBS-4, R-TEST-2.
+**Traces to.** DEC-007, DEC-013, R-PERF-4, R-OBS-4, R-TEST-2.
 
 **TDD.**
-- `test_probe_module_imports_and_exposes_two_test_functions` — sanity-check the module shape (always-collectable, marker-gated execution).
+- `test_probe_module_imports_and_exposes_three_test_functions` — sanity-check the module shape (always-collectable, marker-gated execution).
 - `test_probe_constants_unchanged` — pin `_BYTES_CEILING` and `_BYTES_WARN_AT` values; existing v0.1 thresholds preserved.
 
 **Done when.**
-- [ ] `test_sample_rows_cost_baseline_oneshot` and `test_sample_rows_cost_materialised` both defined under `@pytest.mark.bigquery`.
-- [ ] Both tests gated by `SF_RUN_BQ` env var.
-- [ ] Default `pytest` run skips both (existing marker-exclusion behaviour preserved).
+- [ ] Three `@pytest.mark.bigquery` tests defined.
+- [ ] All three gated by `SF_RUN_BQ` env var.
+- [ ] Default `pytest` run skips all three (existing marker-exclusion behaviour preserved).
 - [ ] Two scaffolding tests pass.
-- [ ] PR description includes the maintainer run command and a placeholder for the post-Q4=C figures (filled during US-010 quality gate).
+- [ ] Cleanup-verification test asserts the temp table is gone post-`__exit__` (positive proof of DEC-013).
+- [ ] PR description includes the maintainer run command and placeholders for the post-Q4=C figures (filled during US-010 quality gate).
 - [ ] Validation command passes.
 
 **Files.**
-- `tests/warehouse/test_sample_cost_probe.py` — two-test split.
+- `tests/warehouse/test_sample_cost_probe.py` — three-test layout (oneshot baseline, materialised target, cleanup verification).
 
-**Depends on.** US-005 (the orchestrator's `sample_strategy` dispatch is what the probe exercises).
+**Depends on.** US-005 (the orchestrator's `sample_strategy` dispatch is what the probe exercises), US-003 (cleanup behaviour for the third test).
 
 ---
 
@@ -416,12 +459,12 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 **Description.** Update every doc surface affected by the v0.2 strategy change, in lockstep:
 
 1. **`docs/prune-ops.md` Cost model section** — add post-Q4=C subsection with placeholders for the figures (filled in US-010 after maintainer probe-run); add audit-reading guide note explaining `_SESSION._sf_sample_<hash>` as the materialisation signal in `compiled_sql`; document the new `sample_strategy` config field with example YAML.
-2. **`docs/warehouse-adapter-ops.md`** — add `warehouse_sample_materialise` to the stage-label list; document `materialise_sample` ABC method + BigQueryAdapter session-state pattern; document the v0.2 → v0.3 migration story for non-BQ adapters.
+2. **`docs/warehouse-adapter-ops.md`** — add `warehouse_sample_materialise` to the stage-label list; document `materialise_sample` ABC method + BigQueryAdapter session-state pattern; document the v0.2 → v0.3 migration story for non-BQ adapters; add a **"Session cleanup & manual recovery"** section covering DEC-013 + DEC-014 (the three-layer cleanup model — explicit `__exit__` close, TTL fallback, manual `bq query --connection_property=session_id=<raw> --use_legacy_sql=false "CALL BQ.ABORT_SESSION();"`); add an `INFORMATION_SCHEMA.JOBS_BY_PROJECT` query template for ops to spot orphaned `signalforge_stage='warehouse_sample_materialise'` sessions older than 2× TTL.
 3. **`.claude/rules/prune-engine.md`** — add a "v0.2 reservations / additions" section documenting `sample_strategy`, the two new typed errors, the `_SESSION.<temp>` audit signal, and DEC-010 (total-budget includes materialisation).
 4. **`.claude/rules/warehouse-adapters.md`** — document `materialise_sample` ABC method + adapter session-state pattern (mirrors DEC-008/DEC-025 batching-state precedent).
 5. **`CLAUDE.md`** — amend "Public API surface (v0.1)" to "Public API surface (v0.1 + v0.2 additions)" and list the four new exports: `signalforge.warehouse.MaterialisationFailedError`, `signalforge.warehouse.MaterialisationNotSupportedError`, `WarehouseAdapter.materialise_sample`, `PruneConfig.sample_strategy`.
 
-**Traces to.** R-API-4, R-OBS-3, B2 (CLAUDE.md surface), DEC-002/006/007/008/010.
+**Traces to.** R-API-4, R-OBS-3, B2 (CLAUDE.md surface), DEC-002/006/007/008/010/013/014.
 
 **TDD.** Docs-only — no new test code. Validation: existing doc-link tests pass; existing markdown linter passes.
 
