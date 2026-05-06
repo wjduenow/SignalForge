@@ -6,7 +6,8 @@
 
 ## Meta
 
-- **Phase:** detailing
+- **Phase:** published
+- **PR:** <https://github.com/wjduenow/SignalForge/pull/30>
 - **Sessions:** 1
 - **Last session:** 2026-05-05
 - **Owner:** wjduenow
