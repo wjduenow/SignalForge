@@ -157,7 +157,9 @@ The blocker surface collapses to four genuinely independent items; the rest are 
 
 - **DEC-010 — Total-budget watchdog ticks across both phases.** Materialisation cost counts against `PruneConfig.total_budget_seconds`; budget exhaustion mid-materialisation marks every remaining test `kept-without-evidence` with the existing `why="total prune budget exceeded before evaluation"`. v0.2 does NOT add a separate `materialisation_timeout_seconds` knob (graduated to v0.3 batch runner if needed).
 
-- **DEC-011 — No CLI flag for `sample_strategy` in v0.2.** Operators set it via `signalforge.yml`. Consistent with the issue's framing; CLI surface stays minimal.
+- **DEC-011 — `signalforge generate` exposes `--scope {sample,full}` and `--sample-strategy {oneshot,materialised}` flags** (revised 2026-05-05). Reverses the prior "config-only" position. Operators flipping between thorough (`--scope full`) and cheap (`--sample-strategy materialised`, the default) modes per-run no longer need to edit `signalforge.yml`. Config file remains the durable default; flags are per-invocation overrides; both flags optional and independent (set one, the other, both, or neither).
+
+- **DEC-012 — CLI override mechanism re-validates the config.** `cmd_generate` applies overrides via `PruneConfig.model_validate({**config.model_dump(), "scope": override_or_existing, "sample_strategy": override_or_existing})` so every Pydantic validator re-runs (typos still fail loud; field validators on the new field re-fire). Mirrors `safety-layer.md` DEC-018 (`SafetyPolicy.with_mode`) and the `DiffConfig.render_kind` graduation in #9 — the canonical project pattern for "CLI flag overrides config-file value." Don't use `model_copy(update=...)` here; that path silently skips `@model_validator(mode="after")`.
 
 ---
 
@@ -326,7 +328,40 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 
 ---
 
-### US-006 — CLI exit-code mapping for new typed errors
+### US-006 — `signalforge generate` flags `--scope` and `--sample-strategy`
+
+**Description.** Add two flags to `signalforge generate`: `--scope {sample,full}` (overrides `prune.scope`) and `--sample-strategy {oneshot,materialised}` (overrides `prune.sample_strategy`). Both are optional and independent. When supplied, `cmd_generate` re-validates the config via `PruneConfig.model_validate({**dump, "scope": ..., "sample_strategy": ...})` (DEC-012) so validators re-run. When absent, config-file values apply unchanged. Help text follows cli-layer.md's multi-surface parity rule (help string + handler docstring + DEC + test name aligned in lockstep).
+
+**Traces to.** DEC-011, DEC-012, user request 2026-05-05.
+
+**TDD.**
+- `test_generate_scope_flag_overrides_config_value` — config has `scope: sample`; `--scope full` makes the orchestrator see `scope=full`.
+- `test_generate_sample_strategy_flag_overrides_config_value` — config has `sample_strategy: materialised`; `--sample-strategy oneshot` makes the orchestrator see `sample_strategy=oneshot`.
+- `test_generate_both_flags_independent` — set one without the other; the unset axis falls through to config.
+- `test_generate_no_flag_uses_config_value` — neither flag set; config values apply unchanged.
+- `test_generate_invalid_scope_returns_exit_2` — `--scope invalid` → argparse rejection mapped to tier-2 exit.
+- `test_generate_invalid_sample_strategy_returns_exit_2` — same shape.
+- `test_generate_help_text_lists_new_flags` — `signalforge generate --help` output mentions both flag names + their value lists.
+- `test_generate_override_re_runs_pydantic_validators` — pin DEC-012: tweak a `PruneConfig` `@field_validator` in a test fixture to assert it re-fires under the override path (mirrors `safety-layer.md` DEC-018 pin).
+
+**Done when.**
+- [ ] Both flags registered in `cmd_generate`'s argparse parser via the existing `add_parser` extension point.
+- [ ] Override mechanism uses `PruneConfig.model_validate(...)` (NOT `model_copy(update=...)`).
+- [ ] `cmd_generate`'s docstring documents the override precedence (flag > config).
+- [ ] All eight new tests pass.
+- [ ] Existing CLI in-process tests (`tests/cli/`) pass unchanged.
+- [ ] No traceback leaks on invalid flag values (cli-layer.md DEC-016 floor).
+- [ ] Validation command passes.
+
+**Files.**
+- `src/signalforge/cli/generate.py` — argparse extensions + override application in `cmd_generate`.
+- `tests/cli/test_generate.py` — eight new tests.
+
+**Depends on.** US-001 (`PruneConfig.sample_strategy` field exists), US-005 (orchestrator honours both axes).
+
+---
+
+### US-007 — CLI exit-code mapping for new typed errors
 
 **Description.** Register `MaterialisationFailedError` and `MaterialisationNotSupportedError` in `signalforge/cli/_helpers.py::_EXCEPTION_TO_EXIT_CODE`, both → tier 3 (external-dep / fail-closed). Add the two errors to the parametrized factory in `tests/cli/test_exit_codes.py`. The 7th AST scan auto-validates registration; this story ensures the parametrized contract covers the new types end-to-end.
 
@@ -351,7 +386,7 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 
 ---
 
-### US-007 — Probe re-run scaffolding (split into oneshot baseline + materialised target)
+### US-008 — Probe re-run scaffolding (split into oneshot baseline + materialised target)
 
 **Description.** Restructure `tests/warehouse/test_sample_cost_probe.py` into two `@pytest.mark.bigquery` tests (DEC-007): `test_sample_rows_cost_baseline_oneshot` (asserts the 9.92 GB AR-B1 measurement under `sample_strategy=oneshot` — regression guard for the legacy path) and `test_sample_rows_cost_materialised` (asserts the per-test bytes drop below 100 MB under `sample_strategy=materialised`). Each test sets `os.environ["SF_RUN_BQ"]` gate; both use `_BYTES_CEILING` and `_BYTES_WARN_AT` constants. Tests stay marker-gated; default CI does NOT run them. Maintainer runs `SF_RUN_BQ=1 pytest -m bigquery tests/warehouse/test_sample_cost_probe.py --no-cov` before declaring the PR ready.
 
@@ -366,7 +401,7 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 - [ ] Both tests gated by `SF_RUN_BQ` env var.
 - [ ] Default `pytest` run skips both (existing marker-exclusion behaviour preserved).
 - [ ] Two scaffolding tests pass.
-- [ ] PR description includes the maintainer run command and a placeholder for the post-Q4=C figures (filled during US-009 quality gate).
+- [ ] PR description includes the maintainer run command and a placeholder for the post-Q4=C figures (filled during US-010 quality gate).
 - [ ] Validation command passes.
 
 **Files.**
@@ -376,11 +411,11 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 
 ---
 
-### US-008 — Documentation surfaces (5-surface parity from `cli-layer.md`)
+### US-009 — Documentation surfaces (5-surface parity from `cli-layer.md`)
 
 **Description.** Update every doc surface affected by the v0.2 strategy change, in lockstep:
 
-1. **`docs/prune-ops.md` Cost model section** — add post-Q4=C subsection with placeholders for the figures (filled in US-009 after maintainer probe-run); add audit-reading guide note explaining `_SESSION._sf_sample_<hash>` as the materialisation signal in `compiled_sql`; document the new `sample_strategy` config field with example YAML.
+1. **`docs/prune-ops.md` Cost model section** — add post-Q4=C subsection with placeholders for the figures (filled in US-010 after maintainer probe-run); add audit-reading guide note explaining `_SESSION._sf_sample_<hash>` as the materialisation signal in `compiled_sql`; document the new `sample_strategy` config field with example YAML.
 2. **`docs/warehouse-adapter-ops.md`** — add `warehouse_sample_materialise` to the stage-label list; document `materialise_sample` ABC method + BigQueryAdapter session-state pattern; document the v0.2 → v0.3 migration story for non-BQ adapters.
 3. **`.claude/rules/prune-engine.md`** — add a "v0.2 reservations / additions" section documenting `sample_strategy`, the two new typed errors, the `_SESSION.<temp>` audit signal, and DEC-010 (total-budget includes materialisation).
 4. **`.claude/rules/warehouse-adapters.md`** — document `materialise_sample` ABC method + adapter session-state pattern (mirrors DEC-008/DEC-025 batching-state precedent).
@@ -403,17 +438,17 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 - `.claude/rules/warehouse-adapters.md`
 - `CLAUDE.md`
 
-**Depends on.** US-005 (final shape of the dispatch surface), US-006 (exit-code mapping confirms the typed errors), US-007 (probe shape stable).
+**Depends on.** US-005 (final shape of the dispatch surface), US-006 (CLI flag surface to document), US-007 (exit-code mapping confirms the typed errors), US-008 (probe shape stable).
 
 ---
 
-### US-009 — Quality Gate (code review × 4 + CodeRabbit + maintainer probe-run)
+### US-010 — Quality Gate (code review × 4 + CodeRabbit + maintainer probe-run)
 
 **Description.** Run the project's quality-gate sequence:
 
 1. **Code reviewer × 4.** Spawn `code-reviewer` agent (or equivalent) four times across the full changeset. Fix every real bug found each pass; minor stylistic feedback can be deferred to "Patterns & Memory."
 2. **CodeRabbit review** (if available in the GitHub PR).
-3. **Maintainer probe-run.** Run `SF_RUN_BQ=1 pytest -m bigquery tests/warehouse/test_sample_cost_probe.py --no-cov` against a real BQ project. Capture the figures. Update `docs/prune-ops.md` Cost model section, replacing the placeholders from US-008 with the actual post-Q4=C bytes_billed + run date. Confirm per-test bytes_billed < 100 MB for `materialised` strategy (issue acceptance criterion).
+3. **Maintainer probe-run.** Run `SF_RUN_BQ=1 pytest -m bigquery tests/warehouse/test_sample_cost_probe.py --no-cov` against a real BQ project. Capture the figures. Update `docs/prune-ops.md` Cost model section, replacing the placeholders from US-009 with the actual post-Q4=C bytes_billed + run date. Confirm per-test bytes_billed < 100 MB for `materialised` strategy (issue acceptance criterion).
 4. **Validation final.** `pip install -e ".[dev]" && ruff check . && ruff format --check . && pyright && pytest && pytest -m cli_subprocess --no-cov`.
 
 **Traces to.** Issue acceptance criteria (#1, #2, #3, #4 — every checkbox).
@@ -428,11 +463,11 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 
 **Files.** Whatever the reviewer passes turn up; final cost-figure substitution in `docs/prune-ops.md`.
 
-**Depends on.** US-001 through US-008.
+**Depends on.** US-001 through US-009.
 
 ---
 
-### US-010 — Patterns & Memory (priority 99)
+### US-011 — Patterns & Memory (priority 99)
 
 **Description.** Distil the patterns this issue established into the rule files and memory so future v0.2/v0.3 work doesn't relearn them. New patterns:
 
@@ -455,7 +490,7 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 - `.claude/rules/testing-signal.md`
 - One or more `bd remember "..."` invocations.
 
-**Depends on.** US-009.
+**Depends on.** US-010.
 
 ---
 
