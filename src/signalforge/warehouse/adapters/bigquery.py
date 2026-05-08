@@ -742,12 +742,16 @@ class BigQueryAdapter(WarehouseAdapter):
         )
 
         # Return a TableRef pointing at the session-scoped temp table.
-        # The ``_SESSION`` namespace is BigQuery's canonical pseudo-
-        # dataset for session-local objects; the three-part
-        # ``<project>._SESSION._sf_sample_<run_id>`` qualified_name is
-        # what subsequent per-test queries quote against.
+        # ``_SESSION`` is BigQuery's pseudo-dataset for session-local
+        # objects; per-test queries reference it as the two-part
+        # ``_SESSION._sf_sample_<run_id>`` (no project prefix). BigQuery
+        # rejects the three-part ``<project>._SESSION.<name>`` form even
+        # inside the owning session ("Use of _SESSION is not allowed
+        # here") — caught during the maintainer probe-run on 2026-05-08.
+        # ``project=None`` makes ``TableRef.qualified_name`` render the
+        # two-part form so the compiler's quoted reference is valid SQL.
         return TableRef(
-            project=self._get_client().project,
+            project=None,
             dataset="_SESSION",
             name=temp_name,
         )

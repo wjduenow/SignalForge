@@ -60,7 +60,7 @@ public ``sample_rows`` path is documented inline in
 ``_issue_sample_capture_bytes_billed``.
 
 The baseline test's assertion is documentation-grade: a sanity ceiling
-(5 GB) plus a soft WARNING at 500 MB so the figure shows up in the
+(15 GB) plus a soft WARNING at 500 MB so the figure shows up in the
 test log even on a successful run. The materialised test, by
 contrast, is a hard regression gate — under 100 MB or the build is
 broken.
@@ -95,16 +95,44 @@ _SAMPLE_SIZE = 100_000
 so the figure the probes record is directly comparable to what prune
 will spend per test in v0.1."""
 
-_BYTES_CEILING = 5_000_000_000
-"""5 GB sanity ceiling. Not a budget — a runaway-cost circuit-breaker.
-The Iowa liquor sales table is roughly 4 GB on disk; the deterministic
-sampler reading every column should not exceed this even with full-row
-scan amplification.
+_BYTES_CEILING = 15_000_000_000
+"""15 GB sanity ceiling. Not a budget — a runaway-cost circuit-breaker.
+AR-B1 measured 9.92 GB on the 30M-row Iowa liquor sales table on
+2026-05-01; the original 5 GB ceiling was inconsistent with the
+recorded figure (caught during the maintainer probe-run on 2026-05-08).
+The ceiling is now 15 GB: ~50% headroom over AR-B1 to absorb table
+growth or full-row-scan amplification drift, while still failing loud
+if BigQuery's optimiser starts scanning materially more.
 
 Pinned by ``test_probe_constants_unchanged`` so an accidental edit to
 this value (or its sibling ``_BYTES_WARN_AT``) breaks the
 default-collected scaffolding test loudly rather than silently
 relaxing the regression guard.
+"""
+
+_BOOTSTRAP_BYTES_BILLED_CAP = 20_000_000_000
+"""20 GB cap on the BigQuery adapter when running the probe.
+
+The default ``BigQueryAdapter(max_bytes_billed=100_000_000)`` (DEC-005
+of #3 — 100 MB safety net) is intentionally too low to allow
+``sample_rows``'s deterministic full-row scan OR ``materialise_sample``'s
+one-time CTAS bootstrap to complete on the AR-B1 probe target.
+
+For the maintainer probe specifically — where the goal is to MEASURE
+the cost figures for ``docs/prune-ops.md`` rather than ship the
+production safety net — we bump the cap to 20 GB. This permits the
+bootstrap (~10 GB AR-B1 figure) to execute so the probe can record
+the per-test bytes_billed AFTER materialisation (which is the issue's
+acceptance gate). 20 GB is twice the AR-B1 measurement so the cap is
+not the binding constraint — ``_BYTES_CEILING`` (15 GB) is.
+
+Production users who hit this same wall on wide tables under
+``sample_strategy=materialised`` can either raise their adapter's
+``max_bytes_billed`` constructor arg OR set
+``prune.sample_strategy: oneshot`` in ``signalforge.yml``. Adapter-side
+per-stage cap overrides for the materialisation bootstrap are a v0.3
+follow-up — see issue #22 PR description's "Maintainer follow-ups"
+section.
 """
 
 _BYTES_WARN_AT = 500_000_000
@@ -282,7 +310,7 @@ def test_probe_constants_unchanged() -> None:
     """Pin the cost-probe thresholds so a silent edit can't soften the
     regression guard.
 
-    ``_BYTES_CEILING`` (5 GB) is the runaway-cost circuit-breaker on
+    ``_BYTES_CEILING`` (15 GB) is the runaway-cost circuit-breaker on
     the baseline ``oneshot`` test; ``_BYTES_WARN_AT`` (500 MB) is the
     soft floor that asserts the AR-B1 cost cliff genuinely exists on
     the legacy path. Together they are the contract that the
@@ -293,10 +321,12 @@ def test_probe_constants_unchanged() -> None:
     this test AND the constants in lockstep — the test name plus the
     DEC reference in the docstring is the audit trail.
     """
-    assert _BYTES_CEILING == 5_000_000_000, (
+    assert _BYTES_CEILING == 15_000_000_000, (
         f"_BYTES_CEILING moved silently: got {_BYTES_CEILING}; "
-        f"the 5 GB sanity ceiling is the regression-guard contract for "
-        f"test_sample_rows_cost_baseline_oneshot"
+        f"the 15 GB sanity ceiling is the regression-guard contract for "
+        f"test_sample_rows_cost_baseline_oneshot (raised from 5 GB to "
+        f"accommodate AR-B1's 9.92 GB measurement; see the constant's "
+        f"docstring for the 2026-05-08 maintainer-run audit trail)"
     )
     assert _BYTES_WARN_AT == 500_000_000, (
         f"_BYTES_WARN_AT moved silently: got {_BYTES_WARN_AT}; "
@@ -328,7 +358,7 @@ def test_sample_rows_cost_baseline_oneshot(
     * ``bytes_billed >= _BYTES_WARN_AT`` (500 MB) — positive proof the
       cost cliff exists on the legacy path; without this the
       materialised-path win narrative is unfalsifiable.
-    * ``bytes_billed < _BYTES_CEILING`` (5 GB) — sanity ceiling, not a
+    * ``bytes_billed < _BYTES_CEILING`` (15 GB) — sanity ceiling, not a
       budget. A runaway above this means the assumption that the Iowa
       liquor sales table costs roughly its on-disk size is broken and
       the probe's other assertions can't be trusted.
@@ -344,7 +374,7 @@ def test_sample_rows_cost_baseline_oneshot(
     bytes_billed exposure on the public surface remains a v0.2
     concern (DEC-027 of issue #6).
     """
-    adapter = BigQueryAdapter()
+    adapter = BigQueryAdapter(max_bytes_billed=_BOOTSTRAP_BYTES_BILLED_CAP)
 
     started_at_monotonic = time.monotonic()
     with adapter:
@@ -454,7 +484,7 @@ def test_sample_rows_cost_materialised() -> None:
     apples-to-apples (both read ``QueryJob.total_bytes_billed`` off
     the just-issued job, no ``INFORMATION_SCHEMA`` round-trip).
     """
-    adapter = BigQueryAdapter()
+    adapter = BigQueryAdapter(max_bytes_billed=_BOOTSTRAP_BYTES_BILLED_CAP)
 
     per_test_bytes = -1
     with adapter:
@@ -491,11 +521,17 @@ def test_sample_rows_cost_materialised() -> None:
         # so the per-test query routes into the same session and can
         # resolve ``_SESSION._sf_sample_<run_id>``.
         client = adapter._get_client()  # noqa: SLF001 - documented seam
+        # Mirror what prune's `not_null` compiler emits — a single-column
+        # IS NULL scan over the materialised rows. ``invoice_and_item_number``
+        # is the iowa_liquor_sales primary-key column, so a real NOT NULL
+        # test against it is the canonical shape. The original probe
+        # query (``WHERE FALSE``) short-circuited in BQ's planner before
+        # any column scan, billing zero bytes — meaningless as a
+        # post-Q4=C cost figure. Caught during the maintainer probe-run
+        # on 2026-05-08.
         per_test_sql = (
-            f"SELECT COUNT(*) AS failures FROM ("
-            f"SELECT * FROM `{temp_ref.qualified_name}` AS t "
-            f"WHERE FALSE"
-            f") AS t"
+            f"SELECT COUNT(*) AS failures FROM `{temp_ref.qualified_name}` "
+            f"WHERE invoice_and_item_number IS NULL"
         )
         started_at_test = time.monotonic()
         job = client.query(
@@ -507,7 +543,12 @@ def test_sample_rows_cost_materialised() -> None:
         )
         list(job.result())
         elapsed_test_s = time.monotonic() - started_at_test
-        per_test_bytes = int(getattr(job, "total_bytes_billed", -1) or -1)
+        # ``or -1`` would corrupt a legitimate 0-byte measurement
+        # (``0 or -1 == -1``). Treat None / missing as unavailable; treat
+        # 0 as a valid measurement (BQ may bill 0 bytes for queries that
+        # the planner can satisfy from metadata alone).
+        raw_bytes_billed = getattr(job, "total_bytes_billed", None)
+        per_test_bytes = -1 if raw_bytes_billed is None else int(raw_bytes_billed)
 
         _LOGGER.info(
             "per-test cost probe (materialised): bytes_billed=%d elapsed_test_s=%.2f temp_ref=%s",
@@ -586,7 +627,7 @@ def test_materialised_session_cleaned_up_after_exit() -> None:
     # collection phase.
     from google.api_core import exceptions as gae
 
-    adapter = BigQueryAdapter()
+    adapter = BigQueryAdapter(max_bytes_billed=_BOOTSTRAP_BYTES_BILLED_CAP)
 
     with adapter:
         temp_ref = adapter.materialise_sample(

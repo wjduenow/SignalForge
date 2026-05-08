@@ -132,8 +132,16 @@ def test_materialise_sample_returns_tableref_with_session_dataset(
     table_ref: TableRef,
     shakespeare_table: FakeTable,
 ) -> None:
-    """DEC-001/002 — return value must be ``TableRef(project=client.project,
+    """DEC-001/002 — return value must be ``TableRef(project=None,
     dataset='_SESSION', name='_sf_sample_<16-hex>')``.
+
+    ``project=None`` is load-bearing: BigQuery rejects the three-part
+    ``<project>._SESSION.<name>`` form even inside the owning session
+    ("Use of _SESSION is not allowed here"). Caught during the
+    maintainer probe-run on 2026-05-08; the fix is in
+    ``BigQueryAdapter.materialise_sample`` returning ``project=None`` so
+    ``TableRef.qualified_name`` renders the two-part
+    ``_SESSION._sf_sample_<run_id>`` form that BigQuery accepts.
     """
     fake_client.expect_get_table(ref=table_ref, returns=shakespeare_table)
     _materialise_response_query(fake_client)
@@ -142,7 +150,7 @@ def test_materialise_sample_returns_tableref_with_session_dataset(
 
     assert isinstance(result, TableRef)
     assert result.dataset == "_SESSION"
-    assert result.project == "fake_project"
+    assert result.project is None
     assert re.fullmatch(r"_sf_sample_[0-9a-f]{16}", result.name)
 
 
@@ -337,7 +345,7 @@ def test_run_test_sql_uses_active_session_id_after_materialise(
     captured = _wrap_query_capture(fake_client)
 
     adapter.materialise_sample(table_ref, n=100)
-    adapter.run_test_sql("SELECT * FROM `fake_project._SESSION._sf_sample_x` WHERE 1=0")
+    adapter.run_test_sql("SELECT * FROM `_SESSION._sf_sample_x` WHERE 1=0")
 
     test_job_config = captured["job_configs"][1]
     cps = list(getattr(test_job_config, "connection_properties", []))

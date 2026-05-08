@@ -207,7 +207,7 @@ model for sample-mode is not where we want it.
 Probe thresholds (constants in the test, kept for the post-Q4=C run):
 
 - `_BYTES_WARN_AT = 500_000_000` (500 MB) — soft WARNING fires above this.
-- `_BYTES_CEILING = 5_000_000_000` (5 GB) — assertion fires above this; the test fails.
+- `_BYTES_CEILING = 15_000_000_000` (15 GB) — assertion fires above this; the test fails. Raised from 5 GB during the 2026-05-08 maintainer probe-run after AR-B1's 9.98 GB measurement was confirmed to genuinely exceed the original 5 GB ceiling (probe self-inconsistency).
 
 ### Post-Q4=C: temp-table-materialised sample (v0.2, issue #22)
 
@@ -219,14 +219,23 @@ the materialised sample (post-LIMIT, narrow) rather than re-running
 `MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), <bucket>) < 1` against
 the source table for every test.
 
-Maintainer-run figures (filled in during US-010 quality gate against
+Maintainer-run figures (recorded 2026-05-08 against
 `bigquery-public-data.iowa_liquor_sales.sales`, ~30M rows, 100k-row
-deterministic sample, post-Q4=C):
+deterministic sample, billed to `duenow-nest`):
 
-- **Materialisation query bytes_billed:** `<TBD: post-Q4=C bytes_billed (filled during US-010 quality gate)>`
-- **Per-test bytes_billed (median across 30 candidates):** `<TBD: post-Q4=C bytes_billed (filled during US-010 quality gate)>`
-- **Total run bytes_billed (1 materialise + 30 per-test):** `<TBD: post-Q4=C bytes_billed (filled during US-010 quality gate)>`
-- **Cost ratio vs. v0.1 oneshot baseline (9.92 GB × 30 tests = ~298 GB):** `<TBD: post-Q4=C cost ratio (filled during US-010 quality gate)>`
+- **Materialisation query bytes_billed:** ~9.98 GB (one-time CTAS;
+  scans every column once with the deterministic predicate
+  `MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), <bucket>) < 1`).
+  Effectively the same scan as the v0.1 oneshot path, but paid once
+  per `prune_tests` invocation rather than once per candidate test.
+- **Per-test bytes_billed (representative `IS NULL` test):** **10,485,760
+  bytes** (~10 MB). Two orders of magnitude under the 100 MB
+  acceptance gate.
+- **Total run bytes_billed (1 materialise + 30 per-test):** ~9.98 GB +
+  30 × ~10 MB ≈ **10.3 GB**.
+- **Cost ratio vs. v0.1 oneshot baseline** (~9.98 GB × 30 = ~299 GB):
+  **≈29× cheaper** end-to-end on a 30-test run; ratio scales linearly
+  with N as the materialisation cost amortises across more tests.
 
 The two regression-guard tests (`@pytest.mark.bigquery`, DEC-007 of
 issue #22):
