@@ -358,6 +358,64 @@ class UnknownTableSizeError(SamplingError):
         super().__init__(message, remediation=remediation)
 
 
+class MaterialisationFailedError(WarehouseError):
+    """The per-run sample-materialisation query (BigQuery CTAS / equivalent)
+    failed at the SDK / network / quota seam (DEC-008 of issue #22).
+
+    Wraps the underlying SDK exception via the ``cause=`` kwarg pattern
+    (mirrors ``LLMResponseAuditWriteError``). The orchestrator routes
+    every remaining test to ``kept-without-evidence`` per Q3 of the
+    plan; the typed exception lets the prune/CLI layers pattern-match
+    on materialisation failure without sniffing message text.
+
+    Tier-3 in the CLI exit-code taxonomy (external-dep failure) via
+    inheritance from :class:`WarehouseError`.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Inspect the underlying warehouse error (job_id / quota / auth). "
+        "To bypass materialisation entirely, set "
+        "'prune.sample_strategy: oneshot' in signalforge.yml."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: BaseException | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        self.cause = cause
+        super().__init__(message, remediation=remediation)
+
+
+class MaterialisationNotSupportedError(WarehouseError):
+    """The :class:`WarehouseAdapter` ABC default impl of
+    ``materialise_sample`` raises this; concrete adapters override the
+    method to provide a real implementation (DEC-008 of issue #22).
+
+    v0.1 ships the BigQuery override in US-003; non-BigQuery adapters
+    (Snowflake/Postgres in v0.2) inherit the default raise until each
+    grows its own override. The remediation is verbatim DEC-006 of the
+    plan: it tells the operator how to opt out via
+    ``signalforge.yml prune.sample_strategy: oneshot``.
+
+    Tier-3 in the CLI exit-code taxonomy via inheritance from
+    :class:`WarehouseError`.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Set 'prune.sample_strategy: oneshot' in signalforge.yml to fall "
+        "back to per-test sampling, or wait for v0.3 multi-warehouse "
+        "materialisation support."
+    )
+
+    def __init__(self, adapter_name: str, *, remediation: str | None = None) -> None:
+        self.adapter_name = adapter_name
+        message = f"Adapter {_format_value(adapter_name)} does not support sample materialisation."
+        super().__init__(message, remediation=remediation)
+
+
 # Sorted alphabetically (verified by tests/warehouse/test_errors.py).
 __all__ = [
     "BytesBilledExceededError",
@@ -365,6 +423,8 @@ __all__ = [
     "InvalidIdentifierError",
     "ManifestProjectNotFoundError",
     "ManifestSchemaNotFoundError",
+    "MaterialisationFailedError",
+    "MaterialisationNotSupportedError",
     "ProfileNotFoundError",
     "ProfileTargetNotFoundError",
     "QuerySyntaxError",
