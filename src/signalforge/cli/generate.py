@@ -23,6 +23,20 @@ argparse level. The observability flags (``--quiet``, ``--verbose``,
 verifies every typed exception in the layer maps to exactly one tier
 lands in US-008.
 
+US-006 of #22 layers two more prune-stage runtime-knob flags onto
+``cmd_generate``: ``--scope {sample,full}`` (overrides
+:attr:`signalforge.prune.PruneConfig.scope`) and ``--sample-strategy
+{oneshot,materialised}`` (overrides
+:attr:`signalforge.prune.PruneConfig.sample_strategy`). Both are
+optional and independent — set one, the other, both, or neither.
+Precedence: flag > config-file value > library default. The override
+is applied via :meth:`PruneConfig.model_validate` (NOT
+``model_copy(update=...)``) so every Pydantic validator re-runs — DEC-012
+of ``plans/super/22-temp-table-sample.md``. Mirrors
+:meth:`SafetyPolicy.with_mode` (DEC-018 of ``safety-layer.md``) and
+:attr:`DiffConfig.render_kind` (DEC-020 of #9 — the canonical project
+pattern for "CLI flag overrides config-file value").
+
 Project-root resolution (DEC-001 + DEC-027):
 
 * No flag → walk up from :func:`Path.cwd` to the nearest dir containing
@@ -96,6 +110,10 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
     extends with the runtime knob flags (``--mode``, ``--min-score``,
     ``--write``/``--dry-run`` mutex, ``--format``). Observability flags
     (``--quiet``, ``--verbose``, ``--no-color``) follow in US-007.
+    US-006 of #22 adds the prune-stage runtime knobs ``--scope`` and
+    ``--sample-strategy``; both override the same-named
+    :class:`PruneConfig` fields via :meth:`model_validate` so validators
+    re-run (DEC-012 of ``plans/super/22-temp-table-sample.md``).
     """
     parser = subparsers.add_parser(
         "generate",
@@ -207,6 +225,38 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "Select the diff renderer. ANSI: coloured terminal output "
             "(default). Markdown: GitHub-friendly report. JSON: stdout "
             "receives the JSON sidecar's contents."
+        ),
+    )
+    # US-006 of #22 / DEC-011 / DEC-012 — prune scope and sample-strategy
+    # overrides. Argparse-level ``choices`` rejection produces exit 2 (the
+    # argparse default). Both are ``default=None`` sentinels so we know
+    # whether the operator set the flag (override) or not (config-file
+    # value applies). The override is applied via
+    # :meth:`PruneConfig.model_validate` (NOT ``model_copy(update=...)``)
+    # so every Pydantic validator re-runs — mirrors
+    # :meth:`SafetyPolicy.with_mode` (DEC-018 of ``safety-layer.md``)
+    # and the ``DiffConfig.render_kind`` graduation in #9 (DEC-020).
+    parser.add_argument(
+        "--scope",
+        choices=("sample", "full"),
+        default=None,
+        help=(
+            "Override prune.scope (default: from config). Precedence: "
+            "flag > prune.scope in signalforge.yml > library default "
+            "('sample'). Applied via PruneConfig.model_validate so "
+            "validators re-run."
+        ),
+    )
+    parser.add_argument(
+        "--sample-strategy",
+        dest="sample_strategy",
+        choices=("oneshot", "materialised"),
+        default=None,
+        help=(
+            "Override prune.sample_strategy (default: from config). "
+            "Precedence: flag > prune.sample_strategy in signalforge.yml "
+            "> library default ('materialised'). Applied via "
+            "PruneConfig.model_validate so validators re-run."
         ),
     )
     # US-007 / DEC-014 / DEC-016 — observability flags. ``--quiet`` and
@@ -347,6 +397,19 @@ def cmd_generate(args: argparse.Namespace) -> int:
     Pipeline order is the documented ``safety → draft → prune → grade →
     diff`` (DEC-005). The stage-order test in
     ``tests/cli/test_generate.py`` pins this contract.
+
+    Per-flag override precedence (US-006 / US-006 of #22):
+
+    * ``--mode`` > ``safety.mode`` in ``signalforge.yml`` > library default.
+    * ``--min-score`` > ``grade.min_mean_score`` > library default.
+    * ``--format`` > ``diff.render_kind`` > library default (``"ansi"``).
+    * ``--scope`` > ``prune.scope`` > library default (``"sample"``).
+    * ``--sample-strategy`` > ``prune.sample_strategy`` > library default
+      (``"materialised"``).
+
+    The prune overrides apply via :meth:`PruneConfig.model_validate`
+    (NOT ``model_copy(update=...)``) so every Pydantic validator
+    re-runs — DEC-012 of ``plans/super/22-temp-table-sample.md``.
     """
     # US-007 — observability: configure logging and the progress gate
     # BEFORE any pipeline work. ``--quiet`` and ``--verbose`` are mutex
@@ -452,7 +515,29 @@ def cmd_generate(args: argparse.Namespace) -> int:
             emit_progress_done(2, "draft", time.monotonic() - _t0)
 
         # ---- 3/5: prune -------------------------------------------------
+        # US-006 of #22 / DEC-011 / DEC-012 — apply ``--scope`` and
+        # ``--sample-strategy`` by re-validating the frozen
+        # :class:`PruneConfig` with the overrides. ``model_validate`` (NOT
+        # ``model_copy(update=...)``) so every Pydantic validator re-runs:
+        # the ``Literal`` validators on ``scope`` / ``sample_strategy``
+        # reject typos like ``"materialized"`` (US spelling), and the
+        # ``_positive`` field validator re-fires on the rest of the dump.
+        # Mirrors :meth:`SafetyPolicy.with_mode` (DEC-018 of
+        # ``safety-layer.md``) and ``DiffConfig.render_kind`` (DEC-020 of
+        # #9). Both flags are independent — set one, the other, both, or
+        # neither; the unset axis falls through to the config-file value.
         prune_config = prune_module.load_prune_config(project_dir)
+        scope_override = getattr(args, "scope", None)
+        sample_strategy_override = getattr(args, "sample_strategy", None)
+        prune_overrides: dict[str, str] = {}
+        if scope_override is not None:
+            prune_overrides["scope"] = scope_override
+        if sample_strategy_override is not None:
+            prune_overrides["sample_strategy"] = sample_strategy_override
+        if prune_overrides:
+            prune_config = prune_module.PruneConfig.model_validate(
+                {**prune_config.model_dump(), **prune_overrides}
+            )
         candidate = draft_outcome.candidate
         candidate_test_count = sum(len(c.tests) for c in candidate.columns) + len(candidate.tests)
         if progress_on:
