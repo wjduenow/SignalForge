@@ -15,6 +15,8 @@ Any exception inside `audit.write` propagates as `AuditWriteError` from `build_l
 
 An unaudited LLM call is, by definition, PII leaving the warehouse without a receipt — exactly the failure mode this layer exists to prevent. Don't add try/except around audit writes "to be defensive"; the propagation IS the defence.
 
+This is the **primary-work fail-closed** pattern: the audit write is part of the unit of work, and the unit either fully succeeds or fully aborts. Contrast with the **cleanup-boundary fail-soft** pattern in `warehouse-adapters.md` DEC-013/DEC-014: cleanup fires AFTER the user's actual work has succeeded, so blocking on cleanup failure would punish the operator for housekeeping issues they can't fix mid-flight; cleanup paths swallow + emit an operator-actionable WARNING instead. The two look superficially similar (both deal with "I/O failed at a defended boundary") but apply at different points in the lifecycle. Don't conflate them when introducing a new boundary in v0.3 — primary-work boundaries propagate; cleanup-boundary swallows-and-warns.
+
 ## Column NAMES leak PII too — redact them with stable hashes (DEC-010)
 
 A column named `customer_ssn` or `john_smith_email` leaks PII via the name itself, even when no values are sampled. The layer redacts NAMES in `schema-only` and `aggregate-only` modes, not just values in `sample` mode.

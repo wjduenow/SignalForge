@@ -147,6 +147,14 @@ Two takeaways for future adapter work:
 1. Every public adapter method that calls `client.<method>(ref, ...)` needs a live integration test that runs against the real SDK, not just the fake. The fake is for behaviour assertions; only the real SDK enforces input-type contracts. Gate the live test on `SF_RUN_BQ=1` (or per-vendor equivalent) so default CI stays free, but require maintainers to run it before declaring an adapter "done."
 2. When the fake's coercion helper has a special case for accepting strings, that's a load-bearing signal that the production path passes strings — don't accept non-string forms in the fake without a paired test that proves the real SDK accepts them too.
 
+## Session/connection state on the adapter (DEC-002 of #22 generalised)
+
+When a vendor protocol requires per-call state (BigQuery `session_id`, Snowflake transaction id, Postgres prepared-statement cache, Databricks SQL warehouse handle), store it on the adapter instance as `self._active_<x>_id: <type> | None` rather than threading it through ABC method signatures. The ABC stays vendor-neutral — a generic `materialise_sample(table, n, *, partition_filter=None, ttl_seconds=...) -> TableRef` does not need a `session_id` parameter that only one adapter populates. Concrete adapters wire the state internally; subsequent per-call methods on the same adapter instance read the state and attach the right vendor primitive (BigQuery `ConnectionProperty`, Snowflake `transaction_id`, etc.) without callers needing to know the dialect.
+
+`__exit__` is the durable cleanup seam — the adapter is invoked as a context manager (`with adapter:`) and teardown lives there, NOT in the orchestrator. Cleanup-on-success and cleanup-on-failure share one path, and a hard process death falls back to the vendor's server-side timeout. State resets in a `finally` clause so a second `__exit__` is a no-op.
+
+This generalises the v0.1 `column_stats` batching-state precedent (DEC-008 / DEC-025 of #3) and the v0.2 BigQuery `_active_session_id` pattern (DEC-002 of #22). When v0.3 ships a new adapter that needs per-call state, match this shape: `_active_<x>_id` instance fields, ABC stays neutral, cleanup in `__exit__`, no per-call state-id parameter on the ABC.
+
 ## `materialise_sample` ABC method + adapter session-state pattern (issue #22, v0.2)
 
 Issue #22 lands `WarehouseAdapter.materialise_sample(table, n, *, partition_filter=None, ttl_seconds=3600) -> TableRef` (DEC-004 of #22). The ABC's default impl raises `MaterialisationNotSupportedError`; subclasses override (BigQuery in v0.2; Snowflake/Postgres in v0.3 via their own session/temp-table primitives). Method is NOT decorated `@abstractmethod` because the default impl IS the v0.2 behaviour for non-BQ adapters — the prune orchestrator's conservative-bias routing handles the no-support case gracefully and the operator opts out via `prune.sample_strategy: oneshot`.
@@ -160,6 +168,16 @@ The pattern mirrors the `column_stats` batching-state precedent (DEC-008 / DEC-0
 **`ttl_seconds` is OUR-side hint, NOT a BQ knob (DEC-013 of #22).** BigQuery sessions have a server-enforced max lifetime (~24h regardless of activity) plus a BQ-default idle timeout. The `ttl_seconds=3600` parameter on `materialise_sample(...)` is NOT passed to BigQuery — it's a hint to OUR cleanup-WARNING text (the "auto-expire in Ns" line below). Don't go looking for a BQ SDK call to set it; v0.2 trusts the BQ default. v0.3 may revisit if BQ exposes a configurable per-session TTL knob.
 
 **`_client.py` extension stays scoped (DEC-012 of #5 unchanged).** Any new `# pyright: ignore` for the session/connection-property surface lives in `adapters/_client.py` like every other BigQuery SDK ignore. The `_BQClientProtocol` may gain a session-property surface only if the existing `job_config: Any = None` typing is too loose — review during impl, but default to keeping the protocol minimal.
+
+## Cleanup-boundary fail-soft pattern (DEC-013 / DEC-014 of #22 generalised)
+
+Cleanup-boundary errors are fail-SOFT, in deliberate contrast to primary-work fail-CLOSED (`safety-layer.md` DEC-011 — propagation IS the defence; an unaudited LLM call must abort the run). A cleanup boundary fires AFTER the user's actual work has succeeded; blocking on cleanup failure punishes the user for housekeeping problems they cannot fix in the moment. The pattern is three layers: (1) explicit close on the happy path, (2) swallow-and-warn on cleanup failure with an operator-actionable WARNING, (3) durable server-side fallback (vendor timeout, retry queue, etc.) for hard process death.
+
+The WARNING is the load-bearing surface. It must give the operator three things, in this order: (a) the **identifier** required to act (raw `session_id`, transaction id, file handle — NOT a hash on this path; see DEC-003 of #22 for why redaction is relaxed only on this surface), (b) the **exact copy-pasteable command** to clean up manually (`bq query --connection_property=session_id=<raw> ...`, `kill -9 <pid>`, etc. — verbatim, not paraphrased), and (c) the **durable fallback** ("auto-expire in Ns", "will retry on next run", "OS reaps on process exit"). Without all three the WARNING is just noise; with all three the operator either acts or accepts the fallback in seconds.
+
+`--quiet` does NOT suppress cleanup-failure WARNINGs (CLI default raises the floor to WARNING; the WARNING still surfaces). This is deliberate — the operator-actionable contract is the contract. Don't add a config knob to disable it; if a future caller genuinely needs silence (notebook tight loop), they configure Python's logging directly.
+
+When introducing a new fail-soft cleanup boundary in v0.3 (Snowflake transaction rollback, Postgres connection pool drain, temp-file unlinking), match this shape verbatim. Cross-reference to `safety-layer.md` DEC-011 in the new section so the boundary distinction is explicit at the point a maintainer reads it.
 
 ## Best-effort cleanup in `__exit__` (DEC-013) with user-actionable failure WARNING (DEC-014)
 
