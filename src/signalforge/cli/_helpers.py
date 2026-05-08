@@ -117,6 +117,8 @@ from signalforge.warehouse import (
     InvalidIdentifierError,
     ManifestProjectNotFoundError,
     ManifestSchemaNotFoundError,
+    MaterialisationFailedError,
+    MaterialisationNotSupportedError,
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
     QuerySyntaxError,
@@ -253,6 +255,16 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     SamplingError: 3,
     SamplingRequiresPartitionFilterError: 3,
     UnknownTableSizeError: 3,
+    # Sample-materialisation seam (issue #22 / DEC-008 of US-007 of the
+    # plan): both errors are external-dep failures — the materialise
+    # query failed at the SDK / network / quota seam, or the active
+    # adapter does not support per-run materialisation. The orchestrator
+    # routes every candidate to ``kept-without-evidence`` per the
+    # conservative-bias rule, but the typed exception still surfaces at
+    # the CLI when it propagates (e.g., outside the prune orchestrator's
+    # catch surface, or via the lint subcommand).
+    MaterialisationFailedError: 3,
+    MaterialisationNotSupportedError: 3,
     # Audit-write durability across every fail-closed seam — when any of
     # these fire the disk hand-off didn't happen, which is an external-dep
     # state we couldn't recover.
