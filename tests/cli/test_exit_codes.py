@@ -225,6 +225,16 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
     }:
         return cls(_SENTINEL_MESSAGE, cause=_SENTINEL_CAUSE)
 
+    # Sample-materialisation seam (issue #22 / DEC-008 of US-007 of the
+    # plan). ``MaterialisationFailedError`` follows the ``cause=`` kwarg
+    # pattern (mirrors ``LLMResponseAuditWriteError``);
+    # ``MaterialisationNotSupportedError`` takes a positional adapter
+    # name. Both registered at tier 3 (external-dep) per DEC-008.
+    if name == "MaterialisationFailedError":
+        return cls(_SENTINEL_MESSAGE, cause=_SENTINEL_CAUSE)
+    if name == "MaterialisationNotSupportedError":
+        return cls("SyntheticAdapter")
+
     # Catch-all: layer-base default ``Cls(message, *, remediation=None)``.
     try:
         return cls(_SENTINEL_MESSAGE)
@@ -412,3 +422,113 @@ def test_table_not_found_error_exits_tier_two(
     assert code == 2, f"TableNotFoundError must exit tier 2; got {code}"
     assert captured.err.startswith("ERROR: ")
     assert "Traceback" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Explicit per-class call-outs: materialisation seam errors → tier 3
+# (US-007 / DEC-008 of plans/super/22-temp-table-sample.md)
+# ---------------------------------------------------------------------------
+
+
+def test_materialisation_failed_error_maps_to_tier_3(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """:class:`MaterialisationFailedError` is tier 3 (external-dep) per
+    DEC-008 of US-007. It wraps any SDK / network / quota failure during
+    the per-run materialisation query (BigQuery CTAS / equivalent), so
+    it slots alongside the other warehouse-connectivity / quota errors
+    in the four-tier taxonomy.
+
+    The parametrized loop above covers every entry in
+    :data:`_EXCEPTION_TO_EXIT_CODE`; this non-parametrized test calls
+    the contract out by name so a future tier-change diff is easy to
+    read in code review (mirrors the precedent set by
+    :func:`test_table_not_found_error_exits_tier_two`).
+    """
+    from signalforge.warehouse.errors import MaterialisationFailedError
+
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    mocks["manifest_load"].side_effect = MaterialisationFailedError(
+        "synthetic materialise failure",
+        cause=_SENTINEL_CAUSE,
+    )
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 3, f"MaterialisationFailedError must exit tier 3; got {code}"
+    assert captured.err.startswith("ERROR: ")
+    assert "Traceback" not in captured.err
+
+
+def test_materialisation_not_supported_error_maps_to_tier_3(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """:class:`MaterialisationNotSupportedError` is tier 3 (external-dep)
+    per DEC-008 of US-007. The :class:`WarehouseAdapter` ABC default
+    impl raises this when a concrete adapter has not overridden
+    ``materialise_sample`` — for v0.1 only BigQuery overrides; v0.2
+    Snowflake/Postgres adapters inherit the default raise until each
+    grows its own override.
+
+    Tier 3 (rather than tier 1) because the failure is "the active
+    adapter cannot do what we asked of it" — an external-dep state we
+    cannot recover by retrying or by fixing user input — not a
+    configuration / load failure.
+    """
+    from signalforge.warehouse.errors import MaterialisationNotSupportedError
+
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    mocks["manifest_load"].side_effect = MaterialisationNotSupportedError("SyntheticAdapter")
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 3, f"MaterialisationNotSupportedError must exit tier 3; got {code}"
+    assert captured.err.startswith("ERROR: ")
+    assert "Traceback" not in captured.err
+
+
+def test_audit_completeness_scan_passes_for_new_errors() -> None:
+    """The 7th AST scan
+    (:func:`tests.test_audit_completeness.test_every_typed_error_is_in_exit_code_mapping_table`)
+    walks every ``src/signalforge/*/errors.py`` and asserts every
+    concrete ``class <Name>Error`` declaration appears in
+    :data:`_EXCEPTION_TO_EXIT_CODE`. US-007 of issue #22 lands the two
+    new materialisation-seam errors in lockstep with the mapping; this
+    test pins the scan to **pass** specifically for both new classes so
+    a future regression that drops one (or moves them to a different
+    errors module without updating the mapping) breaks loud at the
+    callout, not just inside the broader 7th-scan failure list.
+    """
+    from signalforge.cli._helpers import _EXCEPTION_TO_EXIT_CODE
+    from signalforge.warehouse.errors import (
+        MaterialisationFailedError,
+        MaterialisationNotSupportedError,
+    )
+
+    assert MaterialisationFailedError in _EXCEPTION_TO_EXIT_CODE, (
+        "MaterialisationFailedError missing from _EXCEPTION_TO_EXIT_CODE; "
+        "the 7th AST scan would catch this, but the per-class assertion "
+        "names the offending class up front."
+    )
+    assert MaterialisationNotSupportedError in _EXCEPTION_TO_EXIT_CODE, (
+        "MaterialisationNotSupportedError missing from "
+        "_EXCEPTION_TO_EXIT_CODE; same scan fail-loud as above."
+    )
+    assert _EXCEPTION_TO_EXIT_CODE[MaterialisationFailedError] == 3, (
+        "MaterialisationFailedError must map to tier 3 (external-dep) per DEC-008 of US-007."
+    )
+    assert _EXCEPTION_TO_EXIT_CODE[MaterialisationNotSupportedError] == 3, (
+        "MaterialisationNotSupportedError must map to tier 3 (external-dep) per DEC-008 of US-007."
+    )
