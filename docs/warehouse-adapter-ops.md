@@ -383,6 +383,20 @@ for the full WARNING shape and the `--quiet` interaction (the
 cleanup-failure WARNING is operator-actionable and is NOT suppressed
 by `--quiet`).
 
+### Edge case: SDK returns `session_info=None`
+
+If `materialise_sample`'s first query succeeds server-side but the
+BigQuery SDK returns `job.session_info=None` (or `session_id=None`),
+the adapter cannot stash the id and `__exit__` will not fire
+`BQ.ABORT_SESSION()` — `_active_session_id is None`, so the cleanup
+short-circuits to a no-op. The server-side session lives until BQ's
+own timeout (~24h max). This is the SDK contract violating its own
+documented behaviour and is not expected in practice; the
+**Spotting orphaned sessions** query below catches it. If you see
+materialisation jobs in `INFORMATION_SCHEMA.JOBS_BY_PROJECT` whose
+`session_info.session_id` is set but no matching `BQ.ABORT_SESSION`
+job ever ran for that session, this is the path that produced them.
+
 ### Spotting orphaned sessions
 
 When a maintainer wants to audit a project for orphan sessions

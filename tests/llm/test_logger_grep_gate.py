@@ -29,6 +29,7 @@ _PRUNE_DIR = _REPO_ROOT / "src" / "signalforge" / "prune"
 _GRADE_DIR = _REPO_ROOT / "src" / "signalforge" / "grade"
 _DIFF_DIR = _REPO_ROOT / "src" / "signalforge" / "diff"
 _CLI_DIR = _REPO_ROOT / "src" / "signalforge" / "cli"
+_WAREHOUSE_DIR = _REPO_ROOT / "src" / "signalforge" / "warehouse"
 
 # Matches ``_LOGGER.<method>(f"...``, ``_LOGGER.<method>(f'...``,
 # ``_LOGGER.<method>( f"...``, ``_LOGGER.<method>(rf"...``,
@@ -54,10 +55,13 @@ def _scan_for_f_string_logger_calls(root: Path) -> list[tuple[Path, int, str]]:
 
 
 def test_no_f_string_logger_calls_in_llm_draft_prune_grade_diff_or_cli_modules() -> None:
-    """DEC-011 / DEC-019 of #8 / DEC-017 of #9: no f-string-interpolated
-    ``_LOGGER`` calls in :mod:`signalforge.llm`, :mod:`signalforge.draft`,
-    :mod:`signalforge.prune`, :mod:`signalforge.grade`,
-    :mod:`signalforge.diff`, or :mod:`signalforge.cli`.
+    """DEC-011 / DEC-019 of #8 / DEC-017 of #9 / QG fix of #22: no
+    f-string-interpolated ``_LOGGER`` calls in :mod:`signalforge.llm`,
+    :mod:`signalforge.draft`, :mod:`signalforge.prune`,
+    :mod:`signalforge.grade`, :mod:`signalforge.diff`,
+    :mod:`signalforge.cli`, or :mod:`signalforge.warehouse` (added by
+    issue #22's QG review — US-003 introduced the cleanup-failure
+    WARNING and INFO logs in the warehouse layer).
 
     Use lazy ``%s`` formatting with :func:`json.dumps` for any
     user-controlled string. ANSI escapes in column names / model ids
@@ -71,12 +75,14 @@ def test_no_f_string_logger_calls_in_llm_draft_prune_grade_diff_or_cli_modules()
         + _scan_for_f_string_logger_calls(_GRADE_DIR)
         + _scan_for_f_string_logger_calls(_DIFF_DIR)
         + _scan_for_f_string_logger_calls(_CLI_DIR)
+        + _scan_for_f_string_logger_calls(_WAREHOUSE_DIR)
     )
     formatted = "\n".join(f"  {p}:{line}: {content}" for p, line, content in hits)
     assert not hits, (
         "Found f-string-interpolated _LOGGER calls in signalforge.llm / "
         "signalforge.draft / signalforge.prune / signalforge.grade / "
-        "signalforge.diff / signalforge.cli (DEC-011 violation):\n"
+        "signalforge.diff / signalforge.cli / signalforge.warehouse "
+        "(DEC-011 violation):\n"
         f"{formatted}\n"
         "Use lazy-format with json.dumps instead, e.g.:\n"
         '  _LOGGER.info("audit event: %s", json.dumps({"unique_id": ...}))'

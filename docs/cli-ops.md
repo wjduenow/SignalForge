@@ -118,6 +118,21 @@ Runtime knob flags:
   ANSI: coloured terminal output (default). Markdown:
   GitHub-friendly report. JSON: stdout receives the JSON
   sidecar's contents.
+- `--scope {sample,full}` — Override `prune.scope`
+  (default: from config). `sample`: tests run against a
+  100k-row deterministic sample. `full`: tests run against
+  the entire source table (no sampling). Per-run override;
+  the config-file value is the durable default. (DEC-011 of
+  issue #22.)
+- `--sample-strategy {oneshot,materialised}` — Override
+  `prune.sample_strategy` (default: from config). Only
+  meaningful when `scope=sample`. `materialised` (default):
+  materialise the sample once into a BigQuery temp table,
+  then run all candidate tests against it. `oneshot`:
+  re-sample per test (v0.1 behaviour, much costlier on wide
+  tables). Per-run override; the config-file value is the
+  durable default. (DEC-011 of issue #22; see
+  `docs/prune-ops.md` cost model section.)
 
 Observability flags:
 
