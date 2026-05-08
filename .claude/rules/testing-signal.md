@@ -36,6 +36,10 @@ uvx --python 3.11 --from "dbt-duckdb==X.Y.*" --with "dbt-core==X.Y.*" dbt parse
 
 Pin the tool version in dev-deps for the *latest* schema only — older versions are summoned ephemerally. Strip non-deterministic fields (`generated_at`, `invocation_id`, `user_id`, etc.) with `jq` before committing so the JSON is reproducible. Reference: `tests/fixtures/regenerate.sh` (issue #2).
 
+## Seeded determinism over snapshot normalisation
+
+When a derived identifier needs to land in a snapshot fixture (compiled SQL, generated artefact id, run-scoped temp-table name), prefer **seeded determinism** — `blake2b(stable_inputs, digest_size=N).hex()` over the inputs that should produce the same output across runs — over post-hoc regex normalisation in the test. The seeded path makes raw bytes stable across runs without a normalisation layer; the normalisation path becomes a maintenance burden the moment the regex shape evolves (e.g., the LLM drafter's `prompt_version` would have needed regex updates every time the system prompt changed if it weren't already a content hash). Mirrors DEC-001 of #22 (16-hex `_sf_sample_<run_id>` derived from `(model.unique_id, signalforge_version, sample_size, partition_filter)`) and the LLM drafter's `prompt_version` (DEC of #5). Reach for the hash recipe before reaching for `re.sub` in tests.
+
 ## Drift detection via one-off `extra="forbid"` model
 
 If a parser uses `extra="ignore"` in production (forward-compat), pair it with a test that constructs a one-off `StrictModel(BaseModel)` with `extra="forbid"` and validates a known-current fixture against it. Adding a key to the fixture without updating the model breaks the test loudly. Reference: `tests/manifest/test_models.py::test_drift_detector_extra_forbid`.

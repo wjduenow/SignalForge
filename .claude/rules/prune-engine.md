@@ -18,6 +18,8 @@ The decision matrix lives in `engine.py::_decide_from_test_result` (the routing 
 
 If you add a sixth `DropReason` literal in v0.2 (e.g. `"sample-too-small"`), update production `DropReason` AND `StrictPruneDecision` (the drift detector) AND the fixture at `tests/fixtures/prune/prune_event_v1.jsonl` AND the decision-matrix table in `docs/prune-ops.md` in the same change.
 
+**Conservative-bias routing across `WarehouseError` subclasses.** When an orchestrator-entry warehouse exception fires — any `WarehouseError` subclass, including ones added by future adapters (`SnowflakeTransactionError`, `PostgresConnectionPoolDrainedError`, `DatabricksClusterUnavailableError`) — the WHOLE candidate set routes to `kept-without-evidence`, NOT just the test that happened to be running when the exception surfaced. The 5-value `DropReason` literal stays locked across these expansions; the diagnostic travels in the `why` field as `f"<operation> failed: {type(exc).__name__}: {str(exc)[:200]}"`. The orchestrator emits a single stderr WARNING at the head of the failure path so the operator gets a one-line out-of-band signal that the run was degraded — otherwise the only signal is N identical `why` fields buried in the diff. Generalises DEC-009 of #22 (materialisation failure) for any new pre-loop warehouse step that might land in v0.3 (cluster spin-up, schema introspection, transaction begin); apply the same routing without inventing a sixth `DropReason`.
+
 ## Fail-closed audit (DEC-016, mirrors safety/draft)
 
 `signalforge.prune.audit.write_prune_event` is the project's third fail-closed JSONL writer (after `signalforge.safety.audit.write` and `signalforge.draft.audit.write_response_event`). The contract is identical to those — load-bearing rules:
@@ -130,6 +132,16 @@ A typo like `trusted_models: ["model.proj.cusotmers"]` (vs. `customers`) MUST fa
 ## v0.2 reservations / additions (issue #22 — temp-table-materialised sample)
 
 Issue #22 lands the materialised-sample optimisation as the v0.2 default. The additions below extend (don't replace) every rule in this file; the v0.1 oneshot path remains the fallback for non-BigQuery adapters.
+
+**5-surface parity for v0.x → v0.(x+1) graduations.** When graduating a reserved surface in this section (or any rule file's "v0.2 reservations" / "v0.3 reservations" block) from forward-compat-only to behaviour-active, update **five surfaces in the same commit** — the non-CLI analogue of `cli-layer.md`'s 5-surface flag-parity rule (help / docstring / ops doc / test name / DEC):
+
+1. **Rule file** — this block (or the equivalent in another rule file) — promote from "reserved" to "active" wording, retaining the historical DEC pointer.
+2. **Ops doc** — `docs/prune-ops.md` § "Configuration" / § "Decision matrix" / § "Cost model" (or the corresponding stage's ops doc). The contract surface external CI parsers and downstream tooling key on.
+3. **CLAUDE.md public-API surface** — the bullet under "Public API surface (v0.1 + v0.2 additions)" so a maintainer reading top-level orientation sees the active surface, not the reserved one.
+4. **Test** — promote a forward-compat smoke test (or write a fresh one) that pins the active behaviour, not just the reserved type signature.
+5. **DEC in `plans/super/<n>-<topic>.md`** — the ADR-style record of why the graduation happened. Don't leave the plan stale relative to shipped behaviour.
+
+Surfaces 2 and 3 are the ones most often forgotten because they sit furthest from the code. Codify the parity check into every graduation PR's review checklist. Same lesson as `cli-layer.md` pass-3 / pass-4; the surface count is the same; the mapping is "rule file ↔ argparse help" / "ops doc ↔ ops doc" / "CLAUDE.md ↔ handler docstring" / "test ↔ test" / "DEC ↔ DEC".
 
 - **`PruneConfig.sample_strategy: Literal["oneshot", "materialised"] = "materialised"` (DEC-007 of #22).** New `extra="forbid"` field on `PruneConfig`; `materialised` is the v0.2 default. Operators on non-BigQuery adapters opt out via `prune.sample_strategy: oneshot`. v0.1 YAML files without the field load with the `materialised` default and the orchestrator's conservative-bias routing handles non-BQ adapters gracefully. Same `extra="forbid"` placement convention as the rest of `PruneConfig` — typos like `sample_stratagy:` (or US `materialized`) fail loud at config load.
 
