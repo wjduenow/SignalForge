@@ -79,6 +79,8 @@ def _make_query_job_config(
     stage: str,
     version: str | None = None,
     timeout_ms: int | None = None,
+    create_session: bool = False,
+    session_id: str | None = None,
 ) -> Any:
     """Build a ``QueryJobConfig`` with DEC-015 defaults.
 
@@ -128,6 +130,27 @@ def _make_query_job_config(
         # (str | int property under the hood); the type-ignore stays
         # confined to this seam.
         job_config.job_timeout_ms = timeout_ms  # pyright: ignore[reportAttributeAccessIssue]
+    if create_session:
+        # DEC-002 of issue #22 — the BigQueryAdapter's materialise_sample
+        # path requests a session via QueryJobConfig.create_session=True so
+        # BigQuery server-side mints a session_id (returned via
+        # job.session_info.session_id after .result()). Confined to this
+        # SDK seam per DEC-012 of #5.
+        job_config.create_session = True  # pyright: ignore[reportAttributeAccessIssue]
+    if session_id is not None:
+        # DEC-002 of #22 — once a session is active, subsequent queries
+        # (per-test failing-rows queries; the BQ.ABORT_SESSION cleanup)
+        # route into that session via connection_properties. The
+        # BigQuery SDK exposes the typed
+        # :class:`bigquery.query.ConnectionProperty` value object; mirror
+        # that here behind the SDK seam.
+        from google.cloud.bigquery.query import (  # type: ignore[import-not-found]
+            ConnectionProperty,
+        )
+
+        job_config.connection_properties = [  # pyright: ignore[reportAttributeAccessIssue]
+            ConnectionProperty(key="session_id", value=session_id),
+        ]
     return job_config
 
 

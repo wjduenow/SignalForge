@@ -49,8 +49,11 @@ shim's typed surface and is otherwise pyright-clean.
 
 from __future__ import annotations
 
+import json
 import logging
+import time
 from datetime import date, datetime
+from hashlib import blake2b
 from typing import Any
 
 from signalforge.warehouse._sql_safety import validate_identifier, validate_test_sql
@@ -63,6 +66,7 @@ from signalforge.warehouse.adapters._client import (
 )
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
+    MaterialisationFailedError,
     SamplingRequiresPartitionFilterError,
     UnknownTableSizeError,
 )
@@ -76,6 +80,12 @@ from signalforge.warehouse.models import (
 )
 
 _LOGGER = logging.getLogger("signalforge.warehouse")
+
+# Module-level alias so tests can reassign to a deterministic stand-in
+# (mirrors prune-engine.md DEC-019 / llm-drafter.md DEC-004 — never
+# monkey-patch ``time.monotonic`` globally). Used by materialise_sample +
+# __exit__ to drive the DEC-014 ``auto-expire in <N>s`` text.
+_monotonic = time.monotonic
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +165,20 @@ class BigQueryAdapter(WarehouseAdapter):
         self._column_stats_pending: dict[TableRef, list[str]] | None = None
         self._column_stats_results: dict[TableRef, dict[str, ColumnStats]] | None = None
 
+        # Session-state carrying the BigQuery session_id once
+        # :meth:`materialise_sample` has run (DEC-002 of issue #22). Lives
+        # outside the per-context cache because materialisation does NOT
+        # require an active ``with`` block (the prune orchestrator owns
+        # the lifecycle), but ``__exit__``'s DEC-013 cleanup wants to see
+        # any session that opened during the block. ``None`` until the
+        # first successful materialise; reset to ``None`` in ``__exit__``
+        # after the abort. ``_session_started_at`` and
+        # ``_session_ttl_seconds`` are the inputs the DEC-014 cleanup
+        # WARNING uses to render the ``auto-expire in <N>s`` line.
+        self._active_session_id: str | None = None
+        self._session_started_at: float | None = None
+        self._session_ttl_seconds: int | None = None
+
     # ------------------------------------------------------------------
     # __repr__ — DEC-022 redaction.
     # ------------------------------------------------------------------
@@ -201,6 +225,95 @@ class BigQueryAdapter(WarehouseAdapter):
             self._column_stats_pending = None
             self._column_stats_results = None
 
+        # DEC-013 / DEC-014 of issue #22 — best-effort BigQuery session
+        # cleanup. Issues ``CALL BQ.ABORT_SESSION();`` inside the active
+        # session via ``connection_properties``, swallows any failure,
+        # and either INFO-logs success (with hashed session_id only —
+        # DEC-003) or WARNING-logs the cleanup-failure remediation (with
+        # the raw session_id — DEC-014, the deliberate exception). State
+        # always resets in the inner ``finally`` so a subsequent
+        # ``__exit__`` is a no-op.
+        self._cleanup_active_session()
+
+    def _cleanup_active_session(self) -> None:
+        """DEC-013 / DEC-014 best-effort session cleanup.
+
+        Splits out so the test surface can exercise the cleanup path
+        without entering an actual ``with`` block. Idempotent: returns
+        immediately when ``_active_session_id`` is ``None``.
+        """
+        session_id = self._active_session_id
+        if session_id is None:
+            return
+        try:
+            try:
+                # Issue the abort inside the same session via
+                # connection_properties. The query routes through
+                # ``_default_job_config`` so ``use_query_cache=False`` +
+                # the bytes cap apply to the abort too — preserves the
+                # DEC-015 reproducibility / cost-attribution invariant.
+                job = self._get_client().query(
+                    "CALL BQ.ABORT_SESSION();",
+                    job_config=self._default_job_config(
+                        stage="warehouse_session_abort",
+                        session_id=session_id,
+                    ),
+                )
+                # ``.result()`` flushes the call so we observe any
+                # server-side failure here rather than at process exit.
+                list(job.result())
+            except Exception as exc:  # noqa: BLE001 - DEC-014 swallows all
+                # DEC-014 multi-line WARNING — raw session_id is the
+                # deliberate exception to DEC-003 redaction. The bq
+                # command is unconstructable without it, so a hash here
+                # would defeat the remediation purpose.
+                ttl_remaining = self._compute_ttl_remaining_seconds()
+                _LOGGER.warning(
+                    "BigQuery session cleanup failed; session will auto-expire "
+                    "in %ds (BigQuery TTL).\n"
+                    "  Session ID: %s\n"
+                    "  Reason: %s\n"
+                    "  To clean up immediately:\n"
+                    "    bq query --connection_property=session_id=%s "
+                    '--use_legacy_sql=false "CALL BQ.ABORT_SESSION();"',
+                    ttl_remaining,
+                    session_id,
+                    type(exc).__name__,
+                    session_id,
+                )
+            else:
+                # Happy path — DEC-003 redacted INFO log. ``session_id_hash``
+                # is the only session-correlating identifier on disk; the
+                # raw session_id never leaves the adapter.
+                _LOGGER.info(
+                    "session closed: %s",
+                    json.dumps(
+                        {
+                            "session_id_hash": _hash_session_id(session_id),
+                            "ttl_remaining_seconds": self._compute_ttl_remaining_seconds(),
+                        }
+                    ),
+                )
+        finally:
+            self._active_session_id = None
+            self._session_started_at = None
+            self._session_ttl_seconds = None
+
+    def _compute_ttl_remaining_seconds(self) -> int:
+        """DEC-014 ``auto-expire in <N>s`` floor.
+
+        ``max(1, int(ttl_seconds - elapsed))``. Floor at 1 avoids
+        ``auto-expire in 0s`` confusion: if the session has actually
+        expired, the abort would have succeeded with "session not found"
+        and the WARNING wouldn't fire.
+        """
+        ttl = self._session_ttl_seconds
+        started_at = self._session_started_at
+        if ttl is None or started_at is None:
+            return 1
+        elapsed = _monotonic() - started_at
+        return max(1, int(ttl - elapsed))
+
     # ------------------------------------------------------------------
     # Public dialect surface.
     # ------------------------------------------------------------------
@@ -218,7 +331,14 @@ class BigQueryAdapter(WarehouseAdapter):
             self._client = make_real_client(self._project, self._location)
         return self._client
 
-    def _default_job_config(self, *, stage: str, timeout_ms: int | None = None) -> Any:
+    def _default_job_config(
+        self,
+        *,
+        stage: str,
+        timeout_ms: int | None = None,
+        create_session: bool = False,
+        session_id: str | None = None,
+    ) -> Any:
         """Build the DEC-015 job config for ``stage``.
 
         Always:
@@ -236,6 +356,20 @@ class BigQueryAdapter(WarehouseAdapter):
         value through ``run_test_sql`` in v0.1. The warehouse adapter's
         own ``sample_rows`` / ``column_stats`` / ``run_test_sql`` paths
         leave it ``None``.
+
+        ``create_session`` (DEC-002 of issue #22): when ``True``, the
+        job opens a fresh BigQuery session. Used exclusively by
+        :meth:`materialise_sample` so the temp-table CTAS lives inside
+        a server-side session whose ``session_id`` the SDK exposes via
+        ``job.session_info.session_id`` after ``.result()``.
+
+        ``session_id`` (DEC-002 of issue #22): when not ``None``, the
+        job routes into the named session via
+        ``connection_properties=[ConnectionProperty(key="session_id",
+        value=...)]`` so per-test failing-rows queries (and the
+        ``CALL BQ.ABORT_SESSION()`` cleanup) can read the
+        ``_SESSION._sf_sample_<run_id>`` temp table that
+        :meth:`materialise_sample` produced.
         """
         from signalforge import __version__
 
@@ -244,6 +378,8 @@ class BigQueryAdapter(WarehouseAdapter):
             stage=stage,
             version=__version__,
             timeout_ms=timeout_ms,
+            create_session=create_session,
+            session_id=session_id,
         )
 
     def _quote(self, ref: TableRef) -> str:
@@ -413,6 +549,210 @@ class BigQueryAdapter(WarehouseAdapter):
         return [row_to_dict(r) for r in rows]
 
     # ------------------------------------------------------------------
+    # materialise_sample — DEC-001 / DEC-002 / DEC-003 of issue #22.
+    # ------------------------------------------------------------------
+
+    def materialise_sample(
+        self,
+        table: TableRef,
+        n: int,
+        *,
+        partition_filter: PartitionFilter | None = None,
+        ttl_seconds: int = 3600,
+    ) -> TableRef:
+        """Materialise a deterministic sample into a BigQuery session
+        temp table; return a :class:`TableRef` pointing at it.
+
+        DEC-001 — Compiled-SQL determinism via seeded ``run_id``.
+        ``run_id = blake2b-8(table.qualified_name + signalforge_version
+        + n + canonical_json(partition_filter))`` (16 hex chars). The
+        same ``(table, n, partition_filter)`` tuple under the same
+        ``signalforge_version`` produces a byte-equal temp-table name
+        — the prune compiler's ``compiled_sql_hash`` invariant holds
+        because the per-test SQL references the deterministic temp
+        table.
+
+        DEC-002 — BigQuery session lifecycle. The first query
+        (``CREATE TEMP TABLE _sf_sample_<run_id> AS SELECT ...``) runs
+        with ``QueryJobConfig.create_session=True``. BigQuery assigns
+        a server-side ``session_id``; the SDK exposes it on
+        ``job.session_info.session_id`` once ``.result()`` completes.
+        We capture that, store it on ``self._active_session_id``, and
+        use ``connection_properties`` on every subsequent query
+        (``run_test_sql``, the ``__exit__`` abort) to route into the
+        same session so the ``_SESSION._sf_sample_<run_id>`` temp
+        table is reachable.
+
+        DEC-003 — Session-id redaction. The success INFO log emits
+        ``session_id_hash = blake2b-4(session_id).hexdigest()`` (8 hex
+        chars); the raw session_id never leaves the adapter except in
+        the DEC-014 cleanup-failure WARNING.
+
+        DEC-004 — ``ttl_seconds`` is OUR-side only: it never touches
+        the BigQuery SDK. BigQuery enforces its own server-side
+        session TTL. The kwarg drives the DEC-014 WARNING text's
+        ``auto-expire in <N>s`` line if cleanup fails.
+
+        Q5 — ``partition_filter`` lands in the materialisation
+        ``WHERE`` clause once. Per-test queries against the temp
+        table do NOT re-apply it (the materialised rows already
+        survived the filter).
+
+        Args:
+            table: Source production table to sample from.
+            n: Target sample size; bucket sizing mirrors
+                :meth:`sample_rows` (deterministic hash-mod, fail-loud
+                size guards).
+            partition_filter: Optional :class:`PartitionFilter` applied
+                ONCE inside the CTAS WHERE clause.
+            ttl_seconds: OUR-side hint to the DEC-014 WARNING text
+                only; not passed to BigQuery (DEC-013 / DEC-004).
+
+        Returns:
+            :class:`TableRef` with ``project=client.project``,
+            ``dataset="_SESSION"``, ``name="_sf_sample_<run_id>"``.
+
+        Raises:
+            MaterialisationFailedError: any SDK / network / quota
+                failure during the CTAS query (wraps the original
+                exception via ``cause=``).
+            ValueError: ``n <= 0``.
+            UnknownTableSizeError, SamplingRequiresPartitionFilterError:
+                propagated from the underlying size-check pathway
+                (mirrors :meth:`sample_rows`'s fail-loud sizing
+                contract).
+        """
+        if n <= 0:
+            raise ValueError(f"materialise_sample requires n > 0; got n={n}")
+
+        run_id = _compute_run_id(table=table, n=n, partition_filter=partition_filter)
+        temp_name = f"_sf_sample_{run_id}"
+        # DEC-013 of #3 / C3 of #22 — the temp-table identifier MUST pass
+        # validate_identifier before quoting. blake2b-8 lowercase hex is
+        # always alphanumeric so the regex passes; the explicit call
+        # documents the contract and catches any future drift in
+        # _compute_run_id (e.g., if someone adds a hyphen separator).
+        validate_identifier("temp_table_name", temp_name)
+
+        # Mirror the sample_rows sizing pathway — same failure-loud
+        # contract, same deterministic bucket. The compile-time bucket
+        # for materialisation is sized off the source table's num_rows
+        # so the produced sample is ~3-5x n before LIMIT.
+        meta = self._get_table(table)
+        num_rows: int | None = getattr(meta, "num_rows", None)
+        if num_rows is None or num_rows == 0:
+            if partition_filter is None:
+                raise UnknownTableSizeError(table=table.qualified_name)
+            bucket = 1000
+        elif num_rows >= _LARGE_TABLE_THRESHOLD and partition_filter is None:
+            raise SamplingRequiresPartitionFilterError(
+                table=table.qualified_name, num_rows=num_rows
+            )
+        else:
+            bucket = max(num_rows // n, 1)
+
+        quoted_source = self._quote(table)
+        where_clauses = [
+            f"MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), {bucket}) < 1",
+        ]
+        if partition_filter is not None:
+            where_clauses.append(self._render_partition_filter(partition_filter))
+        where_sql = " AND ".join(where_clauses)
+        # The deterministic predicate is byte-identical to
+        # ``sample_rows`` (Architectural Commitment #5): same hash-mod
+        # formula, same ORDER BY, same LIMIT shape. The CREATE TEMP
+        # TABLE wraps it; per-test queries hit the materialised rows
+        # column-pruned, so the per-test bytes drop to ~1 MB instead
+        # of the ~10 GB the cost-probe AR-B1 measured.
+        sql = (
+            f"CREATE TEMP TABLE {temp_name} AS "
+            f"SELECT * FROM {quoted_source} AS t "
+            f"WHERE {where_sql} "
+            f"ORDER BY FARM_FINGERPRINT(TO_JSON_STRING(t)) "
+            f"LIMIT {n}"
+        )
+
+        started_at = _monotonic()
+        try:
+            job = self._get_client().query(
+                sql,
+                job_config=self._default_job_config(
+                    stage="warehouse_sample_materialise",
+                    create_session=True,
+                ),
+            )
+            # ``.result()`` blocks until BigQuery completes the CTAS.
+            # The SDK populates ``job.session_info`` only after the job
+            # finishes successfully; capturing earlier would race the
+            # server-side session assignment.
+            list(job.result())
+        except Exception as exc:
+            # DEC-008 of #22 — wrap any SDK / network / quota failure
+            # in a typed MaterialisationFailedError. The original
+            # exception travels via ``cause=`` for post-mortem; the
+            # raise-from chain lets a debugger walk the real
+            # ``__cause__`` while the prune orchestrator's pattern
+            # match keys on the typed shell.
+            raise MaterialisationFailedError(
+                message=f"sample materialisation failed for {table.qualified_name}: {exc}",
+                cause=exc,
+            ) from exc
+
+        session_info = getattr(job, "session_info", None)
+        session_id: str | None = (
+            getattr(session_info, "session_id", None) if session_info is not None else None
+        )
+        if session_id is None:
+            # The SDK contract guarantees session_info on a
+            # create_session=True job that completed successfully. A
+            # missing session_id is a real protocol violation — fail
+            # loud rather than ship an unreachable temp table.
+            raise MaterialisationFailedError(
+                message=(
+                    f"BigQuery did not return a session_id for the materialise job "
+                    f"on {table.qualified_name}; the CTAS completed but the session "
+                    "is unreachable for follow-up queries."
+                ),
+                cause=None,
+            )
+
+        # State lands AFTER the SDK confirmed both completion and
+        # session minting — partial state on failure is what the
+        # ``raise from`` paths above prevent.
+        self._active_session_id = session_id
+        self._session_started_at = started_at
+        self._session_ttl_seconds = ttl_seconds
+
+        duration_ms = int((_monotonic() - started_at) * 1000)
+        # DEC-003 of #22 — INFO log uses session_id_hash, never raw.
+        # Lazy-format JSON for ANSI safety (mirrors safety-layer DEC-022 /
+        # llm-drafter DEC-011; the warehouse layer tracks the same
+        # convention).
+        _LOGGER.info(
+            "materialised sample: %s",
+            json.dumps(
+                {
+                    "table": table.qualified_name,
+                    "sample_rows": n,
+                    "session_id_hash": _hash_session_id(session_id),
+                    "run_id": run_id,
+                    "duration_ms": duration_ms,
+                }
+            ),
+        )
+
+        # Return a TableRef pointing at the session-scoped temp table.
+        # The ``_SESSION`` namespace is BigQuery's canonical pseudo-
+        # dataset for session-local objects; the three-part
+        # ``<project>._SESSION._sf_sample_<run_id>`` qualified_name is
+        # what subsequent per-test queries quote against.
+        return TableRef(
+            project=self._get_client().project,
+            dataset="_SESSION",
+            name=temp_name,
+        )
+
+    # ------------------------------------------------------------------
     # column_stats — DEC-008 / DEC-013 / DEC-016 / DEC-023 / DEC-025.
     # ------------------------------------------------------------------
 
@@ -567,7 +907,17 @@ class BigQueryAdapter(WarehouseAdapter):
 
         try:
             job = self._get_client().query(
-                wrapped, job_config=self._default_job_config(stage="warehouse_test")
+                wrapped,
+                job_config=self._default_job_config(
+                    stage="warehouse_test",
+                    # DEC-002 of #22 — when materialise_sample has minted
+                    # an active session, every per-test query routes
+                    # into it via connection_properties so the
+                    # ``_SESSION._sf_sample_<run_id>`` temp table is
+                    # reachable. ``None`` (no active session) reverts to
+                    # the v0.1 oneshot path unchanged.
+                    session_id=self._active_session_id,
+                ),
             )
             rows = list(job.result())
         except Exception as exc:
@@ -602,6 +952,79 @@ class BigQueryAdapter(WarehouseAdapter):
 # ---------------------------------------------------------------------------
 # Schema normalisation
 # ---------------------------------------------------------------------------
+
+
+def _hash_session_id(session_id: str) -> str:
+    """DEC-003 of #22 — emit ``blake2b-4(session_id).hexdigest()`` (8 hex
+    chars).
+
+    Mirrors :mod:`signalforge.safety.redact`'s column-name redaction
+    (DEC-010 of #4) — the LLM / log-aggregator boundary never sees the
+    raw session id; the hash is enough to correlate records emitted by
+    the same materialisation run.
+    """
+    return blake2b(session_id.encode("utf-8"), digest_size=4).hexdigest()
+
+
+def _canonical_partition_filter(pf: PartitionFilter | None) -> str:
+    """Render a :class:`PartitionFilter` to a canonical JSON string for
+    inclusion in the DEC-001 ``run_id`` blake2b input.
+
+    Stable ordering + ``isoformat()`` for ``date`` / ``datetime`` so two
+    callers building the same logical filter produce byte-equal
+    canonical text — the run_id stays deterministic across runs.
+    """
+    if pf is None:
+        return "null"
+    # ``datetime`` is a ``date`` subclass; isinstance(..., date) covers both,
+    # and ``.isoformat()`` produces the canonical text for either type so a
+    # ternary keeps the rendering rule on one line.
+    rendered_value = pf.value.isoformat() if isinstance(pf.value, date) else str(pf.value)
+    return json.dumps(
+        {"column": pf.column, "op": pf.op, "value": rendered_value},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _compute_run_id(
+    *,
+    table: TableRef,
+    n: int,
+    partition_filter: PartitionFilter | None,
+) -> str:
+    """DEC-001 of #22 — derive the deterministic ``run_id`` for the
+    temp-table name ``_sf_sample_<run_id>``.
+
+    Inputs (joined with NUL separator to prevent concatenation
+    collisions, mirrors the grader's ``criterion_prompt_hash`` recipe):
+
+    * ``table.qualified_name`` — the source table's three-part
+      ``<project>.<dataset>.<name>`` (or two-part when project is
+      None). Identifies the sample's source uniquely.
+    * ``signalforge.__version__`` — bumps when the codebase changes,
+      so a SignalForge upgrade invalidates any cached materialised
+      sample (compiled SQL drift across versions stays observable).
+    * ``str(n)`` — sample size; different ``n`` values produce
+      distinct temp tables.
+    * :func:`_canonical_partition_filter` — stable JSON encoding so
+      two callers building the same filter produce byte-equal input.
+
+    Output: 16 hex chars (``blake2b(..., digest_size=8).hexdigest()``).
+    Lowercase alphanumeric, so the resulting ``_sf_sample_<run_id>``
+    passes :func:`validate_identifier` without further coercion.
+    """
+    from signalforge import __version__
+
+    payload = "\x00".join(
+        [
+            table.qualified_name,
+            __version__,
+            str(n),
+            _canonical_partition_filter(partition_filter),
+        ]
+    ).encode("utf-8")
+    return blake2b(payload, digest_size=8).hexdigest()
 
 
 def _normalise_schema(schema: Any) -> list[tuple[str, str]]:
