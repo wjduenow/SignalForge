@@ -258,6 +258,113 @@ Multi-violation formatting lives in
 sink; the layer error classes do NOT override `__str__` for the
 header+bullet shape (DEC-017, "escape at the sink").
 
+## Stderr shapes (WARNING)
+
+Three operator-facing WARNINGs surface to stderr through the CLI's
+log handler (`setup_logging`, default level `INFO`). They are
+distinct from the four-tier exit-code message shapes above —
+WARNINGs are signal that the run continued (or that a cleanup
+side-effect failed), not signal that the run failed. CI parsers
+that key on `ERROR:` lines should ignore these.
+
+### Cleanup-failure WARNING (issue #22 DEC-014)
+
+Source: `BigQueryAdapter.__exit__` after a failed
+`CALL BQ.ABORT_SESSION();` cleanup attempt at the end of a
+materialised-strategy prune run. The materialisation work succeeded;
+only the explicit teardown failed (network blip, session already
+revoked, quota issue). BigQuery's server-side session timeout will
+reap the orphan (~24h max) but the operator can clean up
+immediately by running the printed manual command.
+
+Multi-line shape (verbatim from issue #22 DEC-014 — the manual
+command's flag form is load-bearing; do not paraphrase):
+
+```text
+BigQuery session cleanup failed; session will auto-expire in <N>s (BigQuery TTL).
+  Session ID: <raw session_id>
+  Reason: <exception class name>
+  To clean up immediately:
+    bq query --connection_property=session_id=<raw> --use_legacy_sql=false "CALL BQ.ABORT_SESSION();"
+```
+
+`<N>` is `max(1, int(ttl_seconds - elapsed_in_session))` — floor
+at 1 avoids "auto-expire in 0s" confusion. The raw `session_id`
+appears only in this WARNING (deliberate exception to the
+otherwise-strict redaction rule per issue #22 DEC-003): it's the
+only piece of info the operator needs to construct the manual
+command, the audience is the same principal who owns the session
+(BigQuery rejects `BQ.ABORT_SESSION()` from any other identity),
+and the surface is bounded (cleanup-failure path only, never on the
+happy path, never in audit JSONL, never in `__repr__`).
+
+**`--quiet` does NOT suppress this WARNING.** `--quiet` raises the
+log floor to `WARNING`, which keeps WARNINGs flowing. The
+cleanup-failure WARNING is operator-actionable (manual command +
+identifier inside) — silently dropping it would defeat the point.
+
+See [`docs/warehouse-adapter-ops.md` § Session cleanup & manual
+recovery](warehouse-adapter-ops.md#session-cleanup--manual-recovery)
+for the three-layer cleanup model and the
+`INFORMATION_SCHEMA.JOBS_BY_PROJECT` query template that surfaces
+orphan sessions for periodic audits.
+
+### Materialisation-failure / degraded-run WARNING (issue #22 DEC-009)
+
+Source: `prune_tests` orchestrator at the head of the
+conservative-bias routing path, BEFORE the per-decision JSONL
+audit writes. Fires when `adapter.materialise_sample(...)` raises
+any `WarehouseError` subclass (`MaterialisationFailedError`,
+`MaterialisationNotSupportedError`, `UnknownTableSizeError`,
+`SamplingRequiresPartitionFilterError`, etc.) at orchestrator entry.
+The orchestrator catches the exception, routes every candidate
+test to `kept-without-evidence`, and emits one stderr WARNING so
+the operator gets a one-line out-of-band signal that the run was
+degraded (the only in-band signal is N identical
+`why="sample materialisation failed: ..."` fields buried in the
+`prune.jsonl` audit).
+
+Single-line lazy-format JSON (passes the grep gate at
+`tests/llm/test_logger_grep_gate.py`):
+
+```text
+materialisation failed; routing all tests to kept-without-evidence: {"model_unique_id": "model.proj.customers", "candidate_count": 30, "error_class": "MaterialisationFailedError", "error_message": "BigQuery API: 503 Service Unavailable"}
+```
+
+Distinct from the per-decision `why` field (the in-band signal in
+the prune JSONL audit) and from the cleanup-failure WARNING above
+(different boundary — that's `__exit__` cleanup; this is
+orchestrator entry). The exit code is still `0` if everything else
+succeeds — the run produces a valid `PruneResult` with every
+candidate marked `kept-without-evidence`. Operators that want a
+hard-fail on degraded runs use `prune.sample_strategy: oneshot`
+to bypass materialisation entirely.
+
+Mirrors the existing budget-exceeded WARNING pattern (next
+section).
+
+### Budget-exceeded WARNING (v0.1, prune-engine.md DEC-011)
+
+Source: `prune_tests` orchestrator after `total_budget_seconds`
+has elapsed. Existing v0.1 surface; documented here for parity
+with the two new WARNINGs above so all three sit in one place for
+operator reference.
+
+Single-line lazy-format JSON:
+
+```text
+budget exceeded: {"unstarted_count": 14, "model": "model.proj.customers"}
+```
+
+The orchestrator marks every remaining un-started test
+`kept-without-evidence` with
+`why="total prune budget exceeded before evaluation"` and emits one
+final WARNING with the count of un-started tests. No partial
+evaluation results — a test that was running when the budget
+tripped is `kept-without-evidence`, not `kept` (failing-rows count
+is unknown). See
+[`docs/prune-ops.md` § Drop-reason taxonomy](prune-ops.md#drop-reason-taxonomy).
+
 ## Threshold-fail behaviour
 
 By default, a below-threshold rubric is reported (the diff renderer

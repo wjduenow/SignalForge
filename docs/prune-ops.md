@@ -95,6 +95,7 @@ llm:
   # ... (loaded by signalforge.draft)
 prune:
   scope: sample            # "sample" | "full"
+  sample_strategy: materialised  # "materialised" (default, v0.2) | "oneshot" (v0.1 fallback)
   sample_size: 100000      # rows
   test_timeout_seconds: 30
   total_budget_seconds: 600
@@ -110,6 +111,7 @@ prune:
 Field-by-field:
 
 - **`scope`** — `"sample"` | `"full"`. Default `"sample"`. Whether candidate tests run against a deterministic warehouse sample or a full table scan. Switch to `"full"` only when the model is small enough that `sample_size` would scan most of it anyway.
+- **`sample_strategy`** — `"materialised"` | `"oneshot"`. Default `"materialised"` (v0.2 — see issue #22). When set to `"materialised"`, `prune_tests` calls `adapter.materialise_sample(...)` ONCE before the per-test loop — the adapter creates a `_SESSION._sf_sample_<run_id>` temp table and every test's compiled SQL reads from it (per-test bytes drop from ~9.92 GB to <100 MB on the AR-B1 reference workload). When set to `"oneshot"`, the v0.1 path runs unchanged — every test issues its own deterministic-sample query against the source table. Adapters that don't override `materialise_sample` (any non-BigQuery adapter in v0.2) raise `MaterialisationNotSupportedError`; the orchestrator then routes every candidate to `kept-without-evidence` per the conservative-bias rule (see [Drop-reason taxonomy](#drop-reason-taxonomy)). Operators on non-BQ adapters opt out via `sample_strategy: oneshot`.
 - **`sample_size`** — Integer row count for sample scope. Default `100_000`. Passed to `WarehouseAdapter.sample_rows`. Increase when the always-pass false-positive rate on small samples hides real signal; decrease to cap query bytes on very wide tables (column-pruning does NOT apply through `FARM_FINGERPRINT(TO_JSON_STRING(t))` — see [Cost model](#cost-model-us-003-verification)).
 - **`test_timeout_seconds`** — Per-test wall-clock budget. Default `30`. **Reserved for v0.2** — the adapter's `_default_job_config(timeout_ms=...)` plumbing exists (US-002 of issue #3) but `WarehouseAdapter.run_test_sql` does not yet accept a per-call timeout kwarg, so v0.1 does not enforce this knob. Per-test wall-clock control in v0.1 comes implicitly from `total_budget_seconds` plus the `WarehouseError` catch path: a test that exceeds the warehouse's own budget surfaces as a typed error → `kept-without-evidence`. See [v0.2 deferrals](#v02-deferrals).
 - **`total_budget_seconds`** — Whole-run wall-clock budget. Default `600`. Once exceeded, every remaining test drains to `kept-without-evidence` with `why="Total prune budget (Ns) exceeded before evaluation."` (DEC-011). Conservative bias — no test is silently dropped because the run ran long.
@@ -207,6 +209,39 @@ Probe thresholds (constants in the test, kept for the post-Q4=C run):
 - `_BYTES_WARN_AT = 500_000_000` (500 MB) — soft WARNING fires above this.
 - `_BYTES_CEILING = 5_000_000_000` (5 GB) — assertion fires above this; the test fails.
 
+### Post-Q4=C: temp-table-materialised sample (v0.2, issue #22)
+
+Issue #22 lands `sample_strategy: materialised` as the v0.2 default.
+The materialise-once pattern amortises the full-row scan across every
+candidate test by pre-computing the deterministic sample into a
+`_SESSION._sf_sample_<run_id>` temp table; per-test queries read from
+the materialised sample (post-LIMIT, narrow) rather than re-running
+`MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), <bucket>) < 1` against
+the source table for every test.
+
+Maintainer-run figures (filled in during US-010 quality gate against
+`bigquery-public-data.iowa_liquor_sales.sales`, ~30M rows, 100k-row
+deterministic sample, post-Q4=C):
+
+- **Materialisation query bytes_billed:** `<TBD: post-Q4=C bytes_billed (filled during US-010 quality gate)>`
+- **Per-test bytes_billed (median across 30 candidates):** `<TBD: post-Q4=C bytes_billed (filled during US-010 quality gate)>`
+- **Total run bytes_billed (1 materialise + 30 per-test):** `<TBD: post-Q4=C bytes_billed (filled during US-010 quality gate)>`
+- **Cost ratio vs. v0.1 oneshot baseline (9.92 GB × 30 tests = ~298 GB):** `<TBD: post-Q4=C cost ratio (filled during US-010 quality gate)>`
+
+The two regression-guard tests (`@pytest.mark.bigquery`, DEC-007 of
+issue #22):
+
+- `test_sample_rows_cost_baseline_oneshot` — pins the AR-B1 9.92 GB
+  baseline for `sample_strategy=oneshot` so a regression in the
+  oneshot path stays visible after the materialised default takes
+  over.
+- `test_sample_rows_cost_materialised` — asserts per-test
+  bytes_billed drops below 100 MB under
+  `sample_strategy=materialised`.
+
+The 9.92 GB AR-B1 figure remains the v0.1 oneshot reference and the
+oneshot fallback's cost story for non-BQ adapters in v0.2.
+
 ## Audit JSONL schema
 
 Every `PruneDecision` produces exactly one JSONL record at
@@ -253,6 +288,35 @@ pairs the production model (`extra="ignore"`) with a one-off
 `extra="forbid"` strict model and validates against the fixture.
 Adding a field to `PruneEvent` without updating the strict model OR
 the fixture breaks the test loudly. Don't bypass.
+
+### Audit reading guide: spotting materialised vs. oneshot runs (issue #22)
+
+The `compiled_sql` field on every `PruneEvent` is the durable signal
+that distinguishes a materialised-strategy run from a oneshot run:
+
+- **Materialised (v0.2 default):** every test's `compiled_sql`
+  references the temp table — look for `FROM \`<project>._SESSION._sf_sample_<run_id>\``
+  (the `_SESSION` dataset and the `_sf_sample_<16-hex>` table name are
+  load-bearing — `_SESSION` is BigQuery's session-scoped namespace,
+  and the 16-hex `run_id` derives deterministically from
+  `blake2b-12(model.unique_id + signalforge_version + sample_size + canonical_json(partition_filter))`).
+  Same input → same `run_id` → same `compiled_sql_hash` (DEC-001 of #22).
+- **Oneshot (v0.1 fallback / non-BQ adapters):** `compiled_sql`
+  references the source table directly — no `_SESSION` prefix.
+
+Joining a `prune.jsonl` line to the materialisation query in
+`INFORMATION_SCHEMA.JOBS_BY_PROJECT` is the operator's path for
+post-mortem cost attribution; see
+[`docs/warehouse-adapter-ops.md` § Session cleanup & manual recovery](warehouse-adapter-ops.md#session-cleanup--manual-recovery)
+for the query template.
+
+A `kept-without-evidence` decision whose `why` field starts with
+`"sample materialisation failed: "` is the conservative-bias signal
+that materialisation raised at orchestrator entry — every candidate
+in the run shares the same `why` shape, and the operator should
+inspect the orchestrator-level WARNING (see
+[`docs/cli-ops.md` § Stderr shapes](cli-ops.md#stderr-shapes-warning))
+for the materialisation error class and message.
 
 ## Audit log sensitivity
 

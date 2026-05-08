@@ -18,7 +18,7 @@ v0.1 alpha. Nine issues shipped:
 
 Design happens in the open on the `dev` branch; v0.1 feature work is complete and the CLI ships the operator-facing surface.
 
-## Public API surface (v0.1)
+## Public API surface (v0.1 + v0.2 additions)
 
 - `signalforge.manifest.load`, `Manifest`, `Model`, and the `ManifestError` hierarchy. Documented in `docs/manifest-loader-ops.md`.
 - `signalforge.warehouse.load_profile`, `DbtProfileTarget`, the `WarehouseAdapter` ABC + `from_profile` factory, the `BigQueryAdapter` concrete, the typed value objects (`Dialect`, `BIGQUERY_DIALECT`, `TableRef`, `PartitionFilter`, `ColumnStats`, `TestResult`), and the `WarehouseError` hierarchy. Documented in `docs/warehouse-adapter-ops.md`.
@@ -29,6 +29,13 @@ Design happens in the open on the `dev` branch; v0.1 feature work is complete an
 - `signalforge.grade.grade_artifacts`, `GradingReport`, `GradingResult`, `GradeConfig`, `load_grade_config`, `Criterion`, `Rubric`, `GradeThresholds`, `DEFAULT_RUBRIC`, `GradeEvent`, the typed literal (`GradeOutputViolationType`), and the `GradeError` hierarchy (nine classes). Documented in `docs/grade-ops.md`.
 - `signalforge.diff.render_diff`, `signalforge.diff.render_to_text` (graduated by #9 so the CLI doesn't reach into `_renderers`), `load_diff_config`, `DiffConfig`, `DiffReport`, `DiffEntry`, the typed literal (`Tier`), and the `DiffError` hierarchy (seven classes). Documented in `docs/diff-ops.md`.
 - `signalforge.cli.main(argv: list[str] | None = None) -> int` (the in-process entry point used by tests; the `signalforge` console-script registered under `[project.scripts]` in `pyproject.toml` wraps it via `sys.exit(main())`), and the CLI-layer `CliError` hierarchy (`CliError`, `CliPathError`, `CliInputError`). Documented in `docs/cli-ops.md`.
+
+v0.2 additions (issue #22 — temp-table-materialised sample):
+
+- `signalforge.warehouse.MaterialisationFailedError` — `WarehouseError` subclass; wraps SDK / network / quota failures during `BigQueryAdapter.materialise_sample` via the `cause` kwarg pattern. CLI tier 3 (external-dep). Documented in `docs/warehouse-adapter-ops.md` § Error reference.
+- `signalforge.warehouse.MaterialisationNotSupportedError` — `WarehouseError` subclass; raised by the ABC's default `materialise_sample` for non-BigQuery adapters in v0.2. CLI tier 3. Remediation locked verbatim per DEC-006 of `plans/super/22-temp-table-sample.md`: `"Set 'prune.sample_strategy: oneshot' in signalforge.yml to fall back to per-test sampling, or wait for v0.3 multi-warehouse materialisation support."` Documented in `docs/warehouse-adapter-ops.md` § Error reference.
+- `WarehouseAdapter.materialise_sample(table, n, *, partition_filter=None, ttl_seconds=3600) -> TableRef` — new ABC method. The default impl raises `MaterialisationNotSupportedError`; `BigQueryAdapter` overrides to land a `_SESSION._sf_sample_<run_id>` temp table that every per-test query reads from. Documented in `docs/warehouse-adapter-ops.md` § Materialised sampling.
+- `PruneConfig.sample_strategy: Literal["oneshot", "materialised"] = "materialised"` — new `extra="forbid"` config field; default `materialised` is the v0.2 cost-optimisation default. v0.1 YAML files load with the default; non-BigQuery adapters opt in to the v0.1 oneshot path via `prune.sample_strategy: oneshot`. Documented in `docs/prune-ops.md` § Configuration.
 
 Internals (`_loader_helpers`, `_sql_safety`, `_path_safety`, `_test_result_repr`, `adapters/_client`, `_classify_column`, `_compute_policy_hash`, `_resolve_redact_patterns`, `_emitter`, `_renderers`, `_sidecar`, `_artifact_id`, `_ansi_safety`, `_markdown_safety`, `cli/_helpers`, etc.) are `_`-prefixed and not part of the public contract.
 
