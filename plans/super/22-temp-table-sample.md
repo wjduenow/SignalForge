@@ -6,9 +6,12 @@
 
 ## Meta
 
-- **Phase:** approved
+- **Phase:** devolved
 - **PR:** <https://github.com/wjduenow/SignalForge/pull/30>
 - **Approved:** 2026-05-07 by wjduenow
+- **Devolved:** 2026-05-07
+- **Beads epic:** `SignalForge-6tv`
+- **Worktree:** `/Users/wesduenow/Projects/worktrees/SignalForge/22-temp-table-sample`
 - **Sessions:** 1
 - **Last session:** 2026-05-05
 - **Owner:** wjduenow
@@ -554,5 +557,27 @@ Validation command (referenced in every "Done When"): `pip install -e ".[dev]" &
 **Depends on.** US-010.
 
 ---
+
+## Beads manifest (devolved 2026-05-07)
+
+Epic: `SignalForge-6tv` (external-ref: `gh-22`).
+
+| Story | Beads ID | Priority | Depends on |
+|-------|----------|----------|------------|
+| US-001 | `SignalForge-6tv.1` | P2 | — (foundation) |
+| US-002 | `SignalForge-6tv.2` | P2 | US-001 |
+| US-003 | `SignalForge-6tv.3` | P2 | US-002 |
+| US-004 | `SignalForge-6tv.4` | P2 | US-003 |
+| US-005 | `SignalForge-6tv.5` | P2 | US-001, US-002, US-003, US-004 |
+| US-006 | `SignalForge-6tv.6` | P2 | US-001, US-005 |
+| US-007 | `SignalForge-6tv.7` | P2 | US-001 |
+| US-008 | `SignalForge-6tv.8` | P2 | US-003, US-005 |
+| US-009 | `SignalForge-6tv.9` | P2 | US-005, US-006, US-007, US-008 |
+| US-010 (Quality Gate) | `SignalForge-6tv.10` | P2 | US-001 … US-009 |
+| US-011 (Patterns & Memory) | `SignalForge-6tv.11` | P4 | US-010 |
+
+Total: 1 epic + 11 tasks + 26 dependency edges. Ready set on devolve: `SignalForge-6tv.1` (US-001).
+
+Run `bd ready` from the main checkout to see available work; `bd show <id>` for details.
 
 
