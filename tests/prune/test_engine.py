@@ -25,6 +25,7 @@ because the test ships, conservatively, when we cannot evaluate it):
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -47,7 +48,11 @@ from signalforge.prune.errors import (
     PruneTrustedModelNotFoundError,
 )
 from signalforge.warehouse.adapters.bigquery import BigQueryAdapter
-from signalforge.warehouse.errors import TableNotFoundError
+from signalforge.warehouse.errors import (
+    MaterialisationFailedError,
+    TableNotFoundError,
+    UnknownTableSizeError,
+)
 from signalforge.warehouse.models import PartitionFilter, TableRef
 from tests.warehouse._fake import FakeBigQueryClient, FakeTable
 
@@ -729,6 +734,7 @@ def test_prune_tests_sample_mode_wraps_sql_with_deterministic_sample_cte(
         scope="sample",
         sample_size=100_000,
         capture_failure_rows=0,
+        sample_strategy="oneshot",
     )
 
     result = prune_tests(
@@ -813,6 +819,7 @@ def test_prune_tests_partition_filter_threads_through(tmp_path: Path) -> None:
         sample_size=100_000,
         capture_failure_rows=0,
         partition_filter=PartitionFilter(column="dt", op=">=", value="2026-01-01"),
+        sample_strategy="oneshot",
     )
 
     prune_tests(
@@ -896,6 +903,7 @@ def test_prune_tests_sample_mode_relationships_samples_child_only(
         scope="sample",
         sample_size=100_000,
         capture_failure_rows=0,
+        sample_strategy="oneshot",
     )
 
     prune_tests(
@@ -932,7 +940,12 @@ def test_prune_tests_sample_mode_unknown_num_rows_raises_prune_error(
     model = _make_orders_model()
     manifest = _make_manifest(model)
     candidates = _candidates_with_one_test("id")
-    config = PruneConfig(scope="sample", sample_size=100_000, capture_failure_rows=0)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="oneshot",
+    )
 
     with pytest.raises(PruneError):
         prune_tests(
@@ -944,4 +957,899 @@ def test_prune_tests_sample_mode_unknown_num_rows_raises_prune_error(
             audit_path=audit_path,
             project_dir=tmp_path,
         )
+    fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# US-005 of issue #22 — sample_strategy dispatch + conservative routing.
+#
+# 15 new tests covering:
+#   * dispatch on PruneConfig.sample_strategy ("materialised" calls
+#     adapter.materialise_sample once before the per-test loop;
+#     "oneshot" preserves the v0.1 path),
+#   * compiled SQL references the materialised _SESSION temp table,
+#   * materialisation failure routes ALL tests to kept-without-evidence
+#     with the DEC-005 ``why`` shape and emits ONE DEC-009 WARNING
+#     before the per-test audit writes,
+#   * total budget includes materialisation (DEC-010 of #22),
+#   * the orchestrator wraps the adapter in ``with`` so __exit__ fires.
+# ---------------------------------------------------------------------------
+
+
+def _make_materialised_ref(name: str = "_sf_sample_deadbeefcafe1234") -> TableRef:
+    """Build a deterministic :class:`TableRef` with ``dataset="_SESSION"``
+    that mirrors the adapter's ``materialise_sample`` return shape.
+    """
+    return TableRef(project="fake_project", dataset="_SESSION", name=name)
+
+
+def test_prune_tests_with_materialised_strategy_calls_materialise_sample_once(
+    tmp_path: Path,
+) -> None:
+    """``sample_strategy="materialised"`` calls
+    :meth:`adapter.materialise_sample` exactly once BEFORE the per-test
+    loop; the per-test queries route into the active session.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    # The single per-test query consumes the registered count expectation.
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    # __exit__ aborts the active session.
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 1
+    # The materialise expectation MUST have been consumed — and exactly
+    # once — for ``assert_all_expectations_met`` to pass.
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_with_oneshot_strategy_skips_materialise_sample(
+    tmp_path: Path,
+) -> None:
+    """``sample_strategy="oneshot"`` preserves the v0.1 path: NO call to
+    ``adapter.materialise_sample`` is issued. The deterministic-sample
+    CTE wraps every per-test failing-rows query as before.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_get_table(
+        ref=TableRef(project="fake_project", dataset="dataset", name="orders"),
+        returns=FakeTable(num_rows=1_000_000),
+    )
+    # The v0.1 path wraps the per-test SQL in ``WITH sample AS (SELECT *
+    # FROM <source> ...)`` — NO ``CREATE TEMP TABLE`` is dispatched, so
+    # the absence of an ``expect_materialise_sample`` registration is
+    # itself the assertion.
+    fake.expect_query(
+        matching=(
+            r"WITH sample AS \(SELECT \* FROM `fake_project\.dataset\.orders` "
+            r"AS t WHERE MOD\(ABS\(FARM_FINGERPRINT\(TO_JSON_STRING\(t\)\)\), "
+            r"10\) < 1 LIMIT 100000\)"
+        ),
+        returns=[{"failures": 0}],
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="oneshot",
+    )
+
+    prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+    # NO materialise / abort expectations registered — a stray call would
+    # raise the standard ``unexpected materialise_sample: ...`` shape.
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_compiled_sql_references_temp_table_under_materialised(
+    tmp_path: Path,
+) -> None:
+    """Under ``materialised`` strategy, every decision's ``compiled_sql``
+    references ``_SESSION._sf_sample_<run_id>`` rather than the source
+    production table.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    # Production derives the temp-table name from
+    # ``_compute_run_id(table, n, partition_filter)`` (DEC-001 of
+    # issue #22) — the fake's ``returns=`` TableRef is informational
+    # only, NOT the source of the actual temp-table name. Pin the
+    # ``_SESSION._sf_sample_<16-hex>`` shape rather than the specific
+    # name.
+    assert "_SESSION._sf_sample_" in decision.compiled_sql
+    assert re.search(r"_sf_sample_[0-9a-f]{16}", decision.compiled_sql) is not None
+    # The source production table MUST NOT appear in the compiled SQL —
+    # the whole point of materialisation is amortised cost via the temp
+    # table.
+    assert "`fake_project.dataset.orders`" not in decision.compiled_sql
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_compiled_sql_hash_is_deterministic_under_materialised(
+    tmp_path: Path,
+) -> None:
+    """Two runs with identical ``(model, candidates, config)`` produce
+    byte-equal ``compiled_sql_hash`` (DEC-001 of issue #22 — the
+    deterministic ``run_id`` keeps the temp-table name byte-identical
+    across runs, which keeps the per-test compiled SQL byte-identical).
+    """
+
+    def _run(suffix: str) -> str:
+        audit_path = tmp_path / f"prune_{suffix}.jsonl"
+        fake = FakeBigQueryClient(project="fake_project")
+        source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+        materialised_ref = _make_materialised_ref()
+        fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+        fake.expect_materialise_sample(
+            source_ref,
+            sample_size=100_000,
+            returns=materialised_ref,
+        )
+        fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+        fake.expect_abort_session(f"sess_{materialised_ref.name}")
+        adapter = _make_adapter(fake)
+
+        model = _make_orders_model()
+        manifest = _make_manifest(model)
+        candidates = _candidates_with_one_test("id")
+        config = PruneConfig(
+            scope="sample",
+            sample_size=100_000,
+            capture_failure_rows=0,
+            sample_strategy="materialised",
+        )
+
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+        fake.assert_all_expectations_met()
+        return result.decisions[0].compiled_sql_hash
+
+    hash_a = _run("a")
+    hash_b = _run("b")
+    assert hash_a == hash_b
+    assert len(hash_a) == 16  # 16-hex blake2b-8 convention
+
+
+def test_prune_tests_materialisation_failed_routes_all_to_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """When ``adapter.materialise_sample`` raises
+    :class:`MaterialisationFailedError`, EVERY candidate test routes to
+    ``decision="kept", reason="kept-without-evidence"`` with the DEC-005
+    ``why`` shape.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=MaterialisationFailedError("boom from BQ"),
+    )
+    # No expect_query / expect_abort_session — the per-test loop never
+    # runs and __exit__ short-circuits because no session was minted.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(4)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 4
+    assert result.kept_count == 4
+    assert result.dropped_count == 0
+    for decision in result.decisions:
+        assert decision.decision == "kept"
+        assert decision.reason == "kept-without-evidence"
+        # DEC-005 ``why`` shape: prefix + class name + colon + truncated
+        # message.
+        assert decision.why.startswith("sample materialisation failed: ")
+        assert "MaterialisationFailedError" in decision.why
+        assert "boom from BQ" in decision.why
+        assert decision.compiled_sql == ""
+        assert decision.elapsed_ms == 0
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_unknown_table_size_routes_all_to_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """When ``adapter.materialise_sample`` raises
+    :class:`UnknownTableSizeError` (any :class:`WarehouseError` subclass),
+    the conservative-bias rule still routes ALL tests to
+    ``kept-without-evidence`` (DEC-009 of issue #22 generalises across
+    the WarehouseError hierarchy).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=UnknownTableSizeError(table=source_ref.qualified_name),
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(3)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 3
+    assert result.kept_count == 3
+    for decision in result.decisions:
+        assert decision.decision == "kept"
+        assert decision.reason == "kept-without-evidence"
+        assert decision.why.startswith("sample materialisation failed: ")
+        # The BigQueryAdapter wraps every materialise failure (whether
+        # the original was an :class:`UnknownTableSizeError`, an
+        # :class:`InvalidIdentifierError`, or anything else) into a
+        # :class:`MaterialisationFailedError` (DEC-008 of issue #22) —
+        # the orchestrator's ``why`` shape carries the WRAPPED class
+        # name, but the inner failure's truncated message still
+        # surfaces in the str(...) tail so a reviewer can correlate.
+        assert "MaterialisationFailedError" in decision.why
+        # The inner ``UnknownTableSizeError`` message ("unknown num_rows")
+        # survives in the truncated str(...) so a reviewer can correlate
+        # the wrapped warning with the real cause.
+        assert "unknown num_rows" in decision.why
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_materialisation_failure_writes_one_audit_per_test(
+    tmp_path: Path,
+) -> None:
+    """N candidate tests → N PruneEvent JSONL lines on the materialisation-
+    failure path. Fail-closed audit (DEC-016 of #6) is preserved even
+    when the per-test loop never runs.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=MaterialisationFailedError("network blip"),
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(5)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    audit_rows = _read_audit_lines(audit_path)
+    assert len(audit_rows) == 5
+    for row in audit_rows:
+        assert row["decision"] == "kept"
+        assert row["reason"] == "kept-without-evidence"
+        assert row["why"].startswith("sample materialisation failed: ")
+        assert row["model_unique_id"] == "model.shop.orders"
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_total_budget_includes_materialisation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEC-010 of issue #22 — the total-budget watchdog ticks across
+    BOTH the materialisation phase AND the per-test loop.
+
+    Stub ``_now_monotonic_ms`` so:
+      * call 0 → 0 ms (start_ms)
+      * later calls → 5000 ms (already past 1s budget by the time the
+        per-test loop checks elapsed_total).
+    Materialisation succeeded (this test does not inject a failure
+    there); but every test in the per-test loop sees the budget
+    exhausted and routes to kept-without-evidence with the
+    ``Total prune budget`` ``why`` shape.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    # Note: NO expect_query — every per-test dispatch is short-circuited
+    # by the budget gate before the warehouse call. The abort still fires
+    # at __exit__ time.
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(3)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        total_budget_seconds=1,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    # ``start_ms`` snapshot at 0, then every later call returns 5000 so
+    # the per-test loop's first elapsed_total check sees the budget
+    # already exhausted. The watchdog is checked BEFORE the per-test
+    # warehouse call, so no expect_query is needed.
+    timeline_iter = iter([0] + [5000] * 50)
+
+    def fake_clock() -> int:
+        return next(timeline_iter)
+
+    monkeypatch.setattr(engine_module, "_now_monotonic_ms", fake_clock)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 3
+    for decision in result.decisions:
+        assert decision.decision == "kept"
+        assert decision.reason == "kept-without-evidence"
+        assert "Total prune budget" in decision.why
+    fake.assert_all_expectations_met()
+
+
+class _RecordingAdapterWrapper:
+    """Wraps a :class:`BigQueryAdapter` to record __enter__/__exit__
+    invocation counts. The orchestrator must call BOTH so DEC-013 of
+    #22 cleanup (CALL BQ.ABORT_SESSION via ``__exit__``) ever fires.
+
+    Forwards every other attribute to the underlying adapter so the
+    production code path stays unchanged.
+    """
+
+    def __init__(self, inner: BigQueryAdapter) -> None:
+        self._inner = inner
+        self.enter_calls: int = 0
+        self.exit_calls: int = 0
+
+    def __enter__(self) -> Any:
+        self.enter_calls += 1
+        return self._inner.__enter__()
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.exit_calls += 1
+        self._inner.__exit__(exc_type, exc, tb)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def test_prune_tests_uses_adapter_as_context_manager(tmp_path: Path) -> None:
+    """``prune_tests`` invokes ``adapter`` inside a ``with`` block so
+    :meth:`WarehouseAdapter.__exit__` always runs (DEC-013 of #22 —
+    explicit ``CALL BQ.ABORT_SESSION();`` cleanup). Without the
+    ``with`` wrap, US-003's cleanup work is unreachable from the
+    orchestrator.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    inner = _make_adapter(fake)
+    wrapper = _RecordingAdapterWrapper(inner)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    prune_tests(
+        model,
+        wrapper,  # type: ignore[arg-type]
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert wrapper.enter_calls == 1
+    assert wrapper.exit_calls == 1
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_adapter_exit_fires_after_normal_completion(
+    tmp_path: Path,
+) -> None:
+    """Exactly one ``__exit__`` invocation after a successful materialised
+    run completes. Pin against accidental ``with`` removal.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    inner = _make_adapter(fake)
+    wrapper = _RecordingAdapterWrapper(inner)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    prune_tests(
+        model,
+        wrapper,  # type: ignore[arg-type]
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert wrapper.enter_calls == 1
+    assert wrapper.exit_calls == 1
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_adapter_exit_fires_after_materialisation_failure(
+    tmp_path: Path,
+) -> None:
+    """``__exit__`` fires even on the materialisation-failure path that
+    routes every test to ``kept-without-evidence``. Cleanup work runs
+    on every exit path, not just the happy-path one.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=MaterialisationFailedError("simulated quota error"),
+    )
+    inner = _make_adapter(fake)
+    wrapper = _RecordingAdapterWrapper(inner)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(2)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    prune_tests(
+        model,
+        wrapper,  # type: ignore[arg-type]
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    # ``__enter__`` and ``__exit__`` BOTH ran exactly once even though
+    # the materialisation phase raised inside the ``with`` block.
+    assert wrapper.enter_calls == 1
+    assert wrapper.exit_calls == 1
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_materialisation_failure_emits_orchestrator_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DEC-009 of issue #22 — exactly ONE WARNING fires from
+    :mod:`signalforge.prune.engine` on the materialisation-failure
+    path, with the canonical JSON payload. Distinct from the per-decision
+    ``why`` field (in-band signal) AND from the cleanup-failure WARNING
+    DEC-014 (which fires from the warehouse layer, not the prune layer).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=MaterialisationFailedError("auth blew up"),
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(3)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    matching = [
+        record
+        for record in caplog.records
+        if record.name == "signalforge.prune.engine"
+        and "materialisation failed" in record.getMessage()
+        and "routing all tests" in record.getMessage()
+    ]
+    assert len(matching) == 1
+    record = matching[0]
+    assert record.levelname == "WARNING"
+    # The JSON payload sits in the ``%s`` slot — a lazy-format args
+    # tuple per DEC-017. Parse it and pin every key.
+    assert record.args is not None
+    raw = record.args[0] if isinstance(record.args, tuple) else record.args
+    assert isinstance(raw, str)
+    payload = json.loads(raw)
+    assert payload["model_unique_id"] == "model.shop.orders"
+    assert payload["candidate_count"] == 3
+    assert payload["error_class"] == "MaterialisationFailedError"
+    # The original ``"auth blew up"`` message survives inside the
+    # truncated ``str(exc)[:200]`` payload — the production adapter
+    # re-wraps every materialisation failure once, prefixing with the
+    # source table identifier; the inner exception's message lives at
+    # the tail of the wrapped str(...) output.
+    assert "auth blew up" in payload["error_message"]
+    # The truncation cap holds — never wider than 200 chars.
+    assert len(payload["error_message"]) <= 200
+
+
+def test_prune_tests_orchestrator_warning_fires_before_per_test_audit_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The DEC-009 WARNING fires ONCE at the head of the failure path,
+    BEFORE the N JSONL audit lines for the kept-without-evidence
+    decisions. Pin the log-record-vs-audit-write ordering so a future
+    refactor can't accidentally interleave them.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=MaterialisationFailedError("oh no"),
+    )
+    adapter = _make_adapter(fake)
+
+    # Capture the chronological order of (warning, audit-write) events.
+    ordering: list[str] = []
+
+    original_warning = engine_module._LOGGER.warning
+
+    def recording_warning(msg: str, *args: Any, **kwargs: Any) -> None:
+        ordering.append("warning")
+        original_warning(msg, *args, **kwargs)
+
+    monkeypatch.setattr(engine_module._LOGGER, "warning", recording_warning)
+
+    original_write = engine_module._write_prune_event
+
+    def recording_write(*args: Any, **kwargs: Any) -> None:
+        ordering.append("write")
+        original_write(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "_write_prune_event", recording_write)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(4)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    # The warning must come FIRST. After that, exactly N writes follow.
+    assert ordering[0] == "warning"
+    assert ordering[1:] == ["write"] * 4
+
+
+def test_prune_tests_budget_exhausted_during_materialisation_marks_all_kept_without_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_sleep`` reassignment isn't usable here (the orchestrator's
+    happy-path doesn't sleep), but ``_now_monotonic_ms`` is the
+    deterministic stand-in. Drive the clock so the budget trips
+    AFTER materialisation succeeds but BEFORE the per-test loop's
+    first iteration — every test then routes to kept-without-evidence
+    with the budget ``why`` shape.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    # No expect_query — the budget watchdog short-circuits BEFORE the
+    # first per-test warehouse call.
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(3)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        total_budget_seconds=1,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    # Clock returns 0 once (start_ms) then 5000 ms forever — past the
+    # 1s budget by the time the per-test loop checks elapsed.
+    timeline_iter = iter([0] + [5000] * 50)
+
+    def fake_clock() -> int:
+        return next(timeline_iter)
+
+    monkeypatch.setattr(engine_module, "_now_monotonic_ms", fake_clock)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 3
+    for decision in result.decisions:
+        assert decision.decision == "kept"
+        assert decision.reason == "kept-without-evidence"
+        # Budget-exhausted ``why`` shape, NOT the materialisation-failed
+        # shape — the materialisation succeeded; the budget tripped
+        # afterwards.
+        assert "Total prune budget" in decision.why
+        assert "materialisation" not in decision.why
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_materialised_strategy_against_pinned_fixture(
+    tmp_path: Path,
+) -> None:
+    """End-to-end snapshot: a known ``(model, candidates, config)`` under
+    ``materialised`` strategy produces audit JSONL whose per-row shape
+    aligns with the committed fixture's ``materialised``-mode entry.
+
+    The fixture has illustrative values; the snapshot here pins the
+    runtime invariants:
+
+      * every per-decision row carries the materialised
+        ``compiled_sql`` (references ``_SESSION._sf_sample_*``),
+      * ``decision.scope == "sample"`` (the user-facing config value,
+        NOT the compiler's effective ``"full"``),
+      * the JSONL is well-formed and matches the
+        :class:`StrictPruneEvent` shape via the per-row drift detector.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    audit_rows = _read_audit_lines(audit_path)
+    assert len(audit_rows) == 1
+    row = audit_rows[0]
+    # End-to-end snapshot invariants (load-bearing rather than byte-equal):
+    assert row["scope"] == "sample"
+    assert row["model_unique_id"] == "model.shop.orders"
+    assert "_SESSION" in row["compiled_sql"]
+    assert re.search(r"_sf_sample_[0-9a-f]{16}", row["compiled_sql"]) is not None
+    assert row["audit_schema_version"] == 1
+
+    # Cross-check against the strict drift-detector mirror so the
+    # in-memory snapshot remains valid against the read-back contract.
+    from tests.prune.test_drift_detector import StrictPruneEvent
+
+    StrictPruneEvent.model_validate(row)
     fake.assert_all_expectations_met()
