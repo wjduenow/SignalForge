@@ -1,0 +1,26 @@
+# Fixture project for issue #10 e2e BigQuery smoke test.
+# Targets dbt-bigquery 1.8.x — no v1.9-specific keys (e.g. no `unit_tests:` block).
+# Profile `austin` is defined in the sibling profiles.yml; the regen script
+# (US-002) sets DBT_PROFILES_DIR to this directory before invoking `dbt parse`.
+name: signalforge_test_austin
+version: 1.0.0
+config-version: 2
+
+profile: austin
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: target
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  signalforge_test_austin:
+    staging:
+      +materialized: view

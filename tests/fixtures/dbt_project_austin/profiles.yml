@@ -1,0 +1,19 @@
+# Committed alongside the fixture project so the regen script (US-002) can
+# invoke `dbt parse` against the live `bigquery-public-data.austin_bikeshare`
+# dataset without contributors needing to author their own profile.
+#
+# `method: oauth` falls through to Application Default Credentials — the
+# maintainer runs `gcloud auth application-default login` once locally before
+# regenerating the manifest. The billing project is NOT set here; the BigQuery
+# SDK reads it from `GOOGLE_CLOUD_PROJECT` at parse time (mirrors the shape of
+# tests/fixtures/profiles/bigquery_oauth.yml). `project: bigquery-public-data`
+# names the SOURCE dataset's project, not the billing project.
+austin:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: bigquery-public-data
+      dataset: austin_bikeshare
+      location: US
