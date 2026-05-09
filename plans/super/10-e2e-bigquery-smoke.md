@@ -211,7 +211,7 @@ The Convention Checker reviewed all eleven `.claude/rules/*.md` files and `CLAUD
 - **DEC-011 — Grade budget bump:** Fixture `signalforge.yml` sets `grade.total_budget_seconds: 600` (default 300 is tight at p99 Anthropic latency × ~12 grade calls + retries). Documented in fixture YAML with a one-line comment.
 - **DEC-012 — Target dataset:** `bigquery-public-data.austin_bikeshare.bikeshare_trips` (the largest of the four tables; richest column set for the LLM to draft against). Verbatim per ticket suggestion.
 - **DEC-013 — Model surface:** One staging model (`stg_bikeshare_trips`); one `signalforge generate` invocation per test run. Sources defined in `models/staging/sources.yml` pointing at `bigquery-public-data.austin_bikeshare`.
-- **DEC-014 — README placement:** New `## Trying it out` H2 after `## Quick start` (matches AC wording verbatim). Walks through: `gcloud auth application-default login`; `export GOOGLE_CLOUD_PROJECT=...`; `export ANTHROPIC_API_KEY=...`; `cd tests/fixtures/dbt_project_austin/`; `signalforge generate stg_bikeshare_trips`. Reminder line: scrub bash history or use a fresh shell so the API key doesn't persist. (Resolves SQ-08.)
+- **DEC-014 — README placement:** New `## Trying it out` H2 after `## Quick start` (matches AC wording verbatim). Walks through: `gcloud auth application-default login`; `export GOOGLE_CLOUD_PROJECT=...`; `export ANTHROPIC_API_KEY=...`; `cd tests/fixtures/dbt_project_austin/`; `signalforge generate models/staging/stg_bikeshare_trips.sql`. The model arg is the **file-path form** (`models/staging/<name>.sql`); the bare model name `stg_bikeshare_trips` does NOT resolve via `Manifest.get_model` (the loader routes bare names to the file-path branch which fails). Reminder line: scrub bash history or use a fresh shell so the API key doesn't persist. (Resolves SQ-08.)
 - **DEC-015 — `docs/cli-ops.md` cross-ref:** Add a one-line link from `docs/cli-ops.md` § "Worked example" pointing at the new README "Trying it out" section. Mirrors the multi-surface parity rule (`cli-layer.md` lines 82–96).
 - **DEC-016 — `CLAUDE.md` "Repository status" update:** Add a `#10` bullet mirroring the `#9` shape: single-paragraph header naming the artifact (`tests/fixtures/dbt_project_austin/`), the gate (`pytest -m e2e --no-cov`), the env-var triple, and the cross-refs to `plans/super/10-e2e-bigquery-smoke.md` + the README section.
 - **DEC-017 — No separate ops doc:** No `docs/e2e-smoke-ops.md`. The e2e fixture is a test artefact (not a pipeline layer). All ops surfaces (regen instructions, env vars, run command) live in the README "Trying it out" section + the regen script's header comment + the test docstring.
@@ -287,7 +287,7 @@ SF_RUN_BQ=1 pytest -m e2e --no-cov
 
 **Depends on:** US-001.
 
-**TDD:** Yes — write `tests/manifest/test_austin_fixture_loads.py::test_austin_manifest_loads_via_signalforge` BEFORE running the regen script; assert `manifest = load(fixture_dir); assert manifest.get_model("stg_bikeshare_trips").name == "stg_bikeshare_trips"`. Then run regen; the test passes once the manifest is committed.
+**TDD:** Yes — write `tests/manifest/test_austin_fixture_loads.py::test_austin_manifest_loads_via_signalforge` BEFORE running the regen script; assert `manifest = load(fixture_dir); assert manifest.get_model("model.signalforge_test_austin.stg_bikeshare_trips").name == "stg_bikeshare_trips"` (use unique_id form — bare names route to the file-path branch and fail). Then run regen; the test passes once the manifest is committed.
 
 ---
 
@@ -350,7 +350,7 @@ SF_RUN_BQ=1 pytest -m e2e --no-cov
 
 ### US-005 — The e2e smoke test (`tests/cli/test_e2e_bigquery_smoke.py`)
 
-**Description.** The actual end-to-end test. One test function, gated by `@pytest.mark.e2e + skipif(...)` for the three env vars. Copies the fixture to `tmp_path`, invokes `cli.main(["generate", "stg_bikeshare_trips", "--project-dir", str(project_dir)])`, asserts the seven invariants from DEC-009.
+**Description.** The actual end-to-end test. One test function, gated by `@pytest.mark.e2e + skipif(...)` for the three env vars. Copies the fixture to `tmp_path`, invokes `cli.main(["generate", "models/staging/stg_bikeshare_trips.sql", "--project-dir", str(project_dir)])`, asserts the seven invariants from DEC-009.
 
 **Traces to:** DEC-002, DEC-008, DEC-009, DEC-010, DEC-020.
 
@@ -362,7 +362,7 @@ SF_RUN_BQ=1 pytest -m e2e --no-cov
   - One test: `test_e2e_signalforge_generate_against_austin_bikeshare(tmp_path, capsys)`:
     1. `if reason := _skip_reason(): pytest.skip(reason)` (belt-and-suspenders alongside the `@pytest.mark.e2e` decorator).
     2. `project_dir = copy_fixture_to_tmp(FIXTURE_DIR, tmp_path)`.
-    3. `exit_code = cli.main(["generate", "stg_bikeshare_trips", "--project-dir", str(project_dir)])`.
+    3. `exit_code = cli.main(["generate", "models/staging/stg_bikeshare_trips.sql", "--project-dir", str(project_dir)])`.
     4. Assert `exit_code == 0`.
     5. Assert `(project_dir / ".signalforge" / "diff.json").is_file()`.
     6. `report = read_diff_report(project_dir)`; assert `report.kept_count >= 1`; assert `report.flagged_count >= 1`.
@@ -391,7 +391,7 @@ SF_RUN_BQ=1 pytest -m e2e --no-cov
 **Files:**
 - `README.md` (EDIT) — insert a new H2 `## Trying it out` after the existing `## Quick start` (line ~63). Content:
   - One-paragraph framing ("If you have a BigQuery billing project and an Anthropic API key, you can run the canonical example end-to-end against `bigquery-public-data.austin_bikeshare` …").
-  - A four-step shell block: `gcloud auth application-default login`; `export GOOGLE_CLOUD_PROJECT=<billing-project>`; `export ANTHROPIC_API_KEY=sk-...`; `cd tests/fixtures/dbt_project_austin/ && signalforge generate stg_bikeshare_trips`.
+  - A four-step shell block: `gcloud auth application-default login`; `export GOOGLE_CLOUD_PROJECT=<billing-project>`; `export ANTHROPIC_API_KEY=sk-...`; `cd tests/fixtures/dbt_project_austin/ && signalforge generate models/staging/stg_bikeshare_trips.sql`.
   - A one-line cost note (~$0.13 + <100 MB BigQuery scanned per run).
   - A reminder about scrubbing bash history (or use a fresh shell session).
   - A pointer to `docs/cli-ops.md` for full-flag reference.

@@ -84,7 +84,7 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 # Run the canonical example
 cd tests/fixtures/dbt_project_austin/
-signalforge generate stg_bikeshare_trips
+signalforge generate models/staging/stg_bikeshare_trips.sql
 ```
 
 What to expect: the diff lists several kept artifacts (column

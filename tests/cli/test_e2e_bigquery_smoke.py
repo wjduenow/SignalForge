@@ -117,7 +117,7 @@ def test_e2e_signalforge_generate_against_austin_bikeshare(
     exit_code = main(
         [
             "generate",
-            "stg_bikeshare_trips",
+            "models/staging/stg_bikeshare_trips.sql",
             "--project-dir",
             str(project_dir),
         ]
