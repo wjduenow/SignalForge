@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "audit_schema_version": 1,
+  "signalforge_version": "0.1.0.dev0",
+  "model_unique_id": "model.sf_demo.fct_orders",
+  "run_id": "0123456789abcdef0123456789abcdef",
+  "duration_seconds": 0.42,
+  "proposed_yaml": "version: 2\nmodels:\n  - name: fct_orders\n    columns:\n      - name: order_id\n        tests:\n          - unique\n",
+  "existing_yaml": null,
+  "unified_diff": "--- /dev/null\n+++ b/models/fct_orders.yml\n@@ -0,0 +1,6 @@\n+version: 2\n+models:\n+  - name: fct_orders\n+    columns:\n+      - name: order_id\n+        tests:\n+          - unique\n",
+  "entries": [
+    {
+      "artifact_id": "test.column.order_id.unique",
+      "test_type": "unique",
+      "tier": "kept",
+      "drop_reason": null,
+      "why": "Test returned non-zero failing rows on the warehouse sample.",
+      "score": null,
+      "passed": null
+    },
+    {
+      "artifact_id": "test.column.id.not_null",
+      "test_type": "not_null",
+      "tier": "dropped",
+      "drop_reason": "always-passes",
+      "why": "Test returned zero failing rows on the representative sample.",
+      "score": null,
+      "passed": null
+    }
+  ],
+  "kept_count": 1,
+  "dropped_count": 1,
+  "flagged_count": 0,
+  "has_existing_schema": false,
+  "candidate_hash": "0123456789abcdef",
+  "prune_result_hash": "fedcba9876543210",
+  "grading_report_hash": null
+}

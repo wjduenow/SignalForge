@@ -27,6 +27,10 @@ htmlcov/
 
 # SignalForge runtime state (audit log lives here; sensitive — see docs/safety-ops.md)
 .signalforge/
+# Allow committed test fixtures that intentionally embed a .signalforge/ subdir
+# (synthetic audit JSONL + diff sidecar consumed by tests/cli/_e2e_helpers.py).
+!tests/fixtures/**/.signalforge/
+!tests/fixtures/**/.signalforge/**
 
 # Local-only symlinked / synced skills — ignore all except maintainer-owned skills
 .claude/skills/*
