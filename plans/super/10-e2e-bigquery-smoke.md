@@ -5,7 +5,7 @@
 - **Ticket:** [#10](https://github.com/wjduenow/SignalForge/issues/10)
 - **Branch:** `feature/10-e2e-bq-smoke` (off `dev`)
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/10-e2e-bq-smoke`
-- **Phase:** published (PR #32 draft; awaiting approval)
+- **Phase:** devolved (PR #32 draft; epic + 8 tasks live in beads 2026-05-09)
 - **PR:** [#32](https://github.com/wjduenow/SignalForge/pull/32) (draft)
 - **Sessions:** 1 (started 2026-05-09)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
@@ -457,4 +457,18 @@ SF_RUN_BQ=1 pytest -m e2e --no-cov
 
 ## Beads manifest
 
-_Pending devolve._
+Devolved 2026-05-09 against the canonical `.beads/` store (worktree-aware).
+
+- **Epic:** `bd_1-scaffolding-91c` — 10: e2e smoke test against bigquery-public-data
+- **US-001** `bd_1-scaffolding-7wu` — Fixture skeleton (dbt project + sources + staging SQL with engineered always-pass column). Depends on: none. **Currently READY.**
+- **US-002** `bd_1-scaffolding-8be` — Manifest regen script + committed target/manifest.json. Depends on: US-001.
+- **US-003** `bd_1-scaffolding-ocg` — Fixture signalforge.yml. Depends on: US-001, US-002.
+- **US-004** `bd_1-scaffolding-r92` — @pytest.mark.e2e marker + tests/cli/_e2e_helpers.py. Depends on: US-002.
+- **US-005** `bd_1-scaffolding-ivh` — The e2e smoke test. Depends on: US-001, US-002, US-003, US-004.
+- **US-006** `bd_1-scaffolding-6ha` — README "Trying it out" + docs/cli-ops.md cross-ref + CLAUDE.md #10 bullet. Depends on: US-005.
+- **US-007** `bd_1-scaffolding-ch4` — Quality Gate (code review × 4 + CodeRabbit). Depends on: US-001..US-006 (all).
+- **US-008** `bd_1-scaffolding-8jp` — Patterns & Memory. Depends on: US-007. Priority P3.
+
+**Worktree:** `/home/wesd/Projects/worktrees/SignalForge/10-e2e-bq-smoke`
+**Branch:** `feature/10-e2e-bq-smoke` (off `dev`)
+**PR:** [#32](https://github.com/wjduenow/SignalForge/pull/32) (draft)
