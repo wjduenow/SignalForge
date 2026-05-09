@@ -1,0 +1,31 @@
+version: 2
+
+sources:
+  - name: austin_bikeshare
+    description: "Austin Bikeshare public dataset (bigquery-public-data)."
+    database: bigquery-public-data
+    schema: austin_bikeshare
+    tables:
+      - name: bikeshare_trips
+        description: "One row per bikeshare trip in Austin, TX."
+        columns:
+          - name: trip_id
+            description: "Unique identifier for each trip."
+          - name: subscriber_type
+            description: "Membership type of the rider (e.g. local monthly, walk-up)."
+          - name: bikeid
+            description: "Identifier of the bike used for the trip."
+          - name: bike_type
+            description: "Type/model of the bike."
+          - name: start_time
+            description: "Trip start timestamp (UTC)."
+          - name: start_station_id
+            description: "Identifier of the trip's origin station."
+          - name: start_station_name
+            description: "Human-readable name of the origin station."
+          - name: end_station_id
+            description: "Identifier of the trip's destination station."
+          - name: end_station_name
+            description: "Human-readable name of the destination station."
+          - name: duration_minutes
+            description: "Trip duration in minutes."
