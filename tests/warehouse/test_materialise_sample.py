@@ -25,7 +25,9 @@ from signalforge.warehouse import (
     BigQueryAdapter,
     MaterialisationFailedError,
     PartitionFilter,
+    SamplingRequiresPartitionFilterError,
     TableRef,
+    UnknownTableSizeError,
 )
 from signalforge.warehouse.adapters import bigquery as bq_module
 from signalforge.warehouse.adapters.bigquery import _compute_run_id, _hash_session_id
@@ -90,7 +92,7 @@ def _wrap_query_capture(fake_client: FakeBigQueryClient) -> dict[str, Any]:
 def _materialise_response_query(
     fake_client: FakeBigQueryClient,
     *,
-    session_id: str = "session_abcdef0123456789abcdef0123456789",
+    session_id: str | None = "session_abcdef0123456789abcdef0123456789",
     matching: str = r"^CREATE TEMP TABLE _sf_sample_",
 ) -> None:
     """Register a fake-client expectation that returns a job carrying
@@ -651,3 +653,96 @@ def test_bigquery_adapter_exit_success_does_not_emit_warning(
 
     warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warning_records == []
+
+
+# ---------------------------------------------------------------------------
+# materialise_sample fail-loud sizing + input-validation contract.
+# Covers DEC-008 sizing pathway parity with sample_rows + the fail-loud
+# session-id post-CTAS guard.
+# ---------------------------------------------------------------------------
+
+
+def test_materialise_sample_rejects_n_zero(
+    adapter: BigQueryAdapter,
+    table_ref: TableRef,
+) -> None:
+    """``n <= 0`` raises ``ValueError`` BEFORE any client call."""
+    with pytest.raises(ValueError, match=r"materialise_sample requires n > 0"):
+        adapter.materialise_sample(table_ref, n=0)
+
+
+def test_materialise_sample_raises_unknown_table_size_when_num_rows_none_no_partition(
+    adapter: BigQueryAdapter,
+    fake_client: FakeBigQueryClient,
+    table_ref: TableRef,
+) -> None:
+    """Mirrors ``sample_rows``: when ``Table.num_rows`` is unknown and
+    no partition filter pins the slice, refuse rather than scan TBs.
+    """
+    fake_client.expect_get_table(
+        ref=table_ref,
+        returns=FakeTable(num_rows=None, schema=[("id", "INT64")]),
+    )
+
+    with pytest.raises(UnknownTableSizeError):
+        adapter.materialise_sample(table_ref, n=100)
+
+
+def test_materialise_sample_falls_back_to_default_bucket_when_partition_filter_present(
+    adapter: BigQueryAdapter,
+    fake_client: FakeBigQueryClient,
+    table_ref: TableRef,
+) -> None:
+    """``num_rows is None`` + partition_filter supplied → use the
+    1000 default bucket and proceed (the partition filter pins the
+    cost, so the missing num_rows is no longer load-bearing).
+    """
+    fake_client.expect_get_table(
+        ref=table_ref,
+        returns=FakeTable(num_rows=None, schema=[("id", "INT64")]),
+    )
+    pf = PartitionFilter(column="event_date", op="=", value="2025-01-01")
+    _materialise_response_query(
+        fake_client,
+        matching=r"MOD\(ABS\(FARM_FINGERPRINT\(TO_JSON_STRING\(t\)\)\), 1000\)",
+    )
+
+    result = adapter.materialise_sample(table_ref, n=100, partition_filter=pf)
+    assert result.dataset == "_SESSION"
+
+
+def test_materialise_sample_raises_when_above_threshold_no_partition(
+    adapter: BigQueryAdapter,
+    fake_client: FakeBigQueryClient,
+    table_ref: TableRef,
+) -> None:
+    """``num_rows >= 100M`` with no partition filter → fail loud
+    rather than ship a query that could scan a TB.
+    """
+    fake_client.expect_get_table(
+        ref=table_ref,
+        returns=FakeTable(num_rows=200_000_000, schema=[("id", "INT64")]),
+    )
+
+    with pytest.raises(SamplingRequiresPartitionFilterError):
+        adapter.materialise_sample(table_ref, n=100)
+
+
+def test_materialise_sample_raises_when_session_id_missing_after_ctas(
+    adapter: BigQueryAdapter,
+    fake_client: FakeBigQueryClient,
+    table_ref: TableRef,
+    shakespeare_table: FakeTable,
+) -> None:
+    """The SDK contract guarantees ``session_info.session_id`` on a
+    ``create_session=True`` job that completed successfully. A missing
+    session id is a real protocol violation — the adapter raises
+    :class:`MaterialisationFailedError` rather than ship an
+    unreachable temp-table reference.
+    """
+    fake_client.expect_get_table(ref=table_ref, returns=shakespeare_table)
+    # Drive the CTAS to "complete" but with session_id=None.
+    _materialise_response_query(fake_client, session_id=None)
+
+    with pytest.raises(MaterialisationFailedError, match="did not return a session_id"):
+        adapter.materialise_sample(table_ref, n=100)

@@ -1853,3 +1853,133 @@ def test_prune_tests_materialised_strategy_against_pinned_fixture(
 
     StrictPruneEvent.model_validate(row)
     fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# Defence-in-depth: invalid SQL identifier on a CandidateTest column +
+# WarehouseError during sample-mode size resolution.
+# ---------------------------------------------------------------------------
+
+
+def _make_orders_model_with_adversarial_column() -> Model:
+    """Build a model whose manifest legitimately contains a column with
+    a name that fails ``validate_identifier`` (whitespace).
+
+    The manifest stores upstream identifiers verbatim — the prune layer
+    is the seam that defends downstream SQL composition (DEC-024).
+    """
+    return Model(
+        unique_id="model.shop.orders",
+        name="orders",
+        resource_type="model",
+        package_name="shop",
+        original_file_path="models/orders.sql",
+        path="orders.sql",
+        database="fake_project",
+        schema="dataset",  # type: ignore[call-arg]
+        columns={
+            "id": Column(name="id"),
+            "col with space": Column(name="col with space"),
+        },
+        raw_code="select 1",
+    )
+
+
+def test_prune_tests_invalid_identifier_routes_to_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """Defence-in-depth: a CandidateTest whose ``column`` passes the
+    drafter anchor contract (it IS in the manifest) but fails the
+    SQL-identifier shape check at the compile seam routes to
+    ``decision="kept", reason="kept-without-evidence"``.
+
+    Conservative default — the test MAY still be signal-bearing once
+    the operator fixes the upstream prompt / manifest. No warehouse
+    call is issued; ``compiled_sql`` is the empty string.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # No expect_query — the compile rejects before any call dispatches.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model_with_adversarial_column()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="col with space",
+                description="adversarial.",
+                tests=(CandidateTestNotNull(column="col with space"),),
+            ),
+        ),
+    )
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 1
+    assert result.kept_count == 1
+    decision = result.decisions[0]
+    assert decision.decision == "kept"
+    assert decision.reason == "kept-without-evidence"
+    assert decision.compiled_sql == ""
+    assert "invalid identifier" in decision.why
+    fake.assert_all_expectations_met()
+
+    audit_rows = _read_audit_lines(audit_path)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["reason"] == "kept-without-evidence"
+
+
+def test_prune_tests_sample_mode_warehouse_error_during_size_fetch_propagates(
+    tmp_path: Path,
+) -> None:
+    """Sample-mode requires ``num_rows`` to size the bucket. When the
+    adapter's :meth:`get_table` raises a :class:`WarehouseError` during
+    that lookup, the engine propagates the typed error rather than
+    silently degrading.
+
+    The resulting fail-loud signal lands in front of the operator —
+    swallowing it would defeat US-003's cost model.
+    """
+    from signalforge.warehouse.errors import TableNotFoundError
+
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_get_table(
+        ref=TableRef(project="fake_project", dataset="dataset", name="orders"),
+        returns=TableNotFoundError(table="fake_project.dataset.orders"),
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="oneshot",
+    )
+
+    with pytest.raises(TableNotFoundError):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+    fake.assert_all_expectations_met()
