@@ -1,0 +1,358 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.8.9",
+    "generated_at": null,
+    "invocation_id": null,
+    "env": {},
+    "project_name": "signalforge_test_austin",
+    "project_id": "signalforgeaustin0000000000000000",
+    "user_id": null,
+    "send_anonymous_usage_stats": null,
+    "adapter_type": null
+  },
+  "nodes": {
+    "model.signalforge_test_austin.stg_bikeshare_trips": {
+      "database": "bigquery-public-data",
+      "schema": "austin_bikeshare",
+      "name": "stg_bikeshare_trips",
+      "resource_type": "model",
+      "package_name": "signalforge_test_austin",
+      "path": "staging/stg_bikeshare_trips.sql",
+      "original_file_path": "models/staging/stg_bikeshare_trips.sql",
+      "unique_id": "model.signalforge_test_austin.stg_bikeshare_trips",
+      "fqn": [
+        "signalforge_test_austin",
+        "staging",
+        "stg_bikeshare_trips"
+      ],
+      "alias": "stg_bikeshare_trips",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "tags": [],
+        "meta": {},
+        "group": null,
+        "materialized": "view",
+        "incremental_strategy": null,
+        "persist_docs": {},
+        "post-hook": [],
+        "pre-hook": [],
+        "quoting": {},
+        "column_types": {},
+        "full_refresh": null,
+        "unique_key": null,
+        "on_schema_change": "ignore",
+        "on_configuration_change": "apply",
+        "grants": {},
+        "packages": [],
+        "docs": {
+          "show": true,
+          "node_color": null
+        },
+        "contract": {
+          "enforced": false,
+          "alias_types": true
+        },
+        "access": "protected"
+      },
+      "tags": [],
+      "description": "",
+      "columns": {
+        "trip_id": {
+          "name": "trip_id",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "subscriber_type": {
+          "name": "subscriber_type",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "bikeid": {
+          "name": "bikeid",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "start_time": {
+          "name": "start_time",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "start_station_id": {
+          "name": "start_station_id",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "end_station_id": {
+          "name": "end_station_id",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "duration_minutes": {
+          "name": "duration_minutes",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "region": {
+          "name": "region",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "start_time_safe": {
+          "name": "start_time_safe",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "meta": {},
+      "group": null,
+      "docs": {
+        "show": true,
+        "node_color": null
+      },
+      "patch_path": null,
+      "build_path": null,
+      "unrendered_config": {
+        "materialized": "view"
+      },
+      "created_at": 0,
+      "relation_name": "`bigquery-public-data`.`austin_bikeshare`.`stg_bikeshare_trips`",
+      "raw_code": "-- Literal/COALESCE'd columns deliberately included to give the LLM at least one\n-- mathematically-guaranteed always-pass test to drop (issue #10 AC).\nSELECT\n    trip_id,\n    subscriber_type,\n    bikeid,\n    start_time,\n    start_station_id,\n    end_station_id,\n    duration_minutes,\n    'austin' AS region,\n    COALESCE(start_time, TIMESTAMP '1970-01-01 00:00:00 UTC') AS start_time_safe\nFROM {{ source('austin_bikeshare', 'bikeshare_trips') }}\nLIMIT 100000\n",
+      "language": "sql",
+      "refs": [],
+      "sources": [
+        [
+          "austin_bikeshare",
+          "bikeshare_trips"
+        ]
+      ],
+      "metrics": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips"
+        ]
+      },
+      "compiled_path": null,
+      "contract": {
+        "enforced": false,
+        "alias_types": true,
+        "checksum": null
+      },
+      "access": "protected",
+      "constraints": [],
+      "version": null,
+      "latest_version": null,
+      "deprecation_date": null
+    }
+  },
+  "sources": {
+    "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips": {
+      "database": "bigquery-public-data",
+      "schema": "austin_bikeshare",
+      "name": "bikeshare_trips",
+      "resource_type": "source",
+      "package_name": "signalforge_test_austin",
+      "path": "models/staging/sources.yml",
+      "original_file_path": "models/staging/sources.yml",
+      "unique_id": "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips",
+      "fqn": [
+        "signalforge_test_austin",
+        "austin_bikeshare",
+        "bikeshare_trips"
+      ],
+      "source_name": "austin_bikeshare",
+      "source_description": "Austin Bikeshare public dataset (bigquery-public-data).",
+      "loader": "",
+      "identifier": "bikeshare_trips",
+      "quoting": {
+        "database": null,
+        "schema": null,
+        "identifier": null,
+        "column": null
+      },
+      "loaded_at_field": null,
+      "freshness": {
+        "warn_after": {
+          "count": null,
+          "period": null
+        },
+        "error_after": {
+          "count": null,
+          "period": null
+        },
+        "filter": null
+      },
+      "external": null,
+      "description": "One row per bikeshare trip in Austin, TX.",
+      "columns": {
+        "trip_id": {
+          "name": "trip_id",
+          "description": "Unique identifier for each trip.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "subscriber_type": {
+          "name": "subscriber_type",
+          "description": "Membership type of the rider (e.g. local monthly, walk-up).",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "bikeid": {
+          "name": "bikeid",
+          "description": "Identifier of the bike used for the trip.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "bike_type": {
+          "name": "bike_type",
+          "description": "Type/model of the bike.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "start_time": {
+          "name": "start_time",
+          "description": "Trip start timestamp (UTC).",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "start_station_id": {
+          "name": "start_station_id",
+          "description": "Identifier of the trip's origin station.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "start_station_name": {
+          "name": "start_station_name",
+          "description": "Human-readable name of the origin station.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "end_station_id": {
+          "name": "end_station_id",
+          "description": "Identifier of the trip's destination station.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "end_station_name": {
+          "name": "end_station_name",
+          "description": "Human-readable name of the destination station.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "duration_minutes": {
+          "name": "duration_minutes",
+          "description": "Trip duration in minutes.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "meta": {},
+      "source_meta": {},
+      "tags": [],
+      "config": {
+        "enabled": true
+      },
+      "patch_path": null,
+      "unrendered_config": {},
+      "relation_name": "`bigquery-public-data`.`austin_bikeshare`.`bikeshare_trips`",
+      "created_at": 0
+    }
+  },
+  "macros": {},
+  "docs": {},
+  "exposures": {},
+  "metrics": {},
+  "groups": {},
+  "selectors": {},
+  "disabled": {},
+  "parent_map": {
+    "model.signalforge_test_austin.stg_bikeshare_trips": [
+      "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips"
+    ],
+    "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips": []
+  },
+  "child_map": {
+    "model.signalforge_test_austin.stg_bikeshare_trips": [],
+    "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips": [
+      "model.signalforge_test_austin.stg_bikeshare_trips"
+    ]
+  },
+  "group_map": {},
+  "saved_queries": {},
+  "semantic_models": {},
+  "unit_tests": {}
+}
