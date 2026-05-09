@@ -537,6 +537,14 @@ prune.jsonl # the per-decision prune audit
 would skip both `schema.yml` and `.signalforge/diff.json` while
 still printing the diff to stdout.
 
+For a guided end-to-end run against a public BigQuery dataset (no
+setup beyond `gcloud auth application-default login` + an Anthropic
+API key), see the README's
+[Trying it out](../README.md#trying-it-out) section. The fixture
+lives at `tests/fixtures/dbt_project_austin/`; the gated
+maintainer-only test that exercises the same flow lives at
+`tests/cli/test_e2e_bigquery_smoke.py` (run via `pytest -m e2e --no-cov`).
+
 ## Subprocess smoke test
 
 The CLI ships one belt-and-braces test gated behind the
