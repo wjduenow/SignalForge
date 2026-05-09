@@ -5,8 +5,8 @@
 - **Ticket:** [#10](https://github.com/wjduenow/SignalForge/issues/10)
 - **Branch:** `feature/10-e2e-bq-smoke` (off `dev`)
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/10-e2e-bq-smoke`
-- **Phase:** refinement (Architecture review complete 2026-05-09; one concern outstanding)
-- **PR:** _not yet opened_
+- **Phase:** published (PR #32 draft; awaiting approval)
+- **PR:** [#32](https://github.com/wjduenow/SignalForge/pull/32) (draft)
 - **Sessions:** 1 (started 2026-05-09)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.1 (capstone validation — every prior v0.1 ticket is shipped; this proves the seams compose against real Anthropic + real BigQuery)
