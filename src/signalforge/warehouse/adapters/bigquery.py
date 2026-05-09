@@ -609,8 +609,12 @@ class BigQueryAdapter(WarehouseAdapter):
                 only; not passed to BigQuery (DEC-013 / DEC-004).
 
         Returns:
-            :class:`TableRef` with ``project=client.project``,
+            :class:`TableRef` with ``project=None``,
             ``dataset="_SESSION"``, ``name="_sf_sample_<run_id>"``.
+            ``project=None`` is load-bearing: BigQuery rejects the
+            three-part ``<project>._SESSION.<name>`` form even inside
+            the owning session, so the rendered ``qualified_name`` is
+            the two-part ``_SESSION._sf_sample_<run_id>``.
 
         Raises:
             MaterialisationFailedError: any SDK / network / quota
@@ -688,14 +692,24 @@ class BigQueryAdapter(WarehouseAdapter):
             list(job.result())
         except Exception as exc:
             # DEC-008 of #22 — wrap any SDK / network / quota failure
-            # in a typed MaterialisationFailedError. The original
-            # exception travels via ``cause=`` for post-mortem; the
-            # raise-from chain lets a debugger walk the real
-            # ``__cause__`` while the prune orchestrator's pattern
-            # match keys on the typed shell.
+            # in a typed MaterialisationFailedError. Route the raw
+            # exception through ``map_bq_exception`` first (matching
+            # ``sample_rows`` / ``column_stats`` / ``run_test_sql``) so
+            # the message and ``cause`` carry our stable warehouse
+            # error surface instead of SDK/version-specific wording.
+            # The raise-from chain still preserves the original SDK
+            # exception via ``__cause__`` for post-mortem.
+            mapped = map_bq_exception(
+                exc,
+                context={
+                    "max_bytes_billed": self._max_bytes_billed,
+                    "table": table.qualified_name,
+                },
+            )
+            cause: BaseException = mapped if mapped is not exc else exc
             raise MaterialisationFailedError(
-                message=f"sample materialisation failed for {table.qualified_name}: {exc}",
-                cause=exc,
+                message=f"sample materialisation failed for {table.qualified_name}: {cause}",
+                cause=cause,
             ) from exc
 
         session_info = getattr(job, "session_info", None)

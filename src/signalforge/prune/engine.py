@@ -651,19 +651,20 @@ def prune_tests(
     * Ensuring the loaded :class:`Manifest` is consistent with the
       ``model`` under prune.
 
-    Context-manager requirement (US-005 of issue #22):
-        ``prune_tests`` invokes ``adapter`` inside a ``with`` block so
-        :meth:`WarehouseAdapter.__exit__` always runs — including on the
-        materialisation-failure path. The CLI's ``cmd_generate`` already
-        wraps the adapter; library callers (notebooks, scripts, custom
-        runners) MUST call this function with an adapter that has not
-        already been entered, or they MUST themselves wrap the call site
-        in ``with adapter:``. Without ``__exit__`` running, BigQuery
-        materialised sessions rely on the server-side TTL for cleanup
-        (~24 hours) instead of the explicit ``CALL BQ.ABORT_SESSION()``
-        the adapter issues from ``__exit__`` (DEC-013 of issue #22). A
-        non-BigQuery adapter that does not maintain session state still
-        sees its own cleanup hooks fire correctly because every
+    Context-manager ownership (US-005 of issue #22):
+        ``prune_tests`` invokes ``adapter`` inside a ``with`` block
+        itself, so :meth:`WarehouseAdapter.__exit__` always runs —
+        including on the materialisation-failure path. **Callers MUST
+        pass an adapter that has not already been entered**; double
+        ``__enter__`` is undefined behaviour. Do not wrap the
+        ``prune_tests`` call in your own ``with adapter:`` — the
+        engine owns the context. Without ``__exit__`` running,
+        BigQuery materialised sessions rely on the server-side TTL
+        for cleanup (~24 hours) instead of the explicit
+        ``CALL BQ.ABORT_SESSION()`` the adapter issues from
+        ``__exit__`` (DEC-013 of issue #22). A non-BigQuery adapter
+        that does not maintain session state still sees its own
+        cleanup hooks fire correctly because every
         :class:`WarehouseAdapter` subclass implements
         ``__enter__`` / ``__exit__``.
 

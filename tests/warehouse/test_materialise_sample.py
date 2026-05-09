@@ -1,14 +1,16 @@
 """US-003 / issue #22 — BigQueryAdapter.materialise_sample tests.
 
-22 tests exercising the materialise + run_test_sql + __exit__ surfaces
+Tests exercising the materialise + run_test_sql + __exit__ surfaces
 introduced by US-003 of plans/super/22-temp-table-sample.md. Every test
 injects a :class:`FakeBigQueryClient` (DEC-002 of #3) — never reaches
 real BigQuery.
 
-The fake's ``expect_query`` is sufficient for v0.2 — US-004 will add
-the explicit ``expect_materialise_sample`` / ``expect_abort_session``
-helpers; this module deliberately uses raw query expectations and
-job_config inspection so the tests don't pre-empt that surface.
+US-004 has since shipped the explicit ``expect_materialise_sample`` /
+``expect_abort_session`` helpers (see ``tests/warehouse/_fake.py``);
+this module intentionally continues to use raw ``expect_query``
+expectations and job_config inspection because the assertions below
+target SQL bytes / connection-property shape directly, which is more
+diagnostic when the production CTAS regresses.
 """
 
 from __future__ import annotations
@@ -317,16 +319,28 @@ def test_materialise_sample_wraps_warehouse_sdk_errors_as_materialisation_failed
     shakespeare_table: FakeTable,
 ) -> None:
     """DEC-008 of #22 — every SDK / network / quota failure during the
-    CTAS surfaces as :class:`MaterialisationFailedError` with the
-    original exception preserved on ``cause``.
+    CTAS surfaces as :class:`MaterialisationFailedError`.
+
+    The raw SDK exception is routed through ``map_bq_exception`` first
+    (mirroring ``sample_rows`` / ``column_stats`` / ``run_test_sql``)
+    so ``cause`` carries our stable warehouse-error surface — here, a
+    :class:`WarehouseAuthError` for a 403 ``Forbidden``. The original
+    SDK exception is preserved on the ``__cause__`` chain via the
+    ``raise from`` so a debugger can still walk back to the raw SDK
+    object.
     """
+    from signalforge.warehouse.errors import WarehouseAuthError
+
     fake_client.expect_get_table(ref=table_ref, returns=shakespeare_table)
     forbidden = Forbidden("permission denied")
     fake_client.expect_query(matching=r"^CREATE TEMP TABLE _sf_sample_", returns=forbidden)
 
     with pytest.raises(MaterialisationFailedError) as exc_info:
         adapter.materialise_sample(table_ref, n=100)
-    assert exc_info.value.cause is forbidden
+    # The typed-shell cause is the mapped warehouse error.
+    assert isinstance(exc_info.value.cause, WarehouseAuthError)
+    # The raw SDK exception is preserved on the raise-from chain.
+    assert exc_info.value.__cause__ is forbidden
 
 
 def test_run_test_sql_uses_active_session_id_after_materialise(

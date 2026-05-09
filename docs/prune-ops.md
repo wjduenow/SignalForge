@@ -304,12 +304,17 @@ The `compiled_sql` field on every `PruneEvent` is the durable signal
 that distinguishes a materialised-strategy run from a oneshot run:
 
 - **Materialised (v0.2 default):** every test's `compiled_sql`
-  references the temp table — look for `FROM \`<project>._SESSION._sf_sample_<run_id>\``
-  (the `_SESSION` dataset and the `_sf_sample_<16-hex>` table name are
-  load-bearing — `_SESSION` is BigQuery's session-scoped namespace,
-  and the 16-hex `run_id` derives deterministically from
-  `blake2b-12(model.unique_id + signalforge_version + sample_size + canonical_json(partition_filter))`).
-  Same input → same `run_id` → same `compiled_sql_hash` (DEC-001 of #22).
+  references the temp table — look for `FROM \`_SESSION._sf_sample_<run_id>\``
+  (two-part `_SESSION._sf_sample_<run_id>`; no `<project>.` prefix
+  because the adapter returns `TableRef(project=None, ...)` —
+  BigQuery rejects the three-part `<project>._SESSION.<name>` form
+  even inside the owning session). The `_SESSION` dataset and the
+  `_sf_sample_<16-hex>` table name are load-bearing — `_SESSION` is
+  BigQuery's session-scoped namespace, and the 16-hex `run_id`
+  derives deterministically from
+  `blake2b(table.qualified_name + signalforge_version + str(n) + canonical_json(partition_filter), digest_size=8).hexdigest()`
+  (inputs joined with NUL separator). Same input → same `run_id` →
+  same `compiled_sql_hash` (DEC-001 of #22).
 - **Oneshot (v0.1 fallback / non-BQ adapters):** `compiled_sql`
   references the source table directly — no `_SESSION` prefix.
 

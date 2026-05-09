@@ -448,17 +448,24 @@ def _is_abort_session_sql(sql: str) -> bool:
 
 
 def _qualified_name_substring(ref: TableRef) -> str:
-    """Mirror :meth:`BigQueryAdapter._quote`'s output shape — backtick-
-    quoted ``project.dataset.name`` (or ``client_project.dataset.name``
-    when ``ref.project`` is ``None``; we can't know the client's project
-    here so fall back to ``dataset.name``).
+    """Mirror :meth:`BigQueryAdapter._quote`'s output shape.
+
+    Production ``_quote`` ALWAYS emits the three-part backtick-quoted
+    form ``\\`{project}.{dataset}.{name}\\``` — when ``ref.project`` is
+    ``None`` the adapter falls back to the SDK client's billing project,
+    so the rendered SQL is still three-part. The matcher returns:
+
+    * ``\\`project.dataset.name\\``` when ``ref.project`` is set —
+      anchored on both sides for an exact substring match.
+    * ``.dataset.name\\``` (period-prefixed, backtick-suffixed) when
+      ``ref.project`` is ``None`` — matches the *suffix* of the
+      production three-part form regardless of the client's project,
+      since the matcher cannot know that project a priori. The leading
+      period prevents accidental matches against a different table
+      whose name ends with ``dataset.name``.
     """
     if ref.project is not None:
         return f"`{ref.project}.{ref.dataset}.{ref.name}`"
-    # When the registration omits ``project``, callers either scaffold
-    # against the client's billing project (covered by the prefix +
-    # LIMIT match alone) or pass an explicit ``ref.project`` that the
-    # production CTAS will mirror byte-for-byte.
     return f".{ref.dataset}.{ref.name}`"
 
 

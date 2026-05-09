@@ -125,15 +125,18 @@ The BigQuery adapter is opinionated about cost on every query.
     Values are `warehouse_sample` (from `sample_rows`),
     `warehouse_sample_materialise` (from `materialise_sample`, v0.2 —
     see [Materialised sampling](#materialised-sampling-v02-issue-22)),
-    `warehouse_stats` (from `column_stats`), and `warehouse_test`
-    (from `run_test_sql`).
+    `warehouse_stats` (from `column_stats`), `warehouse_test` (from
+    `run_test_sql`), and `warehouse_session_abort` (from the
+    `__exit__` cleanup `CALL BQ.ABORT_SESSION()` query — DEC-013 of
+    #22).
   - `signalforge_version` — the package version (with `.` rewritten to
     `_` to satisfy BigQuery's label-character constraint).
 
   Both are filterable in `INFORMATION_SCHEMA.JOBS_BY_PROJECT` for v0.2
   cost analysis. Stage labels are `warehouse_sample`,
-  `warehouse_sample_materialise` (v0.2), `warehouse_stats`, and
-  `warehouse_test` (one per pipeline stage that issues a query):
+  `warehouse_sample_materialise` (v0.2), `warehouse_stats`,
+  `warehouse_test`, and `warehouse_session_abort` (v0.2; one per
+  pipeline stage that issues a query):
 
   ```sql
   SELECT job_id, total_bytes_billed
@@ -283,22 +286,28 @@ with a remediation pointing at `prune.sample_strategy: oneshot` in
 inherit the default until v0.3.
 
 **BigQueryAdapter session-state pattern.** The first call to
-`materialise_sample` runs `CREATE TEMP TABLE _SESSION._sf_sample_<run_id> AS SELECT ...`
-with `QueryJobConfig(create_session=True, ...)` against the
-`warehouse_sample_materialise` stage label. **BigQuery assigns the
-session_id server-side**; the adapter captures it from
+`materialise_sample` runs `CREATE TEMP TABLE _sf_sample_<run_id> AS SELECT ...`
+(the CTAS itself uses the bare `_sf_sample_<run_id>` name — no
+`_SESSION.` prefix) with `QueryJobConfig(create_session=True, ...)`
+against the `warehouse_sample_materialise` stage label. **BigQuery
+assigns the session_id server-side**; the adapter captures it from
 `job.session_info.session_id` and stores it on the adapter instance
 as `self._active_session_id` for the duration of the prune run.
 Subsequent `run_test_sql` calls automatically attach
 `ConnectionProperty(key="session_id", value=self._active_session_id)`
 so the per-test query resolves `_SESSION._sf_sample_<run_id>` against
-the same session.
+the same session. The returned `TableRef` carries
+`project=None, dataset="_SESSION", name="_sf_sample_<run_id>"` —
+two-part `qualified_name` `_SESSION._sf_sample_<run_id>`. `project=None`
+is load-bearing because BigQuery rejects the three-part
+`<project>._SESSION.<name>` form even inside the owning session.
 
 The `run_id` is OUR derivation —
-`blake2b-12(model.unique_id + signalforge_version + sample_size + canonical_json(partition_filter))`
-— so the temp-table name is deterministic across runs and the
-`compiled_sql_hash` reproducibility invariant on `PruneEvent` (DEC-005
-of issue #6) is preserved.
+`blake2b(table.qualified_name + signalforge_version + str(n) + canonical_json(partition_filter), digest_size=8).hexdigest()`
+(inputs joined with NUL separator; 16 hex chars) — so the temp-table
+name is deterministic across runs and the `compiled_sql_hash`
+reproducibility invariant on `PruneEvent` (DEC-005 of issue #6) is
+preserved.
 
 **`ttl_seconds` is OUR-side hint, not a BQ knob.** BigQuery sessions
 have a server-enforced max lifetime (~24h regardless of activity)

@@ -492,7 +492,11 @@ def test_sample_rows_cost_materialised() -> None:
         # ``adapter._active_session_id`` and routed through every
         # subsequent ``run_test_sql`` call via connection_properties
         # (DEC-002 of #22). The returned ``temp_ref.qualified_name``
-        # references ``<project>._SESSION._sf_sample_<run_id>``.
+        # is the two-part ``_SESSION._sf_sample_<run_id>`` —
+        # ``project=None`` on the returned TableRef is load-bearing
+        # because BigQuery rejects the three-part
+        # ``<project>._SESSION.<name>`` form even inside the owning
+        # session.
         started_at_materialise = time.monotonic()
         temp_ref = adapter.materialise_sample(
             _TARGET,
@@ -629,15 +633,21 @@ def test_materialised_session_cleaned_up_after_exit() -> None:
 
     adapter = BigQueryAdapter(max_bytes_billed=_BOOTSTRAP_BYTES_BILLED_CAP)
 
+    captured_session_id: str | None = None
     with adapter:
         temp_ref = adapter.materialise_sample(
             _TARGET,
             _SAMPLE_SIZE,
         )
-        # Sanity check: while still inside the context, the temp table
-        # IS reachable via the active session — proves the
-        # materialisation actually landed before we test the cleanup.
-        assert adapter._active_session_id is not None, (  # noqa: SLF001
+        # Capture the active session_id BEFORE leaving the context so
+        # the post-exit query below can route through the *same*
+        # session. Without this capture the post-exit query would have
+        # no session attached, and the assertion would pass for the
+        # wrong reason — a fresh-SDK query against the two-part
+        # ``_SESSION._sf_sample_<...>`` name fails regardless of
+        # whether ``__exit__`` aborted the session.
+        captured_session_id = adapter._active_session_id  # noqa: SLF001
+        assert captured_session_id is not None, (
             "materialise_sample did not record an active session_id; "
             "DEC-013 cleanup verification cannot proceed"
         )
@@ -650,26 +660,26 @@ def test_materialised_session_cleaned_up_after_exit() -> None:
         "DEC-013 cleanup did not run its finally-block reset"
     )
 
-    # Attempt to query the temp table from a fresh SDK call. We
-    # deliberately do NOT route through any session — the test is "is
-    # the table gone?", and routing through a fresh session would
-    # introduce a new session whose ``_SESSION`` namespace is empty
-    # for trivial reasons. A direct three-part-name query against
-    # ``<project>._SESSION._sf_sample_<run_id>`` is the right shape:
-    # ``_SESSION`` is not a real dataset, so the only way the query
-    # could succeed is if BigQuery resolved it inside an active
-    # session — which is exactly what DEC-013 cleanup destroyed.
+    # Issue the post-exit query routed through the *captured* session
+    # id. This is the load-bearing assertion: if DEC-013 cleanup
+    # actually aborted the session, BigQuery surfaces "session not
+    # found" (or similar) when the query references that session id;
+    # if cleanup leaked, the temp table would still resolve inside the
+    # captured session and the query would succeed — the
+    # ``pytest.raises`` would fail with "DID NOT RAISE", catching the
+    # regression. Without the captured ``session_id`` on the wire the
+    # query would fail for an unrelated reason ("two-part _SESSION
+    # name has no namespace") and the test would pass even when
+    # cleanup was broken.
     client = adapter._get_client()  # noqa: SLF001 - documented seam
 
     with pytest.raises(gae.GoogleAPIError) as excinfo:
-        # No connection_properties → no session routing → the query
-        # planner has no session in which ``_SESSION._sf_sample_*`` is
-        # defined. Even if the BigQuery server hadn't aborted the
-        # session yet (timing fluke), this query would still fail
-        # because the session_id isn't on the wire.
         job = client.query(
             f"SELECT COUNT(*) FROM `{temp_ref.qualified_name}`",
-            job_config=adapter._default_job_config(stage="warehouse_test"),  # noqa: SLF001
+            job_config=adapter._default_job_config(  # noqa: SLF001
+                stage="warehouse_test",
+                session_id=captured_session_id,
+            ),
         )
         list(job.result())
 
