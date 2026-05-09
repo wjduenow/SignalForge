@@ -117,6 +117,23 @@ class PruneConfig(BaseModel):
     otherwise optional. Pydantic recursively validates the YAML mapping
     into the typed ADT."""
 
+    sample_strategy: Literal["oneshot", "materialised"] = "materialised"
+    """Per-run sample materialisation strategy (DEC-006 / Q7 of issue #22).
+
+    * ``"materialised"`` (default) — the orchestrator materialises a
+      single per-run sample table (BigQuery CTAS or equivalent) once,
+      then runs every candidate test against the materialised sample.
+      Cuts bytes-billed by ~N× for an N-test prune over a large source
+      table.
+    * ``"oneshot"`` — fall back to v0.1's per-test
+      :meth:`signalforge.warehouse.WarehouseAdapter.sample_rows` path.
+      Use when the active adapter does not support materialisation
+      (raises :class:`signalforge.warehouse.MaterialisationNotSupportedError`)
+      or for debugging unexpected materialisation behaviour.
+
+    A typo (e.g. the US spelling ``"materialized"``) MUST fail loud per
+    DEC-015 — the ``Literal`` validator rejects every other string."""
+
     @field_validator("sample_size", "test_timeout_seconds", "total_budget_seconds")
     @classmethod
     def _positive(cls, v: int) -> int:

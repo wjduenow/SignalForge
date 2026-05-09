@@ -946,3 +946,19 @@ def test_sample_rows_includes_order_by_for_deterministic_limit(
     assert "ORDER BY" in sql
     # ORDER BY must precede LIMIT in the rendered SQL.
     assert sql.index("ORDER BY") < sql.index("LIMIT")
+
+
+def test_compute_ttl_remaining_seconds_returns_one_when_session_state_unset(
+    adapter: BigQueryAdapter,
+) -> None:
+    """Defensive guard (DEC-014): the floor-at-1 path also handles the
+    inconsistent-state case where ``__exit__`` is invoked without
+    ``materialise_sample`` having minted a session.
+
+    A fresh adapter has both ``_session_ttl_seconds`` and
+    ``_session_started_at`` as ``None``; the helper must short-circuit
+    to ``1`` rather than raise on the ``elapsed`` arithmetic.
+    """
+    assert adapter._session_ttl_seconds is None
+    assert adapter._session_started_at is None
+    assert adapter._compute_ttl_remaining_seconds() == 1

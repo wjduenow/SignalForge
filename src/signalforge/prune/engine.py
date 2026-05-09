@@ -175,6 +175,20 @@ def _why_kept_without_evidence_budget(budget_seconds: int) -> str:
     return f"Total prune budget ({budget_seconds}s) exceeded before evaluation."
 
 
+def _why_materialisation_failed(exc: WarehouseError) -> str:
+    """DEC-005 of issue #22 — ``why`` field shape on the materialisation
+    failure path.
+
+    Format: ``f"sample materialisation failed: {type(exc).__name__}: {str(exc)[:200]}"``.
+    The 200-byte truncation keeps each per-decision audit row under the
+    4000-byte JSONL limit (mirrors safety / draft / prune fail-closed
+    audit caps); the typed-class prefix lets a reviewer correlate with
+    the underlying warehouse adapter's own logs without sniffing the
+    truncated tail.
+    """
+    return f"sample materialisation failed: {type(exc).__name__}: {str(exc)[:200]}"
+
+
 def _validate_trusted_models(config: PruneConfig, manifest: Manifest) -> None:
     """Validate every ``config.trusted_models`` entry exists in the
     manifest (DEC-008).
@@ -432,6 +446,41 @@ def _decide_kept_without_evidence_warehouse_error(
     )
 
 
+def _decide_kept_without_evidence_materialisation_failed(
+    *,
+    test: CandidateTest,
+    test_anchor: str,
+    exc: WarehouseError,
+    scope: Scope,
+) -> PruneDecision:
+    """Build a :class:`PruneDecision` for a test that never compiled because
+    the per-run sample materialisation failed (DEC-005 / DEC-009 of issue
+    #22).
+
+    Conservative-bias routing: every candidate test in the run drains to
+    ``decision="kept", reason="kept-without-evidence"`` regardless of
+    which test it is, because we have no warehouse evidence for any of
+    them. ``compiled_sql`` is empty (compilation never happened) and
+    ``elapsed_ms`` is 0 (the test never ran). The audit JSONL row is
+    still written so a reviewer sees exactly which tests would have been
+    evaluated had the materialisation succeeded.
+    """
+    return PruneDecision(
+        test_anchor=test_anchor,
+        test=test,
+        decision="kept",
+        reason="kept-without-evidence",
+        failures=0,
+        sampled_rows=None,
+        scope=scope,
+        elapsed_ms=0,
+        compiled_sql_hash=_build_compiled_sql_hash_or_empty(""),
+        compiled_sql="",
+        why=_why_materialisation_failed(exc),
+        sample_failures=None,
+    )
+
+
 def _decide_kept_without_evidence_budget(
     *,
     test: CandidateTest,
@@ -602,6 +651,23 @@ def prune_tests(
     * Ensuring the loaded :class:`Manifest` is consistent with the
       ``model`` under prune.
 
+    Context-manager ownership (US-005 of issue #22):
+        ``prune_tests`` invokes ``adapter`` inside a ``with`` block
+        itself, so :meth:`WarehouseAdapter.__exit__` always runs —
+        including on the materialisation-failure path. **Callers MUST
+        pass an adapter that has not already been entered**; double
+        ``__enter__`` is undefined behaviour. Do not wrap the
+        ``prune_tests`` call in your own ``with adapter:`` — the
+        engine owns the context. Without ``__exit__`` running,
+        BigQuery materialised sessions rely on the server-side TTL
+        for cleanup (~24 hours) instead of the explicit
+        ``CALL BQ.ABORT_SESSION()`` the adapter issues from
+        ``__exit__`` (DEC-013 of issue #22). A non-BigQuery adapter
+        that does not maintain session state still sees its own
+        cleanup hooks fire correctly because every
+        :class:`WarehouseAdapter` subclass implements
+        ``__enter__`` / ``__exit__``.
+
     Args:
         model: the manifest :class:`Model` under prune.
         adapter: the :class:`WarehouseAdapter` (BigQuery in v0.1).
@@ -655,7 +721,7 @@ def prune_tests(
     # Validate trusted_models BEFORE any warehouse call (DEC-008).
     _validate_trusted_models(resolved_config, manifest)
 
-    table_ref = TableRef.from_model(model)
+    source_table_ref = TableRef.from_model(model)
     dialect = adapter.dialect()
     is_trusted = model.unique_id in resolved_config.trusted_models
     scope: Scope = resolved_config.scope
@@ -703,128 +769,268 @@ def prune_tests(
         resolved_config.model_dump_json(),
     )
 
-    # Resolve the deterministic-sample bucket once per run when
-    # scope=sample. The bucket is derived from ``num_rows / sample_size``
-    # so the wrapped CTE samples ~sample_size rows; deriving once and
-    # threading through every per-test compile keeps every test in the
-    # run targeting the same sampled row set.
-    sample_bucket = _resolve_sample_bucket(
-        adapter=adapter,
-        table_ref=table_ref,
-        scope=scope,
-        sample_size=resolved_config.sample_size,
-    )
-
     pairs = _iter_candidate_tests(candidates)
     decisions: list[PruneDecision] = []
     start_ms = _now_monotonic_ms()
     total_budget_ms = resolved_config.total_budget_seconds * 1000
-    budget_exhausted = False
 
-    for test_anchor, test in pairs:
-        # Total-budget gate (DEC-011) — checked BEFORE any compile or
-        # warehouse call. Once exceeded, every remaining test drains
-        # to ``kept-without-evidence`` without dispatching.
-        if not budget_exhausted:
-            elapsed_total_ms = _now_monotonic_ms() - start_ms
-            if elapsed_total_ms >= total_budget_ms:
-                budget_exhausted = True
+    # US-005 of issue #22 — wrap the adapter in ``with`` so
+    # :meth:`WarehouseAdapter.__exit__` always runs (DEC-013 of #22 —
+    # explicit ``CALL BQ.ABORT_SESSION();`` cleanup for any session
+    # minted by ``materialise_sample``). The ``with`` block covers the
+    # OneShot path too because DEC-008/DEC-025 of #3 already require it
+    # for ``column_stats`` batching state.
+    with adapter:
+        # ----------------------------------------------------------------
+        # Strategy dispatch (DEC-006 / Q3 / Q7 of issue #22).
+        #
+        # ``"materialised"`` (default per DEC-006):
+        #   1. Materialise a single sample table once via
+        #      :meth:`adapter.materialise_sample`.
+        #   2. Compile every per-test failing-rows SQL against the
+        #      returned :class:`TableRef` (``_SESSION._sf_sample_<run_id>``)
+        #      with effective ``scope="full"`` so the compiler does NOT
+        #      add a redundant deterministic-sample CTE on top of an
+        #      already-sampled table. The decision's ``scope`` field still
+        #      records the user-facing ``config.scope`` so the audit row
+        #      tells a reviewer "this test ran against a (materialised)
+        #      sample".
+        #   3. On any :class:`WarehouseError` (the typed
+        #      :class:`MaterialisationFailedError`,
+        #      :class:`UnknownTableSizeError`,
+        #      :class:`SamplingRequiresPartitionFilterError`,
+        #      :class:`MaterialisationNotSupportedError`, or any other
+        #      subclass): emit ONE DEC-009 degraded-run WARNING, then
+        #      route every candidate to ``kept-without-evidence`` with
+        #      the DEC-005 ``why`` shape and write ONE PruneEvent per
+        #      candidate (fail-closed audit preserved per DEC-016 of #6).
+        #
+        # ``"oneshot"``: v0.1 path unchanged — bucket via
+        # :func:`_resolve_sample_bucket`, compile per-test with the
+        # ``scope`` / ``sample_size`` / ``sample_bucket`` arguments the
+        # compiler already knows how to wrap.
+        # ----------------------------------------------------------------
+        compile_table_ref: TableRef
+        compile_scope: Scope
+        sample_bucket: int | None
+        compile_partition_filter = resolved_config.partition_filter
 
-        if budget_exhausted:
-            decision = _decide_kept_without_evidence_budget(
-                test=test,
-                test_anchor=test_anchor,
-                budget_seconds=resolved_config.total_budget_seconds,
+        if resolved_config.sample_strategy == "materialised" and scope == "sample":
+            try:
+                materialised_ref = adapter.materialise_sample(
+                    source_table_ref,
+                    resolved_config.sample_size,
+                    partition_filter=resolved_config.partition_filter,
+                )
+            except WarehouseError as exc:
+                # DEC-009 of issue #22 — single degraded-run WARNING
+                # fires at the head of the conservative-bias routing
+                # path BEFORE any audit-write iteration. Lazy-format
+                # JSON per the layer-wide DEC-017 logger gate; never
+                # f-string-interpolate user-controlled values.
+                _LOGGER.warning(
+                    "materialisation failed; routing all tests to kept-without-evidence: %s",
+                    json.dumps(
+                        {
+                            "model_unique_id": model.unique_id,
+                            "candidate_count": len(pairs),
+                            "error_class": type(exc).__name__,
+                            "error_message": str(exc)[:200],
+                        }
+                    ),
+                )
+                # Fail-closed audit preserved (DEC-016 of #6): one
+                # PruneEvent per candidate, even on the all-failed path.
+                # The audit-write loop runs to completion unless the
+                # writer itself fails — no early return.
+                for test_anchor, test in pairs:
+                    decision = _decide_kept_without_evidence_materialisation_failed(
+                        test=test,
+                        test_anchor=test_anchor,
+                        exc=exc,
+                        scope=scope,
+                    )
+                    _write_audit_or_abort(
+                        decision,
+                        model_unique_id=model.unique_id,
+                        config_hash=config_hash,
+                        audit_path=resolved_audit_path,
+                    )
+                    decisions.append(decision)
+
+                total_elapsed_ms = max(0, _now_monotonic_ms() - start_ms)
+                return PruneResult(
+                    model_unique_id=model.unique_id,
+                    decisions=tuple(decisions),
+                    elapsed_ms=total_elapsed_ms,
+                    signalforge_version=_SIGNALFORGE_VERSION,
+                )
+
+            # Materialisation succeeded — every per-test compile
+            # references the temp table directly. Effective compile
+            # scope is "full" so the compiler does NOT wrap a
+            # redundant deterministic-sample CTE on top of an
+            # already-sampled table; the decision's user-facing
+            # ``scope`` field stays at ``config.scope``.
+            compile_table_ref = materialised_ref
+            compile_scope = "full"
+            sample_bucket = None
+            # The materialisation already filtered the partitions
+            # (Q5 of issue #22 — partition_filter applies once inside
+            # the CTAS WHERE clause, not on every per-test query).
+            compile_partition_filter = None
+        else:
+            # ``oneshot`` strategy OR ``scope="full"`` (no sampling at
+            # all) — v0.1 path. The bucket lookup runs only when
+            # scope=sample.
+            compile_table_ref = source_table_ref
+            compile_scope = scope
+            sample_bucket = _resolve_sample_bucket(
+                adapter=adapter,
+                table_ref=source_table_ref,
                 scope=scope,
+                sample_size=resolved_config.sample_size,
             )
-            _write_audit_or_abort(
-                decision,
-                model_unique_id=model.unique_id,
-                config_hash=config_hash,
-                audit_path=resolved_audit_path,
-            )
-            decisions.append(decision)
-            continue
 
-        # Compile the candidate test to failing-rows SQL. Returns either
-        # a string (the SELECT), a _RequiresFutureData sentinel, or an
-        # _InvalidIdentifier sentinel.
-        compile_result = _compile_test(
-            test,
-            table_ref,
-            dialect,
-            manifest,
-            scope=scope,
-            sample_size=resolved_config.sample_size if scope == "sample" else None,
-            sample_bucket=sample_bucket,
-            partition_filter=resolved_config.partition_filter,
-        )
-        if isinstance(compile_result, _RequiresFutureData):
-            decision = _decide_requires_future_data(
-                test=test,
-                test_anchor=test_anchor,
-                sentinel=compile_result,
-                elapsed_ms=0,
-                scope=scope,
-            )
-            _write_audit_or_abort(
-                decision,
-                model_unique_id=model.unique_id,
-                config_hash=config_hash,
-                audit_path=resolved_audit_path,
-            )
-            decisions.append(decision)
-            continue
+        budget_exhausted = False
 
-        if isinstance(compile_result, _InvalidIdentifier):
-            decision = _decide_kept_without_evidence_invalid_identifier(
-                test=test,
-                test_anchor=test_anchor,
-                sentinel=compile_result,
-                elapsed_ms=0,
-                scope=scope,
-            )
-            _write_audit_or_abort(
-                decision,
-                model_unique_id=model.unique_id,
-                config_hash=config_hash,
-                audit_path=resolved_audit_path,
-            )
-            decisions.append(decision)
-            continue
+        for test_anchor, test in pairs:
+            # Total-budget gate (DEC-011 of #6 / DEC-010 of #22 — the
+            # watchdog ticks across both materialisation AND the
+            # per-test loop). Checked BEFORE any compile or warehouse
+            # call. Once exceeded, every remaining test drains to
+            # ``kept-without-evidence`` without dispatching.
+            if not budget_exhausted:
+                elapsed_total_ms = _now_monotonic_ms() - start_ms
+                if elapsed_total_ms >= total_budget_ms:
+                    budget_exhausted = True
 
-        compiled_sql: str = compile_result
-        compiled_sql_hash = _build_compiled_sql_hash_or_empty(compiled_sql)
+            if budget_exhausted:
+                decision = _decide_kept_without_evidence_budget(
+                    test=test,
+                    test_anchor=test_anchor,
+                    budget_seconds=resolved_config.total_budget_seconds,
+                    scope=scope,
+                )
+                _write_audit_or_abort(
+                    decision,
+                    model_unique_id=model.unique_id,
+                    config_hash=config_hash,
+                    audit_path=resolved_audit_path,
+                )
+                decisions.append(decision)
+                continue
 
-        # Per-test timing wraps the warehouse call.
-        test_start_ms = _now_monotonic_ms()
-        try:
-            test_result = adapter.run_test_sql(
-                compiled_sql,
-                capture_failures=resolved_config.capture_failure_rows,
+            # Compile the candidate test to failing-rows SQL. Returns
+            # either a string (the SELECT), a ``_RequiresFutureData``
+            # sentinel, or an ``_InvalidIdentifier`` sentinel.
+            compile_result = _compile_test(
+                test,
+                compile_table_ref,
+                dialect,
+                manifest,
+                scope=compile_scope,
+                sample_size=(resolved_config.sample_size if compile_scope == "sample" else None),
+                sample_bucket=sample_bucket,
+                partition_filter=compile_partition_filter,
             )
-        except WarehouseError as exc:
+            if isinstance(compile_result, _RequiresFutureData):
+                decision = _decide_requires_future_data(
+                    test=test,
+                    test_anchor=test_anchor,
+                    sentinel=compile_result,
+                    elapsed_ms=0,
+                    scope=scope,
+                )
+                _write_audit_or_abort(
+                    decision,
+                    model_unique_id=model.unique_id,
+                    config_hash=config_hash,
+                    audit_path=resolved_audit_path,
+                )
+                decisions.append(decision)
+                continue
+
+            if isinstance(compile_result, _InvalidIdentifier):
+                decision = _decide_kept_without_evidence_invalid_identifier(
+                    test=test,
+                    test_anchor=test_anchor,
+                    sentinel=compile_result,
+                    elapsed_ms=0,
+                    scope=scope,
+                )
+                _write_audit_or_abort(
+                    decision,
+                    model_unique_id=model.unique_id,
+                    config_hash=config_hash,
+                    audit_path=resolved_audit_path,
+                )
+                decisions.append(decision)
+                continue
+
+            compiled_sql: str = compile_result
+            compiled_sql_hash = _build_compiled_sql_hash_or_empty(compiled_sql)
+
+            # Per-test timing wraps the warehouse call.
+            test_start_ms = _now_monotonic_ms()
+            try:
+                test_result = adapter.run_test_sql(
+                    compiled_sql,
+                    capture_failures=resolved_config.capture_failure_rows,
+                )
+            except WarehouseError as exc:
+                elapsed_ms = max(0, _now_monotonic_ms() - test_start_ms)
+                # Lazy-format JSON per DEC-017 — never f-string-interpolate
+                # user-controlled values into a logger call.
+                _LOGGER.warning(
+                    "kept-without-evidence: %s",
+                    json.dumps(
+                        {
+                            "model_unique_id": model.unique_id,
+                            "test_anchor": test_anchor,
+                            "error_class": type(exc).__name__,
+                        }
+                    ),
+                )
+                decision = _decide_kept_without_evidence_warehouse_error(
+                    test=test,
+                    test_anchor=test_anchor,
+                    exc=exc,
+                    compiled_sql=compiled_sql,
+                    compiled_sql_hash=compiled_sql_hash,
+                    elapsed_ms=elapsed_ms,
+                    scope=scope,
+                )
+                _write_audit_or_abort(
+                    decision,
+                    model_unique_id=model.unique_id,
+                    config_hash=config_hash,
+                    audit_path=resolved_audit_path,
+                )
+                decisions.append(decision)
+                continue
+
             elapsed_ms = max(0, _now_monotonic_ms() - test_start_ms)
-            # Lazy-format JSON per DEC-017 — never f-string-interpolate
-            # user-controlled values into a logger call.
-            _LOGGER.warning(
-                "kept-without-evidence: %s",
-                json.dumps(
-                    {
-                        "model_unique_id": model.unique_id,
-                        "test_anchor": test_anchor,
-                        "error_class": type(exc).__name__,
-                    }
-                ),
-            )
-            decision = _decide_kept_without_evidence_warehouse_error(
+            # ``sampled_rows`` is the size of the row set the test
+            # ran against. v0.1 does not yet thread the sample-size
+            # from the adapter's TABLESAMPLE / hash-mod path through
+            # to the prune layer (see DEC-026 deferral notes); we
+            # record None for ``"sample"`` scope until US-011 wires
+            # it through. For ``"full"`` scope sampled_rows is None
+            # by design (the model contract:
+            # ``scope == "full"`` ↔ sampled_rows is None).
+            sampled_rows: int | None = None
+            decision = _decide_from_test_result(
                 test=test,
                 test_anchor=test_anchor,
-                exc=exc,
+                test_result=test_result,
                 compiled_sql=compiled_sql,
                 compiled_sql_hash=compiled_sql_hash,
                 elapsed_ms=elapsed_ms,
+                sampled_rows=sampled_rows,
                 scope=scope,
+                is_trusted=is_trusted,
+                capture_failure_rows=resolved_config.capture_failure_rows,
             )
             _write_audit_or_abort(
                 decision,
@@ -833,44 +1039,14 @@ def prune_tests(
                 audit_path=resolved_audit_path,
             )
             decisions.append(decision)
-            continue
 
-        elapsed_ms = max(0, _now_monotonic_ms() - test_start_ms)
-        # ``sampled_rows`` is the size of the row set the test ran
-        # against. v0.1 does not yet thread the sample-size from the
-        # adapter's TABLESAMPLE / hash-mod path through to the prune
-        # layer (see DEC-026 deferral notes); we record None for
-        # ``"sample"`` scope until US-011 wires it through. For
-        # ``"full"`` scope sampled_rows is None by design (the model
-        # contract: ``scope == "full"`` ↔ sampled_rows is None).
-        sampled_rows: int | None = None
-        decision = _decide_from_test_result(
-            test=test,
-            test_anchor=test_anchor,
-            test_result=test_result,
-            compiled_sql=compiled_sql,
-            compiled_sql_hash=compiled_sql_hash,
-            elapsed_ms=elapsed_ms,
-            sampled_rows=sampled_rows,
-            scope=scope,
-            is_trusted=is_trusted,
-            capture_failure_rows=resolved_config.capture_failure_rows,
-        )
-        _write_audit_or_abort(
-            decision,
+        total_elapsed_ms = max(0, _now_monotonic_ms() - start_ms)
+        return PruneResult(
             model_unique_id=model.unique_id,
-            config_hash=config_hash,
-            audit_path=resolved_audit_path,
+            decisions=tuple(decisions),
+            elapsed_ms=total_elapsed_ms,
+            signalforge_version=_SIGNALFORGE_VERSION,
         )
-        decisions.append(decision)
-
-    total_elapsed_ms = max(0, _now_monotonic_ms() - start_ms)
-    return PruneResult(
-        model_unique_id=model.unique_id,
-        decisions=tuple(decisions),
-        elapsed_ms=total_elapsed_ms,
-        signalforge_version=_SIGNALFORGE_VERSION,
-    )
 
 
 __all__ = ("prune_tests",)

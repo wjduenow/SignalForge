@@ -32,6 +32,7 @@ from signalforge.grade import GradeConfig
 from signalforge.grade.errors import GradeBelowThresholdError
 from signalforge.llm.errors import LLMRateLimitError
 from signalforge.manifest.errors import ModelNotFoundError
+from signalforge.prune import PruneConfig
 from signalforge.safety import SafetyPolicy, SamplingMode
 from tests.cli._factories import (
     make_candidate,
@@ -1000,3 +1001,242 @@ def test_generate_progress_uses_live_values_not_hardcoded_hints(
     for line in body_lines:
         for needle in forbidden:
             assert needle not in line, f"forbidden hint {needle!r} in {line!r}"
+
+
+# ---------------------------------------------------------------------------
+# US-006 of #22 — --scope and --sample-strategy flags (DEC-011, DEC-012)
+# ---------------------------------------------------------------------------
+
+
+def test_generate_scope_flag_overrides_config_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--scope full`` overrides ``prune.scope=sample`` from the config
+    (DEC-011). The override is applied via
+    :meth:`PruneConfig.model_validate` so validators re-run (DEC-012).
+    The PruneConfig forwarded to ``prune_tests`` carries
+    ``scope="full"``.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    # Config-file value: scope="sample" (the library default; an
+    # explicit construction makes the contract obvious).
+    mocks["load_prune_config"].return_value = PruneConfig(scope="sample")
+
+    code = main(["generate", "model.shop.customers", "--scope", "full"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    forwarded = mocks["prune_tests"].call_args.kwargs["config"]
+    assert isinstance(forwarded, PruneConfig)
+    assert forwarded.scope == "full"
+    # The unset axis falls through unchanged.
+    assert forwarded.sample_strategy == "materialised"
+
+
+def test_generate_sample_strategy_flag_overrides_config_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--sample-strategy oneshot`` overrides
+    ``prune.sample_strategy=materialised`` from the config (DEC-011).
+    Override applied via :meth:`PruneConfig.model_validate` (DEC-012).
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    mocks["load_prune_config"].return_value = PruneConfig(sample_strategy="materialised")
+
+    code = main(["generate", "model.shop.customers", "--sample-strategy", "oneshot"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    forwarded = mocks["prune_tests"].call_args.kwargs["config"]
+    assert isinstance(forwarded, PruneConfig)
+    assert forwarded.sample_strategy == "oneshot"
+    # The unset axis falls through unchanged.
+    assert forwarded.scope == "sample"
+
+
+def test_generate_both_flags_independent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both flags are independent — set both at once and the orchestrator
+    sees both overrides applied (DEC-011)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    mocks["load_prune_config"].return_value = PruneConfig(
+        scope="sample", sample_strategy="materialised"
+    )
+
+    code = main(
+        [
+            "generate",
+            "model.shop.customers",
+            "--scope",
+            "full",
+            "--sample-strategy",
+            "oneshot",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    forwarded = mocks["prune_tests"].call_args.kwargs["config"]
+    assert isinstance(forwarded, PruneConfig)
+    assert forwarded.scope == "full"
+    assert forwarded.sample_strategy == "oneshot"
+
+
+def test_generate_no_flag_uses_config_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Neither flag set: the PruneConfig from the config-file passes
+    through unchanged. The CLI does NOT re-validate when there is no
+    override (so the config-file value is preserved verbatim, including
+    any future fields not yet known to the CLI)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    config_obj = PruneConfig(scope="full", sample_strategy="oneshot")
+    mocks["load_prune_config"].return_value = config_obj
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    forwarded = mocks["prune_tests"].call_args.kwargs["config"]
+    assert isinstance(forwarded, PruneConfig)
+    assert forwarded.scope == "full"
+    assert forwarded.sample_strategy == "oneshot"
+    # Identity check: with no override the loaded config flows through
+    # without an extra ``model_validate`` round-trip.
+    assert forwarded is config_obj
+
+
+def test_generate_invalid_scope_returns_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--scope invalid`` → argparse rejection → tier-2 exit, no
+    traceback (cli-layer.md DEC-016)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--scope", "invalid"])
+    captured = capsys.readouterr()
+    assert code == 2
+    err_low = captured.err.lower()
+    assert "invalid" in err_low or "invalid choice" in err_low
+    assert "Traceback" not in captured.err
+
+
+def test_generate_invalid_sample_strategy_returns_exit_2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--sample-strategy materialized`` (US spelling) → argparse
+    rejection → tier-2 exit, no traceback. Per DEC-015 of
+    ``prune-engine.md``, a typo MUST fail loud."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--sample-strategy", "materialized"])
+    captured = capsys.readouterr()
+    assert code == 2
+    err_low = captured.err.lower()
+    assert "materialized" in err_low or "invalid choice" in err_low
+    assert "Traceback" not in captured.err
+
+
+def test_generate_help_text_lists_new_flags(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``signalforge generate --help`` mentions both flag names + their
+    value lists. Multi-surface parity (cli-layer.md): the argparse help
+    string is surface 1 of the 5-surface contract."""
+    code = main(["generate", "--help"])
+    captured = capsys.readouterr()
+    assert code == 0
+
+    out = captured.out
+    # Both flag names appear in the help block.
+    assert "--scope" in out
+    assert "--sample-strategy" in out
+    # Both value lists are surfaced (argparse renders ``choices`` as
+    # ``{a,b}`` in the usage line and / or the help body).
+    assert "sample" in out and "full" in out
+    assert "oneshot" in out and "materialised" in out
+
+
+def test_generate_override_re_runs_pydantic_validators(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Pin DEC-012: the CLI override path uses
+    :meth:`PruneConfig.model_validate` (NOT
+    ``model_copy(update=...)``), so every Pydantic validator re-runs.
+
+    Mirrors the ``safety-layer.md`` DEC-018 pin
+    (:meth:`SafetyPolicy.with_mode` re-runs validators). Asserts the
+    validator-bearing ``model_validate`` classmethod is reached when the
+    operator supplies a flag, AND that the resulting config carries the
+    override — collectively proving the override path is *not* the
+    silent ``model_copy`` path.
+    """
+    from signalforge import prune as prune_module
+    from signalforge.cli import generate as gen_mod
+
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    mocks["load_prune_config"].return_value = PruneConfig(scope="sample")
+
+    real_model_validate = PruneConfig.model_validate
+    seen: list[dict[str, object]] = []
+
+    def _tracking_model_validate(payload: object, *args: object, **kwargs: object) -> PruneConfig:
+        # Record the payload so we can prove it carried the override
+        # (and prove model_validate was the seam that built the result).
+        if isinstance(payload, dict):
+            seen.append(dict(payload))
+        return real_model_validate(payload, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        gen_mod.prune_module.PruneConfig,
+        "model_validate",
+        classmethod(lambda cls, payload, *a, **kw: _tracking_model_validate(payload, *a, **kw)),
+    )
+
+    code = main(["generate", "model.shop.customers", "--scope", "full"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    # ``model_validate`` was reached with our override payload.
+    assert any(p.get("scope") == "full" for p in seen), (
+        f"override payload not seen via model_validate; seen={seen}"
+    )
+    # And the resulting config that reached ``prune_tests`` has the
+    # override applied — proving model_validate built the result.
+    forwarded = mocks["prune_tests"].call_args.kwargs["config"]
+    assert isinstance(forwarded, prune_module.PruneConfig)
+    assert forwarded.scope == "full"

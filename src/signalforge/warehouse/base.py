@@ -82,6 +82,56 @@ class WarehouseAdapter(abc.ABC):
         to N rows in :attr:`TestResult.sample_failures`.
         """
 
+    def materialise_sample(
+        self,
+        table: TableRef,
+        n: int,
+        *,
+        partition_filter: PartitionFilter | None = None,
+        ttl_seconds: int = 3600,
+    ) -> TableRef:
+        """Materialise a deterministic sample of ``table`` into a temp/session
+        table and return a :class:`TableRef` pointing at it (DEC-004 of issue #22).
+
+        v0.2 contract: the default impl raises
+        :class:`MaterialisationNotSupportedError`. Concrete adapters override
+        the method when their warehouse provides a primitive that lets the
+        prune layer materialise once and run every per-test failing-rows
+        query against the materialised handle (BigQuery sessions + temp
+        tables in v0.2; Snowflake / Postgres in v0.3+).
+
+        Deliberately NOT decorated with ``@abstractmethod``: the default
+        raise IS the v0.2 behaviour for non-BigQuery adapters. Forcing every
+        new adapter to override would make the ABC harder to subclass for a
+        warehouse that has not grown a materialisation primitive yet —
+        :class:`MaterialisationNotSupportedError` is the correct, typed
+        signal that the orchestrator routes via the conservative-bias
+        ``kept-without-evidence`` taxonomy (DEC-009 of #22).
+
+        Args:
+            table: Source table to sample.
+            n: Target sample size (passed through to the implementation's
+                deterministic hash-mod sizing).
+            partition_filter: Optional :class:`PartitionFilter` applied
+                ONCE inside the materialisation WHERE clause (DEC-004; Q5
+                of #22). Mirrors :meth:`sample_rows` parity.
+            ttl_seconds: Hint to OUR cleanup-WARNING text only — NOT a
+                value passed to the underlying warehouse SDK (DEC-013 of
+                #22). BigQuery enforces its own server-side session
+                lifetime; this kwarg lets the WARNING template say
+                ``auto-expire in <N>s`` without an SDK round-trip.
+
+        Returns:
+            A :class:`TableRef` pointing at the materialised sample.
+
+        Raises:
+            MaterialisationNotSupportedError: Always, in the default impl.
+                Concrete adapters override.
+        """
+        from signalforge.warehouse.errors import MaterialisationNotSupportedError
+
+        raise MaterialisationNotSupportedError(adapter_name=type(self).__name__)
+
     @classmethod
     def from_profile(cls, profile: DbtProfileTarget) -> WarehouseAdapter:
         """Dispatch on ``profile.type`` and instantiate the matching adapter.

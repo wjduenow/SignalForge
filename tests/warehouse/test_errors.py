@@ -17,6 +17,8 @@ from signalforge.warehouse.errors import (
     InvalidIdentifierError,
     ManifestProjectNotFoundError,
     ManifestSchemaNotFoundError,
+    MaterialisationFailedError,
+    MaterialisationNotSupportedError,
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
     QuerySyntaxError,
@@ -50,6 +52,8 @@ _CONSTRUCT_KWARGS: dict[str, dict[str, object]] = {
     "SamplingError": {"message": "generic sampling failure"},
     "SamplingRequiresPartitionFilterError": {"table": "p.d.t", "num_rows": 200_000_000},
     "UnknownTableSizeError": {"table": "p.d.t"},
+    "MaterialisationFailedError": {"message": "BigQuery refused the CTAS"},
+    "MaterialisationNotSupportedError": {"adapter_name": "SnowflakeAdapter"},
 }
 
 
@@ -78,11 +82,12 @@ def test_each_subclass_has_default_remediation() -> None:
     a future contributor who adds a class but forgets the remediation.
     """
     # DEC-026 enumerates 15 typed subclasses (WarehouseAuthError through
-    # UnknownTableSizeError) plus the WarehouseError base = 16 classes
-    # total. The parenthetical "14 + 1" in the prose summary undercounts;
-    # the numbered list is the source of truth.
-    assert len(errors_module.__all__) == 16, (
-        "DEC-026 enumerates 15 typed subclasses + 1 base; update tests "
+    # UnknownTableSizeError) plus the WarehouseError base = 16 classes;
+    # issue #22 (US-001) adds MaterialisationFailedError and
+    # MaterialisationNotSupportedError → 18.
+    assert len(errors_module.__all__) == 18, (
+        "DEC-026 enumerates 15 typed subclasses + 1 base; #22 US-001 "
+        "adds 2 more (MaterialisationFailed/NotSupported). Update tests "
         "and __all__ together if this changes."
     )
     for name in errors_module.__all__:
@@ -254,3 +259,53 @@ def test_query_syntax_and_column_not_found_carry_fields() -> None:
     rendered = str(c)
     assert repr("missing_col") in rendered
     assert repr("p.d.t") in rendered
+
+
+@pytest.mark.unit
+def test_materialisation_failed_error_str_format() -> None:
+    """``MaterialisationFailedError`` renders the message + the
+    ``↳ Remediation:`` line via the layer-base pattern (DEC-008 of
+    plans/super/22-temp-table-sample.md). The class wraps any SDK /
+    network / quota failure during the materialisation query — the
+    operator gets a typed, remediation-bearing exception instead of a
+    raw `google.api_core.exceptions.BadRequest`."""
+    err = MaterialisationFailedError("CTAS rejected by BigQuery")
+    rendered = str(err)
+    assert "CTAS rejected by BigQuery" in rendered
+    assert "↳ Remediation:" in rendered
+    # The default remediation is non-empty and points the operator at a
+    # recovery path.
+    assert MaterialisationFailedError.default_remediation.strip()
+
+
+@pytest.mark.unit
+def test_materialisation_not_supported_error_carries_dec006_remediation() -> None:
+    """``MaterialisationNotSupportedError`` renders the DEC-006 verbatim
+    remediation string. This is the ABC default-impl raise — every
+    non-BigQuery adapter inherits it, and the remediation tells the
+    operator how to fall back via ``signalforge.yml``."""
+    expected_remediation = (
+        "Set 'prune.sample_strategy: oneshot' in signalforge.yml to fall "
+        "back to per-test sampling, or wait for v0.3 multi-warehouse "
+        "materialisation support."
+    )
+    err = MaterialisationNotSupportedError(adapter_name="SnowflakeAdapter")
+    rendered = str(err)
+    assert expected_remediation in rendered
+    # The class-level constant is the source of truth.
+    assert MaterialisationNotSupportedError.default_remediation == expected_remediation
+
+
+@pytest.mark.unit
+def test_both_new_errors_inherit_from_warehouse_error() -> None:
+    """Both ``MaterialisationFailedError`` and
+    ``MaterialisationNotSupportedError`` subclass :class:`WarehouseError`
+    so the CLI's tier-3 ``WarehouseError`` MRO walk in
+    ``_EXCEPTION_TO_EXIT_CODE`` covers them via inheritance (DEC-008 of
+    plans/super/22-temp-table-sample.md). A future regression that
+    drops the warehouse base would silently route these into tier-1
+    (panic-path); the isinstance assertion is the gate."""
+    failed = MaterialisationFailedError("boom")
+    not_supported = MaterialisationNotSupportedError(adapter_name="X")
+    assert isinstance(failed, WarehouseError)
+    assert isinstance(not_supported, WarehouseError)

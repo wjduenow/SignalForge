@@ -147,6 +147,70 @@ Two takeaways for future adapter work:
 1. Every public adapter method that calls `client.<method>(ref, ...)` needs a live integration test that runs against the real SDK, not just the fake. The fake is for behaviour assertions; only the real SDK enforces input-type contracts. Gate the live test on `SF_RUN_BQ=1` (or per-vendor equivalent) so default CI stays free, but require maintainers to run it before declaring an adapter "done."
 2. When the fake's coercion helper has a special case for accepting strings, that's a load-bearing signal that the production path passes strings — don't accept non-string forms in the fake without a paired test that proves the real SDK accepts them too.
 
+## Session/connection state on the adapter (DEC-002 of #22 generalised)
+
+When a vendor protocol requires per-call state (BigQuery `session_id`, Snowflake transaction id, Postgres prepared-statement cache, Databricks SQL warehouse handle), store it on the adapter instance as `self._active_<x>_id: <type> | None` rather than threading it through ABC method signatures. The ABC stays vendor-neutral — a generic `materialise_sample(table, n, *, partition_filter=None, ttl_seconds=...) -> TableRef` does not need a `session_id` parameter that only one adapter populates. Concrete adapters wire the state internally; subsequent per-call methods on the same adapter instance read the state and attach the right vendor primitive (BigQuery `ConnectionProperty`, Snowflake `transaction_id`, etc.) without callers needing to know the dialect.
+
+`__exit__` is the durable cleanup seam — the adapter is invoked as a context manager (`with adapter:`) and teardown lives there, NOT in the orchestrator. Cleanup-on-success and cleanup-on-failure share one path, and a hard process death falls back to the vendor's server-side timeout. State resets in a `finally` clause so a second `__exit__` is a no-op.
+
+This generalises the v0.1 `column_stats` batching-state precedent (DEC-008 / DEC-025 of #3) and the v0.2 BigQuery `_active_session_id` pattern (DEC-002 of #22). When v0.3 ships a new adapter that needs per-call state, match this shape: `_active_<x>_id` instance fields, ABC stays neutral, cleanup in `__exit__`, no per-call state-id parameter on the ABC.
+
+## `materialise_sample` ABC method + adapter session-state pattern (issue #22, v0.2)
+
+Issue #22 lands `WarehouseAdapter.materialise_sample(table, n, *, partition_filter=None, ttl_seconds=3600) -> TableRef` (DEC-004 of #22). The ABC's default impl raises `MaterialisationNotSupportedError`; subclasses override (BigQuery in v0.2; Snowflake/Postgres in v0.3 via their own session/temp-table primitives). Method is NOT decorated `@abstractmethod` because the default impl IS the v0.2 behaviour for non-BQ adapters — the prune orchestrator's conservative-bias routing handles the no-support case gracefully and the operator opts out via `prune.sample_strategy: oneshot`.
+
+**BigQueryAdapter session-state pattern (DEC-002 of #22).** The adapter carries `self._active_session_id: str | None`, `self._session_started_at: float | None`, and `self._session_ttl_seconds: int | None` for the duration of a `with` block. `materialise_sample` runs `CREATE TEMP TABLE _sf_sample_<run_id> AS SELECT ...` with `QueryJobConfig(create_session=True, ...defaults from _default_job_config(stage="warehouse_sample_materialise"))` — the CTAS itself uses the bare `_sf_sample_<run_id>` name, not a `_SESSION.` prefix. **BigQuery assigns the `session_id` server-side** and the SDK exposes it on the returned `QueryJob` via `job.session_info.session_id` only after `.result()` completes. The adapter captures and stores it; subsequent `run_test_sql` calls automatically attach `ConnectionProperty(key="session_id", value=self._active_session_id)` so per-test queries resolve `_SESSION._sf_sample_<run_id>` against the same session. The returned :class:`TableRef` carries `project=None, dataset="_SESSION", name="_sf_sample_<run_id>"` (two-part `qualified_name` `_SESSION._sf_sample_<run_id>`) — `project=None` is load-bearing because BigQuery rejects the three-part `<project>._SESSION.<name>` form even inside the owning session.
+
+The pattern mirrors the `column_stats` batching-state precedent (DEC-008 / DEC-025 of #3 — adapter-instance state scoped to a `with` block; cleanup driven by `__exit__`). Don't introduce per-call session state; the prune orchestrator's `with adapter:` boundary is the unit. Tests reassign the adapter in a fresh `with` for each materialisation test.
+
+**`run_id` is OUR derivation, not BQ's.** `run_id = blake2b(table.qualified_name + signalforge_version + str(n) + canonical_json(partition_filter), digest_size=8).hexdigest()` (16 hex chars) — DEC-001 of #22. Inputs joined with NUL separator. The temp-table name `_sf_sample_<run_id>` is deterministic across runs so the prune compiler's snapshot fixtures (DEC-023 of #6) and the `compiled_sql_hash` reproducibility invariant (DEC-005 of #6) survive unchanged. Don't conflate `run_id` (ours) with `session_id` (BQ's server-assigned UUID); they are not interchangeable.
+
+**`ttl_seconds` is OUR-side hint, NOT a BQ knob (DEC-013 of #22).** BigQuery sessions have a server-enforced max lifetime (~24h regardless of activity) plus a BQ-default idle timeout. The `ttl_seconds=3600` parameter on `materialise_sample(...)` is NOT passed to BigQuery — it's a hint to OUR cleanup-WARNING text (the "auto-expire in Ns" line below). Don't go looking for a BQ SDK call to set it; v0.2 trusts the BQ default. v0.3 may revisit if BQ exposes a configurable per-session TTL knob.
+
+**`_client.py` extension stays scoped (DEC-012 of #5 unchanged).** Any new `# pyright: ignore` for the session/connection-property surface lives in `adapters/_client.py` like every other BigQuery SDK ignore. The `_BQClientProtocol` may gain a session-property surface only if the existing `job_config: Any = None` typing is too loose — review during impl, but default to keeping the protocol minimal.
+
+## Cleanup-boundary fail-soft pattern (DEC-013 / DEC-014 of #22 generalised)
+
+Cleanup-boundary errors are fail-SOFT, in deliberate contrast to primary-work fail-CLOSED (`safety-layer.md` DEC-011 — propagation IS the defence; an unaudited LLM call must abort the run). A cleanup boundary fires AFTER the user's actual work has succeeded; blocking on cleanup failure punishes the user for housekeeping problems they cannot fix in the moment. The pattern is three layers: (1) explicit close on the happy path, (2) swallow-and-warn on cleanup failure with an operator-actionable WARNING, (3) durable server-side fallback (vendor timeout, retry queue, etc.) for hard process death.
+
+The WARNING is the load-bearing surface. It must give the operator three things, in this order: (a) the **identifier** required to act (raw `session_id`, transaction id, file handle — NOT a hash on this path; see DEC-003 of #22 for why redaction is relaxed only on this surface), (b) the **exact copy-pasteable command** to clean up manually (`bq query --connection_property=session_id=<raw> ...`, `kill -9 <pid>`, etc. — verbatim, not paraphrased), and (c) the **durable fallback** ("auto-expire in Ns", "will retry on next run", "OS reaps on process exit"). Without all three the WARNING is just noise; with all three the operator either acts or accepts the fallback in seconds.
+
+`--quiet` does NOT suppress cleanup-failure WARNINGs (CLI default raises the floor to WARNING; the WARNING still surfaces). This is deliberate — the operator-actionable contract is the contract. Don't add a config knob to disable it; if a future caller genuinely needs silence (notebook tight loop), they configure Python's logging directly.
+
+When introducing a new fail-soft cleanup boundary in v0.3 (Snowflake transaction rollback, Postgres connection pool drain, temp-file unlinking), match this shape verbatim. Cross-reference to `safety-layer.md` DEC-011 in the new section so the boundary distinction is explicit at the point a maintainer reads it.
+
+## Best-effort cleanup in `__exit__` (DEC-013) with user-actionable failure WARNING (DEC-014)
+
+The session must be torn down at the end of the prune run so the `_SESSION._sf_sample_<run_id>` temp table doesn't linger until BigQuery's server-side timeout. The adapter's `__exit__` implements a three-layer cleanup model — explicit close on the happy path, swallow-and-warn on cleanup failure, BQ's own session timeout as the durable fallback. **Contrast with `safety-layer.md` DEC-011: that's primary-work fail-closed (an unaudited LLM call must abort the run); this is cleanup-boundary fail-soft (the user's actual work succeeded; cleanup must never block them).** They look similar but apply to different boundaries; don't conflate.
+
+**Layer 1 — explicit close (happy path).** `__exit__` checks `self._active_session_id`; if non-`None`, it issues `client.query("CALL BQ.ABORT_SESSION();", job_config=QueryJobConfig(connection_properties=[ConnectionProperty(key="session_id", value=self._active_session_id)]))`. On success, one `INFO` log: `"session closed"` with `{"session_id_hash": ..., "ttl_remaining_seconds": ...}` (lazy-format JSON; `session_id_hash` is `blake2b-4(session_id).hexdigest()` — DEC-003 of #22 redaction). State resets in a `finally` clause so subsequent `__exit__` calls are no-ops.
+
+**Layer 2 — swallow-and-warn (cleanup failure).** If `CALL BQ.ABORT_SESSION();` itself raises (network blip, session already revoked, quota issue), the adapter **swallows the exception** and emits the DEC-014 multi-line WARNING. Cleanup never blocks the user; their actual work already succeeded. State still resets in `finally` so a second `__exit__` call is a no-op.
+
+**Layer 3 — BigQuery server-side session timeout (durable fallback).** Hard process death (SIGKILL, OOM, the operator forgetting to wrap in a `with` block) cannot fire `__exit__`. BigQuery's BQ-managed ~24h max lifetime reaps the orphan automatically. The DEC-014 WARNING's "auto-expire in Ns" line communicates this fallback to the operator.
+
+**WARNING shape (DEC-014 of #22 — verbatim, do not paraphrase).** The cleanup-failure WARNING is operator-actionable, multi-line, and uses lazy `%s` positional formatting (NOT f-strings — passes the grep gate). The body is exactly:
+
+```text
+BigQuery session cleanup failed; session will auto-expire in <N>s (BigQuery TTL).
+  Session ID: <raw session_id>
+  Reason: <exception class name>
+  To clean up immediately:
+    bq query --connection_property=session_id=<raw> --use_legacy_sql=false "CALL BQ.ABORT_SESSION();"
+```
+
+`<N>` is `max(1, int(ttl_seconds - elapsed_in_session))`. Floor at 1 avoids "auto-expire in 0s" confusion. The manual `bq query` command is verbatim; operators copy-paste it. The trailing `--use_legacy_sql=false` and the `--connection_property=session_id=<raw>` form are load-bearing — strip either and the manual command fails.
+
+**Raw `session_id` surfaces ONLY in the cleanup-failure WARNING (DEC-003 narrow exception).** Logs emit `session_id_hash = blake2b-4(session_id).hexdigest()` (8 hex chars) for every normal-operation event. Raw `session_id` stays in `BigQueryAdapter._active_session_id`, in the BQ `QueryJobConfig.connection_properties`, and in the DEC-014 cleanup-failure WARNING. Never in audit JSONL, never in error messages on the happy path, never in `__repr__` (DEC-022 of #3 unchanged — only `project` + `location` exposed). Three reasons the raw `session_id` is allowed in the WARNING:
+
+1. **It's the only piece of info the operator needs to act.** Without it, the manual `bq` command is unconstructable. A hash defeats the purpose.
+2. **Audience is the same principal who owns the session.** BigQuery rejects `BQ.ABORT_SESSION()` calls from any other identity — the `session_id` is only useful to its owner, who is the user reading their own stderr.
+3. **The surface is bounded.** Raw `session_id` leaks ONLY on the cleanup-failure path, never on the happy path, never in audit JSONL, never in `__repr__`. Bulk log aggregators receive at most one such WARNING per failed cleanup, not per query.
+
+The WARNING surfaces to stderr automatically via the CLI's `setup_logging`. Default level is INFO; `--quiet` raises the floor to WARNING — which means **`--quiet` does NOT suppress this WARNING**. Deliberate (DEC-014): the WARNING is operator-actionable (manual command + identifier inside), so we don't expose a path that silently drops it. If a future caller genuinely needs to silence everything (e.g., a notebook user testing in a tight loop), they configure Python's logging directly — no CLI flag for it.
+
+When introducing a new fail-soft cleanup boundary in v0.3 (Snowflake session teardown, Postgres temp-table cleanup), match this shape: explicit close → swallow-and-warn with copy-pasteable manual recovery command → durable server-side fallback. Don't add a config knob to disable the WARNING; the operator-actionable contract is the contract.
+
 ## Reference
 
-`plans/super/3-bigquery-adapter.md` — DEC-001 … DEC-028. `src/signalforge/warehouse/` — current implementation. `tests/warehouse/_fake.py` — `FakeBigQueryClient` + `expect_*` API. `docs/warehouse-adapter-ops.md` — operational reference.
+`plans/super/3-bigquery-adapter.md` — DEC-001 … DEC-028. `plans/super/22-temp-table-sample.md` — DEC-001 … DEC-014 (v0.2 materialised-sample additions: `materialise_sample` ABC, BigQuery session-state pattern, cleanup-WARNING shape). `src/signalforge/warehouse/` — current implementation. `tests/warehouse/_fake.py` — `FakeBigQueryClient` + `expect_*` API (extends with `expect_materialise_sample` / `expect_abort_session` per US-004 of #22). `docs/warehouse-adapter-ops.md` — operational reference.

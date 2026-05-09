@@ -141,6 +141,68 @@ def test_load_prune_config_parses_partition_filter(tmp_path: Path) -> None:
     assert result.partition_filter.value == "2026-01-01"
 
 
+def test_prune_config_accepts_oneshot_and_materialised_literals() -> None:
+    """``sample_strategy`` accepts the two locked Literal values
+    (``"oneshot"`` and ``"materialised"``) — Q7 / DEC-006 of #22.
+
+    This is the foundation field for issue #22's temp-table sampling:
+    ``"materialised"`` (the default) routes the engine through a single
+    per-run `materialise_sample` call; ``"oneshot"`` falls back to the
+    v0.1 per-test `sample_rows` path. Adding a third literal value is a
+    contract break — the strict mirror in
+    ``tests/prune/test_drift_detector.py`` will fail loud."""
+    materialised = PruneConfig(sample_strategy="materialised")
+    assert materialised.sample_strategy == "materialised"
+
+    oneshot = PruneConfig(sample_strategy="oneshot")
+    assert oneshot.sample_strategy == "oneshot"
+
+
+def test_prune_config_rejects_typo_in_sample_strategy() -> None:
+    """``sample_strategy`` is a ``Literal["oneshot", "materialised"]`` —
+    a US-spelling typo (``"materialized"`` with a ``z``) MUST fail loud
+    per ``safety-layer.md`` DEC-015 (``extra="forbid"`` is the loader's
+    contract; the Literal validator is the field's contract).
+
+    Silently accepting ``"materialized"`` would route through the
+    fallback ``"oneshot"`` path under any future `if strategy ==
+    "materialised":` dispatch — exactly the silent-no-op failure mode
+    DEC-015 exists to prevent."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as excinfo:
+        PruneConfig(sample_strategy="materialized")  # type: ignore[arg-type]
+    # The Literal validator surfaces the offending value.
+    assert "materialized" in str(excinfo.value)
+
+
+def test_prune_config_default_sample_strategy_is_materialised() -> None:
+    """``PruneConfig().sample_strategy`` defaults to ``"materialised"``
+    per Q7 of plans/super/22-temp-table-sample.md — the issue's stated
+    default. Pinning the default in a test guards against an accidental
+    flip when a future reviewer "tidies" the field declaration."""
+    assert PruneConfig().sample_strategy == "materialised"
+
+
+def test_load_prune_config_handles_v01_yaml_without_sample_strategy_field(
+    tmp_path: Path,
+) -> None:
+    """A v0.1-shaped ``signalforge.yml`` (no ``sample_strategy:`` key
+    under ``prune:``) loads cleanly with ``sample_strategy`` defaulting
+    to ``"materialised"`` — backward-compat with every operator
+    pre-issue-#22.
+
+    The ``signalforge_full.yml`` fixture predates this story and
+    therefore omits the new field; loading it MUST not raise and MUST
+    surface the DEC-006 default."""
+    result = load_prune_config(tmp_path, _FIXTURES / "signalforge_full.yml")
+
+    assert result.sample_strategy == "materialised"
+    # Sanity: the rest of the fixture still round-trips.
+    assert result.scope == "full"
+    assert result.sample_size == 50_000
+
+
 def test_load_prune_config_yaml_safe_load_rejects_python_objects(tmp_path: Path) -> None:
     """Confirms :func:`yaml.safe_load` is used (not :func:`yaml.load`).
 
