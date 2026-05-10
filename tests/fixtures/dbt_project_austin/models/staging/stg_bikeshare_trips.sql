@@ -1,14 +1,16 @@
--- Literal/COALESCE'd columns deliberately included to give the LLM at least one
--- mathematically-guaranteed always-pass test to drop (issue #10 AC).
+-- Source-as-model: the manifest aliases this model to `bikeshare_trips`
+-- so its relation_name resolves directly to the public source table.
+-- SignalForge runs queries against the materialised relation; without
+-- `dbt run` against a writable billing project this keeps the smoke
+-- test a single command (issue #10 Path A). The `always-passes` AC then
+-- relies on natural NOT NULL columns (`trip_id`, `start_time`) rather
+-- than engineered literal/COALESCE columns.
 SELECT
     trip_id,
     subscriber_type,
-    bikeid,
+    bike_id,
     start_time,
     start_station_id,
     end_station_id,
-    duration_minutes,
-    'austin' AS region,
-    COALESCE(start_time, TIMESTAMP '1970-01-01 00:00:00 UTC') AS start_time_safe
+    duration_minutes
 FROM {{ source('austin_bikeshare', 'bikeshare_trips') }}
-LIMIT 100000

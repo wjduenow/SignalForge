@@ -13,7 +13,7 @@ sources:
             description: "Unique identifier for each trip."
           - name: subscriber_type
             description: "Membership type of the rider (e.g. local monthly, walk-up)."
-          - name: bikeid
+          - name: bike_id
             description: "Identifier of the bike used for the trip."
           - name: bike_type
             description: "Type/model of the bike."

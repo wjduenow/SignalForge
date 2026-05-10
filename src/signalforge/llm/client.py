@@ -46,7 +46,6 @@ from signalforge.llm._client import (
 from signalforge.llm.errors import (
     LLMAuthError,
     LLMCacheTooLargeError,
-    LLMCacheTooSmallError,
     LLMConnectionError,
     LLMHelperError,
     LLMRateLimitError,
@@ -276,11 +275,24 @@ def call_anthropic(
         )
     min_required = _min_cacheable_tokens(model)
     if cached_block_tokens < min_required:
-        raise LLMCacheTooSmallError(
-            cached_block_tokens=cached_block_tokens,
-            min_tokens=min_required,
-            model=model,
+        # Anthropic silently no-ops the cache marker below the minimum, so
+        # leaving it set wastes the count_tokens call AND triggers our own
+        # dual-zero cache-anomaly WARNING further down. Drop the marker and
+        # log once: the call still succeeds, the caller just doesn't get
+        # caching. Callers whose cached block is reliably below the minimum
+        # (e.g. the grade layer's compact rubric) get a clean run instead
+        # of a hard error.
+        _LOGGER.info(
+            "cache marker dropped (block below cacheable minimum): %s",
+            json.dumps(
+                {
+                    "model": model,
+                    "cached_block_size_tokens": cached_block_tokens,
+                    "min_required": min_required,
+                }
+            ),
         )
+        block_1.pop("cache_control", None)
     if cached_block_tokens > _CACHED_BLOCK_CAP_TOKENS:
         raise LLMCacheTooLargeError(
             cached_block_tokens=cached_block_tokens,

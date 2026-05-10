@@ -26,7 +26,7 @@
         "staging",
         "stg_bikeshare_trips"
       ],
-      "alias": "stg_bikeshare_trips",
+      "alias": "bikeshare_trips",
       "checksum": {
         "name": "sha256",
         "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
@@ -63,11 +63,11 @@
         "access": "protected"
       },
       "tags": [],
-      "description": "",
+      "description": "Source-as-model passthrough for the Austin Bikeshare public dataset's `bikeshare_trips` table. Each row represents one bike-share trip in Austin, TX, captured by the city's bikeshare programme. The model exposes a curated subset of seven columns (trip identifier, subscriber type, bike identifier, start timestamp, start/end station identifiers, duration in minutes) for the LLM drafter to reason about; the full source schema (10 columns including bike type and station names) is documented in `models/staging/sources.yml`. The model's `alias` is overridden to `bikeshare_trips` so its `relation_name` resolves directly to `bigquery-public-data.austin_bikeshare.bikeshare_trips`, sidestepping the need for a `dbt run` materialisation step in the v0.1 smoke-test path. The dataset is authoritative for Austin bikeshare ridership and updated regularly by the city; downstream models can rely on `trip_id` being unique per ride and on `start_time` ordering trips chronologically.",
       "columns": {
         "trip_id": {
           "name": "trip_id",
-          "description": "",
+          "description": "Unique identifier assigned to each bikeshare trip by the city's bikeshare system. Acts as the natural primary key for this table; no two rows in the source share a `trip_id`. Stored as a STRING because the underlying identifier is alphanumeric in some city installations even though it looks numeric in this dataset.",
           "meta": {},
           "data_type": null,
           "constraints": [],
@@ -76,16 +76,16 @@
         },
         "subscriber_type": {
           "name": "subscriber_type",
-          "description": "",
+          "description": "Membership classification of the rider who took the trip — typical values include `local monthly`, `walk-up`, `single trip`, `student membership`, `weekender`, etc. Useful for segmenting demand by user category. Free-form STRING (not enumerated in the source schema), so downstream consumers should expect long-tail values.",
           "meta": {},
           "data_type": null,
           "constraints": [],
           "quote": null,
           "tags": []
         },
-        "bikeid": {
-          "name": "bikeid",
-          "description": "",
+        "bike_id": {
+          "name": "bike_id",
+          "description": "Identifier of the physical bike used for this trip. Maps a single bike across many trips so utilisation per bike can be computed. Note the underscore in `bike_id` (the source column is `bike_id`, NOT `bikeid`); the underscore matters for joins and for any downstream model that references this column by name.",
           "meta": {},
           "data_type": null,
           "constraints": [],
@@ -94,7 +94,7 @@
         },
         "start_time": {
           "name": "start_time",
-          "description": "",
+          "description": "Timestamp marking when the trip began (the rider docked-out the bike). Stored as TIMESTAMP in UTC. This is the primary time dimension for the model and is reliably non-null in the source data — every trip has a recorded start time even when other fields are sparse.",
           "meta": {},
           "data_type": null,
           "constraints": [],
@@ -103,7 +103,7 @@
         },
         "start_station_id": {
           "name": "start_station_id",
-          "description": "",
+          "description": "Numeric identifier of the bikeshare station where the trip began. Joins to `austin_bikeshare.bikeshare_stations.station_id` to resolve station name, latitude, longitude, council district. Some legacy trips have NULL here when the station was deleted from the registry but the trip record was preserved.",
           "meta": {},
           "data_type": null,
           "constraints": [],
@@ -112,7 +112,7 @@
         },
         "end_station_id": {
           "name": "end_station_id",
-          "description": "",
+          "description": "Numeric identifier of the station where the trip ended (rider docked-in the bike). Same join semantics as `start_station_id`. NULL is possible for trips that ended outside the station network or whose end-station record was later deleted from the registry.",
           "meta": {},
           "data_type": null,
           "constraints": [],
@@ -121,25 +121,7 @@
         },
         "duration_minutes": {
           "name": "duration_minutes",
-          "description": "",
-          "meta": {},
-          "data_type": null,
-          "constraints": [],
-          "quote": null,
-          "tags": []
-        },
-        "region": {
-          "name": "region",
-          "description": "",
-          "meta": {},
-          "data_type": null,
-          "constraints": [],
-          "quote": null,
-          "tags": []
-        },
-        "start_time_safe": {
-          "name": "start_time_safe",
-          "description": "",
+          "description": "Trip length in whole minutes, computed by the source system as `end_time - start_time`. INTEGER. Most trips fall under 60 minutes; the long tail above 1440 (24 hours) typically indicates abandoned bikes or system glitches rather than real ridership. Downstream analytics often filter to `duration_minutes BETWEEN 1 AND 240` to focus on legitimate trips.",
           "meta": {},
           "data_type": null,
           "constraints": [],
@@ -159,8 +141,8 @@
         "materialized": "view"
       },
       "created_at": 0,
-      "relation_name": "`bigquery-public-data`.`austin_bikeshare`.`stg_bikeshare_trips`",
-      "raw_code": "-- Literal/COALESCE'd columns deliberately included to give the LLM at least one\n-- mathematically-guaranteed always-pass test to drop (issue #10 AC).\nSELECT\n    trip_id,\n    subscriber_type,\n    bikeid,\n    start_time,\n    start_station_id,\n    end_station_id,\n    duration_minutes,\n    'austin' AS region,\n    COALESCE(start_time, TIMESTAMP '1970-01-01 00:00:00 UTC') AS start_time_safe\nFROM {{ source('austin_bikeshare', 'bikeshare_trips') }}\nLIMIT 100000\n",
+      "relation_name": "`bigquery-public-data`.`austin_bikeshare`.`bikeshare_trips`",
+      "raw_code": "-- Source-as-model: alias overridden to `bikeshare_trips` so the model's\n-- relation_name resolves directly to the public source table. SignalForge\n-- runs against materialised tables; without `dbt run` against a writable\n-- billing project this is the v0.1 path that keeps the smoke test a single\n-- command (issue #10 Path A).\nSELECT\n    trip_id,\n    subscriber_type,\n    bike_id,\n    start_time,\n    start_station_id,\n    end_station_id,\n    duration_minutes\nFROM {{ source('austin_bikeshare', 'bikeshare_trips') }}\n",
       "language": "sql",
       "refs": [],
       "sources": [
@@ -247,8 +229,8 @@
           "quote": null,
           "tags": []
         },
-        "bikeid": {
-          "name": "bikeid",
+        "bike_id": {
+          "name": "bike_id",
           "description": "Identifier of the bike used for the trip.",
           "meta": {},
           "data_type": null,

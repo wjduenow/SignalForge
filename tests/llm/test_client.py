@@ -34,7 +34,6 @@ from signalforge.llm.client import (
 )
 from signalforge.llm.errors import (
     LLMCacheTooLargeError,
-    LLMCacheTooSmallError,
 )
 from signalforge.llm.models import LLMResult
 
@@ -164,24 +163,40 @@ def test_call_anthropic_sets_beta_header_only_when_1h_ttl() -> None:
     }
 
 
-def test_call_anthropic_pre_send_count_below_min_raises_cache_too_small() -> None:
-    """Below-minimum cached block raises :class:`LLMCacheTooSmallError`."""
+def test_call_anthropic_pre_send_count_below_min_drops_cache_marker() -> None:
+    """Below-minimum cached block drops the ``cache_control`` marker and
+    proceeds to the normal call (instead of raising :class:`LLMCacheTooSmallError`).
+
+    Anthropic silently no-ops the cache marker below the per-model minimum
+    (``_MIN_CACHEABLE_TOKENS``) — leaving the marker set wastes the
+    pre-send ``count_tokens`` call and triggers our own dual-zero
+    cache-anomaly WARNING. The right behaviour is to drop the marker, log
+    once, and let the call succeed; callers whose cached block is
+    naturally below the minimum (e.g. the grade layer's compact rubric)
+    still get a clean run rather than a hard error.
+    """
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=FakeCountTokensResponse(input_tokens=128))
+    fake.expect_messages_create(matching={}, returns=_ok_message_response())
 
-    with pytest.raises(LLMCacheTooSmallError) as exc_info:
-        call_anthropic(
-            system="sys",
-            cached_block="c",
-            dynamic_block="d",
-            model="claude-sonnet-4-6",
-            max_tokens=128,
-            prompt_version="v1",
-            client=fake,
-        )
-    assert exc_info.value.cached_block_tokens == 128
-    assert exc_info.value.min_tokens == 1024
-    assert exc_info.value.model == "claude-sonnet-4-6"
+    result = call_anthropic(
+        system="sys",
+        cached_block="c",
+        dynamic_block="d",
+        model="claude-sonnet-4-6",
+        max_tokens=128,
+        prompt_version="v1",
+        client=fake,
+    )
+
+    # The call succeeded — no exception raised.
+    assert result.response_text == "hello world"
+    # The cache marker was dropped before the create call: the request
+    # block 1 carries `text` but NOT `cache_control`.
+    create_call = fake.messages._create_calls[0]  # type: ignore[attr-defined]
+    blocks = create_call["messages"][0]["content"]
+    assert blocks[0]["text"] == "c"
+    assert "cache_control" not in blocks[0]
 
 
 def test_call_anthropic_pre_send_count_above_cap_raises_cache_too_large() -> None:
