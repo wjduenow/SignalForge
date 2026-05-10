@@ -74,7 +74,6 @@ from signalforge.grade import (
 from signalforge.llm import (
     LLMAuthError,
     LLMCacheTooLargeError,
-    LLMCacheTooSmallError,
     LLMConnectionError,
     LLMError,
     LLMHelperError,
@@ -244,7 +243,6 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     LLMServerError: 3,
     LLMConnectionError: 3,
     LLMResponseFormatError: 3,
-    LLMCacheTooSmallError: 3,
     LLMCacheTooLargeError: 3,
     # Warehouse connectivity / quota (auth, query syntax that came back
     # from a real query, billing limit).

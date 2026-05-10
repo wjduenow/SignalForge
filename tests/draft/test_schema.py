@@ -481,7 +481,6 @@ def test_public_api_imports_match_dec_020() -> None:
     assert llm_pkg.__all__ == (
         "LLMAuthError",
         "LLMCacheTooLargeError",
-        "LLMCacheTooSmallError",
         "LLMConnectionError",
         "LLMError",
         "LLMHelperError",

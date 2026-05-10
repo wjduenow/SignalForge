@@ -58,7 +58,6 @@ the layer stays SDK-agnostic and pyright-clean.
 | `LLMRateLimitError`      | exception | 429 retry budget exhausted. Carries `attempts`.                                                                      |
 | `LLMServerError`         | exception | 5xx retry budget exhausted.                                                                                          |
 | `LLMConnectionError`     | exception | Connection / transport retry budget exhausted.                                                                       |
-| `LLMCacheTooSmallError`  | exception | Pre-send: cached block is below the model's minimum cacheable size.                                                  |
 | `LLMCacheTooLargeError`  | exception | Pre-send: cached block exceeds the SignalForge cap (8000 input tokens).                                              |
 
 `LLMResponseFormatError` is exported from
@@ -203,16 +202,20 @@ billing.
 
 **Hard cap and pre-send check.** Before any `messages.create` call,
 the seam issues a `client.messages.count_tokens` against the cached
-block and raises:
+block and:
 
-- `LLMCacheTooSmallError` if the block is below the model's minimum
-  cacheable size (1024 tokens for Sonnet/Opus, 2048 for Haiku).
-  Anthropic silently treats a sub-minimum cache marker as a no-op:
-  the request still succeeds but the cache entry is never created,
-  costing the input-token premium with none of the discount. Failing
-  loud is the only way to surface this.
-- `LLMCacheTooLargeError` if the block exceeds the SignalForge cap
-  of 8000 input tokens. The cap is a SignalForge-imposed safeguard
+- **Drops** the `cache_control` marker from the request when the
+  cached block is below the model's minimum cacheable size (1024
+  tokens for Sonnet/Opus, 2048 for Haiku) and logs an `INFO` line.
+  Anthropic silently treats a sub-minimum cache marker as a no-op,
+  so the call would still succeed; dropping the marker explicitly
+  avoids paying the count-tokens cost twice and silences the
+  dual-zero cache-anomaly WARNING further down. Callers whose cached
+  block is naturally below the minimum (e.g. the grade layer's
+  compact rubric) get a clean run. _(Behaviour changed under issue
+  #10 — previously raised `LLMCacheTooSmallError`.)_
+- Raises `LLMCacheTooLargeError` if the block exceeds the SignalForge
+  cap of 8000 input tokens. The cap is a SignalForge-imposed safeguard
   against accidental prompt bloat: a summary above the cap signals
   the prompt builder has drifted (e.g. embedded the full project
   manifest), and we'd rather fail loud than silently bloat every
@@ -399,7 +402,6 @@ silently — same behaviour as `load_safety_config`.
 | `LLMServerError`               | 5xx retry budget exhausted.                                                                | DEC-004  |
 | `LLMConnectionError`           | Connection / transport retry budget exhausted.                                             | DEC-004  |
 | `LLMResponseFormatError`       | SDK returned 200 but the response object is missing a required attribute (`content`, `usage`). | DEC-004  |
-| `LLMCacheTooSmallError`        | Pre-send: cached block below the model's minimum (1024 / 2048 tokens).                     | DEC-024  |
 | `LLMCacheTooLargeError`        | Pre-send: cached block above the SignalForge 8000-token cap.                               | DEC-009  |
 
 ### `signalforge.draft.errors`

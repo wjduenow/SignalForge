@@ -98,7 +98,11 @@ the fixture pins tight grade thresholds (`min_pass_rate: 0.95` /
 Use a fresh shell session (or `unset ANTHROPIC_API_KEY` after the
 run) so the key doesn't persist in your bash history.
 
-Full flag reference and exit codes: see [docs/cli-ops.md](docs/cli-ops.md).
+The same flow runs as a gated maintainer test (`pytest -m e2e --no-cov`).
+For the full walkthrough — what the test proves, prerequisites,
+cost ceiling, troubleshooting — see
+[docs/e2e-smoke-test.md](docs/e2e-smoke-test.md). Full CLI flag
+reference and exit codes: [docs/cli-ops.md](docs/cli-ops.md).
 
 ## CLI
 

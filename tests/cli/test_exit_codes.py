@@ -210,8 +210,6 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
         "LLMResponseFormatError",
     }:
         return cls(_SENTINEL_MESSAGE, cause=_SENTINEL_CAUSE)
-    if name == "LLMCacheTooSmallError":
-        return cls(500, 1024, "claude-fake")
     if name == "LLMCacheTooLargeError":
         return cls(9000, 8000)
 

@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Regenerate draft-pipeline fixtures.
 #
-# v0.1 — the smoke test (US-015) is a wire test that stops at
-# LLMCacheTooSmallError before any messages.create call (the smoke
-# manifest's cached block is ~106 tokens, far below Haiku's 2048-token
-# minimum). So real-API CandidateSchema capture is still manual.
-#
-# When the smoke fixture grows past the cache minimums (~1024 tokens for
-# Sonnet, ~2048 for Haiku) and the smoke test exercises the full
-# round-trip, replace the exit-1 below with capture of the parsed
-# CandidateSchema (e.g. via a pytest plugin that dumps DraftOutcome).
+# v0.1 — full real-API end-to-end coverage now lives in the issue #10
+# smoke test (`tests/cli/test_e2e_bigquery_smoke.py`, gated by
+# `@pytest.mark.e2e` + the SF_RUN_BQ=1 / ANTHROPIC_API_KEY /
+# GOOGLE_CLOUD_PROJECT env-var triple). This script's draft-layer
+# fixtures are still hand-authored: candidate_schema_v1.json is the
+# golden CandidateSchema shape and is edited manually when the
+# CandidateSchema model evolves. (The previous v0.1 wire-test
+# `tests/draft/test_smoke_real_api.py` was retired in #10's follow-up
+# — it relied on the now-removed LLMCacheTooSmallError hard-fail to
+# short-circuit before `messages.create`.)
 #
 # Until then, candidate_schema_v1.json is hand-authored and edited
 # manually when the CandidateSchema model shape changes (the

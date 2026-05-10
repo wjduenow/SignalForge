@@ -20,9 +20,10 @@ The hierarchy is two-tiered:
 - :class:`LLMHelperError` — umbrella for SDK-call failures (DEC-004).
   Subclasses cover the retry-taxonomy branches (auth / rate-limit /
   server / connection / response-format).
-- :class:`LLMCacheTooSmallError` and :class:`LLMCacheTooLargeError` —
-  pre-send token-count failures (DEC-009 / DEC-024). They are direct
-  ``LLMError`` subclasses, NOT helper-error subclasses, because they fire
+- :class:`LLMCacheTooLargeError` — pre-send token-count failure
+  (DEC-009 / DEC-024) when the cached block exceeds SignalForge's
+  8000-token cap. Direct ``LLMError`` subclass, NOT a helper-error
+  subclass, because it fires
   before any SDK call is issued.
 """
 
@@ -175,46 +176,6 @@ class LLMResponseFormatError(LLMHelperError):
     )
 
 
-class LLMCacheTooSmallError(LLMError):
-    """Pre-send token-count check (DEC-024) reported the cached block is
-    below the model's minimum cacheable size.
-
-    Anthropic's prompt-caching API silently treats a sub-minimum cache
-    marker as a no-op: the request still succeeds but the cache block does
-    nothing, costing the user the input-token premium with none of the
-    discount. DEC-024 fails loud rather than let the cache marker silently
-    be ineffective.
-
-    The model-minimum constants live in :mod:`signalforge.llm.client`
-    (``_MIN_CACHEABLE_TOKENS``); the discriminating fields here let callers
-    report "X tokens vs Y minimum on model M" without sniffing message text.
-    """
-
-    default_remediation: ClassVar[str] = (
-        "Expand the cached block (manifest summary + few-shots) so it meets "
-        "the model's minimum cacheable size, or remove the cache marker "
-        "for this call. See plans/super/5-llm-draft-pipeline.md DEC-009/DEC-024."
-    )
-
-    def __init__(
-        self,
-        cached_block_tokens: int,
-        min_tokens: int,
-        model: str,
-        *,
-        remediation: str | None = None,
-    ) -> None:
-        self.cached_block_tokens = cached_block_tokens
-        self.min_tokens = min_tokens
-        self.model = model
-        message = (
-            f"Cached block is {cached_block_tokens} tokens; model "
-            f"{_format_value(model)} requires at least {min_tokens} tokens "
-            "for the cache marker to be effective."
-        )
-        super().__init__(message, remediation=remediation)
-
-
 class LLMCacheTooLargeError(LLMError):
     """Pre-send token-count check (DEC-024) reported the cached block is
     above the SignalForge cap (DEC-009 — 8000 input tokens).
@@ -253,7 +214,6 @@ class LLMCacheTooLargeError(LLMError):
 __all__ = [
     "LLMAuthError",
     "LLMCacheTooLargeError",
-    "LLMCacheTooSmallError",
     "LLMConnectionError",
     "LLMError",
     "LLMHelperError",

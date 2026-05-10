@@ -165,15 +165,14 @@ def test_call_anthropic_sets_beta_header_only_when_1h_ttl() -> None:
 
 def test_call_anthropic_pre_send_count_below_min_drops_cache_marker() -> None:
     """Below-minimum cached block drops the ``cache_control`` marker and
-    proceeds to the normal call (instead of raising :class:`LLMCacheTooSmallError`).
+    proceeds to the normal call.
 
     Anthropic silently no-ops the cache marker below the per-model minimum
     (``_MIN_CACHEABLE_TOKENS``) — leaving the marker set wastes the
-    pre-send ``count_tokens`` call and triggers our own dual-zero
-    cache-anomaly WARNING. The right behaviour is to drop the marker, log
-    once, and let the call succeed; callers whose cached block is
-    naturally below the minimum (e.g. the grade layer's compact rubric)
-    still get a clean run rather than a hard error.
+    pre-send ``count_tokens`` call and triggers the dual-zero cache-anomaly
+    WARNING. The right behaviour is to drop the marker, log once, and let
+    the call succeed; callers whose cached block is naturally below the
+    minimum (e.g. the grade layer's compact rubric) still get a clean run.
     """
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=FakeCountTokensResponse(input_tokens=128))
