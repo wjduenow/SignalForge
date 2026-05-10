@@ -127,6 +127,31 @@ is set to 80% over the default test set; the e2e test on its own
 exercises only a fraction of the codebase, so coverage would fail
 spuriously without the flag.
 
+The test itself handles the profile-rewrite friction (see "Why the
+profile rewrite matters" below) — it copies the fixture into a
+per-run `tmp_path`, substitutes `GOOGLE_CLOUD_PROJECT` into
+`profiles.yml`, and runs `signalforge generate` against the temp
+project. If you want to run the same flow as a one-off CLI
+invocation (rather than through pytest), follow the README's
+[Trying it out](../README.md#trying-it-out) walkthrough — it
+shows the manual copy + profile-rewrite incantation.
+
+### Why the profile rewrite matters
+
+The committed `profiles.yml` in `tests/fixtures/dbt_project_austin/`
+pins `project: bigquery-public-data`. That's correct for `dbt parse`
+(which only reads schema metadata about the source dataset and
+doesn't bill anything substantive). But at *query* time the BigQuery
+SDK uses `profile.project` as the **billing** project, and you
+can't bill `bigquery-public-data` itself (you don't own it).
+
+The test sidesteps this by writing a per-run `profiles.yml` into
+`tmp_path` that substitutes your `GOOGLE_CLOUD_PROJECT` and adds
+`maximum_bytes_billed: 1000000000` (the default 100 MB cap blocks
+the materialised-sample full-table scan over the ~2.27M-row source).
+This is the v0.1 workaround; a future ticket may teach the profile
+loader to render `${ENV_VAR}` references the way dbt does natively.
+
 A successful run prints `1 passed` and exits 0. A failure prints
 the assertion that fired plus the captured stderr from the CLI
 run; the test framework also preserves the test's `tmp_path`

@@ -36,9 +36,10 @@ def test_austin_manifest_loads_via_signalforge() -> None:
     assert model.raw_code is not None
     assert "trip_id" in model.raw_code
 
-    # The SELECT exposes nine columns; we don't pin the exact set here (the
-    # source-generated columns dict mirrors sources.yml, which may evolve), but
-    # at least one column entry must round-trip from the manifest.
+    # The SELECT currently exposes seven columns; we don't pin the exact
+    # count here (the source-generated columns dict mirrors sources.yml,
+    # which may evolve), but at least one column entry must round-trip
+    # from the manifest.
     assert len(model.columns) >= 1
 
 

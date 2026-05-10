@@ -46,7 +46,7 @@ NO new production code. The CLI was completed in #9; every stage seam is already
 
 **Markers registered in `pyproject.toml:52-70`:**
 
-```
+```text
 "bigquery": tests requiring BigQuery credentials (gated by SF_RUN_BQ=1)
 "anthropic": real-API smoke test (requires ANTHROPIC_API_KEY; excluded from default CI)
 "cli_subprocess": belt-and-braces subprocess-driven CLI smoke (skipped by default)

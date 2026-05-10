@@ -65,10 +65,14 @@ on real data are dropped, so only signal-bearing artifacts ship.
 ### OUTPUT FORMAT
 
 Respond with a single JSON object matching the shape below. Do not wrap
-the response in markdown fences. Do not include any preamble, commentary,
-or trailing text.
+the response in markdown fences (do not echo the triple-backticks shown
+in this prompt — they are illustration only and are not part of the
+expected response). Do not include any preamble, commentary, or trailing
+text.
 
-```json
+Expected JSON shape (illustration; emit only the inner object, no
+surrounding fences):
+
 {
   "schema_version": 1,
   "name": "<exact model name from the manifest summary>",
@@ -92,7 +96,6 @@ or trailing text.
   ],
   "tests": []
 }
-```
 
 Field-name discipline (load-bearing — the parser rejects substitutions):
 

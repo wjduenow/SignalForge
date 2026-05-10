@@ -10,10 +10,19 @@ canonical fixture (the load-bearing part for cache stability).
 On mismatch, the assertion message includes a :func:`difflib.unified_diff`
 so the regression is reviewable in PR.
 
-Pinned ``_PROMPT_VERSION``: ``1c55806467984090`` (rotated during PR-#19
-quality-gate review when the rationale claim was softened — DEC-026 +
-the spec/impl mismatch flagged by Copilot/CodeRabbit). If this rotates
-again, update both :data:`_EXPECTED_PROMPT_VERSION` and
+Pinned ``_PROMPT_VERSION``: tracked by :data:`_EXPECTED_PROMPT_VERSION`
+below — the constant is the source of truth, this docstring deliberately
+does not hard-code a hash so it can't drift. Latest known rotations:
+
+- ``1c55806467984090`` — original pin from #5 / DEC-019.
+- ``c7d15d59f78bab2d`` — rotated under #10 when an explicit JSON-shape
+  example was added to the system prompt (DEC-025 of #10).
+- ``8a0d81994275b803`` — current. Rotated under #10 review feedback
+  when the JSON example's outer ```json fence was removed (the prompt
+  instructs "do not wrap in markdown fences" so showing a fenced
+  example was a foot-gun; CodeRabbit/Copilot both flagged it).
+
+If this rotates again, update both :data:`_EXPECTED_PROMPT_VERSION` and
 :data:`_CACHED_BLOCK_GOLDEN` in lockstep — the rotation is the signal
 that the templates changed.
 """
@@ -40,7 +49,7 @@ _FIXTURE_PATH = (
 )
 
 
-_EXPECTED_PROMPT_VERSION: str = "c7d15d59f78bab2d"
+_EXPECTED_PROMPT_VERSION: str = "8a0d81994275b803"
 
 
 # Captured once via ``render_prompt`` against the canonical fixture below.

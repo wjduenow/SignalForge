@@ -4,8 +4,10 @@ Issue #10 / US-005. Pins the v0.1 promise the rest of the suite cannot
 exercise: ``signalforge generate <model>`` against a real dbt project
 talking to a real warehouse and a real LLM produces a coherent
 ``diff.json`` whose kept / dropped / flagged tallies match the
-fixture's engineered shape (DEC-002, DEC-009, DEC-010 of
-``plans/super/10-e2e-bigquery-smoke.md``).
+fixture's expected shape (DEC-002, DEC-009, DEC-024, DEC-029 of
+``plans/super/10-e2e-bigquery-smoke.md`` — Path A pivots the fixture
+to source-as-model so the always-passes drop comes from natural NOT
+NULL columns in bikeshare data rather than engineered literal columns).
 
 Gated by THREE env vars (DEC-002):
 
@@ -40,9 +42,9 @@ Asserts the seven invariants from DEC-009:
    artifact survives prune + grade).
 4. A :class:`PruneDecision` with ``decision == "dropped"`` and
    ``reason == "always-passes"`` exists in the prune audit (resolves
-   SQ-02 — the v0.1 differentiator: SignalForge dropped a noisy test
-   the LLM proposed against engineered literal / COALESCE columns in
-   ``stg_bikeshare_trips.sql`` per DEC-010).
+   SQ-02 — the v0.1 differentiator: SignalForge dropped a noisy
+   ``not_null`` test the LLM proposed on a natural NOT NULL column
+   like ``trip_id`` or ``start_time`` per DEC-024).
 5. ``DiffReport.flagged_count >= 1`` (forced by tight grade
    thresholds in ``signalforge.yml``).
 6. ``GradingReport.aggregate_complete is True`` (no degraded grade
@@ -182,17 +184,21 @@ def test_e2e_signalforge_generate_against_austin_bikeshare(
     )
 
     # 4. At least one always-passes drop — the v0.1 differentiator.
-    #    The fixture's stg_bikeshare_trips.sql carries literal /
-    #    COALESCE columns (DEC-010) so the LLM proposes at least one
-    #    not_null test that always passes; the prune engine drops it.
+    #    Path A (DEC-024) aliases the fixture model directly at the
+    #    public source table; the always-pass signal comes from natural
+    #    NOT NULL columns in bikeshare data (`trip_id`, `start_time`,
+    #    `duration_minutes`, `bike_id` all have nulls=0 in the source).
+    #    The LLM reliably drafts `not_null` on those; the prune engine
+    #    sees zero failing rows and drops them.
     decisions = read_prune_decisions(project_dir)
     has_always_passes_drop = any(
         d.decision == "dropped" and d.reason == "always-passes" for d in decisions
     )
     assert has_always_passes_drop, (
         "expected at least one PruneDecision with decision='dropped' and "
-        "reason='always-passes' (SQ-02: the v0.1 differentiator). "
-        "Engineered via literal / COALESCE columns in stg_bikeshare_trips.sql per DEC-010."
+        "reason='always-passes' (SQ-02: the v0.1 differentiator). Path A "
+        "(DEC-024) relies on bikeshare's natural NOT NULL columns (trip_id, "
+        "start_time, etc.) rather than engineered literals."
     )
 
     # 6. Grade aggregate_complete — no degraded calls.
