@@ -4,7 +4,6 @@ from signalforge.llm.client import call_anthropic
 from signalforge.llm.errors import (
     LLMAuthError,
     LLMCacheTooLargeError,
-    LLMCacheTooSmallError,
     LLMConnectionError,
     LLMError,
     LLMHelperError,
@@ -17,7 +16,6 @@ from signalforge.llm.models import LLMResult
 __all__ = (
     "LLMAuthError",
     "LLMCacheTooLargeError",
-    "LLMCacheTooSmallError",
     "LLMConnectionError",
     "LLMError",
     "LLMHelperError",

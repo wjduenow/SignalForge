@@ -64,10 +64,47 @@ on real data are dropped, so only signal-bearing artifacts ship.
 
 ### OUTPUT FORMAT
 
-Respond with a single JSON object. Do not wrap the response in markdown
-fences. Do not include any preamble, commentary, or trailing text. The
-top-level object describes one candidate schema for the model under
-draft.
+Respond with a single JSON object matching the shape below. Do not wrap
+the response in markdown fences (do not echo the triple-backticks shown
+in this prompt — they are illustration only and are not part of the
+expected response). Do not include any preamble, commentary, or trailing
+text.
+
+Expected JSON shape (illustration; emit only the inner object, no
+surrounding fences):
+
+{
+  "schema_version": 1,
+  "name": "<exact model name from the manifest summary>",
+  "description": "<1-3 sentences describing the model>",
+  "rationale": "<1 sentence: why these tests + descriptions, at the model level>",
+  "columns": [
+    {
+      "name": "<exact column name from the manifest summary>",
+      "description": "<1-3 sentences describing this column>",
+      "rationale": "<1 sentence: why this description / why these tests on this column>",
+      "tests": [
+        {"type": "not_null", "column": "<column name>", "rationale": "<1 sentence>"},
+        {"type": "unique", "column": "<column name>", "rationale": "<1 sentence>"},
+        {"type": "accepted_values", "column": "<column name>",
+         "values": ["<value1>", "<value2>"], "rationale": "<1 sentence>"},
+        {"type": "relationships", "column": "<column name>",
+         "to": "ref('<other_model>')", "field": "<other column>",
+         "rationale": "<1 sentence>"}
+      ]
+    }
+  ],
+  "tests": []
+}
+
+Field-name discipline (load-bearing — the parser rejects substitutions):
+
+- The top-level identifier MUST be `name` (NOT `model`).
+- Each test object's discriminator MUST be `type` (NOT `test`).
+- Column-scoped tests MUST live inside that column's `tests` array, NOT
+  in the top-level `tests` array. The top-level `tests` array is reserved
+  for model-level tests (e.g. a multi-column uniqueness assertion).
+- `schema_version` is required and MUST be the integer `1` for v0.1.
 
 ### ANCHOR CONTRACT
 

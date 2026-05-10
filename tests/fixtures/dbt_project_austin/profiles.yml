@@ -1,0 +1,27 @@
+# Committed alongside the fixture project so the regen script (US-002) can
+# invoke `dbt parse` against the live `bigquery-public-data.austin_bikeshare`
+# dataset without contributors needing to author their own profile.
+#
+# `method: oauth` falls through to Application Default Credentials — the
+# maintainer runs `gcloud auth application-default login` once locally before
+# regenerating the manifest. `project: bigquery-public-data` works for
+# `dbt parse` (which only reads metadata about the public dataset) but is
+# WRONG for query-time use: the BigQuery SDK uses `profile.project` as the
+# *billing* project, and contributors can't bill `bigquery-public-data`.
+# So the e2e test (`tests/cli/test_e2e_bigquery_smoke.py`) overwrites this
+# file in `tmp_path` with `project: ${GOOGLE_CLOUD_PROJECT}` + a bumped
+# `maximum_bytes_billed` before invoking `signalforge generate`. The
+# committed profile is regen-only; do not run `signalforge generate`
+# directly against this directory without rewriting the profile first
+# (the README's "Trying it out" walkthrough does this implicitly via
+# `cd tests/fixtures/dbt_project_austin/` + `signalforge generate ...`
+# inheriting the env-var path).
+austin:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: bigquery-public-data
+      dataset: austin_bikeshare
+      location: US

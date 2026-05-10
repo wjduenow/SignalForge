@@ -46,7 +46,6 @@ from signalforge.llm._client import (
 from signalforge.llm.errors import (
     LLMAuthError,
     LLMCacheTooLargeError,
-    LLMCacheTooSmallError,
     LLMConnectionError,
     LLMHelperError,
     LLMRateLimitError,
@@ -275,12 +274,30 @@ def call_anthropic(
             "count_tokens response is missing the `input_tokens` field.",
         )
     min_required = _min_cacheable_tokens(model)
+    cache_marker_active = True
     if cached_block_tokens < min_required:
-        raise LLMCacheTooSmallError(
-            cached_block_tokens=cached_block_tokens,
-            min_tokens=min_required,
-            model=model,
+        # Anthropic silently no-ops the cache marker below the minimum, so
+        # leaving it set wastes the count_tokens call AND triggers our own
+        # dual-zero cache-anomaly WARNING further down. Drop the marker and
+        # log once: the call still succeeds, the caller just doesn't get
+        # caching. Callers whose cached block is reliably below the minimum
+        # (e.g. the grade layer's compact rubric) get a clean run instead
+        # of a hard error. The ``cache_marker_active`` flag also gates the
+        # downstream dual-zero WARNING, which would otherwise fire as a
+        # false alarm here — both ``cache_creation`` and ``cache_read``
+        # are guaranteed to be 0 when no marker was sent.
+        _LOGGER.info(
+            "cache marker dropped (block below cacheable minimum): %s",
+            json.dumps(
+                {
+                    "model": model,
+                    "cached_block_size_tokens": cached_block_tokens,
+                    "min_required": min_required,
+                }
+            ),
         )
+        block_1.pop("cache_control", None)
+        cache_marker_active = False
     if cached_block_tokens > _CACHED_BLOCK_CAP_TOKENS:
         raise LLMCacheTooLargeError(
             cached_block_tokens=cached_block_tokens,
@@ -413,14 +430,18 @@ def call_anthropic(
     cache_read = _extract_usage_field(usage, "cache_read_input_tokens", default=0)
 
     # Cache-anomaly WARNING: the cached block had a marker AND was above
-    # the model minimum (the pre-send check would have raised otherwise),
-    # yet the response reports neither a cache write nor a cache read.
-    # This can happen on load-balancer rerouting or partial cache miss;
-    # surface it so the operator knows the cache discount didn't land.
+    # the model minimum (the pre-send check would have dropped the marker
+    # otherwise), yet the response reports neither a cache write nor a
+    # cache read. This can happen on load-balancer rerouting or partial
+    # cache miss; surface it so the operator knows the cache discount
+    # didn't land.
     # NB: ``cache_creation == 0`` alone is the *normal* cache-hit case
     # (creation already happened on a prior call); we only warn when both
     # creation AND read are zero — the genuine no-op signal.
-    if cache_creation == 0 and cache_read == 0:
+    # NB: ``cache_marker_active`` gates the warning so we don't false-
+    # alarm on calls where the pre-send check intentionally dropped the
+    # marker (sub-minimum cached block).
+    if cache_marker_active and cache_creation == 0 and cache_read == 0:
         _LOGGER.warning(
             "cache marker no-op: %s",
             json.dumps(

@@ -17,7 +17,6 @@ from signalforge.llm import errors as errors_module
 from signalforge.llm.errors import (
     LLMAuthError,
     LLMCacheTooLargeError,
-    LLMCacheTooSmallError,
     LLMConnectionError,
     LLMError,
     LLMHelperError,
@@ -38,11 +37,6 @@ _CONSTRUCT_KWARGS: dict[str, dict[str, object]] = {
     "LLMServerError": {"message": "5xx after retries"},
     "LLMConnectionError": {"message": "connection reset"},
     "LLMResponseFormatError": {"message": "missing content block"},
-    "LLMCacheTooSmallError": {
-        "cached_block_tokens": 512,
-        "min_tokens": 1024,
-        "model": "claude-sonnet-4-6",
-    },
     "LLMCacheTooLargeError": {"cached_block_tokens": 9000},
 }
 
@@ -60,14 +54,17 @@ def test_llm_error_renders_remediation() -> None:
 @pytest.mark.unit
 @pytest.mark.llm
 def test_all_is_sorted_and_complete() -> None:
-    """``__all__`` is alphabetically sorted and lists 9 classes total
-    (LLMError + 8 subclasses)."""
+    """``__all__`` is alphabetically sorted and lists 8 classes total
+    (LLMError + 7 subclasses)."""
     assert errors_module.__all__ == sorted(errors_module.__all__)
     # 1 base (LLMError) + 1 umbrella (LLMHelperError) + 5 helper subclasses
-    # (Auth/RateLimit/Server/Connection/ResponseFormat) + 2 cache-size
-    # subclasses (TooSmall/TooLarge) = 9 classes.
-    assert len(errors_module.__all__) == 9, (
-        "US-003 enumerates 8 typed subclasses + 1 base; update tests "
+    # (Auth/RateLimit/Server/Connection/ResponseFormat) + 1 cache-size
+    # subclass (TooLarge) = 8 classes. (LLMCacheTooSmallError was dropped
+    # in #10's follow-up — Anthropic silently no-ops a sub-minimum cache
+    # marker, so the production code drops the marker and continues
+    # rather than raising.)
+    assert len(errors_module.__all__) == 8, (
+        "US-003 enumerates 7 typed subclasses + 1 base; update tests "
         "and __all__ together if this changes."
     )
 
@@ -151,28 +148,6 @@ def test_llm_rate_limit_error_includes_attempts() -> None:
 
 @pytest.mark.unit
 @pytest.mark.llm
-def test_llm_cache_too_small_error_carries_block_size_min_and_model() -> None:
-    """Three discriminating attributes: ``cached_block_tokens``,
-    ``min_tokens``, ``model``. The rendered message includes all three so
-    ops queries can grep without parsing a stack trace."""
-    err = LLMCacheTooSmallError(
-        cached_block_tokens=512,
-        min_tokens=1024,
-        model="claude-sonnet-4-6",
-    )
-    assert err.cached_block_tokens == 512
-    assert err.min_tokens == 1024
-    assert err.model == "claude-sonnet-4-6"
-    rendered = str(err)
-    assert "512" in rendered
-    assert "1024" in rendered
-    # Model name is repr-quoted (DEC-022 — a model id with control chars
-    # still renders safely).
-    assert repr("claude-sonnet-4-6") in rendered
-
-
-@pytest.mark.unit
-@pytest.mark.llm
 def test_llm_cache_too_large_error_carries_block_size_and_cap() -> None:
     """Two discriminating attributes: ``cached_block_tokens`` and ``cap``.
     The cap defaults to 8000 (DEC-009)."""
@@ -213,18 +188,10 @@ def test_user_input_repr_quoted_in_messages() -> None:
     # escapes the ESC byte).
     assert "\x1b" not in repr(adversarial)
 
-    err = LLMCacheTooSmallError(
-        cached_block_tokens=10,
-        min_tokens=1024,
-        model=adversarial,
-    )
-    rendered = str(err)
-    # The repr-quoted form appears verbatim; the raw ANSI escape does not.
-    assert repr(adversarial) in rendered
-    assert "\x1b" not in rendered
-    # Attribute is preserved for programmatic access (untouched by
-    # rendering).
-    assert err.model == adversarial
+    # The helper itself is the load-bearing surface — guarded directly via
+    # ``_format_value(adversarial) == repr(adversarial)`` above. New typed
+    # errors that surface user-controlled values must route through it.
+    assert "\x1b" not in repr(adversarial)
 
 
 @pytest.mark.unit
@@ -263,11 +230,9 @@ def test_llm_helper_subclasses_caught_by_umbrella() -> None:
 @pytest.mark.unit
 @pytest.mark.llm
 def test_cache_errors_not_helper_subclasses() -> None:
-    """The cache-size errors fire BEFORE any SDK call (DEC-024 pre-send
-    check), so they intentionally live outside the ``LLMHelperError``
-    umbrella. Catching ``LLMHelperError`` must NOT swallow them."""
-    assert not issubclass(LLMCacheTooSmallError, LLMHelperError)
+    """The cache-size error fires BEFORE any SDK call (DEC-024 pre-send
+    check), so it intentionally lives outside the ``LLMHelperError``
+    umbrella. Catching ``LLMHelperError`` must NOT swallow it."""
     assert not issubclass(LLMCacheTooLargeError, LLMHelperError)
-    # They are still ``LLMError`` instances so a top-level catch-all works.
-    assert issubclass(LLMCacheTooSmallError, LLMError)
+    # Still an ``LLMError`` instance so a top-level catch-all works.
     assert issubclass(LLMCacheTooLargeError, LLMError)

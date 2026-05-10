@@ -34,7 +34,6 @@ _DOCUMENTED_PUBLIC = (
     "LLMServerError",
     # Errors — cache sizing
     "LLMCacheTooLargeError",
-    "LLMCacheTooSmallError",
 )
 
 
@@ -58,7 +57,6 @@ def test_each_public_name_is_importable_via_from_signalforge_llm() -> None:
     from signalforge.llm import (  # noqa: F401
         LLMAuthError,
         LLMCacheTooLargeError,
-        LLMCacheTooSmallError,
         LLMConnectionError,
         LLMError,
         LLMHelperError,
@@ -78,7 +76,6 @@ def test_typed_errors_subclass_llm_error() -> None:
     from signalforge.llm import (
         LLMAuthError,
         LLMCacheTooLargeError,
-        LLMCacheTooSmallError,
         LLMConnectionError,
         LLMError,
         LLMHelperError,
@@ -90,7 +87,6 @@ def test_typed_errors_subclass_llm_error() -> None:
     for cls in (
         LLMAuthError,
         LLMCacheTooLargeError,
-        LLMCacheTooSmallError,
         LLMConnectionError,
         LLMHelperError,
         LLMRateLimitError,

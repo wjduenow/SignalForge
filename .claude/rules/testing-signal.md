@@ -65,15 +65,75 @@ Revisit when actual coverage exceeds `<N> + 5` for two consecutive `dev` builds.
 
 ### Known gap: excluded markers (DEC-004)
 
-Coverage measures only the default pytest set. Tests gated behind `bigquery`, `anthropic`, and `cli_subprocess` markers are excluded by addopts (`-m 'not bigquery and not anthropic and not cli_subprocess'`). Those code paths are exercised via fakes in unit tests; the real-network paths are not instrumented.
+Coverage measures only the default pytest set. Tests gated behind `bigquery`, `anthropic`, `cli_subprocess`, and `e2e` markers are excluded by addopts (`-m 'not bigquery and not anthropic and not cli_subprocess and not e2e'`). Those code paths are exercised via fakes in unit tests; the real-network paths are not instrumented.
 
-Because `--cov-fail-under` is in `addopts`, marker-specific runs (`pytest -m cli_subprocess`, `pytest -m bigquery`) will fail the coverage gate. Use `--no-cov` for these runs:
+Because `--cov-fail-under` is in `addopts`, marker-specific runs (`pytest -m cli_subprocess`, `pytest -m bigquery`, `pytest -m e2e`) will fail the coverage gate. Use `--no-cov` for these runs:
 
 ```bash
 pytest -m cli_subprocess --no-cov
 SF_RUN_BQ=1 pytest -m bigquery --no-cov
+SF_RUN_BQ=1 GOOGLE_CLOUD_PROJECT=<billing-project> ANTHROPIC_API_KEY=sk-... pytest -m e2e --no-cov
 ```
+
+## End-to-end gated tests (issue #10)
+
+Established by issue #10 (e2e smoke test against `bigquery-public-data`). Apply to any new test that exercises the full pipeline against a real warehouse + a real LLM provider.
+
+### Belt-and-suspenders gating: marker + runtime `pytest.skipif`
+
+A gated end-to-end test carries TWO independent gates:
+
+1. **`@pytest.mark.<gate>` on the test function** — registered in `pyproject.toml` `[tool.pytest.ini_options].markers` AND added to the default `addopts` exclusion list (`-m 'not <gate>'`). Default `pytest` invocations DESELECT (do not collect) the test entirely. Mirrors the `bigquery` / `anthropic` / `cli_subprocess` precedent.
+2. **A `_skip_reason()` helper called inside the test** — returns the missing-env-var message; the test calls `pytest.skip(reason)` when set. Surfaces a clear runtime skip when a maintainer runs `pytest -m <gate>` but forgets one of the env vars.
+
+Both gates are required. The marker prevents accidental collection in CI; the runtime skip turns a missing-env-var run into an obvious skip-with-reason rather than a cryptic real-network failure. Mirrors `tests/warehouse/test_bigquery_integration.py:1-17` precedent.
+
+### Three-env-var gate for full-stack e2e
+
+When the test exercises BOTH the warehouse adapter AND the LLM seam (issue #10's case), require THREE env vars:
+
+- `SF_RUN_BQ=1` (or equivalent for non-BQ adapters) — opt-in to real warehouse calls.
+- `ANTHROPIC_API_KEY` — opt-in to real LLM calls.
+- `GOOGLE_CLOUD_PROJECT` — the billing project (BigQuery won't bill `bigquery-public-data` to itself; ADC's default project may not be set).
+
+Each missing var → a distinct skip reason naming the missing var. Maintainers debug missing-env-var skips quickly when the message says exactly which one.
+
+### `tmp_path` fixture isolation for tests producing on-disk artefacts
+
+If the test produces audit JSONLs or sidecar JSON under `<project_dir>/.signalforge/`, the test MUST copy the committed fixture into pytest's `tmp_path` before invoking the CLI:
+
+```python
+def test_e2e(tmp_path):
+    project_dir = copy_fixture_to_tmp(_FIXTURE_DIR, tmp_path)  # shutil.copytree
+    main(["generate", "models/staging/<name>.sql", "--project-dir", str(project_dir)])
+    # audits land in tmp_path/.signalforge/, not the committed fixture
+```
+
+Mirrors `tests/cli/_factories.py::make_fake_dbt_project` and `tests/cli/_e2e_helpers.py::copy_fixture_to_tmp`. Without this, running the test in place pollutes the committed `tests/fixtures/<name>/.signalforge/` directory across runs (DEC-008 of `plans/super/10-e2e-bigquery-smoke.md`).
+
+### Engineered determinism for LLM-driven assertions
+
+When an assertion depends on what the LLM drafts (which is non-deterministic across runs), engineer the test INPUT so the assertion is mathematically guaranteed.
+
+Issue #10's load-bearing example: the AC required at least one `drop_reason="always-passes"` decision, which depends on the LLM drafting a `not_null` test on a column that's actually never null. The fixture's staging SQL ships an engineered literal column (`'austin' AS region`) and a `COALESCE`'d column (`COALESCE(start_time, TIMESTAMP '...') AS start_time_safe`). The LLM reliably proposes `not_null` on every column; `not_null` on a literal is mathematically guaranteed to always-pass; the prune engine deterministically drops it.
+
+The pattern: identify the LLM-driven assertion → identify the input shape that makes it deterministic → engineer the fixture to produce that shape. Apply to any future end-to-end assertion that depends on LLM output.
+
+### Hand-crafted manifest seed when workers can't run live tooling
+
+When a fixture depends on `dbt parse` against a live warehouse (or any tool requiring credentials Ralph workers don't have), ship:
+
+1. A **regen script** (sibling of `tests/fixtures/regenerate.sh`) that documents the maintainer-only command for full reproduction.
+2. A **hand-crafted minimal seed** of the generated artefact, validated by an in-process loads test (no env vars). Workers produce the seed; maintainers run the regen script later for full parity.
+
+Issue #10's `tests/fixtures/dbt_project_austin/{regenerate.sh, target/manifest.json}` is the precedent. The seed manifest contains exactly the model + source the test exercises; the regen script overwrites with the live `dbt parse` output. The committed seed must satisfy `signalforge.manifest.load(fixture_dir)` — test it via a loads-only test that ships in the same commit (DEC-004 of issue #10).
+
+### Multi-surface drift on user-facing model arguments
+
+A user-facing CLI flag's value can drift across surfaces (README example, test argv, plan example, ops-doc example). When a value's correctness depends on the resolver's parsing rules (e.g., `Manifest.get_model` accepts unique_id and file path but NOT bare model names — bare names route to the file-path branch and fail), pin the **canonical form** in ONE place and reference it everywhere.
+
+Issue #10's gotcha: `signalforge generate stg_bikeshare_trips` (bare name) failed with `ModelNotFoundError`; only `signalforge generate models/staging/stg_bikeshare_trips.sql` (file path) and `signalforge generate model.<project>.stg_bikeshare_trips` (unique_id) work. The bare-name form was caught only by Pass 4 of the Quality Gate code review — no test in the unit suite exercises the CLI's full model-arg path against the real `Manifest.get_model`. Mitigation: pre-merge code review explicitly verifies CLI examples by running them locally; the orchestrator should not trust prose alone for resolver-arg shapes.
 
 ## Reference
 
-`plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `plans/super/27-codecov-coverage.md` — DEC-001, DEC-004, DEC-009. `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh` — current implementations.
+`plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `plans/super/27-codecov-coverage.md` — DEC-001, DEC-004, DEC-009. `plans/super/10-e2e-bigquery-smoke.md` — DEC-001, DEC-002, DEC-004, DEC-008, DEC-010, DEC-022 (end-to-end gated tests section). `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh`, `tests/fixtures/dbt_project_austin/regenerate.sh`, `tests/cli/_e2e_helpers.py`, `tests/cli/test_e2e_bigquery_smoke.py` — current implementations.

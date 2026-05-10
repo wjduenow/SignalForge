@@ -62,6 +62,71 @@ rubric, and prints the diff. The full per-flag reference, the
 four-tier exit-code taxonomy, environment variables, and a worked
 example are in [docs/cli-ops.md](docs/cli-ops.md).
 
+## Trying it out
+
+The repo ships a minimal dbt fixture under
+`tests/fixtures/dbt_project_austin/` pointing at the public
+`bigquery-public-data.austin_bikeshare.bikeshare_trips` dataset, so
+you can run `signalforge` end-to-end against a real warehouse with no
+infrastructure beyond a Google Cloud billing project and an Anthropic
+API key. The materialised-sample CTAS scans ~200–500 MB of BigQuery
+(well under $0.01 at on-demand pricing); per-test queries against the
+sample are tiny. The Anthropic side typically incurs ~$0.13 of model
+spend (one draft call + ~84 grade calls on Sonnet 4.6). End-to-end
+wall-clock is roughly 5–6 minutes, dominated by sequential grade calls.
+
+```bash
+# Authenticate to Google Cloud (first run only)
+gcloud auth application-default login
+
+# Set the BigQuery billing project (any GCP project you have query access to)
+export GOOGLE_CLOUD_PROJECT=<your-billing-project>
+
+# Set your Anthropic API key
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Copy the fixture to a writable tmp dir and substitute your billing
+# project into the profile. The committed profiles.yml is oriented at
+# `dbt parse` (it pins `project: bigquery-public-data`, the source);
+# at query time the BigQuery SDK uses `profile.project` as the BILLING
+# project, which you can't bill to `bigquery-public-data` itself.
+mkdir -p /tmp/sf-austin
+cp -r tests/fixtures/dbt_project_austin/. /tmp/sf-austin/
+cat > /tmp/sf-austin/profiles.yml <<EOF
+austin:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: ${GOOGLE_CLOUD_PROJECT}
+      dataset: austin_bikeshare
+      location: US
+      maximum_bytes_billed: 1000000000
+EOF
+
+# Run the canonical example
+signalforge generate models/staging/stg_bikeshare_trips.sql --project-dir /tmp/sf-austin
+```
+
+What to expect: the diff lists drafted column descriptions and
+signal-bearing tests, at least one dropped test with reason
+`always-passes` (bikeshare's primary-key and timestamp columns are
+reliably never-null in the source, so an LLM-drafted `not_null` on
+them is mathematically guaranteed to always-pass — prune drops it),
+and at least one `flagged` artifact — the fixture pins tight grade
+thresholds (`min_pass_rate: 0.95` / `min_mean_score: 0.95`) so the
+LLM-as-judge scrutiny is real.
+
+Use a fresh shell session (or `unset ANTHROPIC_API_KEY` after the
+run) so the key doesn't persist in your bash history.
+
+The same flow runs as a gated maintainer test (`pytest -m e2e --no-cov`).
+For the full walkthrough — what the test proves, prerequisites,
+cost ceiling, troubleshooting — see
+[docs/e2e-smoke-test.md](docs/e2e-smoke-test.md). Full CLI flag
+reference and exit codes: [docs/cli-ops.md](docs/cli-ops.md).
+
 ## CLI
 
 Three subcommands ship in v0.1:

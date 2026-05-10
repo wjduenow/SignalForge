@@ -569,7 +569,22 @@ def cmd_generate(args: argparse.Namespace) -> int:
             grade_config = grade_module.GradeConfig.model_validate(
                 {**grade_config.model_dump(), "min_mean_score": min_score_override}
             )
-        kept_count = prune_result.kept_count
+        # Count artifacts the grader will actually iterate over. The
+        # grade engine's ``_stable_artifact_pairs`` (DEC-018) yields one
+        # entry per (column.description, column.rationale, model.description,
+        # model.rationale, column-scoped test rationale, model-scoped test
+        # rationale) — independent of which tests prune kept. Earlier CLI
+        # versions used ``prune_result.kept_count`` here, which conflated
+        # "tests surviving prune" with "artifacts visible to the grader"
+        # and emitted "0 artifacts" runs when prune dropped everything
+        # (issue #10 follow-up).
+        candidate = draft_outcome.candidate
+        artifact_count = (
+            2 * len(candidate.columns)  # column description + rationale per column
+            + 2  # model description + rationale
+            + sum(len(c.tests) for c in candidate.columns)  # column-scoped test rationales
+            + len(candidate.tests)  # model-scoped test rationales
+        )
         # Honour ``GradeConfig.rubric`` overrides — the operator may
         # ship a custom rubric in ``signalforge.yml grade:`` (or via
         # ``--config``) that has a different criterion count than the
@@ -578,13 +593,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
         # rubric the LLM judge will actually iterate over.
         active_rubric = grade_config.rubric or DEFAULT_RUBRIC
         criteria_count = len(active_rubric)
-        total_calls = kept_count * criteria_count
+        total_calls = artifact_count * criteria_count
         if progress_on:
             emit_progress_entry(
                 4,
                 "grade",
                 (
-                    f"scoring {kept_count} artifacts × {criteria_count} "
+                    f"scoring {artifact_count} artifacts × {criteria_count} "
                     f"criteria ({total_calls} calls)..."
                 ),
             )
