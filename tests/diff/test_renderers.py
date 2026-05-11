@@ -23,6 +23,7 @@ import abc
 
 import pytest
 
+from signalforge.diff import render_to_text
 from signalforge.diff._renderers import AnsiRenderer, MarkdownRenderer, Renderer
 from signalforge.diff.config import DiffConfig
 from signalforge.diff.models import DiffEntry, DiffReport
@@ -851,3 +852,79 @@ def test_markdown_renderer_dynamic_fence_floor_at_three_backticks(
     assert "```diff\n" in output
     # No 4+-backtick fence present.
     assert "````diff" not in output
+
+
+# ---------------------------------------------------------------------------
+# Issue #41 — hostile rationale threaded into DiffEntry.why escapes through
+# both DEC-007 (ANSI strip) and DEC-008 (Markdown HTML-entity escape) at
+# the table-cell sink.
+# ---------------------------------------------------------------------------
+
+
+def test_kept_row_rationale_with_hostile_content_is_escaped_in_markdown(
+    default_config: DiffConfig,
+) -> None:
+    """Issue #41 acceptance #3 — bead 1 now threads candidate ``rationale``
+    into :attr:`DiffEntry.why` for kept rows. A hostile rationale carrying
+    HTML close tags, triple-backticks, pipes, and ANSI control sequences
+    must still flow through the existing DEC-007 strip + DEC-008 markdown
+    escape sinks at the table-cell boundary. Exercised end-to-end via
+    :func:`render_to_text` so the production code path is the one under
+    test (not a unit-level call to ``escape_markdown_scalar``).
+    """
+    # Hostile rationale combining all four threat shapes:
+    #   * ``</details>`` — HTML close-tag injection (DEC-008 ``<``/``>``)
+    #   * triple-backtick — would open a code span / close the outer
+    #     fence if it leaked unescaped (DEC-008 backtick escape)
+    #   * pipe — terminates a GFM table cell early (DEC-008 in_table_cell
+    #     ``&#124;`` encoding)
+    #   * ``\x1b[31m...\x1b[0m`` — SGR colour, must be stripped at the
+    #     input boundary by DEC-007's unconditional ANSI strip
+    hostile_rationale = "</details> ```triple``` | pipe \x1b[31mred\x1b[0m sneak"
+    entry = _kept_entry(why=hostile_rationale)
+    report = _make_report(entries=(entry,))
+
+    cfg = DiffConfig(render_kind="markdown")
+    output = render_to_text(report, config=cfg)
+
+    # DEC-008 — HTML metacharacters in the close-tag are entity-encoded.
+    assert "&lt;/details&gt;" in output
+    # And the raw close-tag must NOT appear anywhere in the rendered
+    # output. (The encoded form contains neither '<' nor '>' so the
+    # check is direct.)
+    assert "</details>" not in output
+
+    # DEC-008 — pipe inside a table cell is HTML-entity-encoded so the
+    # GFM column count survives. The raw pipe still appears as the
+    # row's column-separator characters, but the cell content's pipe
+    # must be encoded.
+    assert "&#124;" in output
+
+    # DEC-008 — triple-backtick is backslash-escaped (each backtick
+    # individually), so the rendered cell carries ``\`\`\``` instead
+    # of a raw ``` run that could open a code span / close the outer
+    # fence. The raw triple-backtick must NOT appear anywhere in the
+    # cell. (It could appear inside the fenced diff block, but the
+    # report here has no unified_diff, so the only place ``` could
+    # appear is the table cell.)
+    assert "\\`\\`\\`" in output
+    assert "```triple```" not in output
+
+    # DEC-007 — the ANSI SGR sequence is stripped UNCONDITIONALLY
+    # before the markdown-escape pass. The plain "red" text survives;
+    # the raw ESC bytes do not.
+    assert "red" in output
+    assert "\x1b[" not in output
+    assert "\x1b[31m" not in output
+
+    # Structural invariant — the table row stays rectangular: 6 cells
+    # means 7 unencoded ``|`` characters in the row. A leaked raw pipe
+    # in the why cell would push the count to 8 and shift columns.
+    row_line = next(
+        line
+        for line in output.splitlines()
+        if "kept" in line and "column.customer_id.description" in line
+    )
+    assert row_line.startswith("| ")
+    assert row_line.endswith(" |")
+    assert row_line.count("|") == 7

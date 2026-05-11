@@ -368,6 +368,31 @@ def _first_failing_grading(
     return None
 
 
+def _truncate_why(text: str, max_chars: int) -> str:
+    """Truncate ``text`` to ``max_chars`` with a U+2026 ellipsis tail.
+
+    Shared helper extracted from :func:`_flagged_why`'s truncation step
+    (issue #41). Empty / whitespace-only input returns the empty string
+    so callers can cascade onto the next fallback in the precedence
+    chain (``CandidateColumn.rationale`` → ``GradingResult.evidence`` →
+    existing fallback). ``max_chars <= 0`` also returns the empty
+    string — a non-positive budget has no room even for the ellipsis.
+
+    For non-empty inputs that exceed ``max_chars``, hard-cut at
+    ``max_chars - 1`` (after :meth:`str.rstrip` on the slice) and append
+    ``"…"`` (U+2026), mirroring the existing :func:`_flagged_why`
+    pattern byte-for-byte. Inputs at or below ``max_chars`` are
+    returned with a trailing :meth:`str.rstrip` only (no ellipsis).
+    """
+    if not text or not text.strip():
+        return ""
+    if max_chars <= 0:
+        return ""
+    if len(text) > max_chars:
+        return text[: max_chars - 1].rstrip() + "…"
+    return text.rstrip()
+
+
 def _flagged_why(failing: GradingResult, *, max_chars: int) -> str:
     """Render the per-row "why" for a flagged tier (DEC-012 + post-QG fix #3).
 
@@ -376,15 +401,22 @@ def _flagged_why(failing: GradingResult, *, max_chars: int) -> str:
     one-line. The dash is the en-dash ``—`` (U+2014) used elsewhere in
     the renderer's per-row why output for consistency with the grade
     sidecar's reasoning summarisation.
+
+    The truncation step delegates to :func:`_truncate_why` (issue #41)
+    so the same one-line cap applies to the rationale → evidence →
+    fallback cascade for kept rows. The ``prefix`` shares the
+    ``max_chars`` budget with ``reasoning`` — the total returned
+    string never exceeds ``max_chars`` (issue #41 review fix). When
+    ``max_chars`` is narrower than the prefix itself, the prefix is
+    returned alone with no separator.
     """
     reasoning = failing.reasoning or ""
-    # Reserve space for the prefix; if the reserved budget is non-positive
-    # (very narrow ``max_chars``), return the prefix as-is.
     prefix = f"failed grading: {failing.criterion_id} — "
-    if max_chars <= 0:
+    if max_chars <= 0 or max_chars < len(prefix):
         return prefix.rstrip()
-    if len(reasoning) > max_chars:
-        reasoning = reasoning[: max_chars - 1].rstrip() + "…"
+    reasoning_budget = max_chars - len(prefix)
+    if len(reasoning) > reasoning_budget:
+        reasoning = _truncate_why(reasoning, reasoning_budget)
     return f"{prefix}{reasoning}".rstrip()
 
 
@@ -395,7 +427,20 @@ def _entry_for_test(
     *,
     max_why_chars: int,
 ) -> DiffEntry:
-    """Build a :class:`DiffEntry` for one :class:`PruneDecision`."""
+    """Build a :class:`DiffEntry` for one :class:`PruneDecision`.
+
+    Kept-row ``why`` precedence (issue #41): the drafter populates
+    ``CandidateTest*.rationale`` per artifact and the grader populates
+    ``GradingResult.evidence``; both carry richer context than the
+    pre-issue boilerplate ``decision.why`` ("ran on 1k sample, 0 failing
+    rows"). The cascade prefers ``decision.test.rationale``, then the
+    first non-empty ``GradingResult.evidence`` for this artifact, then
+    falls back to ``decision.why``. Each candidate cascades on
+    ``None`` or whitespace-only via :func:`_truncate_why` returning
+    the empty string. The cascade only fires on the kept tier — the
+    flagged tier keeps the grading-reason override (post-QG fix #3),
+    and the dropped tier keeps ``decision.why`` verbatim.
+    """
     artifact_id = _resolve_test_artifact_id(decision, args_hashes)
     if decision.decision == "dropped":
         return DiffEntry(
@@ -422,7 +467,29 @@ def _entry_for_test(
             _flagged_why(failing, max_chars=max_why_chars) if failing is not None else decision.why
         )
     else:
-        why = decision.why
+        # Issue #41 cascade for plain ``kept`` rows: rationale →
+        # evidence → existing prune why. Each tier in the cascade is
+        # run through :func:`_truncate_why`; an empty/whitespace result
+        # falls through to the next candidate. The grader's ``evidence``
+        # is picked from the FIRST result with a non-empty evidence
+        # string (criterion-order matches the grader's run order) so
+        # the precedence is deterministic across re-runs. The
+        # ``decision.why`` fallback is also capped at ``max_why_chars``
+        # so a verbose prune reason cannot bypass the per-row budget
+        # (issue #41 review fix); ``decision.why`` is non-empty per
+        # the prune contract, so the final tier always produces a
+        # non-empty result.
+        rationale_candidate = decision.test.rationale or ""
+        evidence_candidate = ""
+        for result in grading_results:
+            if result.evidence and result.evidence.strip():
+                evidence_candidate = result.evidence
+                break
+        why = (
+            _truncate_why(rationale_candidate, max_why_chars)
+            or _truncate_why(evidence_candidate, max_why_chars)
+            or _truncate_why(decision.why, max_why_chars)
+        )
     return DiffEntry(
         artifact_id=artifact_id,
         test_type=decision.test.type,
@@ -449,6 +516,7 @@ def _entries_for_doc(
     *,
     artifact_id: str,
     description: str,
+    rationale: str | None = None,
     grading_index: dict[str, list[GradingResult]],
     max_why_chars: int,
 ) -> DiffEntry:
@@ -466,9 +534,15 @@ def _entries_for_doc(
 
     * The aggregate ``(score, passed)`` flips the tier to ``flagged``
       iff the rubric thresholds tripped (per :func:`_tier_for_kept`).
-    * The why is derived from the first failing criterion (mirroring
-      :func:`_flagged_why`) when flagged, or the first criterion's
-      reasoning when kept.
+    * The flagged-tier ``why`` is derived from the first failing
+      criterion (mirroring :func:`_flagged_why`).
+    * The kept-tier ``why`` follows the issue #41 cascade:
+      ``rationale`` (candidate-supplied) → ``GradingResult.evidence``
+      (first available criterion) → ``description``. The pre-#41
+      source ``grading_results[0].reasoning`` was operator-reported as
+      boilerplate; ``rationale`` and ``evidence`` carry the richer
+      content. The ``_DOC_KEPT_NO_GRADING_WHY`` branch (no grading
+      attached) is preserved verbatim.
     """
     grading_results = grading_index.get(artifact_id, [])
     if not grading_results:
@@ -490,9 +564,27 @@ def _entries_for_doc(
         else:  # pragma: no cover — defensive; flagged ⇒ at least one failing
             why = grading_results[0].reasoning or description
     else:
-        # Kept with grading — surface the first criterion's reasoning,
-        # falling back to the description when reasoning is empty.
-        why = grading_results[0].reasoning or description
+        # Issue #41 cascade for kept-with-grading docs:
+        # candidate ``rationale`` → first non-empty
+        # :attr:`GradingResult.evidence` → ``description`` fallback.
+        # The previous source (``grading_results[0].reasoning``) was
+        # boilerplate per the ticket and is no longer consulted here.
+        # The ``description`` fallback is also capped at
+        # ``max_why_chars`` so a verbose column doc cannot bypass the
+        # per-row budget (issue #41 review fix); a column without a
+        # description would have been ungraded and would not reach
+        # this branch in the first place, so the final tier is
+        # non-empty in practice.
+        evidence_candidate = ""
+        for result in grading_results:
+            if result.evidence and result.evidence.strip():
+                evidence_candidate = result.evidence
+                break
+        why = (
+            _truncate_why(rationale or "", max_why_chars)
+            or _truncate_why(evidence_candidate, max_why_chars)
+            or _truncate_why(description, max_why_chars)
+        )
     return DiffEntry(
         artifact_id=artifact_id,
         test_type=None,
@@ -543,7 +635,10 @@ def _build_entries(
 
     rows: list[DiffEntry] = []
 
-    # Model-level doc artifacts.
+    # Model-level doc artifacts. Issue #41: pass the candidate's
+    # ``rationale`` through to the row builder so the kept-with-grading
+    # ``why`` precedence can prefer it over the boilerplate that
+    # ``grading_results[0].reasoning`` used to surface.
     for field in ("description", "rationale"):
         text = getattr(candidate, field, None)
         if text is None:
@@ -553,6 +648,7 @@ def _build_entries(
             _entries_for_doc(
                 artifact_id=artifact_id,
                 description=text,
+                rationale=candidate.rationale,
                 grading_index=grading_index,
                 max_why_chars=max_why_chars,
             )
@@ -573,6 +669,7 @@ def _build_entries(
                 _entries_for_doc(
                     artifact_id=artifact_id,
                     description=text,
+                    rationale=column.rationale,
                     grading_index=grading_index,
                     max_why_chars=max_why_chars,
                 )
