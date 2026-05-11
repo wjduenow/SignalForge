@@ -33,6 +33,15 @@ walked via :func:`ast.walk`.
 Scan 3 is stricter than the regex-level check in
 ``tests/llm/test_client_shim.py::test_anthropic_client_construction_only_in_shim``
 — that test is the cheap floor; this is the load-bearing AST one.
+
+Scans 2, 4, 5, 6 use :class:`_QualifiedNameCallFinder` (issue #40) so
+import-alias bypasses (``from … import AuditEvent as E; E(...)``) and
+module-attribute bypasses (``from … import models; models.AuditEvent(...)``)
+are caught — not just the bare-name ``AuditEvent(...)`` shape.
+Scan 3 already handles aliasing via :class:`_AttributeCallFinder` and
+keeps that visitor. ``getattr(module, "<Target>")(...)`` is acceptable
+to leave unprotected — too dynamic for AST gating, and any reviewer
+reading ``getattr`` should already be on alert.
 """
 
 from __future__ import annotations
@@ -55,7 +64,12 @@ _SIGNALFORGE_DIR = _REPO_ROOT / "src" / "signalforge"
 
 
 class _NameCallFinder(ast.NodeVisitor):
-    """Records every ``Call(func=Name(id=<target>))`` in the visited tree."""
+    """Records every ``Call(func=Name(id=<target>))`` in the visited tree.
+
+    Kept for the negative self-check below that pins the bare-name shape
+    explicitly. Production scans (2, 4, 5, 6) use
+    :class:`_QualifiedNameCallFinder`, which is strictly stronger.
+    """
 
     def __init__(self, target: str) -> None:
         self._target = target
@@ -63,6 +77,63 @@ class _NameCallFinder(ast.NodeVisitor):
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 — ast API
         if isinstance(node.func, ast.Name) and node.func.id == self._target:
+            self.calls.append((node.lineno, node.col_offset))
+        self.generic_visit(node)
+
+
+class _QualifiedNameCallFinder(ast.NodeVisitor):
+    """Records construction calls of ``<target>`` across the three bypass
+    patterns the project's gated-construction scans must defend against
+    (issue #40).
+
+    Three patterns are caught:
+
+    1. **Bare** — ``Call(func=Name(id=<target>))``. The canonical form
+       after ``from <module> import <target>``.
+    2. **Import alias** — ``Call(func=Name(id=<alias>))`` after a
+       ``from <module> import <target> as <alias>`` statement anywhere
+       earlier in the file. Aliases are tracked module-wide; scope-local
+       shadowing is intentionally NOT modelled — the goal is to detect
+       bypasses, not to type-check.
+    3. **Module-attribute access** — ``Call(func=Attribute(attr=<target>))``,
+       regardless of which ``<obj>`` the attribute is accessed on. Catches
+       ``import <module>; module.<target>(...)``,
+       ``from <pkg> import <module>; module.<target>(...)``, and any
+       other ``something.<target>(...)`` shape.
+
+    The third pattern is deliberately broad: the gated class names
+    (``AuditEvent`` / ``LLMResponseEvent`` / ``PruneEvent`` /
+    ``GradeEvent``) are unique enough across the codebase that an
+    attribute access with the same name is overwhelmingly likely to be
+    the gated class. The blast radius of a false positive is one test
+    failure, which surfaces before merge.
+
+    ``getattr(module, "<target>")(...)`` is acceptable to leave
+    unprotected (the issue documents this) — it is too dynamic to gate
+    via AST shapes, and any reviewer reading ``getattr`` should already
+    be on alert.
+    """
+
+    def __init__(self, target: str) -> None:
+        self._target = target
+        # Aliases that bind to <target>. Seeded with the canonical name so
+        # an unaliased ``from <module> import <target>`` works without an
+        # explicit ImportFrom visit (the bare-name pattern is the common
+        # case).
+        self._aliases: set[str] = {target}
+        self.calls: list[tuple[int, int]] = []
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802 — ast API
+        for alias in node.names:
+            if alias.name == self._target:
+                self._aliases.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 — ast API
+        func = node.func
+        if (isinstance(func, ast.Name) and func.id in self._aliases) or (
+            isinstance(func, ast.Attribute) and func.attr == self._target
+        ):
             self.calls.append((node.lineno, node.col_offset))
         self.generic_visit(node)
 
@@ -120,31 +191,6 @@ class _AttributeCallFinder(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def _scan_dir_for_name_calls(
-    root: Path, *, target: str, excluded_relpaths: set[str]
-) -> list[tuple[Path, int]]:
-    """Walk ``root.rglob('*.py')``; collect ``Call(func=Name(id=target))``
-    hits except in any file whose path relative to ``root`` (POSIX form)
-    is in ``excluded_relpaths``.
-
-    Path-based exclusion (vs basename) prevents accidental shadowing if
-    a future nested module happens to share a name with a sanctioned
-    seam (e.g. a hypothetical ``signalforge/safety/draft/request.py``
-    must not auto-inherit the ``request.py`` exclusion).
-    """
-    hits: list[tuple[Path, int]] = []
-    for path in root.rglob("*.py"):
-        rel = path.relative_to(root).as_posix()
-        if rel in excluded_relpaths:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        finder = _NameCallFinder(target)
-        finder.visit(tree)
-        for line, _col in finder.calls:
-            hits.append((path, line))
-    return hits
-
-
 def _scan_dir_for_attribute_calls(
     root: Path,
     *,
@@ -163,6 +209,32 @@ def _scan_dir_for_attribute_calls(
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"))
         finder = _AttributeCallFinder(obj_name, attr_name)
+        finder.visit(tree)
+        for line, _col in finder.calls:
+            hits.append((path, line))
+    return hits
+
+
+def _scan_dir_for_qualified_name_calls(
+    root: Path, *, target: str, excluded_relpaths: set[str]
+) -> list[tuple[Path, int]]:
+    """Walk ``root.rglob('*.py')``; collect every ``<target>``-construction
+    hit caught by :class:`_QualifiedNameCallFinder` — bare,
+    import-aliased, or attribute-accessed — except in any file whose
+    path relative to ``root`` (POSIX form) is in ``excluded_relpaths``.
+
+    Path-based exclusion (vs basename) prevents accidental shadowing if
+    a future nested module happens to share a name with a sanctioned
+    seam (e.g. a hypothetical ``signalforge/safety/draft/request.py``
+    must not auto-inherit the ``request.py`` exclusion).
+    """
+    hits: list[tuple[Path, int]] = []
+    for path in root.rglob("*.py"):
+        rel = path.relative_to(root).as_posix()
+        if rel in excluded_relpaths:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        finder = _QualifiedNameCallFinder(target)
         finder.visit(tree)
         for line, _col in finder.calls:
             hits.append((path, line))
@@ -188,8 +260,13 @@ def test_audit_event_construction_only_in_safety_request_module() -> None:
     """DEC-013: direct ``AuditEvent(...)`` outside
     ``signalforge.safety.request`` bypasses the fail-closed audit-write
     seam. The AST scan rejects any other location.
+
+    Uses :class:`_QualifiedNameCallFinder` (issue #40) so import-alias
+    (`from … import AuditEvent as E; E(...)`) and module-attribute
+    (`from … import models; models.AuditEvent(...)`) bypasses are also
+    caught — not just bare ``AuditEvent(...)``.
     """
-    hits = _scan_dir_for_name_calls(
+    hits = _scan_dir_for_qualified_name_calls(
         _SAFETY_DIR, target="AuditEvent", excluded_relpaths=_SAFETY_AUDIT_EVENT_EXCLUSIONS
     )
     formatted = "\n".join(f"  {p}:{line}" for p, line in hits)
@@ -208,7 +285,7 @@ def test_audit_event_construction_in_safety_request_module_is_present() -> None:
     """
     request_path = _SAFETY_DIR / "request.py"
     tree = ast.parse(request_path.read_text(encoding="utf-8"))
-    finder = _NameCallFinder("AuditEvent")
+    finder = _QualifiedNameCallFinder("AuditEvent")
     finder.visit(tree)
     assert finder.calls, (
         "Expected AuditEvent(...) call in signalforge.safety.request — "
@@ -291,8 +368,12 @@ _DRAFT_RESPONSE_EVENT_EXCLUSIONS: set[str] = {
 def test_llm_response_event_construction_only_in_draft_audit_module() -> None:
     """DEC-013: direct ``LLMResponseEvent(...)`` outside
     ``signalforge.draft.audit`` bypasses the fail-closed audit-write seam.
+
+    Uses :class:`_QualifiedNameCallFinder` (issue #40) so alias and
+    attribute-access bypasses are caught — not just bare
+    ``LLMResponseEvent(...)``.
     """
-    hits = _scan_dir_for_name_calls(
+    hits = _scan_dir_for_qualified_name_calls(
         _DRAFT_DIR,
         target="LLMResponseEvent",
         excluded_relpaths=_DRAFT_RESPONSE_EVENT_EXCLUSIONS,
@@ -313,7 +394,7 @@ def test_llm_response_event_construction_in_draft_audit_module_is_present() -> N
     """
     audit_path = _DRAFT_DIR / "audit.py"
     tree = ast.parse(audit_path.read_text(encoding="utf-8"))
-    finder = _NameCallFinder("LLMResponseEvent")
+    finder = _QualifiedNameCallFinder("LLMResponseEvent")
     finder.visit(tree)
     assert finder.calls, (
         "Expected LLMResponseEvent(...) call in signalforge.draft.audit — "
@@ -345,8 +426,12 @@ def test_prune_event_construction_only_in_prune_audit_module() -> None:
     ``signalforge.prune.audit`` bypasses the fail-closed JSONL writer —
     the event would never reach disk and the prune decision would be
     unauditable.
+
+    Uses :class:`_QualifiedNameCallFinder` (issue #40) so alias and
+    attribute-access bypasses are caught — not just bare
+    ``PruneEvent(...)``.
     """
-    hits = _scan_dir_for_name_calls(
+    hits = _scan_dir_for_qualified_name_calls(
         _PRUNE_DIR,
         target="PruneEvent",
         excluded_relpaths=_PRUNE_EVENT_EXCLUSIONS,
@@ -367,7 +452,7 @@ def test_prune_event_construction_in_prune_audit_module_is_present() -> None:
     """
     audit_path = _PRUNE_DIR / "audit.py"
     tree = ast.parse(audit_path.read_text(encoding="utf-8"))
-    finder = _NameCallFinder("PruneEvent")
+    finder = _QualifiedNameCallFinder("PruneEvent")
     finder.visit(tree)
     assert finder.calls, (
         "Expected PruneEvent(...) call in signalforge.prune.audit — "
@@ -399,8 +484,12 @@ def test_grade_event_construction_only_in_grade_audit_module() -> None:
     ``signalforge.grade.audit`` bypasses the fail-closed JSONL writer —
     the event would never reach disk and the grade decision would be
     unauditable.
+
+    Uses :class:`_QualifiedNameCallFinder` (issue #40) so alias and
+    attribute-access bypasses are caught — not just bare
+    ``GradeEvent(...)``.
     """
-    hits = _scan_dir_for_name_calls(
+    hits = _scan_dir_for_qualified_name_calls(
         _GRADE_DIR,
         target="GradeEvent",
         excluded_relpaths=_GRADE_EVENT_EXCLUSIONS,
@@ -421,7 +510,7 @@ def test_grade_event_construction_in_grade_audit_module_is_present() -> None:
     """
     audit_path = _GRADE_DIR / "audit.py"
     tree = ast.parse(audit_path.read_text(encoding="utf-8"))
-    finder = _NameCallFinder("GradeEvent")
+    finder = _QualifiedNameCallFinder("GradeEvent")
     finder.visit(tree)
     assert finder.calls, (
         "Expected GradeEvent(...) call in signalforge.grade.audit — "
@@ -749,7 +838,7 @@ def test_fail_closed_writers_use_short_write_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Negative test: confirm the AST visitors detect planted violations
+# Negative tests: confirm the AST visitors detect planted violations
 # ---------------------------------------------------------------------------
 
 
@@ -757,6 +846,14 @@ def test_scan_visitors_catch_planted_violations() -> None:
     """Self-check: feed each visitor a synthetic source string with a
     planted construction call and confirm the call is detected. Without
     this we'd not notice if a refactor broke the visitors silently.
+
+    Covers the bare-name shape (``_NameCallFinder`` for the original
+    self-check) and the attribute shape (``_AttributeCallFinder`` for
+    Scan 3). The strictly-stronger
+    :class:`_QualifiedNameCallFinder` is exercised across all three
+    bypass patterns by
+    :func:`test_qualified_name_finder_catches_all_three_bypass_patterns`
+    below.
     """
     name_src = "def make():\n    return AuditEvent(timestamp=None)\n"
     name_finder = _NameCallFinder("AuditEvent")
@@ -768,20 +865,82 @@ def test_scan_visitors_catch_planted_violations() -> None:
     attr_finder.visit(ast.parse(attr_src))
     assert len(attr_finder.calls) == 1
 
-    response_src = "def make():\n    return LLMResponseEvent(model='x')\n"
-    response_finder = _NameCallFinder("LLMResponseEvent")
-    response_finder.visit(ast.parse(response_src))
-    assert len(response_finder.calls) == 1
 
-    prune_src = "def make():\n    return PruneEvent(model_unique_id='x')\n"
-    prune_finder = _NameCallFinder("PruneEvent")
-    prune_finder.visit(ast.parse(prune_src))
-    assert len(prune_finder.calls) == 1
+# ---------------------------------------------------------------------------
+# Issue #40: planted-violation regression tests for the strong visitor
+# ---------------------------------------------------------------------------
+#
+# Each scan (2, 4, 5, 6) must catch all three bypass patterns: bare,
+# import-alias, and module-attribute. The tests below feed each pattern
+# through :class:`_QualifiedNameCallFinder` and assert the construction
+# call is detected. The parametrisation is per-target rather than per-
+# pattern so a regression that breaks one pattern fails loudly across
+# all four targets (signal over volume — one failing test name names
+# the target; one failing assertion names the pattern).
 
-    grade_src = "def make():\n    return GradeEvent(model_unique_id='x')\n"
-    grade_finder = _NameCallFinder("GradeEvent")
-    grade_finder.visit(ast.parse(grade_src))
-    assert len(grade_finder.calls) == 1
+
+def test_qualified_name_finder_catches_all_three_bypass_patterns() -> None:
+    """Self-check for :class:`_QualifiedNameCallFinder`: every target
+    in {AuditEvent, LLMResponseEvent, PruneEvent, GradeEvent} must be
+    detected across all three bypass patterns.
+    """
+    targets = ("AuditEvent", "LLMResponseEvent", "PruneEvent", "GradeEvent")
+    for target in targets:
+        # Pattern 1: bare ``<target>(...)`` after canonical import.
+        bare_src = (
+            f"from signalforge.x import {target}\ndef make():\n    return {target}(arg=None)\n"
+        )
+        bare = _QualifiedNameCallFinder(target)
+        bare.visit(ast.parse(bare_src))
+        assert len(bare.calls) == 1, (
+            f"{target}: bare-name bypass not detected — "
+            f"_QualifiedNameCallFinder regressed on Pattern 1"
+        )
+
+        # Pattern 2: ``from <module> import <target> as <alias>``.
+        alias_src = (
+            f"from signalforge.x import {target} as _Aliased\n"
+            f"def make():\n"
+            f"    return _Aliased(arg=None)\n"
+        )
+        alias = _QualifiedNameCallFinder(target)
+        alias.visit(ast.parse(alias_src))
+        assert len(alias.calls) == 1, (
+            f"{target}: import-alias bypass not detected — "
+            f"_QualifiedNameCallFinder regressed on Pattern 2 "
+            f"(`from … import {target} as _Aliased; _Aliased(...)`)"
+        )
+
+        # Pattern 3: module-attribute access ``module.<target>(...)``.
+        attr_src = f"from signalforge import x\ndef make():\n    return x.{target}(arg=None)\n"
+        attr = _QualifiedNameCallFinder(target)
+        attr.visit(ast.parse(attr_src))
+        assert len(attr.calls) == 1, (
+            f"{target}: module-attribute bypass not detected — "
+            f"_QualifiedNameCallFinder regressed on Pattern 3 "
+            f"(`module.{target}(...)`)"
+        )
+
+
+def test_qualified_name_finder_ignores_unrelated_calls() -> None:
+    """Negative case: calls to *other* names must not be flagged. Guards
+    against an over-broad visitor that flags everything (which would
+    pass the bypass-detection tests trivially but fail every production
+    scan).
+    """
+    src = (
+        "from signalforge.x import AuditEvent\n"
+        "def make():\n"
+        "    other()\n"
+        "    Other.method()\n"
+        "    obj.something_else()\n"
+        "    return AuditEvent  # name reference, not a call\n"
+    )
+    finder = _QualifiedNameCallFinder("AuditEvent")
+    finder.visit(ast.parse(src))
+    assert finder.calls == [], (
+        f"QualifiedNameCallFinder produced false positives on unrelated calls; got: {finder.calls}"
+    )
 
     # Scan 8 self-check: a synthetic Try-with-except around os.write must
     # be flagged. Guards against a future refactor that breaks
