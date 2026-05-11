@@ -8,10 +8,15 @@ without an audit trail.
 Three load-bearing properties:
 
 * **Atomic concurrent appends** (DEC-005). The writer uses ``os.open`` with
-  ``O_APPEND`` and writes the full record in a single ``os.write`` call. POSIX
-  guarantees ``write(2)`` is atomic up to ``PIPE_BUF`` (4 KiB on Linux); the
+  ``O_APPEND`` and writes the record via a short-write recovery loop. POSIX
+  guarantees ``write(2)`` is atomic for ``O_APPEND`` writes up to ``PIPE_BUF``
+  (4 KiB on Linux), so under normal operation the kernel completes the write
+  in a single syscall and concurrent writers cannot interleave. The
   module-level :data:`_AUDIT_RECORD_LIMIT_BYTES` enforces a 4000-byte cap with
-  a 96-byte margin so concurrent writers cannot interleave partial records.
+  a 96-byte margin to stay below ``PIPE_BUF``. The short-write loop is the
+  documented recovery path for ``EINTR`` (signal-interrupted) calls and
+  pathological short returns on unusual filesystems / kernels — both rare in
+  practice. Mirrors the writer shape in prune / grade / diff / draft.
 * **Fail-closed on every error** (DEC-011). ``write`` catches NO exceptions
   internally — serialisation errors, ``mkdir`` failures, ``open`` failures,
   ``write`` / ``fsync`` failures all propagate raw to the caller. The
@@ -79,12 +84,17 @@ def write(event: AuditEvent, audit_path: Path) -> None:
             or ``redactions`` count. Raised BEFORE any file is opened —
             an oversize record leaves no on-disk artefact.
         OSError: any underlying I/O failure (``PermissionError``,
-            ``FileNotFoundError``, etc.) and any JSON-encoding failure
-            (raw :class:`TypeError` / :class:`ValueError` from
-            :func:`json.dumps`) propagates raw. The caller
+            ``FileNotFoundError``, ``IsADirectoryError``, etc.) from
+            ``mkdir`` / ``os.open`` / ``os.write`` / ``os.fsync`` propagates
+            raw. The caller
             (:func:`signalforge.safety.request.build_llm_request`) wraps
             non-typed propagations as
             :class:`signalforge.safety.errors.AuditWriteError`.
+        TypeError: a JSON-encoding failure from :func:`json.dumps` (e.g. an
+            unserialisable smuggled type) propagates raw. Same orchestrator
+            wrap as ``OSError``.
+        ValueError: same as ``TypeError`` — any other
+            :func:`json.dumps` failure mode propagates raw.
     """
     # Local import keeps ``audit`` importable without forcing the errors module
     # at module-eval time and matches the style used elsewhere in the package.

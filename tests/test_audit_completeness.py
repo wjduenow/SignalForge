@@ -620,11 +620,13 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
 # ---------------------------------------------------------------------------
 
 
-# Each entry is a writer module (relative to ``src/signalforge/``); each
-# module must contain exactly one ``Try`` block guarding ``os.write`` /
-# ``os.fsync`` calls — the ``try / finally`` around ``os.close(fd)``.
-# ``grade/audit.py`` ships two such blocks because it has two writer
-# functions (``write_grade_event`` + ``write_grading_report``).
+# Each entry is ``(relative_module_path, expected_writer_count)`` —
+# ``expected_writer_count`` is the number of writer functions in the
+# module. One writer function contributes exactly one canonical
+# ``Try`` block (``try / finally`` around ``os.close(fd)``) and exactly
+# one ``While`` loop wrapping ``os.write``, so the same count is used
+# by both Scan 8 tests. ``grade/audit.py`` is the only module with
+# more than one writer (``write_grade_event`` + ``write_grading_report``).
 _FAIL_CLOSED_WRITER_MODULES: tuple[tuple[str, int], ...] = (
     ("safety/audit.py", 1),
     ("draft/audit.py", 1),
@@ -635,8 +637,16 @@ _FAIL_CLOSED_WRITER_MODULES: tuple[tuple[str, int], ...] = (
 
 
 def _body_calls_os_syscall(body: list[ast.stmt], names: tuple[str, ...]) -> bool:
-    """Return True iff any node inside ``body`` issues a top-level
+    """Return True iff any node anywhere under ``body`` issues an
     ``os.<name>`` call (``os.write``, ``os.fsync``).
+
+    Walks the full AST under each statement in ``body`` (via
+    :func:`ast.walk`), so nested calls inside an ``if`` / ``while`` /
+    ``try`` body also match — that's load-bearing for Scan 8 because the
+    canonical writer wraps ``os.write`` inside a ``while`` loop AND the
+    ``Try`` block guards both ``os.write`` (inside the loop) and a
+    sibling ``os.fsync``. A shallow scan would miss the wrapped
+    ``os.write`` and undercount the syscalls.
     """
     for node in body:
         for sub in ast.walk(node):
@@ -669,7 +679,7 @@ def test_fail_closed_writers_have_no_except_around_write_fsync() -> None:
     """
     syscall_names = ("write", "fsync")
     failures: list[str] = []
-    for rel_path, expected_try_count in _FAIL_CLOSED_WRITER_MODULES:
+    for rel_path, expected_writer_count in _FAIL_CLOSED_WRITER_MODULES:
         module_path = _SIGNALFORGE_DIR / rel_path
         tree = ast.parse(module_path.read_text(encoding="utf-8"))
 
@@ -683,10 +693,13 @@ def test_fail_closed_writers_have_no_except_around_write_fsync() -> None:
                 if node.handlers:
                     offending.append(node.lineno)
 
-        if syscall_try_count != expected_try_count:
+        # One canonical ``Try`` (``try / finally`` around ``os.close``)
+        # per writer function in the module.
+        if syscall_try_count != expected_writer_count:
             failures.append(
-                f"{rel_path}: expected {expected_try_count} Try block(s) "
-                f"guarding os.write/os.fsync; found {syscall_try_count}."
+                f"{rel_path}: expected {expected_writer_count} Try block(s) "
+                f"guarding os.write/os.fsync (one per writer function); "
+                f"found {syscall_try_count}."
             )
         if offending:
             failures.append(
@@ -712,7 +725,7 @@ def test_fail_closed_writers_use_short_write_loop() -> None:
     functions and contains two such blocks.
     """
     failures: list[str] = []
-    for rel_path, expected_try_count in _FAIL_CLOSED_WRITER_MODULES:
+    for rel_path, expected_writer_count in _FAIL_CLOSED_WRITER_MODULES:
         module_path = _SIGNALFORGE_DIR / rel_path
         tree = ast.parse(module_path.read_text(encoding="utf-8"))
 
@@ -723,9 +736,10 @@ def test_fail_closed_writers_use_short_write_loop() -> None:
             if _body_calls_os_syscall(node.body, ("write",)):
                 looped_write_count += 1
 
-        if looped_write_count < expected_try_count:
+        # One short-write ``While`` loop per writer function.
+        if looped_write_count < expected_writer_count:
             failures.append(
-                f"{rel_path}: expected at least {expected_try_count} short-write "
+                f"{rel_path}: expected at least {expected_writer_count} short-write "
                 f"loop(s) (one per writer function); found {looped_write_count}. "
                 f"A single unlooped os.write can produce a partial JSONL record "
                 f"under EINTR / short-write conditions."

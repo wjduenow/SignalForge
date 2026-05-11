@@ -74,6 +74,14 @@ _LOGGER.info("audit event: %s", json.dumps({"unique_id": event.model_unique_id, 
 
 If you add a new module that genuinely needs to construct an `LLMRequest` (e.g., a deserialiser for resumption), update the AST-scan exclusion list AND document the audit-write seam. Don't suppress the test.
 
+## Fail-closed writer shape — Scan 8 covers all five writers (issue #38)
+
+`tests/test_audit_completeness.py::test_fail_closed_writers_have_no_except_around_write_fsync` and `test_fail_closed_writers_use_short_write_loop` are the eighth AST scan in the project. They walk every fail-closed writer module — `signalforge.{safety,draft,prune,grade}.audit` and `signalforge.diff._sidecar` — and assert: (a) no `except` handler may wrap a `Try` whose body issues `os.write` / `os.fsync` (only a `try / finally` around `os.close(fd)` is permitted); (b) every writer function uses a `while` loop around `os.write` so short writes (`EINTR`, pathological short returns) don't produce partial JSONL records.
+
+The typed-error wrap (`AuditWriteError`, `LLMResponseAuditWriteError`, `PruneAuditWriteError`, `GradeAuditWriteError`, `DiffSidecarWriteError`) lives at the orchestrator boundary (`build_llm_request`, `draft_from_request`, `prune_tests`, `grade_artifacts`, `render_diff`), not inside the writer. `AuditRecordTooLargeError` (and its layer-specific cousins) raises from inside the writer — pre-open, so no on-disk artefact — and propagates as-is.
+
+When a v0.3 stage ships a sixth fail-closed writer (a CLI run-history audit, a multi-model batch checkpointer, etc.), extend `_FAIL_CLOSED_WRITER_MODULES` in the scan to a sixth entry. The writer module must mirror the prune/grade/diff template verbatim: serialise → size-check → `mkdir -p` → `os.open(O_APPEND | O_CREAT | O_WRONLY, 0o600)` → short-write `while` loop → `os.fsync` → close. The orchestrator owns the typed wrap.
+
 ## Pydantic v2 `with_mode` re-runs validators (DEC-018)
 
 `SafetyPolicy.with_mode(mode)` does NOT use `model_copy(update=...)` — that path silently skips `@model_validator(mode="after")`, which means going through the documented CLI override seam would silently enable sample mode without emitting the DEC-021 WARNING.
