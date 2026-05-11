@@ -130,7 +130,7 @@ Inline review (scope is bounded: one flag, one new module, one new ABC method, n
 | **DEC-012** | Heuristic: `3.5 tests/column` average | Derived from the canonical Austin e2e fixture (`stg_bikeshare_trips`: 11 columns yielding ~38 candidate tests pre-prune). Documented in CLI footer; not user-configurable in v0.1. |
 | **DEC-013** | Single INFO log at end-of-run via lazy-format JSON | One emission with `{run_id, model_unique_id, draft_tokens, grade_tokens, total_usd, total_bytes, duration_seconds, price_table_version}`. Falls under the 6-dir grep gate. No DEBUG / WARNING beyond DEC-005's partial-failure WARN. |
 | **DEC-014** | No new audit-event class, no new fail-closed writer | `--estimate` produces no durable artefact in v0.1. No 8th AST scan; AST-scan count stays at 7. |
-| **DEC-015** | 5-surface parity story-gated | The Docs story (US-006) is the parity gate. Story acceptance requires all five surfaces (argparse help, handler docstring, `docs/cli-ops.md` § Flag reference, test name, this DEC) updated in the same PR. |
+| **DEC-015** | 5-surface parity story-gated | The Docs story (US-006) is the parity gate. Story acceptance requires all five surfaces (argparse help, handler docstring, `docs/cli-ops.md` § Flag reference, test name, this DEC) updated in the same PR. **Post-implementation (US-006):** parity reconciled — `docs/cli-ops.md` § Flag reference gained the `--estimate` entry, `README.md` § Quick start gained the one-line pointer, `CLAUDE.md` § Public API surface carries the `signalforge.llm.pricing` + `estimate_query_bytes` + `EstimateNotSupportedError` additions from US-001/US-002, and this DEC records the gate as closed. |
 
 ## Detailed breakdown
 
