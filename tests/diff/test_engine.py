@@ -1342,6 +1342,30 @@ class TestTruncateWhy:
         assert _truncate_why("anything", -1) == ""
 
 
+def test_flagged_why_truncates_long_reasoning_via_truncate_why_helper() -> None:
+    # Pins the post-#41 delegation: _flagged_why hands its truncation
+    # step to _truncate_why when reasoning exceeds max_chars. Existing
+    # flagged-tier integration tests use short reasoning that never
+    # enters the truncation branch, leaving the delegation call
+    # uncovered; this unit test exercises it directly.
+    from signalforge.diff.engine import _flagged_why
+
+    failing = GradingResult(
+        artifact_id="test.column.x.not_null",
+        criterion_id="clarity",
+        score=0.2,
+        passed=False,
+        evidence="",
+        reasoning="a" * 200,
+    )
+    out = _flagged_why(failing, max_chars=20)
+
+    assert out.startswith("failed grading: clarity — ")
+    assert out.endswith("…")
+    reasoning_segment = out.split(" — ", 1)[1]
+    assert len(reasoning_segment) == 20
+
+
 def test_kept_test_why_prefers_candidate_rationale(project_dir: Path) -> None:
     """Issue #41 cascade tier 1: a kept test with a non-empty rationale
     on the ``CandidateTest`` surfaces that rationale in
