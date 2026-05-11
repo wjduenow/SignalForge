@@ -262,6 +262,12 @@ Multi-error reporting (DEC-008): when more than one block fails,
 than short-circuiting on the first. Stdout is silent on success
 (git-style); stderr carries the failures.
 
+The Quick Start in [`README.md`](../README.md#5-validate-config-signalforge-lint)
+runs `signalforge lint` immediately after the fixture is prepared and
+before the first `signalforge generate` call — sub-second, free, and
+catches `extra="forbid"` typos (e.g. `safety: { mdoel: ... }`) that
+would otherwise surface only after a billable LLM round-trip.
+
 ### `signalforge version`
 
 Print the same string as `signalforge --version` and exit 0. Both
