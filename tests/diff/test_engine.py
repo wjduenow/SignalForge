@@ -1344,9 +1344,9 @@ class TestTruncateWhy:
 
 def test_flagged_why_truncates_long_reasoning_via_truncate_why_helper() -> None:
     # Pins the post-#41 delegation: _flagged_why hands its truncation
-    # step to _truncate_why when reasoning exceeds max_chars. Existing
-    # flagged-tier integration tests use short reasoning that never
-    # enters the truncation branch, leaving the delegation call
+    # step to _truncate_why when reasoning exceeds the per-row budget.
+    # Existing flagged-tier integration tests use short reasoning that
+    # never enters the truncation branch, leaving the delegation call
     # uncovered; this unit test exercises it directly.
     from signalforge.diff.engine import _flagged_why
 
@@ -1358,12 +1358,54 @@ def test_flagged_why_truncates_long_reasoning_via_truncate_why_helper() -> None:
         evidence="",
         reasoning="a" * 200,
     )
-    out = _flagged_why(failing, max_chars=20)
+    out = _flagged_why(failing, max_chars=80)
 
     assert out.startswith("failed grading: clarity — ")
     assert out.endswith("…")
-    reasoning_segment = out.split(" — ", 1)[1]
-    assert len(reasoning_segment) == 20
+    # Total output (prefix + reasoning) never exceeds max_chars per
+    # the issue #41 review fix that includes prefix in the budget.
+    assert len(out) <= 80
+
+
+def test_flagged_why_total_output_never_exceeds_max_chars() -> None:
+    # Pins the prefix-budget invariant: the prefix shares the
+    # max_chars budget with reasoning. Pre-fix, the helper budgeted
+    # reasoning against the full max_chars and the total (prefix +
+    # reasoning) routinely overran the per-row cap.
+    from signalforge.diff.engine import _flagged_why
+
+    failing = GradingResult(
+        artifact_id="test.column.x.not_null",
+        criterion_id="clarity",
+        score=0.2,
+        passed=False,
+        evidence="",
+        reasoning="a" * 500,
+    )
+    for budget in (40, 80, 120, 200):
+        out = _flagged_why(failing, max_chars=budget)
+        assert len(out) <= budget, f"max_chars={budget}, got {len(out)}: {out!r}"
+
+
+def test_flagged_why_returns_prefix_only_when_budget_narrower_than_prefix() -> None:
+    # Pins the degenerate-budget behaviour: when max_chars is below
+    # the prefix length, the helper returns the prefix alone (no
+    # trailing en-dash + empty reasoning shape).
+    from signalforge.diff.engine import _flagged_why
+
+    failing = GradingResult(
+        artifact_id="test.column.x.not_null",
+        criterion_id="clarity",
+        score=0.2,
+        passed=False,
+        evidence="",
+        reasoning="some reasoning here",
+    )
+    out = _flagged_why(failing, max_chars=5)
+    # Prefix length ~26 chars > 5; returns prefix-only without
+    # the trailing en-dash whitespace.
+    assert "—" not in out or out.rstrip().endswith("clarity —")
+    assert "some reasoning" not in out
 
 
 def test_kept_test_why_prefers_candidate_rationale(project_dir: Path) -> None:

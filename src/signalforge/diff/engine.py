@@ -404,17 +404,19 @@ def _flagged_why(failing: GradingResult, *, max_chars: int) -> str:
 
     The truncation step delegates to :func:`_truncate_why` (issue #41)
     so the same one-line cap applies to the rationale → evidence →
-    fallback cascade for kept rows. Output is byte-identical to the
-    pre-extraction implementation for non-empty ``failing.reasoning``.
+    fallback cascade for kept rows. The ``prefix`` shares the
+    ``max_chars`` budget with ``reasoning`` — the total returned
+    string never exceeds ``max_chars`` (issue #41 review fix). When
+    ``max_chars`` is narrower than the prefix itself, the prefix is
+    returned alone with no separator.
     """
     reasoning = failing.reasoning or ""
-    # Reserve space for the prefix; if the reserved budget is non-positive
-    # (very narrow ``max_chars``), return the prefix as-is.
     prefix = f"failed grading: {failing.criterion_id} — "
-    if max_chars <= 0:
+    if max_chars <= 0 or max_chars < len(prefix):
         return prefix.rstrip()
-    if len(reasoning) > max_chars:
-        reasoning = _truncate_why(reasoning, max_chars)
+    reasoning_budget = max_chars - len(prefix)
+    if len(reasoning) > reasoning_budget:
+        reasoning = _truncate_why(reasoning, reasoning_budget)
     return f"{prefix}{reasoning}".rstrip()
 
 
@@ -471,7 +473,12 @@ def _entry_for_test(
         # falls through to the next candidate. The grader's ``evidence``
         # is picked from the FIRST result with a non-empty evidence
         # string (criterion-order matches the grader's run order) so
-        # the precedence is deterministic across re-runs.
+        # the precedence is deterministic across re-runs. The
+        # ``decision.why`` fallback is also capped at ``max_why_chars``
+        # so a verbose prune reason cannot bypass the per-row budget
+        # (issue #41 review fix); ``decision.why`` is non-empty per
+        # the prune contract, so the final tier always produces a
+        # non-empty result.
         rationale_candidate = decision.test.rationale or ""
         evidence_candidate = ""
         for result in grading_results:
@@ -481,7 +488,7 @@ def _entry_for_test(
         why = (
             _truncate_why(rationale_candidate, max_why_chars)
             or _truncate_why(evidence_candidate, max_why_chars)
-            or decision.why
+            or _truncate_why(decision.why, max_why_chars)
         )
     return DiffEntry(
         artifact_id=artifact_id,
@@ -562,6 +569,12 @@ def _entries_for_doc(
         # :attr:`GradingResult.evidence` → ``description`` fallback.
         # The previous source (``grading_results[0].reasoning``) was
         # boilerplate per the ticket and is no longer consulted here.
+        # The ``description`` fallback is also capped at
+        # ``max_why_chars`` so a verbose column doc cannot bypass the
+        # per-row budget (issue #41 review fix); a column without a
+        # description would have been ungraded and would not reach
+        # this branch in the first place, so the final tier is
+        # non-empty in practice.
         evidence_candidate = ""
         for result in grading_results:
             if result.evidence and result.evidence.strip():
@@ -570,7 +583,7 @@ def _entries_for_doc(
         why = (
             _truncate_why(rationale or "", max_why_chars)
             or _truncate_why(evidence_candidate, max_why_chars)
-            or description
+            or _truncate_why(description, max_why_chars)
         )
     return DiffEntry(
         artifact_id=artifact_id,
