@@ -78,6 +78,7 @@ from signalforge import manifest as manifest_module
 from signalforge import prune as prune_module
 from signalforge import safety as safety_module
 from signalforge import warehouse as warehouse_module
+from signalforge.cli import _estimate as estimate_module
 from signalforge.cli._helpers import (
     canonicalise_user_path,
     emit_progress_done,
@@ -213,6 +214,21 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "the diff to stdout, but write nothing — neither the "
             "schema.yml nor the .signalforge/diff.json sidecar. "
             "Overrides the default-on sidecar (DEC-010)."
+        ),
+    )
+    # US-005 of #36 — pre-flight cost preview. Mutually exclusive with
+    # --write / --dry-run (the argparse group already enforces this →
+    # SystemExit(2) which ``main`` converts to exit code 2). Runs the
+    # full prelude (configs + profile + adapter + anthropic client) and
+    # the in-CLI estimate engine + renderer; no billable Anthropic or
+    # warehouse calls are made.
+    write_group.add_argument(
+        "--estimate",
+        action="store_true",
+        help=(
+            "Print pre-flight cost estimate (uses count_tokens + "
+            "BigQuery dryRun only; no billable Anthropic or warehouse "
+            "calls); mutually exclusive with --write / --dry-run."
         ),
     )
     # US-006 / DEC-020 — diff renderer kind selection.
@@ -410,6 +426,22 @@ def cmd_generate(args: argparse.Namespace) -> int:
     The prune overrides apply via :meth:`PruneConfig.model_validate`
     (NOT ``model_copy(update=...)``) so every Pydantic validator
     re-runs — DEC-012 of ``plans/super/22-temp-table-sample.md``.
+
+    ``--estimate`` short-circuit (US-005 of #36, DEC-009): when set,
+    the handler runs the full prelude (manifest + model + profile +
+    adapter + every stage config + anthropic client) so the operator
+    catches typos in ``signalforge.yml`` / ``--profiles-dir`` BEFORE
+    any billable call, then skips the four pipeline orchestrators
+    (``draft_schema`` / ``prune_tests`` / ``grade_artifacts`` /
+    ``render_diff``) and dispatches to
+    :func:`signalforge.cli._estimate.estimate` +
+    :func:`signalforge.cli._estimate.render` instead. The renderer's
+    output goes to stdout; exit 0 on success. Mutually exclusive with
+    ``--write`` / ``--dry-run`` (argparse mutex group → exit 2).
+    Partial-failure degrade for the warehouse-bytes section is owned
+    by the estimate engine (DEC-005) — no extra CLI handling needed;
+    the resulting ``EstimateReport.warehouse_unavailable_reason`` is
+    rendered as ``<unavailable: <ErrorClass>>`` by the renderer.
     """
     # US-007 — observability: configure logging and the progress gate
     # BEFORE any pipeline work. ``--quiet`` and ``--verbose`` are mutex
@@ -473,6 +505,46 @@ def cmd_generate(args: argparse.Namespace) -> int:
         # 2. Warehouse profile + adapter.
         profile = warehouse_module.load_profile(project_dir)
         adapter = _make_warehouse_adapter(profile)
+
+        # ---- US-005 of #36 --- --estimate short-circuit -------------
+        # DEC-009: run the FULL prelude (every config load + anthropic
+        # client) before dispatching to the estimate engine, so the
+        # operator catches typos in signalforge.yml / --profiles-dir
+        # BEFORE any LLM call. Skip ONLY the four pipeline orchestrators
+        # (draft_schema / prune_tests / grade_artifacts / render_diff).
+        # The engine handles its own partial-failure degrade for the
+        # warehouse-bytes step (DEC-005); every other failure (LLM auth,
+        # bad config, unknown model) propagates through the existing
+        # try/except Exception boundary below.
+        if getattr(args, "estimate", False):
+            safety_module.load_safety_config(project_dir)
+            draft_config = draft_module.load_draft_config(project_dir)
+            grade_config = grade_module.load_grade_config(project_dir)
+            prune_config = prune_module.load_prune_config(project_dir)
+            diff_module.load_diff_config(project_dir)
+            client = _make_anthropic_client()
+            if client is None:
+                # The default factory returns None to let the underlying
+                # stages lazy-construct via signalforge.llm._client.
+                # The estimate engine needs a concrete client; build one
+                # here through the same single SDK seam so any
+                # LLMAuthError surfaces at the existing panic boundary
+                # → tier 3 via _EXCEPTION_TO_EXIT_CODE.
+                from signalforge.llm._client import _make_anthropic_client as _llm_make_client
+
+                client = _llm_make_client()
+            report = estimate_module.estimate(
+                model,
+                manifest,
+                draft_config,
+                grade_config,
+                prune_config,
+                adapter,
+                client,
+                project_dir=project_dir,
+            )
+            print(estimate_module.render(report))
+            return 0
 
         # ---- 1/5: safety -----------------------------------------------
         # US-007 / DEC-014 / DEC-026 — progress lines wrap each stage
