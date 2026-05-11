@@ -1,0 +1,34 @@
+# Multi-model fixture for issue #37 (--select integration tests, US-006).
+# Three models across two paths and two tags, used by tests/manifest/
+# test_multi_fixture_loads.py and (in US-007) by CLI integration tests
+# exercising the --select selector grammar against fakes.
+#
+# Mirrors tests/fixtures/dbt_project_austin/dbt_project.yml. No dbt run
+# is invoked against this project; the committed target/manifest.json is
+# hand-crafted and regenerated via regenerate.sh (maintainer-only).
+name: dbt_project_multi
+version: 1.0.0
+config-version: 2
+
+profile: dbt_project_multi
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: target
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  dbt_project_multi:
+    staging:
+      +materialized: view
+      +tags: ["staging"]
+    marts:
+      +materialized: table
+      +tags: ["marts"]
