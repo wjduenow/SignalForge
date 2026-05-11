@@ -5,7 +5,7 @@
 - **Ticket:** [#35](https://github.com/wjduenow/SignalForge/issues/35)
 - **Branch:** `feature/35-prune-enabled-doc-reframe` (off `dev`)
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/35-prune-enabled-doc-reframe`
-- **Phase:** detailing
+- **Phase:** devolved
 - **Sessions:** 1 (started 2026-05-11)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.2 (first-run UX repair — onboarding promise of "I can try this safely")
@@ -408,9 +408,19 @@ After all eight stories ship:
 
 ## Beads Manifest
 
-To be filled in at devolve time:
-
-- **Epic ID:** `<bd_TBD>`
-- **Story IDs:** US-001 → `<bd_TBD>`, US-002 → `<bd_TBD>`, US-003 → `<bd_TBD>`, US-004 → `<bd_TBD>`, US-005 → `<bd_TBD>`, US-006 → `<bd_TBD>`, US-007 → `<bd_TBD>`, US-008 → `<bd_TBD>`
-- **Dependencies:** US-002 → US-001 → none; US-003 → US-002; US-004 → US-002; US-005 → US-002; US-006 → US-005; US-007 → US-006; US-008 → US-007
+- **Epic ID:** `bd_1-scaffolding-yxl`
+- **PR (plan):** [#64](https://github.com/wjduenow/SignalForge/pull/64) (draft, base `dev`)
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/35-prune-enabled-doc-reframe`
+
+| Story | Beads ID | Depends on |
+|---|---|---|
+| US-001 — PruneConfig.enabled field | `bd_1-scaffolding-yxl.1` | none (ready) |
+| US-002 — engine short-circuit | `bd_1-scaffolding-yxl.2` | US-001 |
+| US-003 — CLI INFO emission | `bd_1-scaffolding-yxl.3` | US-002 |
+| US-004 — docs reframe | `bd_1-scaffolding-yxl.4` | US-002 |
+| US-005 — engine short-circuit tests | `bd_1-scaffolding-yxl.5` | US-002 |
+| US-006 — CLAUDE.md + rule file | `bd_1-scaffolding-yxl.6` | US-005 |
+| US-007 — Quality Gate | `bd_1-scaffolding-yxl.7` | US-001…US-006 |
+| US-008 — Patterns & Memory | `bd_1-scaffolding-yxl.8` | US-007 |
+
+**Ready queue at devolve:** US-001 (the epic itself surfaces as ready too — it's the umbrella, not a unit of work).
