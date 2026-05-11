@@ -30,6 +30,13 @@ import logging
 import sys
 from pathlib import Path
 from types import TracebackType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Avoid a runtime circular import: ``signalforge.cli.generate`` imports
+    # this module's helpers, and :func:`format_batch_summary` needs the
+    # private ``_BatchOutcome`` dataclass shape only at type-check time.
+    from signalforge.cli.generate import _BatchOutcome
 
 from signalforge.cli.errors import (
     CliError,
@@ -141,14 +148,23 @@ from signalforge.warehouse._path_safety import canonicalise_path
 
 __all__ = [
     "canonicalise_user_path",
+    "emit_batch_progress_entry",
     "emit_progress_done",
     "emit_progress_entry",
+    "format_batch_summary",
     "format_elapsed",
     "format_error_to_stderr",
     "map_exception_to_exit_code",
     "setup_logging",
     "should_emit_progress",
 ]
+
+# Issue #37 / US-005 / DEC-009 — failure list cap. Operators running a
+# pathological batch should still see the first 50 failures named (so
+# they can act on a representative sample) plus a single ``... and <K>
+# more`` line for the overflow. The cap is documented and tested for
+# stability.
+_BATCH_SUMMARY_FAILURE_CAP: int = 50
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +498,90 @@ def emit_progress_done(stage_n: int, stage_name: str, elapsed_seconds: float) ->
         file=sys.stderr,
         flush=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# Batch summary + per-model progress prefix (issue #37 / US-005 — DEC-005,
+# DEC-009, DEC-014)
+# ---------------------------------------------------------------------------
+
+
+def format_batch_summary(outcome: _BatchOutcome) -> str:
+    """Return the DEC-005 stderr summary for a finished :func:`_run_batch`.
+
+    Headline (always emitted) is locked verbatim by
+    ``test_format_batch_summary_headline_shape``:
+
+    ::
+
+        Generated <K> kept / <L> dropped / <J> flagged across <M> models in <T>s
+
+    Failure block (emitted when ≥1 per-model outcome has ``exit_code != 0``):
+
+    ::
+
+        <N> models failed:
+          - <model_unique_id>        exit <code>  (<ExceptionClass>)
+          - ...
+
+    The failure list is capped at :data:`_BATCH_SUMMARY_FAILURE_CAP` (50)
+    entries; overflow renders ``  ... and <K> more`` (DEC-009).
+
+    ``<T>`` is the wall-clock from :class:`_BatchOutcome.duration_seconds`
+    formatted to one decimal place; the kept / dropped / flagged counts
+    are summed across every per-model outcome (failed-model contributions
+    are zero per :class:`_SingleModelOutcome`'s contract).
+
+    The helper accepts the typed :class:`_BatchOutcome` for typing
+    clarity; the contract is a pure-string return — callers own the
+    stderr write so emission stays gated at the call site (mirrors
+    :func:`emit_progress_entry`'s shape).
+    """
+    per_model = outcome.per_model
+    kept = sum(o.kept_count for o in per_model)
+    dropped = sum(o.dropped_count for o in per_model)
+    flagged = sum(o.flagged_count for o in per_model)
+    matched = len(per_model)
+    duration = outcome.duration_seconds
+
+    failures = tuple(o for o in per_model if o.exit_code != 0)
+    failed_count = len(failures)
+
+    lines: list[str] = [
+        f"Generated {kept} kept / {dropped} dropped / {flagged} flagged "
+        f"across {matched} models in {duration:.1f}s"
+    ]
+    if failed_count == 0:
+        return "\n".join(lines) + "\n"
+
+    lines.append(f"{failed_count} models failed:")
+    # Cap at the documented limit; overflow gets one ``... and <K> more`` line.
+    named = failures[:_BATCH_SUMMARY_FAILURE_CAP]
+    # Column-align the bullet body for human readability. ``id`` is left
+    # padded to the longest named-id length (capped at 50 to bound the
+    # padding for pathological model names); narrower ids land in a
+    # consistent column with ``exit <code>``.
+    id_width = max((len(o.model_unique_id) for o in named), default=0)
+    id_width = min(id_width, 50)
+    for o in named:
+        klass = o.exception_class_name or "Exception"
+        lines.append(f"  - {o.model_unique_id:<{id_width}}  exit {o.exit_code}  ({klass})")
+    overflow = failed_count - _BATCH_SUMMARY_FAILURE_CAP
+    if overflow > 0:
+        lines.append(f"  ... and {overflow} more")
+    return "\n".join(lines) + "\n"
+
+
+def emit_batch_progress_entry(model_unique_id: str, batch_index: int, batch_count: int) -> None:
+    """Emit a single ``[i/N] <model_unique_id>`` line to stderr.
+
+    Callers are responsible for the TTY gate via
+    :func:`should_emit_progress`; this helper unconditionally writes when
+    invoked, mirroring :func:`emit_progress_entry`'s contract. The
+    callsite-level gate keeps the helper trivial and lets the batch
+    driver make a single decision once at startup.
+    """
+    print(f"[{batch_index}/{batch_count}] {model_unique_id}", file=sys.stderr, flush=True)
 
 
 def _safe_excepthook(
