@@ -31,7 +31,13 @@ import sys
 from pathlib import Path
 from types import TracebackType
 
-from signalforge.cli.errors import CliError, CliInputError, CliPathError
+from signalforge.cli.errors import (
+    CliError,
+    CliInputError,
+    CliPathError,
+    CliSelectorNoMatchError,
+    CliSelectorParseError,
+)
 
 # --- per-stage public-surface imports for the exit-code table ---------------
 # Importing from each ``signalforge.<stage>`` package mirrors how the rest of
@@ -238,6 +244,13 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     DraftError: 2,
     # CLI-layer input-shape errors.
     CliInputError: 2,
+    # Selector-failure wrappers (issue #37 / DEC-007 — US-002): both
+    # subclass ``CliInputError``; explicit entries here so the 7th AST
+    # scan in ``tests/test_audit_completeness.py`` discovers them. Both
+    # tier 2 (input-validation) — parse failure is malformed input,
+    # zero-match mirrors ``ModelNotFoundError``'s tier.
+    CliSelectorParseError: 2,
+    CliSelectorNoMatchError: 2,
     # ---- Tier 3: API / external dep ---------------------------------------
     # LLM connectivity / quota / SDK issues.
     LLMError: 3,

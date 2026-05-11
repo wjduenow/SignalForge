@@ -28,12 +28,20 @@ from signalforge.cli._helpers import (
     map_exception_to_exit_code,
     setup_logging,
 )
-from signalforge.cli.errors import CliError, CliInputError, CliPathError
+from signalforge.cli.errors import (
+    CliError,
+    CliInputError,
+    CliPathError,
+    CliSelectorNoMatchError,
+    CliSelectorParseError,
+)
 
 __all__ = [
     "CliError",
     "CliInputError",
     "CliPathError",
+    "CliSelectorNoMatchError",
+    "CliSelectorParseError",
     "canonicalise_user_path",
     "format_error_to_stderr",
     "main",
