@@ -72,6 +72,7 @@ from signalforge.grade import (
     GradeRubricError,
 )
 from signalforge.llm import (
+    EstimateUnknownModelError,
     LLMAuthError,
     LLMCacheTooLargeError,
     LLMConnectionError,
@@ -113,6 +114,7 @@ from signalforge.safety import (
 from signalforge.warehouse import (
     BytesBilledExceededError,
     ColumnNotFoundError,
+    EstimateNotSupportedError,
     InvalidIdentifierError,
     ManifestProjectNotFoundError,
     ManifestSchemaNotFoundError,
@@ -232,6 +234,11 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # Drafter base-class catches (concrete leaves above already typed; the
     # base resolves here for any forward-compat subclass).
     DraftError: 2,
+    # ``--estimate`` cost-preview: the operator picked a model the price
+    # table doesn't know — input-shape error, not external-dep failure.
+    # See US-001 of issue #36 and the AC tying tier 2 to "looked-up
+    # identifier not in a static table" failures.
+    EstimateUnknownModelError: 2,
     # CLI-layer input-shape errors.
     CliInputError: 2,
     # ---- Tier 3: API / external dep ---------------------------------------
@@ -263,6 +270,12 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # catch surface, or via the lint subcommand).
     MaterialisationFailedError: 3,
     MaterialisationNotSupportedError: 3,
+    # Query-bytes estimation seam (issue #36 / US-002): the active
+    # adapter does not support ``estimate_query_bytes`` (any non-BigQuery
+    # adapter in v0.2). External-dep tier so the ``--estimate`` CLI flow
+    # surfaces the typed exception with its locked remediation rather
+    # than misclassifying it as input-shape.
+    EstimateNotSupportedError: 3,
     # Audit-write durability across every fail-closed seam — when any of
     # these fire the disk hand-off didn't happen, which is an external-dep
     # state we couldn't recover.

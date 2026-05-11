@@ -59,6 +59,7 @@ from typing import Any
 from signalforge.warehouse._sql_safety import validate_identifier, validate_test_sql
 from signalforge.warehouse.adapters._client import (
     _BQClientProtocol,
+    _make_dry_run_job_config,
     _make_query_job_config,
     make_real_client,
     map_bq_exception,
@@ -965,6 +966,63 @@ class BigQueryAdapter(WarehouseAdapter):
             # separate dry_run on the inner SQL.
             row_schema=None,
         )
+
+    # ------------------------------------------------------------------
+    # estimate_query_bytes — US-002 of issue #36.
+    # ------------------------------------------------------------------
+
+    def estimate_query_bytes(self, sql: str) -> int:
+        """Estimate bytes BigQuery would process for ``sql`` via dry_run.
+
+        Issues one ``client.query(sql, job_config=...)`` call with
+        ``QueryJobConfig(dry_run=True, use_query_cache=False)`` and
+        returns ``int(job.total_bytes_processed)``. BigQuery does not
+        bill bytes for a dry_run, so the job config deliberately does
+        NOT set ``maximum_bytes_billed`` — a cap on something that
+        never bills would be dead config (US-002 of issue #36;
+        DEC-004 of the plan).
+
+        ``sql`` is subject to the same cheap rejects as
+        :meth:`run_test_sql` (no ``;``, no ``--``, balanced parens) via
+        :func:`signalforge.warehouse._sql_safety.validate_test_sql`.
+
+        SDK / network / quota failures route through
+        :func:`signalforge.warehouse.adapters._client.map_bq_exception`
+        — auth surfaces as :class:`WarehouseAuthError`, BadRequest as
+        :class:`QuerySyntaxError` or :class:`BytesBilledExceededError`,
+        etc. (mirrors :meth:`run_test_sql` / :meth:`sample_rows`).
+        """
+        validate_test_sql(sql)
+
+        try:
+            from signalforge import __version__ as _pkg_version
+
+            job = self._get_client().query(
+                sql,
+                job_config=_make_dry_run_job_config(
+                    stage="warehouse_estimate_query_bytes",
+                    version=_pkg_version,
+                ),
+            )
+        except Exception as exc:
+            mapped = map_bq_exception(exc, context={"max_bytes_billed": self._max_bytes_billed})
+            if mapped is exc:
+                raise
+            raise mapped from exc
+
+        total_bytes = getattr(job, "total_bytes_processed", None)
+        if total_bytes is None:
+            # Dry-run jobs populate ``total_bytes_processed`` on the
+            # returned :class:`QueryJob` without calling ``.result()`` —
+            # BigQuery validates the SQL server-side and returns the
+            # estimate inline. A ``None`` here is a real SDK contract
+            # violation; surface it loudly so a regression in the
+            # client surface doesn't silently return 0 bytes.
+            raise RuntimeError(
+                "BigQuery returned no total_bytes_processed for the dry_run query; "
+                "the SDK contract was violated."
+            )
+        return int(total_bytes)
 
 
 # ---------------------------------------------------------------------------

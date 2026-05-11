@@ -30,9 +30,13 @@ dbt-core project, locally or in CI, with no dbt Cloud dependency.
 The published wheel:
 
 ```bash
-pip install signalforge
+pip install signalforge-dbt
 signalforge --version
 ```
+
+The PyPI distribution name is `signalforge-dbt`; the import name and
+CLI command remain `signalforge`. The `-dbt` suffix exists because the
+bare `signalforge` name on PyPI is held by an unrelated DSP package.
 
 For development against a clone (the `[dev]` extra pulls in pytest,
 ruff, and pyright):
@@ -119,6 +123,55 @@ Runtime knob flags:
   `schema.yml` nor the `.signalforge/diff.json` sidecar.
   Overrides the default-on sidecar (DEC-010). Mutually exclusive
   with `--write`.
+- `--estimate` — Print a pre-flight cost preview and exit
+  without making any billable Anthropic or warehouse call. The
+  full pipeline prelude still runs (manifest, safety, draft,
+  prune, grade, diff configs; warehouse profile; adapter
+  construction) so typos in `--profiles-dir` /
+  `signalforge.yml` surface BEFORE the estimate is computed
+  (DEC-009 of `plans/super/36-estimate-cost-preview.md`).
+  The estimate uses `client.messages.count_tokens(...)` for the
+  drafter prompt and one representative artifact per grading
+  criterion (`1 + len(rubric)` calls; `messages.create` is never
+  invoked), plus one BigQuery `dryRun` to project the warehouse
+  bytes for the prune step. Mutually exclusive with `--write`
+  and `--dry-run`; argparse rejects two of the three with
+  exit 2.
+
+  Output goes to stdout as plain text with three sections —
+  Draft / Grade / Warehouse — followed by totals and a footer
+  listing the price-table version
+  (`signalforge.llm.pricing.PRICE_TABLE_VERSION`) and the
+  `3.5 tests/column` heuristic the prune-bytes projection uses
+  (DEC-012). The exact byte-shape is pinned by
+  `tests/cli/test_estimate_render.py` against
+  `tests/fixtures/estimate/output_happy.txt`. The estimate
+  reports a billing ceiling: actual scans usually come in
+  lower because cache hits, sampled rows, and shorter LLM
+  responses all trim the projected numbers.
+
+  Exit codes: `0` on success AND on the partial-failure path
+  where the warehouse `dryRun` raises any `WarehouseError`
+  subclass (per DEC-005, mirrors `prune-engine.md` DEC-009's
+  conservative-bias degrade — the operator still gets the LLM
+  half of the estimate; the warehouse section renders
+  `bytes-per-row: <unavailable: <ErrorClass>>` and the totals
+  show `<unknown>` for the warehouse contribution; a single
+  stderr WARNING carries the one-line reason). `3` (API tier)
+  if the LLM `count_tokens` call fails on auth / connection /
+  quota — `count_tokens` is a real round-trip against the
+  Anthropic API, so `ANTHROPIC_API_KEY` is required (DEC-006).
+  Tier-2 errors that fire before the short-circuit
+  (`EstimateUnknownModelError` if `llm.model` in
+  `signalforge.yml` isn't in `signalforge.llm.pricing.PRICES`,
+  manifest / model-resolver failures) propagate via the usual
+  `cmd_generate` catch surface.
+
+  Example invocation:
+
+  ```bash
+  signalforge generate models/staging/stg_bikeshare_trips.sql --estimate
+  ```
 - `--format {ansi,markdown,json}` — Select the diff renderer.
   ANSI: coloured terminal output (default). Markdown:
   GitHub-friendly report. JSON: stdout receives the JSON

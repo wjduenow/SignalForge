@@ -3,7 +3,7 @@ requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"
 
 [project]
-name = "signalforge"
+name = "signalforge-dbt"
 dynamic = ["version"]
 description = "Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship."
 requires-python = ">=3.10"

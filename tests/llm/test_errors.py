@@ -38,6 +38,7 @@ _CONSTRUCT_KWARGS: dict[str, dict[str, object]] = {
     "LLMConnectionError": {"message": "connection reset"},
     "LLMResponseFormatError": {"message": "missing content block"},
     "LLMCacheTooLargeError": {"cached_block_tokens": 9000},
+    "EstimateUnknownModelError": {"model": "fake-model-id"},
 }
 
 
@@ -59,13 +60,14 @@ def test_all_is_sorted_and_complete() -> None:
     assert errors_module.__all__ == sorted(errors_module.__all__)
     # 1 base (LLMError) + 1 umbrella (LLMHelperError) + 5 helper subclasses
     # (Auth/RateLimit/Server/Connection/ResponseFormat) + 1 cache-size
-    # subclass (TooLarge) = 8 classes. (LLMCacheTooSmallError was dropped
+    # subclass (TooLarge) + 1 estimate subclass (EstimateUnknownModelError,
+    # US-001 of #36) = 9 classes. (LLMCacheTooSmallError was dropped
     # in #10's follow-up — Anthropic silently no-ops a sub-minimum cache
     # marker, so the production code drops the marker and continues
     # rather than raising.)
-    assert len(errors_module.__all__) == 8, (
-        "US-003 enumerates 7 typed subclasses + 1 base; update tests "
-        "and __all__ together if this changes."
+    assert len(errors_module.__all__) == 9, (
+        "US-003 + US-001 of #36 enumerate 8 typed subclasses + 1 base; "
+        "update tests and __all__ together if this changes."
     )
 
 
