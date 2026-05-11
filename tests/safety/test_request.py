@@ -420,6 +420,65 @@ def test_build_llm_request_audit_write_failure_raises_audit_write_error_no_reque
         build_llm_request(customers_model, fake, policy)
 
 
+def test_build_llm_request_wraps_raw_oserror_as_audit_write_error(
+    customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #38 — the writer propagates raw exceptions; the orchestrator
+    owns the typed wrap.
+
+    Mirrors ``draft_from_request``'s wrap shape: a raw ``OSError`` from the
+    writer surfaces to the caller as ``AuditWriteError`` with ``cause`` set.
+    """
+    rec = _AuditRecorder(raise_on_call=OSError("simulated write failure"))
+    monkeypatch.setattr("signalforge.safety.request.audit.write", rec)
+
+    fake = FakeAdapter()
+    policy = _policy(tmp_path, mode=SamplingMode.SCHEMA_ONLY)
+
+    with pytest.raises(AuditWriteError) as excinfo:
+        build_llm_request(customers_model, fake, policy)
+    assert isinstance(excinfo.value.cause, OSError)
+    assert "simulated write failure" in str(excinfo.value.cause)
+
+
+def test_build_llm_request_wraps_serialisation_failure_as_audit_write_error(
+    customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``TypeError`` from ``json.dumps`` inside the writer wraps as
+    ``AuditWriteError`` at the orchestrator boundary (issue #38).
+    """
+    rec = _AuditRecorder(raise_on_call=TypeError("simulated json failure"))
+    monkeypatch.setattr("signalforge.safety.request.audit.write", rec)
+
+    fake = FakeAdapter()
+    policy = _policy(tmp_path, mode=SamplingMode.SCHEMA_ONLY)
+
+    with pytest.raises(AuditWriteError) as excinfo:
+        build_llm_request(customers_model, fake, policy)
+    assert isinstance(excinfo.value.cause, TypeError)
+
+
+def test_build_llm_request_audit_record_too_large_propagates_typed(
+    customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``AuditRecordTooLargeError`` is already typed and must propagate
+    as-is — the orchestrator's blanket-except clause must NOT rewrap it.
+    """
+    from signalforge.safety.errors import AuditRecordTooLargeError
+
+    boom = AuditRecordTooLargeError(size=5000, limit=4000)
+    rec = _AuditRecorder(raise_on_call=boom)
+    monkeypatch.setattr("signalforge.safety.request.audit.write", rec)
+
+    fake = FakeAdapter()
+    policy = _policy(tmp_path, mode=SamplingMode.SCHEMA_ONLY)
+
+    with pytest.raises(AuditRecordTooLargeError) as excinfo:
+        build_llm_request(customers_model, fake, policy)
+    # Same instance — not wrapped.
+    assert excinfo.value is boom
+
+
 # ---------------------------------------------------------------------------
 # Immutability (DEC-022) and shape invariants
 # ---------------------------------------------------------------------------
