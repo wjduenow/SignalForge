@@ -93,8 +93,10 @@ from signalforge import safety as safety_module
 from signalforge import warehouse as warehouse_module
 from signalforge.cli._helpers import (
     canonicalise_user_path,
+    emit_batch_progress_entry,
     emit_progress_done,
     emit_progress_entry,
+    format_batch_summary,
     format_error_to_stderr,
     map_exception_to_exit_code,
     setup_logging,
@@ -537,17 +539,25 @@ def _run_single_model(
     invocations also route through this helper so the seam stays single
     source of truth).
 
-    ``batch_index`` / ``batch_count`` are reserved for the per-model
-    progress prefix (``[i/N] <unique_id>``) that US-005 wires onto this
-    seam. This bead carries them through the signature but does NOT emit
-    the prefix — the single-model path must stay byte-equal under
-    ``capsys`` to the v0.1 shape, and US-005 adds the emission gated on
-    both kwargs being non-``None`` (which only ``_run_batch`` ever does).
+    ``batch_index`` / ``batch_count`` drive the per-model progress prefix
+    ``[i/N] <unique_id>`` emitted at the head of the pipeline when BOTH
+    are non-``None`` — i.e., only when :func:`_run_batch` is the caller
+    (US-005 / DEC-014). The single-model positional path leaves both at
+    their default ``None`` so the prefix is suppressed and the v0.1
+    capsys-pinned stderr shape is preserved byte-for-byte.
     """
-    del batch_index, batch_count  # reserved for US-005 progress prefix
     quiet = bool(getattr(args, "quiet", False))
     verbose = bool(getattr(args, "verbose", False))
     progress_on = should_emit_progress(quiet=quiet, verbose=verbose)
+
+    # US-005 / DEC-014 — per-model progress prefix. Only fires when this
+    # helper is invoked from :func:`_run_batch` (both kwargs non-``None``);
+    # the positional single-model path passes ``None`` for both and emits
+    # NEITHER the prefix here NOR the summary in :func:`_run_batch`. TTY
+    # / quiet / verbose gating delegates to :func:`should_emit_progress`
+    # — same rules as the stage-N progress lines that follow.
+    if progress_on and batch_index is not None and batch_count is not None:
+        emit_batch_progress_entry(model.unique_id, batch_index, batch_count)
 
     start = time.monotonic()
     try:
@@ -873,11 +883,30 @@ def _run_batch(
 
     per_model = tuple(outcomes)
     total_exit_code = max((o.exit_code for o in per_model), default=0)
-    return _BatchOutcome(
+    batch_outcome = _BatchOutcome(
         per_model=per_model,
         total_exit_code=total_exit_code,
         duration_seconds=time.monotonic() - start,
     )
+
+    # US-005 / DEC-005 — aggregated summary to stderr. Emit when (a) ≥2
+    # models matched OR (b) ≥1 model failed. The (single-match AND zero
+    # failures) case suppresses the summary so the UX matches the v0.1
+    # single-model positional path in that degenerate case. The summary
+    # is "always emit when the condition fires" (DEC-005) — NOT
+    # TTY-gated, because the failure list is operator-actionable signal
+    # even in CI / pipeline logs. ``--quiet`` still suppresses it (the
+    # operator explicitly asked for less output); ``--verbose`` is a
+    # no-op on this path (the summary already always fires when the
+    # condition holds).
+    quiet = bool(getattr(args, "quiet", False))
+    failed_count = sum(1 for o in per_model if o.exit_code != 0)
+    should_summarise = len(per_model) >= 2 or failed_count >= 1
+    if should_summarise and not quiet:
+        sys.stderr.write(format_batch_summary(batch_outcome))
+        sys.stderr.flush()
+
+    return batch_outcome
 
 
 # ---------------------------------------------------------------------------
