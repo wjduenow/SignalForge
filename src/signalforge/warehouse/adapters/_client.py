@@ -154,6 +154,49 @@ def _make_query_job_config(
     return job_config
 
 
+def _make_dry_run_job_config(
+    *,
+    stage: str,
+    version: str | None = None,
+) -> Any:
+    """Build a ``QueryJobConfig`` for a ``dry_run=True`` estimate.
+
+    Used by :meth:`BigQueryAdapter.estimate_query_bytes` (US-002 of
+    issue #36). Critically does NOT set ``maximum_bytes_billed`` —
+    BigQuery does not bill bytes for a dry_run query, so the cap would
+    be dead config; worse, setting it could leak the impression that
+    a dry_run query was guarded against runaway cost when in fact it
+    never bills regardless.
+
+    Mirrors :func:`_make_query_job_config` for the standard
+    ``use_query_cache=False`` + labels invariants (DEC-015 of issue #3
+    — reproducibility / cost attribution). Stays confined to this
+    SDK seam per DEC-012 of #5 / DEC-019 of #3.
+
+    Args:
+        stage: The ``signalforge_stage`` label value
+            (``"warehouse_estimate_query_bytes"`` for the v0.2 caller).
+        version: The package version to embed in labels. ``None``
+            resolves :data:`signalforge.__version__` at call time.
+    """
+    from google.cloud import bigquery  # type: ignore[import-not-found]
+
+    if version is None:
+        from signalforge import __version__ as _pkg_version
+
+        version = _pkg_version
+
+    job_config = bigquery.QueryJobConfig(  # type: ignore[no-any-return]
+        dry_run=True,
+        use_query_cache=False,
+        labels={
+            "signalforge_stage": stage,
+            "signalforge_version": version.replace(".", "_"),
+        },
+    )
+    return job_config
+
+
 def map_bq_exception(exc: Exception, *, context: dict[str, Any] | None = None) -> Exception:
     """Translate ``google.api_core.exceptions`` into typed warehouse errors.
 
@@ -252,6 +295,7 @@ def row_to_dict(row: Any) -> dict[str, Any]:
 
 __all__ = [
     "_BQClientProtocol",
+    "_make_dry_run_job_config",
     "_make_query_job_config",
     "make_real_client",
     "map_bq_exception",

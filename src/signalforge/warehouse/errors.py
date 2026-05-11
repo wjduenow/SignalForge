@@ -389,6 +389,35 @@ class MaterialisationFailedError(WarehouseError):
         super().__init__(message, remediation=remediation)
 
 
+class EstimateNotSupportedError(WarehouseError):
+    """The :class:`WarehouseAdapter` ABC default impl of
+    ``estimate_query_bytes`` raises this; concrete adapters override the
+    method to provide a real implementation (US-002 of issue #36).
+
+    v0.2 ships the BigQuery override; non-BigQuery adapters
+    (Snowflake/Postgres in v0.3) inherit the default raise until each
+    grows its own override. The remediation is verbatim DEC-004 of the
+    plan: it tells the operator how to opt out by using a BigQuery
+    profile or waiting for v0.3 multi-warehouse estimation support.
+
+    Tier-3 in the CLI exit-code taxonomy via inheritance from
+    :class:`WarehouseError`.
+    """
+
+    # Locked verbatim per DEC-004 of plans/super/36-estimate-cost-preview.md;
+    # changing this text breaks a contract test pinning the byte-equal
+    # remediation string (test_estimatenotsupportederror_remediation_locked_verbatim).
+    default_remediation: ClassVar[str] = (
+        "Use --estimate with a BigQuery profile, "
+        "or wait for v0.3 multi-warehouse estimation support."
+    )
+
+    def __init__(self, adapter_name: str, *, remediation: str | None = None) -> None:
+        self.adapter_name = adapter_name
+        message = f"Adapter {_format_value(adapter_name)} does not support query-bytes estimation."
+        super().__init__(message, remediation=remediation)
+
+
 class MaterialisationNotSupportedError(WarehouseError):
     """The :class:`WarehouseAdapter` ABC default impl of
     ``materialise_sample`` raises this; concrete adapters override the
@@ -420,6 +449,7 @@ class MaterialisationNotSupportedError(WarehouseError):
 __all__ = [
     "BytesBilledExceededError",
     "ColumnNotFoundError",
+    "EstimateNotSupportedError",
     "InvalidIdentifierError",
     "ManifestProjectNotFoundError",
     "ManifestSchemaNotFoundError",

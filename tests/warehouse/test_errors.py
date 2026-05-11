@@ -54,6 +54,7 @@ _CONSTRUCT_KWARGS: dict[str, dict[str, object]] = {
     "UnknownTableSizeError": {"table": "p.d.t"},
     "MaterialisationFailedError": {"message": "BigQuery refused the CTAS"},
     "MaterialisationNotSupportedError": {"adapter_name": "SnowflakeAdapter"},
+    "EstimateNotSupportedError": {"adapter_name": "SnowflakeAdapter"},
 }
 
 
@@ -84,11 +85,13 @@ def test_each_subclass_has_default_remediation() -> None:
     # DEC-026 enumerates 15 typed subclasses (WarehouseAuthError through
     # UnknownTableSizeError) plus the WarehouseError base = 16 classes;
     # issue #22 (US-001) adds MaterialisationFailedError and
-    # MaterialisationNotSupportedError → 18.
-    assert len(errors_module.__all__) == 18, (
+    # MaterialisationNotSupportedError → 18; issue #36 (US-002) adds
+    # EstimateNotSupportedError → 19.
+    assert len(errors_module.__all__) == 19, (
         "DEC-026 enumerates 15 typed subclasses + 1 base; #22 US-001 "
-        "adds 2 more (MaterialisationFailed/NotSupported). Update tests "
-        "and __all__ together if this changes."
+        "adds 2 more (MaterialisationFailed/NotSupported); #36 US-002 "
+        "adds EstimateNotSupportedError. Update tests and __all__ "
+        "together if this changes."
     )
     for name in errors_module.__all__:
         cls = getattr(errors_module, name)

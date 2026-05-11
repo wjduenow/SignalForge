@@ -114,6 +114,7 @@ from signalforge.safety import (
 from signalforge.warehouse import (
     BytesBilledExceededError,
     ColumnNotFoundError,
+    EstimateNotSupportedError,
     InvalidIdentifierError,
     ManifestProjectNotFoundError,
     ManifestSchemaNotFoundError,
@@ -269,6 +270,12 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # catch surface, or via the lint subcommand).
     MaterialisationFailedError: 3,
     MaterialisationNotSupportedError: 3,
+    # Query-bytes estimation seam (issue #36 / US-002): the active
+    # adapter does not support ``estimate_query_bytes`` (any non-BigQuery
+    # adapter in v0.2). External-dep tier so the ``--estimate`` CLI flow
+    # surfaces the typed exception with its locked remediation rather
+    # than misclassifying it as input-shape.
+    EstimateNotSupportedError: 3,
     # Audit-write durability across every fail-closed seam — when any of
     # these fire the disk hand-off didn't happen, which is an external-dep
     # state we couldn't recover.
