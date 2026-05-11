@@ -69,6 +69,13 @@ def canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
         raise PathContainmentError(
             f"project_dir {project_dir} does not exist or is not a directory"
         ) from exc
+    # `Path.resolve(strict=True)` succeeds on an existing regular file, so the
+    # "is not a directory" promise in the docstring would silently break for a
+    # bare-file `project_dir` (caught by Copilot on PR #72). Explicit guard:
+    if not project_resolved.is_dir():
+        raise PathContainmentError(
+            f"project_dir {project_dir} does not exist or is not a directory"
+        )
 
     if not p.is_absolute():
         p = project_resolved / p

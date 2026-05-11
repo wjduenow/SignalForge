@@ -108,6 +108,22 @@ def test_missing_project_dir_raises(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_project_dir_is_a_regular_file_raises(tmp_path: Path) -> None:
+    """A bare-file ``project_dir`` raises :class:`PathContainmentError`.
+
+    ``Path.resolve(strict=True)`` succeeds on an existing regular file
+    (it only raises on missing paths), so without an explicit
+    :meth:`Path.is_dir` guard the helper would silently accept a file
+    as ``project_dir``. Pinned per Copilot review on PR #72.
+    """
+    not_a_dir = tmp_path / "regular_file"
+    not_a_dir.write_text("x")
+
+    with pytest.raises(PathContainmentError, match="does not exist or is not a directory"):
+        canonicalise_path("any.txt", not_a_dir)
+
+
+@pytest.mark.unit
 def test_project_dir_with_file_in_path_raises(tmp_path: Path) -> None:
     """A ``project_dir`` whose path traverses a regular file raises
     :class:`PathContainmentError` (the ``NotADirectoryError`` branch

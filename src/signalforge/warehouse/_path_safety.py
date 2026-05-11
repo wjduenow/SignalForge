@@ -42,8 +42,15 @@ def canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
     try:
         return _common_canonicalise_path(input_path, project_dir)
     except PathContainmentError as exc:
+        # Record the project-scoped location actually validated so the
+        # ``ProfileNotFoundError`` carries the right diagnostic (Copilot
+        # caught the regression — a relative ``input_path`` like
+        # ``"profiles.yml"`` would otherwise land as cwd-relative,
+        # losing the project_dir context).
+        raw = Path(input_path)
+        searched = raw if raw.is_absolute() else (Path(project_dir) / raw)
         raise ProfileNotFoundError(
-            searched_paths=[Path(input_path)],
+            searched_paths=[searched],
             remediation=(
                 f"{exc}. profiles.yml must point inside the project tree, "
                 "must not traverse a symlink loop, and project_dir must "
