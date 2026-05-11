@@ -1,0 +1,317 @@
+"""Tests for ``signalforge generate --estimate`` (US-005 of issue #36).
+
+Pins the load-bearing properties of the CLI's ``--estimate`` short-circuit:
+
+* AC-4 of the ticket: ``len(fake.messages._create_calls) == 0`` AND
+  ``len(fake.messages._count_calls) >= 1``. Zero billable LLM calls.
+* Happy-path exits 0 and prints the rendered estimate to stdout.
+* Mutex with ``--write`` and ``--dry-run`` — argparse rejects → exit 2.
+* Missing ``ANTHROPIC_API_KEY`` (or any :class:`LLMAuthError` from
+  ``count_tokens``) surfaces as tier 3.
+* Warehouse-bytes failure degrades to ``<unavailable: ...>`` (DEC-005)
+  and exits 0; the LLM-cost half of the report still computes.
+* DEC-016: no traceback ever leaks to stderr on any path.
+
+The tests use a real :class:`FakeAnthropicClient` and a real
+:class:`BigQueryAdapter`-with-:class:`FakeBigQueryClient` so the engine
+runs end-to-end. The CLI's stage entry points
+(``manifest.load`` / ``warehouse.load_profile`` /
+``_make_warehouse_adapter`` / ``_make_anthropic_client``) are patched
+so no real disk / network is touched, but ``signalforge.cli._estimate``
+itself is NOT patched — that's the whole point of the AC-4 contract.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from signalforge.cli import main
+from signalforge.llm.errors import LLMAuthError
+from signalforge.warehouse import BigQueryAdapter, WarehouseAuthError
+from tests.cli._factories import make_fake_dbt_project, make_manifest, make_model
+from tests.llm._fake import FakeAnthropicClient, FakeCountTokensResponse
+from tests.warehouse._fake import FakeBigQueryClient
+
+# ---------------------------------------------------------------------------
+# Patch helper — install fakes for the estimate short-circuit path
+# ---------------------------------------------------------------------------
+
+
+def _install_estimate_patches(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fake_anthropic: FakeAnthropicClient | None = None,
+    fake_bq: FakeBigQueryClient | None = None,
+) -> tuple[FakeAnthropicClient, FakeBigQueryClient]:
+    """Patch the four CLI seams that the ``--estimate`` short-circuit
+    consumes (manifest load, warehouse profile load, warehouse adapter
+    factory, anthropic client factory) with explicit fakes.
+
+    Returns the ``(fake_anthropic, fake_bq)`` pair so the caller can
+    queue ``expect_count_tokens`` / ``expect_dry_run`` expectations.
+    """
+    from signalforge.cli import generate as gen_mod
+
+    model = make_model()
+    manifest = make_manifest(model)
+
+    fa = fake_anthropic if fake_anthropic is not None else FakeAnthropicClient(project="fake")
+    fb = fake_bq if fake_bq is not None else FakeBigQueryClient(project="fake_project")
+
+    adapter = BigQueryAdapter(
+        project="fake_project",
+        location="US",
+        max_bytes_billed=100_000_000,
+        client=fb,
+    )
+
+    monkeypatch.setattr(gen_mod.manifest_module, "load", MagicMock(return_value=manifest))
+    monkeypatch.setattr(
+        gen_mod.warehouse_module, "load_profile", MagicMock(return_value=MagicMock())
+    )
+    monkeypatch.setattr(gen_mod, "_make_warehouse_adapter", MagicMock(return_value=adapter))
+    monkeypatch.setattr(gen_mod, "_make_anthropic_client", MagicMock(return_value=fa))
+
+    return fa, fb
+
+
+def _queue_default_count_tokens(fake: FakeAnthropicClient) -> None:
+    """Queue one drafter ``count_tokens`` plus one per rubric criterion."""
+    from signalforge.grade.rubric import DEFAULT_RUBRIC
+
+    fake.expect_count_tokens(
+        matching=lambda kwargs: True,
+        returns=FakeCountTokensResponse(input_tokens=1000),
+    )
+    for _ in range(len(DEFAULT_RUBRIC)):
+        fake.expect_count_tokens(
+            matching=lambda kwargs: True,
+            returns=FakeCountTokensResponse(input_tokens=500),
+        )
+
+
+# ---------------------------------------------------------------------------
+# AC-4 — zero messages.create calls
+# ---------------------------------------------------------------------------
+
+
+def test_generate_estimate_zero_messages_create_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """AC-4 of issue #36: the ``--estimate`` short-circuit never issues a
+    billable ``messages.create`` call. At least one ``count_tokens`` is
+    issued (drafter + per-criterion).
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    fa, fb = _install_estimate_patches(monkeypatch)
+    _queue_default_count_tokens(fa)
+    fb.expect_dry_run(sql_matching=r"SELECT", returns_bytes=10_000)
+
+    code = main(["generate", "--estimate", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 0, f"stderr={captured.err}"
+    assert len(fa.create_calls) == 0
+    assert len(fa.count_calls) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Happy-path behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_generate_estimate_exits_zero_on_happy_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``signalforge generate --estimate <model>`` exits 0 on the happy path."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    fa, fb = _install_estimate_patches(monkeypatch)
+    _queue_default_count_tokens(fa)
+    fb.expect_dry_run(sql_matching=r"SELECT", returns_bytes=2048)
+
+    code = main(["generate", "--estimate", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 0, f"stderr={captured.err}"
+    assert "Traceback" not in captured.err
+
+
+def test_generate_estimate_prints_rendered_estimate_to_stdout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The renderer's section headers land on stdout for the happy path."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    fa, fb = _install_estimate_patches(monkeypatch)
+    _queue_default_count_tokens(fa)
+    fb.expect_dry_run(sql_matching=r"SELECT", returns_bytes=10_000)
+
+    code = main(["generate", "--estimate", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 0, f"stderr={captured.err}"
+    assert "Estimated draft cost:" in captured.out
+    assert "Total estimated LLM cost:" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# Argparse mutex
+# ---------------------------------------------------------------------------
+
+
+def test_generate_estimate_mutex_with_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--estimate --write`` is rejected by the argparse mutex → exit 2."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+
+    code = main(["generate", "--estimate", "--write", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    err_low = captured.err.lower()
+    assert "--estimate" in err_low or "--write" in err_low or "not allowed" in err_low
+    assert "Traceback" not in captured.err
+
+
+def test_generate_estimate_mutex_with_dry_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--estimate --dry-run`` is rejected by the argparse mutex → exit 2."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+
+    code = main(["generate", "--estimate", "--dry-run", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    err_low = captured.err.lower()
+    assert "--estimate" in err_low or "--dry-run" in err_low or "not allowed" in err_low
+    assert "Traceback" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Error propagation — LLM auth (tier 3)
+# ---------------------------------------------------------------------------
+
+
+def test_generate_estimate_missing_anthropic_api_key_exits_tier_3(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An ``LLMAuthError`` raised from the engine's ``count_tokens`` call
+    propagates through the existing ``cmd_generate`` panic boundary and
+    maps to tier 3 via ``_EXCEPTION_TO_EXIT_CODE``.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    fa, fb = _install_estimate_patches(monkeypatch)
+    # First (and only) count_tokens raises LLMAuthError — mirrors the
+    # "no ANTHROPIC_API_KEY" production failure mode.
+    fa.expect_count_tokens(
+        matching=lambda kwargs: True,
+        returns=LLMAuthError("authentication failed"),
+    )
+
+    code = main(["generate", "--estimate", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 3, f"stderr={captured.err}"
+    assert "ERROR" in captured.err
+    assert "Traceback" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# DEC-005 — warehouse degrade on supplementary stage failure
+# ---------------------------------------------------------------------------
+
+
+def test_generate_estimate_warehouse_failure_degrades_to_exit_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """DEC-005: a ``WarehouseError`` from ``estimate_query_bytes`` is
+    captured into ``warehouse_unavailable_reason`` by the engine; the
+    CLI prints ``<unavailable: WarehouseAuthError>`` and exits 0.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    fa, fb = _install_estimate_patches(monkeypatch)
+    _queue_default_count_tokens(fa)
+    fb.expect_dry_run(
+        sql_matching=r"SELECT", returns_bytes=WarehouseAuthError("credentials invalid")
+    )
+
+    code = main(["generate", "--estimate", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 0, f"stderr={captured.err}"
+    assert "<unavailable: WarehouseAuthError>" in captured.out
+    assert "Traceback" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# DEC-016 — no traceback ever leaks on any path
+# ---------------------------------------------------------------------------
+
+
+def test_generate_estimate_no_traceback_leaks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Pins DEC-016 of ``cli-layer.md``: no traceback escapes the handler
+    boundary on ANY path tested in this file. Re-asserts the property
+    across the happy path, both mutex paths, the auth-error path, and
+    the warehouse-degrade path within a single test for clarity.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+
+    # 1. Happy path.
+    fa, fb = _install_estimate_patches(monkeypatch)
+    _queue_default_count_tokens(fa)
+    fb.expect_dry_run(sql_matching=r"SELECT", returns_bytes=1024)
+    main(["generate", "--estimate", "model.shop.customers"])
+    assert "Traceback" not in capsys.readouterr().err
+
+    # 2. Mutex with --write.
+    main(["generate", "--estimate", "--write", "model.shop.customers"])
+    assert "Traceback" not in capsys.readouterr().err
+
+    # 3. Mutex with --dry-run.
+    main(["generate", "--estimate", "--dry-run", "model.shop.customers"])
+    assert "Traceback" not in capsys.readouterr().err
+
+    # 4. LLM auth error.
+    fa, fb = _install_estimate_patches(monkeypatch)
+    fa.expect_count_tokens(
+        matching=lambda kwargs: True, returns=LLMAuthError("authentication failed")
+    )
+    main(["generate", "--estimate", "model.shop.customers"])
+    assert "Traceback" not in capsys.readouterr().err
+
+    # 5. Warehouse degrade.
+    fa, fb = _install_estimate_patches(monkeypatch)
+    _queue_default_count_tokens(fa)
+    fb.expect_dry_run(sql_matching=r"SELECT", returns_bytes=WarehouseAuthError("creds"))
+    main(["generate", "--estimate", "model.shop.customers"])
+    assert "Traceback" not in capsys.readouterr().err
