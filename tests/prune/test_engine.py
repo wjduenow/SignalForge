@@ -40,6 +40,7 @@ from signalforge.draft.models import (
 )
 from signalforge.manifest.models import Column, Manifest, Model
 from signalforge.prune import engine as engine_module
+from signalforge.prune.audit import PruneEvent
 from signalforge.prune.config import PruneConfig
 from signalforge.prune.engine import prune_tests
 from signalforge.prune.errors import (
@@ -1982,4 +1983,122 @@ def test_prune_tests_sample_mode_warehouse_error_during_size_fetch_propagates(
             audit_path=audit_path,
             project_dir=tmp_path,
         )
+    fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# Issue #35 — `prune.enabled=false` short-circuit (US-005)
+# ---------------------------------------------------------------------------
+
+
+def test_prune_tests_short_circuits_when_enabled_false(tmp_path: Path) -> None:
+    """``PruneConfig.enabled=False`` drains every candidate to
+    ``kept-without-evidence`` with ``why="prune disabled in
+    signalforge.yml"`` (DEC-003 stability gate), issues zero adapter /
+    warehouse calls, and writes one ``PruneEvent`` per candidate to the
+    audit JSONL (DEC-001 fail-closed audit preserved).
+
+    Pins DEC-001, DEC-002, and DEC-003 of plans/super/35-prune-enabled-doc-reframe.md.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    # Zero ``expect_*`` registrations: any adapter / SDK call would
+    # surface as ``AssertionError("unexpected ...")``. ``__enter__`` is
+    # NOT invoked by the disabled short-circuit (DEC-002), but even if a
+    # future maintainer regressed that, ``assert_all_expectations_met()``
+    # would still pass with an empty queue — the load-bearing assertion
+    # is the absence of any ``query`` / ``get_table`` / ``list_rows`` /
+    # ``materialise_sample`` / ``abort_session`` dispatch.
+    fake = FakeBigQueryClient(project="fake_project")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(3)
+    config = PruneConfig(enabled=False)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    # PruneResult: one decision per candidate, every one kept-without-evidence
+    # with the locked ``why`` text (DEC-003 — a future maintainer who
+    # renames the string sees this test break loudly).
+    assert len(result.decisions) == 3
+    assert result.model_unique_id == model.unique_id
+    for decision in result.decisions:
+        assert decision.decision == "kept"
+        assert decision.reason == "kept-without-evidence"
+        assert decision.why == "prune disabled in signalforge.yml"
+        assert decision.compiled_sql == ""
+        assert decision.failures == 0
+        assert decision.elapsed_ms == 0
+        assert decision.sampled_rows is None
+        assert decision.sample_failures is None
+
+    # Zero adapter / SDK calls consumed.
+    fake.assert_all_expectations_met()
+
+    # Audit JSONL: exactly N lines, each a valid ``PruneEvent`` carrying
+    # the same ``reason`` / ``why`` (DEC-001 — one event per candidate
+    # even on the fast path).
+    audit_lines = _read_audit_lines(audit_path)
+    assert len(audit_lines) == 3
+    for raw in audit_lines:
+        event = PruneEvent.model_validate(raw)
+        assert event.model_unique_id == model.unique_id
+        assert event.decision == "kept"
+        assert event.reason == "kept-without-evidence"
+        assert event.why == "prune disabled in signalforge.yml"
+        assert event.compiled_sql == ""
+        assert event.failures == 0
+        assert event.elapsed_ms == 0
+        assert event.sampled_rows is None
+
+
+def test_prune_tests_disabled_does_not_validate_trusted_models(tmp_path: Path) -> None:
+    """``PruneConfig.enabled=False`` short-circuits BEFORE
+    ``_validate_trusted_models`` — a stale ``trusted_models`` entry must
+    NOT raise ``PruneTrustedModelNotFoundError`` on the disabled path
+    (DEC-002 of plans/super/35-prune-enabled-doc-reframe.md).
+
+    An operator who disabled prune chose "stop talking to my warehouse";
+    failing on a typo'd or stale trusted-models entry would defeat that
+    UX promise.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(2)
+    config = PruneConfig(
+        enabled=False,
+        trusted_models=("model.proj.nonexistent",),
+    )
+
+    # No ``pytest.raises`` wrapper: the call must succeed despite the
+    # ``trusted_models`` entry being absent from ``manifest.nodes``.
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    # Same short-circuit invariants as the primary test.
+    assert len(result.decisions) == 2
+    for decision in result.decisions:
+        assert decision.decision == "kept"
+        assert decision.reason == "kept-without-evidence"
+        assert decision.why == "prune disabled in signalforge.yml"
     fake.assert_all_expectations_met()
