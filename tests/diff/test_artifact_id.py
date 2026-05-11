@@ -1,23 +1,27 @@
 """Tests for :mod:`signalforge.diff._artifact_id` (US-006 of issue #8).
 
-The diff layer's ``artifact_id_for`` formatter must produce byte-equal
-output to :func:`signalforge.grade.engine._artifact_id_for` so the diff
-renderer can join grade-sidecar JSON to its rendered diff via the
-``(run_id, artifact_id, criterion_id)`` triple. A single dotted-path
+The diff layer's ``artifact_id_for`` formatter and the grade layer's
+``_artifact_id_for`` join grade-sidecar JSON to the rendered diff via
+the ``(run_id, artifact_id, criterion_id)`` triple. A single dotted-path
 disagreement would silently drop affected grade rows from the join.
 
-The :func:`test_cross_stage_parity_with_grade_engine` and
-:func:`test_cross_stage_parity_compute_args_hashes` tests in this file
-are the **single allowed cross-stage import seam** between
-``signalforge.diff`` and ``signalforge.grade`` — production diff code
-must NOT import from ``signalforge.grade`` at runtime. The grade engine
-is the canonical source of truth; the diff formatter is the byte-equal
-mirror exercised here.
+After issue #42 the implementation lives in
+:mod:`signalforge._common.artifact_id` and both layers re-export the
+same function objects. The cross-stage parity test now asserts function
+**identity** (``is`` equality) rather than byte-equal output — a
+divergence is impossible by construction.
+
+The cross-stage import from :mod:`signalforge.grade.engine` is the
+**single allowed cross-stage seam** between ``signalforge.diff`` and
+``signalforge.grade``; production diff code must NOT import from
+``signalforge.grade`` at runtime.
 """
 
 from __future__ import annotations
 
 import pytest
+
+from signalforge._common import artifact_id as _common_artifact_id
 
 # Cross-stage parity test seam — the only place under signalforge.diff
 # that imports from signalforge.grade.
@@ -246,15 +250,35 @@ def test_model_scope_text_without_field_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cross-stage parity (the load-bearing rule for US-006)
+# Cross-stage parity — identity equality (the load-bearing rule for US-006,
+# tightened by issue #42 from byte-equal output to same-object identity).
 # ---------------------------------------------------------------------------
+
+
+def test_cross_stage_parity_is_function_identity() -> None:
+    """The diff layer and grade layer expose the SAME function objects.
+
+    After issue #42 the formatter + ``compute_args_hashes`` live in
+    :mod:`signalforge._common.artifact_id`; both layers re-export.
+    Asserting ``is`` equality makes a future drift impossible by
+    construction — there is no second copy that could diverge.
+    """
+    assert artifact_id_for is _grade_artifact_id_for
+    assert artifact_id_for is _common_artifact_id.artifact_id_for
+    assert _model_test_args_hash is _grade_model_test_args_hash
+    assert _model_test_args_hash is _common_artifact_id.model_test_args_hash
+    assert compute_args_hashes is _grade_test_args_hashes
+    assert compute_args_hashes is _common_artifact_id.compute_args_hashes
 
 
 def test_cross_stage_parity_with_grade_engine() -> None:
     """Byte-equal output vs :func:`signalforge.grade.engine._artifact_id_for`.
 
-    Representative inputs cover all six shapes plus the args_hash variants.
-    Any divergence here breaks the diff-renderer / grade-sidecar join.
+    Kept as defence-in-depth after issue #42 promoted the parity
+    contract to function-identity equality
+    (:func:`test_cross_stage_parity_is_function_identity`). Representative
+    inputs cover all six shapes plus the args_hash variants. Any
+    divergence here would mean the identity assertion failed silently.
     """
     nn = CandidateTestNotNull(column="user_id")
     uq = CandidateTestUnique(column="email")

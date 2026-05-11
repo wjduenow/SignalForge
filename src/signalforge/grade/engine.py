@@ -71,17 +71,24 @@ import uuid
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
 
 import signalforge as _sf
+from signalforge._common.artifact_id import (
+    artifact_id_for as _artifact_id_for,
+)
+from signalforge._common.artifact_id import (
+    compute_args_hashes as _test_args_hashes,
+)
+
+# Re-exported for back-compat: `signalforge.grade.prompts` and
+# `tests/diff/test_artifact_id.py` import the name from here. Issue #42
+# hoisted the implementation to `signalforge._common.artifact_id`.
+from signalforge._common.artifact_id import (  # noqa: F401
+    model_test_args_hash as _model_test_args_hash,
+)
 from signalforge.draft.models import (
     CandidateColumn,
     CandidateSchema,
-    CandidateTest,
-    CandidateTestAcceptedValues,
-    CandidateTestNotNull,
-    CandidateTestRelationships,
-    CandidateTestUnique,
 )
 from signalforge.grade.audit import (
     _build_grade_event,
@@ -135,198 +142,15 @@ _sleep = time.sleep
 
 # ---------------------------------------------------------------------------
 # Canonical artifact_id formatter (DEC-009)
+#
+# Implementations live in :mod:`signalforge._common.artifact_id` after
+# issue #42 hoisted the byte-equal copies under grade + diff into a
+# single source of truth. The names ``_artifact_id_for`` /
+# ``_model_test_args_hash`` / ``_test_args_hashes`` remain re-exported
+# here so existing import paths keep working AND the cross-stage parity
+# test asserts function-identity equality with
+# :mod:`signalforge.diff._artifact_id`.
 # ---------------------------------------------------------------------------
-
-
-def _model_test_args_hash(test: CandidateTest) -> str:
-    """Return an 8-hex ``blake2b-4`` digest of a model-level test's args.
-
-    Two model-level tests can share a ``test.type`` (e.g. two distinct
-    ``accepted_values`` checks against different columns); the
-    canonical artifact_id format (DEC-009) appends an ``args_hash``
-    suffix to disambiguate. The hash domain is the test's identifying
-    args, sorted-key JSON-serialised so equivalent tests produce
-    identical hashes regardless of field-construction order.
-    """
-    if isinstance(test, (CandidateTestNotNull, CandidateTestUnique)):
-        payload: dict[str, object] = {"type": test.type, "column": test.column}
-    elif isinstance(test, CandidateTestAcceptedValues):
-        # Sort the values so a re-ordering of the literal list does not
-        # rotate the hash — the test is semantically identical.
-        payload = {
-            "type": test.type,
-            "column": test.column,
-            "values": sorted(test.values),
-        }
-    elif isinstance(test, CandidateTestRelationships):
-        payload = {
-            "type": test.type,
-            "column": test.column,
-            "to": test.to,
-            "field": test.field,
-        }
-    else:  # pragma: no cover - exhaustive dispatch over the closed union
-        raise GradeError(
-            f"Unknown CandidateTest variant: {type(test).__name__}",
-            remediation=(
-                "A new CandidateTest discriminated-union variant landed without "
-                "updating signalforge.grade.engine._model_test_args_hash. Add a "
-                "branch covering the new variant."
-            ),
-        )
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.blake2b(canonical.encode("utf-8"), digest_size=4).hexdigest()
-
-
-def _artifact_id_for(
-    *,
-    scope: Literal["column", "model"],
-    column_name: str | None = None,
-    test: CandidateTest | None = None,
-    field: Literal["description", "rationale"] | None = None,
-    args_hash: str | None = None,
-) -> str:
-    """Return the canonical dotted-path ``artifact_id`` (DEC-009).
-
-    Six shapes the formatter emits:
-
-    * ``column.<col>.description`` — column doc (``scope="column"``,
-      ``column_name=...``, ``field="description"``).
-    * ``column.<col>.rationale`` — column rationale.
-    * ``model.description`` — model doc (``scope="model"``,
-      ``field="description"``).
-    * ``model.rationale`` — model rationale.
-    * ``test.column.<col>.<test.type>`` (or ``...<.args_hash>``) —
-      column-scoped test (``scope="column"``, ``column_name=...``,
-      ``test=...``; ``args_hash`` required when two tests on the same
-      column share a ``test.type``, e.g. two ``accepted_values`` with
-      different ``values`` lists).
-    * ``test.model.<test.type>`` (or ``...<.args_hash>``) —
-      model-level test (``scope="model"``, ``test=...``;
-      ``args_hash`` required when two model-level tests share a
-      ``test.type``).
-
-    The :func:`extract_artifact_text` resolver consumes the same shape
-    vocabulary; the orchestrator and resolver are paired so an
-    ``artifact_id`` produced here always round-trips through the
-    resolver.
-    """
-    # test-shaped artifact_ids — column scope.
-    if test is not None and scope == "column":
-        if column_name is None:
-            raise GradeError(
-                "_artifact_id_for: column-scope test artifact_id requires column_name.",
-                remediation=(
-                    "Pass column_name=... alongside scope='column' and a CandidateTest. "
-                    "This is a programming error in the orchestrator."
-                ),
-            )
-        if args_hash is not None:
-            return f"test.column.{column_name}.{test.type}.{args_hash}"
-        return f"test.column.{column_name}.{test.type}"
-
-    # test-shaped artifact_ids — model scope.
-    if test is not None and scope == "model":
-        if args_hash is not None:
-            return f"test.model.{test.type}.{args_hash}"
-        return f"test.model.{test.type}"
-
-    # description / rationale — column scope.
-    if scope == "column":
-        if column_name is None or field is None:
-            raise GradeError(
-                "_artifact_id_for: column-scope text artifact_id requires column_name + field.",
-                remediation=(
-                    "Pass column_name=... and field='description'/'rationale' alongside "
-                    "scope='column'. This is a programming error in the orchestrator."
-                ),
-            )
-        return f"column.{column_name}.{field}"
-
-    # description / rationale — model scope.
-    if scope == "model":
-        if field is None:
-            raise GradeError(
-                "_artifact_id_for: model-scope text artifact_id requires field.",
-                remediation=(
-                    "Pass field='description'/'rationale' alongside scope='model'. "
-                    "This is a programming error in the orchestrator."
-                ),
-            )
-        return f"model.{field}"
-
-    raise GradeError(
-        f"_artifact_id_for: unrecognised scope {scope!r}.",
-        remediation="scope must be 'column' or 'model'.",
-    )
-
-
-# ---------------------------------------------------------------------------
-# Iteration order (DEC-018)
-# ---------------------------------------------------------------------------
-
-
-def _test_args_hashes(candidate: CandidateSchema) -> dict[int, str | None]:
-    """Pre-compute per-test args hashes, marking the disambiguators.
-
-    Returns a dict keyed by ``id(test)`` carrying the args_hash string
-    when the test's ``test.type`` collides with another test in the
-    SAME scope (model-level OR same-column), or ``None`` when the bare
-    ``test.<scope>.<...>.<type>`` form is unique. Computed once per
-    run so the orchestrator's iteration loop and the GradeEvent
-    construction agree on artifact_id shape.
-
-    Collision rules (DEC-009 + QG pass 2 fix + post-PR-review fix):
-
-    * Two model-level tests with the same ``test.type`` collide
-      regardless of args (e.g. two ``accepted_values`` on different
-      columns).
-    * Two tests on the SAME column with the same ``test.type``
-      collide (e.g. two ``accepted_values`` on ``status`` with
-      different ``values`` lists).
-    * A model-level test does NOT collide with a column-scope test
-      because the artifact_id prefix differs (``test.model.`` vs
-      ``test.column.``).
-    * **Exact duplicates** (same type, same args → identical
-      blake2b-4 hash) get an ordinal suffix appended to the hash
-      (``<hash>:<n>``) so artifact_ids stay globally unique even when
-      a candidate carries two semantically identical tests. Without
-      this, the JSONL ``(run_id, artifact_id, criterion_id)`` triple
-      would collide and the diff renderer (#8) couldn't distinguish
-      the records.
-    """
-    out: dict[int, str | None] = {}
-
-    def _assign(
-        tests: tuple[CandidateTest, ...],
-    ) -> None:
-        """Assign args_hash (with ordinal disambiguator on collision)
-        to every test in ``tests`` whose type appears more than once.
-        """
-        type_counts: dict[str, int] = {}
-        for test in tests:
-            type_counts[test.type] = type_counts.get(test.type, 0) + 1
-        # Track per-(type, hash) ordinals so exact duplicates get suffixed.
-        seen: dict[tuple[str, str], int] = {}
-        for test in tests:
-            if type_counts[test.type] <= 1:
-                out[id(test)] = None
-                continue
-            base_hash = _model_test_args_hash(test)
-            key = (test.type, base_hash)
-            seen[key] = seen.get(key, 0) + 1
-            ordinal = seen[key]
-            # First occurrence keeps the bare hash; second+ gets
-            # ":1", ":2", ... suffix. The first occurrence is the
-            # common case (no exact duplicate) and we want its
-            # artifact_id to read as just the base hash.
-            out[id(test)] = base_hash if ordinal == 1 else f"{base_hash}:{ordinal - 1}"
-
-    _assign(candidate.tests)
-    for column in candidate.columns:
-        _assign(column.tests)
-
-    return out
 
 
 def _stable_artifact_pairs(
