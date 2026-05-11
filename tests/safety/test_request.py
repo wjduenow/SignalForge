@@ -479,6 +479,24 @@ def test_build_llm_request_audit_record_too_large_propagates_typed(
     assert excinfo.value is boom
 
 
+def test_build_llm_request_keyboard_interrupt_propagates_unwrapped(
+    customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Signal-shaped exits (``KeyboardInterrupt`` / ``SystemExit``) must
+    propagate untouched — wrapping them as ``AuditWriteError`` would
+    silently demote a Ctrl-C into an audit error and bury the user's
+    intent. Mirrors the same clause in ``draft_from_request``.
+    """
+    rec = _AuditRecorder(raise_on_call=KeyboardInterrupt())
+    monkeypatch.setattr("signalforge.safety.request.audit.write", rec)
+
+    fake = FakeAdapter()
+    policy = _policy(tmp_path, mode=SamplingMode.SCHEMA_ONLY)
+
+    with pytest.raises(KeyboardInterrupt):
+        build_llm_request(customers_model, fake, policy)
+
+
 # ---------------------------------------------------------------------------
 # Immutability (DEC-022) and shape invariants
 # ---------------------------------------------------------------------------

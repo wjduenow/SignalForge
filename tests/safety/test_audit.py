@@ -239,6 +239,25 @@ def test_audit_write_serialisation_failure_propagates_raw(
         write(_make_event(), audit_path)
 
 
+def test_audit_write_zero_bytes_raises_os_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero-byte return from ``os.write`` indicates an unrecoverable
+    I/O failure (disk full, etc.) — the writer raises ``OSError``
+    rather than spinning forever. Mirrors the diff sidecar's
+    ``test_write_sidecar_short_write_zero_bytes_raises``.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+
+    def zero_write(fd: int, data: bytes) -> int:
+        return 0
+
+    monkeypatch.setattr("signalforge.safety.audit.os.write", zero_write)
+    with pytest.raises(OSError, match="os.write returned 0"):
+        write(_make_event(), audit_path)
+
+
 def test_audit_write_fsyncs_before_close(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
