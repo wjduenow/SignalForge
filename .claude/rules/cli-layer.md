@@ -170,8 +170,49 @@ The `--version` flag uses argparse's `action="version"` (which raises `SystemExi
 
 When introducing a new subcommand, match the precedent verbatim. Don't add per-subcommand `try/except` ladders; the single boundary at `cmd_<name>` is the contract.
 
+## Multi-model batch driver pattern (issue #37, v0.2)
+
+Issue #37 lands `--select <expr>` for multi-model batch execution in one `signalforge generate` process. The dispatcher in `cmd_generate` routes to either the single-model path (positional `<model>`) or `_run_batch` (when `--select` is supplied). The two paths are mutex via `add_mutually_exclusive_group(required=True)` — argparse rejects both/neither at parser time, exit 2.
+
+**Dispatcher / driver shape.** Three private helpers in `signalforge.cli.generate`:
+
+- `_SingleModelOutcome` — frozen dataclass with `model_unique_id`, `exit_code`, kept/dropped/flagged counts, `rendered_text` (stdout content for this model), `duration_seconds`, `exception_class_name` (set on failure for the aggregated summary).
+- `_BatchOutcome` — frozen dataclass with `per_model: tuple[_SingleModelOutcome, ...]` and `total_exit_code = max(...)` across the four-tier taxonomy.
+- `_run_single_model(model, manifest, profile, args, *, project_dir, batch_index=None, batch_count=None) -> _SingleModelOutcome` — runs the full safety → draft → prune → grade → diff pipeline for one model. Constructs its OWN `BigQueryAdapter` via `_make_warehouse_adapter(profile)` so each call gets fresh adapter state. `batch_index` / `batch_count` drive the `[i/N] <unique_id>` progress prefix when both non-None.
+- `_run_batch(manifest, profile, args, *, project_dir) -> _BatchOutcome` — calls `select_models(manifest, args.select)`, wraps `SelectorParseError → CliSelectorParseError(cause=...)`, raises `CliSelectorNoMatchError` BEFORE any iteration on empty match.
+
+`cmd_generate` is a thin dispatcher: `if getattr(args, "select", None) is not None: _run_batch(...)` else `_run_single_model(...)`. **Use `is not None`, NOT truthiness** — an empty-string `--select ""` is argparse-accepted (the mutex group treats it as "provided") and MUST route to the parser so it raises `CliSelectorParseError`, not fall through to the single-model branch where `args.model is None`. Pinned by `test_select_empty_string_routes_to_parse_error`.
+
+**Fresh adapter per model** (DEC-010 of #37, generalising `warehouse-adapters.md` DEC-002-of-#22). Stateful adapters carry per-call state in instance fields (`BigQueryAdapter._active_session_id` is the v0.2 instance; v0.3 Snowflake / Postgres will have their own). The batch driver constructs a new adapter inside the per-model loop, NOT once at batch start — otherwise state from model N would leak into model N+1's audit and warehouse session. Adds ~100-500ms BQ client init per model; acceptable vs. state-corruption risk.
+
+**Continue-on-failure with `max()` aggregation** (DEC-004). Each `_run_single_model` lives inside its own `try/except Exception` boundary (mirrors DEC-016). A per-model failure records `exception_class_name`, exit-code (via `map_exception_to_exit_code`), and keeps going. The batch's `total_exit_code = max(per_model_exit_codes)` across the four-tier taxonomy (severity rank = tier integer). Failed models named in the aggregated summary with their tier + exception class; cap 50, overflow `... and <K> more`.
+
+**Aggregated summary → stderr** (DEC-005). `format_batch_summary(outcome) -> str` in `cli/_helpers.py` is the single formatter. Headline format (locked verbatim, pinned by test):
+
+```
+Generated <K> kept / <L> dropped / <J> flagged across <M> models in <T>s
+```
+
+Plus optional failure block when ≥1 model failed. Summary emits when `(matched ≥ 2 OR failed ≥ 1) AND NOT quiet`. Stdout carries rendered diffs in `unique_id` lex order; stderr carries the summary so operators piping `> diffs.txt` get just the diffs.
+
+**Defence-in-depth: scrub control chars in failure-bullet ids.** The failure bullets are column-padded; a `\n` / `\r` / `\t` in any `model_unique_id` would corrupt the CI-parser-keyable column geometry. Real dbt unique_ids never contain control chars (Pydantic-strict-typed at manifest load), but `format_batch_summary` replaces them with single spaces before measuring + emitting. Pinned by `test_format_batch_summary_sanitises_control_chars_in_unique_id`.
+
+**Per-model `[i/N]` progress prefix** (DEC-014). When the batch driver runs AND `_run_single_model` receives non-None `batch_index`/`batch_count` AND `should_emit_progress(quiet, verbose)` returns True, each iteration emits one stderr line `[i/N] <model_unique_id>` before the model's existing stage progress fires. `--quiet` suppresses; `--verbose` forces on regardless of TTY. Single-model positional path emits NEITHER the prefix NOR the summary — preserves v0.1 output shape byte-for-byte.
+
+**Anthropic prompt cache behaviour in batch** (DEC-015). The drafter's *explicitly cache-marked* block is the per-model manifest summary (`<MODEL_SQL>` + neighbours), which changes each iteration — so the marked block does NOT amortise across siblings. Cost savings within one process come from Anthropic's *automatic* caching of the static system prompt only (once it crosses the auto-cache size threshold). Document this honestly in the operator-facing cookbook; the marked-cache claim looks attractive but doesn't materialise on batch runs.
+
+**Sidecar last-writer-wins** (DEC-003). `.signalforge/grade.json` and `.signalforge/diff.json` are `O_TRUNC` overwrite per `cmd_generate` call (locked by `grade-layer.md` DEC-006/012 and `diff-renderer.md` DEC-009). Multi-model in-process iteration overwrites these per model; only the final model's sidecars persist. The four append-only JSONLs (`safety.audit.jsonl`, `llm_response.jsonl`, `prune.jsonl`, `grade.jsonl`) survive iteration because each record is ≤ 4000 bytes (well under `PIPE_BUF = 4096` on Linux) — POSIX guarantees atomic concurrent appends. Operators who want per-model sidecars use the shell-loop pattern (`docs/cli-ops.md § Running across many models`), one process per `--project-dir`.
+
+**5-surface parity test pattern** (DEC-017). For any new CLI flag whose grammar / examples appear across multiple surfaces, ship a bespoke parity test that reads each surface and asserts the same example tokens appear. `tests/cli/test_5_surface_parity_select.py` is the issue-#37 instance — hard-asserts that `tag:staging`, `path:models/marts/*`, and `tag:staging,path:models/marts/*` appear in argparse help, the cookbook section of `docs/cli-ops.md`, and the plan file. When v0.3 flags ship, copy this test verbatim and re-target. **Don't ship the test with `pytest.skip` branches for surfaces that haven't landed yet** — those become dead code the moment the gating PR merges. Either ship the test gated by a sentinel string check that converts to a hard assert once the surface exists, OR ship the test AFTER all surfaces are committed.
+
+**No new AST scan, no new fail-closed writer.** The batch layer does not introduce a new audit-event class (the per-model writers — safety / draft / prune / grade — already cover the contract; the batch driver just iterates). The 7th AST scan (`test_every_typed_error_is_in_exit_code_mapping_table`) auto-covers the two new errors `CliSelectorParseError` and `CliSelectorNoMatchError` because they live in `cli/errors.py`. Logger grep gate auto-covers new lazy-format calls in `cli/` (6th dir; unchanged).
+
+**Two new exit-code-table entries.** Both `CliSelectorParseError` and `CliSelectorNoMatchError` are tier 2 (input-validation): the operator's selector was syntactically malformed OR resolved to nothing in this project. Mirrors `ModelNotFoundError`'s tier (the positional bare-name case).
+
+When v0.3 introduces parallel batch execution (deferred from #37), the per-model boundary catch needs to coordinate with whatever concurrency primitive lands. The current sequential pattern lays the groundwork: outcome-as-typed-result + max-aggregation generalises cleanly.
+
 ## Reference
 
-`plans/super/9-cli-entrypoint.md` — DEC-001 … DEC-027. `src/signalforge/cli/` — current implementation. `docs/cli-ops.md` — operational reference. `tests/cli/` — in-process and subprocess test suite. `tests/test_audit_completeness.py::test_every_typed_error_is_in_exit_code_mapping_table` — 7th AST scan (DEC-024). `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate (6 dirs as of #9). `tests/cli/test_exit_codes.py` — parametrized exception → exit-code contract.
+`plans/super/9-cli-entrypoint.md` — DEC-001 … DEC-027. `plans/super/37-multi-model-select.md` — DEC-001 … DEC-017 (multi-model batch additions). `src/signalforge/cli/` — current implementation. `docs/cli-ops.md` — operational reference. `tests/cli/` — in-process and subprocess test suite. `tests/test_audit_completeness.py::test_every_typed_error_is_in_exit_code_mapping_table` — 7th AST scan (DEC-024). `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate (6 dirs as of #9). `tests/cli/test_exit_codes.py` — parametrized exception → exit-code contract. `tests/cli/test_5_surface_parity_select.py` — 5-surface parity for `--select` (issue #37 DEC-017).
 
 See-Also: clauditor's `.claude/rules/llm-cli-exit-code-taxonomy.md` is the source of the four-tier rule; SignalForge ports it as one section inside this file rather than a standalone rule (DEC-009 of #9 — one rule file per pipeline layer).
