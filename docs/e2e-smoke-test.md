@@ -133,7 +133,7 @@ per-run `tmp_path`, substitutes `GOOGLE_CLOUD_PROJECT` into
 `profiles.yml`, and runs `signalforge generate` against the temp
 project. If you want to run the same flow as a one-off CLI
 invocation (rather than through pytest), follow the README's
-[Trying it out](../README.md#trying-it-out) walkthrough — it
+[Quick start](../README.md#quick-start) walkthrough — it
 shows the manual copy + profile-rewrite incantation.
 
 ### Why the profile rewrite matters
@@ -214,7 +214,7 @@ re-running.
 ## Cross-references
 
 - The walk-through quickstart for end users: `README.md`
-  § "Trying it out".
+  § "Quick start".
 - The fixture itself:
   `tests/fixtures/dbt_project_austin/`. Includes its own
   `regenerate.sh` for refreshing the committed `target/manifest.json`

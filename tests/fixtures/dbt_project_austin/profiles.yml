@@ -13,7 +13,7 @@
 # `maximum_bytes_billed` before invoking `signalforge generate`. The
 # committed profile is regen-only; do not run `signalforge generate`
 # directly against this directory without rewriting the profile first
-# (the README's "Trying it out" walkthrough does this implicitly via
+# (the README's "Quick start" walkthrough does this implicitly via
 # `cd tests/fixtures/dbt_project_austin/` + `signalforge generate ...`
 # inheriting the env-var path).
 austin:
