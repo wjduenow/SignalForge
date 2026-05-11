@@ -102,7 +102,7 @@ Full reference: [docs/safety-ops.md](docs/safety-ops.md),
 [docs/prune-ops.md](docs/prune-ops.md),
 [docs/grade-ops.md](docs/grade-ops.md).
 
-### 4. First run
+### 4. Prepare the fixture
 
 Copy the fixture to a writable tmp dir and rewrite the profile to bill
 queries against your project (the committed `profiles.yml` is oriented
@@ -124,7 +124,32 @@ austin:
       location: US
       maximum_bytes_billed: 1000000000
 EOF
+```
 
+### 5. Validate config (`signalforge lint`)
+
+Before paying for an LLM call, run the config-only validator. It loads
+`signalforge.yml`, the dbt manifest, and the warehouse profile through
+every per-stage loader — no warehouse calls, no Anthropic calls, no
+network — and reports every block that fails to parse in one shot.
+Sub-second; catches typos like `safety: { mdoel: ... }` that the
+`extra="forbid"` config models would otherwise surface only after a
+billable `generate` run:
+
+```bash
+signalforge lint --project-dir /tmp/sf-austin
+```
+
+On success, stdout is silent (git-style) and the exit code is `0`.
+Failures are listed on stderr with the offending block(s) named —
+single-failure runs use the `ERROR: <message>` shape; multi-failure
+runs emit a header + one bullet per block. See
+[`docs/cli-ops.md`](docs/cli-ops.md) § `signalforge lint` for the full
+contract.
+
+### 6. First run
+
+```bash
 signalforge generate models/staging/stg_bikeshare_trips.sql --project-dir /tmp/sf-austin
 ```
 
@@ -135,7 +160,7 @@ plus a single BigQuery `dryRun`). See
 [`docs/cli-ops.md`](docs/cli-ops.md) § `--estimate` for the full
 contract.
 
-### 5. Expected output
+### 7. Expected output
 
 The diff lists drafted column descriptions and signal-bearing tests
 alongside dropped tests with a one-line "why". The kept/dropped/flagged
