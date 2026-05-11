@@ -5,13 +5,15 @@
 - **Ticket:** [GH #36](https://github.com/wjduenow/SignalForge/issues/36)
 - **Branch:** `feature/36-estimate-cost-preview`
 - **Worktree:** `../worktrees/SignalForge/36-estimate-cost-preview`
-- **Phase:** published
+- **Phase:** devolved
 - **PR:** [#63](https://github.com/wjduenow/SignalForge/pull/63) (draft)
+- **Epic:** `bd_1-scaffolding-bmz`
 - **Sessions:**
   - 2026-05-11 — initial discovery + research
   - 2026-05-11 — Phase 1 scoping answers, Phase 2 architecture review
   - 2026-05-11 — Phase 3 refinement (15 DECs), Phase 4 detailing (8 stories)
   - 2026-05-11 — Phase 5 published as draft PR #63
+  - 2026-05-11 — Phase 6 approved, Phase 7 devolved to beads
 
 ## Ticket summary
 
@@ -408,4 +410,18 @@ pip install -e ".[dev]" && ruff check . && ruff format --check . && pyright && p
 
 ## Beads manifest
 
-*pending Phase 7*
+- **Epic:** `bd_1-scaffolding-bmz` — 36: signalforge generate --estimate cost preview (P1, external-ref `gh-36`).
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/36-estimate-cost-preview` (branch `feature/36-estimate-cost-preview`, tracking `origin/feature/36-estimate-cost-preview`).
+
+| Bead ID | Story | Priority | Depends on |
+|---------|-------|----------|------------|
+| `bd_1-scaffolding-bmz.1` | US-001: `signalforge.llm.pricing` module | P1 | — (READY) |
+| `bd_1-scaffolding-bmz.2` | US-002: `WarehouseAdapter.estimate_query_bytes` + BigQuery dryRun | P1 | US-001 |
+| `bd_1-scaffolding-bmz.3` | US-003: estimate engine + `EstimateReport` typed result | P1 | US-001, US-002 |
+| `bd_1-scaffolding-bmz.4` | US-004: text renderer + snapshot fixtures | P1 | US-003 |
+| `bd_1-scaffolding-bmz.5` | US-005: `--estimate` flag wiring in `signalforge generate` | P1 | US-003, US-004 |
+| `bd_1-scaffolding-bmz.6` | US-006: docs + 5-surface parity | P1 | US-001, US-002, US-005 |
+| `bd_1-scaffolding-bmz.7` | US-007: Quality Gate — code review x4 + CodeRabbit | P1 | US-001..US-006 |
+| `bd_1-scaffolding-bmz.8` | US-008: Patterns & Memory — rules updates | P4 | US-007 |
+
+Run `bd ready` from the worktree to see the next available task.
