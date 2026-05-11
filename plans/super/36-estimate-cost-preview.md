@@ -5,11 +5,13 @@
 - **Ticket:** [GH #36](https://github.com/wjduenow/SignalForge/issues/36)
 - **Branch:** `feature/36-estimate-cost-preview`
 - **Worktree:** `../worktrees/SignalForge/36-estimate-cost-preview`
-- **Phase:** detailing
+- **Phase:** published
+- **PR:** [#63](https://github.com/wjduenow/SignalForge/pull/63) (draft)
 - **Sessions:**
   - 2026-05-11 — initial discovery + research
   - 2026-05-11 — Phase 1 scoping answers, Phase 2 architecture review
   - 2026-05-11 — Phase 3 refinement (15 DECs), Phase 4 detailing (8 stories)
+  - 2026-05-11 — Phase 5 published as draft PR #63
 
 ## Ticket summary
 
