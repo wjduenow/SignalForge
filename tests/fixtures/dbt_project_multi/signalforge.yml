@@ -1,0 +1,12 @@
+# Multi-model fixture config (issue #37, US-006).
+#
+# `safety.mode: aggregate-only` keeps the LLM-bound payload free of raw row
+# values; `prune.enabled: false` short-circuits the prune engine before any
+# warehouse contact (DEC-005 of plans/super/35-prune-enabled-doc-reframe.md).
+# Together these settings let the US-007 CLI integration tests drive the
+# full pipeline with the LLM seam stubbed by a fake — no env vars, no
+# warehouse credentials, no live network.
+safety:
+  mode: aggregate-only
+prune:
+  enabled: false
