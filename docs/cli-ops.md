@@ -78,7 +78,41 @@ Positional argument:
   `Manifest.get_model(...)` which canonicalises the path and
   raises `ModelNotFoundError` / `ModelDisabledError` /
   `ModelPathOutsideProjectError` / `ModelMissingSqlError` on
-  failure.
+  failure. Mutually exclusive with `--select`; exactly one of
+  the two must be supplied.
+
+Multi-model flag:
+
+- `--select <expr>` — Run `generate` across multiple models in
+  one process. `<expr>` is a comma-separated union of atoms (set
+  OR); whitespace around commas is stripped. Three atom shapes:
+    - `tag:<name>` — matches when `<name>` is in
+      `Model.tags ∪ Model.config.tags`.
+    - `path:<glob>` — shell-style `fnmatch` against
+      `Model.original_file_path`. dbt's path-prefix convention
+      diverges; v0.2 uses fnmatch and operators write
+      `path:models/staging/*` (with the trailing wildcard),
+      not `path:models/staging` (DEC-016 of
+      [`plans/super/37-multi-model-select.md`](../plans/super/37-multi-model-select.md)).
+    - bare `<value>` — `model.<...>` prefix routes as
+      `unique_id`; otherwise routes as a file path (mirrors the
+      v0.1 positional `<model>` semantics).
+
+  Match results are deduplicated and ordered by `unique_id`
+  (deterministic). Three concrete examples:
+
+  ```bash
+  signalforge generate --select tag:staging
+  signalforge generate --select path:models/marts/*
+  signalforge generate --select tag:staging,path:models/marts/*
+  ```
+
+  Mutually exclusive with the positional `<model>`. Empty atoms
+  (`--select ,tag:foo`) exit 2 with `CliSelectorParseError`; a
+  well-formed selector that matches zero models exits 2 with
+  `CliSelectorNoMatchError`. See [Running across many
+  models](#running-across-many-models) for semantics, the
+  shell-loop alternative, and cumulative-cost guidance.
 
 Path / project-discovery flags:
 
@@ -606,6 +640,161 @@ matrix). The fixture lives at `tests/fixtures/dbt_project_austin/`;
 the gated maintainer-only test that exercises the same flow lives
 at `tests/cli/test_e2e_bigquery_smoke.py` (run via
 `pytest -m e2e --no-cov`).
+
+## Running across many models
+
+A typical dbt project has dozens or hundreds of models. SignalForge
+v0.2 supports two patterns for running `generate` across many of them:
+an in-process selector (`--select`) and a process-per-model shell
+loop. Pick based on whether you want shared LLM prompt-cache state
+across models (in-process wins) or process-level isolation and
+per-model sidecars (shell loop wins). See
+[`plans/super/37-multi-model-select.md`](../plans/super/37-multi-model-select.md)
+for the design record (DEC-001 … DEC-017).
+
+### In-process: `--select <expr>`
+
+`--select` matches models from the manifest and iterates `generate`
+over each in invocation order. Grammar (also pinned in the argparse
+`--help` string and in DEC-001 / DEC-016 of the design plan):
+
+- `tag:<name>` — matches when `<name>` is in
+  `Model.tags ∪ Model.config.tags` (the union of model-level and
+  config-block tags, case-sensitive).
+- `path:<glob>` — shell-style `fnmatch` against
+  `Model.original_file_path`. dbt's own selector grammar uses a
+  path-prefix-with-implicit-wildcard convention; v0.2 deliberately
+  uses fnmatch instead, which means operators write
+  `path:models/staging/*` (with the trailing wildcard) rather than
+  `path:models/staging` (dbt-compat semantics are a v0.3 ask;
+  DEC-016).
+- bare `<value>` — `model.<...>` prefix routes as `unique_id`;
+  otherwise routes as a file path. Mirrors the v0.1 positional
+  `<model>` resolver (`Manifest.get_model`).
+
+Atoms combine as a comma-separated union (set OR); whitespace around
+commas is stripped. Match results are deduplicated by `unique_id` and
+ordered lexicographically.
+
+Three concrete examples:
+
+```bash
+signalforge generate --select tag:staging
+signalforge generate --select path:models/marts/*
+signalforge generate --select tag:staging,path:models/marts/*
+```
+
+Semantics:
+
+- **Sequential.** Models are processed one at a time in
+  lexicographic `unique_id` order. Parallelism inside one process is
+  a v0.3 ask; use the shell-loop pattern below if you need it now.
+- **Fresh `BigQueryAdapter` per model** (DEC-010). The batch driver
+  constructs a new adapter inside the per-model loop, not once at
+  batch start, so `_active_session_id` and the rest of the BigQuery
+  session state cannot bleed between iterations. Adds ~100-500ms BQ
+  client init per model — acceptable vs. state-corruption risk.
+- **Anthropic prompt cache behavior** (DEC-015). The drafter's
+  explicitly cache-marked block is the manifest summary (model
+  under draft + its neighbours), which **changes per model** — so
+  the marked cache does NOT amortise across siblings in a batch.
+  Cost savings within one process come from Anthropic's automatic
+  caching of the static system prompt, which IS byte-stable across
+  iterations once it crosses the auto-cache size threshold. Net:
+  expect partial cache savings on system-prompt tokens; do not
+  expect the marked manifest-summary block to hit on subsequent
+  models.
+- **Per-model progress prefix.** When a TTY is attached and the
+  batch driver runs, each iteration emits one stderr line
+  `[i/N] <model_unique_id>` before that model's existing stage
+  progress lines fire. `--quiet` suppresses; `--verbose` forces on.
+  The single-model (positional) path does not emit the prefix.
+- **Continue on per-model failure.** A model that raises an
+  exception logs the failure, continues to the next model, and
+  contributes to the run-level exit code via
+  `max(per_model_exit_codes)` across the four-tier taxonomy.
+
+At end of run, an aggregated summary lands on stderr (DEC-005). The
+summary always emits when ≥2 models matched OR ≥1 model failed:
+
+```text
+Generated 142 kept / 31 dropped / 8 flagged across 12 models in 4m 18s
+2 models failed:
+  - model.proj.broken_a        exit 3  (LLMRateLimitError)
+  - model.proj.broken_b        exit 2  (LLMOutputAnchorContractError)
+```
+
+Failed-model list is capped at 50 entries; overflow renders
+`  ... and <K> more`.
+
+**Sidecar caveat (DEC-003 — last-writer-wins).**
+`.signalforge/grade.json` and `.signalforge/diff.json` are
+single-document overwrite (`O_TRUNC`) per-call; across N in-process
+iterations, only the FINAL model's sidecars persist. The four
+append-only JSONLs (`safety.audit.jsonl`, `llm_response.jsonl`,
+`prune.jsonl`, `grade.jsonl`) accumulate across iterations and
+survive — that's where the per-model auditable record lives. If you
+need per-model JSON sidecars, use the shell-loop pattern below.
+
+### Process-level: shell-loop pattern
+
+When you need process-level isolation (per-model sidecars, parallel
+execution, hard memory boundaries between models), run one
+`signalforge` process per model from a shell loop:
+
+```bash
+find models -name '*.sql' | \
+  xargs -n1 -P4 -I{} signalforge generate {} --project-dir "$PWD"
+```
+
+Parallelism caveats:
+
+- **BigQuery session isolation:** safe. Each process has its own
+  `BigQueryAdapter` instance with its own `_active_session_id`;
+  sessions cannot cross process boundaries. The cleanup-failure
+  WARNING (above) still surfaces per-process when teardown fails.
+- **Anthropic prompt cache:** each process pays its own
+  cache-creation tokens on its first call. With `-P4`, four
+  processes redundantly pay the cache-creation cost on the cached
+  block (the system prompt + neighbours portion). Choose `-P1`
+  (cheaper, slower) vs. `-P4` (faster, more LLM cost) based on
+  budget. In-process `--select` amortises the cache cost across
+  iterations within one process.
+- **Sidecar overwrite:** each process writes
+  `.signalforge/grade.json` and `.signalforge/diff.json` to the
+  same project dir; whichever process finishes last wins. If you
+  need per-model sidecars, either invoke each process with a
+  per-model `--project-dir` overlay (e.g. `cp -r` the project into
+  a tmp dir per model) or accept last-writer-wins semantics.
+- **Anti-pattern: do NOT share `.signalforge/` across concurrent
+  processes** if which model "owns" the surviving sidecars matters.
+  Configure per-process project directories, or run sequentially
+  (`-P1`), or accept the overwrite.
+
+### Cumulative cost
+
+Per-call cost caps already exist — `maximum_bytes_billed` in the
+BigQuery profile (see
+[`docs/warehouse-adapter-ops.md`](warehouse-adapter-ops.md)) bounds
+each prune query, and the LLM draft + grade calls have per-call
+retry / token budgets in their respective config blocks. Multi-model
+runs are N independent calls; cumulative cost is the operator's
+responsibility (DEC-008).
+
+Recommendations:
+
+- Preview the match-count before committing to a large batch. The
+  library-level helper `signalforge.manifest.select_models(manifest, expr)`
+  returns matches without invoking the pipeline; a quick Python
+  shell call (`from signalforge.manifest import load, select_models;
+  m = load("."); print(len(select_models(m, "tag:staging")))`)
+  tells you how many models a given selector would touch.
+- Start with a single tag (e.g. `--select tag:staging`) before
+  running a wider union, to confirm cost and runtime on a smaller
+  slice.
+- A `cli.max_models_per_run` config knob is reserved as a v0.3
+  forward-compat surface (not shipped in v0.2). For now, the
+  operator's selector is the only governor on batch size.
 
 ## Subprocess smoke test
 

@@ -1,0 +1,407 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.8.9",
+    "generated_at": null,
+    "invocation_id": null,
+    "env": {},
+    "project_name": "dbt_project_multi",
+    "project_id": "dbtprojectmulti0000000000000000000",
+    "user_id": null,
+    "send_anonymous_usage_stats": null,
+    "adapter_type": null
+  },
+  "nodes": {
+    "model.dbt_project_multi.stg_a": {
+      "database": "dev",
+      "schema": "main",
+      "name": "stg_a",
+      "resource_type": "model",
+      "package_name": "dbt_project_multi",
+      "path": "staging/stg_a.sql",
+      "original_file_path": "models/staging/stg_a.sql",
+      "unique_id": "model.dbt_project_multi.stg_a",
+      "fqn": [
+        "dbt_project_multi",
+        "staging",
+        "stg_a"
+      ],
+      "alias": "stg_a",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "tags": ["staging"],
+        "meta": {},
+        "group": null,
+        "materialized": "view",
+        "incremental_strategy": null,
+        "persist_docs": {},
+        "post-hook": [],
+        "pre-hook": [],
+        "quoting": {},
+        "column_types": {},
+        "full_refresh": null,
+        "unique_key": null,
+        "on_schema_change": "ignore",
+        "on_configuration_change": "apply",
+        "grants": {},
+        "packages": [],
+        "docs": {
+          "show": true,
+          "node_color": null
+        },
+        "contract": {
+          "enforced": false,
+          "alias_types": true
+        },
+        "access": "protected"
+      },
+      "tags": ["staging"],
+      "description": "Staging model A. Carries an engineered literal column (`'austin' AS source`) so any LLM-drafted `not_null` test on the `source` column is mathematically guaranteed to always-pass on a representative sample (DEC-006 of plans/super/6-prune-engine.md).",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "description": "Integer user identifier (literal 1 in this fixture).",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "source": {
+          "name": "source",
+          "description": "Literal-value origin marker. Always the string `austin`; mathematically guaranteed non-NULL so `not_null` tests on this column always-pass.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "ingested_at": {
+          "name": "ingested_at",
+          "description": "Ingestion date (literal 2025-01-01 in this fixture).",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "meta": {},
+      "group": null,
+      "docs": {
+        "show": true,
+        "node_color": null
+      },
+      "patch_path": null,
+      "build_path": null,
+      "unrendered_config": {
+        "materialized": "view",
+        "tags": ["staging"]
+      },
+      "created_at": 0,
+      "relation_name": "\"dev\".\"main\".\"stg_a\"",
+      "raw_code": "-- Staging model A: engineered determinism for the always-passes drop path.\n--\n-- The `'austin' AS source` literal column is mathematically guaranteed to be\n-- non-NULL, so any LLM-drafted `not_null` test on `source` will always pass\n-- on a representative sample. The prune engine routes that decision to\n-- DropReason=\"always-passes\" (DEC-006 of plans/super/6-prune-engine.md).\n-- This is the same trick used by tests/fixtures/dbt_project_austin/\n-- (testing-signal.md, \"Engineered determinism for LLM-driven assertions\").\nselect\n    1 as user_id,\n    'austin' as source,\n    cast('2025-01-01' as date) as ingested_at\n",
+      "language": "sql",
+      "refs": [],
+      "sources": [],
+      "metrics": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": []
+      },
+      "compiled_path": null,
+      "contract": {
+        "enforced": false,
+        "alias_types": true,
+        "checksum": null
+      },
+      "access": "protected",
+      "constraints": [],
+      "version": null,
+      "latest_version": null,
+      "deprecation_date": null
+    },
+    "model.dbt_project_multi.stg_b": {
+      "database": "dev",
+      "schema": "main",
+      "name": "stg_b",
+      "resource_type": "model",
+      "package_name": "dbt_project_multi",
+      "path": "staging/stg_b.sql",
+      "original_file_path": "models/staging/stg_b.sql",
+      "unique_id": "model.dbt_project_multi.stg_b",
+      "fqn": [
+        "dbt_project_multi",
+        "staging",
+        "stg_b"
+      ],
+      "alias": "stg_b",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "tags": ["staging"],
+        "meta": {},
+        "group": null,
+        "materialized": "view",
+        "incremental_strategy": null,
+        "persist_docs": {},
+        "post-hook": [],
+        "pre-hook": [],
+        "quoting": {},
+        "column_types": {},
+        "full_refresh": null,
+        "unique_key": null,
+        "on_schema_change": "ignore",
+        "on_configuration_change": "apply",
+        "grants": {},
+        "packages": [],
+        "docs": {
+          "show": true,
+          "node_color": null
+        },
+        "contract": {
+          "enforced": false,
+          "alias_types": true
+        },
+        "access": "protected"
+      },
+      "tags": ["staging"],
+      "description": "Staging model B. Varied column shape (no literal-source column); paired with stg_a to exercise multi-model selection across the `staging` tag.",
+      "columns": {
+        "order_id": {
+          "name": "order_id",
+          "description": "Integer order identifier.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "user_id": {
+          "name": "user_id",
+          "description": "Integer user identifier (joins to stg_a.user_id).",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "amount": {
+          "name": "amount",
+          "description": "Order amount in USD.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "ordered_at": {
+          "name": "ordered_at",
+          "description": "Order timestamp.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "meta": {},
+      "group": null,
+      "docs": {
+        "show": true,
+        "node_color": null
+      },
+      "patch_path": null,
+      "build_path": null,
+      "unrendered_config": {
+        "materialized": "view",
+        "tags": ["staging"]
+      },
+      "created_at": 0,
+      "relation_name": "\"dev\".\"main\".\"stg_b\"",
+      "raw_code": "-- Staging model B: varied column shape (no literal-source column).\n-- Used alongside stg_a.sql to exercise multi-model selection across the\n-- `staging` tag.\nselect\n    1 as order_id,\n    1 as user_id,\n    100.00 as amount,\n    cast('2025-01-01' as timestamp) as ordered_at\n",
+      "language": "sql",
+      "refs": [],
+      "sources": [],
+      "metrics": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": []
+      },
+      "compiled_path": null,
+      "contract": {
+        "enforced": false,
+        "alias_types": true,
+        "checksum": null
+      },
+      "access": "protected",
+      "constraints": [],
+      "version": null,
+      "latest_version": null,
+      "deprecation_date": null
+    },
+    "model.dbt_project_multi.fct_x": {
+      "database": "dev",
+      "schema": "main",
+      "name": "fct_x",
+      "resource_type": "model",
+      "package_name": "dbt_project_multi",
+      "path": "marts/fct_x.sql",
+      "original_file_path": "models/marts/fct_x.sql",
+      "unique_id": "model.dbt_project_multi.fct_x",
+      "fqn": [
+        "dbt_project_multi",
+        "marts",
+        "fct_x"
+      ],
+      "alias": "fct_x",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "tags": ["marts"],
+        "meta": {},
+        "group": null,
+        "materialized": "table",
+        "incremental_strategy": null,
+        "persist_docs": {},
+        "post-hook": [],
+        "pre-hook": [],
+        "quoting": {},
+        "column_types": {},
+        "full_refresh": null,
+        "unique_key": null,
+        "on_schema_change": "ignore",
+        "on_configuration_change": "apply",
+        "grants": {},
+        "packages": [],
+        "docs": {
+          "show": true,
+          "node_color": null
+        },
+        "contract": {
+          "enforced": false,
+          "alias_types": true
+        },
+        "access": "protected"
+      },
+      "tags": ["marts"],
+      "description": "Mart model. Unions the two staging models on `user_id` and aggregates `amount`.",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "description": "User identifier (group-by key).",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "total_amount": {
+          "name": "total_amount",
+          "description": "Sum of `amount` per `user_id` across both staging models.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "meta": {},
+      "group": null,
+      "docs": {
+        "show": true,
+        "node_color": null
+      },
+      "patch_path": null,
+      "build_path": null,
+      "unrendered_config": {
+        "materialized": "table",
+        "tags": ["marts"]
+      },
+      "created_at": 0,
+      "relation_name": "\"dev\".\"main\".\"fct_x\"",
+      "raw_code": "-- Mart model: refs the staging models so the parent_map/child_map is\n-- non-trivial. Tagged `marts` (set in dbt_project.yml).\nwith combined as (\n    select\n        user_id,\n        cast(null as numeric) as amount\n    from {{ ref('stg_a') }}\n    union all\n    select\n        user_id,\n        amount\n    from {{ ref('stg_b') }}\n)\n\nselect\n    user_id,\n    sum(amount) as total_amount\nfrom combined\ngroup by user_id\n",
+      "language": "sql",
+      "refs": [
+        {
+          "name": "stg_a",
+          "package": null,
+          "version": null
+        },
+        {
+          "name": "stg_b",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "metrics": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.dbt_project_multi.stg_a",
+          "model.dbt_project_multi.stg_b"
+        ]
+      },
+      "compiled_path": null,
+      "contract": {
+        "enforced": false,
+        "alias_types": true,
+        "checksum": null
+      },
+      "access": "protected",
+      "constraints": [],
+      "version": null,
+      "latest_version": null,
+      "deprecation_date": null
+    }
+  },
+  "sources": {},
+  "macros": {},
+  "docs": {},
+  "exposures": {},
+  "metrics": {},
+  "groups": {},
+  "selectors": {},
+  "disabled": {},
+  "parent_map": {
+    "model.dbt_project_multi.stg_a": [],
+    "model.dbt_project_multi.stg_b": [],
+    "model.dbt_project_multi.fct_x": [
+      "model.dbt_project_multi.stg_a",
+      "model.dbt_project_multi.stg_b"
+    ]
+  },
+  "child_map": {
+    "model.dbt_project_multi.stg_a": [
+      "model.dbt_project_multi.fct_x"
+    ],
+    "model.dbt_project_multi.stg_b": [
+      "model.dbt_project_multi.fct_x"
+    ],
+    "model.dbt_project_multi.fct_x": []
+  },
+  "group_map": {},
+  "saved_queries": {},
+  "semantic_models": {},
+  "unit_tests": {}
+}

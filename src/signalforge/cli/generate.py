@@ -59,6 +59,18 @@ Stage-order test (DEC-025): ``test_generate_calls_stages_in_documented_order``
 patches every stage entry point and asserts the documented
 ``safety → draft → prune → grade → diff`` ordering against
 ``parent.mock_calls``. Pins CLAUDE.md "Pipeline shape" as a contract.
+
+Issue #37 / US-003 refactor (bd_1-scaffolding-4v1.3): the pipeline body
+moved into :func:`_run_single_model` (returns :class:`_SingleModelOutcome`
+— rendered text + per-model exit code + counts + exception class on
+failure). :func:`_run_batch` iterates :func:`signalforge.manifest.select_models`
+matches and calls ``_run_single_model`` per match with a FRESH
+:class:`WarehouseAdapter` per iteration (DEC-010 of
+``plans/super/37-multi-model-select.md`` — avoids ``_active_session_id``
+bleed across in-process iterations). :func:`cmd_generate` is now a thin
+dispatcher: ``args.select`` set → ``_run_batch``; else ``_run_single_model``
+once. US-004 wires the ``--select`` argparse flag onto this seam (this
+bead does NOT modify argparse).
 """
 
 from __future__ import annotations
@@ -69,6 +81,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from signalforge import diff as diff_module
@@ -81,16 +94,26 @@ from signalforge import warehouse as warehouse_module
 from signalforge.cli import _estimate as estimate_module
 from signalforge.cli._helpers import (
     canonicalise_user_path,
+    emit_batch_progress_entry,
     emit_progress_done,
     emit_progress_entry,
+    format_batch_summary,
     format_error_to_stderr,
     map_exception_to_exit_code,
     setup_logging,
     should_emit_progress,
 )
-from signalforge.cli.errors import CliInputError, CliPathError
+from signalforge.cli.errors import (
+    CliInputError,
+    CliPathError,
+    CliSelectorNoMatchError,
+    CliSelectorParseError,
+)
 from signalforge.grade.rubric import DEFAULT_RUBRIC
 from signalforge.llm._client import _AnthropicClientProtocol
+from signalforge.manifest import select_models
+from signalforge.manifest.errors import SelectorParseError
+from signalforge.manifest.models import Manifest, Model
 from signalforge.warehouse.base import WarehouseAdapter
 
 __all__ = ["add_parser", "cmd_generate"]
@@ -127,13 +150,46 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "existing schema.yml."
         ),
     )
-    parser.add_argument(
+    # Issue #37 / US-004 / DEC-001 / DEC-002 — positional ``<model>`` and
+    # ``--select`` form a ``mutually_exclusive_group(required=True)``: the
+    # operator MUST supply exactly one. Argparse rejects both-supplied
+    # and neither-supplied combinations with its own usage error (exit
+    # 2). The positional uses ``nargs="?"`` so it is optional INSIDE the
+    # mutex; ``default=None`` keeps ``args.model`` falsy when ``--select``
+    # is supplied so the dispatcher in ``cmd_generate`` reads it
+    # accurately. ``--select`` help pins the grammar, three examples
+    # (tag, path glob, comma-union — DEC-001), and the
+    # sidecar-overwrite caveat (DEC-016) verbatim per the 5-surface
+    # parity rule (cli-layer.md "Multi-surface parity for behaviour
+    # changes"). The cookbook docs land in US-008.
+    target_group = parser.add_mutually_exclusive_group(required=True)
+    target_group.add_argument(
         "model",
         metavar="<model>",
+        nargs="?",
+        default=None,
         help=(
             "Model under draft. Accepts a dbt unique_id "
             "(e.g. 'model.proj.customers') or a file path "
             "(e.g. 'models/marts/customers.sql')."
+        ),
+    )
+    target_group.add_argument(
+        "--select",
+        metavar="<expr>",
+        default=None,
+        help=(
+            "Run generate across multiple models in one process. "
+            "<expr> is a comma-separated union of atoms: "
+            "tag:<name>, path:<glob> (shell-style fnmatch), "
+            "or a bare unique_id / file path. Examples: "
+            "tag:staging | path:models/marts/* | "
+            "tag:staging,path:models/marts/*. "
+            "Caveat: multi-model runs overwrite .signalforge/grade.json "
+            "and .signalforge/diff.json per model; only the last model's "
+            "sidecars persist. Use the shell-loop pattern "
+            "(docs/cli-ops.md § Running across many models) for "
+            "per-model sidecars."
         ),
     )
     parser.add_argument(
@@ -395,116 +451,138 @@ def _resolve_project_dir(args: argparse.Namespace) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Subcommand entry point
+# Per-model + batch outcome dataclasses (issue #37 / US-003 — DEC-010)
 # ---------------------------------------------------------------------------
 
 
-def cmd_generate(args: argparse.Namespace) -> int:
-    """Run the full pipeline for ``args.model``.
+@dataclass(frozen=True)
+class _SingleModelOutcome:
+    """Result of one :func:`_run_single_model` invocation.
 
-    Returns the integer exit code per the four-tier taxonomy in
-    :data:`signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE`. No
-    traceback ever leaks (DEC-016): every typed exception is caught at
-    this boundary, formatted via :func:`format_error_to_stderr`, and
-    routed to the right tier via :func:`map_exception_to_exit_code`. An
-    untyped :class:`Exception` lands at the panic-path tier (1) with the
-    same shape — no traceback, just the typed-error one-liner.
+    Fields:
 
-    Pipeline order is the documented ``safety → draft → prune → grade →
-    diff`` (DEC-005). The stage-order test in
-    ``tests/cli/test_generate.py`` pins this contract.
+    * ``model_unique_id`` — the model that was run.
+    * ``exit_code`` — ``0`` on success, ``1`` / ``2`` / ``3`` per the
+      four-tier taxonomy in :data:`signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE`
+      on failure.
+    * ``kept_count`` / ``dropped_count`` / ``flagged_count`` — pulled from
+      the :class:`signalforge.diff.DiffReport` on success; all zero on
+      failure (the diff stage may not have run).
+    * ``rendered_text`` — exact stdout content for this model (including
+      the trailing newline that ``print(rendered)`` produces). Empty
+      string on failure so the dispatcher's ``if r.rendered_text`` check
+      naturally skips it.
+    * ``duration_seconds`` — wall-clock from ``_run_single_model`` entry
+      to exit (success or failure).
+    * ``exception_class_name`` — ``None`` on success; on failure, the
+      ``type(exc).__name__`` of the exception that was caught at the
+      ``_run_single_model`` boundary. Surfaces in the US-005 batch summary
+      so failed-model rows render ``(LLMRateLimitError)`` etc.
 
-    Per-flag override precedence (US-006 / US-006 of #22):
-
-    * ``--mode`` > ``safety.mode`` in ``signalforge.yml`` > library default.
-    * ``--min-score`` > ``grade.min_mean_score`` > library default.
-    * ``--format`` > ``diff.render_kind`` > library default (``"ansi"``).
-    * ``--scope`` > ``prune.scope`` > library default (``"sample"``).
-    * ``--sample-strategy`` > ``prune.sample_strategy`` > library default
-      (``"materialised"``).
-
-    The prune overrides apply via :meth:`PruneConfig.model_validate`
-    (NOT ``model_copy(update=...)``) so every Pydantic validator
-    re-runs — DEC-012 of ``plans/super/22-temp-table-sample.md``.
-
-    ``--estimate`` short-circuit (US-005 of #36, DEC-009): when set,
-    the handler runs the full prelude (manifest + model + profile +
-    adapter + safety + draft + prune + grade + diff configs + anthropic
-    client) so the operator
-    catches typos in ``signalforge.yml`` / ``--profiles-dir`` BEFORE
-    any billable call, then skips the four pipeline orchestrators
-    (``draft_schema`` / ``prune_tests`` / ``grade_artifacts`` /
-    ``render_diff``) and dispatches to
-    :func:`signalforge.cli._estimate.estimate` +
-    :func:`signalforge.cli._estimate.render` instead. The renderer's
-    output goes to stdout; exit 0 on success. Mutually exclusive with
-    ``--write`` / ``--dry-run`` (argparse mutex group → exit 2).
-    Partial-failure degrade for the warehouse-bytes section is owned
-    by the estimate engine (DEC-005) — no extra CLI handling needed;
-    the resulting ``EstimateReport.warehouse_unavailable_reason`` is
-    rendered as ``<unavailable: <ErrorClass>>`` by the renderer.
+    Frozen so test assertions can rely on stable field values. Carries no
+    user-content payloads that would warrant a custom ``__repr__`` (the
+    rendered text is bounded by the diff renderer's own truncation
+    invariants — DEC-005 of ``diff-renderer.md``).
     """
-    # US-007 — observability: configure logging and the progress gate
-    # BEFORE any pipeline work. ``--quiet`` and ``--verbose`` are mutex
-    # at argparse time so at most one is True. ``--no-color`` flips the
-    # ``NO_COLOR`` env var so the AnsiRenderer's existing precedence
-    # chain (DEC-021 of #8) emits plain text. ``FORCE_COLOR`` is
-    # cleared belt-and-braces so an environmental override doesn't
-    # defeat the operator's explicit opt-out.
+
+    model_unique_id: str
+    exit_code: int
+    kept_count: int
+    dropped_count: int
+    flagged_count: int
+    rendered_text: str
+    duration_seconds: float
+    exception_class_name: str | None
+
+
+@dataclass(frozen=True)
+class _BatchOutcome:
+    """Result of one :func:`_run_batch` invocation.
+
+    Fields:
+
+    * ``per_model`` — outcomes in invocation order (matches the order
+      :func:`signalforge.manifest.select_models` returns matches, which
+      is ``unique_id`` lexicographic per its DEC-012).
+    * ``total_exit_code`` — ``max(o.exit_code for o in per_model)``, with
+      a default of ``0`` for the empty-tuple case. The empty tuple should
+      never reach this dataclass — :func:`_run_batch` raises
+      :class:`CliSelectorNoMatchError` before constructing one — but the
+      default keeps the math safe if a future refactor changes the
+      empty-match path.
+    * ``duration_seconds`` — wall-clock from ``_run_batch`` entry to exit.
+
+    Frozen for the same reasons :class:`_SingleModelOutcome` is.
+    """
+
+    per_model: tuple[_SingleModelOutcome, ...]
+    total_exit_code: int
+    duration_seconds: float
+
+
+# ---------------------------------------------------------------------------
+# Single-model pipeline body (issue #37 / US-003 — extracted from cmd_generate)
+# ---------------------------------------------------------------------------
+
+
+def _run_single_model(
+    model: Model,
+    manifest: Manifest,
+    profile: warehouse_module.DbtProfileTarget,
+    args: argparse.Namespace,
+    *,
+    project_dir: Path,
+    batch_index: int | None = None,
+    batch_count: int | None = None,
+) -> _SingleModelOutcome:
+    """Run the full safety → draft → prune → grade → diff pipeline for one model.
+
+    Returns a :class:`_SingleModelOutcome` whose ``exit_code`` is mapped
+    via :func:`signalforge.cli._helpers.map_exception_to_exit_code` per
+    the four-tier taxonomy. The boundary catch lives INSIDE this function
+    (mirrors the previous ``cmd_generate`` shape) so the dispatcher in
+    :func:`cmd_generate` and the batch driver in :func:`_run_batch` both
+    treat this helper as the unit of work — they read ``exit_code`` from
+    the outcome rather than catching exceptions themselves. Per-model
+    stderr formatting also happens here so batch mode preserves stderr
+    ordering across iterations (each model's error follows its own
+    progress lines, not a coalesced dump at end-of-batch).
+
+    Constructs its OWN :class:`WarehouseAdapter` via
+    :func:`_make_warehouse_adapter` (DEC-010 of
+    ``plans/super/37-multi-model-select.md`` — fresh adapter per model
+    in batch mode avoids ``_active_session_id`` bleed; single-model
+    invocations also route through this helper so the seam stays single
+    source of truth).
+
+    ``batch_index`` / ``batch_count`` drive the per-model progress prefix
+    ``[i/N] <unique_id>`` emitted at the head of the pipeline when BOTH
+    are non-``None`` — i.e., only when :func:`_run_batch` is the caller
+    (US-005 / DEC-014). The single-model positional path leaves both at
+    their default ``None`` so the prefix is suppressed and the v0.1
+    capsys-pinned stderr shape is preserved byte-for-byte.
+
+    Inherits :func:`cmd_generate`'s per-flag override precedence and the
+    ``--estimate`` short-circuit (DEC-009 of #36) — see
+    :func:`cmd_generate`'s docstring for the full rules; this helper
+    consumes the resulting ``args`` namespace verbatim.
+    """
     quiet = bool(getattr(args, "quiet", False))
     verbose = bool(getattr(args, "verbose", False))
-    no_color = bool(getattr(args, "no_color", False))
-    setup_logging(verbose=verbose, quiet=quiet)
-    if no_color:
-        os.environ["NO_COLOR"] = "1"
-        os.environ.pop("FORCE_COLOR", None)
     progress_on = should_emit_progress(quiet=quiet, verbose=verbose)
 
+    # US-005 / DEC-014 — per-model progress prefix. Only fires when this
+    # helper is invoked from :func:`_run_batch` (both kwargs non-``None``);
+    # the positional single-model path passes ``None`` for both and emits
+    # NEITHER the prefix here NOR the summary in :func:`_run_batch`. TTY
+    # / quiet / verbose gating delegates to :func:`should_emit_progress`
+    # — same rules as the stage-N progress lines that follow.
+    if progress_on and batch_index is not None and batch_count is not None:
+        emit_batch_progress_entry(model.unique_id, batch_index, batch_count)
+
+    start = time.monotonic()
     try:
-        # US-006 — explicit range-check on ``--min-score``. Argparse's
-        # ``type=float`` cannot natively bound-check; do it here so an
-        # out-of-range value lands at exit 2 (CliInputError tier) BEFORE
-        # any project-root resolution / file IO. ``None`` means
-        # "fall back to grade.min_mean_score" — leave alone.
-        min_score_override = getattr(args, "min_score", None)
-        if min_score_override is not None and not (0.0 <= min_score_override <= 1.0):
-            raise CliInputError(
-                f"--min-score {min_score_override!r} is outside the closed interval [0.0, 1.0]",
-                remediation=(
-                    "Pass a float between 0.0 and 1.0 inclusive. The flag "
-                    "overrides grade.min_mean_score, the aggregate-verdict "
-                    "threshold for GradingReport.passed."
-                ),
-            )
-
-        project_dir = _resolve_project_dir(args)
-
-        manifest_override = canonicalise_user_path(args.manifest, project_dir)
-        # ``--profiles-dir`` becomes an env var for the duration of the
-        # call; the warehouse loader's three-path resolution honours
-        # ``DBT_PROFILES_DIR`` first. It is intentionally NOT routed
-        # through ``canonicalise_user_path`` — the dbt convention places
-        # ``profiles.yml`` at ``~/.dbt/`` which lives outside the project
-        # tree, and the symlink-containment gate would reject every
-        # realistic value. Apply ``expanduser`` + ``resolve`` for
-        # symlink-loop safety; ``profiles.yml`` itself is parsed by the
-        # warehouse loader which has its own existence/shape gate.
-        if args.profiles_dir is not None:
-            try:
-                profiles_dir_resolved = Path(args.profiles_dir).expanduser().resolve(strict=False)
-            except (OSError, RuntimeError) as exc:
-                raise CliPathError(
-                    f"--profiles-dir {args.profiles_dir!r} could not be resolved: {exc}",
-                    remediation="Pass an absolute or ~-prefixed path that exists.",
-                ) from exc
-            os.environ["DBT_PROFILES_DIR"] = str(profiles_dir_resolved)
-
-        # 1. Manifest load + model selection.
-        manifest = manifest_module.load(project_dir, manifest_path=manifest_override)
-        model = manifest.get_model(args.model)
-
-        # 2. Warehouse profile + adapter.
-        profile = warehouse_module.load_profile(project_dir)
+        # 2. Warehouse adapter (manifest + profile resolved by caller).
         adapter = _make_warehouse_adapter(profile)
 
         # ---- US-005 of #36 --- --estimate short-circuit -------------
@@ -567,7 +645,21 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 project_dir=project_dir,
             )
             print(estimate_module.render(report))
-            return 0
+            # ``_run_single_model`` returns a typed outcome; the estimate
+            # short-circuit treats the run as exit-0 success with no
+            # rendered diff (stdout already carries the estimate body
+            # above). Batch mode (``--select``) inherits this shape via
+            # ``_run_batch``'s outcome aggregation.
+            return _SingleModelOutcome(
+                model_unique_id=model.unique_id,
+                exit_code=0,
+                kept_count=0,
+                dropped_count=0,
+                flagged_count=0,
+                rendered_text="",
+                duration_seconds=time.monotonic() - start,
+                exception_class_name=None,
+            )
 
         # ---- 1/5: safety -----------------------------------------------
         # US-007 / DEC-014 / DEC-026 — progress lines wrap each stage
@@ -682,6 +774,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
         # ``signalforge.yml`` owns that knob (DEC-011 path through the
         # grader's :class:`GradeBelowThresholdError`).
         grade_config = grade_module.load_grade_config(project_dir)
+        min_score_override = getattr(args, "min_score", None)
         if min_score_override is not None:
             grade_config = grade_module.GradeConfig.model_validate(
                 {**grade_config.model_dump(), "min_mean_score": min_score_override}
@@ -786,8 +879,276 @@ def cmd_generate(args: argparse.Namespace) -> int:
         rendered = diff_module.render_to_text(
             diff_report, config=diff_config, project_dir=project_dir
         )
-        print(rendered)
-        return 0
+        # ``print(rendered)`` appends ``\n`` to match the v0.1 stdout
+        # shape; the dispatcher does ``sys.stdout.write(outcome.rendered_text)``
+        # so we pre-build the trailing newline here. ``print``'s default
+        # ``end="\n"`` is what every existing snapshot test pins.
+        rendered_text = f"{rendered}\n"
+        return _SingleModelOutcome(
+            model_unique_id=model.unique_id,
+            exit_code=0,
+            kept_count=diff_report.kept_count,
+            dropped_count=diff_report.dropped_count,
+            flagged_count=diff_report.flagged_count,
+            rendered_text=rendered_text,
+            duration_seconds=time.monotonic() - start,
+            exception_class_name=None,
+        )
+
+    except Exception as exc:  # noqa: BLE001 — the boundary catch (DEC-016)
+        message = format_error_to_stderr(exc)
+        print(message, file=sys.stderr)
+        return _SingleModelOutcome(
+            model_unique_id=model.unique_id,
+            exit_code=map_exception_to_exit_code(exc),
+            kept_count=0,
+            dropped_count=0,
+            flagged_count=0,
+            rendered_text="",
+            duration_seconds=time.monotonic() - start,
+            exception_class_name=type(exc).__name__,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Batch driver (issue #37 / US-003 — DEC-010)
+# ---------------------------------------------------------------------------
+
+
+def _run_batch(
+    manifest: Manifest,
+    profile: warehouse_module.DbtProfileTarget,
+    args: argparse.Namespace,
+    *,
+    project_dir: Path,
+) -> _BatchOutcome:
+    """Iterate :func:`signalforge.manifest.select_models` and call
+    :func:`_run_single_model` per match.
+
+    Pre-flight gates:
+
+    * :class:`signalforge.manifest.SelectorParseError` → re-raised as
+      :class:`CliSelectorParseError(expr, cause=...)` so the CLI's
+      exception ladder catches a single :class:`CliInputError` subclass
+      (DEC-007 of ``plans/super/37-multi-model-select.md``).
+    * Empty match tuple → :class:`CliSelectorNoMatchError(expr)` (DEC-006).
+
+    Both fire BEFORE any model iteration. After the gates, each
+    per-model call to :func:`_run_single_model` is treated as
+    independent: that helper carries its own boundary catch (mirroring
+    :ref:`cli-layer.md` DEC-016) and returns an outcome with the per-model
+    exit code, so one model failing does not abort the batch.
+
+    ``total_exit_code`` is ``max(o.exit_code for o in per_model)`` —
+    the four-tier taxonomy is conveniently a severity rank (0 < 1 < 2 <
+    3), so ``max`` is the right aggregator (DEC-004 of #37).
+
+    A FRESH adapter is constructed per model (inside
+    :func:`_run_single_model`) — see DEC-010 of #37 for the
+    ``_active_session_id`` bleed avoidance rationale.
+
+    NOTE: this bead (US-003) wires the helper but does NOT modify
+    argparse. US-004 adds the ``--select`` flag; this driver becomes
+    reachable from :func:`cmd_generate`'s dispatcher when
+    ``args.select`` is set.
+    """
+    start = time.monotonic()
+    expr = getattr(args, "select", None)
+    assert expr is not None, "_run_batch must only be invoked when args.select is set"
+
+    try:
+        matched = select_models(manifest, expr)
+    except SelectorParseError as exc:
+        raise CliSelectorParseError(expr=expr, cause=exc) from exc
+
+    if not matched:
+        raise CliSelectorNoMatchError(expr=expr)
+
+    total = len(matched)
+    outcomes: list[_SingleModelOutcome] = []
+    for index, model in enumerate(matched, start=1):
+        outcome = _run_single_model(
+            model,
+            manifest,
+            profile,
+            args,
+            project_dir=project_dir,
+            batch_index=index,
+            batch_count=total,
+        )
+        outcomes.append(outcome)
+
+    per_model = tuple(outcomes)
+    total_exit_code = max((o.exit_code for o in per_model), default=0)
+    batch_outcome = _BatchOutcome(
+        per_model=per_model,
+        total_exit_code=total_exit_code,
+        duration_seconds=time.monotonic() - start,
+    )
+
+    # US-005 / DEC-005 — aggregated summary to stderr. Emit when (a) ≥2
+    # models matched OR (b) ≥1 model failed. The (single-match AND zero
+    # failures) case suppresses the summary so the UX matches the v0.1
+    # single-model positional path in that degenerate case. The summary
+    # is "always emit when the condition fires" (DEC-005) — NOT
+    # TTY-gated, because the failure list is operator-actionable signal
+    # even in CI / pipeline logs. ``--quiet`` still suppresses it (the
+    # operator explicitly asked for less output); ``--verbose`` is a
+    # no-op on this path (the summary already always fires when the
+    # condition holds).
+    quiet = bool(getattr(args, "quiet", False))
+    failed_count = sum(1 for o in per_model if o.exit_code != 0)
+    should_summarise = len(per_model) >= 2 or failed_count >= 1
+    if should_summarise and not quiet:
+        sys.stderr.write(format_batch_summary(batch_outcome))
+        sys.stderr.flush()
+
+    return batch_outcome
+
+
+# ---------------------------------------------------------------------------
+# Subcommand entry point
+# ---------------------------------------------------------------------------
+
+
+def cmd_generate(args: argparse.Namespace) -> int:
+    """Run the full pipeline for ``args.model`` (single-model) or for every
+    model matched by ``args.select`` (batch).
+
+    Returns the integer exit code per the four-tier taxonomy in
+    :data:`signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE`. No
+    traceback ever leaks (DEC-016): every typed exception is caught at
+    this boundary, formatted via :func:`format_error_to_stderr`, and
+    routed to the right tier via :func:`map_exception_to_exit_code`. An
+    untyped :class:`Exception` lands at the panic-path tier (1) with the
+    same shape — no traceback, just the typed-error one-liner.
+
+    Pipeline order is the documented ``safety → draft → prune → grade →
+    diff`` (DEC-005). The stage-order test in
+    ``tests/cli/test_generate.py`` pins this contract.
+
+    Per-flag override precedence (US-006 / US-006 of #22):
+
+    * ``--mode`` > ``safety.mode`` in ``signalforge.yml`` > library default.
+    * ``--min-score`` > ``grade.min_mean_score`` > library default.
+    * ``--format`` > ``diff.render_kind`` > library default (``"ansi"``).
+    * ``--scope`` > ``prune.scope`` > library default (``"sample"``).
+    * ``--sample-strategy`` > ``prune.sample_strategy`` > library default
+      (``"materialised"``).
+
+    The prune overrides apply via :meth:`PruneConfig.model_validate`
+    (NOT ``model_copy(update=...)``) so every Pydantic validator
+    re-runs — DEC-012 of ``plans/super/22-temp-table-sample.md``.
+
+    Issue #37 / US-003 (bd_1-scaffolding-4v1.3) split the per-model
+    pipeline body into :func:`_run_single_model`. This function is now a
+    thin dispatcher:
+
+    * ``args.select`` set → :func:`_run_batch` (US-004 wires the flag).
+    * else → :func:`_run_single_model` once with ``args.model``.
+
+    The outer try/except in this function catches errors from the
+    pre-pipeline scaffolding (project-root resolution, manifest load,
+    profile load, ``--min-score`` range check, selector parse / no-match
+    raised by ``_run_batch``); per-model failures are caught INSIDE
+    :func:`_run_single_model` so batch mode's stderr ordering is
+    preserved.
+    """
+    # US-007 — observability: configure logging and the progress gate
+    # BEFORE any pipeline work. ``--quiet`` and ``--verbose`` are mutex
+    # at argparse time so at most one is True. ``--no-color`` flips the
+    # ``NO_COLOR`` env var so the AnsiRenderer's existing precedence
+    # chain (DEC-021 of #8) emits plain text. ``FORCE_COLOR`` is
+    # cleared belt-and-braces so an environmental override doesn't
+    # defeat the operator's explicit opt-out.
+    quiet = bool(getattr(args, "quiet", False))
+    verbose = bool(getattr(args, "verbose", False))
+    no_color = bool(getattr(args, "no_color", False))
+    setup_logging(verbose=verbose, quiet=quiet)
+    if no_color:
+        os.environ["NO_COLOR"] = "1"
+        os.environ.pop("FORCE_COLOR", None)
+
+    try:
+        # US-006 — explicit range-check on ``--min-score``. Argparse's
+        # ``type=float`` cannot natively bound-check; do it here so an
+        # out-of-range value lands at exit 2 (CliInputError tier) BEFORE
+        # any project-root resolution / file IO. ``None`` means
+        # "fall back to grade.min_mean_score" — leave alone.
+        min_score_override = getattr(args, "min_score", None)
+        if min_score_override is not None and not (0.0 <= min_score_override <= 1.0):
+            raise CliInputError(
+                f"--min-score {min_score_override!r} is outside the closed interval [0.0, 1.0]",
+                remediation=(
+                    "Pass a float between 0.0 and 1.0 inclusive. The flag "
+                    "overrides grade.min_mean_score, the aggregate-verdict "
+                    "threshold for GradingReport.passed."
+                ),
+            )
+
+        project_dir = _resolve_project_dir(args)
+
+        manifest_override = canonicalise_user_path(args.manifest, project_dir)
+        # ``--profiles-dir`` becomes an env var for the duration of the
+        # call; the warehouse loader's three-path resolution honours
+        # ``DBT_PROFILES_DIR`` first. It is intentionally NOT routed
+        # through ``canonicalise_user_path`` — the dbt convention places
+        # ``profiles.yml`` at ``~/.dbt/`` which lives outside the project
+        # tree, and the symlink-containment gate would reject every
+        # realistic value. Apply ``expanduser`` + ``resolve`` for
+        # symlink-loop safety; ``profiles.yml`` itself is parsed by the
+        # warehouse loader which has its own existence/shape gate.
+        if args.profiles_dir is not None:
+            try:
+                profiles_dir_resolved = Path(args.profiles_dir).expanduser().resolve(strict=False)
+            except (OSError, RuntimeError) as exc:
+                raise CliPathError(
+                    f"--profiles-dir {args.profiles_dir!r} could not be resolved: {exc}",
+                    remediation="Pass an absolute or ~-prefixed path that exists.",
+                ) from exc
+            os.environ["DBT_PROFILES_DIR"] = str(profiles_dir_resolved)
+
+        # 1. Manifest load. Model selection is deferred to the dispatch
+        #    branches below — single-model uses ``manifest.get_model``;
+        #    batch uses ``select_models`` inside ``_run_batch``.
+        manifest = manifest_module.load(project_dir, manifest_path=manifest_override)
+
+        # 2. Warehouse profile. The adapter is constructed inside
+        #    :func:`_run_single_model` (DEC-010 of #37 — fresh adapter
+        #    per model in batch mode; the same seam runs in single-model
+        #    mode so the construction path stays single source of truth).
+        profile = warehouse_module.load_profile(project_dir)
+
+        # ---- Dispatch (issue #37 / US-003) ---------------------------------
+        # US-004 will add the ``--select`` argparse flag; until then,
+        # ``args.select`` is undefined unless a test injects it via
+        # ``argparse.Namespace`` directly. ``getattr`` with a default of
+        # ``None`` is the safe accessor that survives both worlds.
+        # ``is not None`` (not truthiness) so an empty-string ``--select ""``
+        # — which argparse accepts and the mutex group treats as "provided" —
+        # routes through ``_run_batch`` and surfaces as ``CliSelectorParseError``
+        # (DEC-007) rather than silently falling through to the single-model
+        # branch where ``args.model`` is ``None``.
+        select_expr = getattr(args, "select", None)
+        if select_expr is not None:
+            outcome = _run_batch(manifest, profile, args, project_dir=project_dir)
+            # Write each model's rendered text to stdout in invocation
+            # order (US-005 owns the ``[i/N]`` prefix on stderr and the
+            # aggregated summary emission; this bead only wires the
+            # plumbing).
+            for r in outcome.per_model:
+                if r.rendered_text:
+                    sys.stdout.write(r.rendered_text)
+            return outcome.total_exit_code
+
+        # Single-model path. ``manifest.get_model`` may raise
+        # :class:`signalforge.manifest.errors.ModelNotFoundError` (tier 2);
+        # the outer try catches it.
+        model = manifest.get_model(args.model)
+        single_outcome = _run_single_model(model, manifest, profile, args, project_dir=project_dir)
+        if single_outcome.rendered_text:
+            sys.stdout.write(single_outcome.rendered_text)
+        return single_outcome.exit_code
 
     except Exception as exc:  # noqa: BLE001 — the boundary catch (DEC-016)
         message = format_error_to_stderr(exc)

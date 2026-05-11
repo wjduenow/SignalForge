@@ -173,9 +173,12 @@ full rendered diff). The committed `.gitignore` covers `.signalforge/`.
 | `LLM response did not match the CandidateSchema shape` | Anthropic response shape drifted vs. the parser | Set `ANTHROPIC_LOG=info` and inspect `~/.anthropic-debug/`; file an issue |
 
 Full per-flag reference, exit-code taxonomy, and environment
-variables: [docs/cli-ops.md](docs/cli-ops.md). Maintainer-only
-walkthrough of the same flow as a gated test
-(`pytest -m e2e --no-cov`): [docs/e2e-smoke-test.md](docs/e2e-smoke-test.md).
+variables: [docs/cli-ops.md](docs/cli-ops.md). For multi-model dbt
+projects, see [Running across many
+models](docs/cli-ops.md#running-across-many-models) for the
+`--select` flag and shell-loop pattern. Maintainer-only walkthrough
+of the same flow as a gated test (`pytest -m e2e --no-cov`):
+[docs/e2e-smoke-test.md](docs/e2e-smoke-test.md).
 
 ## CLI
 
