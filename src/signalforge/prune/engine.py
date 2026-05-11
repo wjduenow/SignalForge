@@ -81,6 +81,7 @@ import time
 from pathlib import Path
 
 from signalforge import __version__ as _SIGNALFORGE_VERSION
+from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.draft.models import CandidateSchema, CandidateTest
 from signalforge.manifest.models import Manifest, Model
 from signalforge.prune.audit import (
@@ -102,9 +103,8 @@ from signalforge.prune.errors import (
     PruneTrustedModelNotFoundError,
 )
 from signalforge.prune.models import PruneDecision, PruneResult, Scope
-from signalforge.warehouse._path_safety import canonicalise_path
 from signalforge.warehouse.base import WarehouseAdapter
-from signalforge.warehouse.errors import ProfileNotFoundError, WarehouseError
+from signalforge.warehouse.errors import WarehouseError
 from signalforge.warehouse.models import TableRef, TestResult
 
 _LOGGER = logging.getLogger(__name__)
@@ -727,7 +727,7 @@ def prune_tests(
             ``project_dir`` is :func:`pathlib.Path.cwd`); the parent
             directory is created if missing. The resolved path is
             symlink-hardened via
-            :func:`signalforge.warehouse._path_safety.canonicalise_path`
+            :func:`signalforge._common.path_safety.canonicalise_path`
             before any write so a symlinked
             ``<project>/.signalforge/prune.jsonl`` cannot redirect
             writes outside the project tree (DEC-016).
@@ -787,15 +787,15 @@ def prune_tests(
     # `.signalforge/prune.jsonl` pointing outside the project tree
     # could redirect writes to an attacker-controlled location.
     # ``canonicalise_path`` requires project_dir to exist; it raises
-    # ``ProfileNotFoundError`` (the warehouse-layer escape) on cycle /
-    # missing-dir / containment-violation. Wrap as
-    # ``PruneAuditWriteError`` so the prune layer's catch surface stays
-    # homogeneous — every "we couldn't durably persist the audit"
-    # condition raises a single typed error.
+    # :class:`PathContainmentError` (layer-neutral, defined in
+    # :mod:`signalforge._common.path_safety`) on cycle / missing-dir /
+    # containment-violation. Wrap as :class:`PruneAuditWriteError` so the
+    # prune layer's catch surface stays homogeneous — every "we couldn't
+    # durably persist the audit" condition raises a single typed error.
     resolved_project_dir.mkdir(parents=True, exist_ok=True)
     try:
         resolved_audit_path = canonicalise_path(raw_audit_path, resolved_project_dir)
-    except ProfileNotFoundError as exc:
+    except PathContainmentError as exc:
         raise PruneAuditWriteError(
             "Prune-audit path failed symlink-hardened canonicalisation; "
             "refusing to write outside the project tree.",

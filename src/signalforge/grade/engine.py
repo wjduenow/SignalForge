@@ -86,6 +86,7 @@ from signalforge._common.artifact_id import (
 from signalforge._common.artifact_id import (  # noqa: F401
     model_test_args_hash as _model_test_args_hash,
 )
+from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.draft.models import (
     CandidateColumn,
     CandidateSchema,
@@ -126,8 +127,6 @@ from signalforge.llm.client import call_anthropic
 from signalforge.llm.errors import LLMError
 from signalforge.manifest.models import Model
 from signalforge.prune.models import PruneResult
-from signalforge.warehouse._path_safety import canonicalise_path
-from signalforge.warehouse.errors import ProfileNotFoundError as _PathContainmentError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -589,14 +588,14 @@ def grade_artifacts(
     # before any I/O, so the writer never sees an escape-attempt path.
     try:
         resolved_audit_path = canonicalise_path(raw_audit_path, resolved_project_dir)
-    except _PathContainmentError as exc:
+    except PathContainmentError as exc:
         raise GradeAuditWriteError(
             f"Grade audit path {raw_audit_path!r} failed symlink/containment validation.",
             cause=exc,
         ) from exc
     try:
         resolved_sidecar_path = canonicalise_path(raw_sidecar_path, resolved_project_dir)
-    except _PathContainmentError as exc:
+    except PathContainmentError as exc:
         raise GradeAuditWriteError(
             f"Grade sidecar path {raw_sidecar_path!r} failed symlink/containment validation.",
             cause=exc,

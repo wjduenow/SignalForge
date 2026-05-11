@@ -46,9 +46,10 @@ from signalforge.grade.audit import (
     _GRADE_AUDIT_RECORD_LIMIT_BYTES,
     _build_grade_event,
     write_grade_event,
+    write_grading_report,
 )
 from signalforge.grade.errors import GradeAuditRecordTooLargeError, GradeAuditWriteError
-from signalforge.grade.models import GradeEvent
+from signalforge.grade.models import GradeEvent, GradingReport
 
 
 def _make_event(**overrides: Any) -> GradeEvent:
@@ -355,6 +356,44 @@ def test_write_grade_event_rejects_symlink_loop(tmp_path: Path) -> None:
 
     with pytest.raises(GradeAuditWriteError):
         write_grade_event(_make_event(), audit_path=audit_path)
+
+
+def _make_report(**overrides: Any) -> GradingReport:
+    base: dict[str, Any] = dict(
+        signalforge_version=signalforge.__version__,
+        run_id="0123456789abcdef0123456789abcdef",
+        timestamp=datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc),
+        duration_seconds=1.5,
+        model_unique_id="model.test.x",
+        rubric_hash="abc1234567890def",
+        thresholds=(0.5, 0.5),
+        results=(),
+    )
+    base.update(overrides)
+    return GradingReport(**base)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only symlink semantics")
+def test_write_grading_report_rejects_symlink_escape(tmp_path: Path) -> None:
+    """A symlink at ``<project>/.signalforge`` pointing outside the
+    project tree is rejected; the sidecar writer raises
+    :class:`GradeAuditWriteError` rather than write outside the project
+    sandbox. Pairs with :func:`test_write_grade_event_rejects_symlink_escape`
+    for the JSONL writer.
+    """
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    escape_dir = tmp_path / "escape"
+    escape_dir.mkdir()
+    sf_dir = project_dir / ".signalforge"
+    sf_dir.symlink_to(escape_dir, target_is_directory=True)
+    sidecar_path = project_dir / ".signalforge" / "grade.json"
+
+    with pytest.raises(GradeAuditWriteError) as excinfo:
+        write_grading_report(_make_report(), sidecar_path=sidecar_path)
+
+    assert excinfo.value.cause is not None
+    assert not (escape_dir / "grade.json").exists()
 
 
 def test_build_grade_event_attaches_signalforge_version() -> None:

@@ -63,3 +63,37 @@ def test_unknown_command_no_traceback_in_stderr(
     main(["definitely-not-a-real-command"])
     captured = capsys.readouterr()
     assert "Traceback" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# canonicalise_user_path — symlink-hardened path-safety helper (issue #43)
+# ---------------------------------------------------------------------------
+
+
+def test_canonicalise_user_path_returns_none_for_none_input(tmp_path):
+    """``None`` input passes through so callers can plumb optional flags
+    without a per-call ``if`` ladder.
+    """
+    from signalforge.cli._helpers import canonicalise_user_path
+
+    assert canonicalise_user_path(None, tmp_path) is None
+
+
+def test_canonicalise_user_path_rejects_path_outside_project(tmp_path):
+    """A path escaping ``project_dir`` raises :class:`CliPathError`
+    (the cross-package consumer's typed-error wrap of the layer-neutral
+    :class:`PathContainmentError` from
+    :mod:`signalforge._common.path_safety`).
+    """
+    from signalforge.cli._helpers import canonicalise_user_path
+    from signalforge.cli.errors import CliPathError
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("x")
+
+    with pytest.raises(CliPathError) as excinfo:
+        canonicalise_user_path(str(outside), project_dir)
+
+    assert "failed safety check" in str(excinfo.value)
