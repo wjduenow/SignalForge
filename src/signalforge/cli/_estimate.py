@@ -103,6 +103,7 @@ __all__ = [
     "CriterionEstimate",
     "EstimateReport",
     "estimate",
+    "render",
 ]
 
 
@@ -588,3 +589,163 @@ def _representative_artifact(model: Model) -> tuple[str, str]:
         artifact_id = "model.description"
         artifact_text = model.description or f"Model {model.name}"
     return artifact_id, artifact_text
+
+
+# ---------------------------------------------------------------------------
+# Public text renderer (US-004, DEC-007 + DEC-011)
+# ---------------------------------------------------------------------------
+
+
+# Binary (1024-based) byte formatting: "1.5 MB" = 1.5 * 1024 * 1024 bytes.
+# Decimal-place width is fixed at 1 so the column stays visually stable.
+_BYTE_UNITS: tuple[tuple[str, int], ...] = (
+    ("GB", 1024 * 1024 * 1024),
+    ("MB", 1024 * 1024),
+    ("KB", 1024),
+)
+
+
+def _format_bytes(n: int) -> str:
+    """Format an integer byte count as a short human-readable string.
+
+    Binary (1024-based) units. Single-decimal precision keeps the
+    column visually stable across snapshot fixtures. Inputs below 1 KB
+    render as raw bytes (``"512 B"``); negative values are clamped to
+    zero — the engine never emits negatives but the renderer stays
+    defensive.
+    """
+    if n < 0:
+        n = 0
+    for unit, scale in _BYTE_UNITS:
+        if n >= scale:
+            return f"{n / scale:.1f} {unit}"
+    return f"{n} B"
+
+
+def render(report: EstimateReport) -> str:
+    """Render the cost-preview text for ``report``.
+
+    Pure function. Same :class:`EstimateReport` -> same bytes every
+    call. Output ends with a single trailing newline. The contract
+    shape is locked verbatim by DEC-007 of
+    ``plans/super/36-estimate-cost-preview.md`` and pinned by snapshot
+    fixtures ``tests/fixtures/estimate/output_happy.txt`` and
+    ``tests/fixtures/estimate/output_warehouse_unavailable.txt``.
+
+    The CLI wrapper (US-005) is responsible for echoing the user-facing
+    ``signalforge generate --estimate <model>`` command above the
+    renderer's output; this function starts from the prelude block.
+
+    Partial-failure shape (DEC-005): when
+    ``report.warehouse_unavailable_reason is not None``, the warehouse
+    section renders ``bytes-per-row: <unavailable: <ErrorClass>>``,
+    ``total bytes: <unknown>``, and the final totals line shows
+    ``Total estimated warehouse: <unknown>``. The error-class name is
+    the first ``:``-separated chunk of the reason field (verbatim
+    from the engine's ``f"{type(exc).__name__}: ..."`` shape).
+    """
+    lines: list[str] = []
+
+    # ---- Prelude ---------------------------------------------------
+    lines.append(f"Estimate for {report.model_unique_id}")
+    lines.append(f"  drafter: {report.drafter_model}")
+    lines.append(f"  grader:  {report.grader_model}")
+    lines.append("")
+
+    # ---- Draft section ---------------------------------------------
+    lines.append("Estimated draft cost:")
+    lines.append(f"  input tokens:   {report.draft_input_tokens:,}")
+    lines.append(f"  output tokens:  ~{report.draft_output_tokens_estimate:,} (estimated)")
+    lines.append(f"  cost:           ${report.draft_usd:.4f}")
+    lines.append("")
+
+    # ---- Grade section ---------------------------------------------
+    total_calls = sum(c.calls for c in report.grade_per_criterion)
+    lines.append("Estimated grade cost:")
+    lines.append(
+        f"  artifacts: {report.grade_artifacts_count}   "
+        f"criteria: {report.grade_criteria_count}   "
+        f"calls: {total_calls}"
+    )
+    lines.append("  per criterion:")
+    for criterion in report.grade_per_criterion:
+        # Fixed-width label column (16 chars) keeps the section visually
+        # stable across rubrics with varying id lengths.
+        label = f"{criterion.criterion_id:<16}"
+        lines.append(
+            f"    {label}{criterion.calls:>3} calls   "
+            f"{criterion.total_input_tokens:,} tokens   "
+            f"${criterion.usd:.4f}"
+        )
+    lines.append(f"  cost:           ${report.grade_usd:.4f}")
+    lines.append("")
+
+    # ---- Warehouse section (DEC-005 partial-failure degrade) -------
+    lines.append("Estimated warehouse cost:")
+    if report.warehouse_unavailable_reason is not None:
+        # Extract the error class name verbatim — the engine produces
+        # ``f"{type(exc).__name__}: {str(exc)[:200]}"`` so the first
+        # ``:``-separated chunk is the class name.
+        error_class = report.warehouse_unavailable_reason.split(":", 1)[0]
+        lines.append(f"  bytes-per-row:    <unavailable: {error_class}>")
+        lines.append("  total bytes:      <unknown>")
+        warehouse_total_str = "<unknown>"
+    else:
+        # mypy/pyright narrowing: when reason is None, both warehouse
+        # fields are populated in lockstep by the engine (DEC-005).
+        bytes_per_row = report.warehouse_bytes_per_row
+        total_bytes = report.warehouse_total_bytes
+        assert bytes_per_row is not None  # noqa: S101 (engine invariant)
+        assert total_bytes is not None  # noqa: S101 (engine invariant)
+        test_count_est = int(report.tests_per_column_heuristic * _column_count_from_report(report))
+        lines.append(f"  bytes-per-row:    ~{bytes_per_row:,} (BigQuery dryRun)")
+        lines.append(
+            f"  test count est:   {test_count_est} "
+            f"({report.tests_per_column_heuristic} tests/col x "
+            f"{_column_count_from_report(report)} cols)"
+        )
+        lines.append(f"  sample size:      {report.sample_size:,} rows")
+        lines.append(f"  total bytes:      ~{_format_bytes(total_bytes)}")
+        warehouse_total_str = f"~{_format_bytes(total_bytes)}"
+    lines.append("")
+
+    # ---- Totals ----------------------------------------------------
+    lines.append(f"Total estimated LLM cost: ${report.total_llm_usd:.4f}")
+    lines.append(f"Total estimated warehouse: {warehouse_total_str}")
+    lines.append("")
+
+    # ---- Footer ----------------------------------------------------
+    lines.append(
+        f"Price table: {report.price_table_version}  |  "
+        f"Heuristic: ~{report.tests_per_column_heuristic} tests/column "
+        "(canonical fixture average)"
+    )
+
+    return "\n".join(lines) + "\n"
+
+
+def _column_count_from_report(report: EstimateReport) -> int:
+    """Reverse-engineer the column count from the report's stored
+    artifact-count and tests-per-column heuristic.
+
+    ``EstimateReport`` does not carry ``column_count`` directly; the
+    engine derives it from ``len(model.columns_list)`` and folds it
+    into ``grade_artifacts_count`` via
+    ``2*cols + 2 + int(heuristic * cols)``. The renderer needs the
+    column count for the warehouse section's display string; we
+    recover it from the artifact-count via the inverse formula.
+
+    The formula is:
+        artifacts = 2*cols + 2 + int(heuristic * cols)
+                  = cols * (2 + heuristic) + 2  (modulo int() floor)
+        cols      ≈ (artifacts - 2) / (2 + heuristic)
+
+    Floor division matches the engine's ``int(...)`` truncation on the
+    test-count term; the round-trip is exact for the integer column
+    counts the engine emits.
+    """
+    artifacts_minus_constant = report.grade_artifacts_count - 2
+    divisor = 2.0 + report.tests_per_column_heuristic
+    if divisor <= 0 or artifacts_minus_constant < 0:
+        return 0
+    return int(round(artifacts_minus_constant / divisor))
