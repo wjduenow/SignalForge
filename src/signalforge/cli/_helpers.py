@@ -72,6 +72,7 @@ from signalforge.grade import (
     GradeRubricError,
 )
 from signalforge.llm import (
+    EstimateUnknownModelError,
     LLMAuthError,
     LLMCacheTooLargeError,
     LLMConnectionError,
@@ -232,6 +233,11 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # Drafter base-class catches (concrete leaves above already typed; the
     # base resolves here for any forward-compat subclass).
     DraftError: 2,
+    # ``--estimate`` cost-preview: the operator picked a model the price
+    # table doesn't know — input-shape error, not external-dep failure.
+    # See US-001 of issue #36 and the AC tying tier 2 to "looked-up
+    # identifier not in a static table" failures.
+    EstimateUnknownModelError: 2,
     # CLI-layer input-shape errors.
     CliInputError: 2,
     # ---- Tier 3: API / external dep ---------------------------------------

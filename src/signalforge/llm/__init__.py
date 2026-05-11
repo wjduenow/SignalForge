@@ -2,6 +2,7 @@
 
 from signalforge.llm.client import call_anthropic
 from signalforge.llm.errors import (
+    EstimateUnknownModelError,
     LLMAuthError,
     LLMCacheTooLargeError,
     LLMConnectionError,
@@ -12,8 +13,17 @@ from signalforge.llm.errors import (
     LLMServerError,
 )
 from signalforge.llm.models import LLMResult
+from signalforge.llm.pricing import (
+    PRICE_TABLE_VERSION,
+    PRICES,
+    ModelPricing,
+    lookup,
+)
 
 __all__ = (
+    "PRICES",
+    "PRICE_TABLE_VERSION",
+    "EstimateUnknownModelError",
     "LLMAuthError",
     "LLMCacheTooLargeError",
     "LLMConnectionError",
@@ -23,5 +33,7 @@ __all__ = (
     "LLMResponseFormatError",
     "LLMResult",
     "LLMServerError",
+    "ModelPricing",
     "call_anthropic",
+    "lookup",
 )
