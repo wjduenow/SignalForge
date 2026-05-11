@@ -128,6 +128,13 @@ EOF
 signalforge generate models/staging/stg_bikeshare_trips.sql --project-dir /tmp/sf-austin
 ```
 
+Want to preview cost first? `signalforge generate --estimate <model>`
+prints the projected USD + warehouse bytes without making any billable
+Anthropic or warehouse call (one `count_tokens` round-trip per prompt
+plus a single BigQuery `dryRun`). See
+[`docs/cli-ops.md`](docs/cli-ops.md) § `--estimate` for the full
+contract.
+
 ### 5. Expected output
 
 The diff lists drafted column descriptions and signal-bearing tests
