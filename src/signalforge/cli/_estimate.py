@@ -86,6 +86,7 @@ from signalforge.grade.prompts import (
 from signalforge.grade.rubric import DEFAULT_RUBRIC
 from signalforge.llm import pricing as _pricing
 from signalforge.safety.models import LLMRequest, SamplingMode
+from signalforge.warehouse._sql_safety import validate_identifier
 from signalforge.warehouse.errors import WarehouseError
 from signalforge.warehouse.models import TableRef
 
@@ -155,6 +156,19 @@ class CriterionEstimate(BaseModel):
     total_input_tokens: int
     estimated_output_tokens_per_call: int = _GRADE_OUTPUT_TOKENS_PER_CALL
     usd: float
+
+    def __repr__(self) -> str:
+        # QG pass 2 — mirror ``prune-engine.md`` DEC-022. The default
+        # Pydantic v2 ``__repr__`` emits every field; ``criterion_text_truncated``
+        # carries up to 60 chars of operator-supplied ``signalforge.yml``
+        # rubric prose. Restrict the casual-debug-print path to the
+        # minimal-actionable identifying fields; full data stays
+        # accessible via ``model_dump()`` / direct field access.
+        return (
+            f"CriterionEstimate(criterion_id={self.criterion_id!r}, "
+            f"calls={self.calls}, total_input_tokens={self.total_input_tokens}, "
+            f"usd={self.usd!r})"
+        )
 
 
 class EstimateReport(BaseModel):
@@ -354,9 +368,23 @@ def _build_representative_sql(model: Model, adapter: WarehouseAdapter, sample_si
     # Pick the first column alphabetical to keep the representative
     # SQL deterministic across runs.
     columns = sorted(model.columns_list, key=lambda c: c.name)
-    # No columns in the manifest? Fall back to ``*`` — the ``dry_run``
-    # still reports bytes against the source table.
-    column_sql = f"{quote_char}{columns[0].name}{quote_char}" if columns else "*"
+    # QG pass 2 — route the manifest-supplied column name through the
+    # same ``validate_identifier`` gate the prune compiler uses
+    # (``prune-engine.md`` DEC-024) BEFORE quoting. The manifest loader
+    # uses ``extra="ignore"`` and does NOT enforce identifier shape, so
+    # a hostile column name like ``foo\`UNION SELECT…`` would close the
+    # backtick early without this defense. On failure (truly hostile or
+    # weirdly-named columns), fall back to ``*`` — same shape as the
+    # no-columns branch; the dry_run still bills against the source
+    # table and the estimate degrades safely.
+    column_sql = "*"
+    if columns:
+        try:
+            validate_identifier("column", columns[0].name)
+        except WarehouseError:
+            pass
+        else:
+            column_sql = f"{quote_char}{columns[0].name}{quote_char}"
 
     qualified = table_ref.qualified_name
     table_sql = f"{quote_char}{qualified}{quote_char}"

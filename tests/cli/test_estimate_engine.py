@@ -346,6 +346,57 @@ def test_estimate_warehouse_unavailable_reason_carries_error_class_name(
     assert report.warehouse_unavailable_reason.startswith("WarehouseAuthError: ")
 
 
+def test_estimate_emits_warning_on_warehouse_degrade(
+    model: Model,
+    manifest: Manifest,
+    draft_config: DraftConfig,
+    grade_config: GradeConfig,
+    prune_config: PruneConfig,
+    adapter: BigQueryAdapter,
+    fake_anthropic: FakeAnthropicClient,
+    fake_client: FakeBigQueryClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DEC-005 (QG pass-4 B-3 fix): the engine emits exactly one WARNING
+    via lazy-format JSON when ``estimate_query_bytes`` raises a
+    ``WarehouseError``. Pins the WARNING shape so a refactor that
+    silently drops the breadcrumb (or paraphrases the verb) fails loud.
+
+    Without this, operators would see ``<unavailable: ...>`` in stdout
+    but get no out-of-band signal that the run was degraded — the same
+    failure mode the prune engine's DEC-009 warning defends against.
+    """
+    _queue_count_tokens(fake_anthropic, draft=100, per_criterion=50, n_criteria=len(DEFAULT_RUBRIC))
+    boom = WarehouseAuthError("credentials invalid")
+    fake_client.expect_dry_run(sql_matching=r"SELECT", returns_bytes=boom)
+
+    with caplog.at_level(logging.WARNING, logger="signalforge.cli._estimate"):
+        estimate(
+            model,
+            manifest,
+            draft_config,
+            grade_config,
+            prune_config,
+            adapter,
+            fake_anthropic,
+        )
+
+    warning_records = [
+        r
+        for r in caplog.records
+        if r.name == "signalforge.cli._estimate" and r.levelno == logging.WARNING
+    ]
+    assert len(warning_records) == 1
+    msg = warning_records[0].getMessage()
+    assert msg.startswith("warehouse-bytes unavailable: "), msg
+    json_tail = msg.split("warehouse-bytes unavailable: ", 1)[1]
+    parsed = json.loads(json_tail)
+    assert parsed["model_unique_id"] == model.unique_id
+    assert parsed["error_class"] == "WarehouseAuthError"
+    assert "credentials invalid" in parsed["error_message"]
+    assert "run_id" in parsed
+
+
 def test_estimate_propagates_llm_auth_error(
     model: Model,
     manifest: Manifest,

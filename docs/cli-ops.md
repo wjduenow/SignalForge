@@ -139,7 +139,7 @@ Runtime knob flags:
   (`signalforge.llm.pricing.PRICE_TABLE_VERSION`) and the
   `3.5 tests/column` heuristic the prune-bytes projection uses
   (DEC-012). The exact byte-shape is pinned by
-  `tests/cli/test_estimate_output_snapshot.py` against
+  `tests/cli/test_estimate_render.py` against
   `tests/fixtures/estimate/output_happy.txt`. The estimate
   reports a billing ceiling: actual scans usually come in
   lower because cache hits, sampled rows, and shorter LLM

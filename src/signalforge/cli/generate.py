@@ -429,7 +429,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     ``--estimate`` short-circuit (US-005 of #36, DEC-009): when set,
     the handler runs the full prelude (manifest + model + profile +
-    adapter + every stage config + anthropic client) so the operator
+    adapter + safety + draft + prune + grade + diff configs + anthropic
+    client) so the operator
     catches typos in ``signalforge.yml`` / ``--profiles-dir`` BEFORE
     any billable call, then skips the four pipeline orchestrators
     (``draft_schema`` / ``prune_tests`` / ``grade_artifacts`` /
@@ -517,10 +518,32 @@ def cmd_generate(args: argparse.Namespace) -> int:
         # bad config, unknown model) propagates through the existing
         # try/except Exception boundary below.
         if getattr(args, "estimate", False):
-            safety_module.load_safety_config(project_dir)
+            # DEC-009 + B-1 (QG pass 1) — apply the same CLI flag overrides
+            # the real-run prelude applies, so the projected cost matches
+            # the run the operator would actually issue. ``--mode`` flows
+            # through ``SafetyPolicy.with_mode`` (re-runs validators per
+            # ``safety-layer.md`` DEC-018); ``--scope`` / ``--sample-strategy``
+            # flow into ``PruneConfig.model_validate`` (extra="forbid", so
+            # typos fail loud). ``--min-score`` is intentionally NOT applied
+            # — it gates the post-run verdict, not the cost projection.
+            policy = safety_module.load_safety_config(project_dir)
+            mode_override = getattr(args, "mode", None)
+            if mode_override is not None:
+                policy = policy.with_mode(safety_module.SamplingMode(mode_override))
             draft_config = draft_module.load_draft_config(project_dir)
             grade_config = grade_module.load_grade_config(project_dir)
             prune_config = prune_module.load_prune_config(project_dir)
+            scope_override = getattr(args, "scope", None)
+            sample_strategy_override = getattr(args, "sample_strategy", None)
+            prune_overrides: dict[str, str] = {}
+            if scope_override is not None:
+                prune_overrides["scope"] = scope_override
+            if sample_strategy_override is not None:
+                prune_overrides["sample_strategy"] = sample_strategy_override
+            if prune_overrides:
+                prune_config = prune_module.PruneConfig.model_validate(
+                    {**prune_config.model_dump(), **prune_overrides}
+                )
             diff_module.load_diff_config(project_dir)
             client = _make_anthropic_client()
             if client is None:

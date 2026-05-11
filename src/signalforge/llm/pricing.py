@@ -114,6 +114,12 @@ contract is "same SKU → same prices every time the table version stamp
 is unchanged."
 """
 
+# QG pass 1 I-3 — drop the mutable binding once the read-only proxy is
+# built. Without this, ``signalforge.llm.pricing._PRICES_MUTABLE["x"] = ...``
+# would mutate the table through the proxy (the proxy is a view, not a
+# copy). Deleting the name keeps ``MappingProxyType`` as the only handle.
+del _PRICES_MUTABLE
+
 
 def lookup(model: str) -> ModelPricing:
     """Return the :class:`ModelPricing` entry for ``model``.
