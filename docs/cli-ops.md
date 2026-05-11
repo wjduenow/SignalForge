@@ -244,29 +244,62 @@ are documented per-stage in each layer's ops doc.
 ### `signalforge lint`
 
 Validate the five existing `signalforge.yml` config blocks (`safety:`,
-`llm:`, `prune:`, `grade:`, `diff:`) against their per-stage loaders.
-No warehouse, no LLM, no network — sub-second target. The natural
-pre-flight check operators run on every save.
+`llm:`, `prune:`, `grade:`, `diff:`) against their per-stage loaders,
+then load the dbt manifest. No warehouse, no LLM, no network —
+sub-second target. The natural pre-flight check operators run on every
+save.
 
 Flags:
 
 - `--config PATH` — Override the default
   `<project_dir>/signalforge.yml`. Path is canonicalised against
   the resolved project_dir.
+- `--manifest PATH` — Override the default
+  `<project_dir>/target/manifest.json`. Path is canonicalised against
+  the resolved project_dir and must stay inside it (no symlink
+  escapes).
+- `--model NAME` — Optional. Also resolve a model in the loaded
+  manifest and report whether it exists. Accepts three forms:
+  - **unique_id** — `model.<pkg>.<name>`
+  - **file path** — `models/path/to/<name>.sql`
+  - **bare name** — `<name>` (matches against `Model.name` across
+    enabled nodes via `Manifest.iter_models`; sidesteps the
+    `Manifest.get_model` gotcha that routes bare names through the
+    file-path branch). A bare name matching two or more enabled
+    models fails loud with a disambiguation list.
 - `--project-dir PATH` — Same semantics as `generate`'s flag
   (DEC-027 absolute assertion; walk-up applies only when the flag
   is omitted).
 
 Multi-error reporting (DEC-008): when more than one block fails,
 `lint` collects every failure and emits a header + bullet list rather
-than short-circuiting on the first. Stdout is silent on success
-(git-style); stderr carries the failures.
+than short-circuiting on the first. The header generalises to
+`ERROR: lint found N validation errors:` so manifest / model entries
+sit alongside the five config blocks under the same shape. Stdout is
+silent on success (git-style); stderr carries the failures.
+
+The manifest load is appended **after** the config loaders so the
+operator sees `signalforge.yml` typos AND a missing or
+schema-mismatched `target/manifest.json` in one run rather than fixing
+them one cascade at a time. Common manifest failures `lint` surfaces:
+
+| Symptom | Typed error | Exit tier | Fix |
+| --- | --- | --- | --- |
+| `target/manifest.json` is missing | `ManifestNotFoundError` | 1 (load) | Run `dbt parse` (or `dbt compile`) inside the project. |
+| Manifest schema is outside v9–v12 (e.g. dbt 1.13 → v13, Fusion → v20) | `UnsupportedManifestVersionError` | 1 (load) | Pin the project to a supported dbt version, or wait for the upstream tracking issue. |
+| `--model <name>` does not resolve | `ModelNotFoundError` / `ModelDisabledError` | 2 (input) | Check the spelling, or pass the unique_id (`model.<pkg>.<name>`) / file-path form. |
+
+`--model` resolution skips silently when the manifest load itself
+fails — the resolver depends on a loaded manifest and emitting a
+spurious second bullet would mislead the operator. The manifest entry
+alone surfaces.
 
 The Quick Start in [`README.md`](../README.md#5-validate-config-signalforge-lint)
 runs `signalforge lint` immediately after the fixture is prepared and
 before the first `signalforge generate` call — sub-second, free, and
-catches `extra="forbid"` typos (e.g. `safety: { mdoel: ... }`) that
-would otherwise surface only after a billable LLM round-trip.
+catches `extra="forbid"` typos (e.g. `safety: { mdoel: ... }`) plus
+the manifest-version / model-name mistakes that would otherwise
+surface only after a billable LLM round-trip.
 
 ### `signalforge version`
 

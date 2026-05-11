@@ -129,12 +129,13 @@ EOF
 ### 5. Validate config (`signalforge lint`)
 
 Before paying for an LLM call, run the config-only validator. It loads
-`signalforge.yml`, the dbt manifest, and the warehouse profile through
-every per-stage loader — no warehouse calls, no Anthropic calls, no
-network — and reports every block that fails to parse in one shot.
-Sub-second; catches typos like `safety: { mdoel: ... }` that the
-`extra="forbid"` config models would otherwise surface only after a
-billable `generate` run:
+`signalforge.yml` (every per-stage block) and the dbt manifest — no
+warehouse calls, no Anthropic calls, no network — and reports every
+failure in one shot. Sub-second; catches typos like
+`safety: { mdoel: ... }` that the `extra="forbid"` config models would
+otherwise surface only after a billable `generate` run, plus manifest
+schema-version mismatches (e.g. dbt 1.13 → v13, outside the supported
+v9–v12 range) that would otherwise surface mid-pipeline:
 
 ```bash
 signalforge lint --project-dir /tmp/sf-austin
