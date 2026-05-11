@@ -18,6 +18,27 @@ The load-bearing invariant: **`flagged` only fires when `grading_report is not N
 
 If you add a fourth `Tier` literal in v0.2 (e.g. `"warning"`, `"deferred"`), update production `Tier` AND `StrictDiffEntry` (the drift detector) AND the committed fixtures `tests/fixtures/diff/diff_entry_v1.json` / `diff_report_v1.json` AND the renderer dispatch in `signalforge.diff._renderers` in the same change.
 
+## Kept-row `why` precedence: rationale → evidence → fallback (DEC-022)
+
+Established by issue #41. Architectural Commitment #5 ("explainable diffs") says every kept/dropped/flagged artifact ships with a one-line "why." Pre-#41 the drafter's `CandidateColumn.rationale` / `CandidateTest*.rationale` and the grader's `GradingResult.evidence` were thrown away for kept rows — kept entries surfaced templated boilerplate (`"Test returned non-zero failing rows on the warehouse sample."` / `"Description added; passed all grading criteria."`) that degraded the differentiator vs. dbt-codegen / Copilot.
+
+The cascade for kept-tier rows (in `_entry_for_test` and `_entries_for_doc`):
+
+1. **Candidate `rationale`** (drafter-emitted, primary source) — `CandidateColumn.rationale` for docs, `CandidateTest*.rationale` for tests.
+2. **First non-empty `GradingResult.evidence`** (grader-emitted, secondary source) — iterated in criterion-order; the first criterion with non-empty `evidence` wins so precedence is deterministic across re-runs.
+3. **Existing fallback** — `decision.why` for tests (prune's `DropReason` prose), `description` for docs.
+
+Each tier flows through `_truncate_why(text, max_chars)` (hard-cut at `max_chars - 1` + U+2026 ellipsis; whitespace-only input returns `""` so the cascade falls through). The `_DOC_KEPT_NO_GRADING_WHY` branch (kept doc without grading) is preserved verbatim — kept-without-evidence is signal, not boilerplate, and the ticket's acceptance criteria explicitly carve it out.
+
+Load-bearing invariants:
+
+- **One source per row, no concatenation.** Whichever tier of the cascade hits first wins; the others are discarded. Reviewers read a single tight line, not a layered montage.
+- **Cascade on whitespace, not just `None`.** A `rationale=""` or `rationale="   "` is treated as absent so a drafter that emits empty rationale doesn't suppress the next fallback.
+- **`reasoning` is not in the cascade.** The pre-#41 source at `_entries_for_doc`'s kept-with-grading branch was `grading_results[0].reasoning or description` — `reasoning` was the grader's pass/fail justification (criterion-level) and tended to read as boilerplate (`"passed all grading criteria"`). `evidence` carries the qualitative per-criterion content. Do not re-introduce `reasoning` into the cascade without revisiting the boilerplate trade-off.
+- **Escape sinks (DEC-007, DEC-008) still apply.** The threaded rationale/evidence are user-supplied content — the existing unconditional ANSI strip and Markdown HTML-entity escape cover the new path. The renderer-level escape test in `tests/diff/test_renderers.py` (`test_kept_row_rationale_with_hostile_content_is_escaped_in_markdown`) pins this against future bypass.
+
+If you add a fourth source (e.g., a per-artifact operator note in v0.3), append it AFTER `evidence` in the cascade and update this DEC, `_entry_for_test`, `_entries_for_doc`, and the cascade tests in `tests/diff/test_engine.py` in the same change.
+
 ## Fail-closed sidecar JSON (DEC-009, mirrors grade DEC-006/012)
 
 `signalforge.diff._sidecar.write_sidecar` is the project's **fifth** fail-closed writer (after safety, draft, prune, grade). The contract is identical:
