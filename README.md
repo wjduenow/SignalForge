@@ -202,6 +202,11 @@ via dbt `tags: ["pii"]` / `meta.contains_pii: true` /
 `meta.signalforge.sample: false` — are replaced with stable hashed
 placeholders (`col_<8 hex>`) before reaching the LLM.
 
+Note: the prune step runs warehouse SQL on every invocation regardless
+of `safety.mode`. To skip prune entirely (no warehouse contact), set
+`prune.enabled: false` in `signalforge.yml` — see
+[docs/prune-ops.md](docs/prune-ops.md#configuration-signalforgeyml-prune-block).
+
 Every LLM call produces one structured record at
 `.signalforge/audit.jsonl` (default; configurable via
 `safety.audit_path`). The file contains plaintext column-name metadata

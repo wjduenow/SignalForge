@@ -189,6 +189,11 @@ def _why_materialisation_failed(exc: WarehouseError) -> str:
     return f"sample materialisation failed: {type(exc).__name__}: {str(exc)[:200]}"
 
 
+def _why_prune_disabled() -> str:
+    """DEC-003 of issue #35 — locked verbatim; pinned by a stability test."""
+    return "prune disabled in signalforge.yml"
+
+
 def _validate_trusted_models(config: PruneConfig, manifest: Manifest) -> None:
     """Validate every ``config.trusted_models`` entry exists in the
     manifest (DEC-008).
@@ -481,6 +486,42 @@ def _decide_kept_without_evidence_materialisation_failed(
     )
 
 
+def _decide_kept_without_evidence_disabled(
+    *,
+    test: CandidateTest,
+    test_anchor: str,
+    scope: Scope,
+) -> PruneDecision:
+    """DEC-001/DEC-007 of issue #35 — operator-chosen disable path.
+
+    The operator set ``prune.enabled: false`` in ``signalforge.yml``. We
+    route every candidate to ``kept-without-evidence`` (no
+    :data:`DropReason` expansion — the 5-value literal stays locked per
+    DEC-007 of #35) so the diff still surfaces every candidate, and the
+    audit JSONL still records one :class:`PruneEvent` per candidate
+    (fail-closed audit preserved per DEC-016 of #6). No warehouse call,
+    no LLM call, ``compiled_sql`` is empty.
+
+    Mirrors :func:`_decide_kept_without_evidence_materialisation_failed`
+    structurally — the only differences are the ``why`` text and the
+    absence of a triggering exception (the operator chose this path).
+    """
+    return PruneDecision(
+        test_anchor=test_anchor,
+        test=test,
+        decision="kept",
+        reason="kept-without-evidence",
+        failures=0,
+        sampled_rows=None,
+        scope=scope,
+        elapsed_ms=0,
+        compiled_sql_hash=_build_compiled_sql_hash_or_empty(""),
+        compiled_sql="",
+        why=_why_prune_disabled(),
+        sample_failures=None,
+    )
+
+
 def _decide_kept_without_evidence_budget(
     *,
     test: CandidateTest,
@@ -718,19 +759,18 @@ def prune_tests(
     """
     resolved_config = config if config is not None else PruneConfig()
 
-    # Validate trusted_models BEFORE any warehouse call (DEC-008).
-    _validate_trusted_models(resolved_config, manifest)
-
-    source_table_ref = TableRef.from_model(model)
-    dialect = adapter.dialect()
-    is_trusted = model.unique_id in resolved_config.trusted_models
-    scope: Scope = resolved_config.scope
-
     # Resolve audit path. Default: <project_dir>/.signalforge/prune.jsonl
     # (project_dir defaults to cwd). Resolving relative to project_dir
     # rather than cwd matches the safety + draft layers — when the CLI
     # is invoked from a sub-directory, the audit lands next to the
     # project, not next to wherever the user happened to be.
+    #
+    # DEC-002 of issue #35 — audit-path resolution + symlink-hardening
+    # MUST run before the ``enabled=False`` short-circuit (we still
+    # write one PruneEvent per candidate on the disabled path per
+    # DEC-001 of #35), but BEFORE ``_validate_trusted_models`` and
+    # ``TableRef.from_model`` (an operator who disabled prune shouldn't
+    # need a valid trusted_models list or a manifest-shape-clean model).
     resolved_project_dir = project_dir if project_dir is not None else Path.cwd()
     raw_audit_path = (
         audit_path
@@ -772,6 +812,54 @@ def prune_tests(
     pairs = _iter_candidate_tests(candidates)
     decisions: list[PruneDecision] = []
     start_ms = _now_monotonic_ms()
+
+    # DEC-001/DEC-002/DEC-003/DEC-007 of issue #35 — operator-chosen
+    # disable short-circuit. Fires AFTER audit-path symlink-hardening
+    # and ``config_hash`` computation (so every audit row is durable
+    # and provenance-stamped), but BEFORE ``_validate_trusted_models``,
+    # ``TableRef.from_model``, ``adapter.dialect``, and ``with adapter:``.
+    # An operator who disabled prune shouldn't be blocked by a stale
+    # ``trusted_models`` entry or a manifest-shape problem on a model
+    # whose warehouse we're not going to touch.
+    #
+    # Conservative-bias routing (mirrors the materialisation-failed
+    # branch verbatim per DEC-009 of #22): every candidate routes to
+    # ``kept-without-evidence`` with the locked ``why`` text from
+    # DEC-003. One PruneEvent per candidate (fail-closed audit
+    # preserved per DEC-016 of #6) — skipping the audit on a "fast
+    # path" would violate the invariant.
+    if not resolved_config.enabled:
+        scope_disabled: Scope = resolved_config.scope
+        for test_anchor, test in pairs:
+            decision = _decide_kept_without_evidence_disabled(
+                test=test,
+                test_anchor=test_anchor,
+                scope=scope_disabled,
+            )
+            _write_audit_or_abort(
+                decision,
+                model_unique_id=model.unique_id,
+                config_hash=config_hash,
+                audit_path=resolved_audit_path,
+            )
+            decisions.append(decision)
+
+        total_elapsed_ms = max(0, _now_monotonic_ms() - start_ms)
+        return PruneResult(
+            model_unique_id=model.unique_id,
+            decisions=tuple(decisions),
+            elapsed_ms=total_elapsed_ms,
+            signalforge_version=_SIGNALFORGE_VERSION,
+        )
+
+    # Validate trusted_models BEFORE any warehouse call (DEC-008).
+    _validate_trusted_models(resolved_config, manifest)
+
+    source_table_ref = TableRef.from_model(model)
+    dialect = adapter.dialect()
+    is_trusted = model.unique_id in resolved_config.trusted_models
+    scope: Scope = resolved_config.scope
+
     total_budget_ms = resolved_config.total_budget_seconds * 1000
 
     # US-005 of issue #22 — wrap the adapter in ``with`` so
