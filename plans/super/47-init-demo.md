@@ -5,11 +5,31 @@
 - **Ticket:** [GH #47](https://github.com/wjduenow/SignalForge/issues/47)
 - **Branch:** `feature/47-init-demo`
 - **Worktree:** `../worktrees/SignalForge/47-init-demo`
-- **Phase:** detailing
+- **Phase:** devolved
+- **PR:** [#78](https://github.com/wjduenow/SignalForge/pull/78)
+- **Epic:** `bd_1-scaffolding-t1o`
 - **Sessions:**
   - 2026-05-11 — Phase 1 discovery (parallel research, scoping decisions locked)
   - 2026-05-11 — Phase 2 architecture review (3 blockers + 4 concerns surfaced)
   - 2026-05-11 — Phase 3 refinement (15 DECs locked), Phase 4 detailing (9 stories)
+  - 2026-05-11 — Phase 5 published as draft PR #78
+  - 2026-05-11 — Phase 6 approved, Phase 7 devolved to beads
+
+## Beads manifest
+
+- **Epic:** `bd_1-scaffolding-t1o` — "47: signalforge init-demo subcommand"
+- **Tasks:**
+  - `bd_1-scaffolding-t1o.1` — US-001 — Bootstrap `src/signalforge/_demo/` tree + parity test (no deps)
+  - `bd_1-scaffolding-t1o.2` — US-002 — Wire wheel packaging + `wheel_smoke` maintainer gate (depends on .1)
+  - `bd_1-scaffolding-t1o.3` — US-003 — Public `signalforge.demo.copy_demo` module (depends on .1)
+  - `bd_1-scaffolding-t1o.4` — US-004 — CLI `init-demo` subcommand + typed CLI errors (depends on .3)
+  - `bd_1-scaffolding-t1o.5` — US-005 — 5-surface parity test (depends on .4, .7)
+  - `bd_1-scaffolding-t1o.6` — US-006 — Subprocess `--help` smoke (depends on .4)
+  - `bd_1-scaffolding-t1o.7` — US-007 — Docs: README + `cli-ops.md` + `CLAUDE.md` (depends on .4)
+  - `bd_1-scaffolding-t1o.8` — US-008 — Quality Gate (depends on .1..7)
+  - `bd_1-scaffolding-t1o.9` — US-009 — Patterns & Memory (depends on .8)
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/47-init-demo`
+- **Branch:** `feature/47-init-demo`
 
 ## Ticket summary
 
