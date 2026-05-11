@@ -140,7 +140,7 @@ def artifact_id_for(
             )
         return f"model.{field}"
 
-    raise ValueError(
+    raise ValueError(  # pragma: no cover - unreachable when scope honours Literal["column", "model"]
         f"artifact_id_for: unrecognised scope {scope!r}. scope must be 'column' or 'model'."
     )
 
