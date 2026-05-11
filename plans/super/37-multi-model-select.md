@@ -3,7 +3,8 @@
 ## Meta
 
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/37
-- **Phase:** detailing (awaiting user review before publish-PR)
+- **Phase:** devolved (beads created; ready for Ralph)
+- **PR:** https://github.com/wjduenow/SignalForge/pull/66
 - **Branch / worktree:** `feature/37-multi-model-select` at `../worktrees/SignalForge/37-multi-model-select`
 - **Labels:** enhancement, cli, docs
 - **Priority:** HIGH (codebase review 2026-05-11, functional finding #3)
@@ -507,4 +508,22 @@ Validation command for every AC: `pip install -e ".[dev]" && ruff check . && ruf
 
 ## Beads manifest
 
-(Phase 7 — pending devolve.)
+- **Epic:** `bd_1-scaffolding-4v1` — #37: cli --select for multi-model batch + cookbook
+- **Tasks:**
+  - `bd_1-scaffolding-4v1.1` — US-001: Manifest selector module (`signalforge.manifest.select`) — *ready*
+  - `bd_1-scaffolding-4v1.2` — US-002: CLI error classes for selector failures — deps: US-001
+  - `bd_1-scaffolding-4v1.3` — US-003: Refactor cmd_generate — extract _run_single_model + add _run_batch — deps: US-001, US-002
+  - `bd_1-scaffolding-4v1.4` — US-004: argparse --select flag + mutex with positional <model> — deps: US-003
+  - `bd_1-scaffolding-4v1.5` — US-005: Aggregated batch summary + per-model progress prefix — deps: US-003
+  - `bd_1-scaffolding-4v1.6` — US-006: Multi-model test fixture (`dbt_project_multi/`) — *ready*
+  - `bd_1-scaffolding-4v1.7` — US-007: CLI integration tests for --select — deps: US-001..US-006
+  - `bd_1-scaffolding-4v1.8` — US-008: Docs — cookbook section + --select flag reference — deps: US-001..US-006
+  - `bd_1-scaffolding-4v1.9` — Quality Gate — code review x4 + validation — deps: US-001..US-008
+  - `bd_1-scaffolding-4v1.10` — Patterns & Memory — update rules + CLAUDE.md — deps: Quality Gate
+- **Worktree:** `../worktrees/SignalForge/37-multi-model-select` on `feature/37-multi-model-select`.
+
+### Next steps
+
+1. Run Ralph: `/ralph-run`
+2. Monitor: `bd list --status=in_progress`
+3. When done: `/closeout`
