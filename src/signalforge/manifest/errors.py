@@ -90,3 +90,21 @@ class ModelMissingSqlError(ManifestError):
     default_remediation = (
         "Run `dbt parse` first — the manifest's `raw_code` field is empty for this model."
     )
+
+
+class SelectorParseError(ManifestError):
+    """The ``--select`` expression supplied to :func:`parse_selector` is syntactically invalid.
+
+    Issued for empty atoms (``""``, leading / trailing / consecutive commas),
+    empty payloads (``tag:``, ``path:``), or any unparseable shape. Issue #37
+    DEC-001 (grammar) + DEC-012 (module location): selector parsing lives in
+    :mod:`signalforge.manifest.select`, and the manifest layer raises this
+    typed error so the CLI layer can wrap it as a tier-2 input-validation
+    failure (``CliSelectorParseError``) without sniffing message text.
+    """
+
+    default_remediation = (
+        "Selector grammar: <atom>[,<atom>]*, where <atom> is 'tag:<name>', "
+        "'path:<glob>', or a bare unique_id / file path. Example: "
+        "'tag:staging,path:models/marts/*'."
+    )

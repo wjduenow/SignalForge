@@ -88,6 +88,7 @@ from signalforge.manifest import (
     ModelMissingSqlError,
     ModelNotFoundError,
     ModelPathOutsideProjectError,
+    SelectorParseError,
     UnsupportedManifestVersionError,
 )
 from signalforge.prune import (
@@ -202,6 +203,9 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # is disabled — caller's fault, not load).
     ModelNotFoundError: 2,
     ModelDisabledError: 2,
+    # Selector grammar (--select expression syntactically invalid; #37
+    # DEC-007: tier 2 because the operator supplied a malformed input).
+    SelectorParseError: 2,
     # Warehouse identifier-shape / table-target mistakes (DEC-012).
     InvalidIdentifierError: 2,
     TableNotFoundError: 2,
