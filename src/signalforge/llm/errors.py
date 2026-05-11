@@ -176,6 +176,40 @@ class LLMResponseFormatError(LLMHelperError):
     )
 
 
+class EstimateUnknownModelError(LLMError):
+    """The operator requested a cost estimate for a model that does not
+    appear in :data:`signalforge.llm.pricing.PRICES`.
+
+    Raised by :func:`signalforge.llm.pricing.lookup` (and downstream
+    callers in the v0.1 ``--estimate`` engine). The mapped CLI exit-code
+    tier is 2 (input-validation — the operator picked a model we cannot
+    price), not tier 3 (external-dep), because the failure mode is "the
+    config / flag value names a SKU the table doesn't know," not "the
+    Anthropic API is unreachable." Apply the same tier reasoning to any
+    future "looked-up identifier not in a static table" error.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Add the model to signalforge.llm.pricing.PRICES or use a "
+        "supported model: claude-sonnet-4-6, claude-opus-4-7, "
+        "claude-haiku-4-5."
+    )
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        remediation: str | None = None,
+    ) -> None:
+        self.model = model
+        # ``_format_value`` quotes via ``repr()`` so an adversarial
+        # ``model`` value (control chars, ANSI escapes, embedded newlines)
+        # cannot pollute log viewers / stack traces — see DEC-022 of the
+        # warehouse adapter rules; same pattern applies layer-wide.
+        message = f"unknown model for cost estimate: {_format_value(model)}"
+        super().__init__(message, remediation=remediation)
+
+
 class LLMCacheTooLargeError(LLMError):
     """Pre-send token-count check (DEC-024) reported the cached block is
     above the SignalForge cap (DEC-009 — 8000 input tokens).
@@ -212,6 +246,7 @@ class LLMCacheTooLargeError(LLMError):
 
 # Sorted alphabetically (verified by tests/llm/test_errors.py).
 __all__ = [
+    "EstimateUnknownModelError",
     "LLMAuthError",
     "LLMCacheTooLargeError",
     "LLMConnectionError",
