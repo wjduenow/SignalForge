@@ -56,6 +56,28 @@ A bare-name-only visitor (`Call(func=Name(id=target))`) is trivially bypassable 
 
 Each new scan also needs a planted-violation regression test that exercises all three patterns. `tests/test_audit_completeness.py::test_qualified_name_finder_catches_all_three_bypass_patterns` is the precedent (one parametrised test across all gated targets × all three patterns).
 
+## Source-scan gates: AST over per-line regex (issue #45)
+
+Source-scanning gates that enforce a "no X in module Y" rule (the `_LOGGER` lazy-format gate at `tests/llm/test_logger_grep_gate.py`; the safety-layer literal-token gate; future similar tests) MUST be AST-based, never per-line regex. The historic logger gate used `re.search` per line and was trivially bypassable by splitting the call across lines:
+
+```python
+_LOGGER.info(
+    f"resolved project_dir: {project_dir}"  # NOT caught by per-line regex
+)
+```
+
+The general rule: any time a gate scans source code for a pattern that can legally span multiple lines in Python, reach for `ast.parse` + `ast.NodeVisitor` (or `ast.walk` for cheap one-off scans). The parser normalises every quote style, prefix permutation, and whitespace/newline arrangement into the same node type — `JoinedStr` for every f-string, `Import` / `ImportFrom` for every import variant, `Attribute(value=Name('logging'))` for every `logging.X` reference. A regex has to anticipate every textual permutation; the AST has one canonical form. `_LoggerFStringVisitor` and `_file_has_logging_or_logger_node` in `tests/llm/test_logger_grep_gate.py` are the precedent — copy the shape for any new "absence" gate.
+
+Three load-bearing details from the issue-#45 sharpening (PR #75 review):
+
+1. **Walk positional args AND keyword arg values, recursively.** A `_LOGGER.warning("stuff", extra={"x": f"bad {y}"})` call hides an f-string two layers deep inside a keyword arg. The visitor must `ast.walk(arg)` over every positional AND `kw.value` and check for the gated node anywhere in the subtree. Surface-level `isinstance` checks miss it.
+2. **Substring scans false-positive on docstrings / comments mentioning the gated token.** A rule citation like `"per manifest-readers.md, no _LOGGER allowed"` would trip a `if "_LOGGER" in source:` check. The AST walk over `Name(id='_LOGGER')` doesn't see string literals (those parse as `Constant`), so the false-positive vanishes. The companion test plants a docstring containing the gated token and asserts NO match.
+3. **For "no logging at all" stage-0 enforcement, the gate must cover every form of indirection.** `import logging`, `import logging as X`, `from logging import getLogger`, `logging.getLogger(__name__)`, and bare `_LOGGER` references are all separate AST node types — `Import`, `ImportFrom`, `Attribute(value=Name('logging'))`, `Name(id='_LOGGER')`. Cover each. A check that only matches the literal token `_LOGGER` lets `from logging import getLogger; LOG = getLogger(__name__)` slip through silently.
+
+Planted-violation self-checks are mandatory for the same reason as the audit-completeness scans (above): without them, a refactor that broke the visitor (e.g., dropped the `ast.walk` recursion or stopped checking keyword args) would silently disable the gate at the precise moment a real violation needed catching. The self-checks live in the same file as the gate and use the visitor directly against literal source strings, so they cost ~1ms and document the contract for any future maintainer in line with the production walker.
+
+When v0.x adds a new source-scanning gate (e.g., "no `print(...)` in production modules", "no `open(...)` outside the fail-closed writer modules", "no `time.sleep` outside `_sleep` aliases"), follow this shape: AST visitor, walk positional + keyword args recursively, planted-violation self-checks, false-positive control case. The cheap floor of `grep -r` belongs in interactive maintainer workflows, not in the test suite.
+
 ## Coverage measurement
 
 Established by issue #27 (DEC-001, DEC-004, DEC-009). Coverage instrumentation runs both locally and in CI via `--cov*` flags in `pyproject.toml` `addopts`.

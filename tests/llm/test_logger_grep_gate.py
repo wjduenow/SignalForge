@@ -50,6 +50,7 @@ _SCAN_SUBPACKAGES: tuple[str, ...] = (
     "llm",
     "manifest",
     "prune",
+    "safety",
     "warehouse",
 )
 
@@ -75,11 +76,11 @@ class _LoggerFStringVisitor(ast.NodeVisitor):
     """
 
     def __init__(self) -> None:
-        self.violations: list[tuple[int, int]] = []  # (lineno, col_offset)
+        self.violations: list[int] = []  # 1-based linenos
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 — ast convention
         if _is_logger_attribute_call(node.func) and _any_arg_contains_fstring(node):
-            self.violations.append((node.lineno, node.col_offset))
+            self.violations.append(node.lineno)
         self.generic_visit(node)
 
 
@@ -105,20 +106,21 @@ def _any_arg_contains_fstring(call: ast.Call) -> bool:
     return False
 
 
-def _scan_file(path: Path) -> list[tuple[Path, int, int]]:
-    """Return ``(path, lineno, col_offset)`` for every f-string
-    ``_LOGGER`` call in ``path``.
+def _scan_file(path: Path) -> list[tuple[Path, int]]:
+    """Return ``(path, lineno)`` for every f-string ``_LOGGER`` call
+    in ``path``. Linenos are 1-based, consistent with other AST-scan
+    tests in this repo (e.g. ``tests/safety/test_public_api.py``).
     """
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     visitor = _LoggerFStringVisitor()
     visitor.visit(tree)
-    return [(path, lineno, col) for lineno, col in visitor.violations]
+    return [(path, lineno) for lineno in visitor.violations]
 
 
-def _scan_subpackage(name: str) -> list[tuple[Path, int, int]]:
+def _scan_subpackage(name: str) -> list[tuple[Path, int]]:
     """Walk ``src/signalforge/<name>/**/*.py`` and collect violations."""
     root = _SRC_ROOT / name
-    hits: list[tuple[Path, int, int]] = []
+    hits: list[tuple[Path, int]] = []
     for path in sorted(root.rglob("*.py")):
         hits.extend(_scan_file(path))
     return hits
@@ -137,11 +139,11 @@ def test_no_f_string_logger_calls_across_subpackages() -> None:
     inject directly into log viewers when interpolated via f-string;
     JSON encoding escapes them safely.
     """
-    hits: list[tuple[Path, int, int]] = []
+    hits: list[tuple[Path, int]] = []
     for subpkg in _SCAN_SUBPACKAGES:
         hits.extend(_scan_subpackage(subpkg))
 
-    formatted = "\n".join(f"  {p}:{lineno}:{col}" for p, lineno, col in hits)
+    formatted = "\n".join(f"  {p}:{lineno}" for p, lineno in hits)
     covered = " / ".join(f"signalforge.{name}" for name in _SCAN_SUBPACKAGES)
     assert not hits, (
         f"Found f-string-interpolated _LOGGER calls in {covered} "
@@ -152,28 +154,66 @@ def test_no_f_string_logger_calls_across_subpackages() -> None:
     )
 
 
+def _file_has_logging_or_logger_node(path: Path) -> str | None:
+    """Return a short reason string if ``path``'s AST contains:
+
+    - ``import logging`` or ``import logging as X``
+    - ``from logging import ...``
+    - any ``logging.<attr>`` reference (e.g. ``logging.getLogger``)
+    - any ``Name(id='_LOGGER')`` reference (assignment or use)
+
+    Otherwise return ``None``. An AST walk avoids substring
+    false-positives (e.g. the literal token ``_LOGGER`` inside a
+    docstring or comment) and catches indirection like ``from logging
+    import getLogger; LOG = getLogger(__name__)`` that a raw token
+    scan would miss.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(
+            alias.name == "logging" or alias.name.startswith("logging.") for alias in node.names
+        ):
+            return "imports the logging module"
+        if isinstance(node, ast.ImportFrom) and node.module == "logging":
+            return "imports from the logging module"
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "logging"
+        ):
+            return f"references logging.{node.attr}"
+        if isinstance(node, ast.Name) and node.id == "_LOGGER":
+            return "references a _LOGGER name"
+    return None
+
+
 def test_manifest_subpackage_has_no_logger_at_all() -> None:
-    """Issue #45: ``signalforge.manifest`` is a stage-0 reader/parser
-    per ``manifest-readers.md`` § "No logging / metrics in stage-0
-    modules"; it must not import :mod:`logging` or define
+    """Issue #45 (sharpened from PR #75 review): ``signalforge.manifest``
+    is a stage-0 reader/parser per ``manifest-readers.md`` § "No
+    logging / metrics in stage-0 modules"; it must not import
+    :mod:`logging`, reference :mod:`logging` attributes, or define
     ``_LOGGER``.
 
     The f-string gate above also covers ``manifest/``, but a future
-    addition that introduced ``_LOGGER`` with lazy-format JSON would
-    pass that gate while still violating the stage-0 rule. This
-    second assertion enforces absence directly.
+    addition that introduced lazy-format ``_LOGGER`` calls would pass
+    that gate while still violating the stage-0 rule. This second
+    assertion enforces absence directly via an AST walk so the check
+    catches every form of logging indirection (``import logging``,
+    ``from logging import getLogger``, ``logging.getLogger(...)``,
+    bare ``_LOGGER`` references) without false-positives on docstring
+    mentions of the token.
     """
     manifest_root = _SRC_ROOT / "manifest"
-    offenders: list[Path] = []
+    offenders: list[tuple[Path, str]] = []
     for path in sorted(manifest_root.rglob("*.py")):
-        source = path.read_text(encoding="utf-8")
-        if "_LOGGER" in source:
-            offenders.append(path)
-    formatted = "\n".join(f"  {p}" for p in offenders)
+        reason = _file_has_logging_or_logger_node(path)
+        if reason is not None:
+            offenders.append((path, reason))
+    formatted = "\n".join(f"  {p} — {reason}" for p, reason in offenders)
     assert not offenders, (
-        "signalforge.manifest is a stage-0 reader and must not declare "
-        "a _LOGGER (manifest-readers.md § 'No logging / metrics in "
-        f"stage-0 modules'):\n{formatted}"
+        "signalforge.manifest is a stage-0 reader and must not import "
+        "logging or define _LOGGER (manifest-readers.md § 'No logging "
+        f"/ metrics in stage-0 modules'):\n{formatted}"
     )
 
 
@@ -219,11 +259,20 @@ _GOOD_CASES: tuple[str, ...] = (
 )
 
 
-def _visit_source(source: str) -> list[tuple[int, int]]:
+def _visit_source(source: str) -> list[int]:
     tree = ast.parse(source)
     visitor = _LoggerFStringVisitor()
     visitor.visit(tree)
     return visitor.violations
+
+
+def _check_manifest_detector(source: str, tmp_path: Path, name: str) -> str | None:
+    """Write ``source`` to a temp ``.py`` file and run the stage-0
+    AST detector against it. Returns the reason string, or ``None``.
+    """
+    path = tmp_path / f"{name}.py"
+    path.write_text(source, encoding="utf-8")
+    return _file_has_logging_or_logger_node(path)
 
 
 def test_visitor_catches_single_line_fstring_calls() -> None:
@@ -266,3 +315,43 @@ def test_visitor_does_not_match_safe_calls() -> None:
     for source in _GOOD_CASES:
         violations = _visit_source(source)
         assert not violations, f"visitor false-matched: {source!r}"
+
+
+def test_manifest_detector_catches_every_logging_indirection(tmp_path: Path) -> None:
+    """PR #75 review: the manifest stage-0 check must catch every
+    form of logging indirection, not just the literal token
+    ``_LOGGER``. ``import logging``, ``from logging import getLogger``,
+    a ``logging.<attr>`` reference, and a bare ``_LOGGER`` name all
+    have to trip the detector.
+    """
+    cases = (
+        ("import_logging", "import logging\n"),
+        ("import_logging_as", "import logging as _log\n"),
+        ("from_logging_import", "from logging import getLogger\n_LOG = getLogger(__name__)\n"),
+        ("logging_getLogger", "import logging\n_LOG = logging.getLogger(__name__)\n"),
+        ("bare_logger_assignment", "_LOGGER = object()\n"),
+        ("bare_logger_call", "_LOGGER.info('x')\n"),
+    )
+    for name, source in cases:
+        reason = _check_manifest_detector(source, tmp_path, name)
+        assert reason is not None, f"detector missed {name!r}: {source!r}"
+
+
+def test_manifest_detector_does_not_false_positive_on_token_in_docstring(
+    tmp_path: Path,
+) -> None:
+    """PR #75 review: a docstring or comment mentioning the literal
+    string ``_LOGGER`` (e.g. a rule citation) must NOT trip the
+    detector. The historic substring check would have false-matched
+    here; the AST walk fixes that.
+    """
+    docstring_only = (
+        '"""Stage-0 reader; per manifest-readers.md must not define _LOGGER."""\n'
+        "# `_LOGGER` is forbidden here — see the rule file.\n"
+        "x = 1\n"
+    )
+    reason = _check_manifest_detector(docstring_only, tmp_path, "docstring_mention")
+    assert reason is None, (
+        "detector false-positive on a docstring / comment that mentions "
+        f"the literal token _LOGGER: {reason!r}"
+    )
