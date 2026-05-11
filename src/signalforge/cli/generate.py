@@ -147,13 +147,46 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "existing schema.yml."
         ),
     )
-    parser.add_argument(
+    # Issue #37 / US-004 / DEC-001 / DEC-002 — positional ``<model>`` and
+    # ``--select`` form a ``mutually_exclusive_group(required=True)``: the
+    # operator MUST supply exactly one. Argparse rejects both-supplied
+    # and neither-supplied combinations with its own usage error (exit
+    # 2). The positional uses ``nargs="?"`` so it is optional INSIDE the
+    # mutex; ``default=None`` keeps ``args.model`` falsy when ``--select``
+    # is supplied so the dispatcher in ``cmd_generate`` reads it
+    # accurately. ``--select`` help pins the grammar, three examples
+    # (tag, path glob, comma-union — DEC-001), and the
+    # sidecar-overwrite caveat (DEC-016) verbatim per the 5-surface
+    # parity rule (cli-layer.md "Multi-surface parity for behaviour
+    # changes"). The cookbook docs land in US-008.
+    target_group = parser.add_mutually_exclusive_group(required=True)
+    target_group.add_argument(
         "model",
         metavar="<model>",
+        nargs="?",
+        default=None,
         help=(
             "Model under draft. Accepts a dbt unique_id "
             "(e.g. 'model.proj.customers') or a file path "
             "(e.g. 'models/marts/customers.sql')."
+        ),
+    )
+    target_group.add_argument(
+        "--select",
+        metavar="<expr>",
+        default=None,
+        help=(
+            "Run generate across multiple models in one process. "
+            "<expr> is a comma-separated union of atoms: "
+            "tag:<name>, path:<glob> (shell-style fnmatch), "
+            "or a bare unique_id / file path. Examples: "
+            "tag:staging | path:models/marts/* | "
+            "tag:staging,path:models/marts/*. "
+            "Caveat: multi-model runs overwrite .signalforge/grade.json "
+            "and .signalforge/diff.json per model; only the last model's "
+            "sidecars persist. Use the shell-loop pattern "
+            "(docs/cli-ops.md § Running across many models) for "
+            "per-model sidecars."
         ),
     )
     parser.add_argument(
