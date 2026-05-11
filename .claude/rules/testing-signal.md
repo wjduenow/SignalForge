@@ -44,6 +44,18 @@ When a derived identifier needs to land in a snapshot fixture (compiled SQL, gen
 
 If a parser uses `extra="ignore"` in production (forward-compat), pair it with a test that constructs a one-off `StrictModel(BaseModel)` with `extra="forbid"` and validates a known-current fixture against it. Adding a key to the fixture without updating the model breaks the test loudly. Reference: `tests/manifest/test_models.py::test_drift_detector_extra_forbid`.
 
+## AST single-construction-seam scans must catch all three bypass patterns (issue #40)
+
+Several rule files mandate that a "fail-closed audit event" class is constructed in exactly one module (`AuditEvent` in `safety.request`, `LLMResponseEvent` in `draft.audit`, `PruneEvent` in `prune.audit`, `GradeEvent` in `grade.audit`). The convention is enforced by AST scans in `tests/test_audit_completeness.py`. The scan visitor MUST catch three bypass patterns, not just bare-name calls:
+
+1. **Bare** — `Target(...)` after `from <module> import Target`. Caught by `Call(func=Name(id=Target))`.
+2. **Import-alias** — `from <module> import Target as Alias; Alias(...)`. Caught by tracking aliases introduced via `ast.ImportFrom` whose `alias.name == target`, then matching `Call(func=Name(id=<alias>))`.
+3. **Module-attribute** — `from <pkg> import <module>; module.Target(...)`. Caught by matching `Call(func=Attribute(attr=Target))` regardless of which `<obj>` the attribute is accessed on. Deliberately broad — the gated class names are unique enough that an attribute access with the same name is overwhelmingly likely to be the gated class.
+
+A bare-name-only visitor (`Call(func=Name(id=target))`) is trivially bypassable by either alias or attribute form and provides **false confidence** — a reviewer who reads "the AST scan caught it" without knowing the visitor's shape is unprotected. `tests/test_audit_completeness.py::_QualifiedNameCallFinder` is the canonical implementation; reuse it for any new gated-construction scan a future stage ships. `getattr(module, "Target")(...)` is acceptable to leave unprotected — too dynamic for AST gating, and any reviewer reading `getattr` should already be on alert.
+
+Each new scan also needs a planted-violation regression test that exercises all three patterns. `tests/test_audit_completeness.py::test_qualified_name_finder_catches_all_three_bypass_patterns` is the precedent (one parametrised test across all gated targets × all three patterns).
+
 ## Coverage measurement
 
 Established by issue #27 (DEC-001, DEC-004, DEC-009). Coverage instrumentation runs both locally and in CI via `--cov*` flags in `pyproject.toml` `addopts`.
