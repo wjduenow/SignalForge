@@ -1,0 +1,71 @@
+name: Publish to PyPI
+
+# Mirrors clauditor's release flow. Trigger: a GitHub Release published from
+# the repo. The release's "this is a pre-release" checkbox picks the target.
+#   pre-release   -> https://test.pypi.org/project/signalforge-dbt/
+#   full release  -> https://pypi.org/project/signalforge-dbt/
+#
+# Trusted publisher setup (one-time, per index):
+#   pypi.org      project=signalforge-dbt owner=wjduenow repo=SignalForge
+#                 workflow=publish.yml environment=pypi
+#   test.pypi.org project=signalforge-dbt owner=wjduenow repo=SignalForge
+#                 workflow=publish.yml environment=testpypi
+#
+# test.pypi.org rejects duplicate (name, version) uploads; bump __version__
+# (e.g. 0.1.0rc1, 0.1.0rc2) between successive test pushes.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish-testpypi:
+    name: Publish to TestPyPI
+    if: github.event.release.prerelease
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/signalforge-dbt/
+    permissions:
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Install build
+        run: pip install build==1.2.*
+      - name: Build sdist + wheel
+        run: python -m build
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/signalforge-dbt/
+    permissions:
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.11"
+      - name: Install build
+        run: pip install build==1.2.*
+      - name: Build sdist + wheel
+        run: python -m build
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b  # v1.14.0

@@ -30,9 +30,13 @@ dbt-core project, locally or in CI, with no dbt Cloud dependency.
 The published wheel:
 
 ```bash
-pip install signalforge
+pip install signalforge-dbt
 signalforge --version
 ```
+
+The PyPI distribution name is `signalforge-dbt`; the import name and
+CLI command remain `signalforge`. The `-dbt` suffix exists because the
+bare `signalforge` name on PyPI is held by an unrelated DSP package.
 
 For development against a clone (the `[dev]` extra pulls in pytest,
 ruff, and pyright):

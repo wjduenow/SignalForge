@@ -84,7 +84,7 @@ v0.1 = single-model draft + warehouse prune, BigQuery adapter, CLI only. Don't p
 
 When the first code goes in, prefer choices consistent with the README's stated intent:
 
-- Python package named `signalforge`, installed via `pip install signalforge`, exposing a `signalforge` CLI entry point (the quick-start in the README commits to this shape).
+- Python import package named `signalforge`, distributed on PyPI as `signalforge-dbt` (the bare `signalforge` name is held by an unrelated DSP package), installed via `pip install signalforge-dbt`, exposing a `signalforge` CLI entry point.
 - Apache-2.0 headers are not required in source files — the repo-level `LICENSE` covers it.
 - Update this file once real build/test/lint commands exist.
 
