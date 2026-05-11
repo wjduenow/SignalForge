@@ -233,6 +233,15 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
     if name == "MaterialisationNotSupportedError":
         return cls("SyntheticAdapter")
 
+    # Selector-failure CLI wrappers (issue #37 / DEC-007 — US-002).
+    # ``CliSelectorParseError`` accepts an optional ``cause`` (the
+    # underlying ``SelectorParseError`` from the manifest layer);
+    # ``CliSelectorNoMatchError`` is expr-only. Both tier 2.
+    if name == "CliSelectorParseError":
+        return cls(expr="tag:")
+    if name == "CliSelectorNoMatchError":
+        return cls(expr="tag:nonexistent")
+
     # Catch-all: layer-base default ``Cls(message, *, remediation=None)``.
     try:
         return cls(_SENTINEL_MESSAGE)
