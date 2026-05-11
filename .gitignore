@@ -1,0 +1,69 @@
+# Python build / packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+*.so
+
+# Virtualenvs / env files
+.venv/
+.env
+.envrc
+
+# Tooling caches
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.pyright/
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
+
+# SignalForge runtime state (audit log lives here; sensitive — see docs/safety-ops.md)
+.signalforge/
+# Allow committed test fixtures that intentionally embed a .signalforge/ subdir
+# (synthetic audit JSONL + diff sidecar consumed by tests/cli/_e2e_helpers.py).
+!tests/fixtures/**/.signalforge/
+!tests/fixtures/**/.signalforge/**
+
+# Local-only symlinked / synced skills — ignore all except maintainer-owned skills
+.claude/skills/*
+!.claude/skills/release-manager
+!.claude/skills/review-agentskills-spec
+
+# Synced-from-glaude commands and agents — local-only, do not commit per-repo
+.claude/commands/super-plan.md
+.claude/commands/super-plan-team.md
+.claude/commands/chunk.md
+.claude/commands/code-review.md
+.claude/commands/kickoff.md
+.claude/commands/closeout.md
+.claude/commands/validate.md
+.claude/commands/close-ticket.md
+.claude/commands/ralph-run.md
+.claude/agents/pr-reviewer.md
+.claude/agents/code-reviewer.md
+.claude/agents/planner.md
+
+# Local Claude Code state
+.claude/scheduled_tasks.lock
+.claude/plugins/
+
+# Beads / Dolt (added by bd init)
+.beads/
+.dolt/
+*.db
+.beads-credential-key
+work-*/
+
+# Windows NTFS Alternate Data Streams (created when files cross from Windows -> WSL)
+*:Zone.Identifier
+
+# bark worktree scaffolding artifact
+uv.lock

@@ -1,0 +1,68 @@
+{
+  "prune_schema_version": 1,
+  "model_unique_id": "model.sf_demo.fct_orders",
+  "decisions": [
+    {
+      "test_anchor": "column.id",
+      "test": {
+        "type": "not_null",
+        "column": "id",
+        "rationale": "Primary key surrogate; must never be null."
+      },
+      "decision": "dropped",
+      "reason": "always-passes",
+      "failures": 0,
+      "sampled_rows": 10000,
+      "scope": "sample",
+      "elapsed_ms": 87,
+      "compiled_sql_hash": "0123456789abcdef",
+      "compiled_sql": "SELECT COUNT(*) AS failures FROM `proj.dataset.fct_orders` WHERE id IS NULL",
+      "why": "0 failures across 10000 sampled rows; always-pass tests consume reviewer attention.",
+      "sample_failures": null
+    },
+    {
+      "test_anchor": "column.order_id",
+      "test": {
+        "type": "unique",
+        "column": "order_id",
+        "rationale": "Surrogate primary key for the orders fact."
+      },
+      "decision": "kept",
+      "reason": "kept",
+      "failures": 3,
+      "sampled_rows": 10000,
+      "scope": "sample",
+      "elapsed_ms": 142,
+      "compiled_sql_hash": "fedcba9876543210",
+      "compiled_sql": "SELECT order_id FROM `proj.dataset.fct_orders` GROUP BY order_id HAVING COUNT(*) > 1",
+      "why": "3 duplicate order_id values across 10000 sampled rows; real signal worth shipping.",
+      "sample_failures": [
+        {"order_id": "ORD-1001"},
+        {"order_id": "ORD-1002"}
+      ]
+    },
+    {
+      "test_anchor": "column.status",
+      "test": {
+        "type": "accepted_values",
+        "column": "status",
+        "values": ["pending", "shipped", "cancelled"],
+        "rationale": "Documented order status enum."
+      },
+      "decision": "dropped",
+      "reason": "failed-on-known-clean-data",
+      "failures": 27,
+      "sampled_rows": 10000,
+      "scope": "sample",
+      "elapsed_ms": 96,
+      "compiled_sql_hash": "5555666677778888",
+      "compiled_sql": "SELECT status FROM `proj.dataset.fct_orders` WHERE status NOT IN ('pending', 'shipped', 'cancelled')",
+      "why": "27 rows in known-clean sample violate the accepted_values list; LLM hallucinated the enum.",
+      "sample_failures": [
+        {"status": "returned"}
+      ]
+    }
+  ],
+  "elapsed_ms": 715,
+  "signalforge_version": "0.1.0.dev0"
+}

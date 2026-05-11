@@ -1,0 +1,5 @@
+prune:
+  partition_filter:
+    column: event_dt
+    op: ">="
+    value: "2026-01-01"

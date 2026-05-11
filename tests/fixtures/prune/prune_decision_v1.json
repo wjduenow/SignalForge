@@ -1,0 +1,103 @@
+[
+  {
+    "test_anchor": "column.id",
+    "test": {
+      "type": "not_null",
+      "column": "id",
+      "rationale": "Primary key surrogate; must never be null."
+    },
+    "decision": "dropped",
+    "reason": "always-passes",
+    "failures": 0,
+    "sampled_rows": 10000,
+    "scope": "sample",
+    "elapsed_ms": 87,
+    "compiled_sql_hash": "0123456789abcdef",
+    "compiled_sql": "SELECT COUNT(*) AS failures FROM `proj.dataset.fct_orders` WHERE id IS NULL",
+    "why": "0 failures across 10000 sampled rows; always-pass tests consume reviewer attention without catching anything.",
+    "sample_failures": null
+  },
+  {
+    "test_anchor": "column.order_id",
+    "test": {
+      "type": "unique",
+      "column": "order_id",
+      "rationale": "Surrogate primary key for the orders fact."
+    },
+    "decision": "kept",
+    "reason": "kept",
+    "failures": 3,
+    "sampled_rows": 10000,
+    "scope": "sample",
+    "elapsed_ms": 142,
+    "compiled_sql_hash": "fedcba9876543210",
+    "compiled_sql": "SELECT order_id FROM `proj.dataset.fct_orders` GROUP BY order_id HAVING COUNT(*) > 1",
+    "why": "3 duplicate order_id values across 10000 sampled rows; real signal worth shipping.",
+    "sample_failures": [
+      {"order_id": "ORD-1001"},
+      {"order_id": "ORD-1002"},
+      {"order_id": "ORD-1003"}
+    ]
+  },
+  {
+    "test_anchor": "column.customer_id",
+    "test": {
+      "type": "relationships",
+      "column": "customer_id",
+      "to": "ref('dim_customers')",
+      "field": "customer_id",
+      "rationale": "FK from fct_orders to dim_customers."
+    },
+    "decision": "dropped",
+    "reason": "requires-future-data",
+    "failures": 0,
+    "sampled_rows": null,
+    "scope": "full",
+    "elapsed_ms": 312,
+    "compiled_sql_hash": "1111222233334444",
+    "compiled_sql": "SELECT child.customer_id FROM `proj.dataset.fct_orders` child LEFT JOIN `proj.dataset.dim_customers` parent ON child.customer_id = parent.customer_id WHERE parent.customer_id IS NULL AND child.customer_id IS NOT NULL",
+    "why": "Referenced model dim_customers is not yet built in the warehouse; cannot evaluate.",
+    "sample_failures": null
+  },
+  {
+    "test_anchor": "column.status",
+    "test": {
+      "type": "accepted_values",
+      "column": "status",
+      "values": ["pending", "shipped", "cancelled"],
+      "rationale": "Documented order status enum."
+    },
+    "decision": "dropped",
+    "reason": "failed-on-known-clean-data",
+    "failures": 27,
+    "sampled_rows": 10000,
+    "scope": "sample",
+    "elapsed_ms": 96,
+    "compiled_sql_hash": "5555666677778888",
+    "compiled_sql": "SELECT status FROM `proj.dataset.fct_orders` WHERE status NOT IN ('pending', 'shipped', 'cancelled')",
+    "why": "27 rows in known-clean sample violate the accepted_values list; LLM hallucinated the enum.",
+    "sample_failures": [
+      {"status": "returned"},
+      {"status": "refunded"},
+      {"status": "in_transit"}
+    ]
+  },
+  {
+    "test_anchor": "column.email",
+    "test": {
+      "type": "not_null",
+      "column": "email",
+      "rationale": "Customer email is required at signup."
+    },
+    "decision": "kept",
+    "reason": "kept-without-evidence",
+    "failures": 0,
+    "sampled_rows": 12,
+    "scope": "sample",
+    "elapsed_ms": 54,
+    "compiled_sql_hash": "9999aaaabbbbcccc",
+    "compiled_sql": "SELECT COUNT(*) AS failures FROM `proj.dataset.dim_customers` WHERE email IS NULL",
+    "why": "Sample too small (12 rows) to support a verdict; test is well-formed and references a real column.",
+    "sample_failures": null
+  }
+]

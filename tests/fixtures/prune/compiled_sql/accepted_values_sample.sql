@@ -1,0 +1,1 @@
+WITH sample AS (SELECT * FROM `fake_project.dataset.orders` AS t WHERE MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), 10) < 1 LIMIT 100000) SELECT `status` FROM sample WHERE `status` IS NOT NULL AND `status` NOT IN ('placed', 'shipped', 'cancelled')

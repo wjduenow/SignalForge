@@ -1,0 +1,48 @@
+{
+  "skill_name": "review-agentskills-spec",
+  "description": "Eval spec for the maintainer-only /review-agentskills-spec skill. Exercises clauditor's L1 machinery against a representative drift-report output; L3 grading criteria capture the rubric for a human review. The test in tests/test_bundled_review_skill.py runs the L1 assertions against a canned report string (no live subprocess, no Anthropic call).",
+  "test_args": "",
+  "user_prompt": "Review the current agentskills.io specification and report any drift between it and clauditor's current conformance logic. Produce a markdown report with a 'Deltas' section, and list proposed changes with file paths. Do not edit any files.",
+  "assertions": [
+    {
+      "id": "produces-non-trivial-report",
+      "type": "min_length",
+      "length": 200
+    },
+    {
+      "id": "references-spec-url",
+      "type": "contains",
+      "needle": "agentskills.io"
+    },
+    {
+      "id": "has-deltas-section",
+      "type": "contains",
+      "needle": "Deltas"
+    },
+    {
+      "id": "surfaces-proposed-changes",
+      "type": "contains",
+      "needle": "Proposed change"
+    },
+    {
+      "id": "no-python-traceback",
+      "type": "not_contains",
+      "needle": "Traceback"
+    }
+  ],
+  "grading_criteria": [
+    {
+      "id": "concrete-file-paths",
+      "criterion": "Each delta's proposed change names a concrete file path under src/clauditor/ (e.g. src/clauditor/paths.py, src/clauditor/conformance.py) rather than a generic 'update the validator' suggestion."
+    },
+    {
+      "id": "classifies-coverage-precisely",
+      "criterion": "Every delta is classified as one of matches / missing / drifted / over-enforced. No delta uses vague phrasing like 'needs review' or 'might be an issue'."
+    },
+    {
+      "id": "preview-only-never-edits",
+      "criterion": "The response is preview-only: it never claims to have edited files, never shows a diff as applied, and never runs 'gh issue create' without first asking the user."
+    }
+  ],
+  "grading_model": "claude-sonnet-4-6"
+}

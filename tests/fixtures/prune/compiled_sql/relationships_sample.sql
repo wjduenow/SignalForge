@@ -1,0 +1,1 @@
+WITH sample AS (SELECT * FROM `fake_project.dataset.orders` AS t WHERE MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), 10) < 1 LIMIT 100000) SELECT child.`customer_id` FROM sample AS child LEFT JOIN `fake_project.dataset.customers` AS parent ON child.`customer_id` = parent.`id` WHERE child.`customer_id` IS NOT NULL AND parent.`id` IS NULL

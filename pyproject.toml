@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "signalforge-dbt"
+dynamic = ["version"]
+description = "Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship."
+requires-python = ">=3.10"
+license = "Apache-2.0"
+readme = "README.md"
+authors = [{name = "wjduenow"}]
+dependencies = [
+  "google-cloud-bigquery>=3.20,<4",
+  "PyYAML>=6,<7",
+  "pydantic>=2.5,<3",
+  "anthropic>=0.50,<1.0",
+]
+
+[project.optional-dependencies]
+dev = ["ruff", "pyright", "pytest", "dbt-core>=1.8,<2", "types-PyYAML>=6,<7", "pytest-cov>=5.0"]
+
+[project.scripts]
+signalforge = "signalforge.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/wjduenow/SignalForge"
+Issues = "https://github.com/wjduenow/SignalForge/issues"
+
+[tool.hatch.version]
+path = "src/signalforge/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/signalforge"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = []
+
+[tool.ruff.format]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+reportMissingImports = "error"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `--import-mode=importlib` lets us share basenames across test dirs (e.g.
+# tests/manifest/test_errors.py and tests/warehouse/test_errors.py) without
+# adding tests/__init__.py — keeps `testing-signal.md`'s no-init rule intact.
+addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery and not anthropic and not cli_subprocess and not e2e' --cov=signalforge --cov-report=xml --cov-report=term-missing --cov-fail-under=80"
+minversion = "7.0"
+strict_markers = true
+markers = [
+  "unit: unit-level tests with no FS I/O beyond fixtures",
+  "integration: tests exercising the full load() round-trip",
+  "error: tests asserting an exception with its remediation",
+  "bigquery: tests requiring BigQuery credentials (gated by SF_RUN_BQ=1)",
+  "safety: tests for the PII safety layer",
+  "llm: tests for the centralized Anthropic SDK seam",
+  "draft: tests for the schema-drafting layer",
+  "anthropic: real-API smoke test (requires ANTHROPIC_API_KEY; excluded from default CI)",
+  "cli_subprocess: belt-and-braces subprocess-driven CLI smoke (skipped by default; run with -m cli_subprocess)",
+  "e2e: end-to-end smoke test against real Anthropic + real BigQuery (gated by SF_RUN_BQ=1, ANTHROPIC_API_KEY, GOOGLE_CLOUD_PROJECT; skipped by default)",
+]

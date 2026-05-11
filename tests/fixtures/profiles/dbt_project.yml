@@ -1,0 +1,7 @@
+# Minimal dbt_project.yml that pairs with any profile fixture in this
+# directory. Used to drive project-root profile resolution tests where the
+# loader walks up from a project directory containing this file.
+name: signalforge_test
+version: '1.0.0'
+config-version: 2
+profile: signalforge_test

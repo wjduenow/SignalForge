@@ -1,0 +1,7 @@
+safety:
+  mode: schema-only
+llm:
+  model: claude-sonnet-4-6
+prune:
+  scope: sample
+  sample_size: 25000
