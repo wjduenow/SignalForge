@@ -1272,3 +1272,443 @@ def test_exact_duplicate_cross_stage_parity_with_grade_engine(project_dir: Path)
     assert set(diff_aids) == set(grade_aids), (
         f"Cross-stage parity break: diff={diff_aids!r} grade={grade_aids!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #41 — rationale/evidence threaded into DiffEntry.why for kept rows
+# ---------------------------------------------------------------------------
+
+
+class TestTruncateWhy:
+    """Unit coverage for :func:`signalforge.diff.engine._truncate_why`.
+
+    The helper was extracted from :func:`_flagged_why`'s truncation step
+    so the same one-line cap applies to the rationale/evidence cascade.
+    Empty / whitespace-only input returns ``""`` so the caller's cascade
+    can fall through to the next candidate.
+    """
+
+    def test_empty_string_returns_empty(self) -> None:
+        from signalforge.diff.engine import _truncate_why
+
+        assert _truncate_why("", 80) == ""
+
+    def test_whitespace_only_returns_empty(self) -> None:
+        from signalforge.diff.engine import _truncate_why
+
+        # Caller's cascade depends on whitespace-only treated as empty.
+        assert _truncate_why("   \t\n  ", 80) == ""
+
+    def test_exact_max_chars_no_ellipsis(self) -> None:
+        from signalforge.diff.engine import _truncate_why
+
+        text = "a" * 10
+        assert _truncate_why(text, 10) == text
+
+    def test_one_below_max_chars_no_ellipsis(self) -> None:
+        from signalforge.diff.engine import _truncate_why
+
+        text = "a" * 9
+        assert _truncate_why(text, 10) == text
+
+    def test_one_above_max_chars_truncates_with_ellipsis(self) -> None:
+        from signalforge.diff.engine import _truncate_why
+
+        text = "a" * 11
+        out = _truncate_why(text, 10)
+        assert out.endswith("…")
+        # max_chars - 1 chars of content + 1-char ellipsis = max_chars
+        # display width.
+        assert len(out) == 10
+
+    def test_multibyte_emoji_truncates(self) -> None:
+        from signalforge.diff.engine import _truncate_why
+
+        # 30 crab emoji — each is one Python char but four UTF-8 bytes.
+        # Helper measures Python char length, NOT bytes, so a 30-char
+        # input over a 10-char budget truncates predictably.
+        text = "🦀" * 30
+        out = _truncate_why(text, 10)
+        assert out.endswith("…")
+        assert len(out) == 10
+        # The truncated body should still be crab emoji (no broken
+        # surrogate pairs since Python uses Unicode code points).
+        assert out[:-1] == "🦀" * 9
+
+    def test_non_positive_max_chars_returns_empty(self) -> None:
+        from signalforge.diff.engine import _truncate_why
+
+        assert _truncate_why("anything", 0) == ""
+        assert _truncate_why("anything", -1) == ""
+
+
+def test_kept_test_why_prefers_candidate_rationale(project_dir: Path) -> None:
+    """Issue #41 cascade tier 1: a kept test with a non-empty rationale
+    on the ``CandidateTest`` surfaces that rationale in
+    ``DiffEntry.why`` instead of the prune boilerplate.
+    """
+    model = _make_model()
+    rationale_text = "grain assertion: order_id must be non-null per Stripe webhook contract"
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact table",
+        rationale="grain: one row per order",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="surrogate key",
+                rationale="primary identifier",
+                tests=(CandidateTestNotNull(column="order_id", rationale=rationale_text),),
+            ),
+        ),
+    )
+    decision = PruneDecision(
+        test_anchor="column.order_id",
+        test=CandidateTestNotNull(column="order_id", rationale=rationale_text),
+        decision="kept",
+        reason="kept",
+        failures=42,
+        sampled_rows=1000,
+        scope="sample",
+        elapsed_ms=10,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="select 1",
+        why="ran on 1k sample, 42 failing rows",
+    )
+    prune_result = _make_prune_result(decisions=(decision,))
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        grading_report=None,
+        project_dir=project_dir,
+    )
+
+    kept_test_rows = [e for e in report.entries if e.test_type == "not_null" and e.tier == "kept"]
+    assert len(kept_test_rows) == 1
+    why = kept_test_rows[0].why
+    # The rationale text is visible in the why; the boilerplate prune
+    # decision.why is NOT.
+    assert "grain assertion" in why
+    assert "Stripe webhook" in why
+    assert "1k sample" not in why
+    assert "42 failing rows" not in why
+
+
+def test_kept_test_why_cascades_to_grading_evidence(project_dir: Path) -> None:
+    """Issue #41 cascade tier 2: a kept test with ``rationale=None``
+    falls back to :attr:`GradingResult.evidence` for ``DiffEntry.why``.
+    """
+    model = _make_model()
+    candidate = _make_candidate()  # rationale=None on the order_id not_null test
+    # Use a passing grade so the row stays kept (not flagged).
+    grading_report = _grading_report_for(
+        results=(
+            GradingResult(
+                artifact_id="test.column.order_id.not_null",
+                criterion_id="clarity",
+                score=0.95,
+                passed=True,
+                evidence="rubric saw 0 NULLs across 10k-row sample",
+                reasoning="passed",
+            ),
+        )
+    )
+    prune_result = _make_prune_result(decisions=(_kept_decision_for(),))
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        grading_report=grading_report,
+        project_dir=project_dir,
+    )
+
+    kept_test_rows = [e for e in report.entries if e.test_type == "not_null" and e.tier == "kept"]
+    assert len(kept_test_rows) == 1
+    why = kept_test_rows[0].why
+    assert "rubric saw 0 NULLs" in why
+    # The prune boilerplate is NOT used when evidence is available.
+    assert "1k sample" not in why
+
+
+def test_kept_test_why_falls_back_to_decision_why(project_dir: Path) -> None:
+    """Issue #41 cascade tier 3: with rationale=None AND evidence empty,
+    the kept test's ``why`` falls back to ``decision.why`` (the existing
+    pre-#41 source).
+    """
+    model = _make_model()
+    candidate = _make_candidate()  # rationale=None
+    # Passing grade with empty evidence → cascade falls through both
+    # candidate.rationale and grading.evidence to decision.why.
+    grading_report = _grading_report_for(
+        results=(
+            GradingResult(
+                artifact_id="test.column.order_id.not_null",
+                criterion_id="clarity",
+                score=0.95,
+                passed=True,
+                evidence="",
+                reasoning="passed",
+            ),
+        )
+    )
+    prune_result = _make_prune_result(decisions=(_kept_decision_for(),))
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        grading_report=grading_report,
+        project_dir=project_dir,
+    )
+
+    kept_test_rows = [e for e in report.entries if e.test_type == "not_null" and e.tier == "kept"]
+    assert len(kept_test_rows) == 1
+    assert kept_test_rows[0].why == "ran on 1k sample, 42 failing rows"
+
+
+def test_kept_test_why_skips_whitespace_only_rationale(project_dir: Path) -> None:
+    """Cascade guard: a rationale that's whitespace-only (e.g. the LLM
+    emitted ``"   "``) is treated as empty so the cascade descends to
+    evidence rather than surfacing a blank cell.
+    """
+    model = _make_model()
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact table",
+        rationale="grain: one row per order",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="surrogate key",
+                rationale="primary identifier",
+                tests=(CandidateTestNotNull(column="order_id", rationale="   \n\t  "),),
+            ),
+        ),
+    )
+    decision = PruneDecision(
+        test_anchor="column.order_id",
+        test=CandidateTestNotNull(column="order_id", rationale="   \n\t  "),
+        decision="kept",
+        reason="kept",
+        failures=42,
+        sampled_rows=1000,
+        scope="sample",
+        elapsed_ms=10,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="select 1",
+        why="ran on 1k sample, 42 failing rows",
+    )
+    grading_report = _grading_report_for(
+        results=(
+            GradingResult(
+                artifact_id="test.column.order_id.not_null",
+                criterion_id="clarity",
+                score=0.95,
+                passed=True,
+                evidence="evidence from grader survives the cascade",
+                reasoning="passed",
+            ),
+        )
+    )
+    prune_result = _make_prune_result(decisions=(decision,))
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        grading_report=grading_report,
+        project_dir=project_dir,
+    )
+
+    kept_test_rows = [e for e in report.entries if e.test_type == "not_null" and e.tier == "kept"]
+    assert len(kept_test_rows) == 1
+    assert "evidence from grader" in kept_test_rows[0].why
+
+
+def test_kept_doc_why_prefers_candidate_rationale_over_grading(project_dir: Path) -> None:
+    """Issue #41 cascade for doc rows: a kept-with-grading column
+    description row prefers the column's ``rationale`` over the
+    grader's ``evidence`` and over the pre-#41 ``reasoning`` source.
+    """
+    model = _make_model()
+    column_rationale = "primary identifier — survives FK refactors"
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact table",
+        rationale="grain: one row per order",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="surrogate key",
+                rationale=column_rationale,
+            ),
+            CandidateColumn(
+                name="customer_id",
+                description="FK to customers",
+                rationale="links to dim_customer",
+            ),
+        ),
+    )
+    grading_report = _grading_report_for(
+        results=(
+            GradingResult(
+                artifact_id="column.order_id.description",
+                criterion_id="clarity",
+                score=0.95,
+                passed=True,
+                evidence="evidence text that must not surface — rationale wins",
+                reasoning="reasoning text that must not surface either",
+            ),
+        )
+    )
+    prune_result = _make_prune_result()
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        grading_report=grading_report,
+        project_dir=project_dir,
+    )
+
+    desc_rows = [e for e in report.entries if e.artifact_id == "column.order_id.description"]
+    assert len(desc_rows) == 1
+    why = desc_rows[0].why
+    assert "primary identifier" in why
+    assert "survives FK refactors" in why
+    assert "evidence text" not in why
+    assert "reasoning text" not in why
+
+
+def test_kept_doc_why_cascades_to_evidence_when_rationale_missing(
+    project_dir: Path,
+) -> None:
+    """Issue #41 cascade tier 2 for docs: a kept doc row with no
+    ``CandidateColumn.rationale`` falls back to the first non-empty
+    :attr:`GradingResult.evidence`.
+    """
+    model = _make_model()
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact table",
+        rationale="grain: one row per order",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="surrogate key",
+                rationale=None,
+            ),
+            CandidateColumn(
+                name="customer_id",
+                description="FK to customers",
+                rationale="links to dim_customer",
+            ),
+        ),
+    )
+    grading_report = _grading_report_for(
+        results=(
+            GradingResult(
+                artifact_id="column.order_id.description",
+                criterion_id="clarity",
+                score=0.95,
+                passed=True,
+                evidence="grader observed: covers all dbt seed rows",
+                reasoning="passed",
+            ),
+        )
+    )
+    prune_result = _make_prune_result()
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        grading_report=grading_report,
+        project_dir=project_dir,
+    )
+
+    desc_rows = [e for e in report.entries if e.artifact_id == "column.order_id.description"]
+    assert len(desc_rows) == 1
+    assert "covers all dbt seed rows" in desc_rows[0].why
+
+
+def test_end_to_end_kept_test_why_threads_rationale(project_dir: Path) -> None:
+    """Replacement for the pre-#41 kept-row expectation in
+    :func:`test_end_to_end_kept_dropped_flagged_entries`. With grading
+    that PASSES, the kept test row's ``why`` carries the candidate's
+    rationale rather than the prune boilerplate.
+    """
+    model = _make_model()
+    rationale_text = "not-null guard for the surrogate key — joins fail silently otherwise"
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact table",
+        rationale="grain: one row per order",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="surrogate key",
+                rationale="primary identifier",
+                tests=(CandidateTestNotNull(column="order_id", rationale=rationale_text),),
+            ),
+            CandidateColumn(
+                name="customer_id",
+                description="FK to customers",
+                rationale="links to dim_customer",
+            ),
+        ),
+    )
+    decision = PruneDecision(
+        test_anchor="column.order_id",
+        test=CandidateTestNotNull(column="order_id", rationale=rationale_text),
+        decision="kept",
+        reason="kept",
+        failures=42,
+        sampled_rows=1000,
+        scope="sample",
+        elapsed_ms=10,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="select 1",
+        why="ran on 1k sample, 42 failing rows",
+    )
+    prune_result = _make_prune_result(
+        decisions=(
+            decision,
+            _dropped_decision_for(),
+        )
+    )
+    grading_report = _grading_report_for(
+        results=(
+            GradingResult(
+                artifact_id="test.column.order_id.not_null",
+                criterion_id="clarity",
+                score=0.9,
+                passed=True,
+                evidence="0 NULLs in 10k sample",
+                reasoning="passed",
+            ),
+        )
+    )
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        grading_report=grading_report,
+        project_dir=project_dir,
+    )
+
+    kept_test_rows = [e for e in report.entries if e.test_type == "not_null" and e.tier == "kept"]
+    assert len(kept_test_rows) == 1
+    why = kept_test_rows[0].why
+    # Threaded rationale — not the prune boilerplate.
+    assert "not-null guard" in why
+    assert "joins fail silently" in why
+    assert "1k sample" not in why
+    # Dropped row keeps its prune why verbatim.
+    dropped_rows = [e for e in report.entries if e.tier == "dropped"]
+    assert len(dropped_rows) == 1
+    assert dropped_rows[0].why == "ran on 1k sample, 0 failing rows"
