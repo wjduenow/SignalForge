@@ -540,6 +540,28 @@ def cmd_generate(args: argparse.Namespace) -> int:
             )
         candidate = draft_outcome.candidate
         candidate_test_count = sum(len(c.tests) for c in candidate.columns) + len(candidate.tests)
+        # DEC-004 of #35 — operator-visible signal when the prune-stage
+        # short-circuit (US-002) fires. The engine drains every candidate
+        # to ``kept-without-evidence`` when ``prune.enabled=false``; this
+        # INFO line surfaces that fact at the prune-stage progress block
+        # so the operator sees it in stage-order with the existing
+        # ``emit_progress_entry`` narrative. Lazy-format JSON per
+        # ``prune-engine.md`` DEC-017 (the grep gate at
+        # ``tests/llm/test_logger_grep_gate.py`` rejects f-strings in
+        # ``_LOGGER`` calls). Not a WARNING: the operator explicitly
+        # opted in via config — surfacing a WARNING on every run would
+        # be nagging, not signal.
+        if not prune_config.enabled:
+            _LOGGER.info(
+                "prune disabled in signalforge.yml; routing all candidates to "
+                "kept-without-evidence: %s",
+                json.dumps(
+                    {
+                        "model_unique_id": model.unique_id,
+                        "candidate_count": candidate_test_count,
+                    }
+                ),
+            )
         if progress_on:
             emit_progress_entry(
                 3,
