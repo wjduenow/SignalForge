@@ -37,8 +37,8 @@ sidecar precedent:
   than evidence-only payloads (DEC-009 of #8).
 
 The path-safety gate at writer entry routes ``sidecar_path`` through
-:func:`signalforge.warehouse._path_safety.canonicalise_path`, the
-project's standard symlink/containment helper. A symlink at
+:func:`signalforge._common.path_safety.canonicalise_path`, the project's
+standard symlink/containment helper. A symlink at
 ``<project>/.signalforge/diff.json`` pointing outside the project tree
 is rejected — the writer refuses rather than write outside the project
 sandbox. Mirrors prune's post-QG fix and grade's writer-entry
@@ -52,10 +52,9 @@ import os
 from pathlib import Path
 from typing import Final
 
+from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.diff.errors import DiffSidecarRecordTooLargeError, DiffSidecarWriteError
 from signalforge.diff.models import DiffReport
-from signalforge.warehouse._path_safety import canonicalise_path
-from signalforge.warehouse.errors import ProfileNotFoundError
 
 # DEC-009 of #8 — 10 MB cap, an order of magnitude above the grade
 # sidecar's 1 MB cap because diff text (unified diffs across thousands of
@@ -102,12 +101,13 @@ def write_sidecar(
        artefact.
     4. **Path canonicalisation BEFORE any file open**: route
        ``sidecar_path`` through
-       :func:`signalforge.warehouse._path_safety.canonicalise_path` with
-       the caller-supplied ``project_dir``. A symlink escape or cycle is
+       :func:`signalforge._common.path_safety.canonicalise_path` with the
+       caller-supplied ``project_dir``. A symlink escape or cycle is
        wrapped as :class:`DiffSidecarWriteError` — this is the only place
        the writer wraps an exception, because the path-safety helper
-       raises :class:`ProfileNotFoundError` (a warehouse-layer error name
-       that would be confusing for diff callers).
+       raises a layer-neutral :class:`PathContainmentError` and the
+       diff layer surfaces its own typed error to keep its catch
+       surface homogeneous.
     5. Ensure the parent directory exists (``mkdir(parents=True,
        exist_ok=True)``) BEFORE the ``os.open`` so the orchestrator can
        call us against a fresh ``.signalforge/`` directory.
@@ -138,7 +138,7 @@ def write_sidecar(
             artefact.
         DiffSidecarWriteError: ``sidecar_path`` escapes ``project_dir``
             (symlink) or contains a symlink cycle. The original
-            :class:`signalforge.warehouse.errors.ProfileNotFoundError`
+            :class:`signalforge._common.path_safety.PathContainmentError`
             is preserved as ``__cause__`` / ``cause``.
         OSError: any underlying I/O failure on the open / write / fsync
             (``PermissionError``, ``FileNotFoundError``, etc.) propagates
@@ -175,7 +175,8 @@ def write_sidecar(
     # true project root; deriving it from ``sidecar_path.parent.parent``
     # would let an absolute caller-supplied path slip the gate). A
     # symlink escape or cycle in the helper raises
-    # ``ProfileNotFoundError`` (the warehouse-layer name); wrap into a
+    # ``PathContainmentError`` (layer-neutral, from
+    # :mod:`signalforge._common.path_safety`); wrap into a
     # ``DiffSidecarWriteError`` so callers branch on one diff-layer
     # error class. This is the ONLY exception wrap the writer performs
     # — non-path I/O failures propagate raw.
@@ -183,7 +184,7 @@ def write_sidecar(
     project_dir = Path(project_dir)
     try:
         canonical_path = canonicalise_path(sidecar_path, project_dir=project_dir)
-    except ProfileNotFoundError as exc:
+    except PathContainmentError as exc:
         raise DiffSidecarWriteError(
             f"Diff sidecar path {sidecar_path!r} failed symlink/containment validation.",
             cause=exc,

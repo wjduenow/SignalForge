@@ -62,6 +62,7 @@ from pathlib import Path
 import yaml
 
 import signalforge as _sf
+from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.diff._artifact_id import (
     _model_test_args_hash,
     artifact_id_for,
@@ -92,8 +93,6 @@ from signalforge.draft.models import (
 from signalforge.grade.models import GradingReport, GradingResult
 from signalforge.manifest.models import Model
 from signalforge.prune.models import DropReason, PruneDecision, PruneResult
-from signalforge.warehouse._path_safety import canonicalise_path
-from signalforge.warehouse.errors import ProfileNotFoundError as _PathContainmentError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1003,7 +1002,7 @@ def render_diff(
             ) from exc
         try:
             canonical_output_path = canonicalise_path(output_path, resolved_project_dir)
-        except _PathContainmentError as exc:
+        except PathContainmentError as exc:
             raise DiffSidecarWriteError(
                 f"Diff output path {output_path!r} failed symlink/containment validation.",
                 cause=exc,
@@ -1049,7 +1048,7 @@ def render_diff(
             ) from exc
         try:
             canonical_sidecar_path = canonicalise_path(effective_sidecar_path, resolved_project_dir)
-        except _PathContainmentError as exc:
+        except PathContainmentError as exc:
             raise DiffSidecarWriteError(
                 f"Diff sidecar path {effective_sidecar_path!r} "
                 f"failed symlink/containment validation.",

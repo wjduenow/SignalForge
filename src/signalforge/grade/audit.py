@@ -38,8 +38,8 @@ draft, and prune layers:
   calls anywhere else once US-009 lands.
 
 The path-safety gate at writer entry routes ``audit_path`` through
-:func:`signalforge.warehouse._path_safety.canonicalise_path`, the
-project's standard symlink/containment helper. A symlink at
+:func:`signalforge._common.path_safety.canonicalise_path`, the project's
+standard symlink/containment helper. A symlink at
 ``<project>/.signalforge/grade.jsonl`` pointing outside the project
 tree is rejected — the writer refuses rather than write outside the
 project sandbox. Mirrors prune's post-QG fix.
@@ -55,10 +55,9 @@ from pathlib import Path
 from typing import Final
 
 from signalforge import __version__ as _SIGNALFORGE_VERSION
+from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.grade.errors import GradeAuditRecordTooLargeError, GradeAuditWriteError
 from signalforge.grade.models import GradeEvent, GradingReport
-from signalforge.warehouse._path_safety import canonicalise_path
-from signalforge.warehouse.errors import ProfileNotFoundError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -158,14 +157,14 @@ def write_grade_event(event: GradeEvent, *, audit_path: Path) -> None:
        artefact.
     4. **Path canonicalisation BEFORE any file open**: route
        ``audit_path`` through
-       :func:`signalforge.warehouse._path_safety.canonicalise_path` with
+       :func:`signalforge._common.path_safety.canonicalise_path` with
        ``project_dir=audit_path.parent.parent`` (the audit log lives at
        ``<project>/.signalforge/grade.jsonl`` per DEC-006). A symlink
        escape or cycle is wrapped as :class:`GradeAuditWriteError` —
        this is the only place the writer wraps an exception, because the
-       path-safety helper raises :class:`ProfileNotFoundError` (a
-       warehouse-layer error name that would be confusing for grade
-       callers).
+       path-safety helper raises a layer-neutral
+       :class:`PathContainmentError` and the grade layer surfaces its own
+       typed error to keep its catch surface homogeneous.
     5. Ensure the parent directory exists (``mkdir(parents=True,
        exist_ok=True)``) BEFORE the ``os.open`` so the orchestrator can
        call us against a fresh ``.signalforge/`` directory.
@@ -189,7 +188,7 @@ def write_grade_event(event: GradeEvent, *, audit_path: Path) -> None:
             artefact.
         GradeAuditWriteError: ``audit_path`` escapes the project tree
             (symlink) or contains a symlink cycle. The original
-            :class:`signalforge.warehouse.errors.ProfileNotFoundError`
+            :class:`signalforge._common.path_safety.PathContainmentError`
             is preserved as ``__cause__`` / ``cause``.
         OSError: any underlying I/O failure on the open / write / fsync
             (``PermissionError``, ``FileNotFoundError``, etc.) propagates
@@ -215,15 +214,16 @@ def write_grade_event(event: GradeEvent, *, audit_path: Path) -> None:
     # Path canonicalisation BEFORE any file open. The audit log lives at
     # ``<project>/.signalforge/grade.jsonl`` per DEC-006, so the project
     # dir is ``audit_path.parent.parent``. A symlink escape or cycle in
-    # the helper raises ``ProfileNotFoundError`` (the warehouse-layer
-    # name); wrap into a ``GradeAuditWriteError`` so callers branch on
-    # one grade-layer error class. This is the ONLY exception wrap the
-    # writer performs — non-path I/O failures propagate raw.
+    # the helper raises ``PathContainmentError`` (layer-neutral, from
+    # :mod:`signalforge._common.path_safety`); wrap into a
+    # ``GradeAuditWriteError`` so callers branch on one grade-layer
+    # error class. This is the ONLY exception wrap the writer performs
+    # — non-path I/O failures propagate raw.
     audit_path = Path(audit_path)
     project_dir = audit_path.parent.parent
     try:
         canonical_path = canonicalise_path(audit_path, project_dir=project_dir)
-    except ProfileNotFoundError as exc:
+    except PathContainmentError as exc:
         raise GradeAuditWriteError(
             (f"Grade audit path {audit_path!r} failed symlink/containment validation."),
             cause=exc,
@@ -290,7 +290,7 @@ def write_grading_report(report: GradingReport, *, sidecar_path: Path) -> None:
     * Oversize → :class:`GradeAuditRecordTooLargeError` BEFORE any
       file open. No on-disk artefact.
     * Path symlink-escape / cycle → :class:`GradeAuditWriteError`
-      wrapping the underlying :class:`ProfileNotFoundError`.
+      wrapping the underlying :class:`PathContainmentError`.
     * All other I/O failures (``OSError`` /
       ``PermissionError`` / encoding failures) propagate raw — the
       orchestrator wraps them in its own :class:`GradeAuditWriteError`
@@ -323,7 +323,7 @@ def write_grading_report(report: GradingReport, *, sidecar_path: Path) -> None:
     project_dir = sidecar_path.parent.parent
     try:
         canonical_path = canonicalise_path(sidecar_path, project_dir=project_dir)
-    except ProfileNotFoundError as exc:
+    except PathContainmentError as exc:
         raise GradeAuditWriteError(
             (f"Grade sidecar path {sidecar_path!r} failed symlink/containment validation."),
             cause=exc,

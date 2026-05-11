@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     # private ``_BatchOutcome`` dataclass shape only at type-check time.
     from signalforge.cli.generate import _BatchOutcome
 
+from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.cli.errors import (
     CliError,
     CliInputError,
@@ -146,7 +147,6 @@ from signalforge.warehouse import (
     WarehouseAuthError,
     WarehouseError,
 )
-from signalforge.warehouse._path_safety import canonicalise_path
 
 __all__ = [
     "canonicalise_user_path",
@@ -357,13 +357,13 @@ def map_exception_to_exit_code(exc: BaseException) -> int:
 
 
 def canonicalise_user_path(raw: str | Path | None, project_dir: Path) -> Path | None:
-    """Wrap :func:`signalforge.warehouse._path_safety.canonicalise_path`
+    """Wrap :func:`signalforge._common.path_safety.canonicalise_path`
     with a CLI-layer error type and a ``None`` passthrough.
 
     Returns ``None`` when ``raw`` is ``None`` so callers can express
     optional-flag plumbing without a per-call ``if`` ladder.
 
-    The wrapped helper raises :class:`ProfileNotFoundError` on its
+    The wrapped helper raises :class:`PathContainmentError` on its
     failure modes (symlink loop, escape from ``project_dir``, missing
     project directory). We re-raise as :class:`CliPathError` so the
     CLI's own try/except boundary gets a homogeneous catch surface —
@@ -374,7 +374,7 @@ def canonicalise_user_path(raw: str | Path | None, project_dir: Path) -> Path | 
         return None
     try:
         return canonicalise_path(raw, project_dir)
-    except Exception as exc:  # noqa: BLE001
+    except PathContainmentError as exc:
         raise CliPathError(
             f"path {raw!r} failed safety check: {exc}",
             remediation=(

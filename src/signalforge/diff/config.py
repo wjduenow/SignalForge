@@ -60,9 +60,8 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.diff.errors import DiffError
-from signalforge.warehouse._path_safety import canonicalise_path
-from signalforge.warehouse.errors import ProfileNotFoundError
 
 _DEFAULT_CONFIG_FILENAME = "signalforge.yml"
 
@@ -260,7 +259,7 @@ def load_diff_config(project_dir: Path, path: Path | None = None) -> DiffConfig:
     # :meth:`pathlib.Path.read_text`.
     try:
         canonical = canonicalise_path(config_file, project_dir)
-    except ProfileNotFoundError as exc:
+    except PathContainmentError as exc:
         raise DiffError(
             f"signalforge diff config path failed canonicalisation: {config_file!r}",
             remediation=(

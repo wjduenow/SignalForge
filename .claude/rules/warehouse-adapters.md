@@ -114,14 +114,18 @@ User-supplied strings render via `repr()` (`_format_value` helper) in every erro
 
 `__repr__` on the adapter shows only `project` and `location` — never the underlying client, credentials object, or any token. Same DEC.
 
-## Path safety: duplicated, not extracted (US-014 decision)
+## Path safety: layer-neutral common module + per-layer wrappers (issue #43 graduation)
 
-`signalforge.warehouse._path_safety.canonicalise_path` is a near-clone of `signalforge.manifest.loader._canonicalise_path`. The two copies stay decoupled:
+`signalforge._common.path_safety.canonicalise_path` is the single canonical home for the project's symlink / containment defence. It raises a project-neutral typed escape (`PathContainmentError(Exception)`) — no layer prefix, no inheritance from any stage's error hierarchy. The three traps from `manifest-readers.md` (resolve symlinks before containment check; catch `RuntimeError` on cycles; gate the *default* path through the same helper) live here.
 
-- Different escape exceptions (`ProfileNotFoundError` vs `ModelPathOutsideProjectError`) keep each layer's catch surface homogeneous — every "we couldn't load the file" condition in one layer raises one typed error.
-- A shared utility module would force every caller to translate the generic exception back to a layer-specific one, which is more code than the duplication.
+Two distinct consumer patterns:
 
-US-014 evaluated extraction; the decision is to keep the duplication explicit. Apply the three traps from `manifest-readers.md` (resolve symlinks before containment check; catch `RuntimeError` on cycles; gate the *default* path through the same helper) when adding a third copy in a new reader.
+1. **Cross-package consumers (cli / diff / grade / prune)** import `canonicalise_path` and `PathContainmentError` directly from `signalforge._common.path_safety`. At the orchestrator boundary they catch `PathContainmentError` and re-raise as their own layer-typed error (`CliPathError`, `DiffSidecarWriteError`, `GradeAuditWriteError`, `PruneAuditWriteError`) so each layer's downstream catch surface stays homogeneous — every "we couldn't durably persist X" condition in one layer raises one typed error.
+2. **Layer wrappers (`warehouse/_path_safety.py`, `safety/_path_safety.py`)** are thin shims that delegate to the common helper and translate `PathContainmentError` → the layer's typed error (`ProfileNotFoundError`, `InvalidConfigError`) at the helper level. Warehouse callers (`warehouse/profiles.py`) and safety callers (`safety/config.py`) keep their existing one-line call sites and one typed-error catch surface. The wrappers exist because every internal call site within those layers wants the same translation; pushing the try/except into every caller would be more code than the shim.
+
+The manifest loader still ships its own `_canonicalise_path` helper inline — manifest predates the common module and its escape exception (`ModelPathOutsideProjectError`) is tied tightly to the loader's diagnostic shape. Promotion is a future-clean-up candidate; the cost/benefit is low until a third consumer wants to share manifest's behaviour.
+
+When introducing a new stage that needs path canonicalisation, prefer pattern (1) — import from `_common.path_safety` directly, wrap at the orchestrator. Reach for pattern (2) only when the layer has many internal callers that all want the same typed-error translation. **Don't** create a new layer-local `_path_safety.py` that duplicates the helper's body — that's the historical mistake issue #43 reverses.
 
 ## No logging in stage-0 modules; one-line warnings only at adapter boundary
 
