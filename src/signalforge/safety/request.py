@@ -45,7 +45,11 @@ import signalforge as _sf
 from signalforge.manifest.models import Model
 from signalforge.safety import audit
 from signalforge.safety.aggregate import aggregate_columns
-from signalforge.safety.errors import InvalidSamplingModeError
+from signalforge.safety.errors import (
+    AuditRecordTooLargeError,
+    AuditWriteError,
+    InvalidSamplingModeError,
+)
 from signalforge.safety.models import (
     AuditEvent,
     LLMRequest,
@@ -210,7 +214,11 @@ def build_llm_request(
 
     # ---- 4. Build the request, then audit, then return ----------------------
     # DEC-011 fail-closed: ``audit.write`` runs BEFORE we hand back the
-    # request. Any exception propagates and the request is dropped.
+    # request. ``write`` catches NO exceptions internally (mirrors the
+    # writer shape in prune/draft/grade/diff); the orchestrator owns the
+    # typed wrap. ``AuditRecordTooLargeError`` propagates as-is (already
+    # typed); every other exception wraps as ``AuditWriteError``. The
+    # partial request never escapes on either path.
     request = LLMRequest(
         model_unique_id=model.unique_id,
         mode=policy.mode,
@@ -220,7 +228,18 @@ def build_llm_request(
         aggregates=aggregates,
         schema=schema,
     )
-    audit.write(event, policy.audit_path)
+    try:
+        audit.write(event, policy.audit_path)
+    except AuditRecordTooLargeError:
+        # Already a typed safety error — propagate so downstream
+        # pattern-matching can branch on it.
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        # Signal-shaped exits must propagate untouched — wrapping them
+        # would silently demote a Ctrl-C into an audit error.
+        raise
+    except BaseException as exc:
+        raise AuditWriteError(path=policy.audit_path, cause=exc) from exc
     return request
 
 

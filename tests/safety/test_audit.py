@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 
 from signalforge.safety.audit import write
-from signalforge.safety.errors import AuditRecordTooLargeError, AuditWriteError
+from signalforge.safety.errors import AuditRecordTooLargeError
 from signalforge.safety.models import AuditEvent, SamplingMode
 
 pytestmark = pytest.mark.safety
@@ -132,9 +132,17 @@ def test_audit_write_logger_message_escapes_ansi_in_user_input(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only permission semantics")
-def test_audit_write_failure_on_unwritable_parent_raises_audit_write_error(
+def test_audit_write_failure_on_unwritable_parent_propagates_raw(
     tmp_path: Path,
 ) -> None:
+    """A ``PermissionError`` on the parent dir propagates raw (fail-closed).
+
+    Mirrors :func:`tests.draft.test_audit.test_write_response_event_permission_denied_propagates`:
+    ``write`` catches NO exceptions internally, so the underlying
+    ``OSError`` / ``PermissionError`` propagates to the caller
+    (``build_llm_request`` in US-010) which wraps it as
+    :class:`AuditWriteError`.
+    """
     # Skip when running as root because root bypasses permission checks.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         pytest.skip("root bypasses POSIX permission checks")
@@ -144,9 +152,8 @@ def test_audit_write_failure_on_unwritable_parent_raises_audit_write_error(
     audit_path = locked / "denied" / "audit.jsonl"
     locked.chmod(0o000)
     try:
-        with pytest.raises(AuditWriteError) as excinfo:
+        with pytest.raises(PermissionError):
             write(_make_event(), audit_path)
-        assert isinstance(excinfo.value.cause, OSError)
     finally:
         # Restore so tmp_path cleanup can succeed.
         locked.chmod(0o700)
@@ -199,21 +206,28 @@ def test_audit_write_does_not_swallow_exceptions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """``write`` propagates the raw ``OSError`` from ``os.write`` — the
+    fail-closed contract is that the writer never wraps. The orchestrator
+    (``build_llm_request``) owns the typed wrap.
+    """
     audit_path = tmp_path / "audit.jsonl"
 
     def boom(fd: int, data: bytes) -> int:  # pragma: no cover - patched out
         raise OSError("simulated write failure")
 
     monkeypatch.setattr("signalforge.safety.audit.os.write", boom)
-    with pytest.raises(AuditWriteError) as excinfo:
+    with pytest.raises(OSError, match="simulated write failure"):
         write(_make_event(), audit_path)
-    assert isinstance(excinfo.value.cause, OSError)
 
 
-def test_audit_write_serialisation_failure_propagates_as_audit_write_error(
+def test_audit_write_serialisation_failure_propagates_raw(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A ``json.dumps`` failure propagates raw — same fail-closed
+    contract as the I/O syscalls. The orchestrator wraps; the writer
+    does not.
+    """
     audit_path = tmp_path / "audit.jsonl"
 
     def boom(*_args: Any, **_kwargs: Any) -> str:
@@ -221,9 +235,27 @@ def test_audit_write_serialisation_failure_propagates_as_audit_write_error(
 
     # Force the json.dumps call inside audit.write to fail.
     monkeypatch.setattr("signalforge.safety.audit.json.dumps", boom)
-    with pytest.raises(AuditWriteError) as excinfo:
+    with pytest.raises(TypeError, match="simulated json failure"):
         write(_make_event(), audit_path)
-    assert isinstance(excinfo.value.cause, TypeError)
+
+
+def test_audit_write_zero_bytes_raises_os_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero-byte return from ``os.write`` indicates an unrecoverable
+    I/O failure (disk full, etc.) — the writer raises ``OSError``
+    rather than spinning forever. Mirrors the diff sidecar's
+    ``test_write_sidecar_short_write_zero_bytes_raises``.
+    """
+    audit_path = tmp_path / "audit.jsonl"
+
+    def zero_write(fd: int, data: bytes) -> int:
+        return 0
+
+    monkeypatch.setattr("signalforge.safety.audit.os.write", zero_write)
+    with pytest.raises(OSError, match="os.write returned 0"):
+        write(_make_event(), audit_path)
 
 
 def test_audit_write_fsyncs_before_close(

@@ -19,6 +19,11 @@ this module adds the remaining scans:
   :data:`signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE` — the
   load-bearing test that turns the four-tier exit-code taxonomy from a
   guideline into a contract (DEC-024 of #9).
+* **Scan 8** — fail-closed writer shape across the five audit/sidecar
+  writer modules (issue #38). No ``except`` handler may wrap a ``Try``
+  whose body issues ``os.write`` / ``os.fsync``; every writer function
+  must use a short-write loop. The propagation IS the defence
+  (safety-layer.md DEC-011, repeated in prune/grade/diff rules).
 
 Each scan is its own test with an explicit, justified exclusion list. The
 scans are deterministic and cheap: each ``.py`` is read once via
@@ -606,6 +611,144 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Scan 8 — fail-closed writer shape across all six audit/sidecar writers
+# (issue #38). Mirrors the AST defence in
+# ``tests/diff/test_sidecar.py::test_sidecar_module_no_except_handler_around_write_fsync``
+# but generalises it to every writer module: no ``except`` handler may wrap a
+# ``Try`` block whose body issues ``os.write`` / ``os.fsync``. The propagation
+# IS the defence (safety-layer.md DEC-011, repeated in prune/grade/diff rules).
+# ---------------------------------------------------------------------------
+
+
+# Each entry is ``(relative_module_path, expected_writer_count)`` —
+# ``expected_writer_count`` is the number of writer functions in the
+# module. One writer function contributes exactly one canonical
+# ``Try`` block (``try / finally`` around ``os.close(fd)``) and exactly
+# one ``While`` loop wrapping ``os.write``, so the same count is used
+# by both Scan 8 tests. ``grade/audit.py`` is the only module with
+# more than one writer (``write_grade_event`` + ``write_grading_report``).
+_FAIL_CLOSED_WRITER_MODULES: tuple[tuple[str, int], ...] = (
+    ("safety/audit.py", 1),
+    ("draft/audit.py", 1),
+    ("prune/audit.py", 1),
+    ("grade/audit.py", 2),
+    ("diff/_sidecar.py", 1),
+)
+
+
+def _body_calls_os_syscall(body: list[ast.stmt], names: tuple[str, ...]) -> bool:
+    """Return True iff any node anywhere under ``body`` issues an
+    ``os.<name>`` call (``os.write``, ``os.fsync``).
+
+    Walks the full AST under each statement in ``body`` (via
+    :func:`ast.walk`), so nested calls inside an ``if`` / ``while`` /
+    ``try`` body also match — that's load-bearing for Scan 8 because the
+    canonical writer wraps ``os.write`` inside a ``while`` loop AND the
+    ``Try`` block guards both ``os.write`` (inside the loop) and a
+    sibling ``os.fsync``. A shallow scan would miss the wrapped
+    ``os.write`` and undercount the syscalls.
+    """
+    for node in body:
+        for sub in ast.walk(node):
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and isinstance(sub.func.value, ast.Name)
+                and sub.func.value.id == "os"
+                and sub.func.attr in names
+            ):
+                return True
+    return False
+
+
+def test_fail_closed_writers_have_no_except_around_write_fsync() -> None:
+    """Issue #38 — every fail-closed writer module must propagate raw
+    exceptions from ``os.write`` / ``os.fsync``. Any ``ast.Try`` whose body
+    issues an ``os.write`` or ``os.fsync`` call must have ``handlers == []``
+    (only ``finally`` is permitted, for the descriptor release).
+
+    A ``try / except OSError`` around the syscalls would silently swallow
+    the exact failure mode the fail-closed pattern exists to surface. The
+    typed wrap belongs at the orchestrator boundary
+    (``build_llm_request``, ``draft_from_request``, ``prune_tests``,
+    ``grade_artifacts``, ``render_diff``), not inside the writer.
+
+    Generalises the single-module scan from
+    ``tests/diff/test_sidecar.py::test_sidecar_module_no_except_handler_around_write_fsync``
+    to all five writer modules (six writer functions across them).
+    """
+    syscall_names = ("write", "fsync")
+    failures: list[str] = []
+    for rel_path, expected_writer_count in _FAIL_CLOSED_WRITER_MODULES:
+        module_path = _SIGNALFORGE_DIR / rel_path
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+
+        offending: list[int] = []
+        syscall_try_count = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            if _body_calls_os_syscall(node.body, syscall_names):
+                syscall_try_count += 1
+                if node.handlers:
+                    offending.append(node.lineno)
+
+        # One canonical ``Try`` (``try / finally`` around ``os.close``)
+        # per writer function in the module.
+        if syscall_try_count != expected_writer_count:
+            failures.append(
+                f"{rel_path}: expected {expected_writer_count} Try block(s) "
+                f"guarding os.write/os.fsync (one per writer function); "
+                f"found {syscall_try_count}."
+            )
+        if offending:
+            failures.append(
+                f"{rel_path}: found except-handler(s) around os.write/os.fsync at "
+                f"line(s) {offending}. The fail-closed contract requires "
+                f"propagation, not suppression — only `try / finally` for "
+                f"os.close is permitted around the syscalls."
+            )
+
+    assert failures == [], "\n".join(failures)
+
+
+def test_fail_closed_writers_use_short_write_loop() -> None:
+    """Issue #38 — every fail-closed writer must loop on ``os.write``
+    returns to recover from short writes (``EINTR`` on signal-interrupted
+    calls; short returns on some filesystems / kernels). A single
+    unlooped ``os.write`` can theoretically produce a partial JSONL
+    record under signal-interruption load.
+
+    Detection heuristic: an ``ast.While`` whose body issues an
+    ``os.write`` call. Each writer module must contain at least one
+    such ``While`` block. The ``grade/audit.py`` module has two writer
+    functions and contains two such blocks.
+    """
+    failures: list[str] = []
+    for rel_path, expected_writer_count in _FAIL_CLOSED_WRITER_MODULES:
+        module_path = _SIGNALFORGE_DIR / rel_path
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+
+        looped_write_count = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.While):
+                continue
+            if _body_calls_os_syscall(node.body, ("write",)):
+                looped_write_count += 1
+
+        # One short-write ``While`` loop per writer function.
+        if looped_write_count < expected_writer_count:
+            failures.append(
+                f"{rel_path}: expected at least {expected_writer_count} short-write "
+                f"loop(s) (one per writer function); found {looped_write_count}. "
+                f"A single unlooped os.write can produce a partial JSONL record "
+                f"under EINTR / short-write conditions."
+            )
+
+    assert failures == [], "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
 # Negative test: confirm the AST visitors detect planted violations
 # ---------------------------------------------------------------------------
 
@@ -639,3 +782,40 @@ def test_scan_visitors_catch_planted_violations() -> None:
     grade_finder = _NameCallFinder("GradeEvent")
     grade_finder.visit(ast.parse(grade_src))
     assert len(grade_finder.calls) == 1
+
+    # Scan 8 self-check: a synthetic Try-with-except around os.write must
+    # be flagged. Guards against a future refactor that breaks
+    # ``_body_calls_os_syscall`` (e.g. via aliased imports) silently.
+    bad_src = (
+        "import os\n"
+        "def w(fd, data):\n"
+        "    try:\n"
+        "        os.write(fd, data)\n"
+        "        os.fsync(fd)\n"
+        "    except OSError:\n"
+        "        pass\n"
+    )
+    bad_tree = ast.parse(bad_src)
+    bad_count = 0
+    for node in ast.walk(bad_tree):
+        if isinstance(node, ast.Try) and _body_calls_os_syscall(node.body, ("write", "fsync")):
+            assert node.handlers != [], "Self-check: planted Try should have an except handler"
+            bad_count += 1
+    assert bad_count == 1, "Self-check: should detect exactly one offending Try"
+
+    good_src = (
+        "import os\n"
+        "def w(fd, data):\n"
+        "    try:\n"
+        "        os.write(fd, data)\n"
+        "        os.fsync(fd)\n"
+        "    finally:\n"
+        "        os.close(fd)\n"
+    )
+    good_tree = ast.parse(good_src)
+    good_count = 0
+    for node in ast.walk(good_tree):
+        if isinstance(node, ast.Try) and _body_calls_os_syscall(node.body, ("write", "fsync")):
+            assert node.handlers == [], "Self-check: canonical Try has only finally"
+            good_count += 1
+    assert good_count == 1, "Self-check: should find exactly one canonical Try"

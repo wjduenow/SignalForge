@@ -224,7 +224,20 @@ def write_response_event(event: LLMResponseEvent, *, audit_path: Path) -> None:
     # ``OSError`` propagates so the caller drops the partial response.
     fd = os.open(str(audit_path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
-        os.write(fd, payload)
+        # ``os.write`` may return fewer bytes than requested (EINTR on a
+        # signal-interrupted call, or short writes on certain filesystems
+        # / kernels). Loop until the full payload lands; raise on a
+        # zero-byte return (disk full / unrecoverable I/O failure).
+        # POSIX atomicity for ``O_APPEND`` writes still holds at the
+        # ``write(2)`` boundary up to ``PIPE_BUF``; the loop is the
+        # documented short-write recovery, not a contract violation.
+        # Mirrors prune/grade/diff/safety.
+        written = 0
+        while written < len(payload):
+            n = os.write(fd, payload[written:])
+            if n == 0:
+                raise OSError("os.write returned 0 — disk full or other I/O failure")
+            written += n
         os.fsync(fd)
     finally:
         # Best-effort close; the write/fsync above already succeeded
