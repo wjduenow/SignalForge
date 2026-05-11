@@ -1,9 +1,10 @@
 """Tests for :mod:`signalforge.diff._artifact_id` (US-006 of issue #8).
 
 The diff layer's ``artifact_id_for`` formatter and the grade layer's
-``_artifact_id_for`` join grade-sidecar JSON to the rendered diff via
-the ``(run_id, artifact_id, criterion_id)`` triple. A single dotted-path
-disagreement would silently drop affected grade rows from the join.
+``_artifact_id_for`` formatter join grade-sidecar JSON to the rendered
+diff via the ``(run_id, artifact_id, criterion_id)`` triple. A single
+dotted-path disagreement would silently drop affected grade rows from
+the join.
 
 After issue #42 the implementation lives in
 :mod:`signalforge._common.artifact_id` and both layers re-export the
@@ -247,6 +248,31 @@ def test_column_scope_text_without_field_raises() -> None:
 def test_model_scope_text_without_field_raises() -> None:
     with pytest.raises(ValueError, match="field"):
         artifact_id_for(scope="model")
+
+
+def test_test_and_field_combination_raises() -> None:
+    """Passing both ``test`` and ``field`` is an incompatible combination
+    (the formatter would silently ignore ``field`` and emit a test-shaped
+    artifact_id). Hoisting to the shared seam (issue #42) added a hard
+    guard against that footgun."""
+    nn = CandidateTestNotNull(column="x")
+    with pytest.raises(ValueError, match="field is only valid for text artifacts"):
+        artifact_id_for(scope="column", column_name="x", test=nn, field="description")
+
+
+def test_args_hash_without_test_raises() -> None:
+    """``args_hash`` only makes sense alongside a ``test``; without one
+    it would be silently dropped on the text-artifact branch."""
+    with pytest.raises(ValueError, match="args_hash is only valid when test is provided"):
+        artifact_id_for(scope="model", field="description", args_hash="deadbeef")
+
+
+def test_model_scope_with_column_name_raises() -> None:
+    """Model-scope artifacts cannot carry a ``column_name`` — the
+    formatter would silently ignore it and emit the model-shaped
+    artifact_id."""
+    with pytest.raises(ValueError, match="model scope must not receive column_name"):
+        artifact_id_for(scope="model", field="description", column_name="x")
 
 
 # ---------------------------------------------------------------------------

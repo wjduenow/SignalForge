@@ -8,7 +8,7 @@ byte-equal copies under each layer; this module is the hoisted shared
 implementation. Each consuming layer re-exports the same function objects
 so :func:`signalforge.grade.engine._artifact_id_for` is
 :func:`signalforge.diff._artifact_id.artifact_id_for` is
-:func:`signalforge.diff._artifact_id.artifact_id_for` — the cross-stage
+:func:`signalforge._common.artifact_id.artifact_id_for` — the cross-stage
 parity test asserts identity, not byte-equality, after #42.
 
 Six dotted-path shapes the formatter emits (per grade-layer.md DEC-009):
@@ -102,9 +102,36 @@ def artifact_id_for(
     """Return the canonical dotted-path ``artifact_id`` (DEC-009).
 
     See module docstring for the six emitted shapes and the args_hash
-    collision rule. Raises :class:`ValueError` on programming errors
-    (invalid combinations of ``scope`` / ``column_name`` / ``field``).
+    collision rule. Raises :class:`ValueError` on programming errors:
+    missing required args, OR incompatible argument combinations
+    (``test`` + ``field``; ``args_hash`` without ``test``;
+    ``scope='model'`` with ``column_name``). The shared seam fails loud
+    rather than silently dropping the ignored arg — both copies of the
+    pre-#42 formatter silently ignored these combos, which CodeRabbit
+    flagged as a footgun once the function landed in a shared seam.
     """
+    # Reject incompatible argument combinations BEFORE the dispatch
+    # ladder, so a caller that asks for "test + field" or
+    # "args_hash but no test" gets a clear error instead of a silent
+    # drop of the conflicting arg.
+    if test is not None and field is not None:
+        raise ValueError(
+            "artifact_id_for: field is only valid for text artifacts (pass test=None). "
+            "Drop either `test` or `field`. This is a programming error in the caller."
+        )
+    if test is None and args_hash is not None:
+        raise ValueError(
+            "artifact_id_for: args_hash is only valid when test is provided. "
+            "Drop args_hash or pass a CandidateTest. "
+            "This is a programming error in the caller."
+        )
+    if scope == "model" and column_name is not None:
+        raise ValueError(
+            "artifact_id_for: model scope must not receive column_name. "
+            "Drop column_name or switch to scope='column'. "
+            "This is a programming error in the caller."
+        )
+
     if test is not None and scope == "column":
         if column_name is None:
             raise ValueError(
