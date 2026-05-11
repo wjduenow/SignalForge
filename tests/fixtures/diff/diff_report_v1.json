@@ -14,7 +14,7 @@
       "test_type": null,
       "tier": "kept",
       "drop_reason": null,
-      "why": "Description added; passed all grading criteria.",
+      "why": "customer_id is the natural primary key downstream joins rely on for fan-out.",
       "score": 0.85,
       "passed": true
     },
@@ -23,7 +23,7 @@
       "test_type": "not_null",
       "tier": "kept",
       "drop_reason": null,
-      "why": "Test returned non-zero failing rows on the warehouse sample.",
+      "why": "warehouse profile shows zero nulls on customer_id across 1k sample rows.",
       "score": null,
       "passed": null
     },
