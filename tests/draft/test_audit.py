@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +43,7 @@ _FIXTURE_PATH = (
 
 def _make_event(**overrides: Any) -> LLMResponseEvent:
     base: dict[str, Any] = dict(
-        timestamp=datetime(2026, 4, 29, 14, 22, 7, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 4, 29, 14, 22, 7, tzinfo=UTC),
         model_unique_id="model.sf_demo.fct_orders",
         prompt_version="a1b2c3d4e5f60718",
         response_text_hash="9f8e7d6c5b4a3928",
@@ -107,7 +107,7 @@ def test_llm_response_event_round_trip_via_fixture() -> None:
 def test_llm_response_event_audit_schema_version_default_1() -> None:
     """``audit_schema_version`` defaults to 1 when omitted at construction."""
     event = LLMResponseEvent(
-        timestamp=datetime(2026, 4, 29, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 4, 29, tzinfo=UTC),
         model_unique_id="model.x.y",
         prompt_version="v1",
         response_text_hash="0123456789abcdef",

@@ -43,6 +43,20 @@ pip install -e ".[dev]"
 
 Quote the extras — `[dev]` is a glob in zsh and fails with `no matches found` unquoted.
 
+## Python version: advertised floor matches the tested floor (issue #46)
+
+`pyproject.toml` declares `requires-python = ">=3.11"`; `[tool.pyright].pythonVersion` is `"3.11"`; `.github/workflows/ci.yml` runs on `python-version: "3.11"`. **All three agree** — what we advertise is what we type-check is what we test.
+
+The original `>=3.10` floor was an aspirational support promise: the package could install on 3.10, but no CI job and no pyright pass exercised the 3.10 path. Three concrete divergence sources where 3.10-only code can pass review without being caught:
+
+- `match`-statement exhaustiveness varies subtly between 3.10 and 3.11.
+- PEP 604 union-type stringification semantics differ.
+- PEP 695 type-parameter syntax (3.12+) is easy to slip in once PEP 604 is used.
+
+Picked the cheaper of the two options from issue #46: narrow the floor to 3.11 rather than widen CI / pyright to a 3.10 matrix. v0.1 users who need 3.10 support can pin to a 3.10-compatible patch release; v0.2 will revisit if a real user reports.
+
+When CI widens to a Python matrix (likely v0.3, in lockstep with `ci-supply-chain.md` DEC-003 graduation), bump `pyright.pythonVersion` to the floor of the matrix AND keep `requires-python` aligned with that floor. The three values stay in lockstep; drift between them is exactly the bug this DEC closes.
+
 ## Reference
 
-`plans/super/1-project-scaffolding.md` — DEC-002, DEC-004, DEC-011, DEC-014.
+`plans/super/1-project-scaffolding.md` — DEC-002, DEC-004, DEC-011, DEC-014. Issue #46 — Python version reconciliation.

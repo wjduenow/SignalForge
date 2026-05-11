@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -98,12 +99,12 @@ def _prune_result_for(model: Model) -> PruneResult:
 
 
 def _grading_report_for(model: Model) -> GradingReport:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     return GradingReport(
         signalforge_version="0.0.0-test",
         run_id=f"run-{model.unique_id}",
-        timestamp=datetime(2026, 5, 11, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 5, 11, tzinfo=UTC),
         duration_seconds=0.0,
         model_unique_id=model.unique_id,
         rubric_hash="0" * 16,

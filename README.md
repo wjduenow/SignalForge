@@ -55,7 +55,7 @@ on-demand pricing) plus ~$0.13 of Anthropic spend (one draft call +
 
 ### 1. Install
 
-SignalForge is not yet published on PyPI — install from a clone:
+SignalForge requires **Python 3.11+**. It is not yet published on PyPI — install from a clone:
 
 ```bash
 git clone https://github.com/wjduenow/SignalForge.git

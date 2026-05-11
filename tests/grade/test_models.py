@@ -20,7 +20,7 @@ tests.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -57,7 +57,7 @@ def _make_report(
     return GradingReport(
         signalforge_version="0.1.0.dev0",
         run_id="a1b2c3d4e5f6478890aabbccddeeff00",
-        timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=UTC),
         duration_seconds=12.473,
         model_unique_id="model.shop.dim_customers",
         rubric_hash="0123456789abcdef",
@@ -76,7 +76,7 @@ def _make_event(
     return GradeEvent(
         signalforge_version="0.1.0.dev0",
         run_id="a1b2c3d4e5f6478890aabbccddeeff00",
-        timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=UTC),
         model_unique_id="model.shop.dim_customers",
         artifact_id="column.email.description",
         criterion_id="clarity",
@@ -366,7 +366,7 @@ def test_grade_event_audit_schema_version_locked_to_one() -> None:
             audit_schema_version=2,  # type: ignore[arg-type]
             signalforge_version="0.1.0.dev0",
             run_id="a1b2c3d4e5f6478890aabbccddeeff00",
-            timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=UTC),
             model_unique_id="model.shop.dim_customers",
             artifact_id="column.email.description",
             criterion_id="clarity",
@@ -391,7 +391,7 @@ def test_grading_report_grade_schema_version_locked_to_one() -> None:
             grade_schema_version=2,  # type: ignore[arg-type]
             signalforge_version="0.1.0.dev0",
             run_id="a1b2c3d4e5f6478890aabbccddeeff00",
-            timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=timezone.utc),
+            timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=UTC),
             duration_seconds=1.0,
             model_unique_id="model.shop.dim_customers",
             rubric_hash="0123456789abcdef",

@@ -38,7 +38,7 @@ Design commitments operationalised here:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Final
 
 import signalforge as _sf
@@ -200,7 +200,7 @@ def build_llm_request(
         policy_flags.append("audit_path_overridden")
 
     event = AuditEvent(
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         model_unique_id=model.unique_id,
         mode=policy.mode,
         columns_sent=columns_sent,
