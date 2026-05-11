@@ -2,6 +2,10 @@
 
 All notable changes to SignalForge are documented here. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [PEP 440](https://peps.python.org/pep-0440/) for version numbering.
 
+## [Unreleased]
+
+_Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
+
 ## [0.1.0] — 2026-05-11
 
 First public release. Single-model draft + warehouse prune + LLM-as-judge grade + diff renderer, BigQuery only, CLI surface.
@@ -35,4 +39,5 @@ signalforge --version
 - OSS-first, Core-friendly — no dbt Cloud dependency; runs against any dbt-core project, locally or in CI.
 - Explainable diffs — every kept/dropped/flagged artifact ships with a one-line "why"; every run produces a sidecar JSON with reproducibility hashes.
 
+[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.1.0
