@@ -73,6 +73,42 @@ class PruneConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
 
+    enabled: bool = True
+    """Master switch for the prune layer (issue #35, DEC-005).
+
+    Defaults to ``True``: every :func:`signalforge.prune.prune_tests`
+    invocation runs SQL against the warehouse to detect always-pass
+    tests and tests that fail on known-clean data. This is
+    Architectural Commitment #1 (signal over volume) — a candidate
+    test that always passes is worse than no test, so the default
+    posture is to gather warehouse evidence.
+
+    Set to ``False`` as a first-run / debugging escape hatch when the
+    operator wants ``signalforge generate`` to issue ZERO warehouse
+    calls (e.g., evaluating the tool before configuring billing,
+    iterating on the drafter prompt offline, smoke-testing the CLI in
+    CI without warehouse credentials). When disabled, the prune
+    orchestrator short-circuits: every candidate test routes to
+    ``decision="kept"`` with ``reason="kept-without-evidence"`` and
+    ``why="prune disabled in signalforge.yml"`` (DEC-003 of issue #35).
+    The diff renderer surfaces this verbatim so the operator sees the
+    trade-off explicitly per artifact — there is no silent drop.
+
+    **Trade-off (signal over volume):** disabling prune lets
+    always-pass tests ship into the operator's `schema.yml`, directly
+    counter to Commitment #1. The ``kept-without-evidence`` framing
+    in the diff is the load-bearing mitigation — every candidate is
+    flagged as "we have no warehouse evidence for this," not "this is
+    proven signal." Re-enable prune (or run with ``enabled: true``
+    once warehouse access is wired up) to recover the default posture.
+
+    Mirrors the conservative-bias routing precedent from issue #22's
+    materialisation-failed branch and #6's budget-exceeded branch —
+    every "no warehouse evidence" path uses the same five-value
+    :data:`signalforge.prune.DropReason` literal, never a sixth.
+    Typo'd field names (``enabld:``) fail loud at config load via the
+    inner ``extra="forbid"`` validator per DEC-015."""
+
     scope: Literal["sample", "full"] = "sample"
     """Whether candidate tests run against a deterministic warehouse
     sample (``"sample"``, the default) or the full table (``"full"``)."""
