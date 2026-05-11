@@ -19,6 +19,7 @@ without disturbing the underlying package's own import graph.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -1240,3 +1241,119 @@ def test_generate_override_re_runs_pydantic_validators(
     forwarded = mocks["prune_tests"].call_args.kwargs["config"]
     assert isinstance(forwarded, prune_module.PruneConfig)
     assert forwarded.scope == "full"
+
+
+# ---------------------------------------------------------------------------
+# US-003 of #35 — INFO emission when prune.enabled=false (DEC-004)
+# ---------------------------------------------------------------------------
+
+
+def test_generate_emits_info_when_prune_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When ``prune.enabled=false`` in the config, ``cmd_generate`` emits
+    exactly one INFO line surfacing the short-circuit (DEC-004 of #35).
+
+    Lazy-format JSON per ``prune-engine.md`` DEC-017 (the grep gate at
+    ``tests/llm/test_logger_grep_gate.py`` rejects f-strings in
+    ``_LOGGER`` calls).
+
+    Verified by capturing the logger's records directly via a handler
+    attached AFTER ``setup_logging`` runs — ``setup_logging`` uses
+    ``logging.basicConfig(force=True)`` which would strip a handler
+    attached at module-import time (e.g. pytest's ``caplog``). Attaching
+    inside the test (after ``main`` runs ``setup_logging``) is not an
+    option because we need to capture the call that happens during
+    ``main``. The fix: install the handler via ``monkeypatch`` on the
+    module's ``_LOGGER`` directly so it survives the ``basicConfig``
+    reset (basicConfig only touches the root logger).
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    mocks["load_prune_config"].return_value = PruneConfig(enabled=False)
+
+    # Attach a record-collecting handler directly to the CLI logger.
+    # ``setup_logging``'s ``basicConfig(force=True)`` only resets the
+    # root logger's handlers, not handlers attached to named loggers,
+    # so this handler survives the reset and captures the INFO emitted
+    # during ``cmd_generate``.
+    from signalforge.cli import generate as gen_mod
+
+    records: list[logging.LogRecord] = []
+
+    class _RecordCollector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _RecordCollector(level=logging.INFO)
+    gen_mod._LOGGER.addHandler(handler)
+    gen_mod._LOGGER.setLevel(logging.INFO)
+    try:
+        code = main(["generate", "model.shop.customers"])
+    finally:
+        gen_mod._LOGGER.removeHandler(handler)
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    matching = [
+        rec
+        for rec in records
+        if rec.levelno == logging.INFO and "prune disabled in signalforge.yml" in rec.getMessage()
+    ]
+    assert len(matching) == 1, (
+        f"expected exactly one prune-disabled INFO line, got {len(matching)}: "
+        f"{[rec.getMessage() for rec in matching]}"
+    )
+    msg = matching[0].getMessage()
+    assert "routing all candidates to kept-without-evidence" in msg
+    # The lazy-format JSON payload carries the model unique_id and the
+    # candidate_count fact (the default fake candidate ships 1 column
+    # with no tests, so candidate_count == 0).
+    assert "model.shop.customers" in msg
+    assert '"candidate_count": 0' in msg
+
+
+def test_generate_no_info_when_prune_enabled_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The default ``enabled=True`` path emits no prune-disabled INFO
+    line (DEC-004 of #35). Pinned so a future refactor can't silently
+    flip the gate.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    # Explicit construction of the default — enabled=True is the v0.2
+    # contract per US-001 of #35.
+    mocks["load_prune_config"].return_value = PruneConfig(enabled=True)
+
+    from signalforge.cli import generate as gen_mod
+
+    records: list[logging.LogRecord] = []
+
+    class _RecordCollector(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _RecordCollector(level=logging.INFO)
+    gen_mod._LOGGER.addHandler(handler)
+    gen_mod._LOGGER.setLevel(logging.INFO)
+    try:
+        code = main(["generate", "model.shop.customers"])
+    finally:
+        gen_mod._LOGGER.removeHandler(handler)
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    matching = [rec for rec in records if "prune disabled in signalforge.yml" in rec.getMessage()]
+    assert matching == [], (
+        f"expected no prune-disabled INFO when enabled=True, got "
+        f"{[rec.getMessage() for rec in matching]}"
+    )
