@@ -43,53 +43,71 @@ The grading layer reuses [clauditor](https://github.com/wjduenow/clauditor)'s LL
 
 ## Quick start
 
-```bash
-git clone https://github.com/wjduenow/SignalForge.git
-cd SignalForge
-pip install -e ".[dev]"
-signalforge generate models/marts/customer_lifetime_value.sql
-```
-
-(SignalForge is not yet published on PyPI — once v0.1 ships there,
-`pip install signalforge` will replace the clone-and-editable-install
-incantation above.)
-
-The CLI walks up from the current working directory to find
-`dbt_project.yml`, loads the manifest, drafts candidate `schema.yml`
-artefacts via the LLM, prunes always-pass / known-clean-fail tests
-against warehouse samples, grades the survivors against a configurable
-rubric, and prints the diff. The full per-flag reference, the
-four-tier exit-code taxonomy, environment variables, and a worked
-example are in [docs/cli-ops.md](docs/cli-ops.md).
-
-## Trying it out
-
 The repo ships a minimal dbt fixture under
 `tests/fixtures/dbt_project_austin/` pointing at the public
 `bigquery-public-data.austin_bikeshare.bikeshare_trips` dataset, so
 you can run `signalforge` end-to-end against a real warehouse with no
 infrastructure beyond a Google Cloud billing project and an Anthropic
-API key. The materialised-sample CTAS scans ~200–500 MB of BigQuery
-(well under $0.01 at on-demand pricing); per-test queries against the
-sample are tiny. The Anthropic side typically incurs ~$0.13 of model
-spend (one draft call + ~84 grade calls on Sonnet 4.6). End-to-end
-wall-clock is roughly 5–6 minutes, dominated by sequential grade calls.
+API key. A run scans ~200–500 MB of BigQuery (well under $0.01 at
+on-demand pricing) plus ~$0.13 of Anthropic spend (one draft call +
+~84 grade calls on Sonnet 4.6); end-to-end wall-clock is roughly
+5–6 minutes.
+
+### 1. Install
+
+SignalForge is not yet published on PyPI — install from a clone:
 
 ```bash
-# Authenticate to Google Cloud (first run only)
+git clone https://github.com/wjduenow/SignalForge.git
+cd SignalForge
+pip install -e ".[dev]"   # quote the extras — [dev] is a glob in zsh
+```
+
+Once v0.1 ships to PyPI, `pip install signalforge` will replace the
+editable-install step.
+
+### 2. Authenticate to BigQuery and Anthropic
+
+```bash
 gcloud auth application-default login
-
-# Set the BigQuery billing project (any GCP project you have query access to)
-export GOOGLE_CLOUD_PROJECT=<your-billing-project>
-
-# Set your Anthropic API key
+export GOOGLE_CLOUD_PROJECT=<your-billing-project>   # any GCP project you have query access to
 export ANTHROPIC_API_KEY=sk-ant-...
+```
 
-# Copy the fixture to a writable tmp dir and substitute your billing
-# project into the profile. The committed profiles.yml is oriented at
-# `dbt parse` (it pins `project: bigquery-public-data`, the source);
-# at query time the BigQuery SDK uses `profile.project` as the BILLING
-# project, which you can't bill to `bigquery-public-data` itself.
+Use a fresh shell session (or `unset ANTHROPIC_API_KEY` after the
+run) so the key doesn't persist in your bash history.
+
+### 3. Minimum `signalforge.yml`
+
+The fixture ships a working config; a minimum that exercises the full
+pipeline is:
+
+```yaml
+# signalforge.yml — alongside dbt_project.yml
+llm:
+  model: claude-sonnet-4-6
+safety:
+  mode: aggregate-only   # schema-only is the default; aggregate-only sends column profiles, never row data
+prune:
+  sample_strategy: materialised   # v0.2 default; one temp-table CTAS feeds every per-test query
+grade:
+  min_pass_rate: 0.95
+  min_mean_score: 0.95
+  fail_on_below_threshold: false   # report-only; flip to true to exit 2 on flagged artifacts
+```
+
+Full reference: [docs/safety-ops.md](docs/safety-ops.md),
+[docs/prune-ops.md](docs/prune-ops.md),
+[docs/grade-ops.md](docs/grade-ops.md).
+
+### 4. First run
+
+Copy the fixture to a writable tmp dir and rewrite the profile to bill
+queries against your project (the committed `profiles.yml` is oriented
+at `dbt parse` and pins `project: bigquery-public-data`, which you
+can't bill to itself):
+
+```bash
 mkdir -p /tmp/sf-austin
 cp -r tests/fixtures/dbt_project_austin/. /tmp/sf-austin/
 cat > /tmp/sf-austin/profiles.yml <<EOF
@@ -105,27 +123,50 @@ austin:
       maximum_bytes_billed: 1000000000
 EOF
 
-# Run the canonical example
 signalforge generate models/staging/stg_bikeshare_trips.sql --project-dir /tmp/sf-austin
 ```
 
-What to expect: the diff lists drafted column descriptions and
-signal-bearing tests, at least one dropped test with reason
-`always-passes` (bikeshare's primary-key and timestamp columns are
-reliably never-null in the source, so an LLM-drafted `not_null` on
-them is mathematically guaranteed to always-pass — prune drops it),
-and at least one `flagged` artifact — the fixture pins tight grade
-thresholds (`min_pass_rate: 0.95` / `min_mean_score: 0.95`) so the
-LLM-as-judge scrutiny is real.
+### 5. Expected output
 
-Use a fresh shell session (or `unset ANTHROPIC_API_KEY` after the
-run) so the key doesn't persist in your bash history.
+The diff lists drafted column descriptions and signal-bearing tests
+alongside dropped tests with a one-line "why". The kept/dropped/flagged
+table looks like this (truncated):
 
-The same flow runs as a gated maintainer test (`pytest -m e2e --no-cov`).
-For the full walkthrough — what the test proves, prerequisites,
-cost ceiling, troubleshooting — see
-[docs/e2e-smoke-test.md](docs/e2e-smoke-test.md). Full CLI flag
-reference and exit codes: [docs/cli-ops.md](docs/cli-ops.md).
+```text
+diff: model.austin.stg_bikeshare_trips  kept=8  dropped=2  flagged=1
+
+TIER      ARTIFACT                      TEST            REASON                  SCORE    WHY
+kept      column.trip_id.description                                            0.97     Description added; passed all grading criteria.
+kept      test.column.trip_id.not_null  not_null                                —        Test returned non-zero failing rows on the warehouse sample.
+dropped   test.column.region.not_null   not_null        always-passes           —        Test returned zero failing rows on the representative sample.
+flagged   column.bike_id.description                                            0.45     Grading score 0.45 below threshold 0.95.
+...
+```
+
+At least one `dropped` row with `always-passes` is mathematically
+guaranteed — the fixture's staging SQL aliases a literal `'austin' AS
+region` column, so any LLM-drafted `not_null` on it must always-pass
+and the prune engine drops it. The strict 0.95 grade thresholds in
+the fixture config typically surface at least one `flagged` artifact.
+
+Two durable artefacts land under `/tmp/sf-austin/.signalforge/`:
+`grade.json` (per-criterion LLM-judge scores) and `diff.json` (the
+full rendered diff). The committed `.gitignore` covers `.signalforge/`.
+
+### Troubleshooting
+
+| Symptom | Likely cause | Fix |
+| --- | --- | --- |
+| `User does not have bigquery.jobs.create permission in project bigquery-public-data` | `GOOGLE_CLOUD_PROJECT` not set; SDK fell back to the source project | Export `GOOGLE_CLOUD_PROJECT=<billing-project>` where you have the `BigQuery Job User` role |
+| `Query exceeded max_bytes_billed (limit=100000000, ...)` | Editing the profile dropped or lowered `maximum_bytes_billed` | Keep `maximum_bytes_billed: 1000000000` (1 GB) — the smoke test ships this cap intentionally |
+| `Manifest not found` / `dbt_project.yml not found at ...` | CLI walked up from the wrong cwd, or `--project-dir` doesn't directly contain `dbt_project.yml` | Either `cd` into the project root, or pass `--project-dir <abs-path>` pointing at the directory holding `dbt_project.yml` |
+| `aggregate_complete=False` in `grade.json` | Network blip during a grade call exhausted retries | Re-run; if it persists, raise `grade.total_budget_seconds` in `signalforge.yml` |
+| `LLM response did not match the CandidateSchema shape` | Anthropic response shape drifted vs. the parser | Set `ANTHROPIC_LOG=info` and inspect `~/.anthropic-debug/`; file an issue |
+
+Full per-flag reference, exit-code taxonomy, and environment
+variables: [docs/cli-ops.md](docs/cli-ops.md). Maintainer-only
+walkthrough of the same flow as a gated test
+(`pytest -m e2e --no-cov`): [docs/e2e-smoke-test.md](docs/e2e-smoke-test.md).
 
 ## CLI
 
