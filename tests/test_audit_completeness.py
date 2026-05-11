@@ -112,6 +112,14 @@ class _QualifiedNameCallFinder(ast.NodeVisitor):
     unprotected (the issue documents this) — it is too dynamic to gate
     via AST shapes, and any reviewer reading ``getattr`` should already
     be on alert.
+
+    **Two-pass walk** — the visitor pre-collects every alias module-wide
+    BEFORE inspecting any Call node. Python evaluates function bodies
+    lazily, so ``def f(): return E()`` followed later by
+    ``from <pkg> import <target> as E`` is valid — the function body
+    runs after the import resolves. A single-pass source-order visitor
+    would miss this late-import bypass; the override of :meth:`visit`
+    closes it.
     """
 
     def __init__(self, target: str) -> None:
@@ -123,11 +131,23 @@ class _QualifiedNameCallFinder(ast.NodeVisitor):
         self._aliases: set[str] = {target}
         self.calls: list[tuple[int, int]] = []
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802 — ast API
-        for alias in node.names:
-            if alias.name == self._target:
-                self._aliases.add(alias.asname or alias.name)
-        self.generic_visit(node)
+    def visit(self, node: ast.AST) -> None:
+        # Two-pass walk on the root Module: collect every alias module-
+        # wide BEFORE inspecting any Call node. Single-pass source-order
+        # collection misses late-import bypasses — ``def make(): return
+        # E()`` followed by ``from <pkg> import AuditEvent as E`` is
+        # valid Python (the function body runs only when called, by
+        # which time the import has resolved), and a strict scan must
+        # catch it. CodeRabbit caught this on the first iteration of
+        # this finder (PR #69) — the regression is pinned by
+        # ``test_qualified_name_finder_catches_late_import_alias``.
+        if isinstance(node, ast.Module):
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.ImportFrom):
+                    for alias in sub.names:
+                        if alias.name == self._target:
+                            self._aliases.add(alias.asname or alias.name)
+        super().visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 — ast API
         func = node.func
@@ -919,6 +939,31 @@ def test_qualified_name_finder_catches_all_three_bypass_patterns() -> None:
             f"{target}: module-attribute bypass not detected — "
             f"_QualifiedNameCallFinder regressed on Pattern 3 "
             f"(`module.{target}(...)`)"
+        )
+
+
+def test_qualified_name_finder_catches_late_import_alias() -> None:
+    """Regression for the late-import bypass CodeRabbit flagged on PR #69:
+    a function body that references an alias defined by a later
+    top-level ``from <module> import <target> as <alias>`` must still be
+    caught. Single-pass source-order alias collection misses this — the
+    two-pass override of ``_QualifiedNameCallFinder.visit`` closes it.
+    """
+    targets = ("AuditEvent", "LLMResponseEvent", "PruneEvent", "GradeEvent")
+    for target in targets:
+        src = (
+            "def make():\n"
+            "    return _LateAlias(arg=None)\n"  # call BEFORE the import line
+            "\n"
+            f"from signalforge.x import {target} as _LateAlias\n"
+        )
+        finder = _QualifiedNameCallFinder(target)
+        finder.visit(ast.parse(src))
+        assert len(finder.calls) == 1, (
+            f"{target}: late-import alias bypass not detected — "
+            f"_QualifiedNameCallFinder regressed on the two-pass walk "
+            f"(call appears in source before the `from … import "
+            f"{target} as _LateAlias` line that introduces the alias)"
         )
 
 
