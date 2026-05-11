@@ -94,6 +94,7 @@ safety:
 llm:
   # ... (loaded by signalforge.draft)
 prune:
+  enabled: true            # set false to skip prune entirely (no warehouse contact)
   scope: sample            # "sample" | "full"
   sample_strategy: materialised  # "materialised" (default, v0.2) | "oneshot" (v0.1 fallback)
   sample_size: 100000      # rows
@@ -110,6 +111,7 @@ prune:
 
 Field-by-field:
 
+- **`enabled`** — `bool`. Default `true`. When `false`, `prune_tests` short-circuits: it does NOT issue any warehouse calls, does NOT validate `trusted_models`, and routes every candidate to `kept-without-evidence` with `why="prune disabled in signalforge.yml"`. The audit JSONL still records one `PruneEvent` per candidate (fail-closed audit preserved). The CLI emits an INFO line at prune-stage entry. **Trade-off:** disabling prune lets always-pass tests reach the diff — directly counter to Architectural Commitment #1 (signal over volume). Use as a temporary escape hatch when warehouse contact is unavailable (offline, credentials issue, cost ceiling) and you still need a draft run.
 - **`scope`** — `"sample"` | `"full"`. Default `"sample"`. Whether candidate tests run against a deterministic warehouse sample or a full table scan. Switch to `"full"` only when the model is small enough that `sample_size` would scan most of it anyway.
 - **`sample_strategy`** — `"materialised"` | `"oneshot"`. Default `"materialised"` (v0.2 — see issue #22). When set to `"materialised"`, `prune_tests` calls `adapter.materialise_sample(...)` ONCE before the per-test loop — the adapter creates a `_SESSION._sf_sample_<run_id>` temp table and every test's compiled SQL reads from it (per-test bytes drop from ~9.92 GB to <100 MB on the AR-B1 reference workload). When set to `"oneshot"`, the v0.1 path runs unchanged — every test issues its own deterministic-sample query against the source table. Adapters that don't override `materialise_sample` (any non-BigQuery adapter in v0.2) raise `MaterialisationNotSupportedError`; the orchestrator then routes every candidate to `kept-without-evidence` per the conservative-bias rule (see [Drop-reason taxonomy](#drop-reason-taxonomy)). Operators on non-BQ adapters opt out via `sample_strategy: oneshot`.
 - **`sample_size`** — Integer row count for sample scope. Default `100_000`. Passed to `WarehouseAdapter.sample_rows`. Increase when the always-pass false-positive rate on small samples hides real signal; decrease to cap query bytes on very wide tables (column-pruning does NOT apply through `FARM_FINGERPRINT(TO_JSON_STRING(t))` — see [Cost model](#cost-model-us-003-verification)).

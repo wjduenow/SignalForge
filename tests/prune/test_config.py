@@ -203,6 +203,68 @@ def test_load_prune_config_handles_v01_yaml_without_sample_strategy_field(
     assert result.sample_size == 50_000
 
 
+def test_load_prune_config_enabled_defaults_to_true_when_field_absent(
+    tmp_path: Path,
+) -> None:
+    """A v0.1-shaped ``signalforge.yml`` (no ``enabled:`` key under
+    ``prune:``) loads cleanly with ``enabled`` defaulting to ``True``
+    — issue #35 / US-001, DEC-005.
+
+    Mirrors the backward-compat invariant from
+    :func:`test_load_prune_config_handles_v01_yaml_without_sample_strategy_field`
+    for the v0.2 ``sample_strategy`` graduation: every operator's
+    existing config keeps the load-bearing default posture
+    (signal-over-volume — Architectural Commitment #1) when the new
+    field is absent."""
+    config_yml = tmp_path / "signalforge.yml"
+    config_yml.write_text("prune:\n  scope: sample\n")
+
+    result = load_prune_config(tmp_path)
+
+    assert result.enabled is True
+    # Sanity: the rest of the config still round-trips cleanly.
+    assert result.scope == "sample"
+
+
+def test_load_prune_config_enabled_false_when_explicitly_set(tmp_path: Path) -> None:
+    """``prune.enabled: false`` in ``signalforge.yml`` round-trips as
+    ``PruneConfig().enabled is False`` — issue #35 / US-001, DEC-005.
+
+    This is the escape-hatch path: the operator explicitly opts out of
+    the prune layer's warehouse calls. The orchestrator's short-circuit
+    (US-002) keys on this value; pinning the YAML→bool round-trip here
+    is the contract surface that lets US-002 trust the loader."""
+    config_yml = tmp_path / "signalforge.yml"
+    config_yml.write_text("prune:\n  enabled: false\n")
+
+    result = load_prune_config(tmp_path)
+
+    assert result.enabled is False
+
+
+def test_load_prune_config_enabled_typo_raises_config_error(tmp_path: Path) -> None:
+    """A typo'd ``enabld:`` (vs ``enabled:``) raises
+    :class:`PruneConfigError` per the existing ``extra="forbid"``
+    contract on :class:`PruneConfig` (DEC-015).
+
+    Silent no-op (the typo is ignored, the field falls back to the
+    default ``True``) is exactly the failure mode DEC-015 exists to
+    prevent: the operator believes they disabled prune, then sees
+    warehouse bytes-billed and reasonably distrusts the tool.
+    ``extra="forbid"`` on the inner :class:`PruneConfig` block makes
+    this loud rather than silent — issue #35 / US-001."""
+    config_yml = tmp_path / "signalforge.yml"
+    config_yml.write_text("prune:\n  enabld: false\n")
+
+    with pytest.raises(PruneConfigError) as excinfo:
+        load_prune_config(tmp_path)
+
+    # The wrapped pydantic ValidationError surfaces the offending key
+    # name in the error message — same shape as the existing `scop:`
+    # typo regression test.
+    assert "enabld" in str(excinfo.value)
+
+
 def test_load_prune_config_yaml_safe_load_rejects_python_objects(tmp_path: Path) -> None:
     """Confirms :func:`yaml.safe_load` is used (not :func:`yaml.load`).
 

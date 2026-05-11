@@ -65,6 +65,11 @@ safety policy, draft candidate artifacts via the LLM, prune
 always-pass / known-clean-fail tests against warehouse samples, grade
 the survivors, and render a diff against any existing `schema.yml`.
 
+> **Note:** the prune step runs warehouse SQL on every invocation
+> regardless of `safety.mode`. To skip the prune layer entirely, set
+> `prune.enabled: false` in `signalforge.yml` (see
+> [`docs/prune-ops.md`](prune-ops.md#configuration-signalforgeyml-prune-block)).
+
 Positional argument:
 
 - `<model>` — Model under draft. Accepts a dbt `unique_id`
