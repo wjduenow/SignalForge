@@ -63,8 +63,10 @@ cd SignalForge
 pip install -e ".[dev]"   # quote the extras — [dev] is a glob in zsh
 ```
 
-Once v0.1 ships to PyPI, `pip install signalforge` will replace the
-editable-install step.
+Once v0.1 ships to PyPI, `pip install signalforge-dbt` will replace the
+editable-install step. (The PyPI name has a `-dbt` suffix because
+`signalforge` was already taken by an unrelated DSP package; the import
+name and CLI command remain `signalforge`.)
 
 ### 2. Authenticate to BigQuery and Anthropic
 
@@ -125,6 +127,13 @@ EOF
 
 signalforge generate models/staging/stg_bikeshare_trips.sql --project-dir /tmp/sf-austin
 ```
+
+Want to preview cost first? `signalforge generate --estimate <model>`
+prints the projected USD + warehouse bytes without making any billable
+Anthropic or warehouse call (one `count_tokens` round-trip per prompt
+plus a single BigQuery `dryRun`). See
+[`docs/cli-ops.md`](docs/cli-ops.md) § `--estimate` for the full
+contract.
 
 ### 5. Expected output
 

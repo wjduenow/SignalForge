@@ -478,7 +478,13 @@ def test_public_api_imports_match_dec_020() -> None:
         "draft_schema",
         "load_draft_config",
     )
+    # Expanded by US-001 of #36: adds the ``signalforge.llm.pricing``
+    # surface (PRICE_TABLE_VERSION / PRICES / ModelPricing / lookup) and
+    # the ``EstimateUnknownModelError`` typed exception.
     assert llm_pkg.__all__ == (
+        "PRICES",
+        "PRICE_TABLE_VERSION",
+        "EstimateUnknownModelError",
         "LLMAuthError",
         "LLMCacheTooLargeError",
         "LLMConnectionError",
@@ -488,5 +494,7 @@ def test_public_api_imports_match_dec_020() -> None:
         "LLMResponseFormatError",
         "LLMResult",
         "LLMServerError",
+        "ModelPricing",
         "call_anthropic",
+        "lookup",
     )

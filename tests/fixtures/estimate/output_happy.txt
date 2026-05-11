@@ -1,0 +1,28 @@
+Estimate for model.austin.stg_bikeshare_trips
+  drafter: claude-sonnet-4-6
+  grader:  claude-sonnet-4-6
+
+Estimated draft cost:
+  input tokens:   3,124
+  output tokens:  ~1,200 (estimated)
+  cost:           $0.0091
+
+Estimated grade cost:
+  artifacts: 62   criteria: 4   calls: 248
+  per criterion:
+    clarity          62 calls   38,400 tokens   $0.0288
+    consistency      62 calls   38,400 tokens   $0.0288
+    rationale        62 calls   38,400 tokens   $0.0288
+    no-redundant     62 calls   38,400 tokens   $0.0288
+  cost:           $0.1152
+
+Estimated warehouse cost:
+  bytes-per-row:    ~84 (BigQuery dryRun)
+  test count est:   38 (3.5 tests/col x 11 cols)
+  sample size:      10,000 rows
+  total bytes:      ~33.7 MB
+
+Total estimated LLM cost: $0.1243
+Total estimated warehouse: ~33.7 MB
+
+Price table: 2026-05-11  |  Heuristic: ~3.5 tests/column (canonical fixture average)

@@ -95,6 +95,29 @@ class _MaterialiseSampleExpectation:
 
 
 @dataclass
+class _DryRunExpectation:
+    """US-002 (issue #36) — one registered ``client.query(...,
+    job_config=QueryJobConfig(dry_run=True))`` expectation.
+
+    Matches a ``client.query`` call whose ``job_config`` has
+    ``dry_run is True`` AND whose SQL matches ``matching``. On match,
+    the call returns a :class:`_FakeQueryJobWithBytes` whose
+    ``total_bytes_processed`` is ``returns_bytes`` (or raises the
+    exception when ``returns_bytes`` is an :class:`Exception`).
+
+    Dry_run is a separate queue from :attr:`_query_expectations`: a
+    ``dry_run=True`` call that arrives without a matching
+    ``expect_dry_run`` raises ``AssertionError`` rather than falling
+    back to ``expect_query``; conversely, a non-dry_run call cannot
+    consume an ``expect_dry_run`` even if its SQL matches the pattern.
+    """
+
+    matching: re.Pattern[str]
+    returns: int | Exception
+    job_config_check: Any = None  # optional callable(job_config) -> bool
+
+
+@dataclass
 class _AbortSessionExpectation:
     """US-004 (issue #22) — one registered ``CALL BQ.ABORT_SESSION();``
     expectation, keyed by the session id the production code carries
@@ -147,6 +170,32 @@ class _FakeSessionInfo:
         self.session_id = session_id
 
 
+class _FakeQueryJobWithBytes(_FakeQueryJob):
+    """``_FakeQueryJob`` carrying a populated ``total_bytes_processed``.
+
+    US-002 of issue #36 — the production
+    :meth:`BigQueryAdapter.estimate_query_bytes` reads
+    ``job.total_bytes_processed`` off the returned dry_run job to
+    extract the estimated bytes; the helper attaches the value the
+    test registered via :meth:`FakeBigQueryClient.expect_dry_run`.
+
+    Dry_run jobs do NOT have their ``.result()`` called by the
+    production helper (the SDK populates ``total_bytes_processed``
+    inline on the returned job — no row fetch is needed), so
+    ``result()`` inherits the empty-iter behaviour from the parent
+    and is effectively unused on this path.
+    """
+
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        total_bytes_processed: int,
+    ) -> None:
+        super().__init__(rows)
+        self.total_bytes_processed: int = total_bytes_processed
+
+
 class _FakeQueryJobWithSession(_FakeQueryJob):
     """``_FakeQueryJob`` carrying a populated ``session_info``.
 
@@ -175,6 +224,7 @@ class FakeBigQueryClient:
         self._list_rows_expectations: list[_ListRowsExpectation] = []
         self._materialise_sample_expectations: list[_MaterialiseSampleExpectation] = []
         self._abort_session_expectations: list[_AbortSessionExpectation] = []
+        self._dry_run_expectations: list[_DryRunExpectation] = []
 
     # ---- expectation API --------------------------------------------------
 
@@ -199,6 +249,57 @@ class FakeBigQueryClient:
 
     def expect_list_rows(self, *, ref: TableRef, returns: list[dict[str, Any]] | Exception) -> None:
         self._list_rows_expectations.append(_ListRowsExpectation(ref=ref, returns=returns))
+
+    def expect_dry_run(
+        self,
+        *,
+        sql_matching: re.Pattern[str] | str,
+        returns_bytes: int | Exception,
+        job_config_check: Any = None,
+    ) -> None:
+        """US-002 (issue #36) — register one ``dry_run=True`` expectation.
+
+        Matches a ``client.query(sql, job_config=...)`` call whose
+        ``job_config.dry_run is True`` AND whose SQL matches the
+        ``sql_matching`` regex. The dry_run path is a separate queue
+        from :meth:`expect_query`:
+
+        * A ``dry_run=True`` call that arrives without a matching
+          ``expect_dry_run`` queued raises
+          ``AssertionError("unexpected dry_run: ...")`` even if its
+          SQL would match an ``expect_query`` registration.
+        * A non-dry_run call cannot consume an ``expect_dry_run`` even
+          if the SQL would match the pattern.
+
+        On match:
+            * ``returns_bytes: int`` — the matched call returns a
+              :class:`_FakeQueryJobWithBytes` whose
+              ``total_bytes_processed`` is the integer. The production
+              :meth:`BigQueryAdapter.estimate_query_bytes` reads that
+              field off the returned job and returns ``int(value)``.
+            * ``returns_bytes: Exception`` — the matched call raises
+              the given exception. Drives the warehouse-error mapping
+              path (auth / connection / quota) in
+              :meth:`BigQueryAdapter.estimate_query_bytes`.
+
+        Args:
+            sql_matching: A regex string or compiled pattern; matched
+                via :meth:`re.Pattern.search` against the SQL passed to
+                ``client.query``.
+            returns_bytes: An ``int`` (success) or an ``Exception``
+                (failure) instance.
+            job_config_check: Optional callable that receives the
+                ``job_config`` for the matched call and must return
+                truthy; rejects raise ``AssertionError``.
+        """
+        pattern = sql_matching if isinstance(sql_matching, re.Pattern) else re.compile(sql_matching)
+        self._dry_run_expectations.append(
+            _DryRunExpectation(
+                matching=pattern,
+                returns=returns_bytes,
+                job_config_check=job_config_check,
+            )
+        )
 
     def expect_materialise_sample(
         self,
@@ -313,6 +414,8 @@ class FakeBigQueryClient:
             )
         if self._abort_session_expectations:
             unconsumed.append(f"{len(self._abort_session_expectations)} abort_session expectations")
+        if self._dry_run_expectations:
+            unconsumed.append(f"{len(self._dry_run_expectations)} dry_run expectations")
         if unconsumed:
             raise AssertionError("Unconsumed expectations: " + ", ".join(unconsumed))
 
@@ -326,6 +429,15 @@ class FakeBigQueryClient:
         # preserves US-003's existing tests which scaffold CTAS / abort
         # calls via raw ``expect_query`` matchers (the plan for US-004
         # explicitly says NOT to retrofit those tests).
+        #
+        # US-002 (issue #36) — ``dry_run=True`` routes through its own
+        # queue regardless of SQL shape. A dry_run call cannot fall
+        # through to ``expect_query``, and a non-dry_run call cannot
+        # consume an ``expect_dry_run`` — the two queues are isolated so
+        # the production estimate path and the production query path
+        # cannot accidentally share fixtures.
+        if _job_config_is_dry_run(job_config):
+            return self._consume_dry_run(sql, job_config)
         if self._materialise_sample_expectations and _is_materialise_sample_sql(sql):
             return self._consume_materialise_sample(sql)
         if self._abort_session_expectations and _is_abort_session_sql(sql):
@@ -386,6 +498,29 @@ class FakeBigQueryClient:
         raise AssertionError(
             f"unexpected abort_session: session_id={actual_session_id!r}, sql={sql!r}"
         )
+
+    def _consume_dry_run(self, sql: str, job_config: Any) -> _FakeQueryJob:
+        """Walk :attr:`_dry_run_expectations` for a SQL match; consume
+        one matching entry on success.
+
+        Asserts ``job_config.dry_run is True`` before consuming (this
+        helper is reached only via the ``_job_config_is_dry_run``
+        gate in :meth:`query`, so the assertion is belt-and-braces).
+        Non-match raises the standard ``unexpected dry_run: ...``
+        AssertionError.
+        """
+        for i, exp in enumerate(self._dry_run_expectations):
+            if not exp.matching.search(sql):
+                continue
+            if exp.job_config_check is not None and not exp.job_config_check(job_config):
+                raise AssertionError(
+                    f"job_config_check rejected job_config for dry_run query: {sql!r}"
+                )
+            self._dry_run_expectations.pop(i)
+            if isinstance(exp.returns, Exception):
+                raise exp.returns
+            return _FakeQueryJobWithBytes(rows=[], total_bytes_processed=exp.returns)
+        raise AssertionError(f"unexpected dry_run: {sql!r}")
 
     def get_table(self, ref: Any) -> FakeTable:
         # Accept either a TableRef or anything with project/dataset/name attrs.
@@ -513,6 +648,21 @@ def _extract_session_id_from_job_config(job_config: Any) -> str | None:
         if getattr(prop, "key", None) == "session_id":
             return getattr(prop, "value", None)
     return None
+
+
+def _job_config_is_dry_run(job_config: Any) -> bool:
+    """Return ``True`` iff the supplied job config asks for a dry_run.
+
+    Duck-typed against both the real ``bigquery.QueryJobConfig`` (the
+    SDK exposes ``.dry_run`` as a ``bool`` property) and any fake /
+    test double exposing a ``.dry_run`` attribute. ``None`` /
+    missing-attr default to ``False`` so the standard
+    :meth:`FakeBigQueryClient.expect_query` path keeps its v0.1
+    semantics unchanged.
+    """
+    if job_config is None:
+        return False
+    return bool(getattr(job_config, "dry_run", False))
 
 
 def _derive_fake_session_id(temp_table_name: str) -> str:

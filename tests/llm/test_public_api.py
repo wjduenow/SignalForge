@@ -34,6 +34,13 @@ _DOCUMENTED_PUBLIC = (
     "LLMServerError",
     # Errors — cache sizing
     "LLMCacheTooLargeError",
+    # Errors — estimate cost preview (US-001 of #36)
+    "EstimateUnknownModelError",
+    # Pricing surface (US-001 of #36)
+    "PRICE_TABLE_VERSION",
+    "PRICES",
+    "ModelPricing",
+    "lookup",
 )
 
 
@@ -55,6 +62,9 @@ def test_all_lists_documented_surface() -> None:
 def test_each_public_name_is_importable_via_from_signalforge_llm() -> None:
     """Every documented public name is importable directly."""
     from signalforge.llm import (  # noqa: F401
+        PRICE_TABLE_VERSION,
+        PRICES,
+        EstimateUnknownModelError,
         LLMAuthError,
         LLMCacheTooLargeError,
         LLMConnectionError,
@@ -64,7 +74,9 @@ def test_each_public_name_is_importable_via_from_signalforge_llm() -> None:
         LLMResponseFormatError,
         LLMResult,
         LLMServerError,
+        ModelPricing,
         call_anthropic,
+        lookup,
     )
 
 
@@ -74,6 +86,7 @@ def test_typed_errors_subclass_llm_error() -> None:
     Mirrors the equivalent assertion in :mod:`tests.draft.test_public_api`.
     """
     from signalforge.llm import (
+        EstimateUnknownModelError,
         LLMAuthError,
         LLMCacheTooLargeError,
         LLMConnectionError,
@@ -85,6 +98,7 @@ def test_typed_errors_subclass_llm_error() -> None:
     )
 
     for cls in (
+        EstimateUnknownModelError,
         LLMAuthError,
         LLMCacheTooLargeError,
         LLMConnectionError,

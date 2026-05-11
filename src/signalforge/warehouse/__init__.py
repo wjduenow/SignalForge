@@ -28,6 +28,7 @@ from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
     BytesBilledExceededError,
     ColumnNotFoundError,
+    EstimateNotSupportedError,
     InvalidIdentifierError,
     ManifestProjectNotFoundError,
     ManifestSchemaNotFoundError,
@@ -67,6 +68,7 @@ __all__ = [
     "ColumnStats",
     "DbtProfileTarget",
     "Dialect",
+    "EstimateNotSupportedError",
     "InvalidIdentifierError",
     "ManifestProjectNotFoundError",
     "ManifestSchemaNotFoundError",

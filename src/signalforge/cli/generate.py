@@ -91,6 +91,7 @@ from signalforge import manifest as manifest_module
 from signalforge import prune as prune_module
 from signalforge import safety as safety_module
 from signalforge import warehouse as warehouse_module
+from signalforge.cli import _estimate as estimate_module
 from signalforge.cli._helpers import (
     canonicalise_user_path,
     emit_batch_progress_entry,
@@ -269,6 +270,21 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "the diff to stdout, but write nothing — neither the "
             "schema.yml nor the .signalforge/diff.json sidecar. "
             "Overrides the default-on sidecar (DEC-010)."
+        ),
+    )
+    # US-005 of #36 — pre-flight cost preview. Mutually exclusive with
+    # --write / --dry-run (the argparse group already enforces this →
+    # SystemExit(2) which ``main`` converts to exit code 2). Runs the
+    # full prelude (configs + profile + adapter + anthropic client) and
+    # the in-CLI estimate engine + renderer; no billable Anthropic or
+    # warehouse calls are made.
+    write_group.add_argument(
+        "--estimate",
+        action="store_true",
+        help=(
+            "Print pre-flight cost estimate (uses count_tokens + "
+            "BigQuery dryRun only; no billable Anthropic or warehouse "
+            "calls); mutually exclusive with --write / --dry-run."
         ),
     )
     # US-006 / DEC-020 — diff renderer kind selection.
@@ -545,6 +561,11 @@ def _run_single_model(
     (US-005 / DEC-014). The single-model positional path leaves both at
     their default ``None`` so the prefix is suppressed and the v0.1
     capsys-pinned stderr shape is preserved byte-for-byte.
+
+    Inherits :func:`cmd_generate`'s per-flag override precedence and the
+    ``--estimate`` short-circuit (DEC-009 of #36) — see
+    :func:`cmd_generate`'s docstring for the full rules; this helper
+    consumes the resulting ``args`` namespace verbatim.
     """
     quiet = bool(getattr(args, "quiet", False))
     verbose = bool(getattr(args, "verbose", False))
@@ -563,6 +584,82 @@ def _run_single_model(
     try:
         # 2. Warehouse adapter (manifest + profile resolved by caller).
         adapter = _make_warehouse_adapter(profile)
+
+        # ---- US-005 of #36 --- --estimate short-circuit -------------
+        # DEC-009: run the FULL prelude (every config load + anthropic
+        # client) before dispatching to the estimate engine, so the
+        # operator catches typos in signalforge.yml / --profiles-dir
+        # BEFORE any LLM call. Skip ONLY the four pipeline orchestrators
+        # (draft_schema / prune_tests / grade_artifacts / render_diff).
+        # The engine handles its own partial-failure degrade for the
+        # warehouse-bytes step (DEC-005); every other failure (LLM auth,
+        # bad config, unknown model) propagates through the existing
+        # try/except Exception boundary below.
+        if getattr(args, "estimate", False):
+            # DEC-009 + B-1 (QG pass 1) — apply the same CLI flag overrides
+            # the real-run prelude applies, so the projected cost matches
+            # the run the operator would actually issue. ``--mode`` flows
+            # through ``SafetyPolicy.with_mode`` (re-runs validators per
+            # ``safety-layer.md`` DEC-018); ``--scope`` / ``--sample-strategy``
+            # flow into ``PruneConfig.model_validate`` (extra="forbid", so
+            # typos fail loud). ``--min-score`` is intentionally NOT applied
+            # — it gates the post-run verdict, not the cost projection.
+            policy = safety_module.load_safety_config(project_dir)
+            mode_override = getattr(args, "mode", None)
+            if mode_override is not None:
+                policy = policy.with_mode(safety_module.SamplingMode(mode_override))
+            draft_config = draft_module.load_draft_config(project_dir)
+            grade_config = grade_module.load_grade_config(project_dir)
+            prune_config = prune_module.load_prune_config(project_dir)
+            scope_override = getattr(args, "scope", None)
+            sample_strategy_override = getattr(args, "sample_strategy", None)
+            prune_overrides: dict[str, str] = {}
+            if scope_override is not None:
+                prune_overrides["scope"] = scope_override
+            if sample_strategy_override is not None:
+                prune_overrides["sample_strategy"] = sample_strategy_override
+            if prune_overrides:
+                prune_config = prune_module.PruneConfig.model_validate(
+                    {**prune_config.model_dump(), **prune_overrides}
+                )
+            diff_module.load_diff_config(project_dir)
+            client = _make_anthropic_client()
+            if client is None:
+                # The default factory returns None to let the underlying
+                # stages lazy-construct via signalforge.llm._client.
+                # The estimate engine needs a concrete client; build one
+                # here through the same single SDK seam so any
+                # LLMAuthError surfaces at the existing panic boundary
+                # → tier 3 via _EXCEPTION_TO_EXIT_CODE.
+                from signalforge.llm._client import _make_anthropic_client as _llm_make_client
+
+                client = _llm_make_client()
+            report = estimate_module.estimate(
+                model,
+                manifest,
+                draft_config,
+                grade_config,
+                prune_config,
+                adapter,
+                client,
+                project_dir=project_dir,
+            )
+            print(estimate_module.render(report))
+            # ``_run_single_model`` returns a typed outcome; the estimate
+            # short-circuit treats the run as exit-0 success with no
+            # rendered diff (stdout already carries the estimate body
+            # above). Batch mode (``--select``) inherits this shape via
+            # ``_run_batch``'s outcome aggregation.
+            return _SingleModelOutcome(
+                model_unique_id=model.unique_id,
+                exit_code=0,
+                kept_count=0,
+                dropped_count=0,
+                flagged_count=0,
+                rendered_text="",
+                duration_seconds=time.monotonic() - start,
+                exception_class_name=None,
+            )
 
         # ---- 1/5: safety -----------------------------------------------
         # US-007 / DEC-014 / DEC-026 — progress lines wrap each stage

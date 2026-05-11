@@ -330,6 +330,50 @@ non-BigQuery adapter then ships its own session-equivalent in v0.3
 `CREATE TEMP TABLE` inside a transaction). The ABC default-raise is
 the v0.2 stop-gap, not a permanent surface.
 
+## Query-bytes estimation (v0.2, issue #36)
+
+The `WarehouseAdapter` ABC ships an `estimate_query_bytes` method in
+v0.2 so the `signalforge generate --estimate` cost-preview flow can
+estimate how many bytes a candidate query would process WITHOUT
+actually scanning the source table. The BigQuery override uses
+`QueryJobConfig(dry_run=True)` and reads `job.total_bytes_processed`
+off the returned job; non-BigQuery adapters inherit the ABC's default
+`EstimateNotSupportedError` raise.
+
+ABC signature (`signalforge.warehouse.base`):
+
+```python
+def estimate_query_bytes(self, sql: str) -> int: ...
+```
+
+The default ABC implementation raises `EstimateNotSupportedError` with
+the locked remediation: `"Use --estimate with a BigQuery profile, or
+wait for v0.3 multi-warehouse estimation support."` Concrete adapters
+override; v0.2 ships the BigQuery override only.
+
+**BigQuery override mechanism.** A `dry_run=True` query asks BigQuery
+to validate the SQL server-side and return the estimated bytes
+processed, without committing to any actual scan or row return.
+BigQuery does NOT bill bytes for a dry_run, so the production
+`QueryJobConfig` deliberately omits `maximum_bytes_billed` — a cap on
+something that never bills would be dead config; worse, it could
+mislead a reader into thinking the dry_run was guarded against
+runaway cost. The job is tagged with the `warehouse_estimate_query_bytes`
+stage label for `INFORMATION_SCHEMA.JOBS_BY_PROJECT` cost attribution.
+
+The same `_sql_safety.validate_test_sql` cheap-reject pass that
+`run_test_sql` applies fires before the SDK call: a SQL with a
+top-level `;`, a `--` comment, a `/* */` block comment, or unbalanced
+parens raises `QuerySyntaxError` and never reaches BigQuery.
+
+**v0.2 → v0.3 migration story for non-BQ adapters.** Snowflake and
+Postgres adapters in v0.2 (and v0.3 multi-warehouse) inherit the
+default `estimate_query_bytes` → `EstimateNotSupportedError` raise
+until each grows its own override (Snowflake's `EXPLAIN` /
+Postgres's `EXPLAIN` are the natural primitives). The CLI's
+`--estimate` flow surfaces the typed error with the locked
+remediation so operators see the v0.3 expansion plan inline.
+
 ## Session cleanup & manual recovery
 
 Sessions opened by `materialise_sample` need to be torn down so
@@ -515,6 +559,7 @@ on a `↳ Remediation:` line by `__str__`.
 | `UnknownTableSizeError`                  | `Table.num_rows` is `None`/`0` and no `PartitionFilter` was supplied.                                    | `table`                                              | Provide `partition_filter`, or call `adapter.refresh_table_metadata` once `num_rows` is populated. |
 | `MaterialisationFailedError` (v0.2)      | `BigQueryAdapter.materialise_sample` wraps an SDK / network / quota failure during the materialisation query. | `cause`                                              | Inspect `.cause` for the underlying exception; falls back to `prune.sample_strategy: oneshot` to bypass materialisation. |
 | `MaterialisationNotSupportedError` (v0.2)| `WarehouseAdapter.materialise_sample` default impl raised because the concrete adapter doesn't override it (any non-BigQuery adapter in v0.2). | _(none)_                                             | Set `prune.sample_strategy: oneshot` in `signalforge.yml` to fall back to per-test sampling, or wait for v0.3 multi-warehouse materialisation support. |
+| `EstimateNotSupportedError` (v0.2)       | `WarehouseAdapter.estimate_query_bytes` default impl raised because the concrete adapter doesn't override it (any non-BigQuery adapter in v0.2). | `adapter_name`                                       | Use `--estimate` with a BigQuery profile, or wait for v0.3 multi-warehouse estimation support. |
 
 ## v0.2 follow-ups
 

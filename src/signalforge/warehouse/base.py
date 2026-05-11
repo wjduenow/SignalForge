@@ -132,6 +132,41 @@ class WarehouseAdapter(abc.ABC):
 
         raise MaterialisationNotSupportedError(adapter_name=type(self).__name__)
 
+    def estimate_query_bytes(self, sql: str) -> int:
+        """Estimate the bytes BigQuery (or equivalent) would process if
+        ``sql`` ran, without executing it (US-002 of issue #36).
+
+        v0.2 contract: the default impl raises
+        :class:`EstimateNotSupportedError`. Concrete adapters override the
+        method when their warehouse provides a primitive that estimates
+        cost without committing to a real scan — BigQuery's
+        ``QueryJobConfig(dry_run=True)`` in v0.2; Snowflake's
+        ``EXPLAIN`` / Postgres's ``EXPLAIN`` in v0.3+.
+
+        Deliberately NOT decorated with ``@abstractmethod``: mirrors
+        :meth:`materialise_sample` (issue #22) — the default raise IS the
+        v0.2 behaviour for non-BigQuery adapters. The CLI's
+        ``--estimate`` flow degrades gracefully when an adapter signals
+        no support (DEC-004 of issue #36).
+
+        Args:
+            sql: A complete SQL statement to estimate. The implementation
+                is expected to subject the SQL to the same cheap rejects
+                as :meth:`run_test_sql` (no ``;``, no ``--``, balanced
+                parens) before handing it to the warehouse SDK.
+
+        Returns:
+            The estimated bytes the warehouse would process, as a
+            non-negative ``int``.
+
+        Raises:
+            EstimateNotSupportedError: Always, in the default impl.
+                Concrete adapters override.
+        """
+        from signalforge.warehouse.errors import EstimateNotSupportedError
+
+        raise EstimateNotSupportedError(adapter_name=type(self).__name__)
+
     @classmethod
     def from_profile(cls, profile: DbtProfileTarget) -> WarehouseAdapter:
         """Dispatch on ``profile.type`` and instantiate the matching adapter.
