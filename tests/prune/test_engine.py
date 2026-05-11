@@ -2102,3 +2102,49 @@ def test_prune_tests_disabled_does_not_validate_trusted_models(tmp_path: Path) -
         assert decision.reason == "kept-without-evidence"
         assert decision.why == "prune disabled in signalforge.yml"
     fake.assert_all_expectations_met()
+
+
+def test_prune_tests_disabled_with_empty_candidates_returns_empty_result(
+    tmp_path: Path,
+) -> None:
+    """``PruneConfig.enabled=False`` AND an empty ``CandidateSchema``
+    returns a zero-decision ``PruneResult`` and writes zero audit rows.
+
+    Defence-in-depth for the fail-closed audit invariant (DEC-001): "one
+    PruneEvent per candidate" with zero candidates means zero events;
+    the disabled-path loop must NOT raise on an empty iterable, and the
+    audit JSONL file must not be created (no `os.open` happens because
+    the for-loop never runs the writer). A regression that wrapped the
+    loop in ``if not pairs: raise SomeError(...)`` would break this test
+    loudly.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    empty_candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(),
+    )
+    config = PruneConfig(enabled=False)
+
+    result = prune_tests(
+        model,
+        adapter,
+        empty_candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert len(result.decisions) == 0
+    assert result.kept_count == 0
+    assert result.dropped_count == 0
+    # No candidates → no audit writes → no on-disk artefact.
+    assert not audit_path.exists()
+    fake.assert_all_expectations_met()

@@ -117,7 +117,7 @@ The CLI (#9) and any future orchestrator wants one calling convention; new stage
 
 ## `signalforge.yml` top-level namespace: `prune:` (DEC-020)
 
-The prune-stage block is `{ prune: { scope, sample_size, test_timeout_seconds, total_budget_seconds, capture_failure_rows, trusted_models, partition_filter } }`. Sibling top-level keys (`safety:`, `llm:`, future `grade:`/`diff:`) are reserved for other stages and silently ignored by the prune loader.
+The prune-stage block is `{ prune: { enabled, scope, sample_size, sample_strategy, test_timeout_seconds, total_budget_seconds, capture_failure_rows, trusted_models, partition_filter } }`. Sibling top-level keys (`safety:`, `llm:`, future `grade:`/`diff:`) are reserved for other stages and silently ignored by the prune loader.
 
 `PruneConfig` uses `extra="forbid"` (config-shaped; typos fail loud). The wrapping `_PruneConfigFile` uses `extra="ignore"` at the top level so unknown sibling stages don't break the loader. Mirrors `llm-drafter.md` DEC-027 / `safety-layer.md` DEC-025 verbatim.
 

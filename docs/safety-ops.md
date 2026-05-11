@@ -26,12 +26,16 @@ schema-only branch in `build_llm_request` performs zero adapter calls
 (DEC-012). Column NAMES are redacted in addition to values, because a
 column name alone (`john_smith_ssn_1234`) can leak PII (DEC-010).
 
-User-facing tagline: **the LLM never sees data unless you've explicitly
-opted in via `safety.mode: sample`.** Note: `safety.mode` controls what
-the *LLM* sees — the *prune step* (`signalforge.prune.prune_tests`) runs
-warehouse SQL on every invocation regardless of `safety.mode`, because
-it has to in order to detect always-pass tests. To skip the prune step
-entirely, see
+User-facing tagline: **the LLM never sees row data unless you've
+explicitly opted in via `safety.mode: sample`** (`aggregate-only` still
+sends per-column statistics — count, distinct, nulls, min, max — to the
+LLM; only `schema-only` sends column names + types and nothing else).
+Note: `safety.mode` controls what the *LLM* sees — the *prune step*
+(`signalforge.prune.prune_tests`) runs warehouse SQL on every invocation
+regardless of `safety.mode`, because it needs warehouse evidence to
+decide which candidate tests carry signal (always-pass tests get
+dropped; tests that fail on known-clean data also get dropped). To skip
+the prune step entirely, see
 [`prune.enabled`](prune-ops.md#configuration-signalforgeyml-prune-block)
 in `docs/prune-ops.md`.
 
