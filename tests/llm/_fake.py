@@ -164,7 +164,7 @@ class FakeAnthropicClient:
     def __init__(self, project: str = "test") -> None:
         self.project = project
         # The class-level annotation types ``messages`` as the protocol so
-        # the FakeAnthropicClient satisfies ``_AnthropicClientProtocol``
+        # the FakeAnthropicClient satisfies ``AnthropicClientProtocol``
         # under pyright's invariance rules; ``_messages`` is the concrete
         # backing object the ``expect_*`` helpers reach into.
         self._messages = _FakeMessages()
@@ -232,7 +232,7 @@ class _StubMessages:
 
 
 class _StubAnthropicClient:
-    """Minimal client that satisfies ``_AnthropicClientProtocol`` without
+    """Minimal client that satisfies ``AnthropicClientProtocol`` without
     queueing any expectations (US-005 protocol-conformance harness)."""
 
     def __init__(self) -> None:

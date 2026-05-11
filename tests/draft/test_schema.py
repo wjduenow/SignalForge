@@ -480,10 +480,15 @@ def test_public_api_imports_match_dec_020() -> None:
     )
     # Expanded by US-001 of #36: adds the ``signalforge.llm.pricing``
     # surface (PRICE_TABLE_VERSION / PRICES / ModelPricing / lookup) and
-    # the ``EstimateUnknownModelError`` typed exception.
+    # the ``EstimateUnknownModelError`` typed exception. Expanded by
+    # issue #44: adds ``AnthropicClientProtocol`` (promoted from the
+    # private ``_AnthropicClientProtocol`` so the ``client`` kwarg on
+    # ``draft_schema`` / ``grade_artifacts`` can be type-annotated against
+    # a non-underscore public name).
     assert llm_pkg.__all__ == (
         "PRICES",
         "PRICE_TABLE_VERSION",
+        "AnthropicClientProtocol",
         "EstimateUnknownModelError",
         "LLMAuthError",
         "LLMCacheTooLargeError",

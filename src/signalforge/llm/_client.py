@@ -14,10 +14,14 @@ pool SDK ignores into a generic util module.
 
 Two responsibilities:
 
-* :class:`_AnthropicClientProtocol` — duck-typed surface common to
+* :class:`AnthropicClientProtocol` — duck-typed surface common to
   ``anthropic.Anthropic`` and ``tests/llm/_fake.py::FakeAnthropicClient``
   (lands in US-006). Narrow on purpose — only the methods
   :func:`signalforge.llm.client.call_anthropic` actually consumes.
+  Re-exported as ``signalforge.llm.AnthropicClientProtocol`` so the
+  ``client`` kwarg on ``draft_schema`` / ``grade_artifacts`` and
+  downstream library callers can type-annotate against the public name
+  (issue #44).
 * :func:`_make_anthropic_client` — factory that returns
   ``anthropic.Anthropic(api_key=api_key)``. Lazy-imports the SDK so test
   environments that inject a fake never pay the import cost.
@@ -54,7 +58,7 @@ class _AnthropicMessagesProtocol(Protocol):
 
 
 @runtime_checkable
-class _AnthropicClientProtocol(Protocol):
+class AnthropicClientProtocol(Protocol):
     """Duck-typed surface common to ``anthropic.Anthropic`` and the test fake.
 
     Both production (``anthropic.Anthropic``) and test
@@ -64,6 +68,11 @@ class _AnthropicClientProtocol(Protocol):
     protocol is intentionally narrow — only the surface
     :func:`call_anthropic` actually consumes (``messages.create``,
     ``messages.count_tokens``).
+
+    Re-exported as ``signalforge.llm.AnthropicClientProtocol`` (issue #44)
+    so the ``client`` kwarg on :func:`signalforge.draft.draft_schema` and
+    :func:`signalforge.grade.grade_artifacts` can be type-annotated without
+    importing a private underscore-prefixed name.
     """
 
     messages: _AnthropicMessagesProtocol
@@ -71,7 +80,7 @@ class _AnthropicClientProtocol(Protocol):
 
 def _make_anthropic_client(
     api_key: str | None = None,
-) -> _AnthropicClientProtocol:  # pragma: no cover - exercised by integration tests only
+) -> AnthropicClientProtocol:  # pragma: no cover - exercised by integration tests only
     """Construct a real ``anthropic.Anthropic`` client.
 
     ``api_key=None`` lets the SDK consume the ``ANTHROPIC_API_KEY``
@@ -127,7 +136,7 @@ def _load_anthropic_exception_classes() -> _AnthropicExceptionClasses:
 
 
 __all__ = [
-    "_AnthropicClientProtocol",
+    "AnthropicClientProtocol",
     "_AnthropicExceptionClasses",
     "_AnthropicMessagesProtocol",
     "_load_anthropic_exception_classes",
