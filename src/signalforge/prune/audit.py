@@ -44,7 +44,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -140,7 +140,7 @@ def _build_prune_event(
     return PruneEvent(
         signalforge_version=_SIGNALFORGE_VERSION,
         record_id=uuid.uuid4().hex,
-        timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        timestamp=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         config_hash=config_hash,
         model_unique_id=model_unique_id,
         test=decision.test,

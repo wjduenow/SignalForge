@@ -2,7 +2,7 @@
 
 Covers the four typed shapes added by this story:
 
-* :class:`SamplingMode` — ``str + Enum`` mixin (Python 3.10-compatible).
+* :class:`SamplingMode` — :class:`enum.StrEnum` (see models.py DEC-024 note).
 * :class:`RedactionRecord` — frozen Pydantic v2 model with ``Literal`` reason.
 * :class:`AuditEvent` — frozen, reproducibility-carrying audit record (DEC-014).
 * :class:`LLMRequest` — frozen, deep-immutable request payload (DEC-022).
@@ -13,7 +13,7 @@ file only validates the production shapes' behaviour.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -102,7 +102,7 @@ def test_redaction_record_is_frozen() -> None:
 
 def _valid_audit_event(**overrides: object) -> AuditEvent:
     base: dict[str, object] = {
-        "timestamp": datetime(2026, 4, 28, 22, 30, tzinfo=timezone.utc),
+        "timestamp": datetime(2026, 4, 28, 22, 30, tzinfo=UTC),
         "model_unique_id": "model.sf_demo.customers",
         "mode": SamplingMode.SCHEMA_ONLY,
         "columns_sent": ("id", "col_a3f29c61"),

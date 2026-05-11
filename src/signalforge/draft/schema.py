@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
@@ -218,7 +218,7 @@ def draft_from_request(
     # would drift on prompt-template changes and break correlation
     # with `Model.raw_code` for incident-response queries.
     event = _build_response_event(
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         model_unique_id=model.unique_id,
         candidate=candidate,
         raw_text=result.response_text,

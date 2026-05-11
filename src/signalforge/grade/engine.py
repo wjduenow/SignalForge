@@ -68,7 +68,7 @@ import logging
 import time
 import uuid
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import signalforge as _sf
@@ -626,7 +626,7 @@ def grade_artifacts(
 
     # 4. Run-wide derived values.
     run_id = uuid.uuid4().hex
-    started_at = datetime.now(timezone.utc)
+    started_at = datetime.now(UTC)
     rubric_hash = _canonical_rubric_hash(resolved_rubric)
     template_hash = prompt_version_template(resolved_rubric)
     rubric_block = render_rubric_block(resolved_rubric)
@@ -662,7 +662,7 @@ def grade_artifacts(
         # Each call gets its own ``timestamp`` so a forensic query can
         # distinguish per-call latency. The sidecar carries
         # ``started_at`` separately.
-        per_call_ts = datetime.now(timezone.utc)
+        per_call_ts = datetime.now(UTC)
 
         if budget_exhausted:
             grading_result, event = _build_degraded(

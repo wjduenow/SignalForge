@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -909,7 +909,7 @@ def test_grade_artifacts_sidecar_carries_run_id_and_timestamp(tmp_path: Path) ->
     fake = FakeAnthropicClient()
     expect_grade_responses(fake, rubric=rubric, candidate=candidate)
 
-    before = datetime.now(timezone.utc)
+    before = datetime.now(UTC)
     report = grade_artifacts(
         model,
         candidate,
@@ -919,7 +919,7 @@ def test_grade_artifacts_sidecar_carries_run_id_and_timestamp(tmp_path: Path) ->
         client=fake,
         project_dir=project_dir,
     )
-    after = datetime.now(timezone.utc)
+    after = datetime.now(UTC)
 
     assert len(report.run_id) == 32
     assert all(c in "0123456789abcdef" for c in report.run_id)

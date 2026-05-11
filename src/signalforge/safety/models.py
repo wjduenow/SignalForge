@@ -19,15 +19,22 @@ Design commitments operationalised here:
   request object is handed to the LLM-drafting layer (issue #5) *after* the
   audit event has been written; making the sequences immutable closes the
   window where a mutation could desync the request from its audit record.
-* **DEC-024** — :class:`SamplingMode` uses ``str + Enum`` (not :class:`StrEnum`,
-  which is 3.11+) to preserve the project's 3.10 floor. This still gives
-  type-safe ``is``-comparison plus string-equality and YAML round-trip.
+* **DEC-024** — :class:`SamplingMode` uses :class:`enum.StrEnum`. Originally
+  ``str + Enum`` to preserve a 3.10 floor; that floor moved to 3.11 in issue
+  #46 so the simpler :class:`StrEnum` form replaces the mixin. Type-safe
+  ``is``-comparison, string-equality (``SamplingMode.SCHEMA_ONLY == "schema-only"``),
+  and YAML / JSON round-trip behaviour are unchanged. ``str(SamplingMode.X)``
+  now returns the bare value (``"schema-only"``) instead of the dotted form
+  (``"SamplingMode.SCHEMA_ONLY"``); no production code paths exercise
+  ``str()`` on the enum (Pydantic ``model_dump_json`` uses ``.value`` and
+  ``_LOGGER`` calls go through ``json.dumps``), so the change is invisible
+  to audit JSONL consumers.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -37,13 +44,12 @@ from signalforge.warehouse.models import ColumnStats
 _BASE_MODEL_CONFIG = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
 
-class SamplingMode(str, Enum):
+class SamplingMode(StrEnum):
     """Sampling-mode enum for the safety layer (DEC-024).
 
-    Implemented as a ``str + Enum`` mixin rather than :class:`enum.StrEnum`
-    because the project's Python floor is 3.10. Members compare equal to
-    their string values (``SamplingMode.SCHEMA_ONLY == "schema-only"``) and
-    round-trip cleanly through YAML / JSON.
+    :class:`enum.StrEnum` member: ``SamplingMode.SCHEMA_ONLY == "schema-only"``
+    and instances are :class:`str` subclasses, so YAML / JSON round-trip
+    cleanly. See the module docstring for the 3.11-floor history (issue #46).
     """
 
     SCHEMA_ONLY = "schema-only"

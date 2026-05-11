@@ -21,7 +21,7 @@ Lives under ``tests/cli/`` and is never imported from production code.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from signalforge.diff.models import DiffReport
@@ -121,7 +121,7 @@ def make_grading_report(model: Model) -> GradingReport:
     return GradingReport(
         signalforge_version="0.0.0-test",
         run_id="run-cli-test",
-        timestamp=datetime(2026, 5, 3, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 5, 3, tzinfo=UTC),
         duration_seconds=0.0,
         model_unique_id=model.unique_id,
         rubric_hash="0" * 16,

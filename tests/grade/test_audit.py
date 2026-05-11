@@ -34,7 +34,7 @@ import json
 import os
 import stat
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -55,7 +55,7 @@ from signalforge.grade.models import GradeEvent, GradingReport
 def _make_event(**overrides: Any) -> GradeEvent:
     base: dict[str, Any] = dict(
         run_id="0123456789abcdef0123456789abcdef",
-        timestamp=datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
         model_unique_id="model.test.x",
         artifact_id="column.id.description",
         criterion_id="grounded_in_sql",
@@ -362,7 +362,7 @@ def _make_report(**overrides: Any) -> GradingReport:
     base: dict[str, Any] = dict(
         signalforge_version=signalforge.__version__,
         run_id="0123456789abcdef0123456789abcdef",
-        timestamp=datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
         duration_seconds=1.5,
         model_unique_id="model.test.x",
         rubric_hash="abc1234567890def",
@@ -413,7 +413,7 @@ def test_build_grade_event_default_cache_token_fields_zero() -> None:
     """
     event = _build_grade_event(
         run_id="r" * 32,
-        timestamp=datetime(2026, 5, 1, 12, 0, 0, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC),
         model_unique_id="model.test.x",
         artifact_id="column.id.description",
         criterion_id="grounded_in_sql",

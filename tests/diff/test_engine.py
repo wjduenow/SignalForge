@@ -31,7 +31,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -155,7 +155,7 @@ def _grading_report_for(
         signalforge_version="0.0.0-test",
         model_unique_id=model_unique_id,
         run_id="r" * 32,
-        timestamp=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 5, 2, tzinfo=UTC),
         rubric_hash="0" * 16,
         thresholds=(0.7, 0.5),
         results=results,

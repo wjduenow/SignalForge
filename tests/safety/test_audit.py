@@ -16,7 +16,7 @@ import os
 import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ pytestmark = pytest.mark.safety
 
 def _make_event(**overrides: Any) -> AuditEvent:
     base: dict[str, Any] = dict(
-        timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        timestamp=datetime(2026, 1, 1, tzinfo=UTC),
         model_unique_id="model.test.x",
         mode=SamplingMode.SCHEMA_ONLY,
         columns_sent=("id", "name"),
@@ -62,7 +62,7 @@ def test_audit_write_round_trips_through_json_loads(tmp_path: Path) -> None:
     write(_make_event(), audit_path)
     payload = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[0])
     assert payload["model_unique_id"] == "model.test.x"
-    assert payload["mode"] == SamplingMode.SCHEMA_ONLY.value
+    assert payload["mode"] == SamplingMode.SCHEMA_ONLY
     assert payload["columns_sent"] == ["id", "name"]
     assert payload["redactions"] == []
     assert payload["audit_schema_version"] == 1
@@ -107,7 +107,7 @@ def test_audit_write_emits_logger_info_line(
     # rather than the full ``model_unique_id`` field name to keep the line
     # short — both name and value are present.
     assert "model.test.x" in msg
-    assert f'"mode": "{SamplingMode.SCHEMA_ONLY.value}"' in msg
+    assert f'"mode": "{SamplingMode.SCHEMA_ONLY}"' in msg
     assert '"columns_sent": 2' in msg
     assert '"redacted": 0' in msg
     assert '"audit_schema_version": 1' in msg
