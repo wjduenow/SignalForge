@@ -27,8 +27,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import pytest
-
 from signalforge.cli.generate import add_parser
 
 # ---------------------------------------------------------------------------
@@ -106,22 +104,14 @@ def test_5_surface_parity_for_select_flag() -> None:
             f"plan file missing example selector {selector!r} — DEC-017 parity break"
         )
 
-    # Surface 2 — cookbook section. Optional; US-008 may not yet have
-    # merged when this test runs. Skip rather than fail on the merge race;
-    # once US-008 lands the section, this branch flips to a hard assertion.
-    if not _OPS_DOC.exists():
-        pytest.skip(
-            "docs/cli-ops.md not present in this checkout; surface 2 will "
-            "activate when US-008 merges."
-        )
+    # Surface 2 — cookbook section. US-008 has merged; this is a hard
+    # contract. Missing file or missing sentinel is a parity break.
+    assert _OPS_DOC.exists(), f"docs/cli-ops.md not found at {_OPS_DOC}"
     ops_text = _OPS_DOC.read_text(encoding="utf-8")
-    if _COOKBOOK_SENTINEL not in ops_text:
-        pytest.skip(
-            f"docs/cli-ops.md does not yet contain the {_COOKBOOK_SENTINEL!r} "
-            "cookbook section; US-008 ships it in a separate PR. Once that "
-            "PR merges, this test becomes a hard contract."
-        )
-    # Cookbook section IS present — assert the contract.
+    assert _COOKBOOK_SENTINEL in ops_text, (
+        f"docs/cli-ops.md missing the {_COOKBOOK_SENTINEL!r} cookbook section "
+        "— DEC-017 parity break (US-008 ships this section)"
+    )
     for selector in _EXAMPLE_SELECTORS:
         assert selector in ops_text, (
             f"docs/cli-ops.md cookbook missing example selector {selector!r} — DEC-017 parity break"

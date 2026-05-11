@@ -641,12 +641,16 @@ Semantics:
   batch start, so `_active_session_id` and the rest of the BigQuery
   session state cannot bleed between iterations. Adds ~100-500ms BQ
   client init per model — acceptable vs. state-corruption risk.
-- **Anthropic prompt cache survives across iterations** (DEC-015).
-  The drafter's cached block is the system prompt + manifest
-  neighbours; across N models in one process, the system-prompt
-  portion is byte-stable so cache hits land on it after model 1.
-  The dynamic block (`<MODEL_SQL>` + per-model neighbours) varies
-  per iteration — that's expected, it's the model under draft.
+- **Anthropic prompt cache behavior** (DEC-015). The drafter's
+  explicitly cache-marked block is the manifest summary (model
+  under draft + its neighbours), which **changes per model** — so
+  the marked cache does NOT amortise across siblings in a batch.
+  Cost savings within one process come from Anthropic's automatic
+  caching of the static system prompt, which IS byte-stable across
+  iterations once it crosses the auto-cache size threshold. Net:
+  expect partial cache savings on system-prompt tokens; do not
+  expect the marked manifest-summary block to hit on subsequent
+  models.
 - **Per-model progress prefix.** When a TTY is attached and the
   batch driver runs, each iteration emits one stderr line
   `[i/N] <model_unique_id>` before that model's existing stage

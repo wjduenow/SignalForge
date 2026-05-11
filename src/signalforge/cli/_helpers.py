@@ -561,11 +561,19 @@ def format_batch_summary(outcome: _BatchOutcome) -> str:
     # padded to the longest named-id length (capped at 50 to bound the
     # padding for pathological model names); narrower ids land in a
     # consistent column with ``exit <code>``.
-    id_width = max((len(o.model_unique_id) for o in named), default=0)
+    # Defense-in-depth: scrub newline / carriage-return / tab from the id
+    # before measuring + emitting. Real dbt unique_ids never contain control
+    # characters (they're validated by dbt itself + Pydantic-strict-typed at
+    # manifest load), but the summary is a CI-parser-keyable surface and a
+    # control character would corrupt the column geometry irrecoverably.
+    safe_ids = [
+        o.model_unique_id.replace("\n", " ").replace("\r", " ").replace("\t", " ") for o in named
+    ]
+    id_width = max((len(s) for s in safe_ids), default=0)
     id_width = min(id_width, 50)
-    for o in named:
+    for o, safe_id in zip(named, safe_ids, strict=True):
         klass = o.exception_class_name or "Exception"
-        lines.append(f"  - {o.model_unique_id:<{id_width}}  exit {o.exit_code}  ({klass})")
+        lines.append(f"  - {safe_id:<{id_width}}  exit {o.exit_code}  ({klass})")
     overflow = failed_count - _BATCH_SUMMARY_FAILURE_CAP
     if overflow > 0:
         lines.append(f"  ... and {overflow} more")

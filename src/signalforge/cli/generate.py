@@ -1027,8 +1027,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
         # ``args.select`` is undefined unless a test injects it via
         # ``argparse.Namespace`` directly. ``getattr`` with a default of
         # ``None`` is the safe accessor that survives both worlds.
+        # ``is not None`` (not truthiness) so an empty-string ``--select ""``
+        # — which argparse accepts and the mutex group treats as "provided" —
+        # routes through ``_run_batch`` and surfaces as ``CliSelectorParseError``
+        # (DEC-007) rather than silently falling through to the single-model
+        # branch where ``args.model`` is ``None``.
         select_expr = getattr(args, "select", None)
-        if select_expr:
+        if select_expr is not None:
             outcome = _run_batch(manifest, profile, args, project_dir=project_dir)
             # Write each model's rendered text to stdout in invocation
             # order (US-005 owns the ``[i/N]`` prefix on stderr and the

@@ -248,6 +248,38 @@ def test_format_batch_summary_names_failures_with_tier_and_class() -> None:
     assert "(LLMRateLimitError)" in rendered
 
 
+def test_format_batch_summary_sanitises_control_chars_in_unique_id() -> None:
+    """Newline / CR / tab in ``model_unique_id`` is scrubbed to a single
+    space before rendering the failure-bullet column. Real dbt unique_ids
+    never contain control chars (they're Pydantic-strict-typed at manifest
+    load), but the summary is a CI-parser-keyable surface and a stray
+    ``\\n`` would corrupt the row geometry irrecoverably.
+
+    Regression guard for QG pass-3 fix (``format_batch_summary`` was not
+    sanitising the failure-bullet id; pass-4 flagged the missing test).
+    """
+    outcomes = (
+        _make_outcome(
+            "model.x.evil\nINJECTED\ttabby\rEOL",
+            exit_code=2,
+            kept=0,
+            exc_class="ManifestNotFoundError",
+        ),
+    )
+    batch = _make_batch(outcomes)
+    rendered = format_batch_summary(batch)
+    bullet_lines = [line for line in rendered.splitlines() if line.startswith("  - ")]
+    # Exactly ONE bullet (no row geometry corruption from embedded \n).
+    assert len(bullet_lines) == 1
+    # The original control chars are gone; they're replaced by single
+    # spaces. The sanitised id substring appears verbatim in the bullet.
+    assert "model.x.evil INJECTED tabby EOL" in bullet_lines[0]
+    # And no raw control chars survived into the rendered text.
+    assert "\nINJECTED" not in rendered
+    assert "\tINJECTED" not in rendered.replace("\n", "")
+    assert "\rEOL" not in rendered
+
+
 def test_format_batch_summary_truncates_failure_list_at_50() -> None:
     """100 failures → first 50 named + ``  ... and 50 more`` (DEC-009)."""
     outcomes = tuple(

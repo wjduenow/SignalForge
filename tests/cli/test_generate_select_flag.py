@@ -272,6 +272,36 @@ def test_select_parse_failure_returns_exit_2_with_cli_selector_parse_error(
     assert "Traceback" not in captured.err
 
 
+def test_select_empty_string_routes_to_parse_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--select ""`` (empty string) is argparse-valid (mutex group
+    accepts it as "provided") but a malformed selector. The dispatcher
+    MUST route through ``_run_batch`` (not fall through to the
+    single-model branch where ``args.model is None``); the parser raises
+    :class:`SelectorParseError` which is re-wrapped as
+    :class:`CliSelectorParseError`. Exit 2; stderr names the empty
+    expression.
+
+    Regression guard for QG pass-1 finding: truthiness check on
+    ``select_expr`` previously fell through to single-model on empty
+    string. Now uses ``is not None``.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    manifest = _make_multi_manifest()
+    _install_happy_patches(monkeypatch, manifest)
+
+    code = main(["generate", "--select", ""])
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "failed to parse" in captured.err
+    assert "Traceback" not in captured.err
+
+
 # ---------------------------------------------------------------------------
 # --select zero-match → exit 2 with CliSelectorNoMatchError stderr shape
 # ---------------------------------------------------------------------------
