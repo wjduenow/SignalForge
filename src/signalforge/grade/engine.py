@@ -45,8 +45,7 @@ Design commitments operationalised here (``plans/super/7-quality-grader.md``):
   timestamp ranges.
 * **DEC-021** — Test-side ``expect_grade_responses`` helper lives in
   :file:`tests/grade/_fake.py`; the orchestrator only knows about the
-  public :class:`signalforge.llm._client._AnthropicClientProtocol`
-  contract.
+  public :class:`signalforge.llm.AnthropicClientProtocol` contract.
 * **DEC-022** — ``project_dir`` defaults to :func:`pathlib.Path.cwd`
   at orchestrator entry; ``audit_path`` and ``sidecar_path`` resolve
   relative to it.
@@ -122,7 +121,7 @@ from signalforge.grade.rubric import (
     _canonical_rubric_hash,
     validate_rubric,
 )
-from signalforge.llm._client import _AnthropicClientProtocol
+from signalforge.llm import AnthropicClientProtocol
 from signalforge.llm.client import call_anthropic
 from signalforge.llm.errors import LLMError
 from signalforge.manifest.models import Model
@@ -279,7 +278,7 @@ def _grade_one(
     rubric_hash: str,
     template_hash: str,
     crit_hash: str,
-    client: _AnthropicClientProtocol | None,
+    client: AnthropicClientProtocol | None,
     run_id: str,
     timestamp: datetime,
     model_unique_id: str,
@@ -456,7 +455,7 @@ def grade_artifacts(
     config: GradeConfig | None = None,
     audit_path: Path | None = None,
     sidecar_path: Path | None = None,
-    client: _AnthropicClientProtocol | None = None,
+    client: AnthropicClientProtocol | None = None,
     project_dir: Path | None = None,
 ) -> GradingReport:
     """Grade every drafted artifact for ``model`` against ``rubric``.

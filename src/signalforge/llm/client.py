@@ -40,7 +40,7 @@ import time
 from typing import Any, Final, Literal
 
 from signalforge.llm._client import (
-    _AnthropicClientProtocol,
+    AnthropicClientProtocol,
     _load_anthropic_exception_classes,
 )
 from signalforge.llm.errors import (
@@ -170,7 +170,7 @@ def call_anthropic(
     max_retries_429: int = 3,
     max_retries_5xx: int = 1,
     max_retries_conn: int = 1,
-    client: _AnthropicClientProtocol | None = None,
+    client: AnthropicClientProtocol | None = None,
 ) -> LLMResult:
     """Issue one Anthropic ``messages.create`` with retry + audit guard.
 
@@ -187,7 +187,7 @@ def call_anthropic(
 
     The ``client`` argument is the dependency-injection seam used by tests
     (the hand-rolled :class:`FakeAnthropicClient` in ``tests/llm/_fake.py``
-    satisfies :class:`_AnthropicClientProtocol`); production callers leave
+    satisfies :class:`AnthropicClientProtocol`); production callers leave
     it ``None`` and let :func:`_make_anthropic_client` lazy-construct the
     real SDK client. ``client=None`` here is documented for completeness;
     the live drafter in US-013 will always thread an explicit client

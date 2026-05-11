@@ -3,7 +3,7 @@
 Covers:
 
 * The factory returns an object satisfying
-  :class:`signalforge.llm._client._AnthropicClientProtocol`.
+  :class:`signalforge.llm.AnthropicClientProtocol`.
 * The placeholder stub fake (``tests/llm/_fake.py::_StubAnthropicClient``)
   also satisfies the protocol — confirms the structural shape both real and
   test clients commit to.
@@ -23,10 +23,8 @@ from pathlib import Path
 
 import pytest
 
-from signalforge.llm._client import (
-    _AnthropicClientProtocol,
-    _make_anthropic_client,
-)
+from signalforge.llm import AnthropicClientProtocol
+from signalforge.llm._client import _make_anthropic_client
 
 from ._fake import _StubAnthropicClient
 
@@ -54,14 +52,14 @@ def test_make_anthropic_client_returns_protocol_satisfying_object() -> None:
 
 
 def test_stub_satisfies_protocol() -> None:
-    """The placeholder stub satisfies ``_AnthropicClientProtocol``.
+    """The placeholder stub satisfies ``AnthropicClientProtocol``.
 
-    ``_AnthropicClientProtocol`` is ``@runtime_checkable``, so we can use
+    ``AnthropicClientProtocol`` is ``@runtime_checkable``, so we can use
     ``isinstance`` directly. This is the contract the full
     ``FakeAnthropicClient`` (US-006) inherits.
     """
     stub = _StubAnthropicClient()
-    assert isinstance(stub, _AnthropicClientProtocol)
+    assert isinstance(stub, AnthropicClientProtocol)
     assert hasattr(stub.messages, "create")
     assert hasattr(stub.messages, "count_tokens")
 

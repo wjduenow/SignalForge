@@ -24,6 +24,11 @@ _DOCUMENTED_PUBLIC = (
     "call_anthropic",
     # Result model
     "LLMResult",
+    # Client protocol (issue #44 — promoted from the private
+    # ``_AnthropicClientProtocol`` so the ``client`` kwarg on
+    # ``draft_schema`` / ``grade_artifacts`` and downstream library
+    # callers can type-annotate against the public name).
+    "AnthropicClientProtocol",
     # Errors — base + helper-call family
     "LLMError",
     "LLMHelperError",
@@ -64,6 +69,7 @@ def test_each_public_name_is_importable_via_from_signalforge_llm() -> None:
     from signalforge.llm import (  # noqa: F401
         PRICE_TABLE_VERSION,
         PRICES,
+        AnthropicClientProtocol,
         EstimateUnknownModelError,
         LLMAuthError,
         LLMCacheTooLargeError,

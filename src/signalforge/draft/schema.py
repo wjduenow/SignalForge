@@ -60,7 +60,7 @@ from signalforge.draft.errors import (
 from signalforge.draft.models import CandidateSchema
 from signalforge.draft.parser import _LLMResultMeta, parse_draft_response
 from signalforge.draft.prompts import render_prompt
-from signalforge.llm._client import _AnthropicClientProtocol
+from signalforge.llm import AnthropicClientProtocol
 from signalforge.llm.client import call_anthropic
 from signalforge.llm.models import LLMResult
 from signalforge.manifest.models import Manifest, Model
@@ -116,7 +116,7 @@ def draft_from_request(
     *,
     config: DraftConfig,
     audit_path: Path,
-    _client: _AnthropicClientProtocol | None = None,
+    _client: AnthropicClientProtocol | None = None,
 ) -> DraftOutcome:
     """Orchestrate one LLM draft call from a pre-built :class:`LLMRequest`.
 
@@ -267,7 +267,7 @@ def draft_schema(
     manifest: Manifest,
     *,
     config: DraftConfig,
-    _client: _AnthropicClientProtocol | None = None,
+    _client: AnthropicClientProtocol | None = None,
 ) -> DraftOutcome:
     """End-to-end draft entry point: safety-layer + prompt + LLM + parse + audit.
 

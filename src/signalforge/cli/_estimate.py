@@ -94,7 +94,7 @@ if TYPE_CHECKING:
     from signalforge.draft.config import DraftConfig
     from signalforge.grade.config import GradeConfig
     from signalforge.grade.rubric import Criterion
-    from signalforge.llm._client import _AnthropicClientProtocol
+    from signalforge.llm import AnthropicClientProtocol
     from signalforge.manifest.models import Manifest, Model
     from signalforge.prune.config import PruneConfig
     from signalforge.warehouse.base import WarehouseAdapter
@@ -271,7 +271,7 @@ def _truncate_criterion_text(text: str) -> str:
 
 def _count_draft_tokens(
     *,
-    client: _AnthropicClientProtocol,
+    client: AnthropicClientProtocol,
     draft_config: DraftConfig,
     system: str,
     cached_block: str,
@@ -307,7 +307,7 @@ def _count_draft_tokens(
 
 def _count_grade_criterion_tokens(
     *,
-    client: _AnthropicClientProtocol,
+    client: AnthropicClientProtocol,
     grade_config: GradeConfig,
     system_and_rubric: str,
     artifact_id: str,
@@ -403,7 +403,7 @@ def estimate(
     grade_config: GradeConfig,
     prune_config: PruneConfig,
     adapter: WarehouseAdapter,
-    anthropic_client: _AnthropicClientProtocol,
+    anthropic_client: AnthropicClientProtocol,
     *,
     project_dir: Path | None = None,  # noqa: ARG001 (reserved for v0.2)
 ) -> EstimateReport:

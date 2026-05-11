@@ -110,7 +110,7 @@ from signalforge.cli.errors import (
     CliSelectorParseError,
 )
 from signalforge.grade.rubric import DEFAULT_RUBRIC
-from signalforge.llm._client import _AnthropicClientProtocol
+from signalforge.llm import AnthropicClientProtocol
 from signalforge.manifest import select_models
 from signalforge.manifest.errors import SelectorParseError
 from signalforge.manifest.models import Manifest, Model
@@ -373,7 +373,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
 # ---------------------------------------------------------------------------
 
 
-def _make_anthropic_client() -> _AnthropicClientProtocol | None:
+def _make_anthropic_client() -> AnthropicClientProtocol | None:
     """Return the Anthropic client to inject into the draft / grade stages.
 
     Default implementation returns ``None`` so the underlying stage's
