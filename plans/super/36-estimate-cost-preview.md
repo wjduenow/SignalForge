@@ -5,15 +5,16 @@
 - **Ticket:** [GH #36](https://github.com/wjduenow/SignalForge/issues/36)
 - **Branch:** `feature/36-estimate-cost-preview`
 - **Worktree:** `../worktrees/SignalForge/36-estimate-cost-preview`
-- **Phase:** devolved
-- **PR:** [#63](https://github.com/wjduenow/SignalForge/pull/63) (draft)
-- **Epic:** `bd_1-scaffolding-bmz`
+- **Phase:** complete
+- **PR:** [#63](https://github.com/wjduenow/SignalForge/pull/63)
+- **Epic:** `bd_1-scaffolding-bmz` (closed)
 - **Sessions:**
   - 2026-05-11 — initial discovery + research
   - 2026-05-11 — Phase 1 scoping answers, Phase 2 architecture review
   - 2026-05-11 — Phase 3 refinement (15 DECs), Phase 4 detailing (8 stories)
   - 2026-05-11 — Phase 5 published as draft PR #63
   - 2026-05-11 — Phase 6 approved, Phase 7 devolved to beads
+  - 2026-05-11 — Ralph executed US-001..US-008 end-to-end; QG applied 4 review passes (1 BLOCKER + 4 IMPORTANT + 3 NIT fixed)
 
 ## Ticket summary
 

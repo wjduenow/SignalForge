@@ -155,6 +155,20 @@ TTY-gated by default: `should_emit_progress(quiet, verbose)` returns `True` only
 
 The four progress helpers (`should_emit_progress`, `format_elapsed`, `emit_progress_entry`, `emit_progress_done`) live in `_helpers.py`; the orchestrator makes a single decision once at startup and passes the bool through stage by stage. Don't introspect TTY-ness mid-pipeline.
 
+## Estimate-style commands degrade on supplementary sub-stage failures (DEC-005 of #36)
+
+Issue #36's `--estimate` flag has TWO data sources — `count_tokens` (load-bearing; the LLM cost half is the whole point) and `adapter.estimate_query_bytes(...)` BigQuery dryRun (supplementary; the warehouse-bytes line is nice-to-have). DEC-005 of `plans/super/36-estimate-cost-preview.md` locks the policy: a `WarehouseError` from the supplementary step is captured into a `warehouse_unavailable_reason` field on the typed report, the renderer prints `<unavailable: <ErrorClass>>`, the engine emits ONE stderr WARNING via lazy-format JSON, and the command still exits 0. The load-bearing source (LLM) failure propagates as today through the existing panic boundary; the supplementary source degrades.
+
+Apply this pattern verbatim to any future preview / dry-run / `--explain`-style CLI flag that has more than one data source where some are supplementary. Three load-bearing rules:
+
+1. **Identify which sources are load-bearing vs supplementary BEFORE writing the engine.** Load-bearing source failures propagate (typed error → existing panic boundary → mapped exit code). Supplementary source failures are caught at the engine boundary and surfaced as typed `*_unavailable_reason: str | None` fields on the report.
+2. **Mirror `prune-engine.md` DEC-009 conservative-bias verbatim.** The captured reason is `f"{type(exc).__name__}: {str(exc)[:200]}"`. The WARNING emission is one line, lazy-format JSON. The renderer's `<unavailable: <ErrorClass>>` shape uses the class-name prefix split (`reason.split(":", 1)[0]`). No paraphrasing — these strings are operator-actionable surfaces; CI parsers may key on them.
+3. **Pin BOTH the report-field AND the WARNING via tests.** The QG pass-4 lesson (#36 B-3): a test that only pins the `*_unavailable_reason` field does NOT catch a refactor that silently drops the `_LOGGER.warning(...)` breadcrumb. Add a `caplog`-based test alongside the field-shape test. Without the WARNING, operators staring at `<unavailable: ...>` in stdout have no out-of-band signal that the run was degraded.
+
+This generalises both `prune-engine.md` DEC-009 (conservative-bias routing) and `warehouse-adapters.md` cleanup-boundary fail-soft (operator-actionable WARNING) into the CLI-flag surface. It is NOT the same as the panic-path catch (DEC-016 of this file) — that catch maps escaping exceptions to exit codes; this pattern catches inside the engine so the CLI never sees the supplementary error in the first place.
+
+See-Also: `prune-engine.md` § "Conservative drop-reason taxonomy (DEC-006, DEC-011)" for the original conservative-bias routing template; `warehouse-adapters.md` § "Cleanup-boundary fail-soft pattern" for the WARNING-shape contract.
+
 ## API alignment with adjacent stages
 
 Every subcommand module exports the same two public symbols:
