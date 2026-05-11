@@ -70,7 +70,7 @@ Every `GradeEvent` carries five 16-hex blake2b-8 (digest_size=8) fingerprints:
 
 The four default criterion texts (DEC-016) are locked verbatim and tested for stability via a pinned golden hash. Changing the text is a reproducibility break — bump `audit_schema_version` if it happens.
 
-## `_artifact_id_for` canonical dotted-path format (DEC-009 + post-QG fix)
+## `_artifact_id_for` canonical dotted-path format (DEC-009 + post-QG fix + issue #42 hoist)
 
 Six artifact_id shapes the formatter emits:
 
@@ -82,6 +82,8 @@ Six artifact_id shapes the formatter emits:
 Collision rule (post-QG fix): two tests in the SAME scope (model-level OR same-column) sharing a `test.type` get an 8-hex `_model_test_args_hash` suffix to disambiguate. Without this, two `accepted_values` tests on the same column with different `values` lists would produce identical `artifact_id`s and JSONL records would collide on the `(run_id, artifact_id, criterion_id)` triple — the diff renderer (#8) couldn't distinguish them.
 
 The `extract_artifact_text` resolver in `signalforge.grade.prompts` accepts both 4-part and 5-part dotted forms. When v0.2 adds new artifact shapes (model-level docs, snapshots, etc.), extend both the formatter and the resolver in lockstep — they're a paired contract.
+
+**Issue #42 — implementation hoisted to `signalforge._common.artifact_id`.** `_artifact_id_for`, `_model_test_args_hash`, and `_test_args_hashes` in `signalforge.grade.engine` are now re-exports of the same function objects from `signalforge._common.artifact_id` (`artifact_id_for`, `model_test_args_hash`, `compute_args_hashes`); `signalforge.diff._artifact_id` does the same. Cross-stage parity is now enforced by `is` identity rather than byte-equal snapshot — drift is impossible by construction. The shared seam raises plain `ValueError` on programming errors; the prior `GradeError` wrap was dropped because every call site in `_stable_artifact_pairs` feeds canonical inputs and the failure modes were unreachable. When extending the formatter (new artifact shape; collision-rule change), edit only the shared module; both layers pick up the change.
 
 ## Single GradeEvent construction seam (DEC-029, sixth AST scan)
 
