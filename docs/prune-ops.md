@@ -331,11 +331,11 @@ safety) and `signalforge.draft.audit` (DEC-006/008/013 of llm-drafter).
 
 | Field                  | Type                                | Meaning                                                                                          |
 | ---------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `audit_schema_version` | integer (`Literal[1]`)              | Audit shape version. Currently `1`. Bump only on shape change; `extra="ignore"` handles additions. |
+| `audit_schema_version` | integer (`Literal[2]`)              | Audit shape version. Currently `2` (bumped 1→2 by issue #55 when `config_hash` migrated to `blake2b-8`). Bump only on shape change; `extra="ignore"` handles additions. |
 | `signalforge_version`  | PEP-440 version string              | Package version that produced the record.                                                        |
 | `record_id`            | 32-hex-char string                  | Fresh `uuid4().hex` per record; gives reviewers a stable handle for a single decision.           |
 | `timestamp`            | ISO-8601 UTC, microsecond, `Z`      | When the decision was finalised.                                                                 |
-| `config_hash`          | 16 hex chars                        | First 16 hex chars of `SHA-256(canonical_config_json)`. Mirrors safety's `policy_hash` (DEC-005). |
+| `config_hash`          | 16 hex chars                        | `blake2b(canonical_config_json, digest_size=8)`. Migrated from `SHA-256[:16]` by issue #55 so the audit corpus reads one hash recipe across every writer. Mirrors safety's `policy_hash` (DEC-005). |
 | `model_unique_id`      | string                              | dbt `unique_id` of the pruned model.                                                             |
 | `test`                 | discriminated-union object          | The original `CandidateTest` from the drafter (typed; not a loose dict — DEC-004).               |
 | `test_anchor`          | string                              | `"column.<name>"` for column-scoped tests; literal `"model"` for model-level tests.              |

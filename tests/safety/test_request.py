@@ -318,12 +318,14 @@ def test_build_llm_request_audit_carries_policy_hash(
     assert event.policy_hash == _compute_policy_hash(policy)
 
 
-def test_build_llm_request_audit_carries_schema_version_2(
+def test_build_llm_request_audit_carries_schema_version_3(
     customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Issue #54 bumped audit_schema_version 1 → 2. The writer's
-    ``_AUDIT_SCHEMA_VERSION`` constant is the source of truth; this test
-    pins it through the build_llm_request seam."""
+    """Issue #54 bumped audit_schema_version 1 → 2; issue #55 bumped 2 → 3
+    when ``policy_hash`` migrated from ``SHA-256[:16]`` to
+    ``blake2b(digest_size=8)``. The writer's ``_AUDIT_SCHEMA_VERSION``
+    constant is the source of truth; this test pins it through the
+    build_llm_request seam."""
     rec = _AuditRecorder()
     monkeypatch.setattr("signalforge.safety.request.audit.write", rec)
 
@@ -332,7 +334,7 @@ def test_build_llm_request_audit_carries_schema_version_2(
     build_llm_request(customers_model, fake, policy)
 
     event, _ = rec.calls[0]
-    assert event.audit_schema_version == 2
+    assert event.audit_schema_version == 3
 
 
 def test_build_llm_request_audit_policy_flags_sample_mode_enabled(

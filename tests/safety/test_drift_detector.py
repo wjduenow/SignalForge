@@ -69,8 +69,10 @@ def test_audit_event_drift_detector_rejects_unknown_field():
 
 
 def test_audit_event_fixture_audit_schema_version_is_current():
-    """Issue #54 bumped audit_schema_version 1 → 2. Pin the fixture so a
-    future bump without updating the sample line breaks the test loudly.
+    """Issue #54 bumped audit_schema_version 1 → 2; issue #55 bumped 2 → 3
+    when ``policy_hash`` migrated from ``SHA-256[:16]`` to
+    ``blake2b(digest_size=8)``. Pin the fixture so a future bump without
+    updating the sample line breaks the test loudly.
     """
     from signalforge.safety.request import _AUDIT_SCHEMA_VERSION
 
@@ -82,7 +84,8 @@ def test_audit_event_fixture_audit_schema_version_is_current():
 def test_audit_event_fixture_exercises_draft_skip_reason():
     """The fixture must include at least one draft_skip_* RedactionRecord
     so consumers gating on audit_schema_version >= 2 can verify their
-    parser handles the new reason values (issue #54).
+    parser handles the new reason values (issue #54). Carried through the
+    issue-#55 bump 2 → 3.
     """
     seen_reasons: set[str] = set()
     for raw in _fixture_lines():

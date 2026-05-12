@@ -102,7 +102,7 @@ class StrictPruneEvent(BaseModel):
 
     model_config = _STRICT
 
-    audit_schema_version: Literal[1] = 1
+    audit_schema_version: int
     signalforge_version: str
     record_id: str
     timestamp: str
@@ -179,6 +179,41 @@ def test_strict_prune_event_validates_jsonl_fixture() -> None:
         f"missing: {expected_reasons - seen_reasons}, "
         f"unexpected: {seen_reasons - expected_reasons}"
     )
+
+
+def test_prune_event_fixture_audit_schema_version_is_current() -> None:
+    """Issue #55 bumped audit_schema_version 1 → 2 when ``config_hash``
+    migrated from ``SHA-256[:16]`` to ``blake2b(digest_size=8)``. Pin the
+    fixture so a future bump without updating the sample lines breaks
+    the test loudly. Mirrors safety's analogous pin.
+    """
+    from signalforge.prune.audit import _PRUNE_AUDIT_SCHEMA_VERSION
+
+    fixture_path = _FIXTURES_DIR / "prune_event_v1.jsonl"
+    text = fixture_path.read_text(encoding="utf-8")
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert lines, f"expected one-or-more JSONL lines in {fixture_path}"
+
+    for line in lines:
+        payload = json.loads(line)
+        assert payload["audit_schema_version"] == _PRUNE_AUDIT_SCHEMA_VERSION
+
+
+def test_prune_event_round_trips_legacy_schema_version_1() -> None:
+    """A pre-#55 ``prune.jsonl`` record carrying
+    ``audit_schema_version: 1`` must still validate against the current
+    :class:`PruneEvent` — audit replay across versions is a real
+    requirement, mirrors :class:`signalforge.safety.models.AuditEvent`'s
+    same round-trip guarantee. This is the load-bearing reason
+    :attr:`PruneEvent.audit_schema_version` is typed :class:`int`
+    (not :class:`typing.Literal`) in production.
+    """
+    fixture_path = _FIXTURES_DIR / "prune_event_v1.jsonl"
+    first_line = fixture_path.read_text(encoding="utf-8").splitlines()[0]
+    payload = json.loads(first_line)
+    payload["audit_schema_version"] = 1
+    event = PruneEvent.model_validate(payload)
+    assert event.audit_schema_version == 1
 
 
 # --- Field-set parity ------------------------------------------------------

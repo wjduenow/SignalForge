@@ -30,8 +30,8 @@ When adding a new mode or surface, make sure the LLM-bound payload uses hashed n
 Every `AuditEvent` carries three fields that look minor but are load-bearing:
 
 - `signalforge_version: str` — read from `signalforge.__version__` at write time. Lets a reviewer know which code produced the record.
-- `policy_hash: str` — 16-hex-char SHA-256 of the resolved `SafetyPolicy.model_dump_json` (sorted keys, canonical form via the `_compute_policy_hash` helper). Lets a reviewer verify all records in a run came from the same policy.
-- `audit_schema_version: int = 1` — frozen at the constant in production code. Bump when the JSONL schema evolves; v0.2 readers gate on this.
+- `policy_hash: str` — 16-hex-char `blake2b(digest_size=8)` of the resolved `SafetyPolicy.model_dump_json` (sorted keys, canonical form via the `_compute_policy_hash` helper). Migrated from `SHA-256[:16]` by issue #55 so the audit corpus reads one hash recipe across every writer (`safety.jsonl` / `llm_responses.jsonl` / `prune.jsonl` / `grade.jsonl` / `diff.json` all use `blake2b-8` over canonical JSON). Lets a reviewer verify all records in a run came from the same policy.
+- `audit_schema_version: int` — frozen at the writer's `_AUDIT_SCHEMA_VERSION` constant. Bump when the JSONL schema evolves; v0.2 readers gate on this. Currently `3` in production (bumped 1→2 by #54 for the `draft_skip_*` reasons, 2→3 by #55 for the `policy_hash` recipe change). The field is typed `int` (not `Literal`) so older audit JSONLs still round-trip cleanly across version bumps — audit replay is a real requirement.
 
 The drift-detector test (`tests/safety/test_drift_detector.py`) pairs production `AuditEvent` (`extra="ignore"`) with a one-off `StrictAuditEvent` (`extra="forbid"`) validated against the committed JSONL fixture. Adding a field to production without updating the strict model OR the fixture breaks the test loudly. Don't bypass.
 

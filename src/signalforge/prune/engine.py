@@ -687,7 +687,9 @@ def prune_tests(
     Pipeline:
 
     1. Resolve config (``None`` → defaults). Compute ``config_hash`` via
-       ``sha256(canonical_json)[:16]`` for audit-row provenance.
+       ``blake2b(canonical_json, digest_size=8)`` for audit-row provenance
+       (16 hex chars; migrated from ``SHA-256[:16]`` by issue #55 so the
+       audit corpus reads one hash recipe across every writer).
     2. Validate :attr:`PruneConfig.trusted_models` against ``manifest``
        (DEC-008). The first miss raises
        :class:`PruneTrustedModelNotFoundError`; no warehouse calls have

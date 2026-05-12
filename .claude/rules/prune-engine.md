@@ -191,6 +191,16 @@ Issue #51 lands `PruneConfig.min_kept_rate_warn` as a soft, end-of-run signal fo
 
 When a future v0.3 surface adds a new run-shape signal (drift-detection counts, grade-quality summary, multi-model batch aggregates), apply the same three-part contract: (1) operator-configurable threshold field on the relevant `<Stage>Config`, with `field_validator` range-bound, (2) single helper-function emission at every return site (one source of truth, no per-branch duplication), (3) doc framing in the relevant `docs/<stage>-ops.md` that names the failure mode the signal catches. Default the field to a value that preserves the silent posture for existing operators.
 
+## v0.2 additions (issue #55 — normalise hash recipe across writers)
+
+Issue #55 normalised every reproducibility hash in the audit / sidecar corpus to `blake2b(digest_size=8)` over canonical JSON (the recipe already used by `signalforge.draft`, `signalforge.grade`, `signalforge.diff`). The pre-#55 outliers were `signalforge.prune.audit._compute_config_hash` (`SHA-256[:16]`) and `signalforge.safety.policy._compute_policy_hash` (`SHA-256[:16]`); both migrated in lockstep so a reviewer correlating `safety.jsonl` / `llm_responses.jsonl` / `prune.jsonl` / `grade.jsonl` / `diff.json` reads one recipe.
+
+- **`_PRUNE_AUDIT_SCHEMA_VERSION` bumped 1 → 2 (issue #55).** `PruneEvent.audit_schema_version: Literal[2] = 2` in production; the v0.1 `prune.jsonl` fixture and drift detector refreshed in lockstep. Consumers correlating `config_hash` across audit JSONLs must gate on `audit_schema_version >= 2` to skip records produced by the pre-migration writer. Sibling safety bump 2 → 3 documented in `safety-layer.md` § AuditEvent reproducibility fields.
+
+- **Why one recipe.** `blake2b-8` is a 16-hex-char digest with the same collision profile as `SHA-256[:16]` for this use case (the surface area is "did two runs use the same canonicalised config?"; not a security-grade integrity check). The choice is consistency, not strength — mixed hash families across the audit corpus mean a reviewer correlating across writers needs to know which family applies where, which is exactly the kind of operator-trust friction Architectural Commitment #5 ("explainable diffs") exists to eliminate.
+
+When v0.3 adds a new writer (CLI run-history audit, multi-model batch checkpointer, etc.) that needs a reproducibility hash, reach for `blake2b(canonical_json.encode("utf-8"), digest_size=8).hexdigest()` directly. Don't introduce a new family or revive `SHA-256` — the normalisation is now load-bearing for cross-writer correlation.
+
 ## Reference
 
 `plans/super/6-prune-engine.md` — DEC-001 … DEC-028. `plans/super/22-temp-table-sample.md` — DEC-001 … DEC-014 (v0.2 materialised-sample additions). `src/signalforge/prune/` — current implementation. `docs/prune-ops.md` — operational reference. `tests/prune/test_drift_detector.py` — schema-drift gate. `tests/test_audit_completeness.py` — AST-scan suite (7 scans as of #9). `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate (6 dirs as of #9). `tests/fixtures/prune/prune_event_v1.jsonl` — committed audit fixture for the drift detector.
