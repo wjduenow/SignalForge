@@ -501,6 +501,7 @@ __all__ = [
     "ManifestSchemaNotFoundError",
     "MaterialisationFailedError",
     "MaterialisationNotSupportedError",
+    "ProfileEnvVarUnsetError",
     "ProfileNotFoundError",
     "ProfileTargetNotFoundError",
     "QuerySyntaxError",

@@ -40,6 +40,10 @@ _CONSTRUCT_KWARGS: dict[str, dict[str, object]] = {
     "WarehouseAuthError": {"message": "auth failed"},
     "UnsupportedProfileTypeError": {"profile_type": "snowflake"},
     "UnsupportedAuthMethodError": {"method": "service-account"},
+    "ProfileEnvVarUnsetError": {
+        "var_name": "MY_BILLING_PROJECT",
+        "profiles_path": Path("/etc/dbt/profiles.yml"),
+    },
     "ProfileNotFoundError": {"searched_paths": [Path("/etc/dbt/profiles.yml")]},
     "ProfileTargetNotFoundError": {"profile_name": "myproj", "target": "prod"},
     "ManifestProjectNotFoundError": {"model_unique_id": "model.proj.foo"},
@@ -86,12 +90,15 @@ def test_each_subclass_has_default_remediation() -> None:
     # UnknownTableSizeError) plus the WarehouseError base = 16 classes;
     # issue #22 (US-001) adds MaterialisationFailedError and
     # MaterialisationNotSupportedError → 18; issue #36 (US-002) adds
-    # EstimateNotSupportedError → 19.
-    assert len(errors_module.__all__) == 19, (
+    # EstimateNotSupportedError → 19; issue #47 adds
+    # ProfileEnvVarUnsetError (supports init-demo profile env_var
+    # rendering) → 20.
+    assert len(errors_module.__all__) == 20, (
         "DEC-026 enumerates 15 typed subclasses + 1 base; #22 US-001 "
         "adds 2 more (MaterialisationFailed/NotSupported); #36 US-002 "
-        "adds EstimateNotSupportedError. Update tests and __all__ "
-        "together if this changes."
+        "adds EstimateNotSupportedError; #47 QG pass-3 adds "
+        "ProfileEnvVarUnsetError. Update tests and __all__ together "
+        "if this changes."
     )
     for name in errors_module.__all__:
         cls = getattr(errors_module, name)
