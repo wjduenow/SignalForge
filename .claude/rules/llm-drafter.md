@@ -65,6 +65,52 @@ For model-level `candidate.tests`, only the `test.column in model_columns` check
 
 The collected-violations contract is exercised by `test_parse_draft_response_anchor_violation_collects_all_violations`. Don't change the validator to short-circuit on the first violation — the goal is "tell the operator everything wrong about the response in one error so they can fix the prompt or model in one round".
 
+## `exclude_tests` dual-defence: prompt + parser (issue #54)
+
+`DraftConfig.exclude_tests: tuple[str, ...] = ()` lets the operator
+suppress one or more dbt test types from drafting entirely. The four
+valid entries are pinned by `VALID_TEST_TYPES` (`signalforge.draft.config`);
+config-load validates each entry against the set so a typo like `"not_nul"`
+fails loud at YAML-load.
+
+The exclusion is enforced at **two independent layers**:
+
+1. **Prompt-builder server-side filtering.** `_render_system_prompt(exclude_tests)`
+   drops the matching entries from the `_TEST_CATALOGUE_LINES` JSON-shape
+   illustration AND from the `### SCOPE` line's enumeration. A cooperative
+   LLM seeing only the surviving types in its catalogue won't propose
+   excluded ones in the first place.
+2. **Parser anchor-contract rejection.** `_validate_anchor_contract` gains
+   an `exclude_tests: frozenset[str]` kwarg; any candidate test (column-
+   or model-level) whose `type` is in the set adds a violation to the
+   whole-draft fail-loud collection. An LLM that ignores prompt instructions
+   hits `LLMOutputAnchorContractError` here with one violation per
+   defiant test.
+
+Why both — defence in depth. The prompt filter is **cheap and primary**:
+when it works, the LLM never spends tokens generating excluded types and
+the response audit doesn't need to log a rejection. The parser check is
+**load-bearing for correctness**: prompts are advisory; parsers are
+contractual. Removing either layer is a regression.
+
+**Prompt-version cache invalidation.** `_prompt_version_for(exclude_tests)`
+returns `_PROMPT_VERSION` verbatim for the empty case (snapshot-stable),
+or a fresh `blake2b-8` over `(_PROMPT_VERSION + "|exclude=" + canonical_json)`
+when any exclusion is present. The canonical form sorts + dedupes the input
+so `("unique", "not_null")` and `("not_null", "unique", "unique")` hash
+identically. The hash rotation is **load-bearing for Anthropic prompt-cache
+correctness** — two runs with different exclusion sets cache separate
+system-prompt prefixes; conflating them would feed a stale catalogue back
+to a downstream call.
+
+**Excluding all four types raises at render time.** A `DraftConfig` that
+sets `exclude_tests=("not_null", "unique", "accepted_values", "relationships")`
+passes config-load validation but `_render_system_prompt` raises
+`ValueError("at least one type must remain")` so the drafter has something
+to propose. This is enforced at render time, not config-load, so a future
+caller that adds a fifth test type can ship a config that excludes the
+v0.1 four without breaking the validator.
+
 ## ANSI-safe lazy-format logger (DEC-011)
 
 Every `_LOGGER.{info,warning,debug,error}` call in `signalforge.llm.*` and `signalforge.draft.*` uses lazy-format with `json.dumps()` for any user-controlled string:

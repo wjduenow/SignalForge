@@ -44,6 +44,44 @@ The default in `manifest-readers.md` is `extra="ignore"` for forward-compat. The
 
 Pair every `extra="ignore"` reader-shaped model with a one-off `extra="forbid"` drift detector.
 
+## Draft-skip vs. PII opt-out — semantics differ (issue #54)
+
+Issue #54 added two new `RedactionReason` literal values
+(`draft_skip_column_meta`, `draft_skip_model_meta`) driven by
+`meta.signalforge.skip_draft: true` at column or model level. They sit
+in `RedactionReason` alongside the seven PII reasons but carry **different
+semantics**: a PII reason means "send a hashed placeholder in place of the
+real column name"; a draft-skip reason means "omit the column entirely
+from the LLM payload" — the column does not appear in `LLMRequest.columns_sent`
+/ `.schema` / `.aggregates` / `.sampled_rows`. The `RedactionRecord` still
+rides on the `AuditEvent` so the operator-chosen omission is durably recorded.
+
+Two contracts operationalise this:
+
+1. **`DRAFT_SKIP_REASONS` frozenset** in `signalforge.safety.models` — the
+   canonical "which reasons trigger omit-entirely" gate. `build_llm_request`
+   reads it to compute `skipped_columns` and filters the LLM payload.
+   Adding a future omit-entirely reason MUST extend both `RedactionReason`
+   AND `DRAFT_SKIP_REASONS` in lockstep, OR consumers will silently leak
+   the new reason's column into the prompt.
+2. **Skip checks run BEFORE PII checks in `_classify_column`**. A column
+   with both `skip_draft: true` and `tags: [pii]` routes to the skip
+   reason, not the PII reason — if a column is omitted entirely, any PII
+   signal on it is moot. Column-level skip is checked before model-level
+   skip so the audit reason names the most-specific source.
+
+`audit_schema_version` bumped 1 → 2 in lockstep (DEC-014 invariant — bump
+the version every time the JSONL shape evolves; here, the set of allowed
+`RedactionReason` literals widened). The default on the `AuditEvent`
+model also bumps to 2 to match the writer's `_AUDIT_SCHEMA_VERSION`
+constant; the field stays `int` (not `Literal[2]`) so older v1 JSONLs
+still round-trip — audit replay across versions is a real requirement.
+
+**Strict `is True` check, not truthy.** `meta.signalforge.skip_draft` only
+fires on an explicit Python `True` — `"true"` / `"yes"` / `1` are all
+ignored. Mirrors the existing `meta.signalforge.sample is False` shape:
+config noise must not silently engage a security-adjacent behaviour.
+
 ## The four opt-out signals + precedence (DEC-003)
 
 `_classify_column` returns `RedactionRecord | None` based on (in precedence order, first match wins, column-level always beats model-level when both fire):
