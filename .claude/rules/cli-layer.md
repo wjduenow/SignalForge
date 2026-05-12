@@ -13,15 +13,27 @@ src/signalforge/cli/
                  # map_exception_to_exit_code, _safe_excepthook, _EXCEPTION_TO_EXIT_CODE,
                  # progress helpers (should_emit_progress / format_elapsed /
                  # emit_progress_entry / emit_progress_done)
-  errors.py      # CliError + CliPathError + CliInputError
+  errors.py      # CliError + CliPathError + CliInputError + CliInitDemo*
   generate.py    # add_parser + cmd_generate (the full pipeline)
+  init_demo.py   # add_parser + cmd_init_demo (copy bundled demo to disk; issue #47)
   lint.py        # add_parser + cmd_lint (config-only validator)
   version.py     # add_parser + cmd_version (prints signalforge __version__)
 ```
 
-Flat layout — one module per subcommand, no nested directories, no `__main__.py`. Mirrors clauditor's CLI shape (16 subcommand modules in clauditor; SignalForge ships three for v0.1). Every subcommand module exports exactly two public symbols: `add_parser(subparsers) -> None` (registers the subparser, no return) and `cmd_<name>(args) -> int` (handler returning the exit code). The top-level `main(argv: list[str] | None = None) -> int` accepts an explicit argv list (defaults to `sys.argv[1:]`) — that's what makes in-process testing trivial: tests call `main([...])` directly, assert on the returned `int` and capsys output, and never spawn a subprocess.
+Flat layout — one module per subcommand, no nested directories, no `__main__.py`. Mirrors clauditor's CLI shape (16 subcommand modules in clauditor; SignalForge ships four as of #47). Every subcommand module exports exactly two public symbols: `add_parser(subparsers) -> None` (registers the subparser, no return) and `cmd_<name>(args) -> int` (handler returning the exit code). The top-level `main(argv: list[str] | None = None) -> int` accepts an explicit argv list (defaults to `sys.argv[1:]`) — that's what makes in-process testing trivial: tests call `main([...])` directly, assert on the returned `int` and capsys output, and never spawn a subprocess.
 
 When v0.2 adds a new subcommand (`signalforge doctor`, `signalforge profile`, ...), match the precedent: one new module under `src/signalforge/cli/`, register via `add_parser(subparsers)` from `main()`, return an int from `cmd_<name>(args)`.
+
+## Library-surface pattern: CLI handler wraps a public lib module at the boundary (issue #47)
+
+Issue #47 introduces a new pattern for subcommands that have a useful programmatic surface — `signalforge init-demo` ships both as a CLI subcommand AND as a public Python function `signalforge.demo.copy_demo(dest, *, force=False) -> Path`. The split:
+
+- **`signalforge.demo`** (subpackage) — the public library entry point. Owns its own typed-error hierarchy (`DemoError` base + `DemoPathError`, `DemoDestExistsError`, `DemoDestUnsafeError`, `DemoFixtureMissingError`). Errors carry an optional `remediation` and a `cause` kwarg mirrored from every other `signalforge.*.errors` module's layer-base pattern. The library function returns useful work product (`Path`) — not just side effects — so notebook / script callers have a clean programmatic surface.
+- **`signalforge.cli.init_demo`** (CLI module) — thin handler that argparse-parses its inputs, calls into `signalforge.demo.copy_demo(...)` inside the single `try/except Exception` boundary (DEC-016), and wraps every `DemoError` subclass into the matching `CliInitDemo*Error` (tier 2 for input-validation failures, tier 1 for broken-install / filesystem failures). The CLI owns the next-steps message + exit-code mapping; the library function stays clean of CLI concerns.
+
+This is "two-layer error wrapping" — library typed errors are public (catchable by library callers), CLI typed errors are public (registered in `_EXCEPTION_TO_EXIT_CODE`), and the CLI handler does the translation at the boundary. The 7th AST scan walks BOTH `demo/errors.py` AND `cli/errors.py` so missing tier mappings on either side fail loud. Defence-in-depth: the lower-level `DemoError` subclasses are ALSO registered in `_EXCEPTION_TO_EXIT_CODE` with the same tiers as their CLI wrappers, so a v0.2 contributor who adds a new `Demo*Error` subclass and forgets to wire the CLI wrapper still gets a sensible exit code via `map_exception_to_exit_code`'s MRO walk.
+
+When v0.2 adds a similar dual-surface subcommand (e.g., `signalforge fetch-rubrics` library-callable from a notebook, or `signalforge configure` from a CI bootstrap script), follow this pattern: public lib module with its own `errors.py`, CLI handler wraps at the boundary, both layers' errors land in the exit-code mapping.
 
 ## Four-tier exit-code taxonomy (DEC-008, DEC-019, DEC-024)
 

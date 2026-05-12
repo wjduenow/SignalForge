@@ -99,15 +99,18 @@ Revisit when actual coverage exceeds `<N> + 5` for two consecutive `dev` builds.
 
 ### Known gap: excluded markers (DEC-004)
 
-Coverage measures only the default pytest set. Tests gated behind `bigquery`, `anthropic`, `cli_subprocess`, and `e2e` markers are excluded by addopts (`-m 'not bigquery and not anthropic and not cli_subprocess and not e2e'`). Those code paths are exercised via fakes in unit tests; the real-network paths are not instrumented.
+Coverage measures only the default pytest set. Tests gated behind `bigquery`, `anthropic`, `cli_subprocess`, `e2e`, and `wheel_smoke` markers are excluded by addopts (`-m 'not bigquery and not anthropic and not cli_subprocess and not e2e and not wheel_smoke'`). Those code paths are exercised via fakes in unit tests; the real-network paths and the actual `python -m build` invocation are not instrumented.
 
-Because `--cov-fail-under` is in `addopts`, marker-specific runs (`pytest -m cli_subprocess`, `pytest -m bigquery`, `pytest -m e2e`) will fail the coverage gate. Use `--no-cov` for these runs:
+Because `--cov-fail-under` is in `addopts`, marker-specific runs (`pytest -m cli_subprocess`, `pytest -m bigquery`, `pytest -m e2e`, `pytest -m wheel_smoke`) will fail the coverage gate. Use `--no-cov` for these runs:
 
 ```bash
 pytest -m cli_subprocess --no-cov
+pytest -m wheel_smoke --no-cov
 SF_RUN_BQ=1 pytest -m bigquery --no-cov
 SF_RUN_BQ=1 GOOGLE_CLOUD_PROJECT=<billing-project> ANTHROPIC_API_KEY=sk-... pytest -m e2e --no-cov
 ```
+
+**`wheel_smoke` marker (issue #47).** Maintainer-only gate added by issue #47 to verify wheel-build packaging without coupling it to default CI. The single test (`tests/test_wheel_packaging.py`) shells out `python -m build --wheel --outdir <tmp>` (or `uvx --from build pyproject-build` when `build` isn't in the venv), opens the artifact via `zipfile.ZipFile`, and asserts the canonical demo file set appears under `signalforge/_demo/`. Catches `pyproject.toml` `[tool.hatch.build.targets.wheel] include` regressions that editable-install tests cannot — see `python-build.md` § "Shipping package data" for the full pattern.
 
 ## End-to-end gated tests (issue #10)
 
