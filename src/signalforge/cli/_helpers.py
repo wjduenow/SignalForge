@@ -41,6 +41,10 @@ if TYPE_CHECKING:
 from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.cli.errors import (
     CliError,
+    CliInitDemoCopyError,
+    CliInitDemoDestExistsError,
+    CliInitDemoDestUnsafeError,
+    CliInitDemoFixtureMissingError,
     CliInputError,
     CliPathError,
     CliSelectorNoMatchError,
@@ -222,6 +226,13 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # CLI-layer load-shape errors.
     CliError: 1,
     CliPathError: 1,
+    # init-demo broken-install / filesystem-failure wrappers (issue #47 /
+    # DEC-012 of plans/super/47-init-demo.md). Tier 1 because both fire
+    # before any user-content work has happened and represent state we
+    # couldn't get into a coherent shape (missing wheel resource, generic
+    # OSError during the copytree / rmtree).
+    CliInitDemoFixtureMissingError: 1,
+    CliInitDemoCopyError: 1,
     # ---- Tier 2: input ----------------------------------------------------
     # Manifest selection (the operator picked a model that doesn't exist or
     # is disabled — caller's fault, not load).
@@ -274,6 +285,13 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # zero-match mirrors ``ModelNotFoundError``'s tier.
     CliSelectorParseError: 2,
     CliSelectorNoMatchError: 2,
+    # init-demo input-validation wrappers (issue #47 / DEC-013 of
+    # plans/super/47-init-demo.md). Tier 2 because both fire on
+    # operator-supplied dest values that conflict with project state —
+    # mirrors the precedent set by ModelNotFoundError (tier 2 for "the
+    # operator named something the project rejects").
+    CliInitDemoDestExistsError: 2,
+    CliInitDemoDestUnsafeError: 2,
     # ---- Tier 3: API / external dep ---------------------------------------
     # LLM connectivity / quota / SDK issues.
     LLMError: 3,

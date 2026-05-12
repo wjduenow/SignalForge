@@ -158,3 +158,192 @@ class CliSelectorNoMatchError(CliInputError):
             ),
         )
         self.expr = expr
+
+
+# ---------------------------------------------------------------------------
+# init-demo wrappers (issue #47 — US-004, DEC-012 / DEC-013)
+# ---------------------------------------------------------------------------
+#
+# The CLI subcommand ``signalforge init-demo`` calls into the public
+# :func:`signalforge.demo.copy_demo` helper. The helper raises four typed
+# :class:`signalforge.demo.DemoError` subclasses; the CLI handler wraps each
+# at the boundary into one of the four ``CliInitDemo*Error`` classes below so
+# the four-tier exit-code taxonomy stays homogeneous (DEC-012). DEC-013 locks
+# the dest-exists / dest-unsafe cases at tier 2 (input-validation — the
+# operator chose a destination that already has content or that would clobber
+# a system / user directory); the fixture-missing / generic copy-failure cases
+# land at tier 1 (load — broken install or filesystem state we couldn't get
+# into a usable shape before doing work).
+#
+# Each class carries a ``default_remediation`` so the layer-base ``__str__``
+# renders the canonical ``ERROR: <message>\n  ↳ Remediation: <text>`` shape
+# without subclasses having to redefine rendering.
+#
+# The :class:`signalforge.demo.DemoPathError` case (symlink-cycle resolve
+# failure) re-uses the existing :class:`CliPathError` rather than getting its
+# own wrapper — every CLI-originated path-safety failure produces one error
+# type, regardless of which underlying helper detected the cycle.
+
+
+_CLI_INIT_DEMO_DEST_EXISTS_DEFAULT_REMEDIATION: str = (
+    "Remove the existing directory or run 'signalforge init-demo --force' to replace it."
+)
+
+_CLI_INIT_DEMO_DEST_UNSAFE_DEFAULT_REMEDIATION: str = (
+    "Refusing to clobber a system or home directory. Choose a different <dest> "
+    "(a fresh subdirectory, not '/', $HOME, or the current working directory)."
+)
+
+_CLI_INIT_DEMO_FIXTURE_MISSING_DEFAULT_REMEDIATION: str = (
+    "Reinstall signalforge-dbt — the bundled demo fixture is missing from your install."
+)
+
+_CLI_INIT_DEMO_COPY_DEFAULT_REMEDIATION: str = (
+    "Check disk space, permissions, and that the parent directory of <dest> is writable."
+)
+
+
+class CliInitDemoDestExistsError(CliInputError):
+    """Raised by ``cmd_init_demo`` when the destination directory exists
+    and is non-empty and ``--force`` was not supplied.
+
+    Wraps :class:`signalforge.demo.DemoDestExistsError`. Tier 2 (input
+    validation — the operator chose a non-empty destination without
+    opting in to clobbering it). Mirrors the precedent set by
+    :class:`signalforge.manifest.errors.ModelNotFoundError` (tier 2 for
+    "the operator named something that conflicts with project state").
+
+    Message shape:
+    ``f"destination {dest!r} exists and is not empty: {cause}"`` when a
+    ``cause`` is provided; otherwise just the dest path. The trailing
+    ``cause`` rendering reflects the underlying ``DemoDestExistsError``'s
+    own message body for diagnostic continuity.
+    """
+
+    def __init__(
+        self,
+        *,
+        dest: str,
+        cause: Exception | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        if cause is None:
+            message = f"destination {dest!r} exists and is not empty"
+        else:
+            message = f"destination {dest!r} exists and is not empty: {cause}"
+        super().__init__(
+            message,
+            remediation=(
+                remediation
+                if remediation is not None
+                else _CLI_INIT_DEMO_DEST_EXISTS_DEFAULT_REMEDIATION
+            ),
+        )
+        self.dest = dest
+        self.cause = cause
+
+
+class CliInitDemoDestUnsafeError(CliInputError):
+    """Raised by ``cmd_init_demo`` when ``--force`` would target a
+    catastrophic path (``/``, ``Path.home()``, or the current working
+    directory).
+
+    Wraps :class:`signalforge.demo.DemoDestUnsafeError`. Tier 2 (input
+    validation — the operator named a target the blast-radius guard
+    refuses to clobber even under ``--force``). DEC-001 of
+    ``plans/super/47-init-demo.md``.
+    """
+
+    def __init__(
+        self,
+        *,
+        dest: str,
+        cause: Exception | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        if cause is None:
+            message = (
+                f"refusing to --force-replace {dest!r}: would clobber a "
+                "top-level system or user directory"
+            )
+        else:
+            message = (
+                f"refusing to --force-replace {dest!r}: would clobber a "
+                f"top-level system or user directory: {cause}"
+            )
+        super().__init__(
+            message,
+            remediation=(
+                remediation
+                if remediation is not None
+                else _CLI_INIT_DEMO_DEST_UNSAFE_DEFAULT_REMEDIATION
+            ),
+        )
+        self.dest = dest
+        self.cause = cause
+
+
+class CliInitDemoFixtureMissingError(CliError):
+    """Raised by ``cmd_init_demo`` when the bundled
+    ``signalforge._demo/`` tree is missing from the installed package.
+
+    Wraps :class:`signalforge.demo.DemoFixtureMissingError`. Tier 1
+    (load — the wheel install is broken and there is no work that can
+    proceed). The wheel-packaging convention in
+    ``.claude/rules/python-build.md`` makes this practically unreachable
+    on a clean ``pip install signalforge-dbt`` run, but a corrupted
+    install (partial wheel extract, hand-edited site-packages) would
+    surface here. DEC-011 of ``plans/super/47-init-demo.md``.
+    """
+
+    def __init__(
+        self,
+        *,
+        cause: Exception | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        if cause is None:
+            message = "bundled demo fixture is missing from the signalforge-dbt install"
+        else:
+            message = f"bundled demo fixture is missing from the signalforge-dbt install: {cause}"
+        super().__init__(
+            message,
+            remediation=(
+                remediation
+                if remediation is not None
+                else _CLI_INIT_DEMO_FIXTURE_MISSING_DEFAULT_REMEDIATION
+            ),
+        )
+        self.cause = cause
+
+
+class CliInitDemoCopyError(CliError):
+    """Raised by ``cmd_init_demo`` when the ``shutil.copytree`` /
+    ``shutil.rmtree`` operation fails with a generic ``OSError``.
+
+    Catch-all for filesystem failures the more-specific
+    ``CliInitDemo*`` wrappers above do not cover: ENOSPC, EACCES on the
+    parent directory, EROFS, etc. Tier 1 (load — the filesystem isn't
+    in a state where work can proceed) per DEC-012 of
+    ``plans/super/47-init-demo.md``.
+    """
+
+    def __init__(
+        self,
+        *,
+        dest: str,
+        cause: Exception | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        if cause is None:
+            message = f"failed to copy demo tree to {dest!r}"
+        else:
+            message = f"failed to copy demo tree to {dest!r}: {cause}"
+        super().__init__(
+            message,
+            remediation=(
+                remediation if remediation is not None else _CLI_INIT_DEMO_COPY_DEFAULT_REMEDIATION
+            ),
+        )
+        self.dest = dest
+        self.cause = cause

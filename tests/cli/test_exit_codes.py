@@ -242,6 +242,18 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
     if name == "CliSelectorNoMatchError":
         return cls(expr="tag:nonexistent")
 
+    # init-demo CLI wrappers (issue #47 / DEC-012, DEC-013 — US-004).
+    # Each wrapper takes keyword-only kwargs (``dest=`` / ``cause=`` /
+    # ``remediation=``); the dest-exists and dest-unsafe variants are
+    # tier 2 (input-validation), fixture-missing and copy-error are
+    # tier 1 (broken install / generic filesystem failure).
+    if name in {"CliInitDemoDestExistsError", "CliInitDemoDestUnsafeError"}:
+        return cls(dest="/tmp/synthetic", cause=_SENTINEL_CAUSE)
+    if name == "CliInitDemoFixtureMissingError":
+        return cls(cause=_SENTINEL_CAUSE)
+    if name == "CliInitDemoCopyError":
+        return cls(dest="/tmp/synthetic", cause=_SENTINEL_CAUSE)
+
     # Catch-all: layer-base default ``Cls(message, *, remediation=None)``.
     try:
         return cls(_SENTINEL_MESSAGE)

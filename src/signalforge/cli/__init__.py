@@ -19,6 +19,7 @@ import sys
 
 import signalforge
 from signalforge.cli import generate as generate_cmd
+from signalforge.cli import init_demo as init_demo_cmd
 from signalforge.cli import lint as lint_cmd
 from signalforge.cli import version as version_cmd
 from signalforge.cli._helpers import (
@@ -79,6 +80,7 @@ def _build_parser() -> argparse.ArgumentParser:
     version_cmd.add_parser(subparsers)
     lint_cmd.add_parser(subparsers)
     generate_cmd.add_parser(subparsers)
+    init_demo_cmd.add_parser(subparsers)
     return parser
 
 
