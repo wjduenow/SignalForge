@@ -846,7 +846,7 @@ Failed-model list is capped at 50 entries; overflow renders
 `.signalforge/grade.json` and `.signalforge/diff.json` are
 single-document overwrite (`O_TRUNC`) per-call; across N in-process
 iterations, only the FINAL model's sidecars persist. The four
-append-only JSONLs (`safety.audit.jsonl`, `llm_response.jsonl`,
+append-only JSONLs (`audit.jsonl`, `llm_responses.jsonl`,
 `prune.jsonl`, `grade.jsonl`) accumulate across iterations and
 survive — that's where the per-model auditable record lives. If you
 need per-model JSON sidecars, use the shell-loop pattern below.

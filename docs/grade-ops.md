@@ -271,6 +271,12 @@ renderer flags the report as partial.
 
 ## Audit JSONL schema
 
+> **Consumer guide.** For cross-stage joins (including grade JSONL ↔
+> grade sidecar ↔ diff sidecar on `artifact_id`), `jq` / pandas worked
+> examples, the forward-compat policy, and the redaction surface, see
+> [`docs/audits.md`](audits.md). This section is the grade-layer
+> production contract.
+
 Every per-pair `GradingResult` produces exactly one JSONL record at
 `audit_path` (default `<project_dir>/.signalforge/grade.jsonl`). One
 record per line; atomic concurrent appends via

@@ -152,7 +152,7 @@ When v0.2 introduces a new typed-result handoff (e.g., a multi-model batch resul
 - `prune_result_hash` — same recipe, applied to the `PruneResult`.
 - `grading_report_hash` — same recipe applied to the `GradingReport` when provided; `None` when the caller omitted it.
 
-A reviewer querying "what inputs produced this diff?" reads three hashes from the sidecar and reconstructs from the upstream JSONL audits (`safety.jsonl`, `llm_response.jsonl`, `prune.jsonl`, `grade.jsonl`). The double-pass (Pydantic JSON → Python dict → canonical JSON) avoids relying on Pydantic's internal field ordering, which is declared stable in v2 but not contractually guaranteed across point releases.
+A reviewer querying "what inputs produced this diff?" reads three hashes from the sidecar and reconstructs from the upstream JSONL audits (`audit.jsonl`, `llm_responses.jsonl`, `prune.jsonl`, `grade.jsonl`). The double-pass (Pydantic JSON → Python dict → canonical JSON) avoids relying on Pydantic's internal field ordering, which is declared stable in v2 but not contractually guaranteed across point releases.
 
 `DiffReport` also carries `schema_version: Literal[1] = 1` and `audit_schema_version: int = 1` — frozen at constants in production code. Bump when the sidecar JSON schema evolves; v0.2 readers gate on these.
 

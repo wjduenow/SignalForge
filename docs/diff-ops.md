@@ -189,6 +189,12 @@ return value.
 
 ## Sidecar JSON schema
 
+> **Consumer guide.** For cross-stage joins (grade sidecar ↔ diff sidecar
+> on `artifact_id`), `jq` / pandas worked examples, the forward-compat
+> policy (including the `audit_schema_version: 2` bump from issue #50),
+> and the redaction surface, see [`docs/audits.md`](audits.md). This
+> section is the diff-layer production contract.
+
 End-of-run write — **on by default** (`render_diff(..., write_sidecar=True)`
 is the default; pass `write_sidecar=False` to skip). When
 `sidecar_path` is `None` and `write_sidecar=True`, the sidecar lands at

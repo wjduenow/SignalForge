@@ -265,6 +265,11 @@ audit records to manifest columns by re-hashing the real name.
 
 ## Audit JSONL schema
 
+> **Consumer guide.** For cross-stage joins, `jq` / pandas worked examples,
+> the forward-compat policy, and the redaction surface across all five
+> stages, see [`docs/audits.md`](audits.md). This section is the
+> safety-layer production contract.
+
 Every LLM call produces exactly one JSONL record at `safety.audit_path`
 (default `.signalforge/audit.jsonl`). One record per line; atomic
 append via `O_APPEND` + a single `os.write` (DEC-005).
