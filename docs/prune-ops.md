@@ -101,6 +101,7 @@ prune:
   test_timeout_seconds: 30
   total_budget_seconds: 600
   capture_failure_rows: 3
+  min_kept_rate_warn: 0.0  # WARN when kept/total <= this; 0.0 = warn on "all dropped"
   trusted_models:
     - model.shop.dim_customers
   partition_filter:
@@ -119,6 +120,7 @@ Field-by-field:
 - **`total_budget_seconds`** — Whole-run wall-clock budget. Default `600`. Once exceeded, every remaining test drains to `kept-without-evidence` with `why="Total prune budget (Ns) exceeded before evaluation."` (DEC-011). Conservative bias — no test is silently dropped because the run ran long.
 - **`capture_failure_rows`** — Number of failing rows recorded on the `PruneDecision.sample_failures` field per failed test. Default `3`. Set to `0` to omit row-level evidence entirely (the audit record stays compact for very wide tables).
 - **`trusted_models`** — List of manifest `unique_id`s whose data is treated as known-clean. A failure on a trusted model surfaces as `failed-on-known-clean-data` (drop, presumed buggy test) rather than `kept`. Opt-in only (Q1=B). Validated against the manifest at `prune_tests` entry — typos raise `PruneTrustedModelNotFoundError` BEFORE any warehouse call (DEC-008).
+- **`min_kept_rate_warn`** — Float in `[0.0, 1.0]`. Default `0.0`. Soft signal threshold for "did the prune work as intended?" (issue #51). When `kept_count / total_tests` is at or below this value AND at least one candidate was evaluated, the orchestrator emits one `WARNING`-level log line summarising the run shape (model id, total/kept/dropped counts, kept rate, threshold). Default `0.0` fires only when every candidate was dropped — the "did we lose the whole LLM draft?" signal. Set to `0.10` to catch "fewer than 10% kept" on typical staging models, or to `1.0` to always emit the summary line. The WARNING is informational — the run still returns a `PruneResult` and exits cleanly. Empty candidate sets skip the check (no division-by-zero; the drafter producing nothing is its own degenerate signal). See [Expected drop rates](#expected-drop-rates) for the empirical context this threshold is meant to calibrate against.
 - **`partition_filter`** — Optional `PartitionFilter` ADT (`{column, op, value}`) scoping every sample query. Required by the warehouse adapter for tables with `num_rows >= 100M`; otherwise optional. Pydantic recursively validates the YAML mapping into the typed shape.
 
 Unknown keys under `prune:` raise `PruneConfigError` (Pydantic
@@ -144,6 +146,64 @@ Conservative bias: when in doubt, keep. Architectural Commitment #1
 penalises always-pass tests (no signal, consumes reviewer attention) but
 does not penalise kept tests with ambiguous evidence — those land in
 front of a human reviewer who can make the final call.
+
+## Expected drop rates
+
+**A high drop rate is the working state, not the failure state.** The
+LLM is intentionally drafting broadly — it proposes `not_null` on every
+column, `unique` on every column that looks like a primary key, etc.
+The prune layer trims the candidates that always pass on warehouse
+samples (no signal) and the ones that fail on known-clean data (likely
+buggy test). What survives is what a human reviewer should actually
+look at. A run that drops ~60-80% of the drafted tests on a typical
+staging model is doing exactly what it's supposed to.
+
+**Reference numbers — Austin bikeshare staging fixture.** Run captured
+2026-05-09 against
+`bigquery-public-data.austin_bikeshare.bikeshare_trips` (~2.27M rows,
+7 columns), `safety.mode: aggregate-only`,
+`prune.sample_strategy: materialised`, `claude-sonnet-4-6` drafter:
+
+- **Total candidate tests drafted:** 8
+- **Dropped (`always-passes`):** 5 (62.5%)
+- **Kept (`reason="kept"`, non-zero failing rows):** 3 (37.5%)
+
+Per-test-type breakdown for this run:
+
+| Test type | Drafted | Dropped | Kept | Notes |
+|-----------|---------|---------|------|-------|
+| `not_null` | 7 | 4 (57%) | 3 (43%) | Dropped on natural NOT NULL columns (`trip_id`, `bike_id`, `start_time`, `duration_minutes`); kept on `subscriber_type` (249 nulls — walk-up users), `start_station_id` (199 nulls), `end_station_id` (1408 nulls — stations decommissioned mid-trip) |
+| `unique` | 1 | 1 (100%) | 0 | `trip_id` is the natural primary key — `unique` always passes |
+
+The three kept tests are exactly the signal the differentiator
+promises: real nullability that a reviewer should think about before
+shipping a `not_null` test. The five dropped tests would have been
+review-noise — they pass deterministically against the source data.
+
+**Calibration heuristics** (based on internal testing across staging
+models):
+
+- **Wide fact tables with mostly-NOT-NULL surrogate keys** drop more
+  aggressively — most `not_null` candidates trivially pass; the kept
+  set concentrates on FK columns and optional dimensions.
+- **Narrow dimension tables** tend to have a higher kept rate — fewer
+  drafted tests overall, and the columns under test are usually
+  declared-nullable business attributes.
+- **`unique` candidates on declared primary keys** are almost always
+  dropped as always-passes (the warehouse data matches the model's
+  contract). When a `unique` candidate is *kept*, that's high-signal:
+  the surrogate-key contract is broken in production data.
+- **`relationships` candidates** are usually kept (referential
+  integrity is rarely perfect at warehouse scale); when they drop as
+  `requires-future-data`, the target model isn't in the manifest yet
+  (likely an unimplemented downstream).
+
+A run that drops everything is the failure mode to watch for — it
+suggests the LLM proposed nothing the warehouse data contradicted, or
+that the model under draft has so little data that every test is
+trivially passing on the sample. Set
+[`prune.min_kept_rate_warn`](#configuration-signalforgeyml-prune-block)
+to surface this case at run time.
 
 ## Cost model (US-003 verification)
 

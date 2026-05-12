@@ -177,6 +177,15 @@ region` column, so any LLM-drafted `not_null` on it must always-pass
 and the prune engine drops it. The strict 0.95 grade thresholds in
 the fixture config typically surface at least one `flagged` artifact.
 
+**A high drop rate is the working state, not the failure state.** A
+typical staging model drops ~60-80% of the LLM-drafted tests as
+always-passes — the LLM proposes broadly and the prune layer trims the
+ones the warehouse data doesn't contradict. Internal testing on
+`bigquery-public-data.austin_bikeshare.bikeshare_trips` shows 5 of 8
+drafted tests dropped (62.5%); see
+[`docs/prune-ops.md` § Expected drop rates](docs/prune-ops.md#expected-drop-rates)
+for the per-test-type breakdown.
+
 Two durable artefacts land under `/tmp/sf-austin/.signalforge/`:
 `grade.json` (per-criterion LLM-judge scores) and `diff.json` (the
 full rendered diff). The committed `.gitignore` covers `.signalforge/`.

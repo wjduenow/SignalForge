@@ -153,6 +153,37 @@ class PruneConfig(BaseModel):
     otherwise optional. Pydantic recursively validates the YAML mapping
     into the typed ADT."""
 
+    min_kept_rate_warn: float = 0.0
+    """Soft signal threshold for "did the prune work as intended?" (issue #51).
+
+    Floating-point in ``[0.0, 1.0]``. When ``kept_count / total_tests``
+    drops to or below this threshold AND at least one candidate test was
+    evaluated, the orchestrator emits a single ``WARNING``-level log
+    line at the end of :func:`signalforge.prune.prune_tests` summarising
+    the run shape (model id, total/kept/dropped counts, kept rate,
+    threshold).
+
+    Default ``0.0`` — fires only when the prune dropped every single
+    candidate test, which is the "did the operator just lose the entire
+    LLM-drafted suite?" signal. Operators expecting some baseline yield
+    (say, "if fewer than 10 percent are kept on a typical staging model
+    something went wrong") set ``min_kept_rate_warn: 0.10``.
+
+    A high drop rate is the *working* state for SignalForge — the LLM is
+    intentionally drafting broadly and the prune layer trims tests that
+    always pass on warehouse samples (Architectural Commitment #1).
+    Internal testing on the Austin bikeshare staging fixture shows ~63
+    percent dropped on a 7-column model; see
+    ``docs/prune-ops.md`` § Expected drop rates for the empirical
+    breakdown.
+
+    The warning is informational — the run still returns a
+    :class:`PruneResult` and exits cleanly. The default ``0.0`` warns
+    only on entirely-empty-kept runs (``kept_rate == 0.0``, all
+    candidates dropped); raise the threshold to catch runs that drop
+    more than the operator expects. Values outside ``[0.0, 1.0]`` fail
+    loud at config load via the field validator."""
+
     sample_strategy: Literal["oneshot", "materialised"] = "materialised"
     """Per-run sample materialisation strategy (DEC-006 / Q7 of issue #22).
 
@@ -182,6 +213,13 @@ class PruneConfig(BaseModel):
     def _non_negative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("must be non-negative")
+        return v
+
+    @field_validator("min_kept_rate_warn")
+    @classmethod
+    def _unit_interval(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("must be in [0.0, 1.0]")
         return v
 
 
