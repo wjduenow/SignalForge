@@ -40,6 +40,12 @@ Saves runner minutes and surfaces the latest result faster.
 
 DEC-003: lock to one Python version (currently `3.11`) for v0.1 CI. Widen the matrix when the package has real users running on multiple versions.
 
+## CI triggers cover every long-lived branch
+
+Established by issue #57. `on.push.branches` includes `main`, `dev`, AND `release/*`. Release-prep commits (tag-prep, release-note fixes, hotfix backports) land directly on a `release/*` branch and must get CI feedback. Without the `release/*` glob, a direct push to a release branch bypasses CI entirely; PRs targeting `main` still trigger via the `pull_request` branch list, but ad-hoc commits on the release branch do not.
+
+When a new long-lived branch shape lands (e.g., `hotfix/*` in v0.3), add it to BOTH `on.push.branches` AND `on.pull_request.branches` in lockstep. Short-lived feature branches don't need triggers — PRs targeting `main` / `dev` already cover them.
+
 ## Codecov coverage upload
 
 Established by issue #27 (DEC-006, DEC-007). The upload step follows the same SHA-pinning rule as other third-party actions:
@@ -64,4 +70,4 @@ The step must land AFTER the pytest step. `coverage.xml` is produced by `--cov-r
 
 ## Reference
 
-`plans/super/1-project-scaffolding.md` — DEC-003, DEC-009. `plans/super/27-codecov-coverage.md` — DEC-006, DEC-007. `.github/workflows/ci.yml` — current implementation.
+`plans/super/1-project-scaffolding.md` — DEC-003, DEC-009. `plans/super/27-codecov-coverage.md` — DEC-006, DEC-007. Issue #57 — `release/*` push trigger. `.github/workflows/ci.yml` — current implementation.
