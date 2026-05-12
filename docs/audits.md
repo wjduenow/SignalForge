@@ -1,6 +1,6 @@
 # Audit JSONL & sidecar consumer guide
 
-Every `signalforge generate` run lands six durable artefacts under `<project_dir>/.signalforge/`. Four are append-only JSONL streams (one record per LLM call / prune decision / grade call); two are end-of-run sidecar JSON documents that overwrite atomically. This guide is the cross-cutting consumer surface — what's in each file, how to join them, and how to query them with `jq` or pandas.
+Every `signalforge generate` run lands six durable artefacts under `<project_dir>/.signalforge/`. Four are append-only JSONL streams (one record per LLM call / prune decision / grade call); two are end-of-run sidecar JSON documents written as a single-document overwrite (`O_TRUNC` + write + `fsync`). The sidecar overwrite is not visible-atomic across the whole filesystem call — a concurrent reader during the write window can see an empty or partial file — so consumer pipelines should wait for the orchestrator to return before reading. This guide is the cross-cutting consumer surface — what's in each file, how to join them, and how to query them with `jq` or pandas.
 
 For the per-stage *production* contracts (defaults, error remediation, cost guidance), keep reading the per-stage ops docs:
 
@@ -21,7 +21,7 @@ For the per-stage *production* contracts (defaults, error remediation, cost guid
 | `.signalforge/grade.json` | End-of-run `GradingReport` sidecar — aggregate `pass_rate` / `mean_score`, `aggregate_complete`, every per-result row | `grade_schema_version: 1` (top-level) | `tests/grade/test_drift_detector.py` |
 | `.signalforge/diff.json` | End-of-run `DiffReport` sidecar — kept / kept-uncertain / dropped / flagged entries, proposed YAML, unified diff, reproducibility hashes | `schema_version: 1` + `audit_schema_version: 2` (top-level) | `tests/diff/test_drift_detector.py` |
 
-The four JSONLs are **append-only** — one record per write, fail-closed (`O_APPEND | O_CREAT | 0o600`, single `os.write`, `os.fsync`). Multi-model runs in one process append to the same files. Records ≤ 4 KB are guaranteed atomic on POSIX (`PIPE_BUF = 4096`).
+The four JSONLs are **append-only** — one record per write, fail-closed (`O_APPEND | O_CREAT | 0o600`, single `os.write`, `os.fsync`). Multi-model runs in one process append to the same files. Records are size-capped at 4000 bytes per line so concurrent multi-model appends interleave cleanly on Linux: for writes that fit in a single page (~4 KB) into a regular file opened with `O_APPEND`, the kernel atomically combines the offset adjustment and the write under the inode lock. Strict POSIX only requires `PIPE_BUF`-sized atomicity for pipes and FIFOs — not regular files — but mainstream Linux filesystems (ext4, XFS, btrfs) extend the guarantee. Operators on exotic filesystems (network mounts, FUSE drivers without inode locking) should treat concurrent multi-model appends with care.
 
 The two `.json` sidecars are **single-document overwrite** (`O_WRONLY | O_TRUNC`). Multi-model runs in one process leave only the **last** model's sidecars on disk. Operators who need per-model sidecars use the shell-loop pattern in [`docs/cli-ops.md`](cli-ops.md) (one process per model with `--project-dir`).
 
@@ -42,10 +42,10 @@ Every audit shape carries `model_unique_id` so cross-stage joins on the model un
 
 **Cross-stage joins worth knowing:**
 
-- **grade JSONL ↔ grade sidecar** — direct match on `(run_id, artifact_id, criterion_id)`. The sidecar's `results[]` is exactly the set of `GradeEvent` rows with the same `run_id`, plus the run-level aggregates.
+- **grade JSONL ↔ grade sidecar** — direct match on `(run_id, artifact_id, criterion_id)`. The sidecar's `results[]` is a frozen view of the `GradingResult` shapes produced under the same `run_id`, plus run-level aggregates (`pass_rate`, `mean_score`, `aggregate_complete`). The JSONL's `GradeEvent` rows carry the same key triple plus the per-call audit metadata (timestamps, token economics, response-text hash) that the sidecar omits — join when you need the audit detail behind a sidecar row.
 - **grade sidecar ↔ diff sidecar** — match on `artifact_id` within the same `model_unique_id`. The `_artifact_id` formatter is hoisted to `signalforge._common.artifact_id` and identity-shared between layers, so the string form is byte-equal by construction.
 - **prune JSONL ↔ diff sidecar** — there is no direct join key. Prune emits `test_anchor` (`"column.<col>"` / `"model"`); diff emits the richer `artifact_id` (`"test.column.<col>.<test_type>"` / `"test.model.<test_type>"`). To reconstruct the diff `artifact_id` from a `PruneEvent`, format the test scope + column + type (and `args_hash` suffix when two tests in the same scope share a `test.type`). The shared helper is `signalforge._common.artifact_id.artifact_id_for(...)` — use it directly if you're writing Python, or apply the rule from `.claude/rules/grade-layer.md` § "`_artifact_id_for` canonical dotted-path format" by hand.
-- **safety JSONL ↔ draft JSONL** — match on `(model_unique_id, sent_sql_hash)` when the draft stage echoes the model SQL into its request. Draft records the `sent_sql_hash` over `Model.raw_code`; safety records the LLM request envelope including the same SQL block.
+- **safety JSONL ↔ draft JSONL** — no shared content hash. The safety `AuditEvent` records the LLM-request envelope shape (mode, columns sent, redactions, row count) but not SQL or any SQL hash; the draft `LLMResponseEvent` records `sent_sql_hash` over `Model.raw_code` plus the response-token economics. For cross-stage attribution within one `signalforge generate` invocation, group by `(model_unique_id, signalforge_version)` and order by `timestamp` — safety's audit fires before draft's in the same run.
 
 **Multi-model in-process iteration** (one `signalforge generate --select <expr>` process running N models sequentially):
 
@@ -191,25 +191,24 @@ print(joined[["artifact_id", "tier", "score_grade", "grade_passed"]])
 
 ## Forward-compat policy
 
-All five readers use Pydantic v2 `extra="ignore"` on their event / report models (`AuditEvent`, `LLMResponseEvent`, `PruneEvent`, `GradeEvent`, `GradingReport`, `DiffEntry`, `DiffReport`). This is the project's standard forward-compat seam: a future SignalForge release can add fields to any of these without breaking a downstream JSONL reader that knows only the old schema.
+Every event and report model across the five stages uses Pydantic v2 `extra="ignore"` — `AuditEvent` (safety), `LLMResponseEvent` (draft), `PruneEvent` (prune), `GradeEvent` + `GradingReport` (grade), `DiffEntry` + `DiffReport` (diff). This is the project's standard forward-compat seam: a future SignalForge release can add fields to any of these without breaking a downstream JSONL reader that knows only the old schema.
 
 **What is NOT a breaking change** (does not bump `audit_schema_version`):
 
 - Adding a new optional field. Existing readers ignore it; new readers consume it.
 - Adding a new value to a non-`Literal` string field (e.g., a new `ModelPricing` SKU). Readers tolerate unknown values.
-- Adding a new `DropReason` literal — historically the prune layer has been deliberately conservative here (only five values as of v0.2; expansion requires explicit migration plus rule-file + fixture updates).
 
 **What IS a breaking change** (bumps `audit_schema_version`):
 
 - Removing a field, renaming a field, or changing a field's type (string → list, int → string).
 - Changing the semantics of an existing field (e.g., `score` switching from `[0.0, 1.0]` to `[0.0, 100.0]`).
-- Changing a `Literal[...]` discriminator's allowed values (e.g., dropping a `DropReason` literal, or — as in `DiffReport` issue #50 — widening `Tier` from three values to four).
+- Changing a `Literal[...]` discriminator's allowed values — adding, removing, or renaming. `DropReason` (prune) and `Tier` (diff) are closed `Literal` unions; an old typed reader fails Pydantic validation on a new literal value, and a new reader misses records carrying a dropped one. The prune layer has been deliberately conservative — five `DropReason` values as of v0.2 — for exactly this reason; any expansion ships a rule-file update plus a fixture refresh plus an `audit_schema_version` bump. Issue #50 widened `Tier` from three values to four and bumped `DiffReport.audit_schema_version` from 1 to 2 alongside the change.
 
 `audit_schema_version` is per-shape, not project-wide. The pinned values today:
 
 - `AuditEvent.audit_schema_version: int = 1` (safety)
 - `LLMResponseEvent.audit_schema_version: int = 1` (draft)
-- `PruneEvent.audit_schema_version: int = 1` (prune)
+- `PruneEvent.audit_schema_version: Literal[1] = 1` (prune)
 - `GradeEvent.audit_schema_version: Literal[1] = 1` (grade per-call)
 - `GradingReport.grade_schema_version: Literal[1] = 1` (grade sidecar — separate field from the per-call event)
 - `DiffReport.schema_version: Literal[1] = 1` (diff sidecar overall) plus `DiffReport.audit_schema_version: Literal[2] = 2` (diff entries — bumped from 1 in issue #50 alongside the `kept-uncertain` tier literal)
