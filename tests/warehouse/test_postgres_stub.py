@@ -9,8 +9,11 @@ factory through a second concrete code path. Tests pin:
   ``identifier_case``, ``supports_qualify``).
 * :meth:`WarehouseAdapter.from_profile` dispatches ``type: postgres`` to
   the stub.
-* Every non-``dialect`` / non-``__init__`` method raises
-  :class:`NotImplementedError` with a message naming the ticket (#53).
+* The three warehouse-operation methods (``sample_rows`` /
+  ``column_stats`` / ``run_test_sql``) raise :class:`NotImplementedError`
+  with a message naming the ticket (#53). ``__enter__`` / ``__exit__``
+  are intentionally implemented as no-ops so the ``with adapter:``
+  contract works without conditional logic at the call site.
 * A fixture-shaped profile YAML round-trips through :func:`load_profile`
   and out to a constructed adapter without error — exercises the seam
   end-to-end without depending on real Postgres credentials.
@@ -23,9 +26,9 @@ from pathlib import Path
 
 import pytest
 
-from signalforge.warehouse.adapters.postgres import POSTGRES_DIALECT, PostgresAdapter
+from signalforge.warehouse.adapters.postgres import PostgresAdapter
 from signalforge.warehouse.base import WarehouseAdapter
-from signalforge.warehouse.models import Dialect, TableRef
+from signalforge.warehouse.models import POSTGRES_DIALECT, Dialect, TableRef
 from signalforge.warehouse.profiles import DbtProfileTarget, load_profile
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "profiles"

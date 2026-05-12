@@ -12,10 +12,15 @@ Snowflake implementation later.
 Scope (deliberately minimal):
 
 * :meth:`__init__` captures connection params for forward-compat.
-* :meth:`dialect` returns a Postgres-flavoured :class:`Dialect`
-  (``quote_char='"'``, ``identifier_case='lower'``,
-  ``supports_qualify=False``).
-* Every other abstract method on :class:`WarehouseAdapter` raises a clear
+* :meth:`__enter__` / :meth:`__exit__` are implemented as no-ops so the
+  ``with adapter:`` contract from
+  :class:`signalforge.warehouse.base.WarehouseAdapter` works without
+  conditional logic at the call site.
+* :meth:`dialect` returns the :data:`POSTGRES_DIALECT` constant from
+  :mod:`signalforge.warehouse.models` (``quote_char='"'``,
+  ``identifier_case='lower'``, ``supports_qualify=False``).
+* The three warehouse-operation methods (:meth:`sample_rows`,
+  :meth:`column_stats`, :meth:`run_test_sql`) raise
   :class:`NotImplementedError` naming this ticket (#53) so the v0.2
   implementation work has a single grep target.
 * :meth:`WarehouseAdapter.from_profile` dispatches ``profile.type ==
@@ -42,29 +47,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from signalforge.warehouse.base import WarehouseAdapter
-from signalforge.warehouse.models import ColumnStats, Dialect, TestResult
+from signalforge.warehouse.models import POSTGRES_DIALECT, ColumnStats, Dialect, TestResult
 
 if TYPE_CHECKING:
     from signalforge.warehouse.models import PartitionFilter, TableRef
-
-
-POSTGRES_DIALECT = Dialect(
-    name="postgres",
-    supports_tablesample=True,
-    supports_qualify=False,
-    quote_char='"',
-    identifier_case="lower",
-)
-"""Postgres-flavoured :class:`Dialect`.
-
-* ``quote_char='"'`` — Postgres uses double-quote for identifier quoting.
-* ``identifier_case='lower'`` — unquoted identifiers are folded to
-  lowercase (matches Postgres's own SQL parser behaviour).
-* ``supports_qualify=False`` — Postgres has no ``QUALIFY`` clause.
-* ``supports_tablesample=True`` — ``TABLESAMPLE`` is supported (BERNOULLI
-  / SYSTEM), though the prune layer prefers deterministic hash-mod
-  sampling anyway (DEC-006 of issue #3).
-"""
 
 
 _V02_REMEDIATION = "PostgresAdapter is a v0.2 stub (issue #53) — full implementation pending."

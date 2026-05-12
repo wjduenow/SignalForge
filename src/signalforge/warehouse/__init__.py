@@ -49,6 +49,7 @@ from signalforge.warehouse.errors import (
 )
 from signalforge.warehouse.models import (
     BIGQUERY_DIALECT,
+    POSTGRES_DIALECT,
     ColumnStats,
     Dialect,
     PartitionFilter,
@@ -75,6 +76,7 @@ __all__ = [
     "ManifestSchemaNotFoundError",
     "MaterialisationFailedError",
     "MaterialisationNotSupportedError",
+    "POSTGRES_DIALECT",
     "PartitionFilter",
     "ProfileEnvVarUnsetError",
     "ProfileNotFoundError",

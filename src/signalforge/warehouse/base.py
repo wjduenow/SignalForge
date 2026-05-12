@@ -4,12 +4,16 @@ The ABC contract is warehouse-agnostic; per-warehouse specifics live in
 each concrete adapter under :mod:`signalforge.warehouse.adapters`.
 
 The :meth:`WarehouseAdapter.from_profile` classmethod is the single
-dispatch point for v0.1: ``profile.type == "bigquery"`` lazy-imports
-:class:`signalforge.warehouse.adapters.bigquery.BigQueryAdapter`; anything
-else raises :class:`signalforge.warehouse.errors.UnsupportedProfileTypeError`.
-The lazy import keeps ``google-cloud-bigquery`` off the import path of
-callers that never invoke ``from_profile`` (e.g. tests injecting a fake
-client directly).
+dispatch point. v0.1 implemented ``profile.type == "bigquery"`` only;
+issue #53 added a ``profile.type == "postgres"`` branch that routes to
+:class:`signalforge.warehouse.adapters.postgres.PostgresAdapter` — a v0.2
+stub whose warehouse-operation methods (``sample_rows`` /
+``column_stats`` / ``run_test_sql``) raise :class:`NotImplementedError`
+naming the ticket. Any other ``profile.type`` raises
+:class:`signalforge.warehouse.errors.UnsupportedProfileTypeError`. The
+lazy imports keep ``google-cloud-bigquery`` (and any future Postgres
+driver) off the import path of callers that never invoke ``from_profile``
+(e.g. tests injecting a fake client directly).
 """
 
 from __future__ import annotations
@@ -171,12 +175,23 @@ class WarehouseAdapter(abc.ABC):
     def from_profile(cls, profile: DbtProfileTarget) -> WarehouseAdapter:
         """Dispatch on ``profile.type`` and instantiate the matching adapter.
 
-        v0.1 supports only ``profile.type == "bigquery"``; anything else
-        raises :class:`UnsupportedProfileTypeError`. Direct instantiation
-        of a concrete adapter remains supported for tests and explicit-config
-        use; this factory is the single dispatch point for the CLI / prune
-        layer so v0.2 can add a Snowflake case in one place rather than
-        threading dispatch through every caller.
+        Supported types:
+
+        * ``"bigquery"`` — returns a fully-implemented
+          :class:`signalforge.warehouse.adapters.bigquery.BigQueryAdapter`.
+        * ``"postgres"`` — returns the v0.2 stub
+          :class:`signalforge.warehouse.adapters.postgres.PostgresAdapter`
+          (issue #53); its warehouse-operation methods raise
+          :class:`NotImplementedError` until the full implementation
+          lands.
+
+        Anything else raises :class:`UnsupportedProfileTypeError`.
+
+        Direct instantiation of a concrete adapter remains supported for
+        tests and explicit-config use; this factory is the single
+        dispatch point for the CLI / prune layer so v0.x can add a
+        Snowflake case in one place rather than threading dispatch
+        through every caller.
         """
         from signalforge.warehouse.errors import UnsupportedProfileTypeError
 
@@ -202,7 +217,8 @@ class WarehouseAdapter(abc.ABC):
         if profile.type == "postgres":
             # v0.2 stub (issue #53) — validates the warehouse-agnostic seam
             # by routing a second profile.type through the factory. The
-            # adapter raises NotImplementedError on every non-dialect call;
+            # adapter's warehouse-operation methods (sample_rows /
+            # column_stats / run_test_sql) raise NotImplementedError;
             # operators see a clear "v0.2 pending" signal rather than the
             # v0.1 UnsupportedProfileTypeError.
             from signalforge.warehouse.adapters.postgres import PostgresAdapter
