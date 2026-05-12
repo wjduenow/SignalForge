@@ -46,7 +46,7 @@ construction tags and is unsafe for any input we don't fully control.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
@@ -54,6 +54,16 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from signalforge.draft.errors import DraftConfigInvalidError, DraftConfigNotFoundError
 
 _DEFAULT_CONFIG_FILENAME = "signalforge.yml"
+
+VALID_TEST_TYPES: Final[frozenset[str]] = frozenset(
+    {"not_null", "unique", "accepted_values", "relationships"}
+)
+"""The four dbt test types the drafter can propose (mirrors the system
+prompt's SCOPE section and the discriminated union in
+:mod:`signalforge.draft.models`). The :attr:`DraftConfig.exclude_tests`
+validator (issue #54) rejects anything outside this set so a typo like
+``"not_nul"`` fails loud at config-load rather than silently passing the
+LLM call and showing up later as an anchor-contract violation."""
 
 
 class DraftConfig(BaseModel):
@@ -96,12 +106,61 @@ class DraftConfig(BaseModel):
     max_retries_conn: int = 1
     """Connection / transport-error retry budget."""
 
+    exclude_tests: tuple[str, ...] = ()
+    """Test types to omit from drafting entirely (issue #54).
+
+    Each entry must be one of :data:`VALID_TEST_TYPES` (``"not_null"``,
+    ``"unique"``, ``"accepted_values"``, ``"relationships"``); unknown
+    values fail loud at config-load via the field validator. When
+    non-empty, the system prompt's test catalogue is filtered down to
+    the remaining types AND the parser's anchor-contract validator
+    rejects any candidate test of an excluded type (defence in depth —
+    the LLM can ignore prompt instructions; the parser cannot).
+    """
+
     @field_validator("max_output_tokens")
     @classmethod
     def _max_output_tokens_positive(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("max_output_tokens must be positive")
         return v
+
+    @field_validator("exclude_tests", mode="before")
+    @classmethod
+    def _coerce_exclude_tests(cls, value: object) -> tuple[str, ...]:
+        """Accept YAML's list output and reject unknown test types.
+
+        YAML ``[a, b]`` parses to a Python list; coerce to tuple for the
+        frozen-model contract. Duplicates are silently deduped (order
+        preserved) — a config that lists ``[unique, unique]`` is a typo,
+        not a meaningful signal. Each entry must be one of
+        :data:`VALID_TEST_TYPES`.
+        """
+        if value is None:
+            return ()
+        if isinstance(value, str):
+            raise ValueError(
+                "exclude_tests must be a list of test-type strings, not a single string"
+            )
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(
+                f"exclude_tests must be a list of test-type strings; "
+                f"got {type(value).__name__}"
+            )
+        seen: list[str] = []
+        for entry in value:
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"exclude_tests entries must be strings; got {type(entry).__name__}"
+                )
+            if entry not in VALID_TEST_TYPES:
+                raise ValueError(
+                    f"exclude_tests: {entry!r} is not a valid test type "
+                    f"(allowed: {sorted(VALID_TEST_TYPES)})"
+                )
+            if entry not in seen:
+                seen.append(entry)
+        return tuple(seen)
 
 
 class _DraftConfigFile(BaseModel):
@@ -208,4 +267,4 @@ def load_draft_config(project_dir: Path, path: Path | None = None) -> DraftConfi
     return wrapper.llm
 
 
-__all__ = ["DraftConfig", "load_draft_config"]
+__all__ = ["DraftConfig", "VALID_TEST_TYPES", "load_draft_config"]
