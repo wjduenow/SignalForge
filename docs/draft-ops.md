@@ -95,6 +95,11 @@ and forward-compat field additions don't break older readers.
 
 ## Response audit
 
+> **Consumer guide.** For cross-stage joins, `jq` / pandas worked examples,
+> the forward-compat policy, and the redaction surface, see
+> [`docs/audits.md`](audits.md). This section is the draft-layer
+> production contract.
+
 Path: `audit_path.with_name("llm_responses.jsonl")` — adjacent to the
 safety layer's `audit.jsonl`. Both audit streams share a parent
 directory so the privacy boundary is uniform (DEC-006).

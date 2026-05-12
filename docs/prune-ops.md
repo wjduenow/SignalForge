@@ -255,6 +255,11 @@ oneshot fallback's cost story for non-BQ adapters in v0.2.
 
 ## Audit JSONL schema
 
+> **Consumer guide.** For cross-stage joins, `jq` / pandas worked examples,
+> the forward-compat policy, and the redaction surface, see
+> [`docs/audits.md`](audits.md). This section is the prune-layer
+> production contract.
+
 Every `PruneDecision` produces exactly one JSONL record at
 `audit_path` (default `<project>/.signalforge/prune.jsonl`). One record
 per line; atomic concurrent appends via `O_APPEND | O_CREAT | 0o600` and
