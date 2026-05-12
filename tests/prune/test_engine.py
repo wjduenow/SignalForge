@@ -551,7 +551,7 @@ def test_prune_tests_kept_rate_warning_fires_when_all_tests_dropped(
     assert result.kept_count == 0
     assert result.dropped_count == 1
     matching = [
-        r for r in caplog.records if "kept rate at or below configured threshold" in r.message
+        r for r in caplog.records if "kept rate at or below configured threshold" in r.getMessage()
     ]
     assert len(matching) == 1
     # Payload is lazy-format JSON (DEC-017); the rendered message
@@ -593,7 +593,7 @@ def test_prune_tests_kept_rate_warning_silent_when_at_least_one_kept(
 
     assert result.kept_count == 1
     matching = [
-        r for r in caplog.records if "kept rate at or below configured threshold" in r.message
+        r for r in caplog.records if "kept rate at or below configured threshold" in r.getMessage()
     ]
     assert matching == []
 
@@ -650,7 +650,7 @@ def test_prune_tests_kept_rate_warning_respects_configured_threshold(
     assert result.kept_count == 1
     assert result.dropped_count == 1
     matching = [
-        r for r in caplog.records if "kept rate at or below configured threshold" in r.message
+        r for r in caplog.records if "kept rate at or below configured threshold" in r.getMessage()
     ]
     assert len(matching) == 1
     rendered = matching[0].getMessage()
@@ -692,9 +692,112 @@ def test_prune_tests_kept_rate_warning_silent_on_empty_candidate_set(
 
     assert result.total_tests == 0
     matching = [
-        r for r in caplog.records if "kept rate at or below configured threshold" in r.message
+        r for r in caplog.records if "kept rate at or below configured threshold" in r.getMessage()
     ]
     assert matching == []
+
+
+def test_prune_tests_kept_rate_warning_fires_on_disabled_short_circuit(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The kept-rate WARNING is wired into the ``enabled=False`` early-return
+    site too (not just the normal completion path) — every candidate drains
+    to ``kept-without-evidence`` (``decision="kept"``), so a configured
+    ``min_kept_rate_warn=1.0`` MUST fire because ``kept_rate == 1.0 <= 1.0``.
+
+    Locks in the "all three return paths" contract for issue #51 (CodeRabbit
+    follow-up): disabled short-circuit, materialisation-failure, and normal
+    completion all run through ``_maybe_emit_kept_rate_warning``.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(3)
+    config = PruneConfig(enabled=False, min_kept_rate_warn=1.0)
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    # All candidates routed to kept-without-evidence; kept_rate == 1.0.
+    assert result.total_tests == 3
+    assert result.kept_count == 3
+    matching = [
+        r for r in caplog.records if "kept rate at or below configured threshold" in r.getMessage()
+    ]
+    assert len(matching) == 1
+    rendered = matching[0].getMessage()
+    assert '"model_unique_id": "model.shop.orders"' in rendered
+    assert '"total_tests": 3' in rendered
+    assert '"kept": 3' in rendered
+    assert '"kept_rate": 1.0' in rendered
+    assert '"min_kept_rate_warn": 1.0' in rendered
+
+
+def test_prune_tests_kept_rate_warning_fires_on_materialisation_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The kept-rate WARNING fires on the materialisation-failure early-return
+    site (issue #51, CodeRabbit follow-up). Every candidate routes to
+    ``kept-without-evidence`` per DEC-009 of issue #22; with
+    ``min_kept_rate_warn=1.0`` the helper fires because ``kept_rate == 1.0``.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=MaterialisationFailedError("simulated quota error"),
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_n_tests(4)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+        min_kept_rate_warn=1.0,
+    )
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert result.total_tests == 4
+    assert result.kept_count == 4
+    matching = [
+        r for r in caplog.records if "kept rate at or below configured threshold" in r.getMessage()
+    ]
+    assert len(matching) == 1
+    rendered = matching[0].getMessage()
+    assert '"model_unique_id": "model.shop.orders"' in rendered
+    assert '"total_tests": 4' in rendered
+    assert '"kept": 4' in rendered
+    assert '"kept_rate": 1.0' in rendered
+    assert '"min_kept_rate_warn": 1.0' in rendered
+    fake.assert_all_expectations_met()
 
 
 def test_prune_tests_module_level_sleep_alias_is_reassignable() -> None:

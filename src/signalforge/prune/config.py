@@ -178,10 +178,11 @@ class PruneConfig(BaseModel):
     breakdown.
 
     The warning is informational — the run still returns a
-    :class:`PruneResult` and exits cleanly. Set to ``0.0`` to silence
-    entirely-empty-kept runs, or raise the threshold to catch
-    runs that drop more than the operator expects. Values outside
-    ``[0.0, 1.0]`` fail loud at config load via the field validator."""
+    :class:`PruneResult` and exits cleanly. The default ``0.0`` warns
+    only on entirely-empty-kept runs (``kept_rate == 0.0``, all
+    candidates dropped); raise the threshold to catch runs that drop
+    more than the operator expects. Values outside ``[0.0, 1.0]`` fail
+    loud at config load via the field validator."""
 
     sample_strategy: Literal["oneshot", "materialised"] = "materialised"
     """Per-run sample materialisation strategy (DEC-006 / Q7 of issue #22).
