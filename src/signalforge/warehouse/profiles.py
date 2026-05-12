@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from signalforge.warehouse._path_safety import canonicalise_path
 from signalforge.warehouse.errors import (
+    ProfileEnvVarUnsetError,
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
     UnsupportedAuthMethodError,
@@ -161,11 +163,59 @@ def _maybe_warn_large_profile(path: Path) -> None:
         )
 
 
+_ENV_VAR_RE = re.compile(
+    # dbt-compatible: ``env_var('NAME')`` or ``env_var("NAME")`` with an
+    # optional second positional arg used as the default. Whitespace
+    # between args is tolerated. Outer ``{{ ... }}`` brackets optional —
+    # dbt strictly requires them, but we accept the bare form so an
+    # operator who copy-pastes between profiles.yml and JSON contexts
+    # gets predictable behaviour.
+    r"""\{\{\s*env_var\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]"""
+    r"""(?:\s*,\s*['"]([^'"]*)['"])?\s*\)\s*\}\}""",
+    re.VERBOSE,
+)
+
+
+def _render_env_vars(text: str, *, path: Path) -> str:
+    """Render dbt-style ``{{ env_var('NAME') }}`` macros in ``text``.
+
+    Supports two forms — ``env_var('NAME')`` (raises
+    :class:`ProfileEnvVarUnsetError` if NAME is unset) and
+    ``env_var('NAME', 'default')`` (falls back to the literal default).
+
+    This is a deliberately minimal jinja-compat shim — full jinja
+    rendering (loops, conditionals, other macros) is out of scope. Just
+    enough to make the bundled ``signalforge init-demo`` profile's
+    ``project: "{{ env_var('GOOGLE_CLOUD_PROJECT') }}"`` line work
+    without an extra rendering step. Issue #47.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        var_name = match.group(1)
+        default = match.group(2)
+        value = os.environ.get(var_name)
+        if value is not None:
+            return value
+        if default is not None:
+            return default
+        raise ProfileEnvVarUnsetError(var_name=var_name, profiles_path=path)
+
+    return _ENV_VAR_RE.sub(_replace, text)
+
+
 def _load_profiles_yaml(path: Path) -> dict[str, Any]:
-    """Read and parse ``path`` as YAML, returning the top-level mapping."""
+    """Read and parse ``path`` as YAML, returning the top-level mapping.
+
+    Applies a dbt-compatible ``env_var('NAME')`` substitution pass over
+    the raw text before YAML parsing — see :func:`_render_env_vars`. The
+    substitution runs against the YAML text (not the parsed structure)
+    so quoted ``"{{ env_var('NAME') }}"`` strings cleanly become quoted
+    ``"<value>"`` strings; YAML quoting rules are preserved.
+    """
     _maybe_warn_large_profile(path)
-    with path.open("r", encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh)
+    raw_text = path.read_text(encoding="utf-8")
+    rendered_text = _render_env_vars(raw_text, path=path)
+    raw = yaml.safe_load(rendered_text)
     if not isinstance(raw, dict):
         raise ProfileNotFoundError(
             searched_paths=[path],

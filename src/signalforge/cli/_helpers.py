@@ -145,6 +145,7 @@ from signalforge.warehouse import (
     ManifestSchemaNotFoundError,
     MaterialisationFailedError,
     MaterialisationNotSupportedError,
+    ProfileEnvVarUnsetError,
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
     QuerySyntaxError,
@@ -212,6 +213,7 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # Warehouse profile / connection-shape config (auth lives in tier 3
     # because it's an external-dep state rather than a config-shape issue).
     ProfileNotFoundError: 1,
+    ProfileEnvVarUnsetError: 1,
     ProfileTargetNotFoundError: 1,
     UnsupportedProfileTypeError: 1,
     UnsupportedAuthMethodError: 1,

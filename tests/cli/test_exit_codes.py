@@ -254,6 +254,14 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
     if name == "CliInitDemoCopyError":
         return cls(dest="/tmp/synthetic", cause=_SENTINEL_CAUSE)
 
+    # Warehouse profile env_var failure (issue #47 — supports init-demo's
+    # bundled `{{ env_var('GOOGLE_CLOUD_PROJECT') }}` profile). Requires
+    # (var_name, profiles_path) as positional args.
+    if name == "ProfileEnvVarUnsetError":
+        from pathlib import Path
+
+        return cls(var_name="SYNTHETIC_VAR", profiles_path=Path("/tmp/synthetic/profiles.yml"))
+
     # Catch-all: layer-base default ``Cls(message, *, remediation=None)``.
     try:
         return cls(_SENTINEL_MESSAGE)

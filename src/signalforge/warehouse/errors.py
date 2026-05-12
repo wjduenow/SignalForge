@@ -128,6 +128,52 @@ class ProfileNotFoundError(WarehouseError):
         super().__init__(message, remediation=remediation)
 
 
+class ProfileEnvVarUnsetError(ProfileNotFoundError):
+    """The profile references ``env_var('NAME')`` for a variable that is
+    not set in the environment and has no default supplied.
+
+    Inherits from :class:`ProfileNotFoundError` so existing callers
+    catching "profile won't load" with one except keep working
+    (init-demo's documented happy path falls back to ``profiles.yml``
+    edits when this fires, so the operator sees one error type for
+    "profile broken").
+
+    The dbt convention ``env_var('NAME', 'default')`` resolves to the
+    default and never raises; only the no-default form trips this.
+    Added by issue #47 to support the demo's
+    ``{{ env_var('GOOGLE_CLOUD_PROJECT') }}`` profile.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Set the environment variable named in the message, or supply a default "
+        "to the env_var(...) call (e.g. env_var('NAME', 'fallback'))."
+    )
+
+    def __init__(
+        self,
+        var_name: str,
+        profiles_path: Path,
+        *,
+        remediation: str | None = None,
+    ) -> None:
+        self.var_name = var_name
+        self.profiles_path = profiles_path
+        message = (
+            f"profiles.yml at {profiles_path} references env_var({_format_value(var_name)}) "
+            f"but environment variable {_format_value(var_name)} is not set "
+            "and no default was supplied."
+        )
+        if remediation is None:
+            remediation = (
+                f"Set the environment variable: `export {var_name}=<value>`, "
+                f"or edit {profiles_path} to supply a default: "
+                f"`env_var('{var_name}', '<default>')`."
+            )
+        # Track searched_paths so parent contract holds.
+        self.searched_paths: list[Path] = [profiles_path]
+        WarehouseError.__init__(self, message, remediation=remediation)
+
+
 class ProfileTargetNotFoundError(ProfileNotFoundError):
     """The profile resolved but the requested ``target`` field is missing.
 
