@@ -79,6 +79,29 @@ BIGQUERY_DIALECT = Dialect(
 )
 
 
+POSTGRES_DIALECT = Dialect(
+    name="postgres",
+    supports_tablesample=True,
+    supports_qualify=False,
+    quote_char='"',
+    identifier_case="lower",
+)
+"""Postgres-flavoured :class:`Dialect` for the v0.2 stub adapter (issue #53).
+
+* ``quote_char='"'`` — Postgres uses double-quote for identifier quoting.
+* ``identifier_case='lower'`` — unquoted identifiers are folded to
+  lowercase (matches Postgres's own SQL parser behaviour).
+* ``supports_qualify=False`` — Postgres has no ``QUALIFY`` clause.
+* ``supports_tablesample=True`` — ``TABLESAMPLE`` is supported (BERNOULLI
+  / SYSTEM), though the prune layer prefers deterministic hash-mod
+  sampling anyway (DEC-006 of issue #3).
+
+Lives alongside :data:`BIGQUERY_DIALECT` per DEC-003 so the prune
+compiler (and any other dialect-aware consumer) imports every flavour
+from one place rather than reaching into adapter modules.
+"""
+
+
 # ---------------------------------------------------------------------------
 # TableRef
 # ---------------------------------------------------------------------------
@@ -256,6 +279,7 @@ __all__ = [
     "BIGQUERY_DIALECT",
     "ColumnStats",
     "Dialect",
+    "POSTGRES_DIALECT",
     "PartitionFilter",
     "TableRef",
     "TestResult",

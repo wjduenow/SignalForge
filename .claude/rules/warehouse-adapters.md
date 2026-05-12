@@ -15,11 +15,14 @@ src/signalforge/warehouse/
   _path_safety.py        # symlink-hardened path canonicalisation (warehouse copy)
   _test_result_repr.py   # deterministic compact_repr for sample failures
   adapters/
-    bigquery.py          # the only concrete adapter in v0.1
+    bigquery.py          # the v0.1 concrete adapter
+    postgres.py          # v0.2 stub (issue #53) — validates the warehouse-agnostic seam
     _client.py           # pyright-noise shim around google.cloud.bigquery
 ```
 
 The ABC is warehouse-agnostic. v0.2 Snowflake/Postgres slot under `adapters/` without restructuring (DEC-001). `_`-prefixed helpers stay reachable via dotted import but are absent from the package namespace.
+
+**Second-adapter stub lives at `adapters/postgres.py`; lights up the v0.2 work (issue #53).** The stub implements only `__init__` (capturing connection params) and `dialect()` (returning a Postgres-flavoured `Dialect`: `quote_char='"'`, `identifier_case='lower'`, `supports_qualify=False`); every other abstract method raises `NotImplementedError("…issue #53…")`. `WarehouseAdapter.from_profile` dispatches `profile.type == "postgres"` to it so an operator with a Postgres profile sees a `NotImplementedError` rather than the v0.1 `UnsupportedProfileTypeError`. The stub exists to verify Architectural Commitment #3 ("warehouse-agnostic by design") by forcing the ABC + factory seam through a second code path right now — pre-#53 the only concrete was `bigquery.py` and the abstraction was unverified. When the v0.2 Postgres implementation lands it should replace every `NotImplementedError` with the real call (and likely extend `DbtProfileTarget` to accept Postgres-specific fields — the current `extra="forbid"` model is BigQuery-shaped).
 
 ## ABC + lazy-import factory (DEC-019)
 

@@ -1,0 +1,17 @@
+# Minimal valid Postgres profile for the v0.2 stub adapter (issue #53).
+# Exercises the WarehouseAdapter.from_profile dispatch path for
+# `type: postgres` without depending on a real Postgres connection.
+#
+# Note: the current DbtProfileTarget model is BigQuery-shaped
+# (`extra="forbid"`), so Postgres-specific fields (host/port/user/password)
+# are not present here. A real Postgres adapter (v0.x) will need to relax
+# or split the profile model — that work belongs to the v0.x ticket, not
+# the stub. ``project`` maps to the Postgres dbname and ``schema`` (YAML)
+# maps to ``DbtProfileTarget.dataset``.
+signalforge_test_postgres:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      project: analytics_db
+      schema: public
