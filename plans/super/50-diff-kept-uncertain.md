@@ -13,9 +13,9 @@
 
 ## Ticket summary
 
-Pre-#50 the diff renderer collapsed `prune_result.reason == "kept"` and
-`prune_result.reason == "kept-without-evidence"` into a single
-`tier="kept"` (green) row. The only signal distinguishing the two was
+Pre-#50 the diff renderer collapsed the per-row
+`PruneDecision.reason == "kept"` and `PruneDecision.reason ==
+"kept-without-evidence"` into a single `tier="kept"` (green) row. The only signal distinguishing the two was
 the prose `why` field. This defeated the conservative-bias commitment
 (`.claude/rules/prune-engine.md` DEC-006 / DEC-011) — a reviewer
 scanning the kept column saw "we shipped this without evidence" in the
