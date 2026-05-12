@@ -13,15 +13,27 @@ src/signalforge/cli/
                  # map_exception_to_exit_code, _safe_excepthook, _EXCEPTION_TO_EXIT_CODE,
                  # progress helpers (should_emit_progress / format_elapsed /
                  # emit_progress_entry / emit_progress_done)
-  errors.py      # CliError + CliPathError + CliInputError
+  errors.py      # CliError + CliPathError + CliInputError + CliInitDemo*
   generate.py    # add_parser + cmd_generate (the full pipeline)
+  init_demo.py   # add_parser + cmd_init_demo (copy bundled demo to disk; issue #47)
   lint.py        # add_parser + cmd_lint (config-only validator)
   version.py     # add_parser + cmd_version (prints signalforge __version__)
 ```
 
-Flat layout — one module per subcommand, no nested directories, no `__main__.py`. Mirrors clauditor's CLI shape (16 subcommand modules in clauditor; SignalForge ships three for v0.1). Every subcommand module exports exactly two public symbols: `add_parser(subparsers) -> None` (registers the subparser, no return) and `cmd_<name>(args) -> int` (handler returning the exit code). The top-level `main(argv: list[str] | None = None) -> int` accepts an explicit argv list (defaults to `sys.argv[1:]`) — that's what makes in-process testing trivial: tests call `main([...])` directly, assert on the returned `int` and capsys output, and never spawn a subprocess.
+Flat layout — one module per subcommand, no nested directories, no `__main__.py`. Mirrors clauditor's CLI shape (16 subcommand modules in clauditor; SignalForge ships four as of #47). Every subcommand module exports exactly two public symbols: `add_parser(subparsers) -> None` (registers the subparser, no return) and `cmd_<name>(args) -> int` (handler returning the exit code). The top-level `main(argv: list[str] | None = None) -> int` accepts an explicit argv list (defaults to `sys.argv[1:]`) — that's what makes in-process testing trivial: tests call `main([...])` directly, assert on the returned `int` and capsys output, and never spawn a subprocess.
 
 When v0.2 adds a new subcommand (`signalforge doctor`, `signalforge profile`, ...), match the precedent: one new module under `src/signalforge/cli/`, register via `add_parser(subparsers)` from `main()`, return an int from `cmd_<name>(args)`.
+
+## Library-surface pattern: CLI handler wraps a public lib module at the boundary (issue #47)
+
+Issue #47 introduces a new pattern for subcommands that have a useful programmatic surface — `signalforge init-demo` ships both as a CLI subcommand AND as a public Python function `signalforge.demo.copy_demo(dest, *, force=False) -> Path`. The split:
+
+- **`signalforge.demo`** (subpackage) — the public library entry point. Owns its own typed-error hierarchy (`DemoError` base + `DemoPathError`, `DemoDestExistsError`, `DemoDestUnsafeError`, `DemoFixtureMissingError`). Errors carry an optional `remediation` and a `cause` kwarg mirrored from every other `signalforge.*.errors` module's layer-base pattern. The library function returns useful work product (`Path`) — not just side effects — so notebook / script callers have a clean programmatic surface.
+- **`signalforge.cli.init_demo`** (CLI module) — thin handler that argparse-parses its inputs, calls into `signalforge.demo.copy_demo(...)` inside the single `try/except Exception` boundary (DEC-016), and wraps every `DemoError` subclass into the matching `CliInitDemo*Error` (tier 2 for input-validation failures, tier 1 for broken-install / filesystem failures). The CLI owns the next-steps message + exit-code mapping; the library function stays clean of CLI concerns.
+
+This is "two-layer error wrapping" — library typed errors are public (catchable by library callers), CLI typed errors are public (registered in `_EXCEPTION_TO_EXIT_CODE`), and the CLI handler does the translation at the boundary. The 7th AST scan walks BOTH `demo/errors.py` AND `cli/errors.py` so missing tier mappings on either side fail loud. Defence-in-depth: the lower-level `DemoError` subclasses are ALSO registered in `_EXCEPTION_TO_EXIT_CODE` with the same tiers as their CLI wrappers, so a v0.2 contributor who adds a new `Demo*Error` subclass and forgets to wire the CLI wrapper still gets a sensible exit code via `map_exception_to_exit_code`'s MRO walk.
+
+When v0.2 adds a similar dual-surface subcommand (e.g., `signalforge fetch-rubrics` library-callable from a notebook, or `signalforge configure` from a CI bootstrap script), follow this pattern: public lib module with its own `errors.py`, CLI handler wraps at the boundary, both layers' errors land in the exit-code mapping.
 
 ## Four-tier exit-code taxonomy (DEC-008, DEC-019, DEC-024)
 
@@ -34,7 +46,7 @@ Every `cmd_<name>` handler returns an integer drawn from exactly four values. Po
 
 The mapping table lives at `signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE`. `map_exception_to_exit_code(exc)` walks `type(exc).__mro__` against the table so subclasses inherit their parent's tier; an unregistered type (or a bare `Exception`) lands at tier 1 per DEC-016 (the panic path).
 
-The 7th AST scan in `tests/test_audit_completeness.py` (DEC-024) walks every `src/signalforge/*/errors.py` (nine modules: the eight stage layers plus `cli/errors.py`) and asserts every concrete `class <Name>Error(...):` declaration appears in the mapping table. Excluded bases: the nine per-stage abstract bases (`ManifestError`, `WarehouseError`, `SafetyError`, `LLMError`, `LLMHelperError`, `DraftError`, `PruneError`, `GradeError`, `DiffError`, `CliError`). A new typed exception lands without a tier mapping → test fails loud.
+The 7th AST scan in `tests/test_audit_completeness.py` (DEC-024) walks every `src/signalforge/*/errors.py` (ten modules as of #47: the eight pipeline stages plus `cli/errors.py` plus the new `demo/errors.py`) and asserts every concrete `class <Name>Error(...):` declaration appears in the mapping table. Excluded bases: the ten per-stage abstract bases (`ManifestError`, `WarehouseError`, `SafetyError`, `LLMError`, `DraftError`, `PruneError`, `GradeError`, `DiffError`, `CliError`, `DemoError`). **NOTE:** `LLMHelperError` is deliberately NOT excluded — it is raised directly in `signalforge.llm.client` (three sites), so it's a concrete leaf for taxonomy purposes and must appear in `_EXCEPTION_TO_EXIT_CODE`. A new typed exception lands without a tier mapping → test fails loud.
 
 See clauditor's `.claude/rules/llm-cli-exit-code-taxonomy.md` for the source rule in the See-Also footer.
 
@@ -74,10 +86,10 @@ The exit-code mapping is a `dict[type[BaseException], int]` keyed by exception c
 Three load-bearing invariants:
 
 1. **One entry per concrete error class.** Every concrete `class <Name>Error(...):` declaration in any `src/signalforge/*/errors.py` module gets exactly one entry in the table. Adding multiple entries (the same class registered at two tiers) is a typo — the dict semantics keep only the last one and the test won't notice.
-2. **Abstract bases land in `_EXCEPTION_MAPPING_EXCLUDED_BASES`, not the table.** The nine per-stage abstract bases (`ManifestError`, `WarehouseError`, `SafetyError`, `LLMError`, `LLMHelperError`, `DraftError`, `PruneError`, `GradeError`, `DiffError`, `CliError` — eight pipeline stages plus the CLI base) are listed in the frozenset constant and excluded by the AST scan. Subclasses inherit via the MRO walk; registering an abstract base directly would make `map_exception_to_exit_code(exc_with_unrelated_concrete_base)` accidentally return the abstract-base tier, defeating the per-class precision.
+2. **Abstract bases land in `_EXCEPTION_MAPPING_EXCLUDED_BASES`, not the table.** The ten per-stage abstract bases (`ManifestError`, `WarehouseError`, `SafetyError`, `LLMError`, `DraftError`, `PruneError`, `GradeError`, `DiffError`, `CliError`, `DemoError` — eight pipeline stages plus the CLI base plus the demo-layer base added in #47) are listed in the frozenset constant and excluded by the AST scan. `LLMHelperError` is deliberately NOT in the excluded set despite living one level below `LLMError` — it's raised directly in `signalforge.llm.client` (concrete leaf for taxonomy purposes). Subclasses inherit via the MRO walk; registering an abstract base directly would make `map_exception_to_exit_code(exc_with_unrelated_concrete_base)` accidentally return the abstract-base tier, defeating the per-class precision.
 3. **An unregistered concrete class falls to tier 1 via the panic path.** `map_exception_to_exit_code` returns `1` for any class without an MRO match, mirroring `signalforge.cli._helpers._safe_excepthook`'s tier-1 default for bare `Exception`. The 7th AST scan ensures unregistered concretes are caught at test time, not runtime — but the runtime fallback is the safety net.
 
-If v0.2 introduces a new intermediate abstract base (e.g., a `WarehouseTransientError` that sits between `WarehouseError` and the concrete `WarehouseRateLimitError`), add it to `_EXCEPTION_MAPPING_EXCLUDED_BASES` AND document the addition. The exclusion list is a contract surface, not a convenience cache. The same rule applies if a new pipeline subpackage ships its own `errors.py` (a tenth stage, e.g., `signalforge.cache`): the companion test `test_scan_7_discovers_every_per_stage_errors_module` asserts the scan walks exactly nine `errors.py` files, so the count must be bumped in lockstep with the new stage's abstract base getting added to the excluded-bases set.
+If v0.2 introduces a new intermediate abstract base (e.g., a `WarehouseTransientError` that sits between `WarehouseError` and the concrete `WarehouseRateLimitError`), add it to `_EXCEPTION_MAPPING_EXCLUDED_BASES` AND document the addition. The exclusion list is a contract surface, not a convenience cache. The same rule applies if a new pipeline subpackage ships its own `errors.py` (an eleventh stage, e.g., `signalforge.cache`): the companion test `test_scan_7_discovers_every_per_stage_errors_module` asserts the scan walks exactly ten `errors.py` files, so the count must be bumped in lockstep with the new stage's abstract base getting added to the excluded-bases set. Issue #47 set the precedent by adding `signalforge.demo` (the 10th `errors.py`) and `DemoError` (the 10th excluded base) in lockstep.
 
 ## Multi-surface parity for behaviour changes (QG pass-3 lesson)
 
@@ -127,9 +139,9 @@ The CLI is the orchestration layer (NOT a stage-0 reader/parser per the `manifes
 
 ## 7th AST scan: every typed exception has an exit-code mapping (DEC-019, DEC-024)
 
-`tests/test_audit_completeness.py::test_every_typed_error_is_in_exit_code_mapping_table` is the 7th AST scan in the project (after the six landed by #4 / #5 / #6 / #7). Walks every `*/errors.py` under `src/signalforge/`, collects each `class <Name>Error(...):` declaration via `ast.ClassDef`, and asserts the class is registered in `signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE`. Excludes the nine per-stage abstract bases (frozenset constant `_EXCEPTION_MAPPING_EXCLUDED_BASES`); subclasses inherit via the MRO walk in `map_exception_to_exit_code`.
+`tests/test_audit_completeness.py::test_every_typed_error_is_in_exit_code_mapping_table` is the 7th AST scan in the project (after the six landed by #4 / #5 / #6 / #7). Walks every `*/errors.py` under `src/signalforge/`, collects each `class <Name>Error(...):` declaration via `ast.ClassDef`, and asserts the class is registered in `signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE`. Excludes the ten per-stage abstract bases (frozenset constant `_EXCEPTION_MAPPING_EXCLUDED_BASES`); subclasses inherit via the MRO walk in `map_exception_to_exit_code`.
 
-A companion test `test_scan_7_discovers_every_per_stage_errors_module` asserts the scan walks exactly nine `errors.py` files (one per stage subpackage). A future stage that forgets to ship `errors.py` (or moves the CLI errors to a sibling location) breaks this test loudly.
+A companion test `test_scan_7_discovers_every_per_stage_errors_module` asserts the scan walks exactly ten `errors.py` files (one per stage subpackage, including `demo/errors.py` from #47). A future stage that forgets to ship `errors.py` (or moves the CLI errors to a sibling location) breaks this test loudly.
 
 Sanity test `test_exit_code_mapping_has_at_least_one_entry_per_tier` asserts every tier (1, 2, 3) has at least one entry in the table — guards against an accidental mass-rename / deletion.
 

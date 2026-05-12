@@ -44,6 +44,7 @@ _SRC_ROOT = _REPO_ROOT / "src" / "signalforge"
 # diffing when a future stage extends the list.
 _SCAN_SUBPACKAGES: tuple[str, ...] = (
     "cli",
+    "demo",
     "diff",
     "draft",
     "grade",

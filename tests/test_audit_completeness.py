@@ -584,6 +584,15 @@ _EXCEPTION_MAPPING_EXCLUDED_BASES: frozenset[str] = frozenset(
         "GradeError",
         "DiffError",
         "CliError",
+        # ``DemoError`` (issue #47) — abstract base of the
+        # ``signalforge.demo`` typed-error hierarchy. Its four concrete
+        # subclasses are wrapped at the CLI handler boundary into
+        # ``CliInitDemo*Error`` wrappers, but the concretes themselves
+        # still land in ``_EXCEPTION_TO_EXIT_CODE`` (defence-in-depth so
+        # a v0.2 ``Demo*Error`` that escapes the ladder gets a sensible
+        # exit code via the MRO walk). The base is excluded per the
+        # abstract-base convention.
+        "DemoError",
     }
 )
 
@@ -704,6 +713,7 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
     rel_names = sorted(p.relative_to(_SIGNALFORGE_DIR).as_posix() for p in paths)
     assert rel_names == [
         "cli/errors.py",
+        "demo/errors.py",
         "diff/errors.py",
         "draft/errors.py",
         "grade/errors.py",
@@ -713,8 +723,8 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
         "safety/errors.py",
         "warehouse/errors.py",
     ], (
-        "Expected exactly nine per-stage errors.py modules (one per "
-        "stage); got: "
+        "Expected exactly ten per-stage errors.py modules (one per "
+        "stage; demo added in #47); got: "
         f"{rel_names}. If this changes, update Scan 7's expected set."
     )
 

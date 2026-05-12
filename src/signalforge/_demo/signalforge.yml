@@ -1,0 +1,14 @@
+# Issue #10 e2e fixture config. Locked values are load-bearing for the smoke test
+# — see plans/super/10-e2e-bigquery-smoke.md DEC-005..DEC-018.
+# Pinned to match DraftConfig.model default; bump in lockstep when Sonnet 4.6 sunsets.
+llm:
+  model: claude-sonnet-4-6
+safety:
+  mode: aggregate-only
+prune:
+  sample_strategy: materialised  # v0.2 default; exercises BQ session-state.
+grade:
+  min_pass_rate: 0.95
+  min_mean_score: 0.95
+  fail_on_below_threshold: false
+  total_budget_seconds: 600  # default 300 is tight at p99 latency × ~12 calls.

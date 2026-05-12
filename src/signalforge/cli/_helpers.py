@@ -41,10 +41,20 @@ if TYPE_CHECKING:
 from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.cli.errors import (
     CliError,
+    CliInitDemoCopyError,
+    CliInitDemoDestExistsError,
+    CliInitDemoDestUnsafeError,
+    CliInitDemoFixtureMissingError,
     CliInputError,
     CliPathError,
     CliSelectorNoMatchError,
     CliSelectorParseError,
+)
+from signalforge.demo import (
+    DemoDestExistsError,
+    DemoDestUnsafeError,
+    DemoFixtureMissingError,
+    DemoPathError,
 )
 
 # --- per-stage public-surface imports for the exit-code table ---------------
@@ -135,6 +145,7 @@ from signalforge.warehouse import (
     ManifestSchemaNotFoundError,
     MaterialisationFailedError,
     MaterialisationNotSupportedError,
+    ProfileEnvVarUnsetError,
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
     QuerySyntaxError,
@@ -202,6 +213,7 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # Warehouse profile / connection-shape config (auth lives in tier 3
     # because it's an external-dep state rather than a config-shape issue).
     ProfileNotFoundError: 1,
+    ProfileEnvVarUnsetError: 1,
     ProfileTargetNotFoundError: 1,
     UnsupportedProfileTypeError: 1,
     UnsupportedAuthMethodError: 1,
@@ -222,6 +234,24 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # CLI-layer load-shape errors.
     CliError: 1,
     CliPathError: 1,
+    # init-demo broken-install / filesystem-failure wrappers (issue #47 /
+    # DEC-012 of plans/super/47-init-demo.md). Tier 1 because both fire
+    # before any user-content work has happened and represent state we
+    # couldn't get into a coherent shape (missing wheel resource, generic
+    # OSError during the copytree / rmtree).
+    CliInitDemoFixtureMissingError: 1,
+    CliInitDemoCopyError: 1,
+    # Lower-level signalforge.demo typed errors (issue #47). The CLI
+    # wraps these into the Cli* wrappers above, so under normal CLI
+    # operation they never reach this mapping directly. They land in
+    # the table anyway as defence-in-depth: the 7th AST scan
+    # (tests/test_audit_completeness.py) gates every concrete *Error
+    # under src/signalforge/*/errors.py; mapping them here means a
+    # v0.2 contributor who adds a new Demo*Error and forgets to wire
+    # the CLI wrapper still gets a sensible exit code via the MRO
+    # walk in :func:`map_exception_to_exit_code`.
+    DemoPathError: 1,
+    DemoFixtureMissingError: 1,
     # ---- Tier 2: input ----------------------------------------------------
     # Manifest selection (the operator picked a model that doesn't exist or
     # is disabled — caller's fault, not load).
@@ -274,6 +304,17 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # zero-match mirrors ``ModelNotFoundError``'s tier.
     CliSelectorParseError: 2,
     CliSelectorNoMatchError: 2,
+    # init-demo input-validation wrappers (issue #47 / DEC-013 of
+    # plans/super/47-init-demo.md). Tier 2 because both fire on
+    # operator-supplied dest values that conflict with project state —
+    # mirrors the precedent set by ModelNotFoundError (tier 2 for "the
+    # operator named something the project rejects").
+    CliInitDemoDestExistsError: 2,
+    CliInitDemoDestUnsafeError: 2,
+    # Lower-level demo-layer counterparts — see the tier-1 demo block
+    # above for the defence-in-depth rationale.
+    DemoDestExistsError: 2,
+    DemoDestUnsafeError: 2,
     # ---- Tier 3: API / external dep ---------------------------------------
     # LLM connectivity / quota / SDK issues.
     LLMError: 3,

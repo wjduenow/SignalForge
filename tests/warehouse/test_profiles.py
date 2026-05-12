@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from signalforge.warehouse import profiles as profiles_module
 from signalforge.warehouse.errors import (
+    ProfileEnvVarUnsetError,
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
     UnsupportedAuthMethodError,
@@ -328,6 +329,117 @@ def test_load_profile_warns_on_large_yaml(
         f"expected at least one WARNING from signalforge.warehouse logger; "
         f"got {[(r.name, r.levelno, r.getMessage()) for r in caplog.records]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 6b. env_var() macro rendering (issue #47 — supports init-demo profiles.yml)
+# ---------------------------------------------------------------------------
+
+
+def _write_env_var_profile(project_dir: Path, env_var_expr: str) -> None:
+    """Helper: write a minimal profile that references `env_var(...)`."""
+    (project_dir / "profiles.yml").write_text(
+        "signalforge_test:\n"
+        "  target: dev\n"
+        "  outputs:\n"
+        "    dev:\n"
+        "      type: bigquery\n"
+        "      method: oauth\n"
+        f'      project: "{{{{ {env_var_expr} }}}}"\n'
+        "      dataset: austin_bikeshare\n"
+        "      location: US\n",
+        encoding="utf-8",
+    )
+
+
+def test_load_profile_renders_env_var_macro(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``env_var('NAME')`` resolves to the environment value at load time.
+
+    Mirrors the dbt convention so the bundled ``init-demo`` profile
+    (which uses ``{{ env_var('GOOGLE_CLOUD_PROJECT') }}``) works without
+    profile edits when the operator has the env var set.
+    """
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake_home")
+    monkeypatch.setenv("MY_BILLING_PROJECT", "billing-prod-42")
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _write_dbt_project(project_dir)
+    _write_env_var_profile(project_dir, "env_var('MY_BILLING_PROJECT')")
+
+    target = load_profile(project_dir)
+    assert target.project == "billing-prod-42"
+
+
+def test_load_profile_env_var_with_default_uses_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``env_var('NAME', 'default')`` falls back to the literal default
+    when NAME is unset (dbt convention)."""
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake_home")
+    monkeypatch.delenv("UNSET_BILLING_PROJECT", raising=False)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _write_dbt_project(project_dir)
+    _write_env_var_profile(project_dir, "env_var('UNSET_BILLING_PROJECT', 'fallback-project')")
+
+    target = load_profile(project_dir)
+    assert target.project == "fallback-project"
+
+
+def test_load_profile_env_var_unset_no_default_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``env_var('NAME')`` with no default and NAME unset raises
+    :class:`ProfileEnvVarUnsetError` — dbt's documented behaviour.
+
+    This is the load-bearing test for init-demo's UX: the first-run
+    operator who forgets to ``export GOOGLE_CLOUD_PROJECT`` before
+    ``signalforge lint`` / ``generate`` gets a clear typed error pointing
+    at the missing env var, not a downstream BigQuery rejection of the
+    literal jinja string.
+    """
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake_home")
+    monkeypatch.delenv("DEFINITELY_NOT_SET_47", raising=False)
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _write_dbt_project(project_dir)
+    _write_env_var_profile(project_dir, "env_var('DEFINITELY_NOT_SET_47')")
+
+    with pytest.raises(ProfileEnvVarUnsetError) as excinfo:
+        load_profile(project_dir)
+    assert excinfo.value.var_name == "DEFINITELY_NOT_SET_47"
+    rendered = str(excinfo.value)
+    assert "DEFINITELY_NOT_SET_47" in rendered
+    assert "↳ Remediation:" in rendered
+
+
+def test_load_profile_env_var_preserves_yaml_quoting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A quoted ``"{{ env_var('NAME') }}"`` substitutes the value while
+    preserving the surrounding YAML string context — the rendered
+    ``project`` field is a plain string, not a parsed int / bool."""
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake_home")
+    # Use a numeric-looking value to verify YAML doesn't coerce to int.
+    monkeypatch.setenv("NUMERIC_PROJECT", "12345")
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _write_dbt_project(project_dir)
+    _write_env_var_profile(project_dir, "env_var('NUMERIC_PROJECT')")
+
+    target = load_profile(project_dir)
+    assert target.project == "12345"
+    assert isinstance(target.project, str)
 
 
 # ---------------------------------------------------------------------------
