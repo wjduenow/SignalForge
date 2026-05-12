@@ -128,6 +128,26 @@ def test_copy_demo_to_nonempty_dir_without_force_raises_dest_exists(
     assert (dest / "preexisting.txt").read_text() == "hi"
 
 
+def test_copy_demo_dest_is_file_without_force_raises_dest_exists(
+    tmp_path: Path,
+) -> None:
+    """A ``dest`` that exists as a regular file (not a directory) raises
+    :class:`DemoDestExistsError` with a "not a directory" message, NOT a
+    raw ``NotADirectoryError`` from ``iterdir()``. Pinned because the
+    naive existence-gate would call ``iterdir()`` on a non-directory and
+    surface a misleading "failed to copy demo tree" wrap through the
+    CLI. Pass-2 QG defence.
+    """
+    dest = tmp_path / "demo"
+    dest.write_text("i am a file, not a directory")
+    with pytest.raises(DemoDestExistsError) as excinfo:
+        copy_demo(dest)
+    rendered = str(excinfo.value)
+    assert "not a directory" in rendered
+    # The file is untouched.
+    assert dest.read_text() == "i am a file, not a directory"
+
+
 # ---------------------------------------------------------------------------
 # Force semantics
 # ---------------------------------------------------------------------------
@@ -148,6 +168,23 @@ def test_copy_demo_to_nonempty_dir_with_force_replaces_atomically(
     assert not (dest / "stale.txt").exists()
     assert not (dest / "old_subdir").exists()
     # Demo content is present.
+    assert (dest / "dbt_project.yml").is_file()
+    assert (dest / "target" / "manifest.json").is_file()
+
+
+def test_copy_demo_dest_is_file_with_force_replaces_with_demo_dir(
+    tmp_path: Path,
+) -> None:
+    """``force=True`` against a ``dest`` that exists as a regular file
+    unlinks the file and copies the demo tree in its place. Pinned
+    because the existence-gate's "remove and replace" semantics applies
+    to non-directory contents too. Pass-2 QG defence.
+    """
+    dest = tmp_path / "demo"
+    dest.write_text("i am a file that will be replaced")
+    result = copy_demo(dest, force=True)
+    assert result == dest.resolve()
+    assert result.is_dir()
     assert (dest / "dbt_project.yml").is_file()
     assert (dest / "target" / "manifest.json").is_file()
 

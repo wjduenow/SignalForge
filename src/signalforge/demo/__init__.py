@@ -111,6 +111,21 @@ def copy_demo(dest: Path | str, *, force: bool = False) -> Path:
                 "would clobber a top-level system or user directory"
             )
 
+    # Shape gate — if dest exists but isn't a directory (file, symlink to
+    # a file, etc.), treat it as non-empty content. Without this
+    # pre-check, the iterdir() below would raise NotADirectoryError
+    # which surfaces through the CLI as a misleading
+    # "failed to copy demo tree" wrap instead of the clear
+    # DemoDestExistsError the operator should see.
+    if resolved_dest.exists() and not resolved_dest.is_dir():
+        if not force:
+            raise DemoDestExistsError(
+                f"destination {str(resolved_dest)!r} exists but is not a directory"
+            )
+        # force=True against a non-directory → remove the file/symlink
+        # and fall through to the fresh-dest branch.
+        resolved_dest.unlink()
+
     # Existence gate — non-empty + no force → loud refusal. Empty dirs
     # and non-existent dests both fall through to the copy. We track
     # whether the dest was already a (empty) directory so we can pass

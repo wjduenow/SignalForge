@@ -155,6 +155,27 @@ def test_cmd_init_demo_force_against_existing_nonempty_dir_returns_0(
     assert "Traceback" not in err
 
 
+def test_cmd_init_demo_dest_is_file_returns_exit_2_with_clear_message(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A ``dest`` that exists as a regular file (not a directory) routes
+    to tier 2 ``CliInitDemoDestExistsError`` with a "not a directory"
+    message — NOT a tier-1 ``CliInitDemoCopyError`` wrap of a raw
+    ``NotADirectoryError`` from ``iterdir()``. Pass-2 QG defence.
+    """
+    dest = tmp_path / "demo"
+    dest.write_text("i am a regular file, not a directory")
+    ret = main(["init-demo", str(dest)])
+    out, err = _capture(capsys)
+    assert ret == 2, f"expected tier 2; got {ret}\nstderr: {err}"
+    assert err.startswith("ERROR: ")
+    assert "not a directory" in err
+    # The original file is untouched.
+    assert dest.read_text() == "i am a regular file, not a directory"
+    assert "Traceback" not in err
+
+
 # ---------------------------------------------------------------------------
 # Force blast-radius guard
 # ---------------------------------------------------------------------------
