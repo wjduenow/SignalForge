@@ -41,6 +41,7 @@ def _make_report(
 ) -> DiffReport:
     """Construct a minimal :class:`DiffReport` for renderer tests."""
     kept = sum(1 for e in entries if e.tier == "kept")
+    kept_uncertain = sum(1 for e in entries if e.tier == "kept-uncertain")
     dropped = sum(1 for e in entries if e.tier == "dropped")
     flagged = sum(1 for e in entries if e.tier == "flagged")
     return DiffReport(
@@ -53,6 +54,7 @@ def _make_report(
         unified_diff=unified_diff,
         entries=entries,
         kept_count=kept,
+        kept_uncertain_count=kept_uncertain,
         dropped_count=dropped,
         flagged_count=flagged,
         has_existing_schema=False,
@@ -928,3 +930,99 @@ def test_kept_row_rationale_with_hostile_content_is_escaped_in_markdown(
     assert row_line.startswith("| ")
     assert row_line.endswith(" |")
     assert row_line.count("|") == 7
+
+
+# ---------------------------------------------------------------------------
+# Issue #50 — kept-uncertain tier surfaces in every renderer with a
+# distinct visual / structural signal.
+# ---------------------------------------------------------------------------
+
+
+def _kept_uncertain_entry(
+    *,
+    artifact_id: str = "test.column.email.unique",
+    why: str = "total prune budget exceeded before evaluation",
+) -> DiffEntry:
+    return DiffEntry(
+        artifact_id=artifact_id,
+        test_type="unique",
+        tier="kept-uncertain",
+        drop_reason=None,
+        why=why,
+        score=None,
+        passed=None,
+    )
+
+
+def test_ansi_renderer_kept_uncertain_uses_cyan_colour(
+    default_config: DiffConfig,
+) -> None:
+    """Issue #50: the ANSI renderer paints kept-uncertain rows cyan
+    (``\\x1b[36m``) to distinguish them from the green ``kept`` tier
+    (positive prune evidence). Yellow is reserved for ``flagged``
+    rows; the cyan choice avoids the palette collision.
+    """
+    renderer = AnsiRenderer(config=default_config, force_color=True, terminal_width=200)
+    output = renderer.render(_make_report(entries=(_kept_uncertain_entry(),)))
+
+    # Header carries the kept-uncertain count painted cyan.
+    assert "\x1b[36mkept-uncertain=1\x1b[0m" in output
+    # Tier cell is cyan-coloured.
+    assert "\x1b[36mkept-uncertain" in output
+
+
+def test_markdown_renderer_kept_uncertain_renders_distinct_row(
+    default_config: DiffConfig,
+) -> None:
+    """Issue #50: the Markdown renderer surfaces the kept-uncertain
+    tier in the summary line AND as a distinct tier-cell value in the
+    table row. Markdown carries no colour — the structural distinction
+    is the literal tier-cell text plus the per-tier count in the bold
+    summary.
+    """
+    cfg = DiffConfig(render_kind="markdown")
+    output = render_to_text(_make_report(entries=(_kept_uncertain_entry(),)), config=cfg)
+
+    assert "**kept-uncertain=1**" in output
+    # The tier cell value is the literal Tier literal.
+    row_line = next(line for line in output.splitlines() if "test.column.email.unique" in line)
+    assert "| kept-uncertain |" in row_line
+
+
+def test_kept_uncertain_with_hostile_why_is_ansi_stripped(
+    default_config: DiffConfig,
+) -> None:
+    """Issue #50 + DEC-007: even on the new kept-uncertain code path,
+    the unconditional ANSI strip runs on the ``why`` field. The strip
+    is the security boundary; the colour-precedence chain only governs
+    the renderer's own SGR codes.
+
+    A hostile prune ``why`` carrying smuggled SGR bytes cannot survive
+    to the rendered output regardless of how the tier dispatches.
+    """
+    hostile_why = "budget exceeded \x1b[31mEVIL\x1b[0m sneak"
+    renderer = AnsiRenderer(config=default_config, force_color=True, terminal_width=200)
+    output = renderer.render(_make_report(entries=(_kept_uncertain_entry(why=hostile_why),)))
+
+    # The literal text "EVIL" survives the strip.
+    assert "EVIL" in output
+    # The smuggled SGR pair does NOT appear as a contiguous run.
+    assert "\x1b[31mEVIL\x1b[0m" not in output
+
+
+def test_json_renderer_serialises_kept_uncertain_tier_literally(
+    default_config: DiffConfig,
+) -> None:
+    """Issue #50: the JSON renderer round-trips ``"kept-uncertain"`` as
+    a plain string. The sidecar consumer (a v0.3 GitHub Action) reads
+    this literal to gate on the four-tier taxonomy.
+    """
+    import json as _json
+
+    cfg = DiffConfig(render_kind="json")
+    output = render_to_text(_make_report(entries=(_kept_uncertain_entry(),)), config=cfg)
+
+    parsed = _json.loads(output)
+    assert parsed["audit_schema_version"] == 2
+    assert parsed["kept_uncertain_count"] == 1
+    assert parsed["entries"][0]["tier"] == "kept-uncertain"

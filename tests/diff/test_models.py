@@ -83,7 +83,7 @@ class StrictDiffReport(BaseModel):
     model_config = _STRICT
 
     schema_version: Literal[1] = 1
-    audit_schema_version: Literal[1] = 1
+    audit_schema_version: Literal[2] = 2
     signalforge_version: str
     model_unique_id: str
     run_id: str
@@ -93,6 +93,7 @@ class StrictDiffReport(BaseModel):
     unified_diff: str
     entries: tuple[StrictDiffEntry, ...]
     kept_count: int
+    kept_uncertain_count: int
     dropped_count: int
     flagged_count: int
     has_existing_schema: bool
@@ -131,6 +132,7 @@ def _sample_report(**overrides: object) -> DiffReport:
         "unified_diff": "--- a/x\n+++ b/x\n",
         "entries": (_sample_entry(),),
         "kept_count": 1,
+        "kept_uncertain_count": 0,
         "dropped_count": 0,
         "flagged_count": 0,
         "has_existing_schema": True,
@@ -164,6 +166,24 @@ def test_diff_entry_rejects_invalid_tier_literal() -> None:
         _sample_entry(tier="quux")
 
 
+def test_diff_entry_accepts_kept_uncertain_tier() -> None:
+    """Issue #50: ``DiffEntry.tier`` accepts ``"kept-uncertain"``.
+
+    Positive sanity test paired with the negative one above — confirms
+    the fourth :data:`Tier` literal is wired through the Pydantic
+    validator. A regression that drops the literal value from the
+    closed set would break this test before any rendering happens.
+    """
+    entry = _sample_entry(
+        tier="kept-uncertain",
+        drop_reason=None,
+        why="total prune budget exceeded before evaluation",
+        score=None,
+        passed=None,
+    )
+    assert entry.tier == "kept-uncertain"
+
+
 def test_diff_entry_accepts_dropped_with_drop_reason() -> None:
     """A ``dropped`` entry carries a :data:`DropReason` literal."""
     entry = _sample_entry(
@@ -187,8 +207,9 @@ def test_diff_report_constructs_with_canonical_field_set() -> None:
     """Happy-path: :class:`DiffReport` accepts its documented field set."""
     report = _sample_report()
     assert report.schema_version == 1
-    assert report.audit_schema_version == 1
+    assert report.audit_schema_version == 2
     assert report.kept_count == 1
+    assert report.kept_uncertain_count == 0
     assert report.has_existing_schema is True
     assert len(report.entries) == 1
 
@@ -350,9 +371,10 @@ def test_strict_diff_entry_validates_each_fixture_entry() -> None:
     """Each entry in ``diff_report_v1.json``'s ``entries`` validates
     against :class:`StrictDiffEntry` (``extra="forbid"``).
 
-    The fixture intentionally exercises all three :data:`Tier` values
-    (``kept`` / ``dropped`` / ``flagged``) so the literal-typing on the
-    strict mirror is exercised end-to-end.
+    The fixture intentionally exercises all four :data:`Tier` values
+    (``kept`` / ``kept-uncertain`` / ``dropped`` / ``flagged``) so the
+    literal-typing on the strict mirror is exercised end-to-end. The
+    ``kept-uncertain`` literal was added in issue #50.
     """
     fixture_path = _FIXTURES_DIR / "diff_report_v1.json"
     payload = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -364,10 +386,10 @@ def test_strict_diff_entry_validates_each_fixture_entry() -> None:
     for entry in entries:
         StrictDiffEntry.model_validate(entry)
         seen_tiers.add(entry["tier"])
-    assert seen_tiers == {"kept", "dropped", "flagged"}, (
-        "diff_report_v1.json must exercise all three Tier values "
-        "(kept, dropped, flagged) so the literal typing on "
-        "StrictDiffEntry is tested end-to-end"
+    assert seen_tiers == {"kept", "kept-uncertain", "dropped", "flagged"}, (
+        "diff_report_v1.json must exercise all four Tier values "
+        "(kept, kept-uncertain, dropped, flagged) so the literal "
+        "typing on StrictDiffEntry is tested end-to-end"
     )
 
 

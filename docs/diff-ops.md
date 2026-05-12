@@ -18,7 +18,7 @@ and produces:
 1. A **unified diff** between the existing committed `schema.yml` and
    the canonical proposed YAML emitted from the candidate (kept tests
    only).
-2. A **kept / dropped / flagged table** with one row per candidate
+2. A **kept / kept-uncertain / dropped / flagged table** with one row per candidate
    artefact and a one-line `why` for every entry.
 3. A typed :class:`DiffReport` for in-process consumption (returned to
    the caller).
@@ -73,15 +73,15 @@ Import from `signalforge.diff`. The names exported by `__all__`:
 
 ### Orchestrator
 
-- **`render_diff(model, candidate, prune_result, *, grading_report=None, existing_schema=None, config=None, output_path=None, sidecar_path=None, write_sidecar=True, project_dir=None) -> DiffReport`** — End-to-end orchestrator. Boundary-checks the inputs, computes the canonical proposed YAML, builds the unified diff, builds the per-row entry tuple (assigning `tier="kept" | "dropped" | "flagged"` per DEC-012), computes the three reproducibility hashes, dispatches to the configured renderer, optionally writes the rendered text to `output_path` and the JSON sidecar to `sidecar_path`. Mirrors `signalforge.grade.grade_artifacts` and `signalforge.prune.prune_tests` in calling-convention shape: keyword-only optionals, model-front-paired, sequential execution. `project_dir` defaults to `Path.cwd()` and is used for symlink-hardened canonicalisation of `output_path` / `sidecar_path` (DEC-016 of `prune-engine.md`). The sidecar is **on by default** (`write_sidecar=True`); when `sidecar_path` is omitted the sidecar lands at `<project_dir>/.signalforge/diff.json`. Pass `write_sidecar=False` to skip the sidecar entirely (library callers running in-process without a durable artefact).
+- **`render_diff(model, candidate, prune_result, *, grading_report=None, existing_schema=None, config=None, output_path=None, sidecar_path=None, write_sidecar=True, project_dir=None) -> DiffReport`** — End-to-end orchestrator. Boundary-checks the inputs, computes the canonical proposed YAML, builds the unified diff, builds the per-row entry tuple (assigning `tier="kept" | "kept-uncertain" | "dropped" | "flagged"` per DEC-012, with `kept-uncertain` added in issue #50), computes the three reproducibility hashes, dispatches to the configured renderer, optionally writes the rendered text to `output_path` and the JSON sidecar to `sidecar_path`. Mirrors `signalforge.grade.grade_artifacts` and `signalforge.prune.prune_tests` in calling-convention shape: keyword-only optionals, model-front-paired, sequential execution. `project_dir` defaults to `Path.cwd()` and is used for symlink-hardened canonicalisation of `output_path` / `sidecar_path` (DEC-016 of `prune-engine.md`). The sidecar is **on by default** (`write_sidecar=True`); when `sidecar_path` is omitted the sidecar lands at `<project_dir>/.signalforge/diff.json`. Pass `write_sidecar=False` to skip the sidecar entirely (library callers running in-process without a durable artefact).
 
 ### Result shapes
 
-- **`DiffReport`** — Aggregate output for one model. Frozen Pydantic model carrying `schema_version: Literal[1]`, `audit_schema_version: Literal[1]`, `signalforge_version: str`, `model_unique_id: str`, `run_id: str`, `duration_seconds: float`, `proposed_yaml: str`, `existing_yaml: str | None`, `unified_diff: str`, `entries: tuple[DiffEntry, ...]`, `kept_count: int`, `dropped_count: int`, `flagged_count: int`, `has_existing_schema: bool`, `candidate_hash: str`, `prune_result_hash: str`, `grading_report_hash: str | None`. Custom `__repr__` collapses to identity + aggregate counts (DEC-020) so accidental `_LOGGER.warning("report: %s", report)` does not dump multi-megabyte diff content into log sinks. The full content remains accessible via field access / `model_dump()`.
+- **`DiffReport`** — Aggregate output for one model. Frozen Pydantic model carrying `schema_version: Literal[1]`, `audit_schema_version: Literal[2]` (bumped 1 → 2 in issue #50; external sidecar consumers gate on `>= 2` for the four-tier taxonomy), `signalforge_version: str`, `model_unique_id: str`, `run_id: str`, `duration_seconds: float`, `proposed_yaml: str`, `existing_yaml: str | None`, `unified_diff: str`, `entries: tuple[DiffEntry, ...]`, `kept_count: int`, `kept_uncertain_count: int` (added in issue #50), `dropped_count: int`, `flagged_count: int`, `has_existing_schema: bool`, `candidate_hash: str`, `prune_result_hash: str`, `grading_report_hash: str | None`. Custom `__repr__` collapses to identity + aggregate counts (DEC-020) so accidental `_LOGGER.warning("report: %s", report)` does not dump multi-megabyte diff content into log sinks. The full content remains accessible via field access / `model_dump()`.
 
 - **`DiffEntry`** — One row in the rendered table. Carries `artifact_id: str` (canonical dotted-path mirroring `grade.GradingResult.artifact_id`), `test_type: str | None`, `tier: Tier`, `drop_reason: DropReason | None`, `why: str`, `score: float | None`, `passed: bool | None`. Custom `__repr__` omits the prose `why` to protect against accidental log dumps.
 
-- **`Tier`** — `Literal["kept", "dropped", "flagged"]`. Closed enumeration of per-entry tiers (DEC-012). `flagged` is set only when a grading report is provided AND the artefact's grading is below threshold (any criterion failed OR `score=None` graceful-degrade); `kept` and `dropped` mirror the prune layer's binary verdict otherwise.
+- **`Tier`** — `Literal["kept", "kept-uncertain", "dropped", "flagged"]`. Closed enumeration of per-entry tiers (DEC-012; `kept-uncertain` added in issue #50). `flagged` is set only when a grading report is provided AND the artefact's grading is below threshold (any criterion failed OR `score=None` graceful-degrade) AND the prune decision had positive evidence. `kept-uncertain` fires when `prune_result.reason == "kept-without-evidence"` (origin dominates over grading — a test we couldn't evaluate cannot meaningfully fail a rubric). `kept` and `dropped` mirror the prune layer's binary verdict for the with-evidence path.
 
 ### Configuration
 
@@ -215,7 +215,7 @@ the orchestrator returns):
 ```json
 {
   "schema_version": 1,
-  "audit_schema_version": 1,
+  "audit_schema_version": 2,
   "signalforge_version": "0.1.0.dev0",
   "model_unique_id": "model.shop.dim_customers",
   "run_id": "a1b2c3d4e5f6478890aabbccddeeff00",
@@ -232,9 +232,19 @@ the orchestrator returns):
       "why": "kept by prune; clarity 0.85, consistency 0.90",
       "score": 0.875,
       "passed": true
+    },
+    {
+      "artifact_id": "test.column.email.unique",
+      "test_type": "unique",
+      "tier": "kept-uncertain",
+      "drop_reason": null,
+      "why": "total prune budget exceeded before evaluation",
+      "score": null,
+      "passed": null
     }
   ],
   "kept_count": 8,
+  "kept_uncertain_count": 1,
   "dropped_count": 2,
   "flagged_count": 1,
   "has_existing_schema": true,
@@ -243,6 +253,15 @@ the orchestrator returns):
   "grading_report_hash": "abcdef0123456789"
 }
 ```
+
+**`audit_schema_version: 2`** is the issue-#50 bump (was `1` in
+v0.1). The `kept-uncertain` tier literal + the new
+`kept_uncertain_count` field landed in the same change. External
+sidecar consumers (CI parsers, the v0.3 GitHub Action) gate on
+`audit_schema_version >= 2` to consume the four-tier taxonomy; a
+v0.1 reader gating on `== 1` will reject v0.2 sidecars (the bump is
+intentionally a hard break — the sidecar is `O_TRUNC` write-only and
+prior runs' bytes are not preserved).
 
 **`run_id` correlation.** `run_id` is a fresh `uuid4().hex` stamped at
 orchestrator entry. The diff layer doesn't have a JSONL audit, but the
@@ -274,18 +293,44 @@ changed, or because prune verdicts shifted?" reads to: compare the
 three hashes between two `DiffReport`s. Any single hash differing
 points to that stage's input changing.
 
-## Decision matrix — the kept / dropped / flagged table
+## Decision matrix — the kept / kept-uncertain / dropped / flagged table
 
-| Tier      | Source                                                                                                  | One-line `why` example                                              | Display in `ansi` renderer            |
-| --------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------- |
-| `kept`    | `prune_result.decision == "kept"` AND no grading report OR grading passed.                              | "kept by prune; clarity 0.85, consistency 0.90"                     | green checkmark, full row             |
-| `dropped` | `prune_result.decision == "dropped"`. `drop_reason` carries the prune layer's `DropReason` literal.     | "always-passes (sample of 10000 rows; 0 failing rows)"              | red ✗, dimmed row                     |
-| `flagged` | Kept by prune AND grading is below threshold (any criterion failed OR `score=None` degraded sentinel).  | "passed prune; clarity 0.30 (failed)"                               | yellow ⚠, full row with score badge   |
+| Tier             | Source                                                                                                                                                                                                                                                                                                                                                                            | One-line `why` example                                              | Display in `ansi` renderer            |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------- |
+| `kept`           | `prune_result.decision == "kept"` AND `prune_result.reason == "kept"` (positive prune evidence). No grading report OR grading passed.                                                                                                                                                                                                                                              | "kept by prune; clarity 0.85, consistency 0.90"                     | green, full row                       |
+| `kept-uncertain` | `prune_result.decision == "kept"` AND `prune_result.reason == "kept-without-evidence"` (issue #50). The prune layer could not positively evaluate the test — total budget exhausted, identifier rejected by SQL safety check, warehouse call raised, `prune.enabled: false`, or sample materialisation failed. **Origin dominates over grading** — never collapses to `flagged`. | "total prune budget exceeded before evaluation"                     | cyan, full row, no score              |
+| `dropped`        | `prune_result.decision == "dropped"`. `drop_reason` carries the prune layer's `DropReason` literal.                                                                                                                                                                                                                                                                                | "always-passes (sample of 10000 rows; 0 failing rows)"              | red, dimmed row                       |
+| `flagged`        | Kept by prune (with positive evidence) AND grading is below threshold (any criterion failed OR `score=None` degraded sentinel).                                                                                                                                                                                                                                                    | "passed prune; clarity 0.30 (failed)"                               | yellow, full row with score badge     |
 
 `flagged` is set only when `grading_report is not None` AND the entry's
-grading is below threshold. Without a grading report, no entry can be
-`flagged`; without a prune drop, no entry can be `dropped`. The diff
-layer never *creates* signal; it only **projects** upstream signal.
+grading is below threshold AND the prune decision had positive evidence.
+Without a grading report, no entry can be `flagged`; without a prune
+drop, no entry can be `dropped`; and a kept-without-evidence prune
+decision projects to `kept-uncertain` regardless of grading attachment.
+The diff layer never *creates* signal; it only **projects** upstream
+signal.
+
+**Why kept-uncertain is its own tier (issue #50).** Architectural
+Commitment #5 ("explainable diffs") and the prune layer's conservative
+bias (`.claude/rules/prune-engine.md` DEC-006, DEC-011) jointly say:
+a test we couldn't positively evaluate is shipped (kept) but the
+reviewer must see "we shipped this without evidence" distinctly from
+"this test caught a real failing row." Pre-#50 the diff renderer
+collapsed both into `tier="kept"` (green) and the only signal was the
+prose `why` field; the load-bearing conservative-bias message was
+visually invisible. Issue #50 added the fourth tier so reviewers
+scanning the kept column see the kept-uncertain rows immediately.
+
+**`why` cascade for kept-uncertain.** Kept-uncertain rows bypass the
+rationale → evidence → fallback cascade used for ordinary kept rows
+(`why` priority is `CandidateTest.rationale` → first non-empty
+`GradingResult.evidence` → `decision.why` for plain kept rows). For
+kept-uncertain rows, the prune layer's `decision.why` is surfaced
+directly — it carries the deterministic load-bearing message ("total
+prune budget exceeded before evaluation" / "sample materialisation
+failed: …" / "identifier rejected by SQL safety check") that names
+the actual cause. The drafter's rationale and the grader's evidence
+are not meaningful for a test we couldn't evaluate.
 
 ## Operational notes
 
@@ -327,7 +372,7 @@ Two `_LOGGER` events in the entire diff layer — both lazy-format JSON:
 1. **INFO** — One line at the end of every `render_diff` happy path:
 
    ```text
-   INFO signalforge.diff.engine: rendered diff: {"model_unique_id": "...", "kept": 8, "dropped": 2, "flagged": 1, "has_existing_schema": true, "duration_seconds": 0.041}
+   INFO signalforge.diff.engine: rendered diff: {"model_unique_id": "...", "kept": 8, "kept_uncertain": 1, "dropped": 2, "flagged": 1, "has_existing_schema": true, "duration_seconds": 0.041}
    ```
 2. **WARNING** — The DEC-014 large-schema warning (above). One line per
    `render_diff` call when `existing_schema` exceeds
@@ -411,7 +456,7 @@ logging.getLogger("signalforge.diff").setLevel(logging.DEBUG)
 
 Levels:
 
-- **INFO** — One line per `render_diff` happy-path invocation, lazy-format JSON per DEC-015 (`model_unique_id`, `kept`, `dropped`, `flagged`, `has_existing_schema`, `duration_seconds`). Mirrors `safety-layer.md` DEC-022 / `llm-drafter.md` DEC-011 / `prune-engine.md` DEC-017 / `grade-layer.md` DEC-029 — never f-string-interpolate user-controlled strings into a logger call. The logger grep gate at `tests/llm/test_logger_grep_gate.py` enforces this for `src/signalforge/diff/` (DEC-019 of #8).
+- **INFO** — One line per `render_diff` happy-path invocation, lazy-format JSON per DEC-015 (`model_unique_id`, `kept`, `kept_uncertain`, `dropped`, `flagged`, `has_existing_schema`, `duration_seconds`). Mirrors `safety-layer.md` DEC-022 / `llm-drafter.md` DEC-011 / `prune-engine.md` DEC-017 / `grade-layer.md` DEC-029 — never f-string-interpolate user-controlled strings into a logger call. The logger grep gate at `tests/llm/test_logger_grep_gate.py` enforces this for `src/signalforge/diff/` (DEC-019 of #8).
 - **WARNING** — One line when `existing_schema` exceeds `existing_schema_warn_at_bytes` (DEC-014).
 - **DEBUG** — Reserved for future per-row latency observability; v0.1 emits no DEBUG from the engine.
 

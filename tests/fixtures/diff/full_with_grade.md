@@ -1,11 +1,12 @@
 # Diff: model.shop.dim_customers
 
-**kept=2**  **dropped=1**  **flagged=1**
+**kept=2**  **kept-uncertain=1**  **dropped=1**  **flagged=1**
 
 | Tier | Artifact | Test | Reason | Score | Why |
 | --- | --- | --- | --- | --- | --- |
 | kept | column.customer_id.description |  |  | 0.85 | Description added; passed all grading criteria. |
 | kept | test.column.customer_id.not_null | not_null |  | — | Test returned non-zero failing rows on the warehouse sample. |
+| kept-uncertain | test.column.email.unique | unique |  | — | total prune budget exceeded before evaluation |
 | dropped | test.column.customer_id.unique | unique | always-passes | — | Test returned zero failing rows on the representative sample. |
 | flagged | column.email.description |  |  | 0.45 | Grading score 0.45 below threshold 0.50. |
 

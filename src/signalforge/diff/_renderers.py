@@ -99,6 +99,7 @@ _BOLD = "\x1b[1m"
 _GREEN = "\x1b[32m"
 _RED = "\x1b[31m"
 _YELLOW = "\x1b[33m"
+_CYAN = "\x1b[36m"
 _DIM = "\x1b[2m"
 
 
@@ -145,7 +146,12 @@ class Renderer(abc.ABC):
 # fits the default `DiffConfig.max_why_chars=80` truncation cap with a
 # small visual margin. Narrow mode drops the why cell and re-flows the
 # remaining 5 columns into the available width.
-_COL_TIER = 8
+#
+# Issue #50: ``_COL_TIER`` widened from 8 → 14 so the new
+# ``kept-uncertain`` literal (14 chars) fits without truncation. The
+# existing labels (``kept`` / ``dropped`` / ``flagged``) fit
+# comfortably inside the wider cell.
+_COL_TIER = 14
 _COL_ARTIFACT = 28
 _COL_TEST_TYPE = 14
 _COL_DROP_REASON = 22
@@ -360,9 +366,14 @@ class AnsiRenderer(Renderer):
         clean_id = strip_ansi_escapes(report.model_unique_id)
         title = self._color(f"diff: {clean_id}", _BOLD, emit_color=emit_color)
         kept = self._color(f"kept={report.kept_count}", _GREEN, emit_color=emit_color)
+        kept_uncertain = self._color(
+            f"kept-uncertain={report.kept_uncertain_count}",
+            _CYAN,
+            emit_color=emit_color,
+        )
         dropped = self._color(f"dropped={report.dropped_count}", _RED, emit_color=emit_color)
         flagged = self._color(f"flagged={report.flagged_count}", _YELLOW, emit_color=emit_color)
-        return f"{title}  {kept}  {dropped}  {flagged}"
+        return f"{title}  {kept}  {kept_uncertain}  {dropped}  {flagged}"
 
     def _render_table(self, report: DiffReport, *, narrow: bool, emit_color: bool) -> str:
         """Render the kept/dropped/flagged table.
@@ -421,7 +432,14 @@ class AnsiRenderer(Renderer):
         clean_test_type = strip_ansi_escapes(entry.test_type or "")
 
         # Tier cell — coloured per-tier via the renderer's own codes.
-        tier_colour = {"kept": _GREEN, "dropped": _RED, "flagged": _YELLOW}.get(entry.tier, _RESET)
+        # Issue #50: ``kept-uncertain`` paints cyan to distinguish it
+        # from the green ``kept`` tier (positive prune evidence).
+        tier_colour = {
+            "kept": _GREEN,
+            "kept-uncertain": _CYAN,
+            "dropped": _RED,
+            "flagged": _YELLOW,
+        }.get(entry.tier, _RESET)
         tier_cell = self._color(_pad(entry.tier, _COL_TIER), tier_colour, emit_color=emit_color)
 
         score_text = "—" if entry.score is None else f"{entry.score:.2f}"
@@ -620,6 +638,7 @@ class MarkdownRenderer(Renderer):
         """
         return (
             f"**kept={report.kept_count}**  "
+            f"**kept-uncertain={report.kept_uncertain_count}**  "
             f"**dropped={report.dropped_count}**  "
             f"**flagged={report.flagged_count}**"
         )

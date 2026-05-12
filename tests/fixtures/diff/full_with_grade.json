@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "audit_schema_version": 1,
+  "audit_schema_version": 2,
   "signalforge_version": "0.0.0-snapshot",
   "model_unique_id": "model.shop.dim_customers",
   "run_id": "0123456789abcdef0123456789abcdef",
@@ -28,6 +28,15 @@
       "passed": null
     },
     {
+      "artifact_id": "test.column.email.unique",
+      "test_type": "unique",
+      "tier": "kept-uncertain",
+      "drop_reason": null,
+      "why": "total prune budget exceeded before evaluation",
+      "score": null,
+      "passed": null
+    },
+    {
       "artifact_id": "test.column.customer_id.unique",
       "test_type": "unique",
       "tier": "dropped",
@@ -47,6 +56,7 @@
     }
   ],
   "kept_count": 2,
+  "kept_uncertain_count": 1,
   "dropped_count": 1,
   "flagged_count": 1,
   "has_existing_schema": true,

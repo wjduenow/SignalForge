@@ -59,11 +59,27 @@ from signalforge.prune.models import DropReason
 
 _BASE_CONFIG = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
-Tier = Literal["kept", "dropped", "flagged"]
+Tier = Literal["kept", "kept-uncertain", "dropped", "flagged"]
 """Closed set of per-entry tiers emitted by the diff renderer (DEC-012).
 
 * ``"kept"`` — artifact survived prune (and grade, if a report was
-  provided) and ships in the proposed schema.yml.
+  provided) and ships in the proposed schema.yml. The prune layer ran
+  it with positive evidence (``decision.reason == "kept"``).
+* ``"kept-uncertain"`` — issue #50: artifact survived prune but the
+  prune layer could not positively evaluate it
+  (``decision.reason == "kept-without-evidence"``: total budget
+  exhausted, identifier rejected by SQL safety check, warehouse call
+  raised, ``prune.enabled: false``, or sample materialisation
+  failure). Origin dominates over grading — a kept-uncertain row
+  never collapses to ``flagged`` even when an attached
+  :class:`signalforge.grade.models.GradingResult` also fails the
+  rubric, because a test we couldn't evaluate cannot meaningfully
+  fail a grading criterion. The ``why`` cascade for these rows is
+  also distinct: ``decision.why`` (the prune-emitted load-bearing
+  message — "total prune budget exceeded before evaluation" / etc.)
+  is surfaced verbatim, bypassing the
+  rationale → evidence → fallback cascade used for ordinary kept
+  rows.
 * ``"dropped"`` — artifact was dropped by the prune engine; the
   matched :data:`signalforge.prune.models.DropReason` is carried on
   :attr:`DiffEntry.drop_reason`.
@@ -156,8 +172,12 @@ class DiffReport(BaseModel):
     * :attr:`schema_version` — forward-compat sentinel pinned to ``1``;
       v0.2 readers gate on this.
     * :attr:`audit_schema_version` — mirrors prior stages (safety #4,
-      grade #7); kept at ``1`` so a reviewer querying the sidecar can
-      filter on the same field name across the pipeline.
+      grade #7). Bumped to ``2`` in issue #50 when the
+      :data:`Tier` literal gained ``kept-uncertain`` and
+      :class:`DiffReport` gained :attr:`kept_uncertain_count`.
+      External sidecar consumers (e.g. the v0.3 GitHub Action) gate
+      on ``audit_schema_version >= 2`` to consume the four-tier
+      taxonomy.
     * :attr:`signalforge_version` — read from
       :data:`signalforge.__version__` at orchestrator entry.
     * :attr:`model_unique_id` — the model under render.
@@ -174,11 +194,14 @@ class DiffReport(BaseModel):
       single string.
     * :attr:`entries` — the per-row tuple. Empty when no candidate
       artifacts existed (vacuous report).
-    * :attr:`kept_count` / :attr:`dropped_count` /
-      :attr:`flagged_count` — stored, not computed, so a reader of an
-      external sidecar JSON gets the orchestrator's authoritative
-      counts without re-deriving from :attr:`entries` (forward-compat
-      shield against renaming :data:`Tier` literals in v0.2).
+    * :attr:`kept_count` / :attr:`kept_uncertain_count` /
+      :attr:`dropped_count` / :attr:`flagged_count` — stored, not
+      computed, so a reader of an external sidecar JSON gets the
+      orchestrator's authoritative counts without re-deriving from
+      :attr:`entries` (forward-compat shield against renaming
+      :data:`Tier` literals in v0.x). The
+      :attr:`kept_uncertain_count` field was added in issue #50
+      alongside the ``audit_schema_version: 2`` bump.
     * :attr:`has_existing_schema` — stored convenience boolean equal
       to ``existing_yaml is not None``; the orchestrator stamps it so
       sidecar consumers don't need to introspect ``existing_yaml``.
@@ -199,7 +222,7 @@ class DiffReport(BaseModel):
     model_config = _BASE_CONFIG
 
     schema_version: Literal[1] = 1
-    audit_schema_version: Literal[1] = 1
+    audit_schema_version: Literal[2] = 2
     signalforge_version: str
     model_unique_id: str
     run_id: str
@@ -209,6 +232,7 @@ class DiffReport(BaseModel):
     unified_diff: str
     entries: tuple[DiffEntry, ...]
     kept_count: int
+    kept_uncertain_count: int
     dropped_count: int
     flagged_count: int
     has_existing_schema: bool
@@ -228,6 +252,7 @@ class DiffReport(BaseModel):
         return (
             f"DiffReport(model_unique_id={self.model_unique_id!r}, "
             f"kept_count={self.kept_count!r}, "
+            f"kept_uncertain_count={self.kept_uncertain_count!r}, "
             f"dropped_count={self.dropped_count!r}, "
             f"flagged_count={self.flagged_count!r}, "
             f"has_existing_schema={self.has_existing_schema!r}, "

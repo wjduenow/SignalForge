@@ -57,6 +57,7 @@ def _make_report(**overrides: object) -> DiffReport:
         unified_diff="--- a\n+++ b\n",
         entries=(),
         kept_count=0,
+        kept_uncertain_count=0,
         dropped_count=0,
         flagged_count=0,
         has_existing_schema=False,

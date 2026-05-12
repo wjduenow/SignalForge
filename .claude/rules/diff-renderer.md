@@ -4,19 +4,30 @@ Established by issue #8 (diff renderer). Apply to every module under `signalforg
 
 The diff layer sits between the quality grader (#7) and the CLI (#9). It encodes Architectural Commitment #5 ("explainable diffs") at the post-grade boundary — every kept/dropped/flagged artifact ships with a one-line "why," every run produces a unified diff against the existing committed `schema.yml`, and the operator gets a per-run JSON sidecar that the v0.3 GitHub Action will consume directly.
 
-## Tier classification with no-grading-report degrade (DEC-012)
+## Tier classification with no-grading-report degrade + kept-uncertain origin signal (DEC-012, issue #50)
 
-`DiffEntry.tier` is a `Literal["kept", "dropped", "flagged"]` of exactly three values:
+`DiffEntry.tier` is a `Literal["kept", "kept-uncertain", "dropped", "flagged"]` of exactly four values. The `kept-uncertain` literal was added in issue #50; the other three are unchanged from v0.1.
 
-- `"kept"` — artifact survived prune (and grade, if a report was provided) and ships in the proposed `schema.yml`.
+- `"kept"` — artifact survived prune **with positive evidence** (`prune_result.reason == "kept"`) and (if grading was provided) passed the rubric. Ships in the proposed `schema.yml`.
+- `"kept-uncertain"` (issue #50) — artifact survived prune but the prune layer **could not positively evaluate it** (`prune_result.reason == "kept-without-evidence"`). Six sources route here per `.claude/rules/prune-engine.md` § "Three sources of `kept-without-evidence`": total budget exhausted, identifier rejected by SQL safety check, warehouse call raised, `prune.enabled: false`, sample materialisation failed, or any other `WarehouseError` subclass at orchestrator entry. Ships in the proposed `schema.yml` because the prune layer's conservative-bias contract says "drop only with positive evidence" — but ships with a distinct tier so reviewers see "we shipped this without evidence" as a separate visual signal from "we shipped this because it caught a real failing row."
 - `"dropped"` — artifact was dropped by the prune engine; the matched `DropReason` literal travels on `DiffEntry.drop_reason`.
-- `"flagged"` — artifact survived prune AND a `GradingReport` was provided AND its grading is below threshold (`passed=False` for any criterion OR a graceful-degrade `score=None` was recorded).
+- `"flagged"` — artifact survived prune **with positive evidence** AND a `GradingReport` was provided AND its grading is below threshold (`passed=False` for any criterion OR a graceful-degrade `score=None` was recorded).
 
-The load-bearing invariant: **`flagged` only fires when `grading_report is not None`.** When the caller omits the grading report, every kept entry is plain `"kept"`; no entry can be `flagged` without a grading run. This mirrors the conservative degrade pattern from `grade-layer.md` ("graceful degrade, never silent drop") — the operator running a prune-only pipeline doesn't get surprise `flagged` rows that imply judgements they never asked for.
+Three load-bearing invariants:
 
-`DiffReport` always renders the kept/dropped/flagged table; an empty `dropped_count` produces an empty section, not a missing one. The renderer never elides a tier — the absence of dropped tests is itself signal.
+1. **`flagged` only fires when `grading_report is not None`.** When the caller omits the grading report, no entry can be `flagged` without a grading run. This mirrors the conservative degrade pattern from `grade-layer.md` ("graceful degrade, never silent drop") — the operator running a prune-only pipeline doesn't get surprise `flagged` rows that imply judgements they never asked for.
 
-If you add a fourth `Tier` literal in v0.2 (e.g. `"warning"`, `"deferred"`), update production `Tier` AND `StrictDiffEntry` (the drift detector) AND the committed fixtures `tests/fixtures/diff/diff_entry_v1.json` / `diff_report_v1.json` AND the renderer dispatch in `signalforge.diff._renderers` in the same change.
+2. **Origin dominates over grading for `kept-uncertain` (issue #50).** A kept-without-evidence prune decision projects to `tier="kept-uncertain"` **regardless of grading attachment** — never collapses to `flagged` even when an attached `GradingResult` also fails the rubric. A test we couldn't positively evaluate cannot meaningfully fail a grading criterion; collapsing to `flagged` would be a category error. The classifier (`_tier_for_kept` in `signalforge.diff.engine`) checks `decision.reason == "kept-without-evidence"` BEFORE the grading-aggregate dispatch.
+
+3. **`kept-uncertain` is a prune-origin signal, never a doc/rationale signal.** Doc and rationale rows do not carry a `PruneDecision`; they call the tier classifier with `decision=None`, which never routes to `kept-uncertain`. A kept-with-no-grading doc row uses the pre-existing `_DOC_KEPT_NO_GRADING_WHY` carve-out (`tier="kept"`, `why="kept (no grading)"`) — that signal is orthogonal to kept-uncertain.
+
+`DiffReport` always renders the kept/kept-uncertain/dropped/flagged header row; an empty `dropped_count` (or `kept_uncertain_count`) produces an empty count in the header line, not a missing column. The renderer never elides a tier — the absence of kept-uncertain tests is itself signal (every candidate evaluated with positive evidence).
+
+**ANSI palette and column width (issue #50).** `kept-uncertain` paints **cyan** (`_CYAN = "\x1b[36m"`) in the ANSI renderer — yellow is reserved for `flagged`, so cyan is the closest semantically-neutral choice that avoids palette collision. `_COL_TIER` widened from 8 → 14 to fit the literal `kept-uncertain` (14 chars) without ellipsis; every committed `.ansi` snapshot regenerated to absorb the column-width ripple. The Markdown renderer surfaces the tier as the literal text `kept-uncertain` in the table cell + a `**kept-uncertain=N**` summary cell; the JSON renderer carries `"tier": "kept-uncertain"` verbatim. All three renderers also include the new `kept_uncertain_count` aggregate.
+
+**5-surface graduation discipline (issue #50).** The `kept-uncertain` tier was graduated from a v0.2 reservation to behaviour-active per the rule from `prune-engine.md` § "5-surface parity for v0.x → v0.(x+1) graduations." The five surfaces are: (1) this rule file, (2) `docs/diff-ops.md`, (3) `CLAUDE.md` public-API surface, (4) the engine + renderer + drift-detector tests + committed fixtures, (5) `plans/super/50-diff-kept-uncertain.md`. Any future fifth `Tier` literal must update all five surfaces in lockstep AND bump `audit_schema_version` (currently `Literal[2] = 2`; issue #50's bump 1 → 2 is the precedent — external sidecar consumers gate on `>= 2` for the four-tier taxonomy).
+
+**`why` cascade for kept-uncertain rows.** The pre-#50 cascade (rationale → evidence → `decision.why`, see § "Kept-row `why` precedence" below) is **bypassed** for kept-uncertain rows. The prune-emitted `decision.why` is surfaced directly — it carries the deterministic load-bearing message ("total prune budget exceeded before evaluation" / "sample materialisation failed: …" / "identifier rejected by SQL safety check") that names the actual cause. The drafter's rationale and the grader's evidence are not meaningful for a test we couldn't evaluate. Still truncated to `max_why_chars` so the per-row budget is honoured. Pinned by `tests/diff/test_engine.py::test_kept_uncertain_why_uses_decision_why_not_rationale`.
 
 ## Kept-row `why` precedence: rationale → evidence → fallback (DEC-022)
 
@@ -29,6 +40,8 @@ The cascade for kept-tier rows (in `_entry_for_test` and `_entries_for_doc`):
 3. **Existing fallback** — `decision.why` for tests (prune's `DropReason` prose), `description` for docs.
 
 Each tier flows through `_truncate_why(text, max_chars)` (hard-cut at `max_chars - 1` + U+2026 ellipsis; whitespace-only input returns `""` so the cascade falls through). The `_DOC_KEPT_NO_GRADING_WHY` branch (kept doc without grading) is preserved verbatim — kept-without-evidence is signal, not boilerplate, and the ticket's acceptance criteria explicitly carve it out.
+
+**Issue #50 carve-out — kept-uncertain rows bypass the cascade entirely.** When the tier classifier routes a row to `tier="kept-uncertain"` (`decision.reason == "kept-without-evidence"`), the engine surfaces `decision.why` directly without consulting `rationale` or `evidence`. The prune-emitted message ("total prune budget exceeded before evaluation" / "sample materialisation failed: …" / "identifier rejected by SQL safety check") names the actual cause; the drafter's rationale and the grader's evidence describe a test we couldn't evaluate and would mislead the reviewer. The truncation pass still applies. See § "Tier classification" above for the full kept-uncertain contract.
 
 Load-bearing invariants:
 

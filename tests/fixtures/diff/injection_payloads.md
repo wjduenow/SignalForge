@@ -1,6 +1,6 @@
 # Diff: model.shop.dim_customers
 
-**kept=1**  **dropped=1**  **flagged=1**
+**kept=1**  **kept-uncertain=0**  **dropped=1**  **flagged=1**
 
 | Tier | Artifact | Test | Reason | Score | Why |
 | --- | --- | --- | --- | --- | --- |

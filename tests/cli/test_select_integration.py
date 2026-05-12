@@ -124,6 +124,7 @@ def _diff_report_for(model: Model) -> DiffReport:
         unified_diff="--- existing\n+++ proposed\n",
         entries=(),
         kept_count=0,
+        kept_uncertain_count=0,
         dropped_count=0,
         flagged_count=0,
         has_existing_schema=False,
