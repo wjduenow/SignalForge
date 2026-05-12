@@ -199,6 +199,18 @@ class WarehouseAdapter(abc.ABC):
                 location=profile.location,
                 max_bytes_billed=max_bytes_billed,
             )
+        if profile.type == "postgres":
+            # v0.2 stub (issue #53) — validates the warehouse-agnostic seam
+            # by routing a second profile.type through the factory. The
+            # adapter raises NotImplementedError on every non-dialect call;
+            # operators see a clear "v0.2 pending" signal rather than the
+            # v0.1 UnsupportedProfileTypeError.
+            from signalforge.warehouse.adapters.postgres import PostgresAdapter
+
+            return PostgresAdapter(
+                dbname=profile.project,
+                schema=profile.dataset,
+            )
         raise UnsupportedProfileTypeError(profile_type=profile.type)
 
 
