@@ -65,7 +65,21 @@ RedactionReason = Literal[
     "meta_contains_pii_column",
     "meta_contains_pii_model",
     "pattern_match",
+    "draft_skip_column_meta",
+    "draft_skip_model_meta",
 ]
+
+DRAFT_SKIP_REASONS: frozenset[RedactionReason] = frozenset(
+    {"draft_skip_column_meta", "draft_skip_model_meta"}
+)
+"""Reasons that mean "exclude the column from the LLM prompt entirely",
+distinct from the seven PII reasons that mean "send a hashed placeholder
+in place of the real column name". Columns with a draft-skip reason
+never appear in :attr:`LLMRequest.schema` /
+:attr:`LLMRequest.columns_sent` / :attr:`LLMRequest.aggregates` /
+:attr:`LLMRequest.sampled_rows`; their :class:`RedactionRecord` rides on
+the audit event so the operator-chosen omission is durably recorded.
+"""
 
 
 class RedactionRecord(BaseModel):
@@ -151,6 +165,7 @@ class LLMRequest(BaseModel):
 __all__ = [
     "SamplingMode",
     "RedactionReason",
+    "DRAFT_SKIP_REASONS",
     "RedactionRecord",
     "AuditEvent",
     "LLMRequest",
