@@ -38,6 +38,7 @@ survives ``--no-color`` because it carries no colour codes.
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
 
 from signalforge.cli._helpers import (
@@ -66,14 +67,16 @@ __all__ = ["add_parser", "cmd_init_demo"]
 # commands. ``{dest}`` is the resolved-on-disk path returned by
 # :func:`copy_demo` so the operator's copy-paste ``cd`` command lands on
 # the actual directory rather than the (possibly relative) string they
-# typed.
+# typed. ``{dest_quoted}`` shell-quotes the path so an operator whose home
+# directory contains spaces (``/Users/Wes Duenow/...``) still gets a valid
+# copy-pasteable ``cd`` line.
 _NEXT_STEPS_MESSAGE: str = """\
 Demo copied to {dest}
 
 Next steps:
   1. export GOOGLE_CLOUD_PROJECT=<your-billing-project>
   2. export ANTHROPIC_API_KEY=<your-anthropic-api-key>
-  3. cd {dest}
+  3. cd {dest_quoted}
   4. signalforge lint
   5. signalforge generate models/staging/stg_bikeshare_trips.sql --dry-run
 
@@ -201,5 +204,10 @@ def cmd_init_demo(args: argparse.Namespace) -> int:
         print(format_error_to_stderr(exc), file=sys.stderr)
         return map_exception_to_exit_code(exc)
 
-    print(_NEXT_STEPS_MESSAGE.format(dest=resolved_dest))
+    print(
+        _NEXT_STEPS_MESSAGE.format(
+            dest=resolved_dest,
+            dest_quoted=shlex.quote(str(resolved_dest)),
+        )
+    )
     return 0

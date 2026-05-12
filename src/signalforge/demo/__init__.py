@@ -1,9 +1,9 @@
-"""Public ``signalforge.demo`` module — programmatic access to the bundled
-demo project.
+"""Public ``signalforge.demo`` subpackage — programmatic access to the
+bundled demo project.
 
 Library callers (notebooks, scripts, CI bootstrap) can copy the bundled
 ``signalforge._demo/`` tree into a fresh directory via
-:func:`copy_demo`. The CLI subcommand ``signalforge init-demo`` (US-004)
+:func:`copy_demo`. The CLI subcommand ``signalforge init-demo``
 wraps this function and re-raises the lower-level :class:`DemoError`
 subclasses into ``Cli*Error`` wrappers so the CLI exit-code taxonomy
 stays homogeneous (DEC-012).
@@ -32,6 +32,14 @@ import shutil
 from importlib.resources import as_file, files
 from pathlib import Path
 
+from signalforge.demo.errors import (
+    DemoDestExistsError,
+    DemoDestUnsafeError,
+    DemoError,
+    DemoFixtureMissingError,
+    DemoPathError,
+)
+
 __all__ = [
     "DemoDestExistsError",
     "DemoDestUnsafeError",
@@ -40,101 +48,6 @@ __all__ = [
     "DemoPathError",
     "copy_demo",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Error hierarchy — mirrors the layer-base pattern in ``signalforge.cli.errors``
-# and the other v0.1 stage error modules: every class carries an optional
-# ``remediation`` field; ``__str__`` renders ``message`` plus a
-# ``↳ Remediation: <text>`` line when remediation is set. The CLI (US-004)
-# wraps each subclass into a ``Cli*Error`` so the CLI exit-code taxonomy
-# stays homogeneous (DEC-012).
-# ---------------------------------------------------------------------------
-
-
-class DemoError(Exception):
-    """Base class for ``signalforge.demo`` errors.
-
-    Instances may pass ``remediation=`` to override the (otherwise absent)
-    footer; ``cause=`` is preserved for the CLI layer's traceback-free
-    error formatter to surface if desired. Subclasses define a
-    ``default_remediation`` class attribute which is used when no
-    explicit ``remediation`` is provided.
-    """
-
-    default_remediation: str | None = None
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        remediation: str | None = None,
-        cause: Exception | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.message = message
-        self.remediation = remediation if remediation is not None else self.default_remediation
-        self.cause = cause
-
-    def __str__(self) -> str:
-        if self.remediation is None:
-            return self.message
-        return f"{self.message}\n  ↳ Remediation: {self.remediation}"
-
-
-class DemoPathError(DemoError):
-    """Raised when the destination path cannot be canonicalised.
-
-    Currently fires on symlink-cycle detection (``Path.resolve()`` raises
-    ``RuntimeError`` regardless of ``strict=`` on a cyclic chain). The
-    triggering ``RuntimeError`` rides on the ``cause`` kwarg.
-    """
-
-    default_remediation = "Remove the symlink cycle at the destination or pick a different path."
-
-
-class DemoDestExistsError(DemoError):
-    """Raised when ``dest`` exists and is non-empty and ``force=False``.
-
-    Empty existing directories proceed without ``--force`` — the gate
-    only fires when there is content that ``copy_demo`` would otherwise
-    have to either merge into (unsafe) or replace (requires explicit
-    opt-in).
-    """
-
-    default_remediation = "Remove the destination or pass force=True (CLI: --force) to replace it."
-
-
-class DemoDestUnsafeError(DemoError):
-    """Raised when ``force=True`` would target a catastrophic path.
-
-    Refuses ``/``, ``Path.home()``, and ``Path.cwd()`` per DEC-001 — the
-    blast-radius guard for ``signalforge init-demo --force``. Without the
-    refusal, ``--force ~`` would ``rmtree($HOME)``.
-    """
-
-    default_remediation = (
-        "Pick a fresh subdirectory rather than '/', $HOME, or the current working directory."
-    )
-
-
-class DemoFixtureMissingError(DemoError):
-    """Raised when ``importlib.resources`` cannot locate the bundled
-    ``_demo/`` tree.
-
-    Indicates a broken install — the wheel target packaging should
-    always ship ``src/signalforge/_demo/`` (``python-build.md`` DEC-011
-    + plan DEC-011). The CLI maps this to tier 1.
-    """
-
-    default_remediation = (
-        "Reinstall signalforge-dbt — the bundled demo tree is missing from your install."
-    )
-
-
-# ---------------------------------------------------------------------------
-# Public entry point
-# ---------------------------------------------------------------------------
 
 
 def copy_demo(dest: Path | str, *, force: bool = False) -> Path:
@@ -216,7 +129,8 @@ def copy_demo(dest: Path | str, *, force: bool = False) -> Path:
     # Source lookup via importlib.resources — handles editable installs,
     # wheel installs, and zipapp/zipimport cases. ``as_file`` materialises
     # zip-extracted resources to a real Path; for filesystem installs it's
-    # an effective no-op.
+    # an effective no-op. All file I/O is performed inside the ``with``
+    # block so the materialised path is valid for the duration of the copy.
     source_ref = files("signalforge").joinpath("_demo")
     if not source_ref.is_dir():
         raise DemoFixtureMissingError(

@@ -223,8 +223,11 @@ def test_cmd_init_demo_never_leaks_traceback(
     ret = main(["init-demo", str(dest)])
     out, err = _capture(capsys)
     assert "Traceback" not in err
-    # Exit code is tier 1 (copy error / load) per the mapping.
-    assert ret in (1, 2), f"expected tier 1 or 2; got {ret}\nstderr: {err}"
+    # Exit code is tier 1 — the copytree OSError is wrapped as
+    # CliInitDemoCopyError (CliError → tier 1). A tier 2 outcome here
+    # would mean the OSError was misrouted to an input-validation
+    # wrapper; assert exact tier so a regression surfaces loudly.
+    assert ret == 1, f"expected tier 1 (CliInitDemoCopyError); got {ret}\nstderr: {err}"
     assert err.startswith("ERROR: ")
 
 

@@ -186,7 +186,8 @@ class CliSelectorNoMatchError(CliInputError):
 
 
 _CLI_INIT_DEMO_DEST_EXISTS_DEFAULT_REMEDIATION: str = (
-    "Remove the existing directory or run 'signalforge init-demo --force' to replace it."
+    "Remove the existing directory or run 'signalforge init-demo --force' to replace it "
+    "(refuses '/', $HOME, or the current working directory as a blast-radius guard)."
 )
 
 _CLI_INIT_DEMO_DEST_UNSAFE_DEFAULT_REMEDIATION: str = (
