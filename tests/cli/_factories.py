@@ -2,13 +2,17 @@
 
 Two helpers:
 
-* :func:`make_fake_dbt_project` — drops a minimal ``dbt_project.yml`` and
-  an empty ``target/`` dir under ``tmp_path`` and returns the project
-  root. The CLI's project-root resolver (`_resolve_project_dir`) is
-  satisfied by the presence of ``dbt_project.yml``; the CLI's pipeline
-  is patched out at the stage-entry boundary, so the manifest /
-  warehouse / draft / prune / grade / diff stages never read from
-  these paths.
+* :func:`make_fake_dbt_project` — drops a minimal ``dbt_project.yml``, an
+  empty ``target/`` dir, and a minimal ``target/manifest.json`` under
+  ``tmp_path`` and returns the project root. The CLI's project-root
+  resolver (`_resolve_project_dir`) is satisfied by the presence of
+  ``dbt_project.yml``; the CLI's pipeline is patched out at the
+  stage-entry boundary, so the manifest / warehouse / draft / prune /
+  grade / diff stages never read from these paths during a
+  ``cmd_generate`` test. The bundled manifest exists so the new
+  ``cmd_lint`` manifest-load step (issue #49) finds a parseable file
+  rather than tripping :class:`ManifestNotFoundError` on every test.
+  Suppress it with ``with_manifest=False``.
 * :func:`make_typed_stage_returns` — produces typed-but-trivial return
   values (a :class:`Manifest` containing one :class:`Model`, a
   :class:`CandidateSchema`, a :class:`PruneResult`, a
@@ -21,6 +25,7 @@ Lives under ``tests/cli/`` and is never imported from production code.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -42,19 +47,48 @@ target-path: target
 """
 
 
-def make_fake_dbt_project(tmp_path: Path, name: str = "project") -> Path:
+_MINIMAL_MANIFEST: dict[str, object] = {
+    "metadata": {
+        "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    },
+    "nodes": {},
+    "disabled": {},
+}
+"""Smallest manifest the loader accepts. ``nodes`` and ``disabled`` are
+empty so :func:`signalforge.manifest.load` constructs a :class:`Manifest`
+with no models. Tests that need real models extend this manifest by
+writing their own ``target/manifest.json`` (see
+:func:`tests.cli.test_lint.test_lint_resolves_model_*`)."""
+
+
+def make_fake_dbt_project(
+    tmp_path: Path,
+    name: str = "project",
+    *,
+    with_manifest: bool = True,
+) -> Path:
     """Create a minimal dbt project layout under ``tmp_path / name``.
 
-    Drops ``dbt_project.yml`` (so ``_resolve_project_dir`` is satisfied)
-    and an empty ``target/`` dir. Does NOT write a manifest.json — every
-    test that exercises ``cmd_generate`` patches ``manifest.load`` so
-    the on-disk file is never opened.
+    Drops ``dbt_project.yml`` (so ``_resolve_project_dir`` is satisfied),
+    an empty ``target/`` dir, and (when ``with_manifest=True``, the
+    default) a minimal ``target/manifest.json`` with zero models and the
+    v12 schema URL. The manifest lets ``cmd_lint``'s issue-#49
+    manifest-load step find a parseable file; ``cmd_generate`` tests
+    patch :func:`signalforge.manifest.load` and don't care.
+
+    Pass ``with_manifest=False`` to exercise the ``ManifestNotFoundError``
+    branch.
     """
     project_dir = tmp_path / name
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "dbt_project.yml").write_text(_DBT_PROJECT_YML, encoding="utf-8")
     (project_dir / "target").mkdir(exist_ok=True)
     (project_dir / ".signalforge").mkdir(exist_ok=True)
+    if with_manifest:
+        (project_dir / "target" / "manifest.json").write_text(
+            json.dumps(_MINIMAL_MANIFEST),
+            encoding="utf-8",
+        )
     return project_dir
 
 

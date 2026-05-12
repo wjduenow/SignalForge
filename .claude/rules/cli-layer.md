@@ -225,8 +225,31 @@ Plus optional failure block when ≥1 model failed. Summary emits when `(matched
 
 When v0.3 introduces parallel batch execution (deferred from #37), the per-model boundary catch needs to coordinate with whatever concurrency primitive lands. The current sequential pattern lays the groundwork: outcome-as-typed-result + max-aggregation generalises cleanly.
 
+## Bare-name model resolution lives in the CLI subcommand, not the manifest layer (issue #49)
+
+`Manifest.get_model(key)` accepts the unique_id form (`model.<pkg>.<name>`) and the file-path form (`models/path/to/<name>.sql`); a bare name like `customers` routes through the file-path branch and surfaces a confusing `ModelNotFoundError` even when a model with that name exists. This is the gotcha pinned by `testing-signal.md` § "Multi-surface drift on user-facing model arguments".
+
+Issue #49 shipped `signalforge lint --model <name>` with a private resolver `_resolve_model_for_lint` in `signalforge.cli.lint` that augments the manifest layer's resolver with a third branch:
+
+```python
+if key.startswith("model.") or "/" in key or key.endswith(".sql"):
+    return manifest.get_model(key)               # unique_id or file path
+matches = [m for m in manifest.iter_models() if m.name == key]
+if len(matches) == 1: return matches[0]          # bare name, unambiguous
+if len(matches) > 1: raise ModelNotFoundError(... "matches N enabled models" ...)
+raise ModelNotFoundError(... "No enabled model with name <key>" ...)
+```
+
+Three load-bearing conventions:
+
+1. **The bare-name branch lives in the CLI subcommand, NOT the manifest layer.** `Manifest.get_model` stays a strict two-form resolver because library callers (the prune engine, the drafter, future programmatic consumers) work in unique_ids and don't want bare-name disambiguation cost on every call. The CLI is the only surface where operators type by hand, and that's where the convenience belongs. Mirrors the precedent from `cli-layer.md` § "Stderr message shape" — escape and convenience at the sink, not in the layer.
+2. **Multiple matches fail loud with a disambiguation list, not first-wins.** A cross-package collision (two dbt packages each defining a `customers` model) should never silently pick one — the operator's intent is ambiguous. The list is capped at 5 unique_ids + `(+K more)` to keep stderr readable; the remediation tells them to switch to the unique_id or file-path form.
+3. **Disabled models do NOT match bare-name lookup.** `iter_models()` yields only enabled `resource_type == "model"` nodes; disabled-package models surface only via the unique_id form (which routes through `get_model` and raises `ModelDisabledError` separately). This keeps the bare-name UX honest — the operator sees only models they could actually run against — while preserving the ability to ask explicitly about a disabled model via its unique_id.
+
+When `cmd_generate` (or any future subcommand that takes a model arg) wants the same affordance, hoist `_resolve_model_for_lint` to `signalforge.cli._helpers` rather than copy-pasting. The two consumers' contracts are identical; the only thing v0.1 ships separately is the lint surface because issue #49's scope was bounded.
+
 ## Reference
 
-`plans/super/9-cli-entrypoint.md` — DEC-001 … DEC-027. `plans/super/37-multi-model-select.md` — DEC-001 … DEC-017 (multi-model batch additions). `src/signalforge/cli/` — current implementation. `docs/cli-ops.md` — operational reference. `tests/cli/` — in-process and subprocess test suite. `tests/test_audit_completeness.py::test_every_typed_error_is_in_exit_code_mapping_table` — 7th AST scan (DEC-024). `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate (6 dirs as of #9). `tests/cli/test_exit_codes.py` — parametrized exception → exit-code contract. `tests/cli/test_5_surface_parity_select.py` — 5-surface parity for `--select` (issue #37 DEC-017).
+`plans/super/9-cli-entrypoint.md` — DEC-001 … DEC-027. `plans/super/37-multi-model-select.md` — DEC-001 … DEC-017 (multi-model batch additions). Issue #49 — `cmd_lint` manifest load + `--model` bare-name resolver. `src/signalforge/cli/` — current implementation. `docs/cli-ops.md` — operational reference. `tests/cli/` — in-process and subprocess test suite. `tests/test_audit_completeness.py::test_every_typed_error_is_in_exit_code_mapping_table` — 7th AST scan (DEC-024). `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate (6 dirs as of #9). `tests/cli/test_exit_codes.py` — parametrized exception → exit-code contract. `tests/cli/test_5_surface_parity_select.py` — 5-surface parity for `--select` (issue #37 DEC-017). `tests/cli/test_lint.py::test_lint_resolves_model_*` — bare-name / unique_id / file-path forms (issue #49).
 
 See-Also: clauditor's `.claude/rules/llm-cli-exit-code-taxonomy.md` is the source of the four-tier rule; SignalForge ports it as one section inside this file rather than a standalone rule (DEC-009 of #9 — one rule file per pipeline layer).
