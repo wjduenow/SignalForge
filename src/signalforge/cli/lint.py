@@ -1,22 +1,31 @@
-"""``signalforge lint`` subcommand (US-004 — config-only validator).
+"""``signalforge lint`` subcommand — pre-flight pipeline validator.
 
 Validates the five existing ``signalforge.yml`` config blocks
 (``safety:``, ``llm:``, ``prune:``, ``grade:``, ``diff:``) against their
 per-stage loaders, then loads the dbt manifest (issue #49 — surfaces
 manifest-schema-version mismatches and missing ``target/manifest.json``
-as a pre-LLM-call failure). No warehouse, no LLM, no network —
-sub-second target.
+as a pre-LLM-call failure), and optionally resolves a model in the
+loaded manifest when ``--model <name>`` is supplied. No warehouse, no
+LLM, no network — sub-second target. Originally shipped as US-004 of
+issue #9 (config-only validator); broadened in issue #49 to cover the
+manifest seam.
 
 Multi-error reporting per DEC-008:
 
 * Zero loaders raise → exit 0 with silent stdout (git-style).
-* Exactly one loader raises → exit 1 with the canonical
-  ``ERROR: <message>`` single-line stderr shape.
-* Two or more loaders raise → exit 1 with a header + bullet list:
+* Exactly one loader raises → exit
+  ``map_exception_to_exit_code(exc)`` (typically tier 1 for
+  ``*ConfigNotFoundError`` / ``*ConfigInvalidError`` /
+  ``ManifestNotFoundError`` / ``UnsupportedManifestVersionError``;
+  tier 2 for ``ModelNotFoundError`` / ``CliInputError``) with the
+  canonical ``ERROR: <message>`` single-line stderr shape.
+* Two or more loaders raise → exit
+  ``max(map_exception_to_exit_code(exc) for ... in failures)`` (so the
+  most severe per-failure tier wins) with a header + bullet list:
 
   .. code-block:: text
 
-      ERROR: signalforge.yml has N validation errors:
+      ERROR: lint found N validation errors:
         - safety: <error msg>
         - prune:  <error msg>
         - manifest: <error msg>

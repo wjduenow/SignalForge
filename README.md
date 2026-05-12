@@ -126,9 +126,9 @@ austin:
 EOF
 ```
 
-### 5. Validate config (`signalforge lint`)
+### 5. Pre-flight check (`signalforge lint`)
 
-Before paying for an LLM call, run the config-only validator. It loads
+Before paying for an LLM call, run the pre-flight validator. It loads
 `signalforge.yml` (every per-stage block) and the dbt manifest — no
 warehouse calls, no Anthropic calls, no network — and reports every
 failure in one shot. Sub-second; catches typos like

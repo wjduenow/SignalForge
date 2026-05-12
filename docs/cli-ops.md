@@ -294,7 +294,7 @@ fails — the resolver depends on a loaded manifest and emitting a
 spurious second bullet would mislead the operator. The manifest entry
 alone surfaces.
 
-The Quick Start in [`README.md`](../README.md#5-validate-config-signalforge-lint)
+The Quick Start in [`README.md`](../README.md#5-pre-flight-check-signalforge-lint)
 runs `signalforge lint` immediately after the fixture is prepared and
 before the first `signalforge generate` call — sub-second, free, and
 catches `extra="forbid"` typos (e.g. `safety: { mdoel: ... }`) plus
