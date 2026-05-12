@@ -48,3 +48,36 @@ def test_signalforge_version_via_subprocess() -> None:
     # exactly that. Mirrors the in-process smoke assertion in
     # ``tests/cli/test_smoke.py``.
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.cli_subprocess
+def test_signalforge_init_demo_help_via_subprocess() -> None:
+    """``signalforge init-demo --help`` exits 0 with the subcommand's help.
+
+    US-006 of ``plans/super/47-init-demo.md`` (DEC-010 / AC-5) — extends
+    the subprocess-gated smoke to the new ``init-demo`` subcommand so a
+    ``[project.scripts]`` regression specific to its argparse wiring
+    (subparser deletion, ``add_parser`` typo, console-script wrapper
+    losing the dispatch entry) is caught by ``pytest -m cli_subprocess``.
+    The in-process ``main(argv)`` smoke tests in ``tests/cli/`` cannot
+    catch this class of regression — they bypass the
+    ``[project.scripts]`` table entirely.
+    """
+    result = subprocess.run(
+        ["signalforge", "init-demo", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    # The presence of the subcommand name, the ``--force`` flag, and the
+    # ``DEST`` positional (rendered in argparse's help as the metavar
+    # ``DEST`` AND inside the description prose as ``dest``) jointly
+    # guarantee argparse is rendering the new subcommand's help, not
+    # falling back to top-level usage.
+    assert "init-demo" in result.stdout
+    assert "--force" in result.stdout
+    assert "dest" in result.stdout.lower()
+    # No-traceback floor — see the ``--version`` test above.
+    assert "Traceback" not in result.stderr
