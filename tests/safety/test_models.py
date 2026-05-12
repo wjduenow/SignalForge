@@ -116,15 +116,23 @@ def _valid_audit_event(**overrides: object) -> AuditEvent:
 
 def test_audit_event_schema_version_default_is_current() -> None:
     """Issue #54 bumped the default 1 → 2 in lockstep with the writer
-    constant; the field stays ``int`` so older JSONLs still round-trip."""
+    constant; issue #55 bumped 2 → 3 when ``policy_hash`` migrated from
+    ``SHA-256[:16]`` to ``blake2b(digest_size=8)``. The field stays
+    ``int`` so older JSONLs still round-trip."""
     event = _valid_audit_event()
-    assert event.audit_schema_version == 2
+    assert event.audit_schema_version == 3
 
 
 def test_audit_event_accepts_legacy_schema_version_1() -> None:
     """Forward-compat: older v1 audit JSONLs must still parse."""
     event = _valid_audit_event(audit_schema_version=1)
     assert event.audit_schema_version == 1
+
+
+def test_audit_event_accepts_legacy_schema_version_2() -> None:
+    """Forward-compat: v2 audit JSONLs (post-#54, pre-#55) must still parse."""
+    event = _valid_audit_event(audit_schema_version=2)
+    assert event.audit_schema_version == 2
 
 
 def test_audit_event_extra_ignore_drops_unknown_field() -> None:
@@ -145,8 +153,8 @@ def test_audit_event_round_trips_through_json_dumps() -> None:
     assert event.row_count is None
     assert event.signalforge_version == "0.1.0"
     assert event.policy_hash == "abc123def456789a"
-    # Fixture refreshed to v2 by issue #54.
-    assert event.audit_schema_version == 2
+    # Fixture refreshed to v3 by issue #55 (policy_hash migrated to blake2b-8).
+    assert event.audit_schema_version == 3
     assert event.policy_flags == ()
     assert len(event.redactions) == 1
     assert event.redactions[0].reason == "pattern_match"

@@ -121,14 +121,17 @@ class AuditEvent(BaseModel):
     row_count: int | None = None
     signalforge_version: str
     policy_hash: str
-    audit_schema_version: int = 2
+    audit_schema_version: int = 3
     """Frozen at the writer's :data:`_AUDIT_SCHEMA_VERSION` constant.
     Issue #54 bumped 1 → 2 when the :data:`RedactionReason` literal
     gained ``draft_skip_*`` values and the LLM-payload omission
-    semantics became dependent on the reason. The field stays
+    semantics became dependent on the reason. Issue #55 bumped 2 → 3
+    when :func:`signalforge.safety.policy._compute_policy_hash` migrated
+    from ``SHA-256[:16]`` to ``blake2b(digest_size=8)`` so the audit
+    corpus reads one hash recipe across every writer. The field stays
     :class:`int` (not :class:`typing.Literal`) so older audit JSONLs
-    with ``audit_schema_version: 1`` still round-trip cleanly — audit
-    replay across versions is a real requirement."""
+    with ``audit_schema_version: 1`` or ``2`` still round-trip cleanly —
+    audit replay across versions is a real requirement."""
 
     policy_flags: tuple[str, ...] = ()
 

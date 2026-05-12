@@ -310,8 +310,8 @@ append via `O_APPEND` + a single `os.write` (DEC-005).
 | `redactions`             | array of `RedactionRecord`    | Full redaction decisions — both real and hashed names. **Sensitive.**   | `[{"column_name": "customer_ssn", ...}]` |
 | `row_count`              | integer or `null`             | Row count for sample mode; `null` for schema-only / aggregate-only.     | `100` or `null`                        |
 | `signalforge_version`    | PEP-440 version string        | The package version that produced the record.                           | `"0.1.0"`                              |
-| `policy_hash`            | 16 hex chars                  | First 16 hex chars of `SHA-256(policy)`. DEC-014.                       | `"6f1c0e3d2c44c012"`                   |
-| `audit_schema_version`   | integer                       | Audit shape version. Currently `2` (bumped by issue #54).               | `2`                                    |
+| `policy_hash`            | 16 hex chars                  | `blake2b(policy, digest_size=8)`. Migrated from `SHA-256[:16]` by issue #55. DEC-014. | `"6f1c0e3d2c44c012"`                   |
+| `audit_schema_version`   | integer                       | Audit shape version. Currently `3` (bumped 1→2 by #54, 2→3 by #55).     | `3`                                    |
 | `policy_flags`           | array of string               | Closed set of flag literals — see below.                                | `["sample_mode_enabled"]`              |
 
 **`policy_flags` closed set:**

@@ -6,7 +6,7 @@ underscore-prefixed helpers exercised by other safety-layer modules:
 
 * :func:`_resolve_redact_patterns` — applies ``redact: {extend|replace: [...]}``
   semantics on top of :data:`DEFAULT_REDACT_PATTERNS` (DEC-007).
-* :func:`_compute_policy_hash` — deterministic 16-hex SHA-256 of the policy
+* :func:`_compute_policy_hash` — deterministic 16-hex ``blake2b-8`` of the policy
   used as :class:`signalforge.safety.models.AuditEvent.policy_hash` (DEC-014).
 
 Design commitments operationalised here:
@@ -248,7 +248,7 @@ class SafetyPolicy(BaseModel):
 
 
 def _compute_policy_hash(policy: SafetyPolicy) -> str:
-    """Deterministic 16-hex-char SHA-256 of the policy (DEC-014).
+    """Deterministic 16-hex-char ``blake2b`` digest of the policy (DEC-014).
 
     The hash is what :class:`signalforge.safety.models.AuditEvent.policy_hash`
     carries for every audit row, letting future readers tell whether two
@@ -257,12 +257,18 @@ def _compute_policy_hash(policy: SafetyPolicy) -> str:
     ``json.dumps(sort_keys=True)``) forces canonical key ordering since
     Pydantic does not guarantee it.
 
+    Issue #55 migrated from ``SHA-256[:16]`` to ``blake2b(digest_size=8)``
+    so every reproducibility hash in the audit / sidecar corpus reads one
+    recipe. Consumers correlating ``policy_hash`` across audit JSONLs must
+    gate on ``audit_schema_version >= 3`` to skip records produced by the
+    pre-migration writer.
+
     ``audit_path`` is dumped as a string by Pydantic; the hash is stable
     across runs as long as the policy serialises identically.
     """
     payload = policy.model_dump_json(by_alias=True, exclude_none=False)
     canonical = json.dumps(json.loads(payload), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return hashlib.blake2b(canonical.encode("utf-8"), digest_size=8).hexdigest()
 
 
 __all__ = [

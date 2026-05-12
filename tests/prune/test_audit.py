@@ -7,7 +7,7 @@ of llm-drafter.md), same POSIX-atomic-append size cap, same
 
 The eight tests below assert each load-bearing property of the writer:
 
-* one JSONL line, all documented fields present, ``audit_schema_version == 1``
+* one JSONL line, all documented fields present, ``audit_schema_version == 2``
 * file mode bits are exactly ``0o600`` (POSIX-only)
 * ``os.fsync`` is called exactly once per write
 * oversize record raises BEFORE any file open (no on-disk artefact)
@@ -78,7 +78,7 @@ def _make_event(**decision_overrides: Any) -> PruneEvent:
 
 def test_write_prune_event_emits_one_jsonl_line(tmp_path: Path) -> None:
     """Writer produces exactly one JSONL line; every documented field is
-    present; ``audit_schema_version == 1``.
+    present; ``audit_schema_version == 2``.
     """
     audit_path = tmp_path / "prune.jsonl"
     event = _make_event()
@@ -90,7 +90,7 @@ def test_write_prune_event_emits_one_jsonl_line(tmp_path: Path) -> None:
     assert len(lines) == 1
 
     payload = json.loads(lines[0])
-    assert payload["audit_schema_version"] == 1
+    assert payload["audit_schema_version"] == 2
     # Every documented field present.
     expected_fields = {
         "audit_schema_version",
@@ -274,7 +274,7 @@ def test_write_prune_event_loops_on_short_writes(tmp_path: Path) -> None:
     assert contents.endswith("\n")
     assert len(contents.splitlines()) == 1
     payload = json.loads(contents.splitlines()[0])
-    assert payload["audit_schema_version"] == 1
+    assert payload["audit_schema_version"] == 2
     # The loop ran (at least two ``os.write`` calls — one short, one to
     # complete).
     assert call_count["n"] >= 2

@@ -2125,7 +2125,7 @@ def test_prune_tests_materialised_strategy_against_pinned_fixture(
     assert row["model_unique_id"] == "model.shop.orders"
     assert "_SESSION" in row["compiled_sql"]
     assert re.search(r"_sf_sample_[0-9a-f]{16}", row["compiled_sql"]) is not None
-    assert row["audit_schema_version"] == 1
+    assert row["audit_schema_version"] == 2
 
     # Cross-check against the strict drift-detector mirror so the
     # in-memory snapshot remains valid against the read-back contract.

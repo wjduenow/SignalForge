@@ -102,7 +102,7 @@ class StrictPruneEvent(BaseModel):
 
     model_config = _STRICT
 
-    audit_schema_version: Literal[1] = 1
+    audit_schema_version: Literal[2] = 2
     signalforge_version: str
     record_id: str
     timestamp: str

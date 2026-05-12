@@ -70,13 +70,20 @@ from signalforge.safety.redact import (
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.models import TableRef
 
-_AUDIT_SCHEMA_VERSION: Final[int] = 2
+_AUDIT_SCHEMA_VERSION: Final[int] = 3
 """Bumped from 1 → 2 by issue #54: the :data:`RedactionReason` literal
 gained ``draft_skip_column_meta`` and ``draft_skip_model_meta``, and
 columns carrying those reasons are now omitted entirely from the
 LLM-facing payload (``columns_sent`` / ``schema`` / ``aggregates`` /
 ``sampled_rows``). Audit consumers gating on ``audit_schema_version >= 2``
-know the new reasons may appear in :attr:`AuditEvent.redactions`."""
+know the new reasons may appear in :attr:`AuditEvent.redactions`.
+
+Bumped from 2 → 3 by issue #55: :func:`_compute_policy_hash` migrated
+from ``SHA-256[:16]`` to ``blake2b(digest_size=8)`` so every
+reproducibility hash in the audit / sidecar corpus reads one recipe.
+Consumers correlating ``policy_hash`` across audit JSONLs must gate on
+``audit_schema_version >= 3`` to skip records produced by the
+pre-migration writer."""
 
 
 def build_llm_request(
