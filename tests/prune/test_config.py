@@ -265,6 +265,70 @@ def test_load_prune_config_enabled_typo_raises_config_error(tmp_path: Path) -> N
     assert "enabld" in str(excinfo.value)
 
 
+def test_prune_config_min_kept_rate_warn_defaults_to_zero() -> None:
+    """``PruneConfig().min_kept_rate_warn`` defaults to ``0.0`` (issue #51).
+
+    Default fires the WARNING only when the prune dropped every single
+    candidate test ("did we lose the whole LLM draft?"). Pinning the
+    default in a test guards against an accidental flip when a future
+    reviewer "tidies" the field declaration."""
+    assert PruneConfig().min_kept_rate_warn == 0.0
+
+
+def test_prune_config_min_kept_rate_warn_accepts_unit_interval() -> None:
+    """``min_kept_rate_warn`` accepts any float in ``[0.0, 1.0]`` (issue #51).
+
+    Both endpoints inclusive — ``0.0`` is the default ("warn only on
+    entirely-empty-kept"); ``1.0`` means "always warn" (kept_rate <= 1.0
+    always)."""
+    for value in (0.0, 0.1, 0.5, 0.95, 1.0):
+        config = PruneConfig(min_kept_rate_warn=value)
+        assert config.min_kept_rate_warn == value
+
+
+def test_prune_config_min_kept_rate_warn_rejects_out_of_range_values() -> None:
+    """``min_kept_rate_warn`` outside ``[0.0, 1.0]`` fails loud at config
+    load (issue #51) — silently clamping would defeat the operator's
+    explicit signal. Mirrors the ``_positive`` / ``_non_negative``
+    validators on other numeric knobs."""
+    from pydantic import ValidationError
+
+    for bad in (-0.01, -1.0, 1.01, 2.0):
+        with pytest.raises(ValidationError):
+            PruneConfig(min_kept_rate_warn=bad)
+
+
+def test_load_prune_config_handles_yaml_without_min_kept_rate_warn_field(
+    tmp_path: Path,
+) -> None:
+    """A ``signalforge.yml`` without ``min_kept_rate_warn:`` loads
+    cleanly with the field defaulting to ``0.0`` — backward-compat for
+    every pre-issue-#51 operator config.
+
+    Mirrors :func:`test_load_prune_config_enabled_defaults_to_true_when_field_absent`."""
+    config_yml = tmp_path / "signalforge.yml"
+    config_yml.write_text("prune:\n  scope: sample\n")
+
+    result = load_prune_config(tmp_path)
+
+    assert result.min_kept_rate_warn == 0.0
+    assert result.scope == "sample"
+
+
+def test_load_prune_config_min_kept_rate_warn_round_trips_from_yaml(
+    tmp_path: Path,
+) -> None:
+    """``min_kept_rate_warn`` round-trips through YAML (issue #51) — an
+    operator can pin a non-default threshold and the loader preserves it.
+    """
+    config_yml = tmp_path / "signalforge.yml"
+    config_yml.write_text("prune:\n  min_kept_rate_warn: 0.1\n")
+
+    result = load_prune_config(tmp_path)
+
+    assert result.min_kept_rate_warn == 0.1
+
+
 def test_load_prune_config_yaml_safe_load_rejects_python_objects(tmp_path: Path) -> None:
     """Confirms :func:`yaml.safe_load` is used (not :func:`yaml.load`).
 

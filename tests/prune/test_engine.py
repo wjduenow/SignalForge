@@ -521,6 +521,182 @@ def test_prune_tests_audit_record_too_large_propagates(
     assert excinfo.value is expected
 
 
+def test_prune_tests_kept_rate_warning_fires_when_all_tests_dropped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Default ``min_kept_rate_warn=0.0`` fires the WARNING when every
+    candidate test is dropped (issue #51) — the "did we lose the whole
+    LLM draft?" signal."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert result.kept_count == 0
+    assert result.dropped_count == 1
+    matching = [
+        r for r in caplog.records if "kept rate at or below configured threshold" in r.message
+    ]
+    assert len(matching) == 1
+    # Payload is lazy-format JSON (DEC-017); the rendered message
+    # carries the structured fields.
+    rendered = matching[0].getMessage()
+    assert '"model_unique_id": "model.shop.orders"' in rendered
+    assert '"total_tests": 1' in rendered
+    assert '"kept": 0' in rendered
+    assert '"kept_rate": 0.0' in rendered
+    assert '"min_kept_rate_warn": 0.0' in rendered
+
+
+def test_prune_tests_kept_rate_warning_silent_when_at_least_one_kept(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Default ``min_kept_rate_warn=0.0`` does NOT fire when at least one
+    candidate is kept (issue #51) — the WARNING is a signal of "every
+    test dropped," not a routine end-of-run summary."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 3}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert result.kept_count == 1
+    matching = [
+        r for r in caplog.records if "kept rate at or below configured threshold" in r.message
+    ]
+    assert matching == []
+
+
+def test_prune_tests_kept_rate_warning_respects_configured_threshold(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An operator-configured ``min_kept_rate_warn=0.5`` fires when the
+    kept rate sits at or below ``0.5`` (issue #51) — not just on
+    entirely-empty-kept runs."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Two candidates: first passes (dropped: always-passes); second
+    # fails (kept). Kept rate = 0.5.
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 5}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="Primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+            CandidateColumn(
+                name="customer_id",
+                description="FK to customers.",
+                tests=(CandidateTestNotNull(column="customer_id"),),
+            ),
+        ),
+    )
+    config = PruneConfig(
+        scope="full",
+        capture_failure_rows=0,
+        min_kept_rate_warn=0.5,
+    )
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert result.kept_count == 1
+    assert result.dropped_count == 1
+    matching = [
+        r for r in caplog.records if "kept rate at or below configured threshold" in r.message
+    ]
+    assert len(matching) == 1
+    rendered = matching[0].getMessage()
+    assert '"kept_rate": 0.5' in rendered
+    assert '"min_kept_rate_warn": 0.5' in rendered
+
+
+def test_prune_tests_kept_rate_warning_silent_on_empty_candidate_set(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """An empty candidate set is its own degenerate signal (the drafter
+    produced nothing) and does NOT fire the kept-rate WARNING (issue #51).
+
+    Skipping ``total == 0`` also avoids ``ZeroDivisionError`` on the
+    ``kept / total`` computation."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    empty = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+    )
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            empty,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert result.total_tests == 0
+    matching = [
+        r for r in caplog.records if "kept rate at or below configured threshold" in r.message
+    ]
+    assert matching == []
+
+
 def test_prune_tests_module_level_sleep_alias_is_reassignable() -> None:
     """:data:`signalforge.prune.engine._sleep` exists, IS callable, AND
     can be reassigned to a recording stub (DEC-019). Mirrors

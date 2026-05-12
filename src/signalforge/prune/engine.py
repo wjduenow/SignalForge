@@ -189,6 +189,45 @@ def _why_materialisation_failed(exc: WarehouseError) -> str:
     return f"sample materialisation failed: {type(exc).__name__}: {str(exc)[:200]}"
 
 
+def _maybe_emit_kept_rate_warning(
+    decisions: list[PruneDecision],
+    *,
+    model_unique_id: str,
+    threshold: float,
+) -> None:
+    """Emit one WARNING when the kept rate is at or below ``threshold`` (issue #51).
+
+    No-op when the candidate set is empty — division-by-zero on
+    ``len(decisions) == 0`` would be a degenerate signal of its own
+    (the drafter produced nothing) and is not the failure mode this
+    warning is here to catch. The orchestrator calls this helper once at
+    every return site so the disabled / materialisation-failed branches
+    are covered too; on those paths ``kept_rate`` is ``1.0`` so the
+    warning only fires when an operator explicitly sets
+    ``min_kept_rate_warn`` to ``1.0`` ("always warn").
+    """
+
+    total = len(decisions)
+    if total == 0:
+        return
+    kept = sum(1 for d in decisions if d.decision == "kept")
+    kept_rate = kept / total
+    if kept_rate <= threshold:
+        _LOGGER.warning(
+            "prune kept rate at or below configured threshold: %s",
+            json.dumps(
+                {
+                    "model_unique_id": model_unique_id,
+                    "total_tests": total,
+                    "kept": kept,
+                    "dropped": total - kept,
+                    "kept_rate": round(kept_rate, 4),
+                    "min_kept_rate_warn": threshold,
+                }
+            ),
+        )
+
+
 def _why_prune_disabled() -> str:
     """DEC-003 of issue #35 — locked verbatim; pinned by a stability test."""
     return "prune disabled in signalforge.yml"
@@ -845,6 +884,11 @@ def prune_tests(
             decisions.append(decision)
 
         total_elapsed_ms = max(0, _now_monotonic_ms() - start_ms)
+        _maybe_emit_kept_rate_warning(
+            decisions,
+            model_unique_id=model.unique_id,
+            threshold=resolved_config.min_kept_rate_warn,
+        )
         return PruneResult(
             model_unique_id=model.unique_id,
             decisions=tuple(decisions),
@@ -947,6 +991,11 @@ def prune_tests(
                     decisions.append(decision)
 
                 total_elapsed_ms = max(0, _now_monotonic_ms() - start_ms)
+                _maybe_emit_kept_rate_warning(
+                    decisions,
+                    model_unique_id=model.unique_id,
+                    threshold=resolved_config.min_kept_rate_warn,
+                )
                 return PruneResult(
                     model_unique_id=model.unique_id,
                     decisions=tuple(decisions),
@@ -1129,6 +1178,11 @@ def prune_tests(
             decisions.append(decision)
 
         total_elapsed_ms = max(0, _now_monotonic_ms() - start_ms)
+        _maybe_emit_kept_rate_warning(
+            decisions,
+            model_unique_id=model.unique_id,
+            threshold=resolved_config.min_kept_rate_warn,
+        )
         return PruneResult(
             model_unique_id=model.unique_id,
             decisions=tuple(decisions),
