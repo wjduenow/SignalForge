@@ -329,7 +329,7 @@ def test_build_llm_request_audit_carries_schema_version_1(
     build_llm_request(customers_model, fake, policy)
 
     event, _ = rec.calls[0]
-    assert event.audit_schema_version == 1
+    assert event.audit_schema_version == 2
 
 
 def test_build_llm_request_audit_policy_flags_sample_mode_enabled(

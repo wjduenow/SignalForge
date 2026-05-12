@@ -121,7 +121,15 @@ class AuditEvent(BaseModel):
     row_count: int | None = None
     signalforge_version: str
     policy_hash: str
-    audit_schema_version: int = 1
+    audit_schema_version: int = 2
+    """Frozen at the writer's :data:`_AUDIT_SCHEMA_VERSION` constant.
+    Issue #54 bumped 1 → 2 when the :data:`RedactionReason` literal
+    gained ``draft_skip_*`` values and the LLM-payload omission
+    semantics became dependent on the reason. The field stays
+    :class:`int` (not :class:`typing.Literal`) so older audit JSONLs
+    with ``audit_schema_version: 1`` still round-trip cleanly — audit
+    replay across versions is a real requirement."""
+
     policy_flags: tuple[str, ...] = ()
 
 
