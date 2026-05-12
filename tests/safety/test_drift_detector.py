@@ -46,9 +46,7 @@ _FIXTURE = Path("tests/fixtures/safety/audit_events_sample.jsonl")
 
 
 def _fixture_lines() -> list[str]:
-    return [
-        line for line in _FIXTURE.read_text(encoding="utf-8").splitlines() if line.strip()
-    ]
+    return [line for line in _FIXTURE.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def test_audit_event_drift_detector_validates_committed_fixture():

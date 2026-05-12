@@ -264,6 +264,7 @@ def test_module_all_lists_documented_classes() -> None:
     assert tuple(safety_models.__all__) == (
         "SamplingMode",
         "RedactionReason",
+        "DRAFT_SKIP_REASONS",
         "RedactionRecord",
         "AuditEvent",
         "LLMRequest",

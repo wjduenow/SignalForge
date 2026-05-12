@@ -115,9 +115,7 @@ def test_classify_skip_draft_wins_over_pii_signals(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("value", [False, None, 0, "", "true", "yes", 1])
-def test_classify_skip_draft_only_honours_explicit_true(
-    tmp_path: Path, value: object
-) -> None:
+def test_classify_skip_draft_only_honours_explicit_true(tmp_path: Path, value: object) -> None:
     """Non-True values do NOT enable skip_draft (strict ``is True`` check).
 
     Mirrors the existing ``sample is False`` shape — config noise must
@@ -187,6 +185,4 @@ def test_draft_skip_reasons_constant_matches_literal_values() -> None:
     """``DRAFT_SKIP_REASONS`` must enumerate exactly the new reasons —
     expanding RedactionReason without updating the constant would silently
     leak draft-skip columns into the LLM payload."""
-    assert DRAFT_SKIP_REASONS == frozenset(
-        {"draft_skip_column_meta", "draft_skip_model_meta"}
-    )
+    assert frozenset({"draft_skip_column_meta", "draft_skip_model_meta"}) == DRAFT_SKIP_REASONS

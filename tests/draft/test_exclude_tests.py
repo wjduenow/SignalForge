@@ -28,11 +28,10 @@ from signalforge.draft.parser import (
 )
 from signalforge.draft.prompts import (
     _PROMPT_VERSION,
-    _render_system_prompt,
     _SYSTEM_PROMPT,
     _prompt_version_for,
+    _render_system_prompt,
 )
-
 
 # ---------------------------------------------------------------------------
 # DraftConfig validation
@@ -83,9 +82,7 @@ def test_exclude_tests_rejects_non_string_entries() -> None:
 def test_valid_test_types_constant_matches_dbt_four() -> None:
     """Pin the canonical set so adding a new test type without updating
     VALID_TEST_TYPES (and the prompt catalogue) fails loud here."""
-    assert VALID_TEST_TYPES == frozenset(
-        {"not_null", "unique", "accepted_values", "relationships"}
-    )
+    assert frozenset({"not_null", "unique", "accepted_values", "relationships"}) == VALID_TEST_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -121,9 +118,7 @@ def test_render_system_prompt_single_remaining_type_uses_bare_form() -> None:
 
 def test_render_system_prompt_excluding_all_four_raises() -> None:
     with pytest.raises(ValueError) as exc:
-        _render_system_prompt(
-            ("not_null", "unique", "accepted_values", "relationships")
-        )
+        _render_system_prompt(("not_null", "unique", "accepted_values", "relationships"))
     assert "at least one type must remain" in str(exc.value)
 
 
@@ -178,11 +173,7 @@ def _candidate_with_test(test_type: str, *, column: str = "id") -> str:
                         "type": test_type,
                         "column": column,
                         "rationale": "x",
-                        **(
-                            {"values": ["a", "b"]}
-                            if test_type == "accepted_values"
-                            else {}
-                        ),
+                        **({"values": ["a", "b"]} if test_type == "accepted_values" else {}),
                         **(
                             {"to": "ref('other')", "field": "id"}
                             if test_type == "relationships"
@@ -234,10 +225,7 @@ def test_parser_rejects_excluded_model_level_test_type() -> None:
             exclude_tests=frozenset({"unique"}),
         )
     violations = exc.value.violations
-    assert any(
-        "model-level" in v and "'unique'" in v and "exclude_tests" in v
-        for v in violations
-    )
+    assert any("model-level" in v and "'unique'" in v and "exclude_tests" in v for v in violations)
 
 
 def test_parser_passes_when_excluded_not_present() -> None:
@@ -265,9 +253,7 @@ def test_parser_collects_excluded_alongside_other_violations() -> None:
                 "name": "phantom",
                 "description": "x",
                 "rationale": "x",
-                "tests": [
-                    {"type": "unique", "column": "phantom", "rationale": "x"}
-                ],
+                "tests": [{"type": "unique", "column": "phantom", "rationale": "x"}],
             }
         ],
         "tests": [],
