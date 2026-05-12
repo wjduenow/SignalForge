@@ -35,6 +35,14 @@ Every `AuditEvent` carries three fields that look minor but are load-bearing:
 
 The drift-detector test (`tests/safety/test_drift_detector.py`) pairs production `AuditEvent` (`extra="ignore"`) with a one-off `StrictAuditEvent` (`extra="forbid"`) validated against the committed JSONL fixture. Adding a field to production without updating the strict model OR the fixture breaks the test loudly. Don't bypass.
 
+## Canonical timestamp shape across writers (issue #56)
+
+Every audit/sidecar Pydantic model with a `timestamp: datetime` field renders through `signalforge._common.timestamp.iso8601_z` via `@field_serializer("timestamp")` — `YYYY-MM-DDTHH:MM:SS.ffffffZ`, microsecond precision, literal `Z` suffix, no `+00:00` form. The helper refuses naive datetimes (raises `ValueError`) and normalises non-UTC tz-aware inputs via `astimezone(UTC)` first.
+
+Five surfaces ship with the serializer wired: `safety.AuditEvent`, `draft.LLMResponseEvent`, `prune.PruneEvent`, `grade.GradeEvent`, `grade.GradingReport`. Cross-writer byte-equal parity is pinned by `tests/_common/test_timestamp.py::test_cross_writer_timestamp_byte_parity`.
+
+When a v0.3 writer ships a sixth audit-event type, do NOT lean on Pydantic's default datetime serialization — it emits `+00:00` instead of `Z` and the audit corpus reads two shapes. Wire the serializer at the model: `timestamp: datetime` + `@field_serializer("timestamp")` calling `iso8601_z`, and extend the cross-writer parity test to a sixth assertion in lockstep.
+
 ## Config-shaped models use `extra="forbid"`; read-back models use `extra="ignore"` (DEC-015)
 
 The default in `manifest-readers.md` is `extra="ignore"` for forward-compat. The safety layer **deliberately overrides** for config files:
