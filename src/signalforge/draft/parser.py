@@ -86,17 +86,27 @@ def _is_json_invalid_error(exc: ValidationError) -> bool:
 def _validate_anchor_contract(
     candidate: CandidateSchema,
     model_columns: frozenset[str],
+    *,
+    exclude_tests: frozenset[str] = frozenset(),
 ) -> tuple[str, ...]:
     """Walk ``candidate`` collecting every anchor-contract violation.
 
     Whole-draft fail-loud (DEC-022): never short-circuits on the first
     violation. Returns an empty tuple when the candidate is clean.
+
+    ``exclude_tests`` (issue #54) is the operator-supplied set of test
+    types the drafter must NOT propose. Any candidate test whose
+    ``type`` is in this set adds a violation. The prompt-builder
+    filters the test catalogue server-side too, so a well-behaved LLM
+    won't emit excluded types; this check is the defence-in-depth
+    backstop for a model that ignores the prompt.
     """
     violations: list[str] = []
 
     # Column-scoped tests: hallucinated-column check on the parent
     # CandidateColumn name itself + parent-column-match + nonexistent-
-    # column check on each test + duplicate not_null/unique check.
+    # column check on each test + duplicate not_null/unique check +
+    # excluded-test-type rejection.
     for column in candidate.columns:
         # The CandidateColumn name itself must reference a real column.
         # Without this check, an LLM could invent
@@ -119,6 +129,11 @@ def _validate_anchor_contract(
                     f"test references nonexistent column {test.column!r} "
                     f"(available: {sorted(model_columns)})"
                 )
+            if test.type in exclude_tests:
+                violations.append(
+                    f"column={column.name!r} test type {test.type!r} is in exclude_tests "
+                    f"(excluded: {sorted(exclude_tests)})"
+                )
             if test.type == "not_null":
                 not_null_count += 1
             elif test.type == "unique":
@@ -128,11 +143,16 @@ def _validate_anchor_contract(
         if unique_count > 1:
             violations.append(f"column={column.name!r} has duplicate 'unique' tests")
 
-    # Model-level tests: only the nonexistent-column check applies (the
-    # parent-column rule is column-scoped by definition).
+    # Model-level tests: nonexistent-column check + excluded-test-type
+    # rejection. The parent-column rule is column-scoped by definition.
     for test in candidate.tests:
         if test.column not in model_columns:
             violations.append(f"model-level test references nonexistent column {test.column!r}")
+        if test.type in exclude_tests:
+            violations.append(
+                f"model-level test type {test.type!r} is in exclude_tests "
+                f"(excluded: {sorted(exclude_tests)})"
+            )
 
     return tuple(violations)
 
@@ -142,6 +162,7 @@ def parse_draft_response(
     model_columns: frozenset[str],
     *,
     llm_result_meta: _LLMResultMeta,
+    exclude_tests: frozenset[str] = frozenset(),
 ) -> CandidateSchema:
     """Parse and validate the LLM's textual response.
 
@@ -188,7 +209,9 @@ def parse_draft_response(
         ) from exc
 
     # Stage 2 — Anchor-contract validation.
-    violations = _validate_anchor_contract(candidate, model_columns)
+    violations = _validate_anchor_contract(
+        candidate, model_columns, exclude_tests=exclude_tests
+    )
     if violations:
         raise LLMOutputAnchorContractError(
             f"LLM response violated the anchor contract ({len(violations)} violation(s)).",
