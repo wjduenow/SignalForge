@@ -37,7 +37,9 @@ import math
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, computed_field, field_validator
+from pydantic import BaseModel, ConfigDict, computed_field, field_serializer, field_validator
+
+from signalforge._common.timestamp import iso8601_z
 
 _BASE_CONFIG = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
@@ -183,6 +185,10 @@ class GradingReport(BaseModel):
     thresholds: tuple[float, float]
     results: tuple[GradingResult, ...]
 
+    @field_serializer("timestamp")
+    def _serialize_timestamp(self, value: datetime) -> str:
+        return iso8601_z(value)
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def pass_rate(self) -> float:
@@ -303,6 +309,10 @@ class GradeEvent(BaseModel):
     output_tokens: int
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+
+    @field_serializer("timestamp")
+    def _serialize_timestamp(self, value: datetime) -> str:
+        return iso8601_z(value)
 
     @field_validator("score")
     @classmethod

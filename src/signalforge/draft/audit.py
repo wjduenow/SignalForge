@@ -43,8 +43,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
 
+from signalforge._common.timestamp import iso8601_z
 from signalforge.draft.models import CandidateSchema
 
 if TYPE_CHECKING:
@@ -88,6 +89,10 @@ class LLMResponseEvent(BaseModel):
     model: str
     signalforge_version: str
     audit_schema_version: int = 1
+
+    @field_serializer("timestamp")
+    def _serialize_timestamp(self, value: datetime) -> str:
+        return iso8601_z(value)
 
 
 def _compute_response_text_hash(text: str) -> str:

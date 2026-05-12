@@ -17,7 +17,7 @@ python - <<'PY' > audit_events_sample.jsonl
 import json
 records = [
     {
-        "timestamp": "2026-04-28T22:30:00+00:00",
+        "timestamp": "2026-04-28T22:30:00.000000Z",
         "model_unique_id": "model.sf_demo.customers",
         "mode": "schema-only",
         "columns_sent": ["id", "col_a3f29c61"],
@@ -36,7 +36,7 @@ records = [
         "policy_flags": [],
     },
     {
-        "timestamp": "2026-05-11T18:00:00+00:00",
+        "timestamp": "2026-05-11T18:00:00.000000Z",
         "model_unique_id": "model.sf_demo.orders",
         "mode": "schema-only",
         "columns_sent": ["id", "amount"],

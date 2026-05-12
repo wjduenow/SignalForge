@@ -37,8 +37,9 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
 
+from signalforge._common.timestamp import iso8601_z
 from signalforge.warehouse.models import ColumnStats
 
 _BASE_MODEL_CONFIG = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
@@ -134,6 +135,10 @@ class AuditEvent(BaseModel):
     audit replay across versions is a real requirement."""
 
     policy_flags: tuple[str, ...] = ()
+
+    @field_serializer("timestamp")
+    def _serialize_timestamp(self, value: datetime) -> str:
+        return iso8601_z(value)
 
 
 class LLMRequest(BaseModel):

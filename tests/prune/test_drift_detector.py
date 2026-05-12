@@ -27,6 +27,7 @@ model with a one-off ``extra="forbid"`` mirror).
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -105,7 +106,7 @@ class StrictPruneEvent(BaseModel):
     audit_schema_version: int
     signalforge_version: str
     record_id: str
-    timestamp: str
+    timestamp: datetime
     config_hash: str
     model_unique_id: str
     test: CandidateTest
