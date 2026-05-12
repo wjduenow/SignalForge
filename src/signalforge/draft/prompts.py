@@ -58,12 +58,10 @@ if TYPE_CHECKING:
 
 _TEST_CATALOGUE_LINES: dict[str, str] = {
     "not_null": (
-        '        {"type": "not_null", "column": "<column name>", '
-        '"rationale": "<1 sentence>"},'
+        '        {"type": "not_null", "column": "<column name>", "rationale": "<1 sentence>"},'
     ),
     "unique": (
-        '        {"type": "unique", "column": "<column name>", '
-        '"rationale": "<1 sentence>"},'
+        '        {"type": "unique", "column": "<column name>", "rationale": "<1 sentence>"},'
     ),
     "accepted_values": (
         '        {"type": "accepted_values", "column": "<column name>",\n'

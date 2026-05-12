@@ -144,8 +144,7 @@ class DraftConfig(BaseModel):
             )
         if not isinstance(value, (list, tuple)):
             raise ValueError(
-                f"exclude_tests must be a list of test-type strings; "
-                f"got {type(value).__name__}"
+                f"exclude_tests must be a list of test-type strings; got {type(value).__name__}"
             )
         seen: list[str] = []
         for entry in value:

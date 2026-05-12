@@ -209,9 +209,7 @@ def parse_draft_response(
         ) from exc
 
     # Stage 2 — Anchor-contract validation.
-    violations = _validate_anchor_contract(
-        candidate, model_columns, exclude_tests=exclude_tests
-    )
+    violations = _validate_anchor_contract(candidate, model_columns, exclude_tests=exclude_tests)
     if violations:
         raise LLMOutputAnchorContractError(
             f"LLM response violated the anchor contract ({len(violations)} violation(s)).",
