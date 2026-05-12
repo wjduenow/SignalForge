@@ -105,6 +105,34 @@ def test_signalforge_lint_help_via_subprocess() -> None:
 
 
 @pytest.mark.cli_subprocess
+def test_signalforge_version_help_via_subprocess() -> None:
+    """``signalforge version --help`` exits 0 with the subcommand's help.
+
+    Issue #58 — the existing ``--version`` test (top-level
+    ``action="version"``) does NOT exercise ``signalforge.cli.version``'s
+    ``add_parser`` registration; the ``version`` subparser could be
+    deleted or break at import time without that test noticing. The
+    subparser carries no flags of its own (``cmd_version`` takes no
+    args) and ``add_parser(help=...)`` strings only render on the parent
+    parser, so the assertion pins the argparse-emitted usage line
+    ``usage: signalforge version`` — the dispatched-program name plus
+    the subcommand name jointly prove argparse rendered the right
+    subparser's help, not the top-level usage.
+    """
+    result = subprocess.run(
+        ["signalforge", "version", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert "usage: signalforge version" in result.stdout
+    # No-traceback floor — see the ``--version`` test above.
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.cli_subprocess
 def test_signalforge_init_demo_help_via_subprocess() -> None:
     """``signalforge init-demo --help`` exits 0 with the subcommand's help.
 
