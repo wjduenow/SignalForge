@@ -394,3 +394,113 @@ def test_cmd_init_demo_dest_exists_remediation_mentions_force(
     # The remediation footer is part of the canonical CLI error shape.
     assert "↳ Remediation:" in err
     assert "--force" in err
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap fills: defensive except branches + cause=None error constructors
+# ---------------------------------------------------------------------------
+
+
+def test_cmd_init_demo_demo_path_error_wraps_to_cli_path_error(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``DemoPathError`` raised by ``copy_demo`` (symlink cycle on a
+    platform where ``Path.resolve()`` triggers ``RuntimeError``) is wrapped
+    as ``CliPathError`` per DEC-012.
+
+    Exercised here via monkeypatch because WSL2's filesystem does not
+    raise ``RuntimeError`` on symlink cycles — the natural test path in
+    ``test_demo.py`` is skipped on WSL2 (see the parity test). The CLI
+    handler branch still needs coverage, so we synthesise the error.
+    """
+    from signalforge.cli import init_demo as init_demo_mod
+    from signalforge.demo import DemoPathError
+
+    def _raise(*_args: object, **_kwargs: object) -> Path:
+        raise DemoPathError(
+            "failed to resolve destination path 'fake': simulated cycle",
+            cause=RuntimeError("simulated symlink cycle"),
+        )
+
+    monkeypatch.setattr(init_demo_mod, "copy_demo", _raise)
+    ret = main(["init-demo", str(tmp_path / "demo")])
+    out, err = _capture(capsys)
+    assert ret == 1, f"stdout: {out}\nstderr: {err}"
+    assert err.startswith("ERROR: ")
+    assert "resolve" in err.lower() or "symlink" in err.lower()
+    assert "Traceback" not in err
+
+
+def test_cmd_init_demo_keyboard_interrupt_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``KeyboardInterrupt`` from inside ``copy_demo`` is re-raised — the
+    CLI handler does NOT swallow it (operator Ctrl-C must propagate to
+    Python's default handler for sane shell semantics). DEC-016 carve-out.
+    """
+    from signalforge.cli import init_demo as init_demo_mod
+
+    def _raise(*_args: object, **_kwargs: object) -> Path:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(init_demo_mod, "copy_demo", _raise)
+    with pytest.raises(KeyboardInterrupt):
+        main(["init-demo", str(tmp_path / "demo")])
+
+
+def test_cmd_init_demo_forward_compat_exception_belt_and_braces(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forward-compat exception type that ``copy_demo`` might add in
+    a future version still routes through the canonical formatter +
+    mapper without leaking a traceback. The catch-all ``except Exception``
+    in ``cmd_init_demo`` is the belt-and-braces seam (DEC-016).
+    """
+    from signalforge.cli import init_demo as init_demo_mod
+
+    class _FutureDemoConcurrencyError(Exception):
+        """Hypothetical v0.x error type."""
+
+    def _raise(*_args: object, **_kwargs: object) -> Path:
+        raise _FutureDemoConcurrencyError("demo busy in another process")
+
+    monkeypatch.setattr(init_demo_mod, "copy_demo", _raise)
+    ret = main(["init-demo", str(tmp_path / "demo")])
+    out, err = _capture(capsys)
+    # Unmapped → tier 1 (panic-path default).
+    assert ret == 1, f"stdout: {out}\nstderr: {err}"
+    assert err.startswith("ERROR: ")
+    assert "demo busy" in err
+    assert "Traceback" not in err
+
+
+def test_cli_init_demo_error_constructors_render_without_cause() -> None:
+    """Every ``CliInitDemo*Error`` constructor accepts ``cause=None`` and
+    renders a sensible message without it. Exit-code-table tests always
+    pass a ``cause``, so this exercises the ``cause is None`` branch in
+    each of the four wrappers.
+    """
+    e1 = CliInitDemoDestExistsError(dest="/tmp/x")
+    assert "exists" in str(e1)
+    assert e1.cause is None
+    assert "↳ Remediation:" in str(e1)
+
+    e2 = CliInitDemoDestUnsafeError(dest="/")
+    assert "force" in str(e2).lower()
+    assert e2.cause is None
+    assert "↳ Remediation:" in str(e2)
+
+    e3 = CliInitDemoFixtureMissingError()
+    assert "missing" in str(e3).lower()
+    assert e3.cause is None
+    assert "↳ Remediation:" in str(e3)
+
+    e4 = CliInitDemoCopyError(dest="/tmp/x")
+    assert "copy" in str(e4).lower()
+    assert e4.cause is None
+    assert "↳ Remediation:" in str(e4)
