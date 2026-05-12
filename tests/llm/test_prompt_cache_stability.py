@@ -17,10 +17,16 @@ does not hard-code a hash so it can't drift. Latest known rotations:
 - ``1c55806467984090`` — original pin from #5 / DEC-019.
 - ``c7d15d59f78bab2d`` — rotated under #10 when an explicit JSON-shape
   example was added to the system prompt (DEC-025 of #10).
-- ``8a0d81994275b803`` — current. Rotated under #10 review feedback
-  when the JSON example's outer ```json fence was removed (the prompt
-  instructs "do not wrap in markdown fences" so showing a fenced
-  example was a foot-gun; CodeRabbit/Copilot both flagged it).
+- ``8a0d81994275b803`` — rotated under #10 review feedback when the
+  JSON example's outer ```json fence was removed (the prompt instructs
+  "do not wrap in markdown fences" so showing a fenced example was a
+  foot-gun; CodeRabbit/Copilot both flagged it).
+- ``2563a71c5e31f0db`` — current. Rotated under #54 when the system
+  prompt became parameterised by ``DraftConfig.exclude_tests`` (the
+  test catalogue + SCOPE line are now templated). The default render
+  (no exclusions) is semantically identical to the prior text but
+  has a different line-wrap in the SCOPE paragraph because the enum
+  list is now rendered via :func:`str.format` rather than a literal.
 
 If this rotates again, update both :data:`_EXPECTED_PROMPT_VERSION` and
 :data:`_CACHED_BLOCK_GOLDEN` in lockstep — the rotation is the signal
@@ -49,7 +55,7 @@ _FIXTURE_PATH = (
 )
 
 
-_EXPECTED_PROMPT_VERSION: str = "8a0d81994275b803"
+_EXPECTED_PROMPT_VERSION: str = "2563a71c5e31f0db"
 
 
 # Captured once via ``render_prompt`` against the canonical fixture below.

@@ -194,22 +194,42 @@ flags potential misconfiguration for the operator to decide.
 
 ## Per-column opt-out
 
-Four signals override the pattern matcher (DEC-003). Listed by
-precedence — first match wins, top to bottom:
+Seven precedence steps override the pattern matcher (DEC-003, plus the
+two `skip_draft` signals added by issue #54). Listed by precedence —
+first match wins, top to bottom:
 
-1. **Column-level `meta.signalforge.sample: false`** — strongest;
-   beats every other signal. Reason code `column_meta_optout`.
-2. **Column-level `tags: ["pii"]`** — case-insensitive; `["PII"]` and
+1. **Column-level `meta.signalforge.skip_draft: true`** (#54) — strongest;
+   beats every PII signal. Column is **omitted entirely** from the
+   LLM payload (`columns_sent` / `schema` / `aggregates` / `sampled_rows`)
+   while its `RedactionRecord` still rides on the audit event for
+   traceability. Reason code `draft_skip_column_meta`. Requires
+   explicit `True` — `"true"` / `1` are config noise and do not fire.
+2. **Model-level `meta.signalforge.skip_draft: true`** (#54) — same
+   omit-entirely semantics but cascades to every column on the model.
+   Reason code `draft_skip_model_meta`.
+3. **Column-level `meta.signalforge.sample: false`** — beats every
+   PII signal below. Column is sent under a hashed placeholder
+   (`col_<8 hex>`), not omitted. Reason code `column_meta_optout`.
+4. **Column-level `tags: ["pii"]`** — case-insensitive; `["PII"]` and
    `["Pii"]` both fire. Lowercase recommended. Reason code
    `tag_pii_column`.
-3. **Column-level `meta.contains_pii: true`** — truthy values
+5. **Column-level `meta.contains_pii: true`** — truthy values
    accepted; non-bool truthy values (`"yes"`, `1`) emit a DEBUG log
    noting the coercion. Reason code `meta_contains_pii_column`.
-4. **Model-level fallbacks** — the same three signals at the model
+6. **Model-level fallbacks** — the same three signals at the model
    level (`meta.signalforge.sample`, `tags: [pii]`,
    `meta.contains_pii`) cascade to every column. Reason codes
    `model_meta_optout` / `tag_pii_model` / `meta_contains_pii_model`.
-5. **Pattern match** — last resort. Reason code `pattern_match`.
+7. **Pattern match** — last resort. Reason code `pattern_match`.
+
+**`skip_draft` vs. `sample: false` — which to use?** `sample: false`
+sends a hashed placeholder so the LLM still sees that a column exists
+(and proposes shape-only tests on the placeholder name). `skip_draft`
+omits the column entirely — useful when the column is operational
+plumbing the operator never wants the drafter reasoning about
+(internal tokens, mirror columns, computed-elsewhere data) and the
+hashed-placeholder noise is itself unhelpful. Both record in the
+audit event for traceability.
 
 Concrete dbt YAML:
 
@@ -219,16 +239,21 @@ version: 2
 models:
   - name: customers
     columns:
+      - name: internal_token
+        # Signal 1 (#54): omit entirely from the LLM payload.
+        meta:
+          signalforge:
+            skip_draft: true
       - name: customer_email
-        # Signal 1: strongest opt-out, beats everything else.
+        # Signal 3: strongest PII opt-out — hashed placeholder, not omitted.
         meta:
           signalforge:
             sample: false
       - name: phone_number
-        # Signal 2: case-insensitive tag match.
+        # Signal 4: case-insensitive tag match.
         tags: ["pii"]
       - name: home_address
-        # Signal 3: truthy values accepted.
+        # Signal 5: truthy values accepted.
         meta:
           contains_pii: true
 ```
@@ -286,7 +311,7 @@ append via `O_APPEND` + a single `os.write` (DEC-005).
 | `row_count`              | integer or `null`             | Row count for sample mode; `null` for schema-only / aggregate-only.     | `100` or `null`                        |
 | `signalforge_version`    | PEP-440 version string        | The package version that produced the record.                           | `"0.1.0"`                              |
 | `policy_hash`            | 16 hex chars                  | First 16 hex chars of `SHA-256(policy)`. DEC-014.                       | `"6f1c0e3d2c44c012"`                   |
-| `audit_schema_version`   | integer                       | Audit shape version. Currently `1`.                                     | `1`                                    |
+| `audit_schema_version`   | integer                       | Audit shape version. Currently `2` (bumped by issue #54).               | `2`                                    |
 | `policy_flags`           | array of string               | Closed set of flag literals — see below.                                | `["sample_mode_enabled"]`              |
 
 **`policy_flags` closed set:**
@@ -296,8 +321,18 @@ append via `O_APPEND` + a single `os.write` (DEC-005).
 - `audit_path_overridden` — `policy.audit_path != DEFAULT_AUDIT_PATH`.
 
 `RedactionRecord` fields: `column_name` (real), `hashed_name`
-(`col_<8 hex>`), `redacted` (bool), `reason` (one of seven literal
-strings — see [Per-column opt-out](#per-column-opt-out)).
+(`col_<8 hex>`), `redacted` (bool), `reason` (one of nine literal
+strings — see [Per-column opt-out](#per-column-opt-out); the two
+`draft_skip_*` reasons added in issue #54 indicate omit-entirely
+semantics rather than hashed-placeholder substitution).
+
+**Audit schema version 2 (issue #54).** The bump from 1 → 2 reflects
+the new `draft_skip_column_meta` / `draft_skip_model_meta`
+`RedactionReason` values. Consumers parsing audit JSONLs should gate
+on `audit_schema_version >= 2` before pattern-matching the new
+reasons. Older v1 records continue to round-trip cleanly (the
+production model keeps `audit_schema_version: int`, not
+`Literal[2]`).
 
 ## Audit log sensitivity
 

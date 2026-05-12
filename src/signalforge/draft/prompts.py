@@ -56,7 +56,33 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-_SYSTEM_PROMPT = """\
+_TEST_CATALOGUE_LINES: dict[str, str] = {
+    "not_null": (
+        '        {"type": "not_null", "column": "<column name>", "rationale": "<1 sentence>"},'
+    ),
+    "unique": (
+        '        {"type": "unique", "column": "<column name>", "rationale": "<1 sentence>"},'
+    ),
+    "accepted_values": (
+        '        {"type": "accepted_values", "column": "<column name>",\n'
+        '         "values": ["<value1>", "<value2>"], "rationale": "<1 sentence>"},'
+    ),
+    "relationships": (
+        '        {"type": "relationships", "column": "<column name>",\n'
+        '         "to": "ref(\'<other_model>\')", "field": "<other column>",\n'
+        '         "rationale": "<1 sentence>"}'
+    ),
+}
+"""Per-test-type catalogue lines for the system prompt (issue #54).
+
+The four entries are emitted in this fixed order so the rendered prompt
+stays byte-stable when no exclusions apply. When :class:`DraftConfig`
+sets ``exclude_tests``, the excluded entries are dropped before
+rendering and the surviving entries' trailing-comma placement is fixed
+up so the JSON example stays well-formed."""
+
+
+_SYSTEM_PROMPT_TEMPLATE = """\
 You are a senior dbt analytics engineer drafting schema.yml entries for a
 single dbt model. Your task is to propose column descriptions and tests
 that will survive a warehouse-driven prune step: tests that always pass
@@ -73,29 +99,23 @@ text.
 Expected JSON shape (illustration; emit only the inner object, no
 surrounding fences):
 
-{
+{{
   "schema_version": 1,
   "name": "<exact model name from the manifest summary>",
   "description": "<1-3 sentences describing the model>",
   "rationale": "<1 sentence: why these tests + descriptions, at the model level>",
   "columns": [
-    {
+    {{
       "name": "<exact column name from the manifest summary>",
       "description": "<1-3 sentences describing this column>",
       "rationale": "<1 sentence: why this description / why these tests on this column>",
       "tests": [
-        {"type": "not_null", "column": "<column name>", "rationale": "<1 sentence>"},
-        {"type": "unique", "column": "<column name>", "rationale": "<1 sentence>"},
-        {"type": "accepted_values", "column": "<column name>",
-         "values": ["<value1>", "<value2>"], "rationale": "<1 sentence>"},
-        {"type": "relationships", "column": "<column name>",
-         "to": "ref('<other_model>')", "field": "<other column>",
-         "rationale": "<1 sentence>"}
+{test_catalogue}
       ]
-    }
+    }}
   ],
   "tests": []
-}
+}}
 
 Field-name discipline (load-bearing — the parser rejects substitutions):
 
@@ -129,10 +149,54 @@ forwarded from the manifest.
 
 ### SCOPE
 
-Propose only `not_null`, `unique`, `accepted_values`, and `relationships`
-tests. Other test types (custom singular tests, dbt-utils macros) are out
-of scope for this draft step.
+Propose only {allowed_scope} tests. Other test types (custom singular
+tests, dbt-utils macros) are out of scope for this draft step.
 """
+
+
+def _render_system_prompt(exclude_tests: tuple[str, ...]) -> str:
+    """Render the system prompt with the test catalogue filtered (issue #54).
+
+    When ``exclude_tests`` is empty the rendered prompt is the current
+    ``_SYSTEM_PROMPT`` baseline (semantically identical to the historic
+    v0.1 prompt; the SCOPE line wraps differently because the enum is
+    now substituted via :func:`str.format` rather than a literal —
+    ``_PROMPT_VERSION`` rotated 1 → 2 by issue #54 to reflect that
+    template change). When non-empty, the listed types are dropped from
+    the JSON-shape illustration's ``tests`` array AND from the
+    ``### SCOPE`` line's enumeration. The parser still enforces the
+    exclusion server-side as defence in depth (an LLM may ignore prompt
+    instructions; the parser cannot).
+    """
+    allowed = [t for t in _TEST_CATALOGUE_LINES if t not in exclude_tests]
+    if not allowed:
+        raise ValueError(
+            "exclude_tests dropped every dbt test type from the catalogue; "
+            "at least one type must remain so the drafter has something to propose."
+        )
+    catalogue_lines = [_TEST_CATALOGUE_LINES[t] for t in allowed]
+    # Strip the trailing comma on the final entry so the JSON example
+    # remains well-formed irrespective of how many types were excluded.
+    last = catalogue_lines[-1]
+    if last.endswith(","):
+        catalogue_lines[-1] = last[:-1]
+    test_catalogue = "\n".join(catalogue_lines)
+    if len(allowed) == 1:
+        scope_phrase = f"`{allowed[0]}`"
+    elif len(allowed) == 2:
+        scope_phrase = f"`{allowed[0]}` and `{allowed[1]}`"
+    else:
+        scope_phrase = ", ".join(f"`{t}`" for t in allowed[:-1]) + f", and `{allowed[-1]}`"
+    return _SYSTEM_PROMPT_TEMPLATE.format(
+        test_catalogue=test_catalogue,
+        allowed_scope=scope_phrase,
+    )
+
+
+# Historic ``_SYSTEM_PROMPT`` constant: equals ``_render_system_prompt(())``
+# by construction. Kept so the prompt-cache stability test (US-014) can
+# continue to pin the unfiltered prompt against a snapshot.
+_SYSTEM_PROMPT: str = _render_system_prompt(())
 
 
 _MANIFEST_SUMMARY_TEMPLATE = """\
@@ -186,6 +250,28 @@ _PROMPT_VERSION: str = hashlib.blake2b(
     ).encode("utf-8"),
     digest_size=8,
 ).hexdigest()
+
+
+def _prompt_version_for(exclude_tests: tuple[str, ...]) -> str:
+    """Per-call prompt-version hash that incorporates ``exclude_tests``.
+
+    With no exclusions, returns :data:`_PROMPT_VERSION` verbatim so the
+    historic v0.1 hash and committed snapshots remain stable. With any
+    exclusion, mixes a canonical-sorted JSON of the exclusion list into
+    the base hash so two runs with different exclusion sets get
+    different prompt versions (cache invalidation is the contract; see
+    ``llm-drafter.md`` DEC-019).
+    """
+    if not exclude_tests:
+        return _PROMPT_VERSION
+    # Sort + dedupe for canonical order (the DraftConfig validator already
+    # dedupes, but defensive sorting protects callers that supply the
+    # tuple directly from a test or notebook).
+    canonical = json.dumps(sorted(set(exclude_tests)), separators=(",", ":"))
+    return hashlib.blake2b(
+        (_PROMPT_VERSION + "|exclude=" + canonical).encode("utf-8"),
+        digest_size=8,
+    ).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -376,12 +462,17 @@ def render_prompt(
     model: Model,
     request: LLMRequest,
     manifest: Manifest,
+    *,
+    exclude_tests: tuple[str, ...] = (),
 ) -> tuple[str, str, str, str]:
     """Render the four-part prompt for one LLM draft call.
 
     Returns ``(system, cached_block, dynamic_block, prompt_version)``:
 
-    * ``system`` — :data:`_SYSTEM_PROMPT`, the fixed system message.
+    * ``system`` — the system message. When ``exclude_tests`` is empty
+      this equals :data:`_SYSTEM_PROMPT` (the historic v0.1 prompt);
+      with exclusions the test catalogue and ``### SCOPE`` line are
+      filtered to the remaining types (issue #54).
     * ``cached_block`` — manifest summary covering the model under draft
       and its direct ``refs``/``depends_on`` neighbours (DEC-009). Stable
       across calls for the same ``(model, manifest)`` pair so Anthropic's
@@ -389,13 +480,16 @@ def render_prompt(
     * ``dynamic_block`` — ``<MODEL_SQL>`` envelope around
       :attr:`Model.raw_code` (DEC-007) plus the mode-specific data
       section (DEC-023). Varies per request.
-    * ``prompt_version`` — :data:`_PROMPT_VERSION`, a 16-hex-char
-      ``blake2b`` over the template content (DEC-019). Pinned by US-014's
-      cache-stability test; rotates if any template constant changes.
+    * ``prompt_version`` — 16-hex-char ``blake2b`` over the rendered
+      template content (DEC-019). With no exclusions this equals
+      :data:`_PROMPT_VERSION` (snapshot-pinned by the cache-stability
+      test); with exclusions the hash rotates so cache invalidation
+      tracks the prompt change.
     """
+    system = _render_system_prompt(exclude_tests)
     cached = _render_manifest_summary(model, manifest)
     dynamic = _render_dynamic_block(model, request)
-    return _SYSTEM_PROMPT, cached, dynamic, _PROMPT_VERSION
+    return system, cached, dynamic, _prompt_version_for(exclude_tests)
 
 
 __all__ = ("render_prompt",)

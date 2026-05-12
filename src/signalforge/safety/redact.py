@@ -146,13 +146,23 @@ def _classify_column(
 
     Precedence (first match wins, top to bottom):
 
-    1. column ``meta.signalforge.sample == False``  -> ``column_meta_optout``
-    2. column tag ``pii`` (case-insensitive)         -> ``tag_pii_column``
-    3. column ``meta.contains_pii`` truthy            -> ``meta_contains_pii_column``
-    4. model ``meta.signalforge.sample == False``    -> ``model_meta_optout``
-    5. model tag ``pii`` (case-insensitive)          -> ``tag_pii_model``
-    6. model ``meta.contains_pii`` truthy            -> ``meta_contains_pii_model``
-    7. column name matches a redact pattern          -> ``pattern_match``
+    1. column ``meta.signalforge.skip_draft == True`` -> ``draft_skip_column_meta``
+    2. model ``meta.signalforge.skip_draft == True``  -> ``draft_skip_model_meta``
+    3. column ``meta.signalforge.sample == False``    -> ``column_meta_optout``
+    4. column tag ``pii`` (case-insensitive)          -> ``tag_pii_column``
+    5. column ``meta.contains_pii`` truthy            -> ``meta_contains_pii_column``
+    6. model ``meta.signalforge.sample == False``     -> ``model_meta_optout``
+    7. model tag ``pii`` (case-insensitive)           -> ``tag_pii_model``
+    8. model ``meta.contains_pii`` truthy             -> ``meta_contains_pii_model``
+    9. column name matches a redact pattern           -> ``pattern_match``
+
+    The two ``draft_skip_*`` reasons (issue #54) are semantically distinct
+    from the seven PII reasons below them: a draft-skip column is OMITTED
+    entirely from the LLM prompt, whereas a PII-redacted column is sent
+    under a hashed placeholder. Skip checks run first because if a column
+    is omitted entirely, any PII signal on it is moot. Column-level skip
+    is checked before model-level skip so the audit reason names the
+    most-specific source.
 
     When no signal fires, returns ``None``. As a side effect, columns whose
     name contains a "suspicious" substring (DEC-020) but matched no
@@ -162,9 +172,30 @@ def _classify_column(
     name_lower = name.lower()
     hashed = hash_column_name(name)
 
-    # ----- column-level signals -----
+    # ----- draft-skip signals (issue #54) — run first; semantics differ -----
+    # ``skip_draft`` requires an explicit ``True`` (mirrors the strict
+    # ``sample is False`` check below — truthy non-bool values are
+    # configuration noise, not opt-in).
     column_meta = column.meta or {}
     sf_meta = column_meta.get("signalforge")
+    if isinstance(sf_meta, dict) and sf_meta.get("skip_draft") is True:
+        return RedactionRecord(
+            column_name=name,
+            hashed_name=hashed,
+            redacted=True,
+            reason="draft_skip_column_meta",
+        )
+    model_meta = _model_meta(model)
+    sf_model_meta = model_meta.get("signalforge")
+    if isinstance(sf_model_meta, dict) and sf_model_meta.get("skip_draft") is True:
+        return RedactionRecord(
+            column_name=name,
+            hashed_name=hashed,
+            redacted=True,
+            reason="draft_skip_model_meta",
+        )
+
+    # ----- column-level signals -----
     if isinstance(sf_meta, dict) and sf_meta.get("sample") is False:
         return RedactionRecord(
             column_name=name,
@@ -188,8 +219,6 @@ def _classify_column(
         )
 
     # ----- model-level signals -----
-    model_meta = _model_meta(model)
-    sf_model_meta = model_meta.get("signalforge")
     if isinstance(sf_model_meta, dict) and sf_model_meta.get("sample") is False:
         return RedactionRecord(
             column_name=name,

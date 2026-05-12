@@ -39,7 +39,7 @@ def _make_event(**overrides: Any) -> AuditEvent:
         row_count=None,
         signalforge_version="0.1.0",
         policy_hash="abc123def456789a",
-        audit_schema_version=1,
+        audit_schema_version=2,
         policy_flags=(),
     )
     base.update(overrides)
@@ -65,7 +65,7 @@ def test_audit_write_round_trips_through_json_loads(tmp_path: Path) -> None:
     assert payload["mode"] == SamplingMode.SCHEMA_ONLY
     assert payload["columns_sent"] == ["id", "name"]
     assert payload["redactions"] == []
-    assert payload["audit_schema_version"] == 1
+    assert payload["audit_schema_version"] == 2
     assert payload["signalforge_version"] == "0.1.0"
     assert payload["policy_hash"] == "abc123def456789a"
 
@@ -110,7 +110,7 @@ def test_audit_write_emits_logger_info_line(
     assert f'"mode": "{SamplingMode.SCHEMA_ONLY}"' in msg
     assert '"columns_sent": 2' in msg
     assert '"redacted": 0' in msg
-    assert '"audit_schema_version": 1' in msg
+    assert '"audit_schema_version": 2' in msg
 
 
 def test_audit_write_logger_message_escapes_ansi_in_user_input(
@@ -285,7 +285,7 @@ def test_audit_write_logger_includes_audit_schema_version(
         write(_make_event(), audit_path)
     records = [r for r in caplog.records if r.name == "signalforge.safety"]
     assert len(records) == 1
-    assert '"audit_schema_version": 1' in records[0].getMessage()
+    assert '"audit_schema_version": 2' in records[0].getMessage()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only permission semantics")

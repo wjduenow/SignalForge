@@ -65,7 +65,21 @@ RedactionReason = Literal[
     "meta_contains_pii_column",
     "meta_contains_pii_model",
     "pattern_match",
+    "draft_skip_column_meta",
+    "draft_skip_model_meta",
 ]
+
+DRAFT_SKIP_REASONS: frozenset[RedactionReason] = frozenset(
+    {"draft_skip_column_meta", "draft_skip_model_meta"}
+)
+"""Reasons that mean "exclude the column from the LLM prompt entirely",
+distinct from the seven PII reasons that mean "send a hashed placeholder
+in place of the real column name". Columns with a draft-skip reason
+never appear in :attr:`LLMRequest.schema` /
+:attr:`LLMRequest.columns_sent` / :attr:`LLMRequest.aggregates` /
+:attr:`LLMRequest.sampled_rows`; their :class:`RedactionRecord` rides on
+the audit event so the operator-chosen omission is durably recorded.
+"""
 
 
 class RedactionRecord(BaseModel):
@@ -107,7 +121,15 @@ class AuditEvent(BaseModel):
     row_count: int | None = None
     signalforge_version: str
     policy_hash: str
-    audit_schema_version: int = 1
+    audit_schema_version: int = 2
+    """Frozen at the writer's :data:`_AUDIT_SCHEMA_VERSION` constant.
+    Issue #54 bumped 1 → 2 when the :data:`RedactionReason` literal
+    gained ``draft_skip_*`` values and the LLM-payload omission
+    semantics became dependent on the reason. The field stays
+    :class:`int` (not :class:`typing.Literal`) so older audit JSONLs
+    with ``audit_schema_version: 1`` still round-trip cleanly — audit
+    replay across versions is a real requirement."""
+
     policy_flags: tuple[str, ...] = ()
 
 
@@ -151,6 +173,7 @@ class LLMRequest(BaseModel):
 __all__ = [
     "SamplingMode",
     "RedactionReason",
+    "DRAFT_SKIP_REASONS",
     "RedactionRecord",
     "AuditEvent",
     "LLMRequest",

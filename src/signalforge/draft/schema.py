@@ -175,7 +175,12 @@ def draft_from_request(
             ``cause``.
     """
     # 1. Render the prompt. Returns (system, cached, dynamic, prompt_version).
-    system, cached, dynamic, prompt_version = render_prompt(model, request, manifest)
+    # Issue #54: thread DraftConfig.exclude_tests through so the system
+    # prompt's test catalogue is filtered AND the prompt-version hash
+    # rotates per exclusion set (cache-invalidation contract).
+    system, cached, dynamic, prompt_version = render_prompt(
+        model, request, manifest, exclude_tests=config.exclude_tests
+    )
 
     # 2. Issue the LLM call through the seam.
     result = call_anthropic(
@@ -206,6 +211,7 @@ def draft_from_request(
         result.response_text,
         model_columns,
         llm_result_meta=meta,
+        exclude_tests=frozenset(config.exclude_tests),
     )
 
     # 4. Write the response-audit record. Fail-closed (DEC-011):

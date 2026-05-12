@@ -367,6 +367,7 @@ llm:
   max_retries_429: 3
   max_retries_5xx: 1
   max_retries_conn: 1
+  exclude_tests: []          # subset of [not_null, unique, accepted_values, relationships]
 ```
 
 Field-by-field:
@@ -383,6 +384,18 @@ Field-by-field:
   `extended-cache-ttl-2025-04-11` beta header at the LLM seam.
 - **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — see
   [§7 Retry taxonomy](#retry-taxonomy).
+- **`exclude_tests`** — list of dbt test types the drafter must not
+  propose (issue #54). Each entry must be one of `not_null`,
+  `unique`, `accepted_values`, `relationships`; an unknown value
+  fails loud at config-load. Default `[]` (all four allowed). When
+  non-empty the system prompt's test catalogue + `### SCOPE` line
+  drop the excluded types AND the parser rejects any defiant LLM
+  output via `LLMOutputAnchorContractError`. Excluding all four is
+  a config error (the drafter has nothing to propose). The prompt
+  version hash rotates per exclusion set so Anthropic's prompt cache
+  invalidates correctly. Useful for teams that find `accepted_values`
+  noisy on enum columns or want to defer `relationships` to a
+  manual review pass.
 
 `DraftConfig` uses `extra="forbid"` (DEC-011, mirroring
 `safety-layer.md` DEC-015). Typos like `mdoel:` instead of `model:`

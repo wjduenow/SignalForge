@@ -51,6 +51,7 @@ from signalforge.safety.errors import (
     InvalidSamplingModeError,
 )
 from signalforge.safety.models import (
+    DRAFT_SKIP_REASONS,
     AuditEvent,
     LLMRequest,
     RedactionRecord,
@@ -69,7 +70,13 @@ from signalforge.safety.redact import (
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.models import TableRef
 
-_AUDIT_SCHEMA_VERSION: Final[int] = 1
+_AUDIT_SCHEMA_VERSION: Final[int] = 2
+"""Bumped from 1 → 2 by issue #54: the :data:`RedactionReason` literal
+gained ``draft_skip_column_meta`` and ``draft_skip_model_meta``, and
+columns carrying those reasons are now omitted entirely from the
+LLM-facing payload (``columns_sent`` / ``schema`` / ``aggregates`` /
+``sampled_rows``). Audit consumers gating on ``audit_schema_version >= 2``
+know the new reasons may appear in :attr:`AuditEvent.redactions`."""
 
 
 def build_llm_request(
@@ -130,10 +137,23 @@ def build_llm_request(
         rec for rec in classifications.values() if rec is not None and rec.redacted
     )
 
+    # Issue #54: ``draft_skip_*`` redaction reasons mean "omit this column
+    # entirely from the LLM payload" — distinct from the seven PII reasons
+    # which mean "send a hashed placeholder". Their RedactionRecord still
+    # rides on the audit event (operator-visible record of the omission),
+    # but they are filtered out of ``schema`` / ``columns_sent`` /
+    # ``aggregates`` / ``sampled_rows`` so the LLM never sees them.
+    skipped_columns: frozenset[str] = frozenset(
+        rec.column_name for rec in redactions if rec.reason in DRAFT_SKIP_REASONS
+    )
+
     # ``schema`` is what the LLM sees: (display_name, type_str) for every
-    # column. Display name is the hashed placeholder for redacted columns.
+    # column. Display name is the hashed placeholder for PII-redacted
+    # columns; draft-skip columns are dropped entirely.
     raw_schema: tuple[tuple[str, str], ...] = tuple(
-        (column.name, column.data_type or "") for column in model.columns_list
+        (column.name, column.data_type or "")
+        for column in model.columns_list
+        if column.name not in skipped_columns
     )
     schema = redact_column_names(raw_schema, redactions)
 
@@ -152,10 +172,13 @@ def build_llm_request(
         # ``model``, and ``policy.redact_patterns``, the redaction set it
         # produces matches ours up-front. We pass ``redactions`` from our
         # classification as the source of truth on the audit/request side.
+        #
+        # Issue #54: draft-skip columns are excluded from the aggregate
+        # request entirely — we never even query their stats.
         aggregates_dict, _ = aggregate_columns(
             adapter,
             model,
-            [c.name for c in model.columns_list],
+            [c.name for c in model.columns_list if c.name not in skipped_columns],
             policy,
         )
         # Convert to tuple-of-tuples so the LLMRequest.aggregates field is
@@ -167,13 +190,26 @@ def build_llm_request(
         table = TableRef.from_model(model)
         with adapter:
             raw_rows = adapter.sample_rows(table, policy.sample_size)
-        # Redact values for redacted columns (keys still on real names).
-        redacted_real_names = frozenset(rec.column_name for rec in redactions)
+        # Issue #54: drop skip_draft columns from every row before any
+        # further processing — they must not surface in the LLM-bound
+        # payload even with a redacted value.
+        if skipped_columns:
+            raw_rows = tuple(
+                {k: v for k, v in row.items() if k not in skipped_columns} for row in raw_rows
+            )
+        # Redact values for PII-redacted columns (keys still on real names).
+        redacted_real_names = frozenset(
+            rec.column_name for rec in redactions if rec.reason not in DRAFT_SKIP_REASONS
+        )
         value_redacted = redact_rows(raw_rows, redacted_real_names)
         # Rewrite each redacted column's key from real -> hashed so the row
         # keys match the identifiers the LLM sees in ``schema`` /
         # ``columns_sent``. Non-redacted columns keep their real names.
-        real_to_hashed = {rec.column_name: rec.hashed_name for rec in redactions}
+        real_to_hashed = {
+            rec.column_name: rec.hashed_name
+            for rec in redactions
+            if rec.reason not in DRAFT_SKIP_REASONS
+        }
         sampled_rows = tuple(
             {real_to_hashed.get(k, k): v for k, v in row.items()} for row in value_redacted
         )

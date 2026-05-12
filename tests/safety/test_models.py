@@ -114,8 +114,16 @@ def _valid_audit_event(**overrides: object) -> AuditEvent:
     return AuditEvent(**base)  # type: ignore[arg-type]
 
 
-def test_audit_event_schema_version_default_is_1() -> None:
+def test_audit_event_schema_version_default_is_current() -> None:
+    """Issue #54 bumped the default 1 → 2 in lockstep with the writer
+    constant; the field stays ``int`` so older JSONLs still round-trip."""
     event = _valid_audit_event()
+    assert event.audit_schema_version == 2
+
+
+def test_audit_event_accepts_legacy_schema_version_1() -> None:
+    """Forward-compat: older v1 audit JSONLs must still parse."""
+    event = _valid_audit_event(audit_schema_version=1)
     assert event.audit_schema_version == 1
 
 
@@ -137,7 +145,8 @@ def test_audit_event_round_trips_through_json_dumps() -> None:
     assert event.row_count is None
     assert event.signalforge_version == "0.1.0"
     assert event.policy_hash == "abc123def456789a"
-    assert event.audit_schema_version == 1
+    # Fixture refreshed to v2 by issue #54.
+    assert event.audit_schema_version == 2
     assert event.policy_flags == ()
     assert len(event.redactions) == 1
     assert event.redactions[0].reason == "pattern_match"
@@ -255,6 +264,7 @@ def test_module_all_lists_documented_classes() -> None:
     assert tuple(safety_models.__all__) == (
         "SamplingMode",
         "RedactionReason",
+        "DRAFT_SKIP_REASONS",
         "RedactionRecord",
         "AuditEvent",
         "LLMRequest",
