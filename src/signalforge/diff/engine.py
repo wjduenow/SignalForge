@@ -335,15 +335,36 @@ def _aggregate_grading(
     return mean, all_passed
 
 
-def _tier_for_kept(score: float | None, passed: bool | None) -> Tier:
-    """Return ``"flagged"`` or ``"kept"`` for a kept artifact.
+def _tier_for_kept(
+    decision: PruneDecision | None,
+    score: float | None,
+    passed: bool | None,
+) -> Tier:
+    """Return the tier literal for a kept artifact.
 
-    DEC-012: ``flagged`` is set only when a grading report was provided
-    AND the entry's grading is below threshold (``passed=False`` for any
-    criterion OR a graceful-degrade null score was recorded). When no
-    grading was provided (``score=None`` AND ``passed=None``), the
-    entry is plain ``"kept"``.
+    Three branches (issue #50 adds the first; the latter two are
+    unchanged from v0.1):
+
+    * ``"kept-uncertain"`` (issue #50) — when ``decision`` is not
+      ``None`` and ``decision.reason == "kept-without-evidence"``, the
+      prune layer could not positively evaluate this test (budget
+      exhausted / identifier rejected by SQL safety check / warehouse
+      call raised / ``prune.enabled: false`` / sample materialisation
+      failure). **Origin dominates over grading** — kept-uncertain
+      never collapses to ``flagged`` even when an attached
+      :class:`signalforge.grade.models.GradingResult` also fails the
+      rubric: a test we couldn't evaluate cannot meaningfully fail a
+      grading criterion. ``decision is None`` is the doc / rationale
+      branch (no prune decision attached) — those rows never route
+      to ``kept-uncertain``.
+    * ``"flagged"`` (DEC-012) — grading was provided AND below
+      threshold (``passed=False`` for any criterion OR a
+      graceful-degrade null score was recorded).
+    * ``"kept"`` — every other kept case (positive prune evidence
+      and either no grading attached, or grading attached + passing).
     """
+    if decision is not None and decision.reason == "kept-without-evidence":
+        return "kept-uncertain"
     if score is None and passed is None:
         return "kept"
     if passed is False or score is None:
@@ -455,12 +476,22 @@ def _entry_for_test(
     # decision == "kept" — join grading aggregate (if any).
     grading_results = grading_index.get(artifact_id, [])
     score, passed = _aggregate_grading(grading_results)
-    tier: Tier = _tier_for_kept(score, passed)
+    tier: Tier = _tier_for_kept(decision, score, passed)
+    # Issue #50: kept-uncertain rows bypass the rationale → evidence
+    # cascade and surface ``decision.why`` directly. The prune-emitted
+    # message ("total prune budget exceeded before evaluation" /
+    # "sample materialisation failed: …" / "identifier rejected by
+    # SQL safety check") is the load-bearing operator signal — the
+    # drafter's rationale and the grader's evidence are NOT
+    # meaningful for a test we couldn't evaluate. Still truncated to
+    # ``max_why_chars`` so the per-row budget is honoured.
+    if tier == "kept-uncertain":
+        why = _truncate_why(decision.why, max_why_chars)
     # Post-QG fix #3: a flipped-to-flagged row's why must reflect the
     # GRADING reason, not the prune reason — the row is flagged because
     # of a failing rubric criterion, and surfacing the prune why
     # ("ran on 1k sample, 0 failing rows") is misleading.
-    if tier == "flagged":
+    elif tier == "flagged":
         failing = _first_failing_grading(grading_results)
         why = (
             _flagged_why(failing, max_chars=max_why_chars) if failing is not None else decision.why
@@ -555,7 +586,10 @@ def _entries_for_doc(
             passed=None,
         )
     score, passed = _aggregate_grading(grading_results)
-    tier: Tier = _tier_for_kept(score, passed)
+    # Doc / rationale rows have no PruneDecision attached, so the
+    # ``decision`` argument is ``None`` — kept-uncertain (issue #50)
+    # is a prune-origin signal and never fires on doc rows.
+    tier: Tier = _tier_for_kept(None, score, passed)
     if tier == "flagged":
         failing = _first_failing_grading(grading_results)
         if failing is not None:
@@ -935,6 +969,7 @@ def render_diff(
 
     # 8. Aggregate counts and construct the report.
     kept_count = sum(1 for e in entries if e.tier == "kept")
+    kept_uncertain_count = sum(1 for e in entries if e.tier == "kept-uncertain")
     dropped_count = sum(1 for e in entries if e.tier == "dropped")
     flagged_count = sum(1 for e in entries if e.tier == "flagged")
     has_existing_schema = existing_schema is not None
@@ -955,6 +990,7 @@ def render_diff(
         unified_diff=unified_diff,
         entries=entries,
         kept_count=kept_count,
+        kept_uncertain_count=kept_uncertain_count,
         dropped_count=dropped_count,
         flagged_count=flagged_count,
         has_existing_schema=has_existing_schema,
@@ -1085,6 +1121,7 @@ def render_diff(
                 "model_unique_id": model.unique_id,
                 "render_kind": resolved_config.render_kind,
                 "kept": kept_count,
+                "kept_uncertain": kept_uncertain_count,
                 "dropped": dropped_count,
                 "flagged": flagged_count,
                 "has_existing_schema": has_existing_schema,

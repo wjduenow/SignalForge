@@ -1,8 +1,8 @@
-[1mdiff: model.shop.dim_customers[0m  [32mkept=0[0m  [31mdropped=3[0m  [33mflagged=0[0m
+[1mdiff: model.shop.dim_customers[0m  [32mkept=0[0m  [36mkept-uncertain=0[0m  [31mdropped=3[0m  [33mflagged=0[0m
 
-[1mTIER      ARTIFACT                      TEST            REASON                  SCORE    WHY[0m
-[31mdropped [0m  test.column.customer_id.uni…  unique          always-passes           —        Test returned zero failing rows on the representative sample.
-[31mdropped [0m  test.column.email.unique      unique          always-passes           —        Test returned zero failing rows on the representative sample.
-[31mdropped [0m  test.column.region.relation…  relationships   requires-future-data    —        Target model 'ref(dim_region)' is absent from the manifest.
+[1mTIER            ARTIFACT                      TEST            REASON                  SCORE    WHY[0m
+[31mdropped       [0m  test.column.customer_id.uni…  unique          always-passes           —        Test returned zero failing rows on the representative sample.
+[31mdropped       [0m  test.column.email.unique      unique          always-passes           —        Test returned zero failing rows on the representative sample.
+[31mdropped       [0m  test.column.region.relation…  relationships   requires-future-data    —        Target model 'ref(dim_region)' is absent from the manifest.
 
 (no diff — proposed and existing schemas are identical)

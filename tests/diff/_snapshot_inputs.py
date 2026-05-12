@@ -199,11 +199,35 @@ _UNIFIED_DIFF_FROM_DEVNULL = (
 # ---------------------------------------------------------------------------
 
 
+def _kept_uncertain_test(
+    *,
+    artifact_id: str = "test.column.email.unique",
+    test_type: str = "unique",
+    why: str = "total prune budget exceeded before evaluation",
+) -> DiffEntry:
+    return DiffEntry(
+        artifact_id=artifact_id,
+        test_type=test_type,
+        tier="kept-uncertain",
+        drop_reason=None,
+        why=why,
+        score=None,
+        passed=None,
+    )
+
+
 def _full_with_grade_report() -> DiffReport:
-    """Case 1/2/3 — happy path with kept + dropped + flagged + grading."""
+    """Case 1/2/3 — happy path with all four tiers + grading.
+
+    Issue #50: extended to carry a ``kept-uncertain`` row so the
+    canonical snapshot pins the four-tier renderer behaviour. Drift
+    detector relies on the report-level fixture covering every tier;
+    the snapshot fixtures share the same builder.
+    """
     entries = (
         _kept_doc(),
         _kept_test(),
+        _kept_uncertain_test(),
         _dropped_test(),
         _flagged_doc(),
     )
@@ -217,6 +241,7 @@ def _full_with_grade_report() -> DiffReport:
         unified_diff=_UNIFIED_DIFF,
         entries=entries,
         kept_count=2,
+        kept_uncertain_count=1,
         dropped_count=1,
         flagged_count=1,
         has_existing_schema=True,
@@ -242,6 +267,7 @@ def _no_existing_schema_report() -> DiffReport:
         unified_diff=_UNIFIED_DIFF_FROM_DEVNULL,
         entries=entries,
         kept_count=2,
+        kept_uncertain_count=0,
         dropped_count=0,
         flagged_count=0,
         has_existing_schema=False,
@@ -271,6 +297,7 @@ def _kept_only_report() -> DiffReport:
         unified_diff=_UNIFIED_DIFF,
         entries=entries,
         kept_count=3,
+        kept_uncertain_count=0,
         dropped_count=0,
         flagged_count=0,
         has_existing_schema=True,
@@ -307,6 +334,7 @@ def _dropped_only_report() -> DiffReport:
         unified_diff="",  # identical inputs → no diff body
         entries=entries,
         kept_count=0,
+        kept_uncertain_count=0,
         dropped_count=3,
         flagged_count=0,
         has_existing_schema=True,
@@ -333,6 +361,7 @@ def _no_grading_report_report() -> DiffReport:
         unified_diff=_UNIFIED_DIFF,
         entries=entries,
         kept_count=2,
+        kept_uncertain_count=0,
         dropped_count=1,
         flagged_count=0,
         has_existing_schema=True,
@@ -383,6 +412,7 @@ def _injection_payloads_report() -> DiffReport:
         unified_diff=_UNIFIED_DIFF,
         entries=entries,
         kept_count=1,
+        kept_uncertain_count=0,
         dropped_count=1,
         flagged_count=1,
         has_existing_schema=True,

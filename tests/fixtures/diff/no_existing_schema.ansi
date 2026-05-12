@@ -1,8 +1,8 @@
-[1mdiff: model.shop.dim_customers[0m  [32mkept=2[0m  [31mdropped=0[0m  [33mflagged=0[0m
+[1mdiff: model.shop.dim_customers[0m  [32mkept=2[0m  [36mkept-uncertain=0[0m  [31mdropped=0[0m  [33mflagged=0[0m
 
-[1mTIER      ARTIFACT                      TEST            REASON                  SCORE    WHY[0m
-[32mkept    [0m  column.customer_id.descript…                                          0.85     Description added; passed all grading criteria.
-[32mkept    [0m  test.column.customer_id.not…  not_null                                —        Test returned non-zero failing rows on the warehouse sample.
+[1mTIER            ARTIFACT                      TEST            REASON                  SCORE    WHY[0m
+[32mkept          [0m  column.customer_id.descript…                                          0.85     Description added; passed all grading criteria.
+[32mkept          [0m  test.column.customer_id.not…  not_null                                —        Test returned non-zero failing rows on the warehouse sample.
 
 --- /dev/null
 +++ b/models/dim_customers.yml

@@ -93,7 +93,7 @@ class StrictDiffReport(BaseModel):
     model_config = _STRICT
 
     schema_version: Literal[1] = 1
-    audit_schema_version: Literal[1] = 1
+    audit_schema_version: Literal[2] = 2
     signalforge_version: str
     model_unique_id: str
     run_id: str
@@ -103,6 +103,7 @@ class StrictDiffReport(BaseModel):
     unified_diff: str
     entries: tuple[StrictDiffEntry, ...]
     kept_count: int
+    kept_uncertain_count: int
     dropped_count: int
     flagged_count: int
     has_existing_schema: bool
@@ -150,11 +151,12 @@ def test_strict_diff_entry_validates_each_report_entry() -> None:
     """Each entry in :file:`diff_report_v1.json`'s ``entries`` validates
     against :class:`StrictDiffEntry`.
 
-    The fixture is intentionally constructed to cover all three
-    :data:`Tier` literals (``kept`` / ``dropped`` / ``flagged``); the
-    assertion below pins that contract so a future fixture edit can't
-    regress to a single-tier shape and silently weaken the
-    literal-typing coverage.
+    The fixture is intentionally constructed to cover all four
+    :data:`Tier` literals (``kept`` / ``kept-uncertain`` / ``dropped`` /
+    ``flagged``); the assertion below pins that contract so a future
+    fixture edit can't regress to a partial-tier shape and silently
+    weaken the literal-typing coverage. ``kept-uncertain`` was added
+    in issue #50 alongside the ``audit_schema_version: 2`` bump.
     """
     fixture_path = _FIXTURES_DIR / "diff_report_v1.json"
     payload = json.loads(fixture_path.read_text(encoding="utf-8"))
@@ -166,10 +168,10 @@ def test_strict_diff_entry_validates_each_report_entry() -> None:
     for entry in entries:
         StrictDiffEntry.model_validate(entry)
         seen_tiers.add(entry["tier"])
-    assert seen_tiers == {"kept", "dropped", "flagged"}, (
-        "diff_report_v1.json must exercise all three Tier values "
-        "(kept, dropped, flagged) so the literal typing on "
-        "StrictDiffEntry is tested end-to-end"
+    assert seen_tiers == {"kept", "kept-uncertain", "dropped", "flagged"}, (
+        "diff_report_v1.json must exercise all four Tier values "
+        "(kept, kept-uncertain, dropped, flagged) so the literal typing "
+        "on StrictDiffEntry is tested end-to-end"
     )
 
 

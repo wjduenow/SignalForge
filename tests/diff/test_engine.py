@@ -326,7 +326,7 @@ def test_render_kind_json_writes_json_to_output_path(project_dir: Path) -> None:
     # JsonRenderer output mirrors DiffReport.model_dump_json shape.
     assert parsed["model_unique_id"] == model.unique_id
     assert parsed["schema_version"] == 1
-    assert parsed["audit_schema_version"] == 1
+    assert parsed["audit_schema_version"] == 2
 
 
 def test_render_kind_ansi_writes_ansi_to_output_path(project_dir: Path) -> None:
@@ -655,6 +655,204 @@ def test_end_to_end_kept_dropped_flagged_entries(project_dir: Path) -> None:
     assert len(report.prune_result_hash) == 16
     assert report.grading_report_hash is not None
     assert len(report.grading_report_hash) == 16
+
+
+# ---------------------------------------------------------------------------
+# 8b. kept-uncertain tier (issue #50)
+# ---------------------------------------------------------------------------
+
+
+def _kept_uncertain_decision_for(
+    test_anchor: str = "column.order_id",
+    *,
+    why: str = "total prune budget exceeded before evaluation",
+) -> PruneDecision:
+    """Build a kept-without-evidence prune decision (issue #50).
+
+    The combination ``decision="kept" + reason="kept-without-evidence"``
+    is the prune-layer signal the diff layer projects to
+    ``tier="kept-uncertain"``. ``why`` defaults to the canonical
+    budget-exhaustion message that's stable across runs and pinned in
+    ``.claude/rules/prune-engine.md``.
+    """
+    return PruneDecision(
+        test_anchor=test_anchor,
+        test=CandidateTestNotNull(column="order_id"),
+        decision="kept",
+        reason="kept-without-evidence",
+        failures=0,
+        sampled_rows=None,
+        scope="sample",
+        elapsed_ms=0,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="select 1",
+        why=why,
+    )
+
+
+def test_kept_without_evidence_routes_to_kept_uncertain_tier(project_dir: Path) -> None:
+    """Issue #50: a kept-without-evidence prune decision projects to
+    ``tier="kept-uncertain"`` (NOT plain ``"kept"``).
+
+    The load-bearing conservative-bias signal is that we shipped a
+    test without positive evidence; the diff renderer's distinct tier
+    surfaces that to the reviewer.
+    """
+    model = _make_model()
+    candidate = _make_candidate()
+    prune_result = _make_prune_result(
+        decisions=(_kept_uncertain_decision_for(),),
+    )
+
+    report = render_diff(model, candidate, prune_result, project_dir=project_dir)
+
+    uncertain_entries = [e for e in report.entries if e.tier == "kept-uncertain"]
+    assert len(uncertain_entries) == 1
+    assert uncertain_entries[0].artifact_id == "test.column.order_id.not_null"
+    assert report.kept_uncertain_count == 1
+    # The plain ``kept_count`` does NOT include kept-uncertain rows.
+    kept_test_rows = [e for e in report.entries if e.tier == "kept" and e.test_type is not None]
+    assert kept_test_rows == []
+
+
+def test_kept_uncertain_never_collapses_to_flagged(project_dir: Path) -> None:
+    """Issue #50: origin dominates over grading.
+
+    A kept-without-evidence row stays ``tier="kept-uncertain"`` even
+    when an attached :class:`GradingResult` also fails the rubric — a
+    test we couldn't evaluate cannot meaningfully fail a grading
+    criterion, so collapsing to ``flagged`` would be a category error.
+    """
+    model = _make_model()
+    candidate = _make_candidate()
+    prune_result = _make_prune_result(
+        decisions=(_kept_uncertain_decision_for(),),
+    )
+    # Attach a failing grading result against the same artifact.
+    grading_report = _grading_report_for(
+        results=(
+            GradingResult(
+                artifact_id="test.column.order_id.not_null",
+                criterion_id="clarity",
+                score=0.1,
+                passed=False,
+                evidence="evidence prose",
+                reasoning="below threshold",
+            ),
+        )
+    )
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        grading_report=grading_report,
+        project_dir=project_dir,
+    )
+
+    uncertain_entries = [e for e in report.entries if e.tier == "kept-uncertain"]
+    flagged_entries = [e for e in report.entries if e.tier == "flagged" and e.test_type is not None]
+    assert len(uncertain_entries) == 1
+    # The matched failing-grading test does NOT appear under flagged.
+    assert all(e.artifact_id != "test.column.order_id.not_null" for e in flagged_entries)
+    assert report.kept_uncertain_count == 1
+
+
+def test_kept_uncertain_why_uses_decision_why_not_rationale(project_dir: Path) -> None:
+    """Issue #50: kept-uncertain rows surface ``decision.why`` directly,
+    bypassing the rationale → evidence → fallback cascade.
+
+    The prune-emitted message ("total prune budget exceeded before
+    evaluation" / etc.) is the load-bearing operator signal; a
+    drafter-supplied rationale or grader-supplied evidence is not
+    meaningful for a test we couldn't evaluate.
+    """
+    model = _make_model()
+    # Candidate carries a rationale on its column-scoped test — for
+    # ordinary kept rows the issue-#41 cascade would prefer the
+    # rationale over the prune why. For kept-uncertain rows the cascade
+    # is bypassed.
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact table",
+        rationale="grain: one row per order",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="surrogate key",
+                rationale="primary identifier",
+                tests=(
+                    CandidateTestNotNull(
+                        column="order_id",
+                        rationale="drafter rationale that MUST NOT appear",
+                    ),
+                ),
+            ),
+            CandidateColumn(
+                name="customer_id",
+                description="FK to customers",
+                rationale="links to dim_customer",
+            ),
+        ),
+    )
+    # Provide a grading result with evidence — also must not surface.
+    grading_report = _grading_report_for(
+        results=(
+            GradingResult(
+                artifact_id="test.column.order_id.not_null",
+                criterion_id="clarity",
+                score=0.9,
+                passed=True,
+                evidence="grader evidence that MUST NOT appear",
+                reasoning="passed",
+            ),
+        )
+    )
+    prune_result = _make_prune_result(
+        decisions=(
+            _kept_uncertain_decision_for(
+                why="total prune budget exceeded before evaluation",
+            ),
+        ),
+    )
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        grading_report=grading_report,
+        project_dir=project_dir,
+    )
+
+    uncertain_entries = [e for e in report.entries if e.tier == "kept-uncertain"]
+    assert len(uncertain_entries) == 1
+    why = uncertain_entries[0].why
+    assert why == "total prune budget exceeded before evaluation"
+    assert "drafter rationale" not in why
+    assert "grader evidence" not in why
+
+
+def test_kept_uncertain_count_in_info_log(
+    project_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Issue #50: the INFO log payload carries a ``kept_uncertain`` key
+    alongside the other tier counts (DEC-015).
+    """
+    model = _make_model()
+    candidate = _make_candidate()
+    prune_result = _make_prune_result(
+        decisions=(_kept_uncertain_decision_for(),),
+    )
+
+    caplog.set_level(logging.INFO, logger="signalforge.diff.engine")
+    render_diff(model, candidate, prune_result, project_dir=project_dir)
+
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    matching = [r for r in info_records if "rendered diff" in r.getMessage()]
+    assert matching, "expected one rendered-diff INFO line"
+    # Find the JSON body (it's lazy-formatted via %s args[0]).
+    payload = json.loads(matching[0].args[0])  # type: ignore[index,arg-type]
+    assert payload["kept_uncertain"] == 1
 
 
 def test_existing_schema_none_produces_dev_null_unified_diff(project_dir: Path) -> None:
