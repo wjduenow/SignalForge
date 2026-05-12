@@ -103,7 +103,14 @@ class PruneEvent(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
-    audit_schema_version: Literal[2] = 2
+    audit_schema_version: int = _PRUNE_AUDIT_SCHEMA_VERSION
+    """Frozen at :data:`_PRUNE_AUDIT_SCHEMA_VERSION`. Issue #55 bumped 1 → 2
+    when ``config_hash`` migrated from ``SHA-256[:16]`` to
+    ``blake2b(digest_size=8)``. The field stays :class:`int`
+    (not :class:`typing.Literal`) so older ``prune.jsonl`` records with
+    ``audit_schema_version: 1`` still round-trip cleanly — audit replay
+    across versions is a real requirement. Mirrors
+    :attr:`signalforge.safety.models.AuditEvent.audit_schema_version`."""
     signalforge_version: str
     record_id: str
     timestamp: str
@@ -165,8 +172,8 @@ def _build_prune_event(
     )
 
 
-def _compute_config_hash(canonical_json: str) -> str:
-    """Return a 16-hex-char ``blake2b`` digest of ``canonical_json``.
+def _compute_config_hash(config_json: str) -> str:
+    """Return a 16-hex-char ``blake2b`` digest of the canonicalised config.
 
     Matches the convention :class:`signalforge.safety.models.AuditEvent`
     uses for ``policy_hash`` (DEC-005): a reviewer can verify all records
@@ -177,11 +184,16 @@ def _compute_config_hash(canonical_json: str) -> str:
     survives only in pre-v2 ``prune.jsonl`` records that consumers must
     gate on ``audit_schema_version >= 2`` to skip.
 
-    The caller is responsible for canonicalising the config to a stable
-    JSON string (sorted keys, no whitespace) before hashing — two configs
-    that differ only in field order must hash identically.
+    Canonicalisation (``sort_keys=True``, no whitespace) is performed
+    inside the helper so callers can't accidentally misuse it — Pydantic's
+    ``model_dump_json`` does NOT contractually guarantee sorted keys
+    across point releases, and a caller passing the bare dump would
+    silently drift between runs. Mirrors
+    :func:`signalforge.safety.policy._compute_policy_hash` verbatim
+    (PR #84 review fix).
     """
-    return blake2b(canonical_json.encode("utf-8"), digest_size=8).hexdigest()
+    canonical = json.dumps(json.loads(config_json), sort_keys=True, separators=(",", ":"))
+    return blake2b(canonical.encode("utf-8"), digest_size=8).hexdigest()
 
 
 def _write_prune_event(event: PruneEvent, path: Path) -> None:
