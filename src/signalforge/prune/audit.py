@@ -54,9 +54,10 @@ from hashlib import blake2b
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
 
 from signalforge import __version__ as _SIGNALFORGE_VERSION
+from signalforge._common.timestamp import iso8601_z
 from signalforge.draft.models import CandidateTest
 from signalforge.prune.errors import PruneAuditRecordTooLargeError
 from signalforge.prune.models import DropReason, PruneDecision, Scope
@@ -113,7 +114,7 @@ class PruneEvent(BaseModel):
     :attr:`signalforge.safety.models.AuditEvent.audit_schema_version`."""
     signalforge_version: str
     record_id: str
-    timestamp: str
+    timestamp: datetime
     config_hash: str
     model_unique_id: str
     test: CandidateTest
@@ -128,6 +129,10 @@ class PruneEvent(BaseModel):
     compiled_sql: str
     why: str
     sample_failures: tuple[dict[str, Any], ...] | None = None
+
+    @field_serializer("timestamp")
+    def _serialize_timestamp(self, value: datetime) -> str:
+        return iso8601_z(value)
 
 
 def _build_prune_event(
@@ -148,13 +153,15 @@ def _build_prune_event(
     nesting under a ``decision:`` key.
 
     Stamps ``signalforge_version`` from :data:`signalforge.__version__`,
-    generates a fresh ``uuid4`` ``record_id``, and writes an ISO-8601 UTC
-    timestamp with microsecond precision and a trailing ``Z`` suffix.
+    generates a fresh ``uuid4`` ``record_id``, and stores a tz-aware UTC
+    :class:`datetime`. The model's ``field_serializer`` renders it as
+    ``YYYY-MM-DDTHH:MM:SS.ffffffZ`` (issue #56 — one canonical shape
+    across every audit writer).
     """
     return PruneEvent(
         signalforge_version=_SIGNALFORGE_VERSION,
         record_id=uuid.uuid4().hex,
-        timestamp=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        timestamp=datetime.now(UTC),
         config_hash=config_hash,
         model_unique_id=model_unique_id,
         test=decision.test,
