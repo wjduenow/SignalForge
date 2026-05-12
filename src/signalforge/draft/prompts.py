@@ -157,10 +157,14 @@ tests, dbt-utils macros) are out of scope for this draft step.
 def _render_system_prompt(exclude_tests: tuple[str, ...]) -> str:
     """Render the system prompt with the test catalogue filtered (issue #54).
 
-    When ``exclude_tests`` is empty the rendered prompt is byte-equal to
-    the historic v0.1 prompt. When non-empty, the listed types are
-    dropped from the JSON-shape illustration's ``tests`` array AND from
-    the ``### SCOPE`` line's enumeration. The parser still enforces the
+    When ``exclude_tests`` is empty the rendered prompt is the current
+    ``_SYSTEM_PROMPT`` baseline (semantically identical to the historic
+    v0.1 prompt; the SCOPE line wraps differently because the enum is
+    now substituted via :func:`str.format` rather than a literal —
+    ``_PROMPT_VERSION`` rotated 1 → 2 by issue #54 to reflect that
+    template change). When non-empty, the listed types are dropped from
+    the JSON-shape illustration's ``tests`` array AND from the
+    ``### SCOPE`` line's enumeration. The parser still enforces the
     exclusion server-side as defence in depth (an LLM may ignore prompt
     instructions; the parser cannot).
     """

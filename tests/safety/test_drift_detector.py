@@ -61,6 +61,7 @@ def test_audit_event_drift_detector_validates_committed_fixture():
 
 def test_audit_event_drift_detector_rejects_unknown_field():
     lines = _fixture_lines()
+    assert lines, f"expected ≥1 JSON line in {_FIXTURE}"
     payload = json.loads(lines[0])
     payload["phantom_field"] = "x"
     with pytest.raises(ValidationError):

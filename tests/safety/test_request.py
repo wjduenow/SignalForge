@@ -318,9 +318,12 @@ def test_build_llm_request_audit_carries_policy_hash(
     assert event.policy_hash == _compute_policy_hash(policy)
 
 
-def test_build_llm_request_audit_carries_schema_version_1(
+def test_build_llm_request_audit_carries_schema_version_2(
     customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Issue #54 bumped audit_schema_version 1 → 2. The writer's
+    ``_AUDIT_SCHEMA_VERSION`` constant is the source of truth; this test
+    pins it through the build_llm_request seam."""
     rec = _AuditRecorder()
     monkeypatch.setattr("signalforge.safety.request.audit.write", rec)
 

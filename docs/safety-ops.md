@@ -194,8 +194,8 @@ flags potential misconfiguration for the operator to decide.
 
 ## Per-column opt-out
 
-Five signals override the pattern matcher (DEC-003, plus the
-`skip_draft` signal added by issue #54). Listed by precedence —
+Seven precedence steps override the pattern matcher (DEC-003, plus the
+two `skip_draft` signals added by issue #54). Listed by precedence —
 first match wins, top to bottom:
 
 1. **Column-level `meta.signalforge.skip_draft: true`** (#54) — strongest;
@@ -239,23 +239,23 @@ version: 2
 models:
   - name: customers
     columns:
+      - name: internal_token
+        # Signal 1 (#54): omit entirely from the LLM payload.
+        meta:
+          signalforge:
+            skip_draft: true
       - name: customer_email
-        # Signal 1: strongest opt-out, beats everything else.
+        # Signal 3: strongest PII opt-out — hashed placeholder, not omitted.
         meta:
           signalforge:
             sample: false
       - name: phone_number
-        # Signal 2: case-insensitive tag match.
+        # Signal 4: case-insensitive tag match.
         tags: ["pii"]
       - name: home_address
-        # Signal 3: truthy values accepted.
+        # Signal 5: truthy values accepted.
         meta:
           contains_pii: true
-      - name: internal_token
-        # Issue #54: omit entirely from the LLM payload.
-        meta:
-          signalforge:
-            skip_draft: true
 ```
 
 ```yaml
