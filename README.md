@@ -4,7 +4,7 @@
 
 > LLM-drafted dbt schema.yml, tests, and docs — pruned against real warehouse data so only signal-bearing tests ship.
 
-**Status:** v0.1 alpha. Nine issues shipped — single-model draft + warehouse prune, BigQuery adapter, `signalforge` CLI. Designing in the open on the `dev` branch.
+**Status:** v0.1 alpha. Eleven issues shipped — single-model draft + warehouse prune, BigQuery adapter, `signalforge` CLI, `signalforge init-demo` for first-run UX. Designing in the open on the `dev` branch.
 
 ## Why this exists
 
@@ -43,15 +43,16 @@ The grading layer reuses [clauditor](https://github.com/wjduenow/clauditor)'s LL
 
 ## Quick start
 
-The repo ships a minimal dbt fixture under
-`tests/fixtures/dbt_project_austin/` pointing at the public
-`bigquery-public-data.austin_bikeshare.bikeshare_trips` dataset, so
-you can run `signalforge` end-to-end against a real warehouse with no
-infrastructure beyond a Google Cloud billing project and an Anthropic
-API key. A run scans ~200–500 MB of BigQuery (well under $0.01 at
-on-demand pricing) plus ~$0.13 of Anthropic spend (one draft call +
-~84 grade calls on Sonnet 4.6); end-to-end wall-clock is roughly
-5–6 minutes.
+The wheel ships a minimal dbt demo project (Austin bikeshare staging
+model against the public
+`bigquery-public-data.austin_bikeshare.bikeshare_trips` dataset),
+copied out of the install via `signalforge init-demo`, so you can
+run `signalforge` end-to-end against a real warehouse with no
+infrastructure beyond a Google Cloud billing project and an
+Anthropic API key. A run scans ~200–500 MB of BigQuery (well under
+$0.01 at on-demand pricing) plus ~$0.13 of Anthropic spend (one
+draft call + ~84 grade calls on Sonnet 4.6); end-to-end wall-clock
+is roughly 5–6 minutes.
 
 ### 1. Install
 
@@ -104,29 +105,20 @@ Full reference: [docs/safety-ops.md](docs/safety-ops.md),
 
 ### 4. First run
 
-Copy the fixture to a writable tmp dir and rewrite the profile to bill
-queries against your project (the committed `profiles.yml` is oriented
-at `dbt parse` and pins `project: bigquery-public-data`, which you
-can't bill to itself):
+Copy the bundled demo project to a writable directory and run
+`signalforge` against it:
 
 ```bash
-mkdir -p /tmp/sf-austin
-cp -r tests/fixtures/dbt_project_austin/. /tmp/sf-austin/
-cat > /tmp/sf-austin/profiles.yml <<EOF
-austin:
-  target: dev
-  outputs:
-    dev:
-      type: bigquery
-      method: oauth
-      project: ${GOOGLE_CLOUD_PROJECT}
-      dataset: austin_bikeshare
-      location: US
-      maximum_bytes_billed: 1000000000
-EOF
-
+signalforge init-demo /tmp/sf-austin
 signalforge generate models/staging/stg_bikeshare_trips.sql --project-dir /tmp/sf-austin
 ```
+
+The bundled `profiles.yml` reads `GOOGLE_CLOUD_PROJECT` from your
+environment, so no profile editing is required. `signalforge
+init-demo` prints a next-steps message naming the env vars and the
+exact commands to run; pass `--force` to atomically replace a
+non-empty destination (refuses `/`, `$HOME`, and the current
+working directory as a blast-radius guard).
 
 Want to preview cost first? `signalforge generate --estimate <model>`
 prints the projected USD + warehouse bytes without making any billable
@@ -182,10 +174,11 @@ of the same flow as a gated test (`pytest -m e2e --no-cov`):
 
 ## CLI
 
-Three subcommands ship in v0.1:
+Four subcommands ship in v0.1:
 
 ```bash
 signalforge generate <model>   # full pipeline; --mode, --min-score, --write/--dry-run, --format
+signalforge init-demo [<dest>] # copy the bundled Austin demo project into <dest>; --force
 signalforge lint               # validate signalforge.yml config blocks
 signalforge version            # print the SignalForge version
 ```

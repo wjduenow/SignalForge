@@ -54,7 +54,7 @@ After install, the `signalforge` console script is registered via
 
 ## Subcommands
 
-The CLI exposes three subcommands. `signalforge --help` prints the
+The CLI exposes four subcommands. `signalforge --help` prints the
 top-level help; each subcommand has its own `--help` page (e.g.
 `signalforge generate --help`).
 
@@ -240,6 +240,82 @@ Observability flags:
 The flag → config precedence chain is uniform across knobs: **CLI
 flag > `signalforge.yml` block > library default**. Library defaults
 are documented per-stage in each layer's ops doc.
+
+### `signalforge init-demo [<dest>]`
+
+Copy the bundled Austin bikeshare demo project (a minimal dbt
+project pointing at the public
+`bigquery-public-data.austin_bikeshare.bikeshare_trips` dataset)
+out of the installed wheel into `<dest>` so a first-run PyPI user
+can `cd` into a working project and exercise the full pipeline
+without authoring their own dbt setup. The bundled `profiles.yml`
+reads `GOOGLE_CLOUD_PROJECT` from the operator's environment, so
+no profile editing is required.
+
+Wraps the public library entry point
+`signalforge.demo.copy_demo(dest, *, force=False) -> Path`; the
+CLI re-raises the lower-level `DemoError` subclasses as
+`CliInitDemo*Error` wrappers at the handler boundary so the
+four-tier exit-code taxonomy stays homogeneous (DEC-012 of
+[`plans/super/47-init-demo.md`](../plans/super/47-init-demo.md)).
+
+Positional argument:
+
+- `<dest>` — Destination directory. Optional; default
+  `./signalforge-demo/`. Relative paths resolve against the
+  current working directory; `~` expands;
+  `Path(dest).expanduser().resolve(strict=False)` follows
+  symlinks and raises `CliPathError` on a cycle. **No
+  `--project-dir` containment gate applies** —
+  `init-demo` is the one subcommand that *creates* a project
+  rather than operating *inside* one, so the
+  `canonicalise_user_path(...)` containment helper used by
+  every other CLI flag is deliberately bypassed (DEC-004).
+
+Flags:
+
+- `--force` — Atomically replace `<dest>` if it exists and is
+  non-empty (`shutil.rmtree` then `shutil.copytree`). Without
+  `--force`, a non-empty `<dest>` raises
+  `CliInitDemoDestExistsError` (tier 2); empty existing
+  directories proceed without `--force`. As a blast-radius
+  guard (DEC-001), `--force` refuses `/`, `$HOME`, and the
+  current working directory and raises
+  `CliInitDemoDestUnsafeError` (tier 2) on any of those.
+
+Exit codes (four-tier taxonomy; see § Four-tier exit-code
+taxonomy for the full table):
+
+- `0` — copy succeeded; next-steps message printed to stdout.
+- `1` — broken install (`CliInitDemoFixtureMissingError`:
+  the wheel didn't ship `signalforge/_demo/`), symlink-cycle
+  resolve failure (`CliPathError`), or generic filesystem
+  failure such as `ENOSPC` / `EACCES` / `EROFS`
+  (`CliInitDemoCopyError`).
+- `2` — operator-side dest mistakes:
+  `CliInitDemoDestExistsError` (non-empty dest without
+  `--force`) or `CliInitDemoDestUnsafeError` (`--force`
+  against `/`, `$HOME`, or cwd).
+
+Output: on success, a plain-text "next steps" message lands on
+stdout (DEC-014) — no ANSI colour codes, no Markdown, no env-var
+*values*, just the env-var *names* (`GOOGLE_CLOUD_PROJECT` and
+`ANTHROPIC_API_KEY`) and the three first-run commands an operator
+needs to run (`cd <dest>`, `signalforge lint`, then
+`signalforge generate models/staging/stg_bikeshare_trips.sql --dry-run`).
+The message survives `--no-color` because it carries no colour
+codes.
+
+Example:
+
+```bash
+signalforge init-demo /tmp/sf-austin
+cd /tmp/sf-austin
+export GOOGLE_CLOUD_PROJECT=<your-billing-project>
+export ANTHROPIC_API_KEY=sk-ant-...
+signalforge lint
+signalforge generate models/staging/stg_bikeshare_trips.sql --dry-run
+```
 
 ### `signalforge lint`
 
