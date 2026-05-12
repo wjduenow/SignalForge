@@ -24,6 +24,13 @@
 # DuckDB-fixture regen). It does NOT modify or replace that script — single
 # source of truth per fixture, not per repo.
 #
+# Per DEC-015 of plans/super/47-init-demo.md: the final phase mirrors every
+# file (except this script) into `src/signalforge/_demo/` then applies two
+# demo-only rewrites (`profiles.yml` → env_var() macro per DEC-009;
+# `.gitignore` slimmed per DEC-008). Keeping both trees aligned by
+# construction means the parity gate at
+# `tests/test_demo_fixture_parity.py` fires only on uncommanded drift.
+#
 # Requirements:
 #   * `uvx` (https://docs.astral.sh/uv/) and `jq` on PATH.
 #   * `gcloud auth application-default login` run once (BigQuery uses ADC).
@@ -117,3 +124,90 @@ rm -f \
 
 echo "==> Done. Committed manifest:"
 ls -1 "${TARGET_DIR}"
+
+# ---------------------------------------------------------------------------
+# DEC-015 of plans/super/47-init-demo.md: keep src/signalforge/_demo/ in sync
+# with this test fixture so the parity gate at
+# tests/test_demo_fixture_parity.py fires only on uncommanded drift.
+#
+# 1. Mirror every file (except this script) verbatim into the shipped tree.
+# 2. Overwrite profiles.yml with the env_var('GOOGLE_CLOUD_PROJECT') variant
+#    (DEC-009) — the maintainer-only "DO NOT signalforge against this" header
+#    is dropped because the env_var() lookup makes the shipped copy
+#    safe-to-run as-is.
+# 3. Overwrite .gitignore with the slimmed demo-audience copy (DEC-008) —
+#    issue-#10 / DEC-021 internal references are removed; only the
+#    `.signalforge/` exclusion (actually useful to a demo user) remains.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+DEMO_DIR="${REPO_ROOT}/src/signalforge/_demo"
+
+echo "==> Mirroring fixture tree into ${DEMO_DIR}"
+mkdir -p "${DEMO_DIR}"
+
+# Use rsync if available (cleanly handles the regenerate.sh exclusion);
+# fall back to a portable cp -R + explicit prune otherwise.
+if command -v rsync >/dev/null 2>&1; then
+  rsync -a --delete \
+    --exclude regenerate.sh \
+    "${PROJECT_DIR}/" "${DEMO_DIR}/"
+else
+  rm -rf "${DEMO_DIR}"
+  mkdir -p "${DEMO_DIR}"
+  (cd "${PROJECT_DIR}" && find . -mindepth 1 -path ./regenerate.sh -prune -o -print \
+    | while IFS= read -r rel; do
+        rel="${rel#./}"
+        src_path="${PROJECT_DIR}/${rel}"
+        dst_path="${DEMO_DIR}/${rel}"
+        if [[ -d "${src_path}" ]]; then
+          mkdir -p "${dst_path}"
+        else
+          mkdir -p "$(dirname "${dst_path}")"
+          cp "${src_path}" "${dst_path}"
+        fi
+      done)
+fi
+
+# Demo-only rewrite #1: profiles.yml uses env_var('GOOGLE_CLOUD_PROJECT')
+# (DEC-009). Operator with that env var set runs the demo with zero file
+# edits. Written verbatim so the file is fully reproducible from this
+# script and the parity test's "rewrite must be different from source"
+# clause is preserved.
+cat >"${DEMO_DIR}/profiles.yml" <<'PROFILES_YML'
+# Demo dbt profile shipped by `signalforge init-demo`.
+#
+# `method: oauth` falls through to Application Default Credentials — run
+# `gcloud auth application-default login` once before invoking
+# `signalforge generate` against this project.
+#
+# `project: "{{ env_var('GOOGLE_CLOUD_PROJECT') }}"` resolves at runtime from
+# your billing project; export it before running the demo:
+#
+#     export GOOGLE_CLOUD_PROJECT=<your-gcp-project-id>
+#
+# The Austin bikeshare data is served from the public
+# `bigquery-public-data.austin_bikeshare` dataset; your `GOOGLE_CLOUD_PROJECT`
+# is the BILLING project the BigQuery SDK uses to issue the read.
+austin:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: "{{ env_var('GOOGLE_CLOUD_PROJECT') }}"
+      dataset: austin_bikeshare
+      location: US
+PROFILES_YML
+
+# Demo-only rewrite #2: .gitignore slimmed (DEC-008). Drop issue-#10 /
+# DEC-021 internal references; keep only the `.signalforge/` exclusion the
+# demo audience actually needs.
+cat >"${DEMO_DIR}/.gitignore" <<'GITIGNORE'
+# SignalForge writes per-run audit logs and sidecar artefacts under .signalforge/.
+# These are reproducible from a re-run; no value in committing them.
+.signalforge/
+GITIGNORE
+
+echo "==> Done. Shipped demo files:"
+find "${DEMO_DIR}" -type f | sort

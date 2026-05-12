@@ -1,0 +1,3 @@
+# SignalForge writes per-run audit logs and sidecar artefacts under .signalforge/.
+# These are reproducible from a re-run; no value in committing them.
+.signalforge/

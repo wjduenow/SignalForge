@@ -1,0 +1,23 @@
+# Demo dbt profile shipped by `signalforge init-demo`.
+#
+# `method: oauth` falls through to Application Default Credentials — run
+# `gcloud auth application-default login` once before invoking
+# `signalforge generate` against this project.
+#
+# `project: "{{ env_var('GOOGLE_CLOUD_PROJECT') }}"` resolves at runtime from
+# your billing project; export it before running the demo:
+#
+#     export GOOGLE_CLOUD_PROJECT=<your-gcp-project-id>
+#
+# The Austin bikeshare data is served from the public
+# `bigquery-public-data.austin_bikeshare` dataset; your `GOOGLE_CLOUD_PROJECT`
+# is the BILLING project the BigQuery SDK uses to issue the read.
+austin:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: oauth
+      project: "{{ env_var('GOOGLE_CLOUD_PROJECT') }}"
+      dataset: austin_bikeshare
+      location: US
