@@ -217,6 +217,35 @@ def test_copy_demo_force_against_cwd_raises_dest_unsafe(
     assert tmp_path.is_dir()
 
 
+def test_copy_demo_force_against_symlink_dest_raises_dest_unsafe(
+    tmp_path: Path,
+) -> None:
+    """``force=True`` against a symlink ``dest`` refuses to proceed.
+
+    The naive code path would ``rmtree(resolved_dest)`` after ``resolve()``
+    followed the link, which would delete the link's TARGET (an arbitrary
+    external location) instead of just the link itself. Defence:
+    ``DemoDestUnsafeError`` before any destructive operation. The
+    no-force symlink-dest behaviour is preserved by
+    ``test_copy_demo_with_symlink_dest_resolves_target`` above.
+    """
+    real_target = tmp_path / "target_dir_we_must_not_clobber"
+    real_target.mkdir()
+    (real_target / "important.txt").write_text("don't nuke me")
+
+    symlink = tmp_path / "demo_link"
+    symlink.symlink_to(real_target)
+
+    with pytest.raises(DemoDestUnsafeError) as excinfo:
+        copy_demo(symlink, force=True)
+    assert "symlink" in str(excinfo.value).lower()
+    # Critical: the target directory + its content survived.
+    assert real_target.is_dir()
+    assert (real_target / "important.txt").read_text() == "don't nuke me"
+    # The symlink itself also survived (not unlink()-ed before the raise).
+    assert symlink.is_symlink()
+
+
 # ---------------------------------------------------------------------------
 # Symlink cycle → DemoPathError
 # ---------------------------------------------------------------------------

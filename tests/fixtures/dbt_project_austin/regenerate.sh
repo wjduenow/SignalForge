@@ -164,7 +164,7 @@ else
           mkdir -p "${dst_path}"
         else
           mkdir -p "$(dirname "${dst_path}")"
-          cp "${src_path}" "${dst_path}"
+          cp -f "${src_path}" "${dst_path}"
         fi
       done)
 fi

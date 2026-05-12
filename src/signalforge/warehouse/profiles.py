@@ -164,12 +164,14 @@ def _maybe_warn_large_profile(path: Path) -> None:
 
 
 _ENV_VAR_RE = re.compile(
-    # dbt-compatible: ``env_var('NAME')`` or ``env_var("NAME")`` with an
-    # optional second positional arg used as the default. Whitespace
-    # between args is tolerated. Outer ``{{ ... }}`` brackets optional —
-    # dbt strictly requires them, but we accept the bare form so an
-    # operator who copy-pastes between profiles.yml and JSON contexts
-    # gets predictable behaviour.
+    # dbt-compatible: ``{{ env_var('NAME') }}`` or ``{{ env_var("NAME") }}``
+    # with an optional second positional arg used as the default.
+    # Whitespace between args is tolerated. The outer ``{{ ... }}`` jinja
+    # brackets are REQUIRED — this matches dbt's own jinja-rendering
+    # semantics (a bare ``env_var('NAME')`` is just a string in dbt's
+    # YAML, not an env-var reference). If the bundled init-demo profile
+    # ever needs the bare form, extend the regex (and document the
+    # divergence from dbt) — for v0.1 we follow dbt's contract.
     r"""\{\{\s*env_var\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]"""
     r"""(?:\s*,\s*['"]([^'"]*)['"])?\s*\)\s*\}\}""",
     re.VERBOSE,

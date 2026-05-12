@@ -112,8 +112,23 @@ def _build_wheel(outdir: Path) -> Path:
     return wheels[0]
 
 
+@pytest.fixture(scope="module")
+def _built_wheel_members(tmp_path_factory: pytest.TempPathFactory) -> set[str]:
+    """Build the wheel ONCE per test-module run and return its member list.
+
+    Module-scoped because ``python -m build --wheel`` is the expensive
+    operation here (~5-15s including PEP 517 isolation). Running it once
+    and asserting separate invariants over the resulting member set keeps
+    ``pytest -m wheel_smoke`` fast without weakening either assertion.
+    """
+    outdir = tmp_path_factory.mktemp("wheel-build")
+    wheel_path = _build_wheel(outdir)
+    with zipfile.ZipFile(wheel_path) as zf:
+        return set(zf.namelist())
+
+
 @pytest.mark.wheel_smoke
-def test_wheel_includes_all_demo_files(tmp_path: Path) -> None:
+def test_wheel_includes_all_demo_files(_built_wheel_members: set[str]) -> None:
     """Every file in ``src/signalforge/_demo/`` ships in the built wheel.
 
     Gates DEC-002 (``include = ["src/signalforge/_demo"]``) at packaging
@@ -121,19 +136,15 @@ def test_wheel_includes_all_demo_files(tmp_path: Path) -> None:
     Hatchling's default ``packages`` glob is not guaranteed to pick up
     non-``.py`` files.
     """
-    wheel_path = _build_wheel(tmp_path)
-    with zipfile.ZipFile(wheel_path) as zf:
-        members = set(zf.namelist())
-
-    missing = [name for name in _EXPECTED_DEMO_FILES if name not in members]
+    missing = [name for name in _EXPECTED_DEMO_FILES if name not in _built_wheel_members]
     assert not missing, (
-        f"wheel {wheel_path.name} is missing demo files: {missing}. "
+        f"wheel is missing demo files: {missing}. "
         f"Check `[tool.hatch.build.targets.wheel] include` in pyproject.toml."
     )
 
 
 @pytest.mark.wheel_smoke
-def test_wheel_includes_demo_gitignore_dotfile(tmp_path: Path) -> None:
+def test_wheel_includes_demo_gitignore_dotfile(_built_wheel_members: set[str]) -> None:
     """``signalforge/_demo/.gitignore`` ships in the wheel (DEC-006).
 
     Hatchling's ``include`` glob behaviour on dotfiles is not contractually
@@ -144,11 +155,7 @@ def test_wheel_includes_demo_gitignore_dotfile(tmp_path: Path) -> None:
     discovering the regression — manual ``unzip -l`` at release time is
     too late.
     """
-    wheel_path = _build_wheel(tmp_path)
-    with zipfile.ZipFile(wheel_path) as zf:
-        members = set(zf.namelist())
-
-    assert "signalforge/_demo/.gitignore" in members, (
+    assert "signalforge/_demo/.gitignore" in _built_wheel_members, (
         "wheel does not ship `signalforge/_demo/.gitignore`. "
         "Hatchling may have dropped the dotfile under the directory glob; "
         "see DEC-006 of plans/super/47-init-demo.md for the fallback."

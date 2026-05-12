@@ -159,14 +159,14 @@ class ProfileEnvVarUnsetError(ProfileNotFoundError):
         self.var_name = var_name
         self.profiles_path = profiles_path
         message = (
-            f"profiles.yml at {profiles_path} references env_var({_format_value(var_name)}) "
-            f"but environment variable {_format_value(var_name)} is not set "
-            "and no default was supplied."
+            f"profiles.yml at {_format_value(str(profiles_path))} references "
+            f"env_var({_format_value(var_name)}) but environment variable "
+            f"{_format_value(var_name)} is not set and no default was supplied."
         )
         if remediation is None:
             remediation = (
                 f"Set the environment variable: `export {var_name}=<value>`, "
-                f"or edit {profiles_path} to supply a default: "
+                f"or edit {_format_value(str(profiles_path))} to supply a default: "
                 f"`env_var('{var_name}', '<default>')`."
             )
         # Track searched_paths so parent contract holds.

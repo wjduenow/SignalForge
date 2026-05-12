@@ -88,13 +88,29 @@ def copy_demo(dest: Path | str, *, force: bool = False) -> Path:
     """
 
     raw = Path(dest)
+    expanded_dest = raw.expanduser()
     try:
-        resolved_dest = raw.expanduser().resolve(strict=False)
+        resolved_dest = expanded_dest.resolve(strict=False)
     except RuntimeError as exc:  # symlink cycle
         raise DemoPathError(
             f"failed to resolve destination path {str(raw)!r}: {exc}",
             cause=exc,
         ) from exc
+
+    # Symlink + --force blast-radius guard. `resolve()` above followed the
+    # link, so if we proceeded with `force=True` the existence gate's
+    # `shutil.rmtree(resolved_dest)` would delete the symlink TARGET, not
+    # the link itself — an unintended external location. Refuse loudly.
+    # Without --force the existing behaviour is preserved: a symlink-dest
+    # copy follows the link and writes into the target directory (pinned
+    # by ``test_copy_demo_with_symlink_dest_resolves_target``). DEC-001
+    # extended by QG follow-up to cover the symlink case.
+    if expanded_dest.is_symlink() and force:
+        raise DemoDestUnsafeError(
+            f"refusing to --force-replace symlink destination {str(expanded_dest)!r}: "
+            "would follow the link and clobber the resolved target. Remove the "
+            "symlink first or pick a different destination."
+        )
 
     # DEC-001 blast-radius guard — only fires under force=True; without
     # force the existence gate below handles the same paths benignly
