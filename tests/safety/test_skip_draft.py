@@ -12,11 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from signalforge.manifest.models import Column, Config, Model
+from signalforge.manifest.models import Column, Model
 from signalforge.safety.models import DRAFT_SKIP_REASONS, SamplingMode
 from signalforge.safety.policy import SafetyPolicy
 from signalforge.safety.redact import _classify_column
 from signalforge.safety.request import build_llm_request
+from signalforge.warehouse.models import TableRef
 from tests.safety._fake_adapter import FakeAdapter
 
 pytestmark = pytest.mark.safety
@@ -38,17 +39,21 @@ def _make_model(
     tags: tuple[str, ...] = (),
     meta: dict | None = None,
 ) -> Model:
-    return Model(
-        unique_id="model.sf_demo.orders",
-        name="orders",
-        resource_type="model",
-        package_name="sf_demo",
-        original_file_path="models/orders.sql",
-        path="orders.sql",
-        tags=list(tags),
-        config=Config(materialized="table", tags=list(tags), meta=meta or {}),
-        columns=columns,
-        raw_code="select 1 as id",
+    return Model.model_validate(
+        {
+            "unique_id": "model.sf_demo.orders",
+            "name": "orders",
+            "resource_type": "model",
+            "package_name": "sf_demo",
+            "original_file_path": "models/orders.sql",
+            "path": "orders.sql",
+            "database": "test-project",
+            "schema": "test_dataset",
+            "tags": list(tags),
+            "config": {"materialized": "table", "tags": list(tags), "meta": meta or {}},
+            "columns": {n: c.model_dump() for n, c in columns.items()},
+            "raw_code": "select 1 as id",
+        }
     )
 
 
@@ -179,6 +184,43 @@ def test_build_llm_request_model_level_skip_omits_every_column(tmp_path: Path) -
     assert len(skipped_records) == 2
     assert all(r.reason == "draft_skip_model_meta" for r in skipped_records)
     assert {r.column_name for r in skipped_records} == {"a", "b"}
+
+
+def test_build_llm_request_sample_mode_drops_skipped_columns_from_rows(
+    tmp_path: Path,
+) -> None:
+    """Sample mode is the only path that hits the row-key filter branch
+    in build_llm_request (line 197). The skipped column's value must
+    not appear in any sampled row."""
+    columns = {
+        "id": _make_column("id"),
+        "internal_token": _make_column(
+            "internal_token", meta={"signalforge": {"skip_draft": True}}
+        ),
+    }
+    model = _make_model(columns=columns)
+    fake = FakeAdapter()
+    table = TableRef.from_model(model)
+    fake.expect_sample_rows(
+        table=table,
+        n=100,
+        returns=[
+            {"id": 1, "internal_token": "secret-aaa"},
+            {"id": 2, "internal_token": "secret-bbb"},
+        ],
+    )
+    policy = SafetyPolicy(
+        mode=SamplingMode.SAMPLE,
+        audit_path=tmp_path / ".signalforge" / "audit.jsonl",
+    )
+
+    request = build_llm_request(model, fake, policy)
+
+    assert request.sampled_rows is not None
+    for row in request.sampled_rows:
+        assert "internal_token" not in row
+    # And the schema still excludes the skipped column.
+    assert "internal_token" not in request.columns_sent
 
 
 def test_draft_skip_reasons_constant_matches_literal_values() -> None:

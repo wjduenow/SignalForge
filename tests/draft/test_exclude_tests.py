@@ -79,6 +79,20 @@ def test_exclude_tests_rejects_non_string_entries() -> None:
     assert "must be strings" in str(exc.value)
 
 
+def test_exclude_tests_accepts_none_as_empty_tuple() -> None:
+    """An explicit ``null`` in YAML lands as Python ``None``; the validator
+    coerces to the empty tuple rather than raising."""
+    config = DraftConfig.model_validate({"exclude_tests": None})
+    assert config.exclude_tests == ()
+
+
+def test_exclude_tests_rejects_non_list_non_tuple() -> None:
+    """A dict / set / scalar at the YAML key is a typo; fail loud."""
+    with pytest.raises(ValidationError) as exc:
+        DraftConfig.model_validate({"exclude_tests": {"unique": True}})
+    assert "list of test-type strings" in str(exc.value)
+
+
 def test_valid_test_types_constant_matches_dbt_four() -> None:
     """Pin the canonical set so adding a new test type without updating
     VALID_TEST_TYPES (and the prompt catalogue) fails loud here."""
