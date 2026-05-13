@@ -39,11 +39,11 @@ from __future__ import annotations
 
 import argparse
 import shlex
-import sys
 
 from signalforge.cli._helpers import (
     format_error_to_stderr,
     map_exception_to_exit_code,
+    print_stderr,
 )
 from signalforge.cli.errors import (
     CliInitDemoCopyError,
@@ -165,15 +165,15 @@ def cmd_init_demo(args: argparse.Namespace) -> int:
         resolved_dest = copy_demo(args.dest, force=args.force)
     except DemoDestExistsError as exc:
         wrapped: Exception = CliInitDemoDestExistsError(dest=str(args.dest), cause=exc)
-        print(format_error_to_stderr(wrapped), file=sys.stderr)
+        print_stderr(format_error_to_stderr(wrapped))
         return map_exception_to_exit_code(wrapped)
     except DemoDestUnsafeError as exc:
         wrapped = CliInitDemoDestUnsafeError(dest=str(args.dest), cause=exc)
-        print(format_error_to_stderr(wrapped), file=sys.stderr)
+        print_stderr(format_error_to_stderr(wrapped))
         return map_exception_to_exit_code(wrapped)
     except DemoFixtureMissingError as exc:
         wrapped = CliInitDemoFixtureMissingError(cause=exc)
-        print(format_error_to_stderr(wrapped), file=sys.stderr)
+        print_stderr(format_error_to_stderr(wrapped))
         return map_exception_to_exit_code(wrapped)
     except DemoPathError as exc:
         # Symlink-cycle resolve failure — re-use the existing CliPathError
@@ -184,7 +184,7 @@ def cmd_init_demo(args: argparse.Namespace) -> int:
             f"failed to resolve dest path {str(args.dest)!r}: {exc}",
             remediation=("Remove the symlink cycle at the destination or pick a different path."),
         )
-        print(format_error_to_stderr(wrapped), file=sys.stderr)
+        print_stderr(format_error_to_stderr(wrapped))
         return map_exception_to_exit_code(wrapped)
     except (KeyboardInterrupt, SystemExit):
         # Preserve Python's default semantics for operator Ctrl-C and
@@ -195,13 +195,13 @@ def cmd_init_demo(args: argparse.Namespace) -> int:
         # Generic filesystem failure from shutil.copytree / rmtree:
         # ENOSPC, EACCES on the parent, EROFS, etc. Tier 1 per DEC-012.
         wrapped = CliInitDemoCopyError(dest=str(args.dest), cause=exc)
-        print(format_error_to_stderr(wrapped), file=sys.stderr)
+        print_stderr(format_error_to_stderr(wrapped))
         return map_exception_to_exit_code(wrapped)
     except Exception as exc:  # noqa: BLE001 — uniform CLI boundary catch (DEC-016)
         # Belt-and-braces — any forward-compat exception added to the
         # demo helper's raise surface routes through the canonical
         # formatter + mapper rather than leaking a traceback.
-        print(format_error_to_stderr(exc), file=sys.stderr)
+        print_stderr(format_error_to_stderr(exc))
         return map_exception_to_exit_code(exc)
 
     print(

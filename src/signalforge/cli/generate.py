@@ -100,6 +100,7 @@ from signalforge.cli._helpers import (
     format_batch_summary,
     format_error_to_stderr,
     map_exception_to_exit_code,
+    print_stderr,
     setup_logging,
     should_emit_progress,
 )
@@ -897,7 +898,7 @@ def _run_single_model(
 
     except Exception as exc:  # noqa: BLE001 — the boundary catch (DEC-016)
         message = format_error_to_stderr(exc)
-        print(message, file=sys.stderr)
+        print_stderr(message)
         return _SingleModelOutcome(
             model_unique_id=model.unique_id,
             exit_code=map_exception_to_exit_code(exc),
@@ -1152,5 +1153,5 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     except Exception as exc:  # noqa: BLE001 — the boundary catch (DEC-016)
         message = format_error_to_stderr(exc)
-        print(message, file=sys.stderr)
+        print_stderr(message)
         return map_exception_to_exit_code(exc)
