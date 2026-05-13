@@ -497,7 +497,7 @@ def format_error_to_stderr(exc: Exception) -> str:
     return f"ERROR: {exc}"
 
 
-def print_stderr(message: str, *, flush: bool = False) -> None:
+def print_stderr(message: str, *, end: str = "\n", flush: bool = False) -> None:
     """Write ``message`` to stderr after stripping ANSI CSI escapes.
 
     Single stderr-write sink for ``signalforge.cli``. Mirrors the diff
@@ -509,15 +509,20 @@ def print_stderr(message: str, *, flush: bool = False) -> None:
     sequences into the operator's scrollback.
 
     Idempotent on already-clean input — the strip is a no-op when no
-    CSI bytes are present. The ``flush`` kwarg mirrors :func:`print`'s
-    for the progress-line callsites that need an immediate flush.
+    CSI bytes are present. The ``end`` and ``flush`` kwargs mirror
+    :func:`print`'s — pass ``end=""`` for callsites whose ``message``
+    already carries a trailing newline (e.g.
+    :func:`format_batch_summary`); pass ``flush=True`` for progress-line
+    callsites that need an immediate flush.
 
-    This helper is the only place in :mod:`signalforge.cli` that calls
-    ``print(..., file=sys.stderr)``. The AST scan at
-    ``tests/cli/test_no_direct_stderr_print.py`` rejects any other
-    callsite. Issue #60.
+    This helper is the only place in :mod:`signalforge.cli` that
+    writes to ``sys.stderr``. The AST scan at
+    ``tests/cli/test_no_direct_stderr_print.py`` rejects every
+    bypass form — ``print(..., file=sys.stderr)`` AND
+    ``sys.stderr.write(...)`` / ``sys.stderr.flush()`` — anywhere
+    else in :mod:`signalforge.cli`. Issue #60.
     """
-    print(strip_ansi_escapes(message), file=sys.stderr, flush=flush)
+    print(strip_ansi_escapes(message), file=sys.stderr, end=end, flush=flush)
 
 
 # ---------------------------------------------------------------------------

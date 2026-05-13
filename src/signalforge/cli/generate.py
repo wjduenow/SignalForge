@@ -1001,8 +1001,9 @@ def _run_batch(
     failed_count = sum(1 for o in per_model if o.exit_code != 0)
     should_summarise = len(per_model) >= 2 or failed_count >= 1
     if should_summarise and not quiet:
-        sys.stderr.write(format_batch_summary(batch_outcome))
-        sys.stderr.flush()
+        # ``format_batch_summary`` returns a string ending in ``\n``;
+        # pass ``end=""`` so :func:`print_stderr` doesn't add another.
+        print_stderr(format_batch_summary(batch_outcome), end="", flush=True)
 
     return batch_outcome
 
