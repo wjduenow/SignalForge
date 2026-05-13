@@ -176,3 +176,89 @@ def test_cli_selector_no_match_error_in_exit_code_table() -> None:
         "CliSelectorNoMatchError must map to tier 2 (input-validation) "
         "per DEC-006 of plans/super/37-multi-model-select.md."
     )
+
+
+# ---------------------------------------------------------------------------
+# _safe_excepthook — belt-and-braces traceback strip (DEC-016)
+# ---------------------------------------------------------------------------
+
+
+def test_safe_excepthook_strips_traceback_and_prints_typed_message(
+    capsys: object,
+) -> None:
+    """Issue #60 pins the patch line in ``_safe_excepthook`` that calls
+    :func:`print_stderr`: the panic-path tail writes ``ERROR: <message>``
+    to stderr for any non-``KeyboardInterrupt``/``SystemExit`` exception
+    that escapes the main ``try / except`` (DEC-016 belt-and-braces).
+
+    The hook is normally invoked by Python on an unhandled exception
+    at top-level, which the in-process ``main(argv)`` test pattern
+    cannot trigger directly. Call the hook explicitly with a test
+    exception, then assert the stderr shape — the ANSI-laden message
+    body proves :func:`print_stderr` ran the strip (issue #60).
+    """
+    import pytest as _pytest  # local import keeps the file header stable
+
+    from signalforge.cli._helpers import _safe_excepthook
+
+    assert isinstance(capsys, _pytest.CaptureFixture)
+    capture: _pytest.CaptureFixture[str] = capsys  # type: ignore[assignment]
+
+    # Carry an ANSI escape in the exception message so the assertion
+    # proves the strip in print_stderr actually ran.
+    exc = RuntimeError("\x1b[31mboom\x1b[0m")
+    _safe_excepthook(type(exc), exc, None)
+
+    captured = capture.readouterr()
+    assert captured.out == ""
+    # The strip path replaces the SGR bytes with empty strings, leaving
+    # the bare token. No leading/trailing escape bytes survive.
+    assert "\x1b[" not in captured.err, (
+        "print_stderr did not strip the ANSI CSI bytes from the panic-path "
+        f"stderr write: {captured.err!r}"
+    )
+    assert captured.err.rstrip("\n") == "ERROR: boom"
+
+
+def test_safe_excepthook_passes_keyboard_interrupt_through(capsys: object) -> None:
+    """Companion to the above: ``KeyboardInterrupt`` must NOT hit
+    :func:`print_stderr` — Python's default hook is delegated to
+    instead (DEC-016, the Ctrl-C semantics carve-out).
+
+    Pins the early-return branch at line 689 so a future refactor that
+    accidentally collapsed the two arms (e.g., always calling
+    ``print_stderr``) would fail loud here.
+    """
+    import pytest as _pytest
+
+    from signalforge.cli import _helpers
+
+    assert isinstance(capsys, _pytest.CaptureFixture)
+    capture: _pytest.CaptureFixture[str] = capsys  # type: ignore[assignment]
+
+    calls: list[tuple[type[BaseException], BaseException, object]] = []
+
+    def fake_default(
+        exc_type: type[BaseException],
+        exc_value: BaseException,
+        tb: object,
+    ) -> None:
+        calls.append((exc_type, exc_value, tb))
+
+    monkeypatched = _helpers.sys.__excepthook__
+    _helpers.sys.__excepthook__ = fake_default  # type: ignore[assignment]
+    try:
+        kbd = KeyboardInterrupt()
+        _helpers._safe_excepthook(type(kbd), kbd, None)
+    finally:
+        _helpers.sys.__excepthook__ = monkeypatched  # type: ignore[assignment]
+
+    assert calls == [(KeyboardInterrupt, kbd, None)], (
+        "_safe_excepthook must delegate KeyboardInterrupt to Python's "
+        f"default hook; got calls={calls!r}"
+    )
+    captured = capture.readouterr()
+    assert captured.err == "", (
+        "KeyboardInterrupt must NOT write to stderr via print_stderr — the "
+        f"default hook owns it. Got stderr={captured.err!r}"
+    )
