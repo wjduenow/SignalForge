@@ -51,6 +51,88 @@ def test_signalforge_version_via_subprocess() -> None:
 
 
 @pytest.mark.cli_subprocess
+def test_signalforge_generate_help_via_subprocess() -> None:
+    """``signalforge generate --help`` exits 0 with the subcommand's help.
+
+    Issue #58 — extends the subprocess-gated smoke beyond ``--version`` to
+    a subparser that the top-level parser does NOT expose. ``--version``
+    only proves ``[project.scripts]`` wiring; a regression in
+    ``signalforge.cli.generate.add_parser`` (subparser deletion, an import
+    failure inside the module, an ``add_argument`` that raises during
+    registration) leaves ``--version`` working but breaks every real
+    invocation. Asserting ``generate --help`` exits 0 closes that gap.
+    """
+    result = subprocess.run(
+        ["signalforge", "generate", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    # The presence of the subcommand name plus a ``generate``-specific
+    # flag (``--mode`` is unique to this subparser; absent from
+    # ``lint`` / ``init-demo`` / ``version``) jointly guarantees argparse
+    # is rendering the right subcommand's help, not the top-level usage.
+    assert "generate" in result.stdout
+    assert "--mode" in result.stdout
+    # No-traceback floor — see the ``--version`` test above.
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.cli_subprocess
+def test_signalforge_lint_help_via_subprocess() -> None:
+    """``signalforge lint --help`` exits 0 with the subcommand's help.
+
+    Issue #58 — paired with ``generate --help`` above. Same rationale:
+    a subparser-registration regression in ``signalforge.cli.lint`` would
+    pass the ``--version`` smoke but break the real subcommand. The
+    ``--model`` flag is unique to ``lint`` (issue #49) and pins the
+    subcommand identity in the rendered help.
+    """
+    result = subprocess.run(
+        ["signalforge", "lint", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert "lint" in result.stdout
+    assert "--model" in result.stdout
+    # No-traceback floor — see the ``--version`` test above.
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.cli_subprocess
+def test_signalforge_version_help_via_subprocess() -> None:
+    """``signalforge version --help`` exits 0 with the subcommand's help.
+
+    Issue #58 — the existing ``--version`` test (top-level
+    ``action="version"``) does NOT exercise ``signalforge.cli.version``'s
+    ``add_parser`` registration; the ``version`` subparser could be
+    deleted or break at import time without that test noticing. The
+    subparser carries no flags of its own (``cmd_version`` takes no
+    args) and ``add_parser(help=...)`` strings only render on the parent
+    parser, so the assertion pins the argparse-emitted usage line
+    ``usage: signalforge version`` — the dispatched-program name plus
+    the subcommand name jointly prove argparse rendered the right
+    subparser's help, not the top-level usage.
+    """
+    result = subprocess.run(
+        ["signalforge", "version", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    assert "usage: signalforge version" in result.stdout
+    # No-traceback floor — see the ``--version`` test above.
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.cli_subprocess
 def test_signalforge_init_demo_help_via_subprocess() -> None:
     """``signalforge init-demo --help`` exits 0 with the subcommand's help.
 
