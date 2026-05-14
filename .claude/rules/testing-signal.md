@@ -110,6 +110,12 @@ SF_RUN_BQ=1 pytest -m bigquery --no-cov
 SF_RUN_BQ=1 GOOGLE_CLOUD_PROJECT=<billing-project> ANTHROPIC_API_KEY=sk-... pytest -m e2e --no-cov
 ```
 
+For a one-shot **pre-release** measurement of how much coverage the gated paths
+contribute (run all gated markers under `--cov` in a single invocation), see
+`CONTRIBUTING.md` § "Pre-release coverage audit". A maintainer running that
+before each release catches coverage regressions in the gated paths that the
+default badge number cannot surface.
+
 **`wheel_smoke` marker (issue #47).** Maintainer-only gate added by issue #47 to verify wheel-build packaging without coupling it to default CI. The single test (`tests/test_wheel_packaging.py`) shells out `python -m build --wheel --outdir <tmp>` (or `uvx --from build pyproject-build` when `build` isn't in the venv), opens the artifact via `zipfile.ZipFile`, and asserts the canonical demo file set appears under `signalforge/_demo/`. Catches `pyproject.toml` `[tool.hatch.build.targets.wheel] include` regressions that editable-install tests cannot — see `python-build.md` § "Shipping package data" for the full pattern.
 
 ## End-to-end gated tests (issue #10)

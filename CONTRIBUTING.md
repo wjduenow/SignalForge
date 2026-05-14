@@ -22,6 +22,38 @@ ruff check . && ruff format --check . && pyright && pytest
 
 **Coverage:** see [`docs/codecov-ops.md`](docs/codecov-ops.md) for Codecov setup, badge interpretation, and threshold bumps.
 
+## Pre-release coverage audit
+
+The default `pytest` run — and therefore the coverage badge — measures only the
+default marker set. Tests gated behind `bigquery`, `anthropic`, `cli_subprocess`,
+`e2e`, and `wheel_smoke` are filtered out by `addopts` (see
+`.claude/rules/testing-signal.md` § "Known gap: excluded markers"), so the
+real-network and packaging paths are not instrumented in the badge number.
+
+Before cutting a release, run both suites and combine their coverage into one
+total to catch regressions in the gated paths:
+
+```bash
+# 1. Default coverage (what the badge reports) — writes a fresh .coverage file:
+pytest
+
+# 2. Append the gated-marker run to the SAME .coverage data file.
+#    --cov-append combines with run 1 so the term report shows the COMBINED total.
+#    --cov-fail-under=0 overrides the 80% gate inherited from addopts — gated
+#    markers alone never clear it, and this is a measurement, not a gate.
+#    (bigquery/anthropic/e2e need creds; cli_subprocess/wheel_smoke do not.)
+SF_RUN_BQ=1 ANTHROPIC_API_KEY=sk-... GOOGLE_CLOUD_PROJECT=<billing-project> \
+  pytest -m 'bigquery or anthropic or e2e or cli_subprocess or wheel_smoke' \
+  --cov=signalforge --cov-append --cov-fail-under=0 --cov-report=term
+```
+
+The combined total from step 2 minus the default badge number from step 1 is
+the coverage the gated paths add — typically 5–10%. Interpreting the delta: if
+the default badge number drops by M% but the combined total holds steady, that
+is likely a redistribution (a code path moved behind a gated marker) rather than
+a true regression. A drop in the *combined* total is a real regression worth
+chasing before the release goes out.
+
 ## Test markers
 
 Tests are tagged with `@pytest.mark.{unit, integration, error}` (declared in
