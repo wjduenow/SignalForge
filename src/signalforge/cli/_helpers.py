@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     # private ``_BatchOutcome`` dataclass shape only at type-check time.
     from signalforge.cli.generate import _BatchOutcome
 
+from signalforge._common.ansi_safety import strip_ansi_escapes
 from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.cli.errors import (
     CliError,
@@ -496,6 +497,34 @@ def format_error_to_stderr(exc: Exception) -> str:
     return f"ERROR: {exc}"
 
 
+def print_stderr(message: str, *, end: str = "\n", flush: bool = False) -> None:
+    """Write ``message`` to stderr after stripping ANSI CSI escapes.
+
+    Single stderr-write sink for ``signalforge.cli``. Mirrors the diff
+    renderer's "escape at the sink" principle (.claude/rules/diff-renderer.md
+    DEC-007) for the CLI: every stderr-bound string passes through
+    :func:`signalforge._common.ansi_safety.strip_ansi_escapes` so an
+    upstream-controlled value (a model unique_id, a path, a typed-error
+    message body) carrying ``\\x1b[31m...`` cannot inject terminal-control
+    sequences into the operator's scrollback.
+
+    Idempotent on already-clean input — the strip is a no-op when no
+    CSI bytes are present. The ``end`` and ``flush`` kwargs mirror
+    :func:`print`'s — pass ``end=""`` for callsites whose ``message``
+    already carries a trailing newline (e.g.
+    :func:`format_batch_summary`); pass ``flush=True`` for progress-line
+    callsites that need an immediate flush.
+
+    This helper is the only place in :mod:`signalforge.cli` that
+    writes to ``sys.stderr``. The AST scan at
+    ``tests/cli/test_no_direct_stderr_print.py`` rejects every
+    bypass form — ``print(..., file=sys.stderr)`` AND
+    ``sys.stderr.write(...)`` / ``sys.stderr.flush()`` — anywhere
+    else in :mod:`signalforge.cli`. Issue #60.
+    """
+    print(strip_ansi_escapes(message), file=sys.stderr, end=end, flush=flush)
+
+
 # ---------------------------------------------------------------------------
 # Progress lines (US-007 / DEC-014 / DEC-026)
 # ---------------------------------------------------------------------------
@@ -542,14 +571,13 @@ def emit_progress_entry(stage_n: int, stage_name: str, body: str) -> None:
     invoked. The callsite-level gate keeps the helper trivial and lets
     the orchestrator make a single decision once at startup.
     """
-    print(f"[{stage_n}/5] {stage_name}: {body}", file=sys.stderr, flush=True)
+    print_stderr(f"[{stage_n}/5] {stage_name}: {body}", flush=True)
 
 
 def emit_progress_done(stage_n: int, stage_name: str, elapsed_seconds: float) -> None:
     """Emit the paired ``[N/5] <stage>: done in <X>`` line."""
-    print(
+    print_stderr(
         f"[{stage_n}/5] {stage_name}: done in {format_elapsed(elapsed_seconds)}",
-        file=sys.stderr,
         flush=True,
     )
 
@@ -643,7 +671,7 @@ def emit_batch_progress_entry(model_unique_id: str, batch_index: int, batch_coun
     callsite-level gate keeps the helper trivial and lets the batch
     driver make a single decision once at startup.
     """
-    print(f"[{batch_index}/{batch_count}] {model_unique_id}", file=sys.stderr, flush=True)
+    print_stderr(f"[{batch_index}/{batch_count}] {model_unique_id}", flush=True)
 
 
 def _safe_excepthook(
@@ -671,4 +699,4 @@ def _safe_excepthook(
         sys.__excepthook__(exc_type, exc_value, traceback)
         return
     del traceback  # explicitly unused on the strip path
-    print(f"ERROR: {exc_value}", file=sys.stderr)
+    print_stderr(f"ERROR: {exc_value}")

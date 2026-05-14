@@ -72,13 +72,13 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 from pathlib import Path
 
 from signalforge.cli._helpers import (
     canonicalise_user_path,
     format_error_to_stderr,
     map_exception_to_exit_code,
+    print_stderr,
 )
 from signalforge.cli.errors import CliPathError
 from signalforge.diff import load_diff_config
@@ -307,7 +307,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
         manifest_path = canonicalise_user_path(getattr(args, "manifest", None), project_dir)
     except Exception as exc:  # noqa: BLE001 — uniform CLI boundary catch (DEC-016)
         message = format_error_to_stderr(exc)
-        print(message, file=sys.stderr)
+        print_stderr(message)
         return map_exception_to_exit_code(exc)
 
     # Collect every loader failure rather than short-circuiting on the
@@ -352,7 +352,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
         # exception (DEC-008 four-tier contract).
         _block_name, exc = failures[0]
         message = format_error_to_stderr(exc)
-        print(message, file=sys.stderr)
+        print_stderr(message)
         return map_exception_to_exit_code(exc)
 
     # Multi-error shape (DEC-008 header + bullets). Each bullet names
@@ -378,7 +378,7 @@ def cmd_lint(args: argparse.Namespace) -> int:
         # the bullet renders on one visual line.
         msg = " ".join(msg.split())
         bullets.append(f"  - {block_name}: {msg}")
-    print(header + "\n" + "\n".join(bullets), file=sys.stderr)
+    print_stderr(header + "\n" + "\n".join(bullets))
     # Multi-error exit code = max of the per-failure tiers. Loader
     # failures are typically tier 1 (load), but a CliInputError that
     # bubbles up from a deeper validator surfaces as tier 2 — picking

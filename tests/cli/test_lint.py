@@ -275,6 +275,32 @@ def test_lint_config_path_nonexistent_exits_one(
     assert "nonexistent.yml" in err or "not found" in err.lower()
 
 
+def test_lint_project_dir_without_dbt_project_yml_exits_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--project-dir <bogus>`` exits 1 via cmd_lint's load-time error catch.
+
+    Issue #60 pins the patch line in ``cmd_lint``'s outer ``try / except``
+    that routes :class:`CliPathError` through :func:`print_stderr`.
+    The block-level config tests (above) exercise the per-block failure
+    loop, not the outer catch — ``_resolve_project_dir`` raises BEFORE
+    any block-level work, so a bogus ``--project-dir`` is the cleanest
+    trigger for the outer path. Without this test the line stays
+    uncovered (Codecov reported it as a patch-coverage gap on PR #88).
+    """
+    empty_dir = tmp_path / "no_dbt_here"
+    empty_dir.mkdir()
+
+    code = main(["lint", "--project-dir", str(empty_dir)])
+    _out, err = _capture(capsys)
+
+    assert code == 1, f"expected exit 1 (CliPathError); got {code}; stderr={err!r}"
+    assert err.startswith("ERROR:"), err
+    assert "dbt_project.yml" in err
+    assert "Traceback" not in err
+
+
 def test_lint_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
     """``signalforge lint --help`` → exit 0; stdout non-empty."""
     code = main(["lint", "--help"])
