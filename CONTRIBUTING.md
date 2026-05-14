@@ -30,24 +30,29 @@ default marker set. Tests gated behind `bigquery`, `anthropic`, `cli_subprocess`
 `.claude/rules/testing-signal.md` § "Known gap: excluded markers"), so the
 real-network and packaging paths are not instrumented in the badge number.
 
-Before cutting a release, run the gated-marker suite once to catch coverage
-regressions in those paths:
+Before cutting a release, run both suites and combine their coverage into one
+total to catch regressions in the gated paths:
 
 ```bash
-# Default coverage (what the badge reports):
+# 1. Default coverage (what the badge reports) — writes a fresh .coverage file:
 pytest
 
-# Gated-marker coverage (bigquery/anthropic/e2e need creds; cli_subprocess/wheel_smoke do not):
+# 2. Append the gated-marker run to the SAME .coverage data file.
+#    --cov-append combines with run 1 so the term report shows the COMBINED total.
+#    --cov-fail-under=0 overrides the 80% gate inherited from addopts — gated
+#    markers alone never clear it, and this is a measurement, not a gate.
+#    (bigquery/anthropic/e2e need creds; cli_subprocess/wheel_smoke do not.)
 SF_RUN_BQ=1 ANTHROPIC_API_KEY=sk-... GOOGLE_CLOUD_PROJECT=<billing-project> \
   pytest -m 'bigquery or anthropic or e2e or cli_subprocess or wheel_smoke' \
-  --cov=signalforge --cov-report=term --no-cov-on-fail
+  --cov=signalforge --cov-append --cov-fail-under=0 --cov-report=term
 ```
 
-Gated paths contribute roughly 5–10% additional coverage over the default run.
-Interpreting the delta: if the default coverage drops by M% but the gated run
-rises by M%, that is likely a redistribution (a code path moved behind a gated
-marker) rather than a true regression. A drop in *both* numbers is a real
-regression worth chasing before the release goes out.
+The combined total from step 2 minus the default badge number from step 1 is
+the coverage the gated paths add — typically 5–10%. Interpreting the delta: if
+the default badge number drops by M% but the combined total holds steady, that
+is likely a redistribution (a code path moved behind a gated marker) rather than
+a true regression. A drop in the *combined* total is a real regression worth
+chasing before the release goes out.
 
 ## Test markers
 
