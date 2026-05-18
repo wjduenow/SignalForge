@@ -1,136 +1,110 @@
 # Diff renderer (kept/dropped table + unified diff + sidecar)
 
-Established by issue #8 (diff renderer). Apply to every module under `signalforge.diff` and to any new code that classifies an artifact into a tier, renders a kept/dropped/flagged table, emits a unified `schema.yml` diff, or writes a diff sidecar JSON.
+Established by issue #8. Apply to every module under `signalforge.diff` and to any new code that classifies an artifact into a tier, renders a kept/dropped/flagged table, emits a unified `schema.yml` diff, or writes a diff sidecar JSON.
 
 The diff layer sits between the quality grader (#7) and the CLI (#9). It encodes Architectural Commitment #5 ("explainable diffs") at the post-grade boundary — every kept/dropped/flagged artifact ships with a one-line "why," every run produces a unified diff against the existing committed `schema.yml`, and the operator gets a per-run JSON sidecar that the v0.3 GitHub Action will consume directly.
 
 ## Tier classification with no-grading-report degrade + kept-uncertain origin signal (DEC-012, issue #50)
 
-`DiffEntry.tier` is a `Literal["kept", "kept-uncertain", "dropped", "flagged"]` of exactly four values. The `kept-uncertain` literal was added in issue #50; the other three are unchanged from v0.1.
+`DiffEntry.tier` is `Literal["kept", "kept-uncertain", "dropped", "flagged"]` of exactly four values.
 
-- `"kept"` — artifact survived prune **with positive evidence** (the per-row `PruneDecision.reason == "kept"`) and (if grading was provided) passed the rubric. Ships in the proposed `schema.yml`.
-- `"kept-uncertain"` (issue #50) — artifact survived prune but the prune layer **could not positively evaluate it** (the per-row `PruneDecision.reason == "kept-without-evidence"`). Six sources route here per `.claude/rules/prune-engine.md` § "Three sources of `kept-without-evidence`": total budget exhausted, identifier rejected by SQL safety check, warehouse call raised, `prune.enabled: false`, sample materialisation failed, or any other `WarehouseError` subclass at orchestrator entry. Ships in the proposed `schema.yml` because the prune layer's conservative-bias contract says "drop only with positive evidence" — but ships with a distinct tier so reviewers see "we shipped this without evidence" as a separate visual signal from "we shipped this because it caught a real failing row."
-- `"dropped"` — artifact was dropped by the prune engine; the matched `DropReason` literal travels on `DiffEntry.drop_reason`.
-- `"flagged"` — artifact survived prune **with positive evidence** AND a `GradingReport` was provided AND its grading is below threshold (`passed=False` for any criterion OR a graceful-degrade `score=None` was recorded).
+- `"kept"` — survived prune with positive evidence (`PruneDecision.reason == "kept"`) and (if graded) passed the rubric. Ships in the proposed `schema.yml`.
+- `"kept-uncertain"` (issue #50) — survived prune but the layer could not positively evaluate it (`PruneDecision.reason == "kept-without-evidence"`). Multiple sources route here per `prune-engine.md` § "Conservative-bias routing template". Ships in the proposed `schema.yml` because the conservative-bias contract says "drop only with positive evidence" — but with a distinct tier so reviewers see "shipped without evidence" separately from "shipped because it caught a real failing row."
+- `"dropped"` — dropped by the prune engine; the matched `DropReason` literal travels on `DiffEntry.drop_reason`.
+- `"flagged"` — survived prune **with positive evidence** AND a `GradingReport` was provided AND grading is below threshold.
 
 Three load-bearing invariants:
 
-1. **`flagged` only fires when `grading_report is not None`.** When the caller omits the grading report, no entry can be `flagged` without a grading run. This mirrors the conservative degrade pattern from `grade-layer.md` ("graceful degrade, never silent drop") — the operator running a prune-only pipeline doesn't get surprise `flagged` rows that imply judgements they never asked for.
+1. **`flagged` only fires when `grading_report is not None`.** A prune-only run never gets surprise `flagged` rows that imply judgements the operator didn't ask for. Mirrors `grade-layer.md`'s "graceful degrade, never silent drop."
+2. **Origin dominates over grading for `kept-uncertain` (issue #50).** A kept-without-evidence row stays `kept-uncertain` even when an attached `GradingResult` fails the rubric — collapsing to `flagged` would be a category error. The classifier (`_tier_for_kept` in `signalforge.diff.engine`) checks `decision.reason == "kept-without-evidence"` BEFORE the grading-aggregate dispatch.
+3. **`kept-uncertain` is a prune-origin signal, never a doc/rationale signal.** Doc and rationale rows call the classifier with `decision=None`, which never routes to `kept-uncertain`. A kept-with-no-grading doc row uses the pre-existing `_DOC_KEPT_NO_GRADING_WHY` carve-out (`tier="kept"`, `why="kept (no grading)"`).
 
-2. **Origin dominates over grading for `kept-uncertain` (issue #50).** A kept-without-evidence prune decision projects to `tier="kept-uncertain"` **regardless of grading attachment** — never collapses to `flagged` even when an attached `GradingResult` also fails the rubric. A test we couldn't positively evaluate cannot meaningfully fail a grading criterion; collapsing to `flagged` would be a category error. The classifier (`_tier_for_kept` in `signalforge.diff.engine`) checks `decision.reason == "kept-without-evidence"` BEFORE the grading-aggregate dispatch.
+`DiffReport` always renders the kept/kept-uncertain/dropped/flagged header row; empty counts produce empty columns, not missing ones. The renderer never elides a tier — absence of kept-uncertain is itself signal.
 
-3. **`kept-uncertain` is a prune-origin signal, never a doc/rationale signal.** Doc and rationale rows do not carry a `PruneDecision`; they call the tier classifier with `decision=None`, which never routes to `kept-uncertain`. A kept-with-no-grading doc row uses the pre-existing `_DOC_KEPT_NO_GRADING_WHY` carve-out (`tier="kept"`, `why="kept (no grading)"`) — that signal is orthogonal to kept-uncertain.
-
-`DiffReport` always renders the kept/kept-uncertain/dropped/flagged header row; an empty `dropped_count` (or `kept_uncertain_count`) produces an empty count in the header line, not a missing column. The renderer never elides a tier — the absence of kept-uncertain tests is itself signal (every candidate evaluated with positive evidence).
-
-**ANSI palette and column width (issue #50).** `kept-uncertain` paints **cyan** (`_CYAN = "\x1b[36m"`) in the ANSI renderer — yellow is reserved for `flagged`, so cyan is the closest semantically-neutral choice that avoids palette collision. `_COL_TIER` widened from 8 → 14 to fit the literal `kept-uncertain` (14 chars) without ellipsis; every committed `.ansi` snapshot regenerated to absorb the column-width ripple. The Markdown renderer surfaces the tier as the literal text `kept-uncertain` in the table cell + a `**kept-uncertain=N**` summary cell; the JSON renderer carries `"tier": "kept-uncertain"` verbatim. All three renderers also include the new `kept_uncertain_count` aggregate.
-
-**5-surface graduation discipline (issue #50).** The `kept-uncertain` tier was graduated from a v0.2 reservation to behaviour-active per the rule from `prune-engine.md` § "5-surface parity for v0.x → v0.(x+1) graduations." The five surfaces are: (1) this rule file, (2) `docs/diff-ops.md`, (3) `CLAUDE.md` public-API surface, (4) the engine + renderer + drift-detector tests + committed fixtures, (5) `plans/super/50-diff-kept-uncertain.md`. Any future fifth `Tier` literal must update all five surfaces in lockstep AND bump `audit_schema_version` (currently `Literal[2] = 2`; issue #50's bump 1 → 2 is the precedent — external sidecar consumers gate on `>= 2` for the four-tier taxonomy).
-
-**`why` cascade for kept-uncertain rows.** The pre-#50 cascade (rationale → evidence → `decision.why`, see § "Kept-row `why` precedence" below) is **bypassed** for kept-uncertain rows. The prune-emitted `decision.why` is surfaced directly — it carries the deterministic load-bearing message ("total prune budget exceeded before evaluation" / "sample materialisation failed: …" / "identifier rejected by SQL safety check") that names the actual cause. The drafter's rationale and the grader's evidence are not meaningful for a test we couldn't evaluate. Still truncated to `max_why_chars` so the per-row budget is honoured. Pinned by `tests/diff/test_engine.py::test_kept_uncertain_why_uses_decision_why_not_rationale`.
+Issue #50's bump 1 → 2 of `audit_schema_version` is the precedent for any future fifth `Tier` literal: external sidecar consumers gate on `>= 2` for the four-tier taxonomy. Apply the 5-surface graduation rule from `prune-engine.md` § "5-surface parity for v0.x → v0.(x+1) graduations" when adding a fifth.
 
 ## Kept-row `why` precedence: rationale → evidence → fallback (DEC-022)
 
-Established by issue #41. Architectural Commitment #5 ("explainable diffs") says every kept/dropped/flagged artifact ships with a one-line "why." Pre-#41 the drafter's `CandidateColumn.rationale` / `CandidateTest*.rationale` and the grader's `GradingResult.evidence` were thrown away for kept rows — kept entries surfaced templated boilerplate (`"Test returned non-zero failing rows on the warehouse sample."` / `"Description added; passed all grading criteria."`) that degraded the differentiator vs. dbt-codegen / Copilot.
+Issue #41. Architectural Commitment #5 ("explainable diffs") requires every kept/dropped/flagged artifact to ship with a one-line "why."
 
-The cascade for kept-tier rows (in `_entry_for_test` and `_entries_for_doc`):
+Cascade for kept-tier rows (in `_entry_for_test` and `_entries_for_doc`):
 
-1. **Candidate `rationale`** (drafter-emitted, primary source) — `CandidateColumn.rationale` for docs, `CandidateTest*.rationale` for tests.
-2. **First non-empty `GradingResult.evidence`** (grader-emitted, secondary source) — iterated in criterion-order; the first criterion with non-empty `evidence` wins so precedence is deterministic across re-runs.
-3. **Existing fallback** — `decision.why` for tests (prune's `DropReason` prose), `description` for docs.
+1. **Candidate `rationale`** (drafter-emitted, primary).
+2. **First non-empty `GradingResult.evidence`** (grader-emitted, secondary) — iterated in criterion-order; first non-empty wins for deterministic precedence.
+3. **Existing fallback** — `decision.why` for tests, `description` for docs.
 
-Each tier flows through `_truncate_why(text, max_chars)` (hard-cut at `max_chars - 1` + U+2026 ellipsis; whitespace-only input returns `""` so the cascade falls through). The `_DOC_KEPT_NO_GRADING_WHY` branch (kept doc without grading) is preserved verbatim — kept-without-evidence is signal, not boilerplate, and the ticket's acceptance criteria explicitly carve it out.
+Each tier flows through `_truncate_why(text, max_chars)` (hard-cut at `max_chars - 1` + U+2026 ellipsis; whitespace-only input returns `""` so the cascade falls through).
 
-**Issue #50 carve-out — kept-uncertain rows bypass the cascade entirely.** When the tier classifier routes a row to `tier="kept-uncertain"` (`decision.reason == "kept-without-evidence"`), the engine surfaces `decision.why` directly without consulting `rationale` or `evidence`. The prune-emitted message ("total prune budget exceeded before evaluation" / "sample materialisation failed: …" / "identifier rejected by SQL safety check") names the actual cause; the drafter's rationale and the grader's evidence describe a test we couldn't evaluate and would mislead the reviewer. The truncation pass still applies. See § "Tier classification" above for the full kept-uncertain contract.
+**Issue #50 carve-out — kept-uncertain rows bypass the cascade.** When `decision.reason == "kept-without-evidence"`, the engine surfaces `decision.why` directly. The prune-emitted message names the actual cause ("total prune budget exceeded", "sample materialisation failed", "identifier rejected"); the drafter's rationale describes a test we couldn't evaluate and would mislead. Truncation still applies. Pinned by `tests/diff/test_engine.py::test_kept_uncertain_why_uses_decision_why_not_rationale`.
 
 Load-bearing invariants:
 
-- **One source per row, no concatenation.** Whichever tier of the cascade hits first wins; the others are discarded. Reviewers read a single tight line, not a layered montage.
-- **Cascade on whitespace, not just `None`.** A `rationale=""` or `rationale="   "` is treated as absent so a drafter that emits empty rationale doesn't suppress the next fallback.
-- **`reasoning` is not in the cascade.** The pre-#41 source at `_entries_for_doc`'s kept-with-grading branch was `grading_results[0].reasoning or description` — `reasoning` was the grader's pass/fail justification (criterion-level) and tended to read as boilerplate (`"passed all grading criteria"`). `evidence` carries the qualitative per-criterion content. Do not re-introduce `reasoning` into the cascade without revisiting the boilerplate trade-off.
-- **Every tier obeys `max_why_chars`.** The `decision.why` (test) and `description` (doc) fallbacks flow through `_truncate_why` too, not just the LLM-supplied tiers. A verbose prune reason or column doc cannot bypass the per-row cap. The flagged-tier `_flagged_why` budget likewise includes its `"failed grading: <criterion_id> — "` prefix in `max_chars` so total output ≤ `max_chars`. The JSON sidecar serialises `DiffEntry.why` verbatim, so this is the only barrier between operator content and the rendered table cell.
-- **Escape sinks (DEC-007, DEC-008) still apply.** The threaded rationale/evidence are user-supplied content — the existing unconditional ANSI strip and Markdown HTML-entity escape cover the new path. The renderer-level escape test in `tests/diff/test_renderers.py` (`test_kept_row_rationale_with_hostile_content_is_escaped_in_markdown`) pins this against future bypass.
+- **One source per row, no concatenation.** Whichever tier hits first wins; others are discarded.
+- **Cascade on whitespace, not just `None`.** An empty-or-blank `rationale` is treated as absent so an empty-rationale draft doesn't suppress the fallback.
+- **`reasoning` is not in the cascade.** It reads as boilerplate (`"passed all grading criteria"`); `evidence` carries the qualitative per-criterion content.
+- **Every tier obeys `max_why_chars`.** Including `decision.why`, `description`, and the flagged-tier `_flagged_why` budget (which counts its `"failed grading: <id> — "` prefix in the cap).
+- **Escape sinks (DEC-007, DEC-008) still apply.** The unconditional ANSI strip + Markdown HTML-entity escape cover the new path; pinned by `test_kept_row_rationale_with_hostile_content_is_escaped_in_markdown`.
 
-If you add a fourth source (e.g., a per-artifact operator note in v0.3), append it AFTER `evidence` in the cascade and update this DEC, `_entry_for_test`, `_entries_for_doc`, and the cascade tests in `tests/diff/test_engine.py` in the same change.
+A fourth source (e.g. operator note in v0.3) appends AFTER `evidence` — update this DEC, both `_entry_*` helpers, and the cascade tests in lockstep.
 
 ## Fail-closed sidecar JSON (DEC-009, mirrors grade DEC-006/012)
 
-`signalforge.diff._sidecar.write_sidecar` is the project's **fifth** fail-closed writer (after safety, draft, prune, grade). The contract is identical:
+`signalforge.diff._sidecar.write_sidecar` is the project's fifth fail-closed writer. Contract:
 
-1. **Propagation IS the defence.** Open with `O_WRONLY | O_CREAT | O_TRUNC | 0o600`, single `os.write` (looped on short returns), `os.fsync`, close. Path-canonicalisation failures wrap as `DiffSidecarWriteError(cause=...)` (only because the helper raises a warehouse-layer name); nothing else is wrapped. The sole `try / finally` around `os.close(fd)` does NOT suppress write/fsync failures — `contextlib.suppress(OSError)` guards only the close. The AST defence in `tests/diff/test_sidecar.py` asserts there is exactly one `Try` node in the module and that it has no `except` handlers around the write path.
+1. **Propagation IS the defence.** Open with `O_WRONLY | O_CREAT | O_TRUNC | 0o600`, single `os.write` (looped on short returns), `os.fsync`, close. The sole `try / finally` around `os.close(fd)` does NOT suppress write/fsync failures — `contextlib.suppress(OSError)` guards only the close. The AST defence in `tests/diff/test_sidecar.py` asserts there is exactly one `Try` node in the module with no `except` handlers around the write path.
+2. **Size cap before any file open.** `_DIFF_SIDECAR_RECORD_LIMIT_BYTES = 10_000_000` (10 MB — order of magnitude above grade's 1 MB because diff text is naturally larger). Oversize raises `DiffSidecarRecordTooLargeError` BEFORE any `os.open`.
+3. **Single-document overwrite, not append.** End-of-run only; every `render_diff` replaces the prior sidecar atomically via `O_TRUNC`. Concurrent runs against the same path produce different `run_id`s; last-writer-wins.
 
-2. **Size cap before any file open.** `_DIFF_SIDECAR_RECORD_LIMIT_BYTES = 10_000_000` (10 MB — an order of magnitude above grade's 1 MB because diff text is naturally larger than evidence-only payloads). Oversize raises `DiffSidecarRecordTooLargeError` BEFORE any `os.open` so an oversize payload leaves no on-disk artefact.
-
-3. **Single-document overwrite, not append.** End-of-run only; every `render_diff` call replaces the prior sidecar atomically via `O_TRUNC`. Concurrent runs against the same `sidecar_path` produce different `run_id`s and last-writer-wins (mirrors grade-layer.md). Operators are expected to use a per-run path or accept overwrite semantics.
-
-The sidecar is **on by default** (`write_sidecar=True`). When `sidecar_path=None` and `write_sidecar=True`, the sidecar lands at `<project_dir>/.signalforge/diff.json` (mirrors grade's always-write posture for the durable hand-off). To skip the write entirely, pass `write_sidecar=False` — useful for library callers rendering in-process without a disk artefact. The original "opt-in only" semantics shipped briefly during US-007 development; Q1=A on the second-pass review locked the default-on shape so the diff sidecar matches grade / prune's always-durable contract.
+Sidecar is **on by default** (`write_sidecar=True`). With `sidecar_path=None`, lands at `<project_dir>/.signalforge/diff.json` (mirrors grade's always-write posture). Pass `write_sidecar=False` to skip — useful for library callers rendering in-process without disk.
 
 ## Symlink-hardened path canonicalisation at the orchestrator (mirrors grade post-QG fix)
 
-`render_diff` is the place that knows the true `project_dir`. The writer's own `canonicalise_path` derivation against `project_dir.parent.parent` would be unsafe for caller-supplied paths — a caller passing `sidecar_path=/tmp/diff.json` would let any symlink slip the gate.
-
-The fix (and its precedent in `grade-layer.md`): the orchestrator calls `canonicalise_path(raw_output_path, resolved_project_dir)` and `canonicalise_path(raw_sidecar_path, resolved_project_dir)` BEFORE handing off to the writers. Failures wrap as `DiffSidecarWriteError`. The writer's own canonicalise stays as defence-in-depth, but the load-bearing gate is the engine's. The same gate covers `output_path` (rendered text destination), not just the sidecar.
-
-When introducing a sixth fail-closed writer (e.g., a CLI run-history audit), apply the same engine-level canonicalisation. Don't trust the writer to derive its own `project_dir`.
+`render_diff` knows the true `project_dir`. The orchestrator calls `canonicalise_path(raw_output_path, resolved_project_dir)` and `canonicalise_path(raw_sidecar_path, resolved_project_dir)` BEFORE handing off to the writers. Failures wrap as `DiffSidecarWriteError`. The writer's own canonicalise stays as defence-in-depth, but the load-bearing gate is the engine's. Same applies to `output_path`.
 
 ## `existing_schema` size cap before any `yaml.safe_load` (DEC-006)
 
-`existing_schema` is operator-supplied YAML text. `yaml.safe_load` is safe against arbitrary code execution but is NOT safe against pathological payloads — billion-laughs (deeply nested anchor expansion) and arbitrary deep-nesting can consume gigabytes of memory before the parser yields. Defence: literal byte-length cap on the encoded UTF-8 input.
+`yaml.safe_load` is safe against code execution but NOT against billion-laughs (nested anchor expansion) or arbitrary deep-nesting. `render_diff` checks `len(existing_schema.encode("utf-8")) <= config.existing_schema_size_limit_bytes` BEFORE calling `yaml.safe_load`. Oversize raises `DiffInputTooLargeError(size, limit)` — the parser never sees a hostile payload. Mirrors the "size cap before any open" pattern, applied at the YAML deserialiser instead of the file-open seam.
 
-`render_diff` checks `len(existing_schema.encode("utf-8")) <= config.existing_schema_size_limit_bytes` BEFORE calling `yaml.safe_load`. Oversize raises `DiffInputTooLargeError(size, limit)` — the parser never sees a hostile payload. Mirrors the safety / grade "size cap before any open" pattern, applied at the YAML deserialiser instead of the file-open seam.
+## `existing_schema` soft-warn / hard-cap invariant (DEC-014)
 
-`existing_schema` is not the only externally-controlled YAML in the layer (the `signalforge.yml` config file is too), but the size of an operator's `schema.yml` is the only payload the orchestrator can plausibly receive at runtime. The config loader's failure mode is `DiffError` with remediation; the renderer's is the typed `DiffInputTooLargeError`.
+`DiffConfig.@model_validator(mode="after")` raises `ValueError` at config-load time when `warn_at_bytes >= size_limit_bytes` — otherwise the DEC-014 soft-warn would be dead code. Apply the same shape to any future "soft-warn before hard-cap" pair: a model-level validator that asserts `warn < cap`.
 
-## `existing_schema` soft-warn / hard-cap invariant (DEC-014, post-QG fix)
+## `sidecar_size_limit_bytes` wired through orchestrator
 
-The renderer ships two thresholds: `existing_schema_warn_at_bytes` (soft warning, default 1 MB) and `existing_schema_size_limit_bytes` (hard cap, default 10 MB). The DEC-014 soft-warn fires when the payload exceeds warn-at but stays below the hard cap. **If `warn_at_bytes >= size_limit_bytes`, the warning is dead code.**
-
-The post-QG fix: `DiffConfig.@model_validator(mode="after")` raises `ValueError` at config-load time when `warn_at >= size_limit`. The original implementation shipped with inverted defaults (warn_at=10 MB, size_limit=1 MB) which silently disabled DEC-014; the test suite caught the dead branch but the production defaults made the soft-warn unreachable. The validator now fails loud rather than silently disabling the contract.
-
-The pattern: any future "soft-warn before hard-cap" pair gets a model-level validator that asserts `warn < cap`. Mirror the same shape for warning thresholds in the prune budget (v0.2) or any other tiered cap.
-
-## `sidecar_size_limit_bytes` wired through orchestrator (post-QG fix)
-
-`DiffConfig.sidecar_size_limit_bytes` was originally exported but never consumed — `write_sidecar` only knew the module-level `_DIFF_SIDECAR_RECORD_LIMIT_BYTES = 10_000_000`. The post-QG fix wires the config field through `render_diff` to `write_sidecar` via a `size_limit_bytes` kwarg; the writer falls back to the module constant only when the kwarg is `None` (the test-facing seam).
-
-The pattern: every user-overridable cap on a config block must have one path from `DiffConfig.<field>` → `render_diff(... config=...)` → `write_sidecar(... size_limit_bytes=config.<field>)`. A config field that's exported but not threaded is a silent no-op; future config additions need an end-to-end test that pins the orchestrator-level error when the cap is exceeded (`tests/diff/test_engine.py` carries the precedent).
+Every user-overridable cap on a config block must have one path from `DiffConfig.<field>` → `render_diff(... config=...)` → `write_sidecar(... size_limit_bytes=config.<field>)`. An exported-but-unwired field is a silent no-op; new config additions need an end-to-end test that pins the orchestrator-level error when the cap is exceeded.
 
 ## ANSI strip runs UNCONDITIONALLY on user content (DEC-007)
 
-`signalforge._common.ansi_safety.strip_ansi_escapes(text)` — full ECMA-48 / ISO 6429 CSI regex `r'\x1b\[[0-?]*[ -/]*[@-~]'` (broadened from the original `\x1b\[[0-9;]*[a-zA-Z]` during US-014 because the narrow form missed tilde-terminated key/mode sequences such as `\x1b[3~` (Delete) and bracketed-paste markers `\x1b[200~` / `\x1b[201~`). Promoted to `signalforge._common.ansi_safety` in issue #60 so the CLI's `print_stderr` sink shares the same regex; the diff-layer module `signalforge.diff._ansi_safety` is now a back-compat re-export and stays usable as the historic import path. Covers SGR (colour/style — `\x1b[31m`, `\x1b[1;31;4m`, reset `\x1b[0m`), cursor-movement / screen-clearing (`\x1b[2J`, `\x1b[H`), and the tilde-terminated and intermediate-byte CSI variants. Both `AnsiRenderer` and `MarkdownRenderer` invoke this on every user-content field (`description`, `rationale`, `evidence`, `reasoning`, `why`, `drop_reason`, `artifact_id`) BEFORE the renderer's own colour codes / Markdown escapes are added; the CLI's `signalforge.cli._helpers.print_stderr` invokes it on every stderr write (issue #60).
+`signalforge._common.ansi_safety.strip_ansi_escapes(text)` — full ECMA-48 / ISO 6429 CSI regex `r'\x1b\[[0-?]*[ -/]*[@-~]'`. Covers SGR (colour/style), cursor-movement/screen-clearing, tilde-terminated and intermediate-byte CSI variants. (Broadened during US-014 from `\x1b\[[0-9;]*[a-zA-Z]` which missed tilde-terminated key/mode sequences like `\x1b[3~` and bracketed-paste markers.) Promoted to `_common` in issue #60 so the CLI's `print_stderr` sink shares the same regex; `signalforge.diff._ansi_safety` is now a back-compat re-export.
 
-The load-bearing invariant: **the strip is unconditional, not gated on the colour-precedence chain (DEC-021).** A malicious manifest field carrying `\x1b[31mEVIL\x1b[0m` renders as the literal text `EVIL` even when colour is forced ON via `respect_no_color_env=False` or `FORCE_COLOR=1`. The colour precedence only governs whether the renderer's *own* sanctioned SGR codes get emitted; user-content stripping is the security boundary.
+Both `AnsiRenderer` and `MarkdownRenderer` invoke this on every user-content field (`description`, `rationale`, `evidence`, `reasoning`, `why`, `drop_reason`, `artifact_id`) BEFORE adding their own colour codes / Markdown escapes. The CLI's `signalforge.cli._helpers.print_stderr` invokes it on every stderr write (issue #60).
 
-The CSI regex does NOT cover OSC (`\x1b]...`), DCS (`\x1bP...`), or other non-CSI escapes — out of scope for v0.1 because the upstream sources (manifests, LLM output) overwhelmingly emit only CSI sequences when they emit anything. Extend the regex when a real-world incident demonstrates otherwise; do not pre-emptively broaden.
+**The strip is unconditional, not gated on the colour-precedence chain (DEC-021).** A malicious manifest field carrying `\x1b[31mEVIL\x1b[0m` renders as literal `EVIL` even when colour is forced ON via `respect_no_color_env=False` or `FORCE_COLOR=1`. Colour precedence governs only the renderer's *own* sanctioned SGR codes; user-content stripping is the security boundary.
 
-The `_LOGGER` lazy-format gate (DEC-019) covers the audit channel; this strip covers the stdout / Markdown / sidecar sinks. They are independent defences against the same threat surface.
+Does NOT cover OSC (`\x1b]...`), DCS (`\x1bP...`), or other non-CSI escapes — out of scope for v0.1; broaden only on a real-world incident.
 
 ## Markdown table-cell escape with HTML entities, raw passthrough inside fenced diff (DEC-008)
 
-`signalforge.diff._markdown_safety.escape_markdown_scalar(text, in_table_cell=False)` escapes:
+`signalforge.diff._markdown_safety.escape_markdown_scalar(text, in_table_cell=False)`:
 
-- Backslash (`\\`) — first, so subsequent escapes cannot be unwound by a crafted trailing `\`.
-- Backtick (`` ` ``) — leaks the rest of the line into a code span until the next backtick.
-- Pipe (`|`) — backslash-escaped outside tables; HTML-entity-encoded (`&#124;`) inside table cells because the GFM table parser tokenises pipes BEFORE applying inline-escape rules. Backslash-pipe still breaks column counts in some renderers.
-- Inside table cells, also entity-encode `\n` / `\r` / `\t` (`&#10;` / `&#13;` / `&#9;`) so the row geometry survives.
+- Backslash first (so subsequent escapes can't be unwound by a trailing `\`).
+- Backtick (would leak into a code span).
+- Pipe — backslash-escaped outside tables; HTML-entity-encoded (`&#124;`) inside table cells (GFM tokenises pipes BEFORE inline-escape rules).
+- Inside table cells, also entity-encode `\n` / `\r` / `\t` so row geometry survives.
 
-**Inside the fenced ` ```diff ` block, raw content passes through.** The diff body is YAML; backticks etc. don't break a `diff` fence, and GitHub doesn't interpret HTML inside the fence. Pass-through preserves the actual YAML — escaping inside the fence would corrupt the diff's bytes. Fixtures exercise triple-backticks in `description`, `</details>`, `[evil](javascript:...)`, and pipe in column names; the `injection_payloads` snapshot pins the expected byte-output.
+**Inside the fenced ` ```diff ` block, raw content passes through.** The body is YAML; escaping would corrupt its bytes. Fixtures exercise triple-backticks in `description`, `</details>`, `[evil](javascript:...)`, and pipes in column names; the `injection_payloads` snapshot pins the byte-output.
 
-The pattern: escape at the sink. Markdown is one sink; the JSON sidecar uses Pydantic's `model_dump_json` (which JSON-encodes); the ANSI sink runs `strip_ansi_escapes` (above). Each sink owns its escaping pass — don't centralise into a single "sanitise" helper because each sink has different rules for what's safe.
+The pattern: escape at the sink. Markdown / JSON / ANSI each own their escaping pass; don't centralise — each sink has different rules.
 
 ## Markdown body truncation at the last hunk boundary (DEC-005)
 
-GitHub PR comments are 65 536 chars. `DiffConfig.markdown_max_diff_chars: int = 60_000` leaves room for the table, the prelude, and the truncation footer. When the rendered Markdown diff body exceeds the cap, `MarkdownRenderer` truncates the diff section and appends:
+GitHub PR comments cap at 65 536 chars. `DiffConfig.markdown_max_diff_chars: int = 60_000` leaves room for table + prelude + footer. When the rendered diff exceeds the cap, `MarkdownRenderer` truncates at the **last complete hunk boundary** below the cap (NOT a mid-hunk character cut — that would produce malformed unified-diff that breaks Recce/GitHub) and appends:
 
 ```text
 ... (N more lines truncated — see <project_dir>/.signalforge/diff.json for full diff)
 ```
 
-The truncation is at the **last complete hunk boundary** below the cap, not a mid-hunk character cut. Truncating mid-hunk produces a malformed unified-diff body that breaks downstream tooling (Recce / GitHub's diff viewer). Preserving complete hunks costs at most one hunk's worth of size headroom; the 60 000 cap was chosen with that headroom included.
-
-The kept/dropped/flagged table always renders fully (one line per artifact; small). The unified-diff body is the only field that can outgrow the cap.
-
-Operators are pointed at the sidecar for the full diff; the truncation footer carries the exact path. The CLI (#9) will wire `--sidecar-path` so the footer's reference is always meaningful.
+The kept/dropped/flagged table always renders fully (small). Only the unified-diff body can outgrow the cap. Operators are pointed at the sidecar for the full content.
 
 ## Three boundary checks at orchestrator entry (DEC-002)
 
@@ -140,121 +114,75 @@ Operators are pointed at the sidecar for the full diff; the truncation footer ca
 2. `prune_result.model_unique_id == model.unique_id` → `DiffPruneResultModelMismatchError`.
 3. `grading_report.model_unique_id == model.unique_id` (when provided) → `DiffGradingReportModelMismatchError`.
 
-Mirrors `grade-layer.md`'s `prune_result.model_unique_id` boundary check verbatim — a stale typed result from a sibling stage would silently drive misleading kept/dropped/flagged tallies into the rendered diff. Convention as boundary; the `_unique_id`/`_name` linkage is the v0.1 contract for every typed-result handoff between pipeline stages.
-
-When v0.2 introduces a new typed-result handoff (e.g., a multi-model batch result), apply the same `<arg>.<id_field> == model.<id_field>` check at orchestrator entry. Without it, a stale result silently corrupts the downstream artifact.
+Mirrors `grade-layer.md` verbatim — convention as boundary; the `<arg>.<id> == model.<id>` linkage is the v0.1 contract for every typed-result handoff between stages. When a new typed-result handoff lands in v0.2, apply the same check at orchestrator entry.
 
 ## Reproducibility hash fields on every DiffReport (DEC-016)
 
-`DiffReport` carries three 16-hex `blake2b-8` (digest_size=8) fingerprints:
+Three 16-hex `blake2b-8` (digest_size=8) fingerprints: `candidate_hash`, `prune_result_hash`, `grading_report_hash` (latter is `None` when the caller omitted the report). Recipe: `blake2b-8` of `<obj>.model_dump_json(by_alias=True)` re-encoded through `json.dumps(sort_keys=True, separators=(",", ":"))`. The double-pass (Pydantic JSON → dict → canonical JSON) avoids relying on Pydantic's internal field ordering.
 
-- `candidate_hash` — blake2b-8 of `candidate.model_dump_json(by_alias=True)` re-encoded through `json.dumps(sort_keys=True, separators=(",", ":"))`. Stable across field-construction order.
-- `prune_result_hash` — same recipe, applied to the `PruneResult`.
-- `grading_report_hash` — same recipe applied to the `GradingReport` when provided; `None` when the caller omitted it.
+A reviewer querying "what inputs produced this diff?" reads three hashes from the sidecar and reconstructs from the upstream JSONL audits.
 
-A reviewer querying "what inputs produced this diff?" reads three hashes from the sidecar and reconstructs from the upstream JSONL audits (`audit.jsonl`, `llm_responses.jsonl`, `prune.jsonl`, `grade.jsonl`). The double-pass (Pydantic JSON → Python dict → canonical JSON) avoids relying on Pydantic's internal field ordering, which is declared stable in v2 but not contractually guaranteed across point releases.
-
-`DiffReport` also carries `schema_version: Literal[1] = 1` and `audit_schema_version: int = 1` — frozen at constants in production code. Bump when the sidecar JSON schema evolves; v0.2 readers gate on these.
+`DiffReport` also carries `schema_version: Literal[1] = 1` and `audit_schema_version: Literal[2] = 2` — frozen at constants. Bump when the sidecar JSON shape evolves; v0.2 readers gate on these.
 
 ## Single INFO log per `render_diff` call, lazy-format JSON (DEC-015)
 
-Two `_LOGGER` events in the entire diff layer:
+Two `_LOGGER` events in the entire layer:
 
-1. `INFO`: `"rendered diff: %s"` with `json.dumps({"run_id": ..., "model_unique_id": ..., "render_kind": ..., "kept": k, "dropped": d, "flagged": f, "has_existing_schema": bool, "duration_seconds": s, "candidate_hash": ..., "prune_result_hash": ..., "grading_report_hash": ...})`. Emitted at end of the happy path.
-2. `WARNING`: the DEC-014 large-schema warning when `existing_schema` exceeds `warn_at_bytes` but stays below the hard cap.
+1. `INFO` end-of-happy-path with `run_id`, `model_unique_id`, `render_kind`, tier counts, `has_existing_schema`, `duration_seconds`, the three reproducibility hashes.
+2. `WARNING` for the DEC-014 large-schema condition (over warn-at, under hard-cap).
 
-No separate `WARNING` before raising typed errors — the exception IS the signal (mirrors grade DEC-006). No `DEBUG` calls in v0.1; if an operator needs a deeper trace, the reproducibility hashes plus the upstream JSONL audits cover the post-mortem path.
+No separate WARNING before raising typed errors — the exception IS the signal (mirrors grade DEC-006). No DEBUG in v0.1.
 
-Stdout is the operator channel; `_LOGGER` is for log aggregators / CI runs. INFO + the conditional WARN cover both successful runs and the soft-cap signal without flooding logs.
+## ANSI-safe lazy-format JSON logger + grep gate (DEC-019)
 
-## ANSI-safe lazy-format JSON logger + grep gate (DEC-019, fifth dir)
+Same rule as the other four pipeline layers (`safety-layer.md` DEC-022 / `llm-drafter.md` DEC-011 / `prune-engine.md` DEC-017 / `grade-layer.md` DEC-029). The grep gate at `tests/llm/test_logger_grep_gate.py` scans `src/signalforge/{llm,draft,prune,grade,diff,cli}` (6 dirs as of #9) and rejects any `_LOGGER\.\w+\(f"` hit.
 
-Same rule as `safety-layer.md` DEC-022 / `llm-drafter.md` DEC-011 / `prune-engine.md` DEC-017 / `grade-layer.md` DEC-029. Never f-string-interpolate user-controlled strings into a `_LOGGER` call:
+## Fail-closed writer AST defence (DEC-018)
 
-```python
-_LOGGER.info("rendered diff: %s", json.dumps({"model_unique_id": ..., "kept": k, ...}))
-```
+Every fail-closed writer module gets a test that pins the `try / finally` shape (no `except` around write/fsync). `tests/diff/test_sidecar.py::test_sidecar_writer_has_no_except_around_write` is the diff-layer instance. The diff sidecar `DiffReport` is read-back, gated by the drift detector below — there is no `DiffEvent` class.
 
-The grep gate at `tests/llm/test_logger_grep_gate.py` now scans `src/signalforge/{llm,draft,prune,grade,diff}` (5 dirs) and rejects any `_LOGGER\.\w+\(f"` hit. The regex covers every f-string permutation (`f"`, `f'`, `rf"`, `fr'`, ...). Extend the scan when the CLI (#9, sixth dir) ships, rather than copy-pasting a per-layer gate; the single test is the source of truth.
+## `_artifact_id` parity with grade layer (issue #42)
 
-## No new AST scan for the diff layer (DEC-018)
+`signalforge.diff._artifact_id.artifact_id_for(...)`, `_model_test_args_hash(...)`, and `compute_args_hashes(...)` are **re-exports of the shared seam** `signalforge._common.artifact_id`. The diff renderer joins grade-sidecar JSON to its rendered diff via the `(run_id, artifact_id, criterion_id)` triple — identity-equal function objects across the two consuming layers make silent drift impossible.
 
-The 6th AST scan from #7 (gating `GradeEvent`) is the last of its kind in v0.1. The diff renderer has no audit-event class — the sidecar `DiffReport` is read-back, gated by the drift detector (mandatory below) instead. There is no `DiffEvent`; if v0.2 introduces a per-render audit JSONL (e.g., for multi-model batched runs), revisit and add the 7th scan then with the same exclusion-list pattern as the prior five.
+Cross-stage parity is pinned by `tests/diff/test_artifact_id.py::test_cross_stage_parity_is_function_identity` (`is` equality across `signalforge.diff._artifact_id`, `signalforge.grade.engine`, and `signalforge._common.artifact_id`). The cross-stage import from `signalforge.grade.engine` is the **single allowed cross-stage seam** between `signalforge.diff` and `signalforge.grade`; production diff code must NOT import from `signalforge.grade` at runtime.
 
-The pattern that DOES survive: every fail-closed writer module gets an AST defence test that pins the `try / finally` shape (no `except` around write/fsync). `tests/diff/test_sidecar.py::test_sidecar_writer_has_no_except_around_write` is the diff-layer instance; mirror the assertion when adding a sixth fail-closed writer.
-
-## `_artifact_id` parity with grade layer (DEC-009 + post-QG fix + issue #42 hoist)
-
-`signalforge.diff._artifact_id.artifact_id_for(...)`, `_model_test_args_hash(...)`, and `compute_args_hashes(...)` are now **re-exports of the shared seam** `signalforge._common.artifact_id` (issue #42). Before #42 the module shipped a byte-equal copy of the grade-layer formatter; the duplication is hoisted to a single source of truth. The diff renderer joins grade-sidecar JSON to its rendered diff via the `(run_id, artifact_id, criterion_id)` triple — identity-equal function objects across the two consuming layers make a silent drift impossible by construction. There is no second copy that could diverge.
-
-Cross-stage parity is exercised by `tests/diff/test_artifact_id.py::test_cross_stage_parity_is_function_identity` (the load-bearing assertion; `is` equality across `signalforge.diff._artifact_id`, `signalforge.grade.engine`, and `signalforge._common.artifact_id`). The legacy byte-equal tests (`test_cross_stage_parity_with_grade_engine`, `test_cross_stage_parity_model_test_args_hash`, `test_cross_stage_parity_compute_args_hashes`) remain as defence-in-depth — they're cheap and document the contract for a reader who hasn't followed the hoist. The cross-stage import from `signalforge.grade.engine` stays the **single allowed cross-stage seam** between `signalforge.diff` and `signalforge.grade`; production diff code must NOT import from `signalforge.grade` at runtime.
-
-When the formatter's grammar evolves (new artifact shape; `args_hash` rule change), edit **only** the shared module at `src/signalforge/_common/artifact_id.py`; both layers pick up the change. The collision rule from `grade-layer.md` (8-hex `args_hash` suffix when two tests in the same scope share a `test.type`; ordinal `:1`/`:2` suffix on exact-duplicate args) applies verbatim. The `compute_args_hashes(candidate)` helper pre-computes per-test hashes keyed by `id(test)` so the orchestrator's per-decision walk doesn't recompute on every row. The shared seam raises plain `ValueError` on programming errors; consumers may wrap with a layer-typed error at the orchestrator boundary if a caller needs to handle the failure mode beyond fail-loud (today, neither layer wraps — every internal call site feeds canonical inputs).
+When the formatter's grammar evolves, edit only `src/signalforge/_common/artifact_id.py`; both layers pick it up. The collision rule (8-hex `args_hash` suffix when two tests share scope + type; ordinal `:1`/`:2` on exact-duplicate args) lives in `grade-layer.md` and applies verbatim.
 
 ## Custom `__repr__` on result-shaped models (DEC-020, mirrors prune/grade)
 
-Pydantic v2's default `__repr__` emits every field. `DiffReport` carries `proposed_yaml`, `existing_yaml`, `unified_diff` (potentially multi-megabyte) plus the full `entries` tuple. `DiffEntry` carries `why` (potentially quoting artifact text generated upstream).
+Pydantic v2's default `__repr__` emits every field. `DiffReport` carries `proposed_yaml`, `existing_yaml`, `unified_diff` (potentially multi-megabyte) plus the full `entries` tuple. `DiffEntry` carries `why` (potentially quoting upstream artifact text).
 
-`DiffEntry.__repr__` shows only `artifact_id`, `tier`, `drop_reason`, `score`. `DiffReport.__repr__` shows only `model_unique_id`, `kept_count`, `dropped_count`, `flagged_count`, `has_existing_schema`, `duration_seconds`. Raw YAML, unified diff, and prose `why`/`evidence`/`reasoning` stay accessible via field access / `model_dump()`; they just don't slip out the casual debug-print path.
-
-Apply to any future result-shaped model whose fields include user-content payloads or multi-megabyte text bodies. The pattern is "minimal `__repr__`; rich access via fields" — don't override `__str__` (Pydantic uses it for serialisation).
+`DiffEntry.__repr__` shows `artifact_id`, `tier`, `drop_reason`, `score`. `DiffReport.__repr__` shows `model_unique_id`, kept/dropped/flagged counts, `has_existing_schema`, `duration_seconds`. Raw YAML, unified diff, and prose `why`/`evidence`/`reasoning` stay accessible via field access / `model_dump()`; they just don't slip out the casual debug-print path. Don't override `__str__` (Pydantic uses it for serialisation).
 
 ## Drift detectors are mandatory for read-back models (DEC-003)
 
-Every `extra="ignore"` production model — `DiffEntry`, `DiffReport` — pairs with a `Strict<X>(extra="forbid")` mirror in `tests/diff/test_drift_detector.py`, validated against committed fixtures (`tests/fixtures/diff/{diff_entry_v1.json,diff_report_v1.json}`). Adding a field to production without updating the strict mirror OR the fixture breaks the test loudly.
+Every `extra="ignore"` production model — `DiffEntry`, `DiffReport` — pairs with a `Strict<X>(extra="forbid")` mirror in `tests/diff/test_drift_detector.py`, validated against committed fixtures (`tests/fixtures/diff/{diff_entry_v1.json,diff_report_v1.json}`). Adding a field without updating the strict mirror OR the fixture breaks the test loudly.
 
-The `extra=` placement convention from `safety-layer.md` DEC-015 applies verbatim:
-
-- `DiffConfig`, `_DiffConfigFile` inner content → `extra="forbid"` (config-shaped; typos like `contxt_lines:` must fail loud).
-- `_DiffConfigFile` top level → `extra="ignore"` (sibling stages reserved).
-- `DiffEntry`, `DiffReport` → `extra="ignore"` (read-back; forward-compat).
-
-There is no `DiffEvent` to gate (no per-render JSONL); the `DiffReport` sidecar is the single read-back artefact and the drift detector covers it.
+`extra=` placement convention from `safety-layer.md` DEC-015 applies: config-shaped (`DiffConfig`, `_DiffConfigFile` inner) → `extra="forbid"`; `_DiffConfigFile` top level → `extra="ignore"` (sibling stages reserved); read-back (`DiffEntry`, `DiffReport`) → `extra="ignore"`.
 
 ## API alignment with adjacent stages
 
-`render_diff(model, candidate, prune_result, *, grading_report=None, existing_schema=None, config=None, output_path=None, sidecar_path=None, project_dir=None) -> DiffReport`. Matches the precedent from `grade_artifacts` / `prune_tests` / `draft_schema`:
+`render_diff(model, candidate, prune_result, *, grading_report=None, existing_schema=None, config=None, output_path=None, sidecar_path=None, project_dir=None) -> DiffReport`. Mirrors `grade_artifacts` / `prune_tests` / `draft_schema`: model + data front-paired positionally; keyword-only optionals after `*` in order (data-shaped → behaviour-knob → paths); `project_dir` for orchestrator-level path resolution.
 
-- Model + data front-paired positionally.
-- Keyword-only optionals separated by `*`.
-- Data-shaped optionals (`grading_report`, `existing_schema`) come first inside the kw-only block.
-- Behaviour-knob `config` next.
-- Path-shaped optionals last (`output_path`, `sidecar_path`, `project_dir`).
-- `project_dir` kwarg for orchestrator-level path resolution.
-
-`load_diff_config(project_dir, path=None) -> DiffConfig` matches `load_grade_config` / `load_prune_config` / `load_draft_config` / `load_safety_config`. Resolution order: explicit `path` > `<project_dir>/signalforge.yml diff:` > defaults. Explicit-path-missing raises `DiffError`; default-path-missing returns defaults silently (mirrors grader behaviour exactly).
-
-When introducing a new stage entry in v0.2 or beyond (CLI, multi-model batch runner), match the precedent. Diverging is more code than the alignment.
+`load_diff_config(project_dir, path=None) -> DiffConfig` matches `load_grade_config` / `load_prune_config` / `load_draft_config` / `load_safety_config`. Resolution order: explicit `path` > `<project_dir>/signalforge.yml diff:` > defaults. Explicit-path-missing raises `DiffError`; default-path-missing returns defaults silently (mirrors grader).
 
 ## `signalforge.yml` top-level namespace: `diff:` (DEC-010)
 
-The diff-stage block is `{ diff: { context_lines, max_why_chars, narrow_terminal_threshold, markdown_max_diff_chars, existing_schema_size_limit_bytes, existing_schema_warn_at_bytes, sidecar_size_limit_bytes, render_kind, respect_no_color_env } }`. Sibling top-level keys (`safety:`, `llm:`, `prune:`, `grade:`, future `cli:`) are reserved for other stages and silently ignored by the diff loader.
-
-`DiffConfig` uses `extra="forbid"`; the wrapping `_DiffConfigFile` uses `extra="ignore"` at the top level. Mirrors `grade-layer.md` DEC-029 / `prune-engine.md` DEC-020 / `llm-drafter.md` DEC-027 / `safety-layer.md` DEC-025 verbatim. Each numeric knob carries a `field_validator` that rejects non-positive values — a zero or negative cap would silently disable the protection or render an empty table.
-
-When introducing a new pipeline-stage config, claim its own top-level key. Don't pile under `diff:` — each stage's behaviour-knob block stays separate.
+The diff-stage block is `{ diff: { context_lines, max_why_chars, narrow_terminal_threshold, markdown_max_diff_chars, existing_schema_size_limit_bytes, existing_schema_warn_at_bytes, sidecar_size_limit_bytes, render_kind, respect_no_color_env } }`. Sibling top-level keys are reserved and silently ignored by the diff loader. Each numeric knob carries a `field_validator` that rejects non-positive values — a zero or negative cap would silently disable the protection.
 
 ## Renderer ABC — pure-return, orchestrator owns I/O (DEC-011)
 
-`signalforge.diff._renderers.Renderer` is an ABC with one abstract method: `render(self, report: DiffReport) -> str`. Three concretes return text; the orchestrator (`render_diff`) handles I/O — write to `output_path`, return to caller, dispatch sidecar. Snapshot tests assert `str == fixture_text` byte-for-byte.
+`signalforge.diff._renderers.Renderer` is an ABC with one abstract method: `render(self, report: DiffReport) -> str`. Three concretes (`AnsiRenderer`, `MarkdownRenderer`, `JsonRenderer`) return text; `render_diff` handles I/O. Snapshot tests assert `str == fixture_text` byte-for-byte.
 
-Pure-return is testable with no fake filesystem; mirrors prune/grade returning typed results rather than streaming output. Streaming is a v0.2 ask if real-world reports outgrow memory. The three concretes (`AnsiRenderer`, `MarkdownRenderer`, `JsonRenderer`) are private (`_renderers`) per DEC-004; only the typed-result + orchestrator + config + errors form the public contract. `JsonRenderer` is also the one the sidecar writer uses regardless of `config.render_kind` — the human-facing surface and the durable artefact share the JSON shape so a v0.2 GH Action consumer parses identical bytes whether the operator selected ANSI or Markdown for stdout.
+The three concretes are private (`_renderers`) per DEC-004; only the typed-result + orchestrator + config + errors form the public contract. `JsonRenderer` is also what the sidecar writer uses regardless of `config.render_kind` — the human-facing surface and the durable artefact share the JSON shape so a v0.3 GH Action consumer parses identical bytes whether the operator selected ANSI or Markdown for stdout.
 
-When v0.2 adds a custom renderer (e.g., `HtmlRenderer` for a web preview), promote `Renderer` to the public surface in lockstep with the new concrete. Don't expose a single concrete without the ABC — callers should bind to the abstract method, not the implementation.
+## Schema-version surfaces
 
-## v0.2 reservations (forward-compat surface, currently no-op)
-
-One surface decision ships in v0.1 but is reserved for v0.2:
-
-- `DiffReport.audit_schema_version: int = 1` — frozen; v0.2 readers gate on this when the sidecar JSON shape evolves.
-
-Graduated in #9 (CLI entrypoint):
-
-- `DiffConfig.render_kind: Literal["ansi", "markdown", "json"] = "ansi"` — **Graduated in #9 — `--format {ansi,markdown,json}` wires `render_kind`** (DEC-020 of `plans/super/9-cli-entrypoint.md`). The CLI re-validates `DiffConfig` with the override via `DiffConfig.model_validate({**dump, "render_kind": override})` so the soft-warn / hard-cap invariant validator re-runs (mirrors `SafetyPolicy.with_mode` from `safety-layer.md` DEC-018).
-- `signalforge.diff.render_to_text` — **Graduated in #9 — `signalforge.diff.render_to_text(report, *, config=None, project_dir=None) -> str` is the public stdout helper** (DEC-015 / DEC-022 of `plans/super/9-cli-entrypoint.md`). Internally calls the existing `signalforge.diff.engine._build_renderer(config or DiffConfig(), project_dir=project_dir)` then `renderer.render(report)`. Keeps DEC-004 ("renderers are private") intact while giving the CLI a one-liner for stdout. `DiffReport` does not carry the config used by the original `render_diff` call — the helper does NOT introspect the report; the caller supplies config explicitly OR accepts `DiffConfig()` defaults.
-
-Document these explicitly in their docstrings. The pattern: ship the surface in v0.1 so v0.2 is a behaviour change, not an API break.
+- `DiffReport.audit_schema_version: Literal[2] = 2` — bumped 1 → 2 by issue #50 when `kept-uncertain` graduated. External sidecar consumers gate on `>= 2`.
+- `DiffConfig.render_kind` — graduated by #9 (`--format {ansi,markdown,json}` wires it). CLI re-validates via `DiffConfig.model_validate({**dump, "render_kind": override})` so the soft-warn / hard-cap invariant validator re-runs.
+- `signalforge.diff.render_to_text(report, *, config=None, project_dir=None) -> str` — graduated by #9 as the public stdout helper. Internally builds the renderer via `_build_renderer(config or DiffConfig(), project_dir=project_dir)`. Keeps DEC-004 (renderers private) intact; the caller supplies config explicitly or accepts `DiffConfig()` defaults — the helper does NOT introspect the report.
 
 ## Reference
 
-`plans/super/8-diff-renderer.md` — DEC-001 … DEC-021. `src/signalforge/diff/` — current implementation. `docs/diff-ops.md` — operational reference. `tests/diff/test_drift_detector.py` — schema-drift gate. `tests/diff/test_sidecar.py` — fail-closed writer + AST defence. `tests/diff/test_public_api.py` — public-surface pin. `tests/diff/test_artifact_id.py::test_cross_stage_parity_is_function_identity` — cross-stage parity gate (issue #42; identity-equal re-exports of `signalforge._common.artifact_id`). `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate (5 dirs as of #8). `tests/fixtures/diff/{diff_entry_v1.json,diff_report_v1.json}` — committed sidecar/entry fixtures.
+`plans/super/8-diff-renderer.md` — DEC-001 … DEC-021. `src/signalforge/diff/` — current implementation. `docs/diff-ops.md` — operational reference. `tests/diff/test_drift_detector.py`, `tests/diff/test_sidecar.py`, `tests/diff/test_public_api.py`, `tests/diff/test_artifact_id.py::test_cross_stage_parity_is_function_identity`. `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate (5 dirs as of #8). `tests/fixtures/diff/{diff_entry_v1.json,diff_report_v1.json}`.

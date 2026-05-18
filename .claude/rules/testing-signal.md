@@ -6,7 +6,7 @@ This rule encodes SignalForge's first architectural commitment (signal over volu
 
 ## No `assert True`-shaped tests
 
-Every test must be capable of failing if its target is broken. The smoke test (`tests/test_smoke.py`) is the floor: it imports the package, asserts `__version__` is set, and asserts a PEP 440 shape. Each of those would fail on a real regression.
+Every test must be capable of failing if its target is broken. The smoke test (`tests/test_smoke.py`) is the floor: imports the package, asserts `__version__` is set, asserts PEP 440 shape. Each would fail on a real regression.
 
 If you find yourself writing a test that can't fail, delete it instead of shipping it.
 
@@ -20,45 +20,43 @@ strict_markers = true
 
 `addopts = "--strict-markers"` alone is **not enough on pytest 9.x** — it sets `option.strict_markers=True`, but `_pytest/mark/structures.py` reads `getini("strict_markers")` instead. Without both, an unknown `@pytest.mark.foo` warns but does NOT error at collection time.
 
-To verify locally: temporarily decorate a test with `@pytest.mark.does_not_exist`, run pytest, observe an *error* (not just a warning). Revert.
-
 ## src layout discovery
 
-Do NOT create `tests/__init__.py`. Pytest's rootdir handles discovery for src layouts; an empty `__init__.py` masks import errors and makes failures harder to read.
+Do NOT create `tests/__init__.py`. Pytest's rootdir handles discovery for src layouts; an empty `__init__.py` masks import errors.
 
 ## Fixture regeneration via ephemeral `uvx`
 
-When a fixture's correctness depends on an external tool's output (dbt's `manifest.json`, etc.), commit the *generated* artefact and document a regeneration script that runs the tool via `uvx` (or `pipx run`) at a pinned version:
+When a fixture's correctness depends on an external tool's output (dbt's `manifest.json`, etc.), commit the *generated* artefact and document a regeneration script that runs the tool via `uvx` at a pinned version:
 
 ```bash
 uvx --python 3.11 --from "dbt-duckdb==X.Y.*" --with "dbt-core==X.Y.*" dbt parse
 ```
 
-Pin the tool version in dev-deps for the *latest* schema only — older versions are summoned ephemerally. Strip non-deterministic fields (`generated_at`, `invocation_id`, `user_id`, etc.) with `jq` before committing so the JSON is reproducible. Reference: `tests/fixtures/regenerate.sh` (issue #2).
+Pin the tool version in dev-deps for the *latest* schema only — older versions are summoned ephemerally. Strip non-deterministic fields (`generated_at`, `invocation_id`, etc.) with `jq` before committing.
 
 ## Seeded determinism over snapshot normalisation
 
-When a derived identifier needs to land in a snapshot fixture (compiled SQL, generated artefact id, run-scoped temp-table name), prefer **seeded determinism** — `blake2b(stable_inputs, digest_size=N).hex()` over the inputs that should produce the same output across runs — over post-hoc regex normalisation in the test. The seeded path makes raw bytes stable across runs without a normalisation layer; the normalisation path becomes a maintenance burden the moment the regex shape evolves (e.g., the LLM drafter's `prompt_version` would have needed regex updates every time the system prompt changed if it weren't already a content hash). Mirrors DEC-001 of #22 (16-hex `_sf_sample_<run_id>` derived from `(model.unique_id, signalforge_version, sample_size, partition_filter)`) and the LLM drafter's `prompt_version` (DEC of #5). Reach for the hash recipe before reaching for `re.sub` in tests.
+When a derived identifier needs to land in a snapshot fixture, prefer **seeded determinism** — `blake2b(stable_inputs, digest_size=N).hex()` over inputs that should produce the same output across runs — over post-hoc regex normalisation. The seeded path makes raw bytes stable; the normalisation path becomes a maintenance burden the moment the regex shape evolves. Reach for the hash recipe before reaching for `re.sub` in tests.
 
 ## Drift detection via one-off `extra="forbid"` model
 
-If a parser uses `extra="ignore"` in production (forward-compat), pair it with a test that constructs a one-off `StrictModel(BaseModel)` with `extra="forbid"` and validates a known-current fixture against it. Adding a key to the fixture without updating the model breaks the test loudly. Reference: `tests/manifest/test_models.py::test_drift_detector_extra_forbid`.
+If a parser uses `extra="ignore"` in production (forward-compat), pair it with a test that constructs a one-off `StrictModel(BaseModel)` with `extra="forbid"` and validates a known-current fixture against it. Adding a key to the fixture without updating the model breaks the test loudly.
 
 ## AST single-construction-seam scans must catch all three bypass patterns (issue #40)
 
-Several rule files mandate that a "fail-closed audit event" class is constructed in exactly one module (`AuditEvent` in `safety.request`, `LLMResponseEvent` in `draft.audit`, `PruneEvent` in `prune.audit`, `GradeEvent` in `grade.audit`). The convention is enforced by AST scans in `tests/test_audit_completeness.py`. The scan visitor MUST catch three bypass patterns, not just bare-name calls:
+Several rule files mandate that a "fail-closed audit event" class is constructed in exactly one module (`AuditEvent` in `safety.request`, `LLMResponseEvent` in `draft.audit`, `PruneEvent` in `prune.audit`, `GradeEvent` in `grade.audit`). The scan visitor MUST catch three bypass patterns:
 
 1. **Bare** — `Target(...)` after `from <module> import Target`. Caught by `Call(func=Name(id=Target))`.
 2. **Import-alias** — `from <module> import Target as Alias; Alias(...)`. Caught by tracking aliases introduced via `ast.ImportFrom` whose `alias.name == target`, then matching `Call(func=Name(id=<alias>))`.
-3. **Module-attribute** — `from <pkg> import <module>; module.Target(...)`. Caught by matching `Call(func=Attribute(attr=Target))` regardless of which `<obj>` the attribute is accessed on. Deliberately broad — the gated class names are unique enough that an attribute access with the same name is overwhelmingly likely to be the gated class.
+3. **Module-attribute** — `from <pkg> import <module>; module.Target(...)`. Caught by matching `Call(func=Attribute(attr=Target))` regardless of `<obj>` — the gated class names are unique enough that an attribute access with the same name is overwhelmingly likely to be the gated class.
 
-A bare-name-only visitor (`Call(func=Name(id=target))`) is trivially bypassable by either alias or attribute form and provides **false confidence** — a reviewer who reads "the AST scan caught it" without knowing the visitor's shape is unprotected. `tests/test_audit_completeness.py::_QualifiedNameCallFinder` is the canonical implementation; reuse it for any new gated-construction scan a future stage ships. `getattr(module, "Target")(...)` is acceptable to leave unprotected — too dynamic for AST gating, and any reviewer reading `getattr` should already be on alert.
+A bare-name-only visitor is trivially bypassable and provides **false confidence**. `tests/test_audit_completeness.py::_QualifiedNameCallFinder` is the canonical implementation; reuse for any new gated-construction scan. `getattr(module, "Target")(...)` is acceptable to leave unprotected — too dynamic for AST gating, and any reviewer reading `getattr` should already be on alert.
 
-Each new scan also needs a planted-violation regression test that exercises all three patterns. `tests/test_audit_completeness.py::test_qualified_name_finder_catches_all_three_bypass_patterns` is the precedent (one parametrised test across all gated targets × all three patterns).
+Each new scan also needs a planted-violation regression test exercising all three patterns.
 
 ## Source-scan gates: AST over per-line regex (issue #45)
 
-Source-scanning gates that enforce a "no X in module Y" rule (the `_LOGGER` lazy-format gate at `tests/llm/test_logger_grep_gate.py`; the safety-layer literal-token gate; future similar tests) MUST be AST-based, never per-line regex. The historic logger gate used `re.search` per line and was trivially bypassable by splitting the call across lines:
+Source-scanning gates that enforce "no X in module Y" (the `_LOGGER` lazy-format gate; future similar tests) MUST be AST-based, never per-line regex. The historic logger gate used `re.search` per line and was trivially bypassable by splitting across lines:
 
 ```python
 _LOGGER.info(
@@ -66,17 +64,15 @@ _LOGGER.info(
 )
 ```
 
-The general rule: any time a gate scans source code for a pattern that can legally span multiple lines in Python, reach for `ast.parse` + `ast.NodeVisitor` (or `ast.walk` for cheap one-off scans). The parser normalises every quote style, prefix permutation, and whitespace/newline arrangement into the same node type — `JoinedStr` for every f-string, `Import` / `ImportFrom` for every import variant, `Attribute(value=Name('logging'))` for every `logging.X` reference. A regex has to anticipate every textual permutation; the AST has one canonical form. `_LoggerFStringVisitor` and `_file_has_logging_or_logger_node` in `tests/llm/test_logger_grep_gate.py` are the precedent — copy the shape for any new "absence" gate.
+Any time a gate scans source for a pattern that can legally span multiple lines in Python, reach for `ast.parse` + `ast.NodeVisitor`. The parser normalises every quote style, prefix permutation, and whitespace arrangement into the same node type. `_LoggerFStringVisitor` and `_file_has_logging_or_logger_node` in `tests/llm/test_logger_grep_gate.py` are the precedent.
 
-Three load-bearing details from the issue-#45 sharpening (PR #75 review):
+Three load-bearing details:
 
-1. **Walk positional args AND keyword arg values, recursively.** A `_LOGGER.warning("stuff", extra={"x": f"bad {y}"})` call hides an f-string two layers deep inside a keyword arg. The visitor must `ast.walk(arg)` over every positional AND `kw.value` and check for the gated node anywhere in the subtree. Surface-level `isinstance` checks miss it.
-2. **Substring scans false-positive on docstrings / comments mentioning the gated token.** A rule citation like `"per manifest-readers.md, no _LOGGER allowed"` would trip a `if "_LOGGER" in source:` check. The AST walk over `Name(id='_LOGGER')` doesn't see string literals (those parse as `Constant`), so the false-positive vanishes. The companion test plants a docstring containing the gated token and asserts NO match.
-3. **For "no logging at all" stage-0 enforcement, the gate must cover every form of indirection.** `import logging`, `import logging as X`, `from logging import getLogger`, `logging.getLogger(__name__)`, and bare `_LOGGER` references are all separate AST node types — `Import`, `ImportFrom`, `Attribute(value=Name('logging'))`, `Name(id='_LOGGER')`. Cover each. A check that only matches the literal token `_LOGGER` lets `from logging import getLogger; LOG = getLogger(__name__)` slip through silently.
+1. **Walk positional args AND keyword arg values, recursively.** A `_LOGGER.warning("stuff", extra={"x": f"bad {y}"})` hides an f-string two layers deep. The visitor must `ast.walk(arg)` over every positional AND `kw.value`. Surface-level `isinstance` checks miss it.
+2. **Substring scans false-positive on docstrings / comments mentioning the gated token.** A rule citation like `"per manifest-readers.md, no _LOGGER allowed"` would trip `if "_LOGGER" in source:`. The AST walk over `Name(id='_LOGGER')` doesn't see string literals (those parse as `Constant`). Plant a docstring containing the gated token; assert NO match.
+3. **"No logging at all" stage-0 enforcement must cover every form of indirection.** `import logging`, `import logging as X`, `from logging import getLogger`, `logging.getLogger(__name__)`, bare `_LOGGER` references are all separate AST node types. Cover each. A check that only matches the literal token `_LOGGER` lets `from logging import getLogger; LOG = getLogger(__name__)` slip through.
 
-Planted-violation self-checks are mandatory for the same reason as the audit-completeness scans (above): without them, a refactor that broke the visitor (e.g., dropped the `ast.walk` recursion or stopped checking keyword args) would silently disable the gate at the precise moment a real violation needed catching. The self-checks live in the same file as the gate and use the visitor directly against literal source strings, so they cost ~1ms and document the contract for any future maintainer in line with the production walker.
-
-When v0.x adds a new source-scanning gate (e.g., "no `print(...)` in production modules", "no `open(...)` outside the fail-closed writer modules", "no `time.sleep` outside `_sleep` aliases"), follow this shape: AST visitor, walk positional + keyword args recursively, planted-violation self-checks, false-positive control case. The cheap floor of `grep -r` belongs in interactive maintainer workflows, not in the test suite.
+Planted-violation self-checks are mandatory — without them, a refactor that broke the visitor would silently disable the gate at the precise moment a real violation needed catching.
 
 ## Coverage measurement
 
@@ -84,7 +80,7 @@ Established by issue #27 (DEC-001, DEC-004, DEC-009). Coverage instrumentation r
 
 ### `--cov-fail-under` runs locally too
 
-The `--cov-fail-under=<N>` gate lives in `addopts`, so every local `pytest` invocation enforces the coverage floor. This is deliberate — the canonical validation command (`ruff check . && ruff format --check . && pyright && pytest`) catches coverage regressions before push, not just in CI.
+The `--cov-fail-under=<N>` gate lives in `addopts`, so every local `pytest` invocation enforces the coverage floor. The canonical validation command catches regressions before push, not just in CI.
 
 ### Two-run baseline procedure (DEC-001)
 
@@ -99,9 +95,9 @@ Revisit when actual coverage exceeds `<N> + 5` for two consecutive `dev` builds.
 
 ### Known gap: excluded markers (DEC-004)
 
-Coverage measures only the default pytest set. Tests gated behind `bigquery`, `anthropic`, `cli_subprocess`, `e2e`, and `wheel_smoke` markers are excluded by addopts (`-m 'not bigquery and not anthropic and not cli_subprocess and not e2e and not wheel_smoke'`). Those code paths are exercised via fakes in unit tests; the real-network paths and the actual `python -m build` invocation are not instrumented.
+Coverage measures only the default pytest set. Tests gated behind `bigquery`, `anthropic`, `cli_subprocess`, `e2e`, and `wheel_smoke` markers are excluded by addopts. Those code paths are exercised via fakes in unit tests; the real-network / wheel-build paths are not instrumented.
 
-Because `--cov-fail-under` is in `addopts`, marker-specific runs (`pytest -m cli_subprocess`, `pytest -m bigquery`, `pytest -m e2e`, `pytest -m wheel_smoke`) will fail the coverage gate. Use `--no-cov` for these runs:
+Marker-specific runs must use `--no-cov` because `--cov-fail-under` would fail runs that exercise only a fraction of the codebase:
 
 ```bash
 pytest -m cli_subprocess --no-cov
@@ -110,73 +106,53 @@ SF_RUN_BQ=1 pytest -m bigquery --no-cov
 SF_RUN_BQ=1 GOOGLE_CLOUD_PROJECT=<billing-project> ANTHROPIC_API_KEY=sk-... pytest -m e2e --no-cov
 ```
 
-For a one-shot **pre-release** measurement of how much coverage the gated paths
-contribute (run all gated markers under `--cov` in a single invocation), see
-`CONTRIBUTING.md` § "Pre-release coverage audit". A maintainer running that
-before each release catches coverage regressions in the gated paths that the
-default badge number cannot surface.
+For a one-shot **pre-release** measurement of how much coverage the gated paths contribute (run all gated markers under `--cov` in a single invocation), see `CONTRIBUTING.md` § "Pre-release coverage audit". A maintainer running that before each release catches coverage regressions in the gated paths that the default badge number cannot surface.
 
-**`wheel_smoke` marker (issue #47).** Maintainer-only gate added by issue #47 to verify wheel-build packaging without coupling it to default CI. The single test (`tests/test_wheel_packaging.py`) shells out `python -m build --wheel --outdir <tmp>` (or `uvx --from build pyproject-build` when `build` isn't in the venv), opens the artifact via `zipfile.ZipFile`, and asserts the canonical demo file set appears under `signalforge/_demo/`. Catches `pyproject.toml` `[tool.hatch.build.targets.wheel] include` regressions that editable-install tests cannot — see `python-build.md` § "Shipping package data" for the full pattern.
+The `wheel_smoke` marker (issue #47) verifies wheel-build packaging without coupling it to default CI — the test shells out `python -m build --wheel` and asserts the canonical demo file set appears under `signalforge/_demo/`. See `python-build.md` § "Shipping package data".
 
 ## End-to-end gated tests (issue #10)
 
-Established by issue #10 (e2e smoke test against `bigquery-public-data`). Apply to any new test that exercises the full pipeline against a real warehouse + a real LLM provider.
+Apply to any new test that exercises the full pipeline against a real warehouse + a real LLM provider.
 
 ### Belt-and-suspenders gating: marker + runtime `pytest.skipif`
 
 A gated end-to-end test carries TWO independent gates:
 
-1. **`@pytest.mark.<gate>` on the test function** — registered in `pyproject.toml` `[tool.pytest.ini_options].markers` AND added to the default `addopts` exclusion list (`-m 'not <gate>'`). Default `pytest` invocations DESELECT (do not collect) the test entirely. Mirrors the `bigquery` / `anthropic` / `cli_subprocess` precedent.
+1. **`@pytest.mark.<gate>` on the test function** — registered in `pyproject.toml` `[tool.pytest.ini_options].markers` AND added to the default `addopts` exclusion list. Default `pytest` invocations DESELECT the test entirely.
 2. **A `_skip_reason()` helper called inside the test** — returns the missing-env-var message; the test calls `pytest.skip(reason)` when set. Surfaces a clear runtime skip when a maintainer runs `pytest -m <gate>` but forgets one of the env vars.
 
-Both gates are required. The marker prevents accidental collection in CI; the runtime skip turns a missing-env-var run into an obvious skip-with-reason rather than a cryptic real-network failure. Mirrors `tests/warehouse/test_bigquery_integration.py:1-17` precedent.
+The marker prevents accidental collection in CI; the runtime skip turns a missing-env-var run into an obvious skip-with-reason.
 
 ### Three-env-var gate for full-stack e2e
 
-When the test exercises BOTH the warehouse adapter AND the LLM seam (issue #10's case), require THREE env vars:
-
-- `SF_RUN_BQ=1` (or equivalent for non-BQ adapters) — opt-in to real warehouse calls.
-- `ANTHROPIC_API_KEY` — opt-in to real LLM calls.
-- `GOOGLE_CLOUD_PROJECT` — the billing project (BigQuery won't bill `bigquery-public-data` to itself; ADC's default project may not be set).
-
-Each missing var → a distinct skip reason naming the missing var. Maintainers debug missing-env-var skips quickly when the message says exactly which one.
+When the test exercises BOTH the warehouse adapter AND the LLM seam, require THREE env vars: `SF_RUN_BQ=1`, `ANTHROPIC_API_KEY`, `GOOGLE_CLOUD_PROJECT` (the billing project — BigQuery won't bill `bigquery-public-data` to itself). Each missing var → a distinct skip reason naming the var.
 
 ### `tmp_path` fixture isolation for tests producing on-disk artefacts
 
-If the test produces audit JSONLs or sidecar JSON under `<project_dir>/.signalforge/`, the test MUST copy the committed fixture into pytest's `tmp_path` before invoking the CLI:
+If the test produces audit JSONLs or sidecar JSON under `<project_dir>/.signalforge/`, copy the committed fixture into `tmp_path` before invoking the CLI:
 
 ```python
 def test_e2e(tmp_path):
-    project_dir = copy_fixture_to_tmp(_FIXTURE_DIR, tmp_path)  # shutil.copytree
+    project_dir = copy_fixture_to_tmp(_FIXTURE_DIR, tmp_path)
     main(["generate", "models/staging/<name>.sql", "--project-dir", str(project_dir)])
-    # audits land in tmp_path/.signalforge/, not the committed fixture
 ```
 
-Mirrors `tests/cli/_factories.py::make_fake_dbt_project` and `tests/cli/_e2e_helpers.py::copy_fixture_to_tmp`. Without this, running the test in place pollutes the committed `tests/fixtures/<name>/.signalforge/` directory across runs (DEC-008 of `plans/super/10-e2e-bigquery-smoke.md`).
+Without this, running the test in place pollutes the committed fixture across runs (DEC-008 of issue #10).
 
 ### Engineered determinism for LLM-driven assertions
 
-When an assertion depends on what the LLM drafts (which is non-deterministic across runs), engineer the test INPUT so the assertion is mathematically guaranteed.
-
-Issue #10's load-bearing example: the AC required at least one `drop_reason="always-passes"` decision, which depends on the LLM drafting a `not_null` test on a column that's actually never null. The fixture's staging SQL ships an engineered literal column (`'austin' AS region`) and a `COALESCE`'d column (`COALESCE(start_time, TIMESTAMP '...') AS start_time_safe`). The LLM reliably proposes `not_null` on every column; `not_null` on a literal is mathematically guaranteed to always-pass; the prune engine deterministically drops it.
-
-The pattern: identify the LLM-driven assertion → identify the input shape that makes it deterministic → engineer the fixture to produce that shape. Apply to any future end-to-end assertion that depends on LLM output.
+When an assertion depends on what the LLM drafts (non-deterministic across runs), engineer the INPUT so the assertion is mathematically guaranteed. Issue #10's example: the AC required at least one `drop_reason="always-passes"` decision. The fixture ships an engineered literal column (`'austin' AS region`) and a `COALESCE`'d column (`COALESCE(start_time, TIMESTAMP '...') AS start_time_safe`). The LLM reliably proposes `not_null` on every column; `not_null` on a literal is mathematically guaranteed to always-pass.
 
 ### Hand-crafted manifest seed when workers can't run live tooling
 
-When a fixture depends on `dbt parse` against a live warehouse (or any tool requiring credentials Ralph workers don't have), ship:
-
-1. A **regen script** (sibling of `tests/fixtures/regenerate.sh`) that documents the maintainer-only command for full reproduction.
-2. A **hand-crafted minimal seed** of the generated artefact, validated by an in-process loads test (no env vars). Workers produce the seed; maintainers run the regen script later for full parity.
-
-Issue #10's `tests/fixtures/dbt_project_austin/{regenerate.sh, target/manifest.json}` is the precedent. The seed manifest contains exactly the model + source the test exercises; the regen script overwrites with the live `dbt parse` output. The committed seed must satisfy `signalforge.manifest.load(fixture_dir)` — test it via a loads-only test that ships in the same commit (DEC-004 of issue #10).
+When a fixture depends on `dbt parse` against a live warehouse (or any tool requiring credentials Ralph workers don't have), ship: (1) a regen script documenting the maintainer-only full-reproduction command; (2) a hand-crafted minimal seed, validated by an in-process loads test (no env vars). The seed must satisfy `signalforge.manifest.load(fixture_dir)` — test via a loads-only test that ships in the same commit (DEC-004 of #10).
 
 ### Multi-surface drift on user-facing model arguments
 
-A user-facing CLI flag's value can drift across surfaces (README example, test argv, plan example, ops-doc example). When a value's correctness depends on the resolver's parsing rules (e.g., `Manifest.get_model` accepts unique_id and file path but NOT bare model names — bare names route to the file-path branch and fail), pin the **canonical form** in ONE place and reference it everywhere.
+A user-facing CLI flag's value can drift across surfaces (README, test argv, plan, ops doc). When correctness depends on resolver parsing rules (e.g. `Manifest.get_model` accepts unique_id and file path but NOT bare model names — bare names route to the file-path branch and fail), pin the canonical form in ONE place and reference it everywhere.
 
-Issue #10's gotcha: `signalforge generate stg_bikeshare_trips` (bare name) failed with `ModelNotFoundError`; only `signalforge generate models/staging/stg_bikeshare_trips.sql` (file path) and `signalforge generate model.<project>.stg_bikeshare_trips` (unique_id) work. The bare-name form was caught only by Pass 4 of the Quality Gate code review — no test in the unit suite exercises the CLI's full model-arg path against the real `Manifest.get_model`. Mitigation: pre-merge code review explicitly verifies CLI examples by running them locally; the orchestrator should not trust prose alone for resolver-arg shapes.
+Issue #10's gotcha: `signalforge generate stg_bikeshare_trips` (bare name) failed with `ModelNotFoundError`; only the file path or unique_id forms work. Caught only by Pass 4 of Quality Gate review — no unit test exercises the CLI's full model-arg path against the real `Manifest.get_model`. Mitigation: pre-merge review explicitly verifies CLI examples by running them locally.
 
 ## Reference
 
-`plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `plans/super/27-codecov-coverage.md` — DEC-001, DEC-004, DEC-009. `plans/super/10-e2e-bigquery-smoke.md` — DEC-001, DEC-002, DEC-004, DEC-008, DEC-010, DEC-022 (end-to-end gated tests section). `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh`, `tests/fixtures/dbt_project_austin/regenerate.sh`, `tests/cli/_e2e_helpers.py`, `tests/cli/test_e2e_bigquery_smoke.py` — current implementations.
+`plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `plans/super/27-codecov-coverage.md` — DEC-001, DEC-004, DEC-009. `plans/super/10-e2e-bigquery-smoke.md` — DEC-001, DEC-002, DEC-004, DEC-008, DEC-010, DEC-022. `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh`, `tests/cli/_e2e_helpers.py`, `tests/cli/test_e2e_bigquery_smoke.py`.

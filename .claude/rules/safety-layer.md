@@ -6,16 +6,15 @@ The safety layer sits between the warehouse adapter (#3) and the LLM-drafting pi
 
 ## Fail-closed audit semantics (DEC-011)
 
-Any exception inside `audit.write` propagates as `AuditWriteError` from `build_llm_request`. The function never returns an `LLMRequest` whose audit record didn't durably hit disk. Concretely:
+Any exception inside `audit.write` propagates as `AuditWriteError` from `build_llm_request`. The function never returns an `LLMRequest` whose audit record didn't durably hit disk.
 
-- `audit.write` opens with `O_APPEND | O_CREAT | 0o600`, writes one JSONL line, calls `os.fsync`, closes.
-- Catches **no** exceptions internally — `OSError`, `PermissionError`, `IOError`, encoding failures all propagate.
-- Size cap (`_AUDIT_RECORD_LIMIT_BYTES = 4000`) checked **before** any file open, so an oversize record leaves no artifact.
+- `audit.write` opens with `O_APPEND | O_CREAT | 0o600`, writes one JSONL line, calls `os.fsync`, closes. Catches **no** exceptions internally — `OSError` / `PermissionError` / `IOError` / encoding failures all propagate.
+- Size cap (`_AUDIT_RECORD_LIMIT_BYTES = 4000`) is checked **before** any file open, so an oversize record leaves no artifact.
 - `build_llm_request` calls `audit.write` AFTER constructing the request but BEFORE returning it. If audit fails, the partial request is dropped.
 
-An unaudited LLM call is, by definition, PII leaving the warehouse without a receipt — exactly the failure mode this layer exists to prevent. Don't add try/except around audit writes "to be defensive"; the propagation IS the defence.
+An unaudited LLM call is, by definition, PII leaving the warehouse without a receipt — exactly the failure mode this layer exists to prevent. The propagation IS the defence.
 
-This is the **primary-work fail-closed** pattern: the audit write is part of the unit of work, and the unit either fully succeeds or fully aborts. Contrast with the **cleanup-boundary fail-soft** pattern in `warehouse-adapters.md` DEC-013/DEC-014: cleanup fires AFTER the user's actual work has succeeded, so blocking on cleanup failure would punish the operator for housekeeping issues they can't fix mid-flight; cleanup paths swallow + emit an operator-actionable WARNING instead. The two look superficially similar (both deal with "I/O failed at a defended boundary") but apply at different points in the lifecycle. Don't conflate them when introducing a new boundary in v0.3 — primary-work boundaries propagate; cleanup-boundary swallows-and-warns.
+**Primary-work fail-closed vs. cleanup-boundary fail-soft.** This pattern propagates because the audit write is part of the unit of work — the unit either fully succeeds or fully aborts. Contrast with `warehouse-adapters.md` DEC-013/DEC-014, where cleanup fires AFTER the user's work has succeeded and blocking on cleanup failure would punish the operator for housekeeping they can't fix mid-flight; cleanup paths swallow + emit an operator-actionable WARNING instead. Don't conflate the two when introducing a new boundary in v0.3.
 
 ## Column NAMES leak PII too — redact them with stable hashes (DEC-010)
 
@@ -29,11 +28,11 @@ When adding a new mode or surface, make sure the LLM-bound payload uses hashed n
 
 Every `AuditEvent` carries three fields that look minor but are load-bearing:
 
-- `signalforge_version: str` — read from `signalforge.__version__` at write time. Lets a reviewer know which code produced the record.
-- `policy_hash: str` — 16-hex-char `blake2b(digest_size=8)` of the resolved `SafetyPolicy.model_dump_json` (sorted keys, canonical form via the `_compute_policy_hash` helper). Migrated from `SHA-256[:16]` by issue #55 so the audit corpus reads one hash recipe across every writer (`safety.jsonl` / `llm_responses.jsonl` / `prune.jsonl` / `grade.jsonl` / `diff.json` all use `blake2b-8` over canonical JSON). Lets a reviewer verify all records in a run came from the same policy.
-- `audit_schema_version: int` — frozen at the writer's `_AUDIT_SCHEMA_VERSION` constant. Bump when the JSONL schema evolves; v0.2 readers gate on this. Currently `3` in production (bumped 1→2 by #54 for the `draft_skip_*` reasons, 2→3 by #55 for the `policy_hash` recipe change). The field is typed `int` (not `Literal`) so older audit JSONLs still round-trip cleanly across version bumps — audit replay is a real requirement.
+- `signalforge_version: str` — read from `signalforge.__version__` at write time.
+- `policy_hash: str` — 16-hex `blake2b(digest_size=8)` of the resolved `SafetyPolicy.model_dump_json` (sorted keys, canonical form via `_compute_policy_hash`). Migrated from `SHA-256[:16]` by issue #55 so the audit corpus reads one recipe across every writer (`safety.jsonl` / `llm_responses.jsonl` / `prune.jsonl` / `grade.jsonl` / `diff.json` all use `blake2b-8` over canonical JSON).
+- `audit_schema_version: int` — frozen at the writer's `_AUDIT_SCHEMA_VERSION` constant; currently `3` (bumped 1→2 by #54 for `draft_skip_*` reasons, 2→3 by #55 for the `policy_hash` recipe change). Typed `int` (not `Literal`) so older audit JSONLs still round-trip across version bumps — audit replay is a real requirement.
 
-The drift-detector test (`tests/safety/test_drift_detector.py`) pairs production `AuditEvent` (`extra="ignore"`) with a one-off `StrictAuditEvent` (`extra="forbid"`) validated against the committed JSONL fixture. Adding a field to production without updating the strict model OR the fixture breaks the test loudly. Don't bypass.
+The drift-detector test pairs production `AuditEvent` (`extra="ignore"`) with a one-off `StrictAuditEvent` (`extra="forbid"`) validated against the committed JSONL fixture. Adding a field to production without updating the strict model OR the fixture breaks the test loudly.
 
 ## Canonical timestamp shape across writers (issue #56)
 
@@ -47,48 +46,26 @@ When a v0.3 writer ships a sixth audit-event type, do NOT lean on Pydantic's def
 
 The default in `manifest-readers.md` is `extra="ignore"` for forward-compat. The safety layer **deliberately overrides** for config files:
 
-- `SafetyPolicy`, `_SafetyPolicyContent` (the inner `signalforge.yml` block), `_SafetyConfigFile` → `extra="forbid"`. A typo like `redacts:` (vs `redact:`) in a user-authored YAML file MUST fail loud — silent no-op is exactly the failure mode this ticket exists to prevent.
-- `AuditEvent`, `RedactionRecord`, `LLMRequest` → `extra="ignore"`. These are read back from JSONL files / consumed by downstream stages where forward-compat matters.
+- `SafetyPolicy`, `_SafetyPolicyContent`, `_SafetyConfigFile` → `extra="forbid"`. A typo like `redacts:` (vs `redact:`) in a user-authored YAML file MUST fail loud — silent no-op is exactly the failure mode this ticket exists to prevent.
+- `AuditEvent`, `RedactionRecord`, `LLMRequest` → `extra="ignore"`. Read back from JSONL files / consumed by downstream stages where forward-compat matters.
 
 Pair every `extra="ignore"` reader-shaped model with a one-off `extra="forbid"` drift detector.
 
 ## Draft-skip vs. PII opt-out — semantics differ (issue #54)
 
-Issue #54 added two new `RedactionReason` literal values
-(`draft_skip_column_meta`, `draft_skip_model_meta`) driven by
-`meta.signalforge.skip_draft: true` at column or model level. They sit
-in `RedactionReason` alongside the seven PII reasons but carry **different
-semantics**: a PII reason means "send a hashed placeholder in place of the
-real column name"; a draft-skip reason means "omit the column entirely
-from the LLM payload" — the column does not appear in `LLMRequest.columns_sent`
-/ `.schema` / `.aggregates` / `.sampled_rows`. The `RedactionRecord` still
-rides on the `AuditEvent` so the operator-chosen omission is durably recorded.
+Issue #54 added two new `RedactionReason` literals (`draft_skip_column_meta`, `draft_skip_model_meta`) driven by `meta.signalforge.skip_draft: true` at column or model level. They carry **different semantics** than the seven PII reasons:
+
+- **PII reason** = "send a hashed placeholder in place of the real column name."
+- **Draft-skip reason** = "omit the column entirely from the LLM payload" — not in `LLMRequest.columns_sent` / `.schema` / `.aggregates` / `.sampled_rows`. The `RedactionRecord` still rides on the `AuditEvent` so the operator-chosen omission is durably recorded.
 
 Two contracts operationalise this:
 
-1. **`DRAFT_SKIP_REASONS` frozenset** in `signalforge.safety.models` — the
-   canonical "which reasons trigger omit-entirely" gate. `build_llm_request`
-   reads it to compute `skipped_columns` and filters the LLM payload.
-   Adding a future omit-entirely reason MUST extend both `RedactionReason`
-   AND `DRAFT_SKIP_REASONS` in lockstep, OR consumers will silently leak
-   the new reason's column into the prompt.
-2. **Skip checks run BEFORE PII checks in `_classify_column`**. A column
-   with both `skip_draft: true` and `tags: [pii]` routes to the skip
-   reason, not the PII reason — if a column is omitted entirely, any PII
-   signal on it is moot. Column-level skip is checked before model-level
-   skip so the audit reason names the most-specific source.
+1. **`DRAFT_SKIP_REASONS` frozenset** in `signalforge.safety.models` is the canonical "which reasons trigger omit-entirely" gate. `build_llm_request` reads it to compute `skipped_columns`. Adding a future omit-entirely reason MUST extend both `RedactionReason` AND `DRAFT_SKIP_REASONS` in lockstep — otherwise consumers silently leak the new reason's column into the prompt.
+2. **Skip checks run BEFORE PII checks in `_classify_column`.** A column with both `skip_draft: true` and `tags: [pii]` routes to the skip reason; column-level skip beats model-level so the audit reason names the most-specific source.
 
-`audit_schema_version` bumped 1 → 2 in lockstep (DEC-014 invariant — bump
-the version every time the JSONL shape evolves; here, the set of allowed
-`RedactionReason` literals widened). The default on the `AuditEvent`
-model also bumps to 2 to match the writer's `_AUDIT_SCHEMA_VERSION`
-constant; the field stays `int` (not `Literal[2]`) so older v1 JSONLs
-still round-trip — audit replay across versions is a real requirement.
+**Strict `is True` check, not truthy.** `meta.signalforge.skip_draft` only fires on explicit Python `True` — `"true"` / `"yes"` / `1` are ignored. Mirrors `meta.signalforge.sample is False`: config noise must not silently engage a security-adjacent behaviour.
 
-**Strict `is True` check, not truthy.** `meta.signalforge.skip_draft` only
-fires on an explicit Python `True` — `"true"` / `"yes"` / `1` are all
-ignored. Mirrors the existing `meta.signalforge.sample is False` shape:
-config noise must not silently engage a security-adjacent behaviour.
+`audit_schema_version` bumped 1 → 2 in lockstep (the set of allowed `RedactionReason` literals widened). Field stays `int` for replay across versions.
 
 ## The four opt-out signals + precedence (DEC-003)
 
@@ -102,43 +79,35 @@ config noise must not silently engage a security-adjacent behaviour.
 6. Model-level `meta.contains_pii` truthy → `meta_contains_pii_model`
 7. Pattern match against `policy.redact_patterns` (case-insensitive `fnmatch`) → `pattern_match`
 
-Every coercion path emits a DEBUG log when it normalises (e.g., `tags: [PII]` → lowercase, `meta.contains_pii: "yes"` → True). The seven reasons are a `Literal[...]` so audit-log consumers can pattern-match exhaustively. Don't add an eighth without updating both production `RedactionReason` and the drift detector.
+Every coercion path emits a DEBUG log when it normalises (e.g., `tags: [PII]` → lowercase). The seven reasons are a `Literal[...]` so audit-log consumers can pattern-match exhaustively. Don't add an eighth without updating both production `RedactionReason` and the drift detector.
 
 ## ANSI-safe lazy-format logger (DEC-022)
 
-Every `_LOGGER.{info,warning,debug,error}` call in `signalforge.safety.*` uses lazy-format with `json.dumps()` for any user-controlled string:
-
-```python
-_LOGGER.info("audit event: %s", json.dumps({"unique_id": event.model_unique_id, ...}))
-```
-
-**Never** `_LOGGER.info(f"... {model_unique_id} ...")` — a column name or model id containing ANSI escapes (`\x1b[31m...`) would inject into log viewers. JSON encoding handles this; f-string interpolation does not. Quality-gate validation greps for `_LOGGER.\w+\(f"` and rejects any hits in `src/signalforge/safety/`.
+Same rule as the other layers (`llm-drafter.md` DEC-011 / `prune-engine.md` DEC-017 / `grade-layer.md` DEC-029 / `diff-renderer.md` DEC-019). The grep gate at `tests/llm/test_logger_grep_gate.py` scans 6 dirs as of #9 (extends to `safety/` here) and rejects any `_LOGGER\.\w+\(f"` hit. Never f-string-interpolate user-controlled strings; JSON-encode in lazy-format `%s`.
 
 ## AST audit-completeness scan (DEC-020(a))
 
-`tests/safety/test_public_api.py::test_llm_request_construction_only_in_request_module` scans every `.py` under `src/signalforge/safety/` (excluding `request.py`) for `Call(func=Name(id="LLMRequest"))` and rejects any hits. The convention is "construct `LLMRequest` only via `build_llm_request`" — the docstring on `LLMRequest` says so, and the AST scan enforces it.
+`tests/safety/test_public_api.py::test_llm_request_construction_only_in_request_module` scans every `.py` under `src/signalforge/safety/` (excluding `request.py`) for `Call(func=Name(id="LLMRequest"))` and rejects any hits. Construct `LLMRequest` only via `build_llm_request` — the docstring on `LLMRequest` says so, the AST scan enforces it.
 
-If you add a new module that genuinely needs to construct an `LLMRequest` (e.g., a deserialiser for resumption), update the AST-scan exclusion list AND document the audit-write seam. Don't suppress the test.
+If you add a new module that genuinely needs to construct an `LLMRequest` (e.g., a deserialiser for resumption), update the exclusion list AND document the audit-write seam. Don't suppress the test.
 
 ## Fail-closed writer shape — Scan 8 covers all five writers (issue #38)
 
-`tests/test_audit_completeness.py::test_fail_closed_writers_have_no_except_around_write_fsync` and `test_fail_closed_writers_use_short_write_loop` are the eighth AST scan in the project. They walk every fail-closed writer module — `signalforge.{safety,draft,prune,grade}.audit` and `signalforge.diff._sidecar` — and assert: (a) no `except` handler may wrap a `Try` whose body issues `os.write` / `os.fsync` (only a `try / finally` around `os.close(fd)` is permitted); (b) every writer function uses a `while` loop around `os.write` so short writes (`EINTR`, pathological short returns) don't produce partial JSONL records.
+`tests/test_audit_completeness.py::test_fail_closed_writers_have_no_except_around_write_fsync` and `test_fail_closed_writers_use_short_write_loop` are the eighth AST scan in the project. They walk every fail-closed writer module — `signalforge.{safety,draft,prune,grade}.audit` and `signalforge.diff._sidecar` — and assert: (a) no `except` handler may wrap a `Try` whose body issues `os.write` / `os.fsync` (only `try / finally` around `os.close(fd)` is permitted); (b) every writer function uses a `while` loop around `os.write` so short writes (`EINTR`, pathological short returns) don't produce partial JSONL records.
 
-The typed-error wrap (`AuditWriteError`, `LLMResponseAuditWriteError`, `PruneAuditWriteError`, `GradeAuditWriteError`, `DiffSidecarWriteError`) lives at the orchestrator boundary (`build_llm_request`, `draft_from_request`, `prune_tests`, `grade_artifacts`, `render_diff`), not inside the writer. `AuditRecordTooLargeError` (and its layer-specific cousins) raises from inside the writer — pre-open, so no on-disk artefact — and propagates as-is.
+The typed-error wrap (`AuditWriteError`, `LLMResponseAuditWriteError`, `PruneAuditWriteError`, `GradeAuditWriteError`, `DiffSidecarWriteError`) lives at the orchestrator boundary, not inside the writer. `AuditRecordTooLargeError` (and its layer-specific cousins) raises from inside the writer — pre-open, so no on-disk artefact — and propagates as-is.
 
-When a v0.3 stage ships a sixth fail-closed writer (a CLI run-history audit, a multi-model batch checkpointer, etc.), extend `_FAIL_CLOSED_WRITER_MODULES` in the scan to a sixth entry. The writer module must mirror the prune/grade/diff template verbatim: serialise → size-check → `mkdir -p` → `os.open(O_APPEND | O_CREAT | O_WRONLY, 0o600)` → short-write `while` loop → `os.fsync` → close. The orchestrator owns the typed wrap.
+When a v0.3 stage ships a sixth fail-closed writer, extend `_FAIL_CLOSED_WRITER_MODULES` in the scan. The writer module must mirror the prune/grade/diff template verbatim: serialise → size-check → `mkdir -p` → `os.open(O_APPEND | O_CREAT | O_WRONLY, 0o600)` → short-write `while` loop → `os.fsync` → close. The orchestrator owns the typed wrap.
 
 ## Pydantic v2 `with_mode` re-runs validators (DEC-018)
 
-`SafetyPolicy.with_mode(mode)` does NOT use `model_copy(update=...)` — that path silently skips `@model_validator(mode="after")`, which means going through the documented CLI override seam would silently enable sample mode without emitting the DEC-021 WARNING.
+`SafetyPolicy.with_mode(mode)` does NOT use `model_copy(update=...)` — that path silently skips `@model_validator(mode="after")`, which would silently enable sample mode without emitting the DEC-021 WARNING.
 
-Use `model_validate({**self.model_dump(), "mode": mode})` so every validator re-runs. This was caught by Quality-Gate review and is a regression worth defending against in any future "factory that produces a mutated copy" helpers — `model_copy` is the wrong tool any time a validator side-effect is part of the contract.
+Use `model_validate({**self.model_dump(), "mode": mode})` so every validator re-runs. `model_copy` is the wrong tool any time a validator side-effect is part of the contract — apply the same rule to any future "factory that produces a mutated copy" helpers.
 
 ## `signalforge.yml` top-level namespace: `safety:` (DEC-025)
 
-The config file's top level is `{ safety: { ... } }`. Other top-level keys (`llm:`, `prune:`, `grade:`, ...) are reserved for future stages and silently ignored by the safety loader. Each stage validates its own subtree independently.
-
-When introducing a new pipeline stage with config, claim its own top-level key. Don't pile config under `safety:` — that violates the namespacing reservation and forces a v2-config migration when you eventually split.
+The config file's top level is `{ safety: { ... } }`. Other top-level keys (`llm:`, `prune:`, `grade:`, ...) are reserved for future stages and silently ignored by the safety loader. Each stage validates its own subtree independently. `SafetyPolicy` uses `extra="forbid"`; the wrapping `_SafetyConfigFile` uses `extra="ignore"` at the top level. Mirrors the same pattern across all five pipeline-stage configs.
 
 ## Reference
 
