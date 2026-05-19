@@ -34,8 +34,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          # Build job doesn't push to git; least-privilege.
+          persist-credentials: false
       - name: Set up uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          # Pin the build interpreter to the supported floor for release
+          # reproducibility. Without this, `uv build` picks whatever
+          # `ubuntu-latest` happens to ship, which can drift over time.
+          python-version: "3.11"
       - name: Build sdist + wheel
         run: uv build
       - name: Publish to TestPyPI
@@ -55,8 +63,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          # Build job doesn't push to git; least-privilege.
+          persist-credentials: false
       - name: Set up uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          # Pin the build interpreter to the supported floor for release
+          # reproducibility.
+          python-version: "3.11"
       - name: Build sdist + wheel
         run: uv build
       - name: Publish to PyPI

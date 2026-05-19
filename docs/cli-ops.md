@@ -42,7 +42,10 @@ For development against a clone (`[dependency-groups].dev` pulls in
 pytest, ruff, pyright, and `build`):
 
 ```bash
-uv sync --dev   # or: pip install -e ".[dev]"  (back-compat)
+uv sync --dev   # canonical
+# back-compat fallback for contributors without uv:
+pip install -e ".[dev]"  # note: does not include the uv-only `build` extra
+                         # used by the wheel_smoke marker (issue #47)
 ```
 
 `uv.lock` is committed; `uv sync --dev` reproduces the exact resolved

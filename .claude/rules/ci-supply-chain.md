@@ -75,7 +75,7 @@ Three load-bearing details:
 
 1. **SHA-pin the action** — same `gh api repos/codecov/codecov-action/git/refs/tags/v5` lookup as other actions. Dereference annotated tags. The trailing `# v5.X.Y` comment is for reviewers; the SHA is what executes.
 2. **`fail_ci_if_error: false`** — required for fork-safe CI. Fork PRs via `pull_request` do not receive `secrets.CODECOV_TOKEN` (GitHub strips repository secrets from fork-originated workflows). The upload silently fails; `fail_ci_if_error: false` prevents CI failure on the missing token. This is expected behaviour, not a bug.
-3. **Gate on `matrix.python-version == '3.13'`** — the upload runs from the matrix ceiling iteration only, so coverage doesn't double-upload (codecov rejects duplicate uploads for the same commit). The choice of 3.13 over 3.11 is conventional; either matrix endpoint works.
+3. **Gate on `matrix.python-version == '3.12'`** — the upload runs from the matrix ceiling iteration only, so coverage doesn't double-upload (codecov rejects duplicate uploads for the same commit). The choice of ceiling over floor is conventional; either matrix endpoint works. When 3.13 returns to the matrix (gated by issue #96), flip this to `'3.13'`.
 
 The step must land AFTER the pytest step. `coverage.xml` is produced by `--cov-report=xml` in `pyproject.toml` `addopts` — no workflow-level `--cov` flag is needed.
 
