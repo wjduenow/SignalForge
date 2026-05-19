@@ -12,6 +12,12 @@
 # The Austin bikeshare data is served from the public
 # `bigquery-public-data.austin_bikeshare` dataset; your `GOOGLE_CLOUD_PROJECT`
 # is the BILLING project the BigQuery SDK uses to issue the read.
+#
+# `maximum_bytes_billed: 1000000000` (1 GB) raises the adapter's default
+# 100 MB cap — the `prune.sample_strategy: materialised` run in the demo's
+# `signalforge.yml` does a CTAS over the full ~2.27M-row `bikeshare_trips`
+# source, which exceeds 100 MB. 1 GB is still a hard ceiling well inside the
+# BigQuery free tier.
 austin:
   target: dev
   outputs:
@@ -21,3 +27,4 @@ austin:
       project: "{{ env_var('GOOGLE_CLOUD_PROJECT') }}"
       dataset: austin_bikeshare
       location: US
+      maximum_bytes_billed: 1000000000

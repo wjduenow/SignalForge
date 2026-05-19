@@ -133,8 +133,11 @@ per-run `tmp_path`, substitutes `GOOGLE_CLOUD_PROJECT` into
 `profiles.yml`, and runs `signalforge generate` against the temp
 project. If you want to run the same flow as a one-off CLI
 invocation (rather than through pytest), follow the README's
-[Quick start](../README.md#quick-start) walkthrough — it
-shows the manual copy + profile-rewrite incantation.
+[Quick start](../README.md#quick-start) walkthrough — it uses
+`signalforge init-demo` to copy out the bundled demo project, whose
+`profiles.yml` already reads `GOOGLE_CLOUD_PROJECT` from the
+environment and ships the raised `maximum_bytes_billed` cap, so no
+profile rewrite is needed.
 
 ### Why the profile rewrite matters
 
