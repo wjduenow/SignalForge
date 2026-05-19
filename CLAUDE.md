@@ -74,6 +74,10 @@ uv sync --dev && uv run ruff check . && uv run ruff format --check . && uv run p
 
 The repo is uv-managed (see `.claude/rules/python-build.md`). `pip install -e ".[dev]"` still works for contributors without uv (the `[project.optional-dependencies].dev` extra is kept in sync with `[dependency-groups].dev`), but uv is the default; `uv.lock` is committed.
 
+## Documentation site
+
+Published at https://wjduenow.github.io/SignalForge/ — MkDocs Material build, redeploy on every push to `main` via the `docs:` job in `.github/workflows/ci.yml`. The site's home page is the root `README.md` rendered via `mkdocs-include-markdown-plugin`; the per-stage ops docs under `docs/*-ops.md` ship as the nav. Internal research under `docs/research/` is excluded. See `.claude/rules/docs-publishing.md` for the full deploy contract.
+
 ## What SignalForge is
 
 A CLI that drafts dbt `schema.yml`, tests, and docs with an LLM, then **prunes** the candidates against real warehouse data so only signal-bearing artifacts ship. The differentiator vs. dbt Copilot / dbt-codegen / DinoAI / datapilot is the prune step — competitors generate; SignalForge generates *and grades*.

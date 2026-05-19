@@ -65,3 +65,38 @@ jobs:
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  docs:
+    # Publish the MkDocs site to GitHub Pages. Triggers only on push to
+    # main — `main` is the released line; the published site reflects
+    # the last release, not every dev iteration. See
+    # `.claude/rules/docs-publishing.md` for the full deploy contract.
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Only the docs job needs write access (to push the built site to
+    # the `gh-pages` branch). The workflow default `contents: read`
+    # covers every other job.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        # `mkdocs gh-deploy` issues a real `git push` to the `gh-pages`
+        # branch — it relies on the persisted GITHUB_TOKEN in the
+        # runner's git config. Do NOT set `persist-credentials: false`
+        # here; doing so breaks the deploy. The token is post-job-cleaned
+        # by the runner; the scope is bounded by `permissions.contents:
+        # write` above.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          # Same floor as publish.yml — keeps the doc-build interpreter
+          # deterministic across runs.
+          python-version: "3.11"
+      - name: Sync dev dependencies
+        run: uv sync --dev
+      - name: Deploy to GitHub Pages
+        # `--force` overwrites the prior gh-pages commit (the site is
+        # generated, not authored). `--no-history` keeps the gh-pages
+        # branch shallow so the repo stays small.
+        run: uv run mkdocs gh-deploy --force --no-history

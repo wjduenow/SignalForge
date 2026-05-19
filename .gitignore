@@ -65,3 +65,6 @@ work-*/
 # Windows NTFS Alternate Data Streams (created when files cross from Windows -> WSL)
 *:Zone.Identifier
 
+# MkDocs build output (CI publishes to gh-pages branch; local builds are throwaway)
+site/
+

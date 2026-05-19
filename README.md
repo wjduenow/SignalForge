@@ -1,4 +1,4 @@
-[![codecov](https://codecov.io/gh/wjduenow/SignalForge/branch/dev/graph/badge.svg)](https://codecov.io/gh/wjduenow/SignalForge)
+[![codecov](https://codecov.io/gh/wjduenow/SignalForge/branch/dev/graph/badge.svg)](https://codecov.io/gh/wjduenow/SignalForge) [![docs](https://img.shields.io/badge/docs-signalforge-blue?logo=materialformkdocs)](https://wjduenow.github.io/SignalForge/)
 
 # SignalForge
 

@@ -30,6 +30,8 @@ uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run 
 
 **Coverage:** see [`docs/codecov-ops.md`](docs/codecov-ops.md) for Codecov setup, badge interpretation, and threshold bumps.
 
+**Docs:** the [published docs site](https://wjduenow.github.io/SignalForge/) is built by MkDocs Material on every push to `main`. Edits to `docs/*.md` and `README.md` land on `dev` like any other PR; the published site picks them up on the next `dev → main` merge. Local preview with `uv run mkdocs serve`. See [`.claude/rules/docs-publishing.md`](.claude/rules/docs-publishing.md) for the full deploy contract.
+
 ## Pre-release coverage audit
 
 The default `pytest` run — and therefore the coverage badge — measures only the
