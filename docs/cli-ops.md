@@ -38,15 +38,15 @@ The PyPI distribution name is `signalforge-dbt`; the import name and
 CLI command remain `signalforge`. The `-dbt` suffix exists because the
 bare `signalforge` name on PyPI is held by an unrelated DSP package.
 
-For development against a clone (the `[dev]` extra pulls in pytest,
-ruff, and pyright):
+For development against a clone (`[dependency-groups].dev` pulls in
+pytest, ruff, pyright, and `build`):
 
 ```bash
-pip install -e ".[dev]"
+uv sync --dev   # or: pip install -e ".[dev]"  (back-compat)
 ```
 
-Quote the `".[dev]"` — bare `.[dev]` is a glob in zsh and fails with
-`no matches found`.
+`uv.lock` is committed; `uv sync --dev` reproduces the exact resolved
+versions CI uses across the 3.11 / 3.12 / 3.13 matrix.
 
 After install, the `signalforge` console script is registered via
 `pyproject.toml`'s `[project.scripts]` entry and resolves to

@@ -66,13 +66,13 @@ Internals (`_loader_helpers`, `_sql_safety`, `_path_safety`, `_test_result_repr`
 
 ## Validation
 
-Canonical validation command for this repo (run locally; CI runs the same four checks):
+Canonical validation command for this repo (run locally; CI runs the same four checks across a 3.11 / 3.12 / 3.13 matrix):
 
 ```bash
-pip install -e ".[dev]" && ruff check . && ruff format --check . && pyright && pytest
+uv sync --dev && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest
 ```
 
-Quote the `".[dev]"` — bare `.[dev]` is a glob in zsh.
+The repo is uv-managed (see `.claude/rules/python-build.md`). `pip install -e ".[dev]"` still works for contributors without uv (the `[project.optional-dependencies].dev` extra is kept in sync with `[dependency-groups].dev`), but uv is the default; `uv.lock` is committed.
 
 ## What SignalForge is
 
