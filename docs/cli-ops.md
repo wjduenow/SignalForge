@@ -46,7 +46,7 @@ uv sync --dev   # or: pip install -e ".[dev]"  (back-compat)
 ```
 
 `uv.lock` is committed; `uv sync --dev` reproduces the exact resolved
-versions CI uses across the 3.11 / 3.12 / 3.13 matrix.
+versions CI uses across the 3.11 / 3.12 matrix.
 
 After install, the `signalforge` console script is registered via
 `pyproject.toml`'s `[project.scripts]` entry and resolves to

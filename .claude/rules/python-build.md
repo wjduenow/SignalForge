@@ -75,7 +75,7 @@ The old "quote the `".[dev]"` — `[dev]` is a glob in zsh" gotcha drops away �
 
 ## Python version: advertised floor matches the tested floor (issue #46, uv migration)
 
-`pyproject.toml` declares `requires-python = ">=3.11"`; `[tool.pyright].pythonVersion` is `"3.11"`; `.github/workflows/ci.yml` runs a `python-version: ["3.11", "3.12", "3.13"]` matrix. **All three agree on the floor** — what we advertise (`>=3.11`) is what we type-check (`3.11`) is what we test as the *floor of the matrix* (`3.11`). The 3.12 and 3.13 iterations run pytest only; pyright is gated on `matrix.python-version == '3.11'` so the type-check pins to the advertised floor.
+`pyproject.toml` declares `requires-python = ">=3.11"`; `[tool.pyright].pythonVersion` is `"3.11"`; `.github/workflows/ci.yml` runs a `python-version: ["3.11", "3.12"]` matrix. **All three agree on the floor** — what we advertise (`>=3.11`) is what we type-check (`3.11`) is what we test as the *floor of the matrix* (`3.11`). The 3.12 iteration runs pytest only; pyright is gated on `matrix.python-version == '3.11'` so the type-check pins to the advertised floor.
 
 The original `>=3.10` floor was an aspirational support promise: the package could install on 3.10, but no CI job and no pyright pass exercised the 3.10 path. Three concrete divergence sources where 3.10-only code can pass review without being caught:
 
@@ -85,7 +85,9 @@ The original `>=3.10` floor was an aspirational support promise: the package cou
 
 Picked the cheaper of the two options from issue #46: narrow the floor to 3.11 rather than widen CI / pyright to a 3.10 matrix. v0.1 users who need 3.10 support can pin to a 3.10-compatible patch release.
 
-The uv migration widened the CI matrix to 3.11 / 3.12 / 3.13 (uv's interpreter management makes a multi-version matrix essentially free). The floor stays at 3.11; if a future ticket bumps the floor (e.g. for a stdlib feature only present in 3.12+), `requires-python` AND `pyright.pythonVersion` AND the matrix floor move in lockstep. Drift between them is exactly the bug this DEC closes.
+The uv migration widened the CI matrix to 3.11 / 3.12 (uv's interpreter management makes a multi-version matrix essentially free). The intended ceiling is 3.13, but Python 3.13 changed `Path.resolve()` to raise `OSError(errno.ELOOP)` instead of `RuntimeError` on cyclic symlinks; six tests under the path-safety / sidecar / audit / manifest-loader surfaces rely on the 3.11/3.12 shape. A follow-up issue tracks updating the catch sites in `signalforge/_common/path_safety.py` and `signalforge/manifest/loader.py` so 3.13 can return to the matrix.
+
+The floor stays at 3.11; if a future ticket bumps the floor (e.g. for a stdlib feature only present in 3.12+), `requires-python` AND `pyright.pythonVersion` AND the matrix floor move in lockstep. Drift between them is exactly the bug this DEC closes.
 
 ## Reference
 

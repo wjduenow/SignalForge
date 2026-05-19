@@ -66,7 +66,7 @@ Internals (`_loader_helpers`, `_sql_safety`, `_path_safety`, `_test_result_repr`
 
 ## Validation
 
-Canonical validation command for this repo (run locally; CI runs the same four checks across a 3.11 / 3.12 / 3.13 matrix):
+Canonical validation command for this repo (run locally; CI runs the same four checks across a 3.11 / 3.12 matrix — 3.13 is deferred pending the open path-safety follow-up):
 
 ```bash
 uv sync --dev && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest

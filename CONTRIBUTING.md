@@ -20,8 +20,9 @@ on the matrix floor (3.11) by default, and writes `uv.lock` (committed).
 Contributors without uv can fall back to `pip install -e ".[dev]"` — the
 `[project.optional-dependencies].dev` extra is kept in sync.
 
-Validate before pushing (CI runs the same four checks on a 3.11 / 3.12 / 3.13
-matrix; pyright is gated to the matrix floor, codecov upload to the ceiling):
+Validate before pushing (CI runs the same four checks on a 3.11 / 3.12
+matrix; pyright is gated to the matrix floor, codecov upload to the ceiling.
+3.13 is deferred — see the open Python-3.13 path-safety follow-up issue):
 
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest

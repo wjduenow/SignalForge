@@ -38,14 +38,16 @@ concurrency:
 
 Saves runner minutes and surfaces the latest result faster.
 
-## Python matrix: 3.11 / 3.12 / 3.13 (uv migration)
+## Python matrix: 3.11 / 3.12 (uv migration)
 
-Originally DEC-003 locked CI to a single Python version (3.11) for v0.1 — the matrix widening was deferred to "when the package has real users running on multiple versions." The uv migration graduated this: `astral-sh/setup-uv` fetches missing interpreters in seconds, so a multi-version matrix costs ~3x runner minutes for a cleanly worth-it signal (PEP 604 / match-statement / type-param syntax issues catch earlier).
+Originally DEC-003 locked CI to a single Python version (3.11) for v0.1 — the matrix widening was deferred to "when the package has real users running on multiple versions." The uv migration graduated this: `astral-sh/setup-uv` fetches missing interpreters in seconds, so a multi-version matrix costs ~2x runner minutes for a cleanly worth-it signal (PEP 604 / match-statement / type-param syntax issues catch earlier).
 
 The matrix runs ruff + pytest on every Python version. Two steps are gated to one iteration:
 
-- **Pyright** runs only when `matrix.python-version == '3.11'` — pyright's own `pythonVersion = "3.11"` setting pins the type-check to the floor (`python-build.md` issue #46); running it on 3.12 / 3.13 adds no signal.
-- **Codecov upload** runs only when `matrix.python-version == '3.13'` — coverage is interpreter-invariant for this codebase, so the choice is conventional. Picking the matrix ceiling avoids the appearance that codecov measures the floor's behaviour.
+- **Pyright** runs only when `matrix.python-version == '3.11'` — pyright's own `pythonVersion = "3.11"` setting pins the type-check to the floor (`python-build.md` issue #46); running it on 3.12 adds no signal.
+- **Codecov upload** runs only when `matrix.python-version == '3.12'` (the current matrix ceiling) — coverage is interpreter-invariant for this codebase, so the choice is conventional. When 3.13 returns to the matrix, flip the gate back to 3.13.
+
+**3.13 is deferred.** Python 3.13 changed `Path.resolve()` to raise `OSError(errno.ELOOP)` instead of `RuntimeError` on cyclic symlinks; six tests under `tests/_common/`, `tests/diff/`, `tests/grade/`, `tests/manifest/` rely on the 3.11/3.12 shape. A follow-up issue tracks the catch-site updates in `signalforge/_common/path_safety.py` + `signalforge/manifest/loader.py`; once those land, 3.13 returns to the matrix.
 
 If a future ticket bumps the matrix floor (e.g., to 3.12), update `requires-python` + `pyright.pythonVersion` + the matrix in lockstep per `python-build.md` issue #46.
 
