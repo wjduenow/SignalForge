@@ -149,9 +149,14 @@ class AuditEvent(BaseModel):
 # intentional. Scope the suppression to this one class definition rather than
 # mutating the global filter list — issue #93.
 with warnings.catch_warnings():
+    # Relaxed regex (not the literal full message) so a future Pydantic
+    # version rewording the suffix still gets caught. Scoped to a narrow
+    # message anchor + ``UserWarning`` category — broad enough to survive
+    # message-wording drift, narrow enough not to swallow unrelated
+    # warnings.
     warnings.filterwarnings(
         "ignore",
-        message=r'Field name "schema" in "LLMRequest" shadows an attribute in parent "BaseModel"',
+        message=r'Field name "schema".*shadows.*',
         category=UserWarning,
     )
 

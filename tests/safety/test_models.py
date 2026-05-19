@@ -277,6 +277,7 @@ def test_importing_safety_models_emits_no_userwarning() -> None:
         capture_output=True,
         text=True,
         check=False,
+        timeout=10,
     )
     assert result.returncode == 0, (
         f"importing signalforge.safety.models surfaced a UserWarning:\n"
