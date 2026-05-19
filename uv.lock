@@ -1937,6 +1937,10 @@ dev = [
     { name = "ruff" },
     { name = "types-pyyaml" },
 ]
+docs = [
+    { name = "mkdocs-include-markdown-plugin" },
+    { name = "mkdocs-material" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1964,6 +1968,10 @@ dev = [
     { name = "pytest-cov", specifier = ">=5.0" },
     { name = "ruff" },
     { name = "types-pyyaml", specifier = ">=6,<7" },
+]
+docs = [
+    { name = "mkdocs-include-markdown-plugin", specifier = ">=6.0" },
+    { name = "mkdocs-material", specifier = ">=9.0" },
 ]
 
 [[package]]

@@ -2,11 +2,16 @@
 
 The published documentation site at https://wjduenow.github.io/SignalForge/ is built by MkDocs Material on every push to `main` and pushed to the `gh-pages` branch. The setup mirrors clauditor's docs-publishing pattern.
 
-## Trigger: push to `main` only
+## Two jobs: `docs-build` (always) + `docs` (deploy, main only)
 
-The `docs:` job in `.github/workflows/ci.yml` is gated by `if: github.ref == 'refs/heads/main' && github.event_name == 'push'`. Dev pushes do NOT redeploy — the published site reflects the released line, not every in-flight iteration. The dev → main release merge IS the publish event.
+- **`docs-build`** runs on every PR and push — a read-only "does the site still build?" gate. It runs `uv run --only-group docs mkdocs build` with NO write permissions. A broken `mkdocs.yml`, plugin config, or include-markdown syntax error fails the PR here instead of silently merging and only breaking the post-merge deploy.
+- **`docs`** (deploy) is gated by `if: github.ref == 'refs/heads/main' && github.event_name == 'push'`. Dev pushes do NOT redeploy — the published site reflects the released line, not every in-flight iteration. The dev → main release merge IS the publish event. PRs against `main` don't trigger the deploy job either; only the post-merge push does.
 
-PRs against `main` do not trigger the docs job either; only the post-merge push does. This is deliberate: a PR's mkdocs-build only matters when it lands.
+The split matters: without the always-on `docs-build` gate, the deploy job (main-only) is the *first* place a doc-config regression surfaces, which is too late. Keep both.
+
+## `docs` dependency group is separate from `dev`
+
+`[dependency-groups].docs` carries ONLY `mkdocs-material` + `mkdocs-include-markdown-plugin`. Both CI docs jobs `uv run --only-group docs ...` so they pull just MkDocs + plugins — not the heavy `dev` set (`dbt-core`, `pyright`, etc.). The `dev` group includes `docs` via `{include-group = "docs"}`, so a single `uv sync --dev` still gives a contributor everything (docs preview included). When adding a new docs-only tool, put it in the `docs` group; when adding a dev tool that isn't needed to build docs, put it in `dev` directly.
 
 ## `docs/index.md` is a 4-line include-markdown stub
 
@@ -49,7 +54,7 @@ Do NOT use `--strict` locally. The ops docs link to `plans/super/*.md`, `.claude
 - **New research doc under `docs/research/`** → no mkdocs.yml change (covered by `exclude_docs:`).
 - **Renaming an existing ops doc** → update `mkdocs.yml` `nav:` in the same commit; otherwise the nav link 404s.
 - **Theme tweaks** → adjust `theme:` block. Keep palette toggle (DEC: accessibility floor).
-- **New plugin** → add to `[dependency-groups].dev` in `pyproject.toml` (uv-only — pip contributors don't need to build docs) AND `plugins:` in mkdocs.yml.
+- **New plugin** → add to `[dependency-groups].docs` in `pyproject.toml` (NOT `dev` — the `docs` group is what the CI jobs sync; `dev` picks it up via `include-group`) AND `plugins:` in mkdocs.yml.
 
 ## First-time setup the maintainer does once
 
