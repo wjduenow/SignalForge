@@ -252,4 +252,4 @@ for issue #50.
   - `src/signalforge/diff/models.py` — `Tier`, `DiffReport.kept_uncertain_count`, `audit_schema_version: Literal[2] = 2`.
   - `src/signalforge/diff/engine.py::_tier_for_kept` — classifier; `_entry_for_test` — `why` cascade bypass; count aggregation + INFO log payload.
   - `src/signalforge/diff/_renderers.py` — `_CYAN`, `_COL_TIER = 14`, header / table / Markdown summary extensions.
-- Cross-stage signal source: `.claude/rules/prune-engine.md` § "Conservative drop-reason taxonomy" and § "Three sources of `kept-without-evidence`" — the prune layer's signal that the diff layer now projects to a visible tier.
+- Cross-stage signal source: `.claude/rules/prune-engine.md` § "Conservative drop-reason taxonomy" and § "Conservative-bias routing template" — the prune layer's signal that the diff layer now projects to a visible tier.
