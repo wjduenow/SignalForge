@@ -65,3 +65,62 @@ jobs:
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  docs-build:
+    # Read-only "does the site still build?" gate. Runs on every PR and
+    # push (same triggers as lint-test) so a broken mkdocs.yml / plugin
+    # config / include-markdown syntax error fails the PR instead of
+    # silently merging and only breaking the post-merge deploy. No write
+    # permissions — this never touches gh-pages.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          # Read-only build; never pushes. Least-privilege.
+          persist-credentials: false
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          python-version: "3.11"
+      - name: Build the docs site
+        # `--only-group docs` installs JUST MkDocs + plugins, not the
+        # heavy dev set. Non-strict build: it returns non-zero on real
+        # config/syntax/plugin errors (the cases this gate exists to
+        # catch) but tolerates the expected warnings on repo-internal
+        # links to plans/super/ and .claude/rules/ that aren't published.
+        run: uv run --only-group docs mkdocs build
+
+  docs:
+    # Publish the MkDocs site to GitHub Pages. Triggers only on push to
+    # main — `main` is the released line; the published site reflects
+    # the last release, not every dev iteration. See
+    # `.claude/rules/docs-publishing.md` for the full deploy contract.
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Only the docs deploy job needs write access (to push the built site
+    # to the `gh-pages` branch). The workflow default `contents: read`
+    # covers every other job.
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        # `mkdocs gh-deploy` issues a real `git push` to the `gh-pages`
+        # branch — it relies on the persisted GITHUB_TOKEN in the
+        # runner's git config. Do NOT set `persist-credentials: false`
+        # here; doing so breaks the deploy. The token is post-job-cleaned
+        # by the runner; the scope is bounded by `permissions.contents:
+        # write` above.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          # Same floor as publish.yml — keeps the doc-build interpreter
+          # deterministic across runs.
+          python-version: "3.11"
+      - name: Deploy to GitHub Pages
+        # `--only-group docs` keeps the deploy env minimal (no dbt-core /
+        # pyright). `--force` overwrites the prior gh-pages commit (the
+        # site is generated, not authored). `--no-history` keeps the
+        # gh-pages branch shallow so the repo stays small.
+        run: uv run --only-group docs mkdocs gh-deploy --force --no-history
