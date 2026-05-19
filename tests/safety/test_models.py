@@ -13,6 +13,8 @@ file only validates the production shapes' behaviour.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -264,6 +266,22 @@ def test_llm_request_docstring_warns_about_direct_construction() -> None:
 # ---------------------------------------------------------------------------
 # Module surface
 # ---------------------------------------------------------------------------
+
+
+def test_importing_safety_models_emits_no_userwarning() -> None:
+    """Issue #93: a clean import must not emit the Pydantic ``schema``-shadow
+    UserWarning. Run in a subprocess so the import is genuinely fresh — the
+    parent process already imported the module via the test collector."""
+    result = subprocess.run(
+        [sys.executable, "-W", "error::UserWarning", "-c", "import signalforge.safety.models"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"importing signalforge.safety.models surfaced a UserWarning:\n"
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )
 
 
 def test_module_all_lists_documented_classes() -> None:
