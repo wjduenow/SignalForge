@@ -38,8 +38,8 @@ SignalForge generates the same artifacts, then asks a different question: **does
 The grading layer reuses [clauditor](https://github.com/wjduenow/clauditor)'s LLM-as-judge methodology, applied to a new artifact class.
 
 > **Status (v0.1):** Not yet on PyPI. Today the package installs from a
-> clone with `pip install -e ".[dev]"` (quote the extras — `[dev]` is a
-> glob in zsh).
+> clone with `uv sync --dev` (or `pip install -e ".[dev]"` for contributors
+> without uv).
 
 ## Quick start
 
@@ -61,7 +61,7 @@ SignalForge requires **Python 3.11+**. It is not yet published on PyPI — insta
 ```bash
 git clone https://github.com/wjduenow/SignalForge.git
 cd SignalForge
-pip install -e ".[dev]"   # quote the extras — [dev] is a glob in zsh
+uv sync --dev   # or: pip install -e ".[dev]"  (back-compat for non-uv setups)
 ```
 
 Once v0.1 ships to PyPI, `pip install signalforge-dbt` will replace the

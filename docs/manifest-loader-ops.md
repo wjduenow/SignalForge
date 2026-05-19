@@ -35,8 +35,8 @@ Cross-link: [`tests/fixtures/README.md`](../tests/fixtures/README.md) holds
 the canonical recipe, including the per-schema-version `uvx dbt-core==X.Y.x`
 incantation for v9 / v10 / v11.
 
-- v12 can be regenerated with the in-`[dev]` `dbt-core>=1.8` install — no
-  `uvx` needed; `pip install -e ".[dev]"` is sufficient.
+- v12 can be regenerated with the in-dev-group `dbt-core>=1.8` install — no
+  ephemeral `uvx` needed; `uv sync --dev` is sufficient.
 - v9 / v10 / v11 use ephemeral `uvx` installs of dbt-core 1.5.x / 1.6.x /
   1.7.x; the older lines need `--python 3.11` because they import the
   removed `distutils` module.
