@@ -98,14 +98,14 @@ locally too. Running `pytest` locally will fail if coverage drops below the
 threshold. This matches the canonical validation command in `CLAUDE.md`:
 
 ```bash
-pip install -e ".[dev]" && ruff check . && ruff format --check . && pyright && pytest
+uv sync --dev && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest
 ```
 
 To skip the coverage gate temporarily (e.g., during a focused TDD loop),
 use `--no-cov`:
 
 ```bash
-pytest --no-cov
+uv run pytest --no-cov
 ```
 
 This disables all coverage instrumentation including the `--cov-fail-under`

@@ -14,9 +14,9 @@ For the per-stage *production* contracts (defaults, error remediation, cost guid
 
 | File | One-line content | Per-record version field | Drift-detector test |
 |------|------------------|--------------------------|---------------------|
-| `.signalforge/audit.jsonl` | One safety `AuditEvent` per `build_llm_request` call (LLM request leaving the warehouse boundary, plus column-name redaction map) | `audit_schema_version: 1` | `tests/safety/test_drift_detector.py` |
+| `.signalforge/audit.jsonl` | One safety `AuditEvent` per `build_llm_request` call (LLM request leaving the warehouse boundary, plus column-name redaction map) | `audit_schema_version: 3` | `tests/safety/test_drift_detector.py` |
 | `.signalforge/llm_responses.jsonl` | One `LLMResponseEvent` per successful LLM round-trip in the draft layer (prompt + response hashes, cache-token economics) | `audit_schema_version: 1` | `tests/draft/test_drift_detector.py` |
-| `.signalforge/prune.jsonl` | One `PruneEvent` per candidate test routed through the prune orchestrator (decision, reason, compiled SQL hash, optional sample failures) | `audit_schema_version: 1` | `tests/prune/test_drift_detector.py` |
+| `.signalforge/prune.jsonl` | One `PruneEvent` per candidate test routed through the prune orchestrator (decision, reason, compiled SQL hash, optional sample failures) | `audit_schema_version: 2` | `tests/prune/test_drift_detector.py` |
 | `.signalforge/grade.jsonl` | One `GradeEvent` per `(artifact × criterion)` LLM-as-judge call (score, evidence, reasoning, response-token economics) | `audit_schema_version: 1` | `tests/grade/test_drift_detector.py` |
 | `.signalforge/grade.json` | End-of-run `GradingReport` sidecar — aggregate `pass_rate` / `mean_score`, `aggregate_complete`, every per-result row | `grade_schema_version: 1` (top-level) | `tests/grade/test_drift_detector.py` |
 | `.signalforge/diff.json` | End-of-run `DiffReport` sidecar — kept / kept-uncertain / dropped / flagged entries, proposed YAML, unified diff, reproducibility hashes | `schema_version: 1` + `audit_schema_version: 2` (top-level) | `tests/diff/test_drift_detector.py` |
@@ -206,9 +206,9 @@ Every event and report model across the five stages uses Pydantic v2 `extra="ign
 
 `audit_schema_version` is per-shape, not project-wide. The pinned values today:
 
-- `AuditEvent.audit_schema_version: int = 1` (safety)
+- `AuditEvent.audit_schema_version: int = 3` (safety — bumped 1 → 2 in issue #54 for the `draft_skip_*` redaction reasons, 2 → 3 in issue #55 for the `policy_hash` recipe change)
 - `LLMResponseEvent.audit_schema_version: int = 1` (draft)
-- `PruneEvent.audit_schema_version: Literal[1] = 1` (prune)
+- `PruneEvent.audit_schema_version: int = 2` (prune — bumped 1 → 2 in issue #55 when `config_hash` migrated to the `blake2b-8` recipe)
 - `GradeEvent.audit_schema_version: Literal[1] = 1` (grade per-call)
 - `GradingReport.grade_schema_version: Literal[1] = 1` (grade sidecar — separate field from the per-call event)
 - `DiffReport.schema_version: Literal[1] = 1` (diff sidecar overall) plus `DiffReport.audit_schema_version: Literal[2] = 2` (diff entries — bumped from 1 in issue #50 alongside the `kept-uncertain` tier literal)

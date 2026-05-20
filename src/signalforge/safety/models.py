@@ -33,6 +33,7 @@ Design commitments operationalised here:
 
 from __future__ import annotations
 
+import warnings
 from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
@@ -141,41 +142,59 @@ class AuditEvent(BaseModel):
         return iso8601_z(value)
 
 
-class LLMRequest(BaseModel):
-    """The request payload handed to issue #5's LLM-drafting layer.
-
-    Construct only via :func:`signalforge.safety.request.build_llm_request` —
-    direct construction bypasses the audit log and breaks the reproducibility
-    contract documented in DEC-014. The AST scan in US-011 enforces this
-    convention at lint time; this docstring is the human-readable companion.
-
-    Sequences are :class:`tuple` (DEC-022) so the request cannot be mutated
-    after the audit event has been written.
-    """
-
-    model_config = ConfigDict(
-        frozen=True,
-        extra="ignore",
-        populate_by_name=True,
-        arbitrary_types_allowed=True,
+# The ``schema`` field name shadows Pydantic v1's deprecated
+# :meth:`BaseModel.schema` method, which makes Pydantic emit a UserWarning at
+# class-creation time. The field name is part of the documented LLMRequest
+# contract (audit-log shape per safety-layer.md DEC-014), so the override is
+# intentional. Scope the suppression to this one class definition rather than
+# mutating the global filter list — issue #93.
+with warnings.catch_warnings():
+    # Relaxed regex (not the literal full message) so a future Pydantic
+    # version rewording the suffix still gets caught. Scoped to a narrow
+    # message anchor + ``UserWarning`` category — broad enough to survive
+    # message-wording drift, narrow enough not to swallow unrelated
+    # warnings.
+    warnings.filterwarnings(
+        "ignore",
+        message=r'Field name "schema".*shadows.*',
+        category=UserWarning,
     )
 
-    model_unique_id: str
-    mode: SamplingMode
-    columns_sent: tuple[str, ...]
-    redactions: tuple[RedactionRecord, ...]
-    sampled_rows: tuple[dict[str, Any], ...] | None = None
-    # Tuple-of-tuples (not dict) so frozen=True actually prevents mutation:
-    # downstream consumers cannot do `request.aggregates["x"] = ...` post-audit
-    # (DEC-022 transitive immutability). Convention: list order matches
-    # ``columns_sent``; redacted columns appear with their hashed name as key
-    # and ``None`` as value.
-    aggregates: tuple[tuple[str, ColumnStats | None], ...] | None = None
-    # ``schema`` overrides Pydantic v1's deprecated :meth:`BaseModel.schema`
-    # method on this subclass. The override is intentional — the field name is
-    # part of the documented LLMRequest contract — so pyright's structural
-    # complaint is silenced here rather than renamed.
-    schema: tuple[tuple[str, str], ...]  # pyright: ignore[reportIncompatibleMethodOverride]
+    class LLMRequest(BaseModel):
+        """The request payload handed to issue #5's LLM-drafting layer.
+
+        Construct only via :func:`signalforge.safety.request.build_llm_request` —
+        direct construction bypasses the audit log and breaks the reproducibility
+        contract documented in DEC-014. The AST scan in US-011 enforces this
+        convention at lint time; this docstring is the human-readable companion.
+
+        Sequences are :class:`tuple` (DEC-022) so the request cannot be mutated
+        after the audit event has been written.
+        """
+
+        model_config = ConfigDict(
+            frozen=True,
+            extra="ignore",
+            populate_by_name=True,
+            arbitrary_types_allowed=True,
+        )
+
+        model_unique_id: str
+        mode: SamplingMode
+        columns_sent: tuple[str, ...]
+        redactions: tuple[RedactionRecord, ...]
+        sampled_rows: tuple[dict[str, Any], ...] | None = None
+        # Tuple-of-tuples (not dict) so frozen=True actually prevents mutation:
+        # downstream consumers cannot do `request.aggregates["x"] = ...` post-audit
+        # (DEC-022 transitive immutability). Convention: list order matches
+        # ``columns_sent``; redacted columns appear with their hashed name as key
+        # and ``None`` as value.
+        aggregates: tuple[tuple[str, ColumnStats | None], ...] | None = None
+        # ``schema`` overrides Pydantic v1's deprecated :meth:`BaseModel.schema`
+        # method on this subclass; the structural override is silenced for
+        # pyright here and the runtime UserWarning is silenced by the
+        # ``catch_warnings`` block above.
+        schema: tuple[tuple[str, str], ...]  # pyright: ignore[reportIncompatibleMethodOverride]
 
 
 __all__ = [

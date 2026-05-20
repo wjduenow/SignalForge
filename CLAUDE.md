@@ -66,13 +66,17 @@ Internals (`_loader_helpers`, `_sql_safety`, `_path_safety`, `_test_result_repr`
 
 ## Validation
 
-Canonical validation command for this repo (run locally; CI runs the same four checks):
+Canonical validation command for this repo (run locally; CI runs the same four checks across a 3.11 / 3.12 matrix — 3.13 is deferred pending the open path-safety follow-up):
 
 ```bash
-pip install -e ".[dev]" && ruff check . && ruff format --check . && pyright && pytest
+uv sync --dev && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest
 ```
 
-Quote the `".[dev]"` — bare `.[dev]` is a glob in zsh.
+The repo is uv-managed (see `.claude/rules/python-build.md`). `pip install -e ".[dev]"` still works for contributors without uv (the `[project.optional-dependencies].dev` extra is kept in sync with `[dependency-groups].dev`), but uv is the default; `uv.lock` is committed.
+
+## Documentation site
+
+Published at https://wjduenow.github.io/SignalForge/ — MkDocs Material build, redeploy on every push to `main` via the `docs:` job in `.github/workflows/ci.yml`. The site's home page is the root `README.md` rendered via `mkdocs-include-markdown-plugin`; the per-stage ops docs under `docs/*-ops.md` ship as the nav. Internal research under `docs/research/` is excluded. See `.claude/rules/docs-publishing.md` for the full deploy contract.
 
 ## What SignalForge is
 
