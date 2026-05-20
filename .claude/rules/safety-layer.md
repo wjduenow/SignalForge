@@ -91,6 +91,20 @@ Same rule as the other layers (`llm-drafter.md` DEC-011 / `prune-engine.md` DEC-
 
 If you add a new module that genuinely needs to construct an `LLMRequest` (e.g., a deserialiser for resumption), update the exclusion list AND document the audit-write seam. Don't suppress the test.
 
+## Pydantic field-name shadow of `BaseModel` — scope the suppression, don't rename (issue #93)
+
+`LLMRequest.schema: tuple[tuple[str, str], ...]` deliberately shadows Pydantic v1's deprecated `BaseModel.schema()` method. The field name is part of the audit-log contract (DEC-014); renaming would break `safety.jsonl` consumers, and a Pydantic `Field(alias="schema")` would change the Python attribute name out from under every internal caller of `request.schema`.
+
+Pydantic emits a `UserWarning` at class-creation time for this kind of shadow. The fix is `warnings.catch_warnings()` around the class definition with a targeted `filterwarnings("ignore", message=r'Field name "schema".*shadows.*', category=UserWarning)`. Three rules:
+
+1. **Scope to the class definition, not the module / process.** A bare `warnings.filterwarnings(...)` at module top-level permanently mutates the global filter list and silences unrelated future warnings. `catch_warnings()` is a context manager that restores the prior filter state on exit.
+2. **Pin the message regex.** A category-only filter (`category=UserWarning`) is too broad. The `message=r'...'` anchor catches the specific Pydantic shadow warning and nothing else.
+3. **Keep the existing `pyright: ignore[reportIncompatibleMethodOverride]` on the field.** Pyright's structural-override complaint is a separate signal from Pydantic's runtime UserWarning; both need their own suppression.
+
+Regression test: `tests/safety/test_models.py::test_importing_safety_models_emits_no_userwarning` shells out a subprocess with `-W error::UserWarning` and asserts exit 0. Subprocess (not in-process `importlib.reload`) because the parent process imports `signalforge.safety.models` via the test collector before any in-test code runs.
+
+When a future Pydantic field-name shadow surfaces (an audit-log contract is the same kind of "renaming would break consumers" pin), match this shape verbatim — don't reach for a global filter, and don't rename the field.
+
 ## Fail-closed writer shape — Scan 8 covers all five writers (issue #38)
 
 `tests/test_audit_completeness.py::test_fail_closed_writers_have_no_except_around_write_fsync` and `test_fail_closed_writers_use_short_write_loop` are the eighth AST scan in the project. They walk every fail-closed writer module — `signalforge.{safety,draft,prune,grade}.audit` and `signalforge.diff._sidecar` — and assert: (a) no `except` handler may wrap a `Try` whose body issues `os.write` / `os.fsync` (only `try / finally` around `os.close(fd)` is permitted); (b) every writer function uses a `while` loop around `os.write` so short writes (`EINTR`, pathological short returns) don't produce partial JSONL records.

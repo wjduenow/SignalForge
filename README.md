@@ -1,4 +1,4 @@
-[![codecov](https://codecov.io/gh/wjduenow/SignalForge/branch/dev/graph/badge.svg)](https://codecov.io/gh/wjduenow/SignalForge)
+[![codecov](https://codecov.io/gh/wjduenow/SignalForge/branch/dev/graph/badge.svg)](https://codecov.io/gh/wjduenow/SignalForge) [![docs](https://img.shields.io/badge/docs-signalforge-blue?logo=materialformkdocs)](https://wjduenow.github.io/SignalForge/)
 
 # SignalForge
 
@@ -38,8 +38,8 @@ SignalForge generates the same artifacts, then asks a different question: **does
 The grading layer reuses [clauditor](https://github.com/wjduenow/clauditor)'s LLM-as-judge methodology, applied to a new artifact class.
 
 > **Status (v0.1):** Not yet on PyPI. Today the package installs from a
-> clone with `pip install -e ".[dev]"` (quote the extras — `[dev]` is a
-> glob in zsh).
+> clone with `uv sync --dev` (or `pip install -e ".[dev]"` for contributors
+> without uv).
 
 ## Quick start
 
@@ -61,7 +61,7 @@ SignalForge requires **Python 3.11+**. It is not yet published on PyPI — insta
 ```bash
 git clone https://github.com/wjduenow/SignalForge.git
 cd SignalForge
-pip install -e ".[dev]"   # quote the extras — [dev] is a glob in zsh
+uv sync --dev   # or: pip install -e ".[dev]"  (back-compat for non-uv setups)
 ```
 
 Once v0.1 ships to PyPI, `pip install signalforge-dbt` will replace the
@@ -130,7 +130,9 @@ signalforge lint --project-dir /tmp/sf-austin
 On success, stdout is silent (git-style) and the exit code is `0`.
 Failures are listed on stderr with the offending block(s) named —
 single-failure runs use the `ERROR: <message>` shape; multi-failure
-runs emit a header + one bullet per block. See
+runs emit a header + one bullet per block. Pass `--model <name>` to
+also confirm a specific model resolves in the manifest (accepts a
+bare name, a `unique_id`, or a file path). See
 [`docs/cli-ops.md`](docs/cli-ops.md) § `signalforge lint` for the full
 contract.
 
@@ -157,11 +159,16 @@ contract.
 ### 7. Expected output
 
 The diff lists drafted column descriptions and signal-bearing tests
-alongside dropped tests with a one-line "why". The kept/dropped/flagged
-table looks like this (truncated):
+alongside dropped tests with a one-line "why". Every artifact lands
+in one of four tiers — `kept` (survived prune with positive
+evidence), `kept-uncertain` (kept, but the warehouse couldn't be
+reached to evaluate it — e.g. a budget or connectivity issue),
+`dropped` (prune found it adds no signal), and `flagged` (kept, but
+graded below the quality threshold). The table looks like this
+(truncated):
 
 ```text
-diff: model.austin.stg_bikeshare_trips  kept=8  dropped=2  flagged=1
+diff: model.austin.stg_bikeshare_trips  kept=8  kept-uncertain=0  dropped=2  flagged=1
 
 TIER      ARTIFACT                      TEST            REASON                  SCORE    WHY
 kept      column.trip_id.description                                            0.97     Description added; passed all grading criteria.
@@ -195,7 +202,7 @@ full rendered diff). The committed `.gitignore` covers `.signalforge/`.
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
 | `User does not have bigquery.jobs.create permission in project bigquery-public-data` | `GOOGLE_CLOUD_PROJECT` not set; SDK fell back to the source project | Export `GOOGLE_CLOUD_PROJECT=<billing-project>` where you have the `BigQuery Job User` role |
-| `Query exceeded max_bytes_billed (limit=100000000, ...)` | Editing the profile dropped or lowered `maximum_bytes_billed` | Keep `maximum_bytes_billed: 1000000000` (1 GB) — the smoke test ships this cap intentionally |
+| `Query exceeded max_bytes_billed (limit=100000000, ...)` | Editing the profile dropped or lowered `maximum_bytes_billed` | Keep `maximum_bytes_billed: 1000000000` (1 GB) — the bundled demo `profiles.yml` ships this cap intentionally so the materialised-sample scan clears the adapter's 100 MB default |
 | `Manifest not found` / `dbt_project.yml not found at ...` | CLI walked up from the wrong cwd, or `--project-dir` doesn't directly contain `dbt_project.yml` | Either `cd` into the project root, or pass `--project-dir <abs-path>` pointing at the directory holding `dbt_project.yml` |
 | `aggregate_complete=False` in `grade.json` | Network blip during a grade call exhausted retries | Re-run; if it persists, raise `grade.total_budget_seconds` in `signalforge.yml` |
 | `LLM response did not match the CandidateSchema shape` | Anthropic response shape drifted vs. the parser | Set `ANTHROPIC_LOG=info` and inspect `~/.anthropic-debug/`; file an issue |
@@ -213,15 +220,25 @@ of the same flow as a gated test (`pytest -m e2e --no-cov`):
 Four subcommands ship in v0.1:
 
 ```bash
-signalforge generate <model>   # full pipeline; --mode, --min-score, --write/--dry-run, --format
-signalforge init-demo [<dest>] # copy the bundled Austin demo project into <dest>; --force
-signalforge lint               # validate signalforge.yml config blocks
+signalforge generate <model>   # full draft -> prune -> grade -> diff pipeline for one model
+signalforge init-demo [<dest>] # copy the bundled Austin demo project into <dest>
+signalforge lint               # validate signalforge.yml config blocks (no LLM/warehouse calls)
 signalforge version            # print the SignalForge version
 ```
 
+Key `generate` flags: `--project-dir`, `--manifest`, `--profiles-dir`
+(point at the project / manifest / profile); `--mode
+{schema-only,aggregate-only,sample}` and `--min-score` (pipeline
+behaviour); `--write` / `--dry-run` and `--format {ansi,markdown,json}`
+(output); `--estimate` (cost preview, no billable calls); `--select
+<expr>` (run across many models); `--scope`, `--sample-strategy`; and
+the `--quiet` / `--verbose` / `--no-color` observability triad.
+`init-demo` takes `--force`; `lint` takes `--config`, `--manifest`,
+`--model`, `--project-dir`.
+
 `signalforge --help` prints the top-level help; each subcommand has its
 own `--help` page. See [docs/cli-ops.md](docs/cli-ops.md) for the full
-reference.
+reference, exit-code taxonomy, and environment variables.
 
 ## Configuration
 

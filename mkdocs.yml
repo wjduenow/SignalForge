@@ -1,0 +1,59 @@
+site_name: SignalForge
+site_description: Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.
+site_url: https://wjduenow.github.io/SignalForge/
+repo_url: https://github.com/wjduenow/SignalForge
+repo_name: wjduenow/SignalForge
+# Edits target dev — main is the release line; doc PRs land on dev like every
+# other change. The published site reflects main (the docs job publishes on
+# push to main only), so an edit-now-publish-later workflow follows the
+# regular dev → main release cadence.
+edit_uri: edit/dev/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.top
+    - search.highlight
+    - content.code.copy
+
+# Research docs are internal analysis (dbt-pain-deep-dive, dbt-research-index,
+# etc.) — not user-facing. Excluded from the published site.
+exclude_docs: |
+  research/
+
+plugins:
+  - search
+  - include-markdown
+
+markdown_extensions:
+  - md_in_html
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: index.md
+  - CLI Reference: cli-ops.md
+  - Pipeline Stages:
+      - Manifest Loader: manifest-loader-ops.md
+      - Warehouse Adapter: warehouse-adapter-ops.md
+      - Safety Layer: safety-ops.md
+      - LLM Drafter: draft-ops.md
+      - Prune Engine: prune-ops.md
+      - Quality Grader: grade-ops.md
+      - Diff Renderer: diff-ops.md
+  - Audits & Sidecars: audits.md
+  - End-to-End Smoke Test: e2e-smoke-test.md
+  - Coverage Setup: codecov-ops.md

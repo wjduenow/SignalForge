@@ -9,18 +9,28 @@ SignalForge is pre-alpha and designing in the open. The differentiator is the pr
 
 ## Local development
 
+The repo is uv-managed. Install [uv](https://docs.astral.sh/uv/), then:
+
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"   # quoted for zsh; bash also accepts this form
+uv sync --dev
 ```
 
-Validate before pushing:
+uv reads `[dependency-groups].dev` in `pyproject.toml`, picks an interpreter
+on the matrix floor (3.11) by default, and writes `uv.lock` (committed).
+Contributors without uv can fall back to `pip install -e ".[dev]"` — the
+`[project.optional-dependencies].dev` extra is kept in sync.
+
+Validate before pushing (CI runs the same four checks on a 3.11 / 3.12
+matrix; pyright is gated to the matrix floor, codecov upload to the ceiling.
+3.13 is deferred — see the open Python-3.13 path-safety follow-up issue):
 
 ```bash
-ruff check . && ruff format --check . && pyright && pytest
+uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest
 ```
 
 **Coverage:** see [`docs/codecov-ops.md`](docs/codecov-ops.md) for Codecov setup, badge interpretation, and threshold bumps.
+
+**Docs:** the [published docs site](https://wjduenow.github.io/SignalForge/) is built by MkDocs Material on every push to `main`. Edits to `docs/*.md` and `README.md` land on `dev` like any other PR; the published site picks them up on the next `dev → main` merge. Local preview with `uv run mkdocs serve`. See [`.claude/rules/docs-publishing.md`](.claude/rules/docs-publishing.md) for the full deploy contract.
 
 ## Pre-release coverage audit
 
@@ -35,7 +45,7 @@ total to catch regressions in the gated paths:
 
 ```bash
 # 1. Default coverage (what the badge reports) — writes a fresh .coverage file:
-pytest
+uv run pytest
 
 # 2. Append the gated-marker run to the SAME .coverage data file.
 #    --cov-append combines with run 1 so the term report shows the COMBINED total.
@@ -43,7 +53,7 @@ pytest
 #    markers alone never clear it, and this is a measurement, not a gate.
 #    (bigquery/anthropic/e2e need creds; cli_subprocess/wheel_smoke do not.)
 SF_RUN_BQ=1 ANTHROPIC_API_KEY=sk-... GOOGLE_CLOUD_PROJECT=<billing-project> \
-  pytest -m 'bigquery or anthropic or e2e or cli_subprocess or wheel_smoke' \
+  uv run pytest -m 'bigquery or anthropic or e2e or cli_subprocess or wheel_smoke' \
   --cov=signalforge --cov-append --cov-fail-under=0 --cov-report=term
 ```
 
@@ -88,7 +98,7 @@ Maintainers should run it once before declaring a CLI PR ready
 (mirrors the `bigquery` integration-test gate):
 
 ```bash
-pytest -m cli_subprocess --no-cov
+uv run pytest -m cli_subprocess --no-cov
 ```
 
 ## BigQuery integration tests
@@ -108,7 +118,7 @@ SF_RUN_BQ)`.
 
 2. Run with the gate:
    ```bash
-   SF_RUN_BQ=1 pytest -m bigquery --no-cov
+   SF_RUN_BQ=1 uv run pytest -m bigquery --no-cov
    ```
 
 The tests query `bigquery-public-data.samples.shakespeare` (164K rows,

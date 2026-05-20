@@ -1,21 +1,23 @@
 ---
 name: release-manager
 description: Cut a signalforge-dbt release. Test releases publish to TestPyPI via a prerelease GitHub Release; full releases publish to PyPI via a non-prerelease GitHub Release.
-compatibility: "Requires: gh CLI, git, pip, uvx (for twine). Must be run from the SignalForge repo root."
+compatibility: "Requires: gh CLI, git, uv (build + validation), uvx (for twine), pip (clean-room TestPyPI install test). Must be run from the SignalForge repo root."
 metadata:
   signalforge-version: "0.1.0"
 disable-model-invocation: true
-allowed-tools: Bash(git *), Bash(gh *), Bash(uvx *), Bash(grep *), Bash(cat *), Bash(sleep *), Bash(pip *), Bash(python *), Bash(curl *), Bash(awk *), Bash(rm *), Bash(date *), Read, Edit, Write
+allowed-tools: Bash(git *), Bash(gh *), Bash(uv *), Bash(uvx *), Bash(grep *), Bash(cat *), Bash(sleep *), Bash(pip *), Bash(python *), Bash(curl *), Bash(awk *), Bash(rm *), Bash(date *), Read, Edit, Write
 ---
 
 # /release-manager — Cut a signalforge-dbt release
 
 You help the maintainer cut a release of `signalforge-dbt` (PyPI distribution name; the import package and CLI remain `signalforge`).
 
-SignalForge's publish workflow (`.github/workflows/publish.yml`) routes on the GitHub Release `prerelease` flag, **not** on branch:
+SignalForge cuts releases from two branches — **TestPyPI from `dev`, real PyPI from `main`**:
 
-- **Prerelease** GitHub Release → `publish-testpypi` job → https://test.pypi.org/project/signalforge-dbt/
-- **Non-prerelease** GitHub Release → `publish-pypi` job → https://pypi.org/project/signalforge-dbt/
+- **Test release** — cut from **`dev`**, published as a **prerelease** GitHub Release → `publish-testpypi` job → https://test.pypi.org/project/signalforge-dbt/
+- **Full release** — cut from **`main`**, published as a **non-prerelease** GitHub Release → `publish-pypi` job → https://pypi.org/project/signalforge-dbt/
+
+The publish workflow (`.github/workflows/publish.yml`) is the technical switch — it routes on the GitHub Release `prerelease` flag. The branch each release is cut from is the maintainer discipline this skill enforces in pre-flight: a test release tags `dev` HEAD and a full release tags `main` HEAD. The two line up — `dev` is the in-development line that feeds TestPyPI; `main` is the released line that feeds PyPI.
 
 Both routes use PyPI Trusted Publishers; each index has its own environment (`testpypi` / `pypi`) — these must be configured (or "pending") on the respective index before the first publish.
 
@@ -23,8 +25,8 @@ Both routes use PyPI Trusted Publishers; each index has its own environment (`te
 
 Ask the user:
 > **Release type?**
-> - `test` — publish to TestPyPI as a pre-release (version must have a dev/alpha/beta/rc suffix, e.g. `0.1.0rc1`)
-> - `full` — publish to real PyPI as a stable release (clean version, e.g. `0.1.0`)
+> - `test` — publish to TestPyPI as a pre-release, cut from **`dev`** (version must have a dev/alpha/beta/rc suffix, e.g. `0.1.0rc1`)
+> - `full` — publish to real PyPI as a stable release, cut from **`main`** (clean version, e.g. `0.1.0`)
 
 Record the choice and follow the matching workflow below.
 
@@ -36,8 +38,8 @@ Run these checks and STOP if any fail — report the problem clearly and do not 
 
 **Branch check (differs by release type):**
 
-- **Test release**: any branch is acceptable, but the tag will point at the current commit. Typically run from a `release/X.Y.Zrc1` branch that has been merged to `main`, or from `main` itself once the release PR is merged.
-- **Full release**: `git branch --show-current` must return `main`. Full releases tag `main` HEAD.
+- **Test release**: `git branch --show-current` must return `dev`. Test releases tag `dev` HEAD and publish to TestPyPI. If the user is on another branch, STOP and ask them to `git checkout dev` (and ensure the rc commit is on `dev`) first.
+- **Full release**: `git branch --show-current` must return `main`. Full releases tag `main` HEAD and publish to PyPI.
 
 **Checks for both modes:**
 
@@ -48,7 +50,7 @@ Run these checks and STOP if any fail — report the problem clearly and do not 
    - `git fetch origin {branch} && git status` must show "up to date".
 3. **Canonical validation passes** (per `CLAUDE.md`):
    ```bash
-   ruff check . && ruff format --check . && pyright && pytest
+   uv sync --dev && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest
    ```
 4. **CHANGELOG `[Unreleased]` is current**. Read `CHANGELOG.md` and show the user the current `[Unreleased]` section. Ask: "Does this cover everything shipping in this release?" Pause for confirmation — for **full** releases the `[Unreleased]` content gets promoted to `[X.Y.Z]` and used as the GitHub Release body. Empty / stale `[Unreleased]` means an empty / stale release page. If the user wants to edit it, stop here, let them edit, then re-run pre-flight.
 
@@ -56,7 +58,7 @@ Run these checks and STOP if any fail — report the problem clearly and do not 
 
 ```
 Pre-flight checks:
-- Branch (any|main): PASS|FAIL
+- Branch (test→dev | full→main): PASS|FAIL
 - Clean working tree: PASS|FAIL
 - Up to date with origin: PASS|FAIL
 - ruff check / format / pyright / pytest: PASS|FAIL
@@ -105,7 +107,7 @@ Next dev version: {next}   ← only shown for full release; ask user to confirm
 
 ```bash
 rm -rf dist/
-python -m build
+uv build
 uvx twine check dist/*
 ```
 
@@ -113,16 +115,15 @@ Both artifacts must show `PASSED`. STOP and report if either fails.
 
 ### Step 2 — Commit if version changed
 
-If the version in `src/signalforge/__init__.py` was not changed (used as-is), skip this step. Otherwise open a short PR — main is the release branch and the prerelease tag will point at `main` HEAD:
+If the version in `src/signalforge/__init__.py` was not changed (used as-is), skip this step. Otherwise commit the bump to `dev` — test releases are cut from `dev` and the prerelease tag points at `dev` HEAD:
 
 ```bash
-branch=$(git branch --show-current)
 git add src/signalforge/__init__.py
 git commit -m "chore: bump to {release_version} for test release"
-git push origin "$branch"
+git push origin dev
 ```
 
-If `$branch` is `main` and `main` has branch protection, instead open a release-bump PR (`release/{release_version}`) and stop here for the user to merge.
+If `dev` has branch protection that blocks direct pushes, open a release-bump PR (`release/{release_version}`) targeting `dev` instead and stop here for the user to merge.
 
 ### Step 3 — Tag and create GitHub pre-release
 
@@ -153,16 +154,23 @@ sleep 15
 pip index versions signalforge-dbt --index-url https://test.pypi.org/simple/ 2>/dev/null | head -3
 ```
 
-Confirm `{release_version}` appears. Then install in a clean venv to smoke-test:
+Confirm `{release_version}` appears. Then install in a clean venv to smoke-test.
+
+**The clean-room interpreter MUST be ≥3.11** — `signalforge-dbt` declares `requires-python = ">=3.11"`, so `pip` on a 3.10-or-older interpreter silently *ignores* the new release ("Could not find a version that satisfies …", only the pre-3.11-floor `0.1.0rc1` installs). A bare `python -m venv` picks up whatever `python3` is on PATH, which may be 3.10. Provision the interpreter explicitly via `uv`:
 
 ```bash
-python -m venv /tmp/sf-testpypi-check && \
-  /tmp/sf-testpypi-check/bin/pip install \
-    --index-url https://test.pypi.org/simple/ \
-    --extra-index-url https://pypi.org/simple/ \
-    "signalforge-dbt=={release_version}" && \
-  /tmp/sf-testpypi-check/bin/signalforge --version
+rm -rf /tmp/sf-testpypi-check
+uv venv --python 3.11 /tmp/sf-testpypi-check
+uv pip install --python /tmp/sf-testpypi-check/bin/python --no-cache \
+  --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple/ \
+  "signalforge-dbt=={release_version}"
+/tmp/sf-testpypi-check/bin/signalforge --version
 ```
+
+Pin **3.11** (the `requires-python` floor) so the smoke test verifies installability on the *minimum* supported interpreter. `uv venv --python 3.11` auto-fetches 3.11 if it isn't already present, so this works regardless of the host's default `python3`.
+
+If the install fails with "Could not find a version that satisfies the requirement" right after a successful publish, it's almost always TestPyPI's simple-index (Fastly) cache lagging the upload by a minute or two — confirm the artifact exists via the per-version JSON (`curl -sf "https://test.pypi.org/pypi/signalforge-dbt/{release_version}/json"`), wait, and retry. (Distinguish this from the Python-version mismatch above: the version-mismatch error names "Requires-Python >=3.11" in the pip output; the cache-lag error just shows an older `(from versions: …)` list.)
 
 Report: TestPyPI URL `https://test.pypi.org/project/signalforge-dbt/{release_version}/`.
 
@@ -197,7 +205,7 @@ Edit `CHANGELOG.md` so this release has its own dated section the GitHub Release
 
 ```bash
 rm -rf dist/
-python -m build
+uv build
 uvx twine check dist/*
 ```
 
@@ -214,7 +222,7 @@ git commit -m "chore: release {release_version}"
 git push -u origin release/{release_version}
 gh pr create --base main --head release/{release_version} \
   --title "chore: release {release_version}" \
-  --body "Cuts v{release_version} to PyPI. Pre-flight passed (ruff/pyright/pytest); \`python -m build\` + \`uvx twine check\` PASSED on wheel and sdist. CHANGELOG promoted from \`[Unreleased]\`."
+  --body "Cuts v{release_version} to PyPI. Pre-flight passed (ruff/pyright/pytest); \`uv build\` + \`uvx twine check\` PASSED on wheel and sdist. CHANGELOG promoted from \`[Unreleased]\`."
 ```
 
 STOP and ask the user to merge the PR via GitHub. Once merged, continue.

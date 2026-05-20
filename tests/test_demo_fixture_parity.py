@@ -5,8 +5,11 @@ must stay byte-for-byte equal to the e2e-smoke fixture tree EXCEPT for two
 documented rewrites:
 
 1. ``profiles.yml`` — the shipped copy uses dbt's ``env_var('GOOGLE_CLOUD_PROJECT')``
-   macro for the BigQuery project field and drops the maintainer-only
-   "DO NOT signalforge against this" header (DEC-009).
+   macro for the BigQuery project field, drops the maintainer-only
+   "DO NOT signalforge against this" header (DEC-009), and adds
+   ``maximum_bytes_billed: 1000000000`` so the demo's materialised-sample
+   CTAS clears the adapter's default 100 MB cap (the e2e test fixture
+   does the equivalent bump in ``tmp_path`` at run time instead).
 2. ``.gitignore`` — the shipped copy is slimmed to a single ``.signalforge/``
    exclusion; the test-fixture copy keeps the issue-#10 / DEC-021 maintainer
    commentary.
