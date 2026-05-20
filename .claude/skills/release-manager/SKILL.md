@@ -154,16 +154,23 @@ sleep 15
 pip index versions signalforge-dbt --index-url https://test.pypi.org/simple/ 2>/dev/null | head -3
 ```
 
-Confirm `{release_version}` appears. Then install in a clean venv to smoke-test:
+Confirm `{release_version}` appears. Then install in a clean venv to smoke-test.
+
+**The clean-room interpreter MUST be ≥3.11** — `signalforge-dbt` declares `requires-python = ">=3.11"`, so `pip` on a 3.10-or-older interpreter silently *ignores* the new release ("Could not find a version that satisfies …", only the pre-3.11-floor `0.1.0rc1` installs). A bare `python -m venv` picks up whatever `python3` is on PATH, which may be 3.10. Provision the interpreter explicitly via `uv`:
 
 ```bash
-python -m venv /tmp/sf-testpypi-check && \
-  /tmp/sf-testpypi-check/bin/pip install \
-    --index-url https://test.pypi.org/simple/ \
-    --extra-index-url https://pypi.org/simple/ \
-    "signalforge-dbt=={release_version}" && \
-  /tmp/sf-testpypi-check/bin/signalforge --version
+rm -rf /tmp/sf-testpypi-check
+uv venv --python 3.11 /tmp/sf-testpypi-check
+uv pip install --python /tmp/sf-testpypi-check/bin/python --no-cache \
+  --index-url https://test.pypi.org/simple/ \
+  --extra-index-url https://pypi.org/simple/ \
+  "signalforge-dbt=={release_version}"
+/tmp/sf-testpypi-check/bin/signalforge --version
 ```
+
+Pin **3.11** (the `requires-python` floor) so the smoke test verifies installability on the *minimum* supported interpreter. `uv venv --python 3.11` auto-fetches 3.11 if it isn't already present, so this works regardless of the host's default `python3`.
+
+If the install fails with "Could not find a version that satisfies the requirement" right after a successful publish, it's almost always TestPyPI's simple-index (Fastly) cache lagging the upload by a minute or two — confirm the artifact exists via the per-version JSON (`curl -sf "https://test.pypi.org/pypi/signalforge-dbt/{release_version}/json"`), wait, and retry. (Distinguish this from the Python-version mismatch above: the version-mismatch error names "Requires-Python >=3.11" in the pip output; the cache-lag error just shows an older `(from versions: …)` list.)
 
 Report: TestPyPI URL `https://test.pypi.org/project/signalforge-dbt/{release_version}/`.
 
