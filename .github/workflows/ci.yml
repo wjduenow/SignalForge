@@ -40,6 +40,12 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           python-version: ${{ matrix.python-version }}
+          # Disable the GitHub Actions cache for the uv download. On a
+          # public repo, PR-triggered runs share a cache scope with the
+          # base branch; an explicit `false` removes the cache-poisoning
+          # vector across that trust boundary. Runs are fast enough that
+          # the lost cache is negligible.
+          enable-cache: false
       - name: Sync dev dependencies
         run: uv sync --dev
       - name: Ruff check
@@ -83,6 +89,7 @@ jobs:
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           python-version: "3.11"
+          enable-cache: false  # no shared cache across PR trust boundary
       - name: Build the docs site
         # `--only-group docs` installs JUST MkDocs + plugins, not the
         # heavy dev set. Non-strict build: it returns non-zero on real
@@ -118,6 +125,7 @@ jobs:
           # Same floor as publish.yml — keeps the doc-build interpreter
           # deterministic across runs.
           python-version: "3.11"
+          enable-cache: false  # no shared cache across PR trust boundary
       - name: Deploy to GitHub Pages
         # `--only-group docs` keeps the deploy env minimal (no dbt-core /
         # pyright). `--force` overwrites the prior gh-pages commit (the

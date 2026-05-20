@@ -28,6 +28,19 @@ permissions:
 
 Default-deny everything; expand per-job only when explicitly needed. Never use `pull_request_target` for fork-safe CI — it exposes write tokens.
 
+## Disable `setup-uv` caching on a public repo (`enable-cache: false`)
+
+Every `astral-sh/setup-uv` step sets `enable-cache: false` explicitly. `setup-uv`'s default persists the uv download/cache to the GitHub Actions Cache; on a public repo, `pull_request`-triggered runs share a cache scope with the base branch, so a malicious fork PR can poison a cache entry that a later trusted run restores — a cross-trust-boundary cache-poisoning vector. Disabling the cache removes it. The runs are short (CI ~15–40s; release build a few seconds), so the lost cache is negligible.
+
+```yaml
+- uses: astral-sh/setup-uv@<40-char-sha>  # v8.1.0
+  with:
+    python-version: "3.11"
+    enable-cache: false
+```
+
+This applies to **every** setup-uv step in both `ci.yml` (lint-test, docs-build, docs-deploy) and `publish.yml` (testpypi, pypi). The publish/deploy steps matter most — a poisoned cache must never reach a published artifact or the gh-pages deploy. A new setup-uv step without `enable-cache: false` is a regression; flagged by CodeRabbit on the integration PR that introduced the uv migration (#98).
+
 ## Concurrency: cancel superseded runs
 
 ```yaml
