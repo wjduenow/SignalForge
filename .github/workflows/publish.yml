@@ -44,6 +44,9 @@ jobs:
           # reproducibility. Without this, `uv build` picks whatever
           # `ubuntu-latest` happens to ship, which can drift over time.
           python-version: "3.11"
+          # No GitHub Actions cache for release builds — a poisoned cache
+          # must never touch a published artifact.
+          enable-cache: false
       - name: Build sdist + wheel
         run: uv build
       - name: Publish to TestPyPI
@@ -72,6 +75,9 @@ jobs:
           # Pin the build interpreter to the supported floor for release
           # reproducibility.
           python-version: "3.11"
+          # No GitHub Actions cache for release builds — a poisoned cache
+          # must never touch a published artifact.
+          enable-cache: false
       - name: Build sdist + wheel
         run: uv build
       - name: Publish to PyPI
