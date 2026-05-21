@@ -96,6 +96,13 @@ from signalforge.grade import (
     GradePromptEnvelopeBreachError,
     GradeRubricError,
 )
+from signalforge.ingest import (
+    IngestAnchorContractError,
+    IngestModelNotFoundError,
+    IngestSchemaNotFoundError,
+    IngestSchemaParseError,
+    IngestSchemaTooLargeError,
+)
 from signalforge.llm import (
     EstimateUnknownModelError,
     LLMAuthError,
@@ -253,6 +260,19 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # walk in :func:`map_exception_to_exit_code`.
     DemoPathError: 1,
     DemoFixtureMissingError: 1,
+    # Ingest layer (issue #104 / DEC-001 / US-001). The reader parses an
+    # external dbt schema.yml into a CandidateSchema. These three are
+    # load-tier: the schema file is missing, unparseable, or exceeds the
+    # size cap applied before yaml.safe_load (DEC-005) — all "couldn't get
+    # the input into a coherent state to start work." The two input-tier
+    # concretes live in the Tier 2 block below. Like DemoError, the
+    # IngestError base spans tiers 1 and 2, so it gets NO single fallback
+    # entry — it lives only in _EXCEPTION_MAPPING_EXCLUDED_BASES; a forgotten
+    # concrete falls through to tier 1 and the 7th AST scan catches the
+    # missing per-class entry at test time.
+    IngestSchemaNotFoundError: 1,
+    IngestSchemaParseError: 1,
+    IngestSchemaTooLargeError: 1,
     # ---- Tier 2: input ----------------------------------------------------
     # Manifest selection (the operator picked a model that doesn't exist or
     # is disabled — caller's fault, not load).
@@ -316,6 +336,14 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # above for the defence-in-depth rationale.
     DemoDestExistsError: 2,
     DemoDestUnsafeError: 2,
+    # Ingest layer (issue #104 / DEC-002 of US-001). Both fire on
+    # operator-supplied input that conflicts with the manifest/schema:
+    # the named model is absent from the schema.yml (mirrors
+    # ModelNotFoundError's tier), or one or more tests reference a column
+    # missing from the Model (whole-file collect-all anchor-contract
+    # failure — the YAML is stale or wrong vs. the manifest).
+    IngestModelNotFoundError: 2,
+    IngestAnchorContractError: 2,
     # ---- Tier 3: API / external dep ---------------------------------------
     # LLM connectivity / quota / SDK issues.
     LLMError: 3,
