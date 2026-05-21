@@ -6,7 +6,7 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 _Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
 
-## [0.1.0] — 2026-05-11
+## [0.1.0] — 2026-05-20
 
 First public release. Single-model draft + warehouse prune + LLM-as-judge grade + diff renderer, BigQuery only, CLI surface.
 
