@@ -1,0 +1,71 @@
+# dbt-codegen-shaped schema.yml exercised by tests/ingest/test_reader.py.
+#
+# The `orders` model carries column-level + model-level tests across all four
+# supported types (not_null, unique, accepted_values, relationships) PLUS
+# unsupported / custom tests that the reader must skip+record, exercising every
+# SkipReason. It also exercises:
+#   - both `tests:` and `data_tests:` keys (DEC-006)
+#   - a test duplicated across `tests:` and `data_tests:` (dedupe, DEC-008)
+#   - inline args AND `arguments:`-nested args (dbt 1.8+, DEC-006)
+#   - ref() / source() unwrap on relationships.to (DEC-009)
+#   - a column with no supported tests (still a CandidateColumn)
+#   - a column with no description (defaults to "", DEC-010)
+#
+# Column names match the `orders` Model built in test_reader.py.
+version: 2
+
+models:
+  - name: customers
+    description: "An unrelated model in the same file — must not be selected."
+    columns:
+      - name: id
+        tests:
+          - not_null
+
+  - name: orders
+    description: "Orders fact table."
+    columns:
+      - name: order_id
+        description: "Surrogate key for the order."
+        tests:
+          - not_null
+          - unique
+        data_tests:
+          # Duplicate of the `unique` above — must dedupe to one CandidateTest.
+          - unique
+
+      - name: status
+        description: "Order lifecycle status."
+        tests:
+          # Inline args.
+          - accepted_values:
+              values: ["placed", "shipped", "cancelled"]
+          # Unsupported namespaced/custom generic — custom-or-generic-test.
+          - dbt_utils.unique_combination_of_columns:
+              combination_of_columns: [order_id, status]
+
+      - name: customer_id
+        description: "FK to customers."
+        data_tests:
+          # arguments:-nested args (dbt 1.8+) + ref() unwrap on `to`.
+          - relationships:
+              arguments:
+                to: "ref('customers')"
+                field: id
+
+      - name: amount
+        description: "Order amount; intentionally has no supported tests."
+        tests:
+          # Bare-string unsupported test — unsupported-test-type.
+          - positive
+
+      # Column with no description — defaults to "" (DEC-010), no tests.
+      - name: created_at
+
+    # Model-level test: a custom/generic test (column=None => custom-or-generic).
+    # Note: the four supported test types all require a non-empty column, so a
+    # supported model-level test is not representable; supported coverage lives
+    # at column level above.
+    tests:
+      - dbt_utils.expression_is_true:
+          expression: "amount >= 0"
