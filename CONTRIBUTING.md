@@ -39,6 +39,12 @@ default marker set. Tests gated behind `bigquery`, `anthropic`, `cli_subprocess`
 `.claude/rules/testing-signal.md` § "Known gap: excluded markers"), so the
 real-network and packaging paths are not instrumented in the badge number.
 
+Run this audit against the **matrix ceiling** (currently Python 3.13 — the
+highest version CI exercises) by prefixing `uv run --python 3.13`, so the
+gated wheel-build (`wheel_smoke`) and console-script (`cli_subprocess`) paths
+are checked on the newest supported interpreter. The gated markers carry no
+version pin; they run on whatever interpreter `uv run` resolves.
+
 Before cutting a release, run both suites and combine their coverage into one
 total to catch regressions in the gated paths:
 
