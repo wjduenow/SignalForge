@@ -3,7 +3,7 @@
 ## Meta
 
 - **Ticket:** [#105](https://github.com/wjduenow/SignalForge/issues/105) — feat: `signalforge prune-existing` CLI subcommand (prune external schema.yml tests)
-- **Phase:** detailing (awaiting approval)
+- **Phase:** published (awaiting approval) — PR [#107](https://github.com/wjduenow/SignalForge/pull/107)
 - **Branch / worktree:** `feature/105-prune-existing-cli` @ `/home/wesd/Projects/worktrees/SignalForge/105-prune-existing-cli` (off `dev`)
 - **Blocked by:** #104 (library seam) — **landed** at `7a97a6d`, so this is unblocked.
 - **Sessions:** 1 (2026-05-21)
