@@ -5,7 +5,7 @@
 - **Ticket:** [#104](https://github.com/wjduenow/SignalForge/issues/104)
 - **Branch:** `feature/104-ingest-external-tests` (off `dev`)
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/104-ingest-external-tests`
-- **Phase:** published (PR [#106](https://github.com/wjduenow/SignalForge/pull/106), awaiting approval)
+- **Phase:** devolved (PR [#106](https://github.com/wjduenow/SignalForge/pull/106); beads created)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.2 (extends Architectural Commitment #1 — "prune any generator's tests, not just our own LLM drafts")
 - **Labels:** none on the issue
@@ -247,3 +247,24 @@ US-001 ── US-002 ─┬─ US-003 ─┐
 ## Detailed breakdown (Phase 4)
 
 _pending_
+
+---
+
+## Beads manifest (Phase 7 — devolved)
+
+- **Epic:** `bd_1-scaffolding-ky3` — #104: ingest external dbt schema.yml tests into CandidateSchema
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/104-ingest-external-tests` (branch `feature/104-ingest-external-tests` off `dev`)
+- **Tasks:**
+
+| Bead | Story | Depends on |
+|------|-------|-----------|
+| `bd_1-scaffolding-ky3.1` | US-001 scaffold + errors.py + exit-code lockstep | — |
+| `bd_1-scaffolding-ky3.2` | US-002 typed result models | .1 |
+| `bd_1-scaffolding-ky3.3` | US-003 dbt test-entry parser | .2 |
+| `bd_1-scaffolding-ky3.4` | US-004 anchor-contract validator | .2 |
+| `bd_1-scaffolding-ky3.5` | US-005 read_schema orchestrator | .3, .4 |
+| `bd_1-scaffolding-ky3.6` | US-006 docs/ingest-ops.md | .5 |
+| `bd_1-scaffolding-ky3.7` | US-007 Quality Gate | .6 |
+| `bd_1-scaffolding-ky3.8` | US-008 Patterns & Memory | .7 |
+
+Ready to start: `bd_1-scaffolding-ky3.1` (US-001). Fast-follow CLI work tracked in [#105](https://github.com/wjduenow/SignalForge/issues/105).
