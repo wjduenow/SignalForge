@@ -596,10 +596,11 @@ _EXCEPTION_MAPPING_EXCLUDED_BASES: frozenset[str] = frozenset(
         # ``IngestError`` (issue #104 / DEC-001) — abstract base of the
         # ``signalforge.ingest`` typed-error hierarchy (the 11th per-stage
         # errors.py). Its five concrete subclasses are individually mapped
-        # in ``_EXCEPTION_TO_EXIT_CODE`` (3× tier 1, 2× tier 2); the base
-        # is also registered there at fallback tier 1 (dual-registration)
-        # but is excluded from the AST scan's required-mapping check per
-        # the abstract-base convention.
+        # in ``_EXCEPTION_TO_EXIT_CODE`` (3× tier 1, 2× tier 2). Like
+        # ``DemoError``, the concretes span tiers 1 and 2, so the base gets
+        # NO single fallback-tier entry — it lives only here in the excluded
+        # set; a forgotten concrete falls through to tier 1 and the AST scan
+        # catches the missing per-class entry at test time.
         "IngestError",
     }
 )

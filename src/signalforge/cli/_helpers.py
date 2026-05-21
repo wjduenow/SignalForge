@@ -98,7 +98,6 @@ from signalforge.grade import (
 )
 from signalforge.ingest import (
     IngestAnchorContractError,
-    IngestError,
     IngestModelNotFoundError,
     IngestSchemaNotFoundError,
     IngestSchemaParseError,
@@ -265,12 +264,12 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # external dbt schema.yml into a CandidateSchema. These three are
     # load-tier: the schema file is missing, unparseable, or exceeds the
     # size cap applied before yaml.safe_load (DEC-005) — all "couldn't get
-    # the input into a coherent state to start work." The IngestError base
-    # is registered here too (dual-registration fallback tier 1) so a
-    # forward-compat concrete added without a table entry still resolves
-    # via the MRO walk; it is also excluded from the 7th AST scan's
-    # required-mapping check via _EXCEPTION_MAPPING_EXCLUDED_BASES.
-    IngestError: 1,
+    # the input into a coherent state to start work." The two input-tier
+    # concretes live in the Tier 2 block below. Like DemoError, the
+    # IngestError base spans tiers 1 and 2, so it gets NO single fallback
+    # entry — it lives only in _EXCEPTION_MAPPING_EXCLUDED_BASES; a forgotten
+    # concrete falls through to tier 1 and the 7th AST scan catches the
+    # missing per-class entry at test time.
     IngestSchemaNotFoundError: 1,
     IngestSchemaParseError: 1,
     IngestSchemaTooLargeError: 1,
