@@ -116,8 +116,14 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
         "LLMResponseAuditRecordTooLargeError",
         "DiffSidecarRecordTooLargeError",
         "DiffInputTooLargeError",
+        "IngestSchemaTooLargeError",
     }:
         return cls(5000, 4000)
+
+    # Ingest layer (issue #104) — anchor-contract collect-all takes a
+    # positional tuple of violation strings.
+    if name == "IngestAnchorContractError":
+        return cls(("a", "b", "c"))
 
     # Safety policy / config edge shapes.
     if name == "ColumnNotInModelError":
