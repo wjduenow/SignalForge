@@ -1,4 +1,4 @@
-"""``signalforge prune-existing`` subcommand (US-002 — issue #105).
+"""``signalforge prune-existing`` subcommand (issue #105).
 
 Prunes an externally-authored dbt ``schema.yml`` against real warehouse
 data: it runs **ingest -> prune -> diff** (no draft, no grade, **no LLM
@@ -9,10 +9,13 @@ which ones add no signal* — extending Architectural Commitment #1
 ("signal over volume") to any generator's tests (hand-written,
 dbt-codegen, dbt Copilot, DinoAI, datapilot).
 
-This module is the **contract surface** (US-002): it defines
-:func:`add_parser` registering the full flag set and a **stub**
-:func:`cmd_prune_existing` returning ``0``. The full ingest -> prune ->
-diff orchestrator body lands in US-003.
+The module exposes :func:`add_parser` (registering the full flag set,
+US-002) and :func:`cmd_prune_existing` (the end-to-end ingest -> prune ->
+diff orchestrator, US-003). Library errors flow through the CLI's single
+``try/except Exception`` boundary: the five ``IngestError`` concretes are
+already registered in ``_EXCEPTION_TO_EXIT_CODE`` (issue #104), so the
+handler maps them directly without bespoke ``CliPruneExisting*`` wrappers
+(DEC-006).
 
 Read-only by design (DEC-003)
 =============================

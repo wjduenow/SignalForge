@@ -57,7 +57,7 @@ After install, the `signalforge` console script is registered via
 
 ## Subcommands
 
-The CLI exposes six subcommands: `generate`, `init-demo`, `lint`,
+The CLI exposes five subcommands: `generate`, `init-demo`, `lint`,
 `prune-existing`, `version`. `signalforge --help` prints the
 top-level help; each subcommand has its own `--help` page (e.g.
 `signalforge generate --help`).
@@ -392,8 +392,8 @@ story: *point SignalForge at your existing dbt tests and let the
 warehouse tell you which ones add no signal* — extending Architectural
 Commitment #1 ("signal over volume") to any generator's tests
 (hand-written, dbt-codegen, dbt Copilot, DinoAI, datapilot). The
-library seam this wraps is `signalforge.ingest.read_schema(...)` (issue
-#104); the subcommand is issue #105 (DEC-002 … DEC-010 of
+library seam this wraps is `signalforge.ingest.read_schema(...)`
+(issue #104); the subcommand is issue #105 (DEC-002 … DEC-010 of
 [`plans/super/105-prune-existing-cli.md`](../plans/super/105-prune-existing-cli.md)).
 
 Because there is no LLM call, this is strictly cheaper than
@@ -494,7 +494,7 @@ Stderr shapes:
   operator-facing info, not a log event. `--quiet` suppresses both.
 
 - **Errors** — the standard `ERROR: <message>` + optional
-  `  ↳ Remediation: <text>` shape (see § Stderr message shape per
+  `↳ Remediation: <text>` shape (see § Stderr message shape per
   tier).
 
 - **Progress** — three stages (DEC-010): `[1/3] ingest`,

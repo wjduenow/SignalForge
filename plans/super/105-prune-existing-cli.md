@@ -12,9 +12,9 @@
 
 ## What & why
 
-#104 shipped the **library** seam — `signalforge.ingest.read_schema(schema, model, *, project_dir=None) -> IngestResult` — which parses an externally-authored dbt `schema.yml` into the typed `CandidateSchema` the prune engine consumes. This issue adds the **operator-facing CLI** on top of it:
+Issue #104 shipped the **library** seam — `signalforge.ingest.read_schema(schema, model, *, project_dir=None) -> IngestResult` — which parses an externally-authored dbt `schema.yml` into the typed `CandidateSchema` the prune engine consumes. This issue adds the **operator-facing CLI** on top of it:
 
-```
+```text
 signalforge prune-existing <model> --schema <path>
 ```
 

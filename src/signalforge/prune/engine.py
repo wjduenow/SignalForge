@@ -911,6 +911,17 @@ def prune_tests(
     # fail-closed audit invariant is preserved trivially (zero decisions
     # → zero PruneEvents).
     if not pairs:
+        # Call the kept-rate WARNING helper at this return site too, per
+        # the "called at every prune_tests return site" contract (issue
+        # #51) — it's a no-op here (the helper early-returns on
+        # ``total == 0``), but routing every return site through it keeps
+        # a future change to the empty-candidate path from silently
+        # dropping the signal.
+        _maybe_emit_kept_rate_warning(
+            [],
+            model_unique_id=model.unique_id,
+            threshold=resolved_config.min_kept_rate_warn,
+        )
         return PruneResult(
             model_unique_id=model.unique_id,
             decisions=(),
