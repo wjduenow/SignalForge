@@ -169,7 +169,7 @@ def test_signalforge_init_demo_help_via_subprocess() -> None:
 def test_signalforge_prune_existing_help_via_subprocess() -> None:
     """``signalforge prune-existing --help`` exits 0 with the subcommand's help.
 
-    US-005 of ``plans/super/104-ingest-external-tests.md`` (#105) — extends
+    US-005 of ``plans/super/105-prune-existing-cli.md`` (#105) — extends
     the subprocess-gated smoke to the new ``prune-existing`` subcommand so a
     ``[project.scripts]`` regression specific to its argparse wiring
     (subparser deletion, ``add_parser`` typo, console-script wrapper losing
