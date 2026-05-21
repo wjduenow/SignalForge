@@ -5,7 +5,7 @@
 - **Ticket:** [#104](https://github.com/wjduenow/SignalForge/issues/104)
 - **Branch:** `feature/104-ingest-external-tests` (off `dev`)
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/104-ingest-external-tests`
-- **Phase:** detailing (awaiting approval)
+- **Phase:** published (PR [#106](https://github.com/wjduenow/SignalForge/pull/106), awaiting approval)
 - **Plan author:** Claude Code (Opus 4.7, 1M context)
 - **Milestone:** v0.2 (extends Architectural Commitment #1 — "prune any generator's tests, not just our own LLM drafts")
 - **Labels:** none on the issue
