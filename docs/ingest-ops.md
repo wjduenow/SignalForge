@@ -35,12 +35,14 @@ Every other test — `dbt_utils.*`, `dbt_expectations.*`, singular/custom
 generics, anything namespaced — is **skipped and recorded**, never
 silently dropped (see [Supported vs skipped](#supported-vs-skipped-tests)).
 
-!!! note "CLI is a planned fast-follow"
-    There is no `signalforge prune-existing` CLI subcommand yet — that is
-    tracked as fast-follow
-    [#105](https://github.com/wjduenow/SignalForge/issues/105). For now the
-    ingest layer is a **library** entry point: call `read_schema` and hand
-    the result's `candidate` to `prune_tests` yourself.
+!!! tip "There's a CLI for this"
+    The ingest layer is a **library** entry point — call `read_schema` and
+    hand the result's `candidate` to `prune_tests` yourself — but most
+    operators won't need to. The `signalforge prune-existing <model>
+    --schema <path>` subcommand (shipped in
+    [#105](https://github.com/wjduenow/SignalForge/issues/105)) wires
+    ingest → prune → diff end to end with no LLM call. See the
+    [CLI reference](cli-ops.md#signalforge-prune-existing-model-schema-path).
 
 ## Public API
 
@@ -131,8 +133,9 @@ values:
 | `"malformed-supported-test"` | a supported type whose required args are missing or empty (`accepted_values` with no `values`; `relationships` missing `to` or `field`) |
 
 A skip is never a failure — the run continues. The skip records exist so an
-operator can see *what was left out and why* (and so the future
-`prune-existing` CLI can print a "N tests skipped, here's why" report).
+operator can see *what was left out and why* — the `signalforge
+prune-existing` CLI surfaces them as a "N tests skipped, here's why"
+stderr report (one summary line, with per-test detail under `--verbose`).
 Contrast this with the [anchor contract](#anchor-contract), which **does**
 fail loud.
 
