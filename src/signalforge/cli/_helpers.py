@@ -649,21 +649,28 @@ def format_elapsed(elapsed_seconds: float) -> str:
     return f"{minutes}m {seconds}s"
 
 
-def emit_progress_entry(stage_n: int, stage_name: str, body: str) -> None:
-    """Emit a single ``[N/5] <stage>: <body>`` line to stderr.
+def emit_progress_entry(stage_n: int, stage_name: str, body: str, *, total: int = 5) -> None:
+    """Emit a single ``[N/<total>] <stage>: <body>`` line to stderr.
 
     Callers are responsible for the TTY gate via
     :func:`should_emit_progress`; this helper unconditionally writes when
     invoked. The callsite-level gate keeps the helper trivial and lets
     the orchestrator make a single decision once at startup.
+
+    ``total`` defaults to ``5`` (the ``generate`` pipeline's stage count)
+    so the v0.1 callers stay byte-identical. The ``prune-existing``
+    subcommand passes ``total=3`` for its ``ingest → prune → diff``
+    progress (DEC-010 of ``plans/super/105-prune-existing-cli.md``).
     """
-    print_stderr(f"[{stage_n}/5] {stage_name}: {body}", flush=True)
+    print_stderr(f"[{stage_n}/{total}] {stage_name}: {body}", flush=True)
 
 
-def emit_progress_done(stage_n: int, stage_name: str, elapsed_seconds: float) -> None:
-    """Emit the paired ``[N/5] <stage>: done in <X>`` line."""
+def emit_progress_done(
+    stage_n: int, stage_name: str, elapsed_seconds: float, *, total: int = 5
+) -> None:
+    """Emit the paired ``[N/<total>] <stage>: done in <X>`` line."""
     print_stderr(
-        f"[{stage_n}/5] {stage_name}: done in {format_elapsed(elapsed_seconds)}",
+        f"[{stage_n}/{total}] {stage_name}: done in {format_elapsed(elapsed_seconds)}",
         flush=True,
     )
 
