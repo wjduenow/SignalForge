@@ -252,3 +252,31 @@ def test_produced_candidate_is_accepted_by_disabled_prune(tmp_path: Path) -> Non
     # Every candidate routes to kept-without-evidence on the disabled path.
     assert prune_result.model_unique_id == model.unique_id
     assert prune_result.kept_count >= 1
+
+
+# ---------------------------------------------------------------------------
+# Dedupe: reordered accepted_values value sets collapse (QG fix, DEC-008)
+# ---------------------------------------------------------------------------
+
+
+def test_accepted_values_dedupe_is_order_insensitive() -> None:
+    # Same value set in different order under tests: and data_tests: must
+    # dedupe to ONE CandidateTestAcceptedValues (key uses sorted values).
+    yaml_text = """
+version: 2
+models:
+  - name: orders
+    columns:
+      - name: status
+        tests:
+          - accepted_values:
+              values: ["placed", "shipped"]
+        data_tests:
+          - accepted_values:
+              values: ["shipped", "placed"]
+"""
+    result = read_schema(yaml_text, _make_orders_model())
+    status = _column(result, "status")
+    av = [t for t in status.tests if isinstance(t, CandidateTestAcceptedValues)]
+    assert len(av) == 1
+    assert tuple(sorted(av[0].values)) == ("placed", "shipped")

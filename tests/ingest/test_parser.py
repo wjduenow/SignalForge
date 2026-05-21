@@ -197,3 +197,23 @@ def test_bare_non_ref_to_string_carried_verbatim() -> None:
     )
     assert isinstance(result, CandidateTestRelationships)
     assert result.to == "dim_customers"
+
+
+# --- model-level supported tests are not representable (QG fix) ------------
+
+
+def test_model_level_not_null_skips_malformed_not_validationerror() -> None:
+    # A supported type at model level (column=None) must route to a structured
+    # skip, NOT raise a Pydantic ValidationError out of the parser.
+    result = parse_test_entry("not_null", column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.column is None
+    assert result.test_name == "not_null"
+
+
+def test_model_level_accepted_values_skips_malformed() -> None:
+    result = parse_test_entry({"accepted_values": {"values": ["a", "b"]}}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.column is None

@@ -98,7 +98,9 @@ def _extract_args(body: Any) -> dict[str, Any]:
 
     Reads args inline OR nested under ``arguments:`` (dbt 1.8+). Config keys
     are stripped so a downstream ``required-arg`` check sees only real args.
-    A non-mapping body (or a missing/non-mapping ``arguments``) yields ``{}``.
+    A non-dict body yields ``{}``. When ``arguments`` is present but is not a
+    mapping, it is treated as a config key and stripped, so the inline args
+    (if any) are returned instead.
     """
     if not isinstance(body, dict):
         return {}
@@ -145,19 +147,40 @@ def parse_test_entry(
     )
 
 
+def _model_level_supported_skip(name: str) -> SkippedTest:
+    """A supported test type used at model level cannot be represented.
+
+    The four supported ``CandidateTest`` subtypes all require a non-empty
+    ``column``. dbt does not place these at model level, but a hand-edited
+    schema.yml could; route it to a structured skip rather than letting a
+    Pydantic ``ValidationError`` escape ``read_schema``.
+    """
+    return SkippedTest(
+        test_name=name,
+        column=None,
+        reason="malformed-supported-test",
+        detail="supported test types must be column-scoped; model-level is not representable",
+    )
+
+
 def _parse_named_test(name: str, *, body: Any, column: str | None) -> CandidateTest | SkippedTest:
     """Dispatch on the (already-extracted) test name."""
     if name in ("not_null", "unique"):
         # Parameterless; any body is config-only and ignored.
-        col = column if column is not None else ""
+        if column is None:
+            return _model_level_supported_skip(name)
         if name == "not_null":
-            return CandidateTestNotNull(column=col)
-        return CandidateTestUnique(column=col)
+            return CandidateTestNotNull(column=column)
+        return CandidateTestUnique(column=column)
 
     if name == "accepted_values":
+        if column is None:
+            return _model_level_supported_skip(name)
         return _parse_accepted_values(body=body, column=column)
 
     if name == "relationships":
+        if column is None:
+            return _model_level_supported_skip(name)
         return _parse_relationships(body=body, column=column)
 
     # A namespaced or project-defined test: dbt_utils.*, dbt_expectations.*,

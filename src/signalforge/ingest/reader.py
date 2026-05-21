@@ -194,7 +194,8 @@ def _test_dedupe_key(test: CandidateTest) -> tuple[Any, ...]:
     under both ``tests:`` and ``data_tests:`` collapses to one entry.
     """
     if test.type == "accepted_values":
-        return (test.type, test.column, tuple(test.values))
+        # Sort so two identical value sets in different order dedupe (DEC-008).
+        return (test.type, test.column, tuple(sorted(test.values)))
     if test.type == "relationships":
         return (test.type, test.column, test.to, test.field)
     return (test.type, test.column)
