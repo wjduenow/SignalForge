@@ -217,3 +217,17 @@ def test_model_level_accepted_values_skips_malformed() -> None:
     assert isinstance(result, SkippedTest)
     assert result.reason == "malformed-supported-test"
     assert result.column is None
+
+
+# --- non-mapping `arguments` is stripped, not leaked (PR review fix) -------
+
+
+def test_inline_args_with_non_mapping_arguments_key_is_stripped() -> None:
+    # `arguments: <non-dict>` must not leak into the inline args nor break the
+    # required-arg extraction — the structural key is dropped.
+    result = parse_test_entry(
+        {"accepted_values": {"values": ["a", "b"], "arguments": 123}},
+        column="status",
+    )
+    assert isinstance(result, CandidateTestAcceptedValues)
+    assert result.values == ("a", "b")

@@ -96,18 +96,21 @@ def _unwrap_ref_or_source(to: str) -> str:
 def _extract_args(body: Any) -> dict[str, Any]:
     """Return the arg mapping for a single-key test dict body.
 
-    Reads args inline OR nested under ``arguments:`` (dbt 1.8+). Config keys
-    are stripped so a downstream ``required-arg`` check sees only real args.
-    A non-dict body yields ``{}``. When ``arguments`` is present but is not a
-    mapping, it is treated as a config key and stripped, so the inline args
-    (if any) are returned instead.
+    Reads args nested under ``arguments:`` (dbt 1.8+) when that key is a
+    mapping; otherwise reads inline args. Config keys are stripped so a
+    downstream ``required-arg`` check sees only real args. A non-dict body
+    yields ``{}``. The structural ``arguments`` key itself is never returned
+    as an arg: when it is present but not a mapping, it is dropped and the
+    inline args (if any) are returned instead.
     """
     if not isinstance(body, dict):
         return {}
-    source: dict[str, Any] = body
     nested = body.get("arguments")
     if isinstance(nested, dict):
-        source = nested
+        source: dict[str, Any] = nested
+    else:
+        # Inline args; drop the structural ``arguments`` key itself.
+        source = {k: v for k, v in body.items() if k != "arguments"}
     return {k: v for k, v in source.items() if k not in _CONFIG_KEYS}
 
 

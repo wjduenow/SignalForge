@@ -76,9 +76,11 @@ class IngestError(Exception):
     excluded-bases set) — every concrete leaf below must appear in the
     exit-code mapping, but the base is excluded (the MRO walk in
     ``map_exception_to_exit_code`` resolves forward-compat subclasses to
-    their parent's tier). The base is *also* registered in
-    ``_EXCEPTION_TO_EXIT_CODE`` at a single fallback tier (1) per the
-    dual-registration pattern.
+    their parent's tier). Like ``DemoError``, the concrete leaves span
+    tiers 1 and 2, so the base gets **no** single fallback-tier entry in
+    ``_EXCEPTION_TO_EXIT_CODE`` — a forgotten concrete falls through to
+    tier 1 and the AST scan catches the missing per-class entry at test
+    time (see ``.claude/rules/cli-layer.md`` § dual registration).
     """
 
     default_remediation: ClassVar[str] = "(no remediation set — this is the base class)"

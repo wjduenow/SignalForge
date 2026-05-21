@@ -9,11 +9,13 @@ no signal. The reader parses standard dbt test syntax and emits a typed
 ``CandidateSchema`` that ``signalforge.prune.prune_tests`` consumes
 unchanged.
 
-US-001 (this story) ships the package scaffold + the typed-error surface
-only; the reader / parser / result models land in later stories of issue
-#104. The CLI ``prune-existing`` subcommand is the fast-follow #105
-(DEC-004) — the ``IngestError`` hierarchy is wired into the CLI exit-code
-taxonomy now so #105 inherits it with no rework.
+Issue #104 ships this full library seam: the package scaffold + typed-error
+hierarchy (US-001), the result models (US-002), the pure dbt test-entry
+parser (US-003), the fail-loud anchor validator (US-004), and the
+``read_schema`` orchestrator (US-005). The operator-facing CLI
+``prune-existing`` subcommand is the fast-follow #105 (DEC-004) — the
+``IngestError`` hierarchy is wired into the CLI exit-code taxonomy now so
+#105 inherits it with no rework.
 
 Public API surface:
 

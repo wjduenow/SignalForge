@@ -99,19 +99,22 @@ from pathlib import Path
 from signalforge.ingest import read_schema
 from signalforge.manifest import load
 from signalforge.prune import prune_tests
-from signalforge.warehouse import from_profile, load_profile
+from signalforge.warehouse import WarehouseAdapter, load_profile
 
-manifest = load(project_dir="/path/to/dbt/project")
+project_dir = Path("/path/to/dbt/project")
+manifest = load(project_dir)
 model = manifest.get_model("model.my_project.orders")
 
-result = read_schema(Path("models/marts/schema.yml"), model)
+result = read_schema(project_dir / "models/marts/schema.yml", model)
 print(f"{len(result.candidate.columns)} columns, "
       f"{len(result.skipped)} tests skipped")
 for s in result.skipped:
     print(f"  skipped {s.test_name} on {s.column}: {s.reason} — {s.detail}")
 
-# The candidate feeds prune unchanged.
-adapter = from_profile(load_profile(project_dir="/path/to/dbt/project"))
+# The candidate feeds prune unchanged. Pass an un-entered adapter —
+# prune_tests owns the `with adapter:` lifecycle.
+profile = load_profile(project_dir)
+adapter = WarehouseAdapter.from_profile(profile)
 prune_result = prune_tests(model, adapter, result.candidate, manifest)
 ```
 
