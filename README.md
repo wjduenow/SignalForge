@@ -37,9 +37,7 @@ SignalForge generates the same artifacts, then asks a different question: **does
 
 The grading layer reuses [clauditor](https://github.com/wjduenow/clauditor)'s LLM-as-judge methodology, applied to a new artifact class.
 
-> **Status (v0.1):** Not yet on PyPI. Today the package installs from a
-> clone with `uv sync --dev` (or `pip install -e ".[dev]"` for contributors
-> without uv).
+> **Status (v0.1):** Live on PyPI — `pip install signalforge-dbt`. See [Quick start](#quick-start).
 
 ## Quick start
 
@@ -56,18 +54,28 @@ is roughly 5–6 minutes.
 
 ### 1. Install
 
-SignalForge requires **Python 3.11+**. It is not yet published on PyPI — install from a clone:
+SignalForge requires **Python 3.11+**.
 
 ```bash
-git clone https://github.com/wjduenow/SignalForge.git
-cd SignalForge
-uv sync --dev   # or: pip install -e ".[dev]"  (back-compat for non-uv setups)
+pip install signalforge-dbt
 ```
 
-Once v0.1 ships to PyPI, `pip install signalforge-dbt` will replace the
-editable-install step. (The PyPI name has a `-dbt` suffix because
-`signalforge` was already taken by an unrelated DSP package; the import
-name and CLI command remain `signalforge`.)
+Verify the CLI is on your PATH:
+
+```bash
+signalforge --version
+```
+
+The PyPI distribution name is **`signalforge-dbt`** (the bare `signalforge` name
+is held by an unrelated DSP package); the import package and CLI command are both
+**`signalforge`**.
+
+**Prefer an isolated CLI install?** `uv tool install signalforge-dbt` (or
+`pipx install signalforge-dbt`) puts the `signalforge` command on your PATH
+without adding it to a project environment.
+
+**Working from a clone (contributing)?** Install the dev toolchain with
+`uv sync --dev` — see [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
 ### 2. Authenticate to BigQuery and Anthropic
 
