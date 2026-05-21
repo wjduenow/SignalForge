@@ -51,6 +51,7 @@ nav:
       - Warehouse Adapter: warehouse-adapter-ops.md
       - Safety Layer: safety-ops.md
       - LLM Drafter: draft-ops.md
+      - Ingest Layer: ingest-ops.md
       - Prune Engine: prune-ops.md
       - Quality Grader: grade-ops.md
       - Diff Renderer: diff-ops.md
