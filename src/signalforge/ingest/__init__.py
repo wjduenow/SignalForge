@@ -15,9 +15,14 @@ only; the reader / parser / result models land in later stories of issue
 (DEC-004) — the ``IngestError`` hierarchy is wired into the CLI exit-code
 taxonomy now so #105 inherits it with no rework.
 
-Public API surface (US-001):
+Public API surface:
 
-* The :class:`IngestError` hierarchy: :class:`IngestError`,
+* :func:`read_schema` (US-005) — the public entry point: parse an
+  external ``schema.yml`` for one model and return an
+  :class:`IngestResult`.
+* :class:`IngestResult` / :class:`SkippedTest` / :data:`SkipReason`
+  (US-002) — the reader's return shapes.
+* The :class:`IngestError` hierarchy (US-001): :class:`IngestError`,
   :class:`IngestSchemaNotFoundError`, :class:`IngestSchemaParseError`,
   :class:`IngestSchemaTooLargeError`, :class:`IngestModelNotFoundError`,
   :class:`IngestAnchorContractError`.
@@ -36,6 +41,7 @@ from signalforge.ingest.errors import (
     IngestSchemaTooLargeError,
 )
 from signalforge.ingest.models import IngestResult, SkippedTest, SkipReason
+from signalforge.ingest.reader import read_schema
 
 __all__ = [
     # Errors (6)
@@ -49,4 +55,6 @@ __all__ = [
     "IngestResult",
     "SkippedTest",
     "SkipReason",
+    # Reader orchestrator (US-005) — the public entry point
+    "read_schema",
 ]
