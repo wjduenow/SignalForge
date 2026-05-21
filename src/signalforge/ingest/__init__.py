@@ -35,6 +35,7 @@ from signalforge.ingest.errors import (
     IngestSchemaParseError,
     IngestSchemaTooLargeError,
 )
+from signalforge.ingest.models import IngestResult, SkippedTest, SkipReason
 
 __all__ = [
     # Errors (6)
@@ -44,4 +45,8 @@ __all__ = [
     "IngestSchemaTooLargeError",
     "IngestModelNotFoundError",
     "IngestAnchorContractError",
+    # Result models (US-002)
+    "IngestResult",
+    "SkippedTest",
+    "SkipReason",
 ]
