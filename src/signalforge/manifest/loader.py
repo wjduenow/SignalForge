@@ -44,6 +44,7 @@ Design notes
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -94,25 +95,55 @@ def _canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
     paths whose resolved form is not under the resolved ``project_dir``.
 
     Raises :class:`ModelPathOutsideProjectError` if the resolved path
-    escapes the project tree, or if either path contains a symlink loop
-    (``Path.resolve`` raises :class:`RuntimeError` on cycles regardless of
-    the ``strict=`` flag).
+    escapes the project tree, or if either path contains a symlink loop.
+    Symlink-cycle detection spans Python versions: <= 3.12 raises
+    :class:`RuntimeError` from ``Path.resolve`` regardless of ``strict=``;
+    >= 3.13 (gh-108958) raises ``OSError(errno.ELOOP)`` under ``strict=True``
+    and stops resolving silently under ``strict=False``, so the input path is
+    resolved ``strict=True`` first (falling back to ``strict=False`` only for
+    a genuinely missing target).
     """
     p = Path(input_path)
-    try:
+    # The sole caller (`load`) passes an already-resolved `project_dir`, so a
+    # cycle / missing-dir cannot surface here in the real flow — these arms are
+    # defensive for direct callers and mirror `signalforge._common.path_safety`
+    # (which is exercised directly by its own test suite). Excluded from
+    # coverage to avoid a spurious gap on the pre-resolved path.
+    try:  # pragma: no cover
         project_resolved = project_dir.resolve(strict=True)
-    except RuntimeError as exc:
+    except RuntimeError as exc:  # pragma: no cover - defensive (pre-resolved)
         raise ModelPathOutsideProjectError(
             f"project_dir contains a symlink loop: {project_dir}",
         ) from exc
+    except OSError as exc:  # pragma: no cover - defensive (pre-resolved)
+        if exc.errno == errno.ELOOP:  # Python >= 3.13 symlink cycle (gh-108958)
+            raise ModelPathOutsideProjectError(
+                f"project_dir contains a symlink loop: {project_dir}",
+            ) from exc
+        raise
     if not p.is_absolute():
         p = project_resolved / p
+    # Resolve strict=True first so a symlink cycle raises on every supported
+    # Python (<= 3.12 RuntimeError; >= 3.13 OSError(ELOOP)). A missing target
+    # falls back to strict=False best-effort — under 3.13, strict=False
+    # silently stops at the loop and would otherwise slip past containment.
     try:
-        resolved = p.resolve(strict=False)
-    except RuntimeError as exc:
+        resolved = p.resolve(strict=True)
+    except RuntimeError as exc:  # pragma: no cover - <=3.12 cycle signal
         raise ModelPathOutsideProjectError(
             f"Path contains a symlink loop: {p}",
         ) from exc
+    except (FileNotFoundError, NotADirectoryError):
+        # Target does not exist yet — fall back to best-effort resolution.
+        # Narrow to these two so a PermissionError / other OSError surfaces
+        # instead of being masked as a partially-resolved path.
+        resolved = p.resolve(strict=False)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:  # Python >= 3.13 symlink cycle (gh-108958)
+            raise ModelPathOutsideProjectError(
+                f"Path contains a symlink loop: {p}",
+            ) from exc
+        raise
     if not resolved.is_relative_to(project_resolved):
         raise ModelPathOutsideProjectError(
             f"Path {resolved} escapes project_dir {project_resolved}.",
@@ -221,20 +252,24 @@ def load(
 
     try:
         with resolved_manifest.open("r", encoding="utf-8") as fh:
-            raw: dict[str, Any] = json.load(fh)
+            # `json.load` returns `Any`; keep it `Any` (not `dict[str, Any]`)
+            # so the root-shape guard below stays live — annotating it as a
+            # dict up front makes pyright treat the isinstance check as dead.
+            loaded: Any = json.load(fh)
     except json.JSONDecodeError as exc:
         raise ManifestError(
             f"Manifest is not valid JSON: {resolved_manifest} ({exc})",
             remediation="Re-run `dbt parse` — the manifest file is corrupt or truncated.",
         ) from exc
 
-    if not isinstance(raw, dict):
+    if not isinstance(loaded, dict):
         raise ManifestError(
             f"Manifest root is not a JSON object: {resolved_manifest}",
             remediation=(
                 "Re-run `dbt parse` — manifest.json must be a JSON object at the top level."
             ),
         )
+    raw: dict[str, Any] = loaded
 
     metadata = raw.get("metadata", {}) or {}
     if not isinstance(metadata, dict):

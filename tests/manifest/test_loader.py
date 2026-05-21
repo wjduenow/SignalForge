@@ -23,6 +23,7 @@ guard for ``manifest_path=`` overrides.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import sys
@@ -378,6 +379,19 @@ def test_malformed_json_raises_manifest_error(tmp_path: Path) -> None:
         load(project, manifest_path="target/malformed.json")
 
 
+@pytest.mark.error
+def test_non_dict_root_raises_manifest_error(tmp_path: Path) -> None:
+    """A manifest whose JSON root is not an object (e.g. a list) is rejected.
+
+    The payload parses cleanly (it is valid JSON), so the
+    ``json.JSONDecodeError`` guard does not fire — the root-shape
+    ``isinstance(loaded, dict)`` guard is the live branch that catches it.
+    """
+    project = _project_with_error_manifest(tmp_path, "non_dict_root.json")
+    with pytest.raises(ManifestError, match="not a JSON object"):
+        load(project, manifest_path="target/non_dict_root.json")
+
+
 # ---------------------------------------------------------------------------
 # 13. Missing version URL falls through to feature-sniff (does NOT raise)
 # ---------------------------------------------------------------------------
@@ -490,3 +504,32 @@ def test_symlink_loop_in_explicit_manifest_path_is_rejected(tmp_path: Path) -> N
 
     with pytest.raises(ModelPathOutsideProjectError):
         load(project, manifest_path=project / "a")
+
+
+@pytest.mark.error
+def test_non_loop_oserror_on_input_path_is_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ELOOP ``OSError`` (e.g. ``PermissionError``) from strict
+    resolution of the manifest path propagates rather than being downgraded
+    to a best-effort ``strict=False`` resolution.
+
+    Issue #96 review (Copilot): the ``except OSError`` fallback must be
+    narrowed to ``FileNotFoundError`` / ``NotADirectoryError`` so a
+    permission failure is not masked as a partially-resolved path.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    project_resolved = project.resolve(strict=True)
+
+    original_resolve = Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if strict and self.name == "manifest.json":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    with pytest.raises(PermissionError):
+        _canonicalise_path("manifest.json", project_resolved)

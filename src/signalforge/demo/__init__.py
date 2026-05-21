@@ -17,8 +17,9 @@ containment boundary appropriate for paths the CLI consumes *inside* an
 existing project. ``init-demo`` is the one entry point in the toolchain
 that *creates* a project, so the containment gate doesn't apply.
 
-The function still defends against symlink cycles (``.resolve()`` raises
-``RuntimeError`` on cycles regardless of ``strict=``) and refuses, when
+The function still defends against symlink cycles (``.resolve(strict=True)``
+raises ``RuntimeError`` on cycles on Python <= 3.12 and ``OSError(ELOOP)`` on
+>= 3.13) and refuses, when
 ``force=True``, to nuke any of ``/``, ``Path.home()``, or ``Path.cwd()``
 (DEC-001 — the ``--force`` blast-radius guard).
 
@@ -28,6 +29,7 @@ See ``plans/super/47-init-demo.md`` § US-003 + DEC-001 / DEC-004 / DEC-005
 
 from __future__ import annotations
 
+import errno
 import shutil
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -57,10 +59,11 @@ def copy_demo(dest: Path | str, *, force: bool = False) -> Path:
     ----------
     dest:
         Destination directory. Resolved via
-        ``Path(dest).expanduser().resolve(strict=False)`` — a relative
-        path resolves against the current working directory; ``~``
-        expands; symlinks are followed; cycles raise
-        :class:`DemoPathError`.
+        ``Path(dest).expanduser().resolve(strict=True)``, falling back to
+        ``resolve(strict=False)`` only when the destination does not exist
+        yet (``FileNotFoundError`` / ``NotADirectoryError``) — a relative
+        path resolves against the current working directory; ``~`` expands;
+        symlinks are followed; cycles raise :class:`DemoPathError`.
     force:
         If ``True``, a non-empty existing destination is replaced
         atomically (``shutil.rmtree`` then ``shutil.copytree``). The
@@ -89,13 +92,31 @@ def copy_demo(dest: Path | str, *, force: bool = False) -> Path:
 
     raw = Path(dest)
     expanded_dest = raw.expanduser()
+    # Resolve strict=True first so a symlink cycle surfaces on every supported
+    # Python: <= 3.12 raises RuntimeError, >= 3.13 raises OSError(ELOOP)
+    # (gh-108958). A genuinely missing destination (the common case — the dest
+    # dir need not exist yet) raises FileNotFoundError / NotADirectoryError,
+    # where we fall back to strict=False. (Under 3.13, strict=False stops at
+    # the loop silently and the cycle guard would never fire.)
     try:
-        resolved_dest = expanded_dest.resolve(strict=False)
-    except RuntimeError as exc:  # symlink cycle
+        resolved_dest = expanded_dest.resolve(strict=True)
+    except RuntimeError as exc:  # pragma: no cover - <=3.12 cycle signal
         raise DemoPathError(
             f"failed to resolve destination path {str(raw)!r}: {exc}",
             cause=exc,
         ) from exc
+    except (FileNotFoundError, NotADirectoryError):
+        # Destination does not exist yet (the common case) — fall back to
+        # best-effort resolution. Narrow to these two so a PermissionError /
+        # other OSError surfaces instead of being silently downgraded.
+        resolved_dest = expanded_dest.resolve(strict=False)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:  # Python >= 3.13 symlink cycle (gh-108958)
+            raise DemoPathError(
+                f"failed to resolve destination path {str(raw)!r}: {exc}",
+                cause=exc,
+            ) from exc
+        raise
 
     # Symlink + --force blast-radius guard. `resolve()` above followed the
     # link, so if we proceeded with `force=True` the existence gate's

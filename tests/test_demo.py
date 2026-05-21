@@ -260,24 +260,52 @@ def test_copy_demo_with_cyclic_symlink_raises_demo_path_error(tmp_path: Path) ->
     link_a.symlink_to(link_b)
     link_b.symlink_to(link_a)
 
-    # On some filesystems (notably WSL2), resolve() does NOT raise on this
-    # pattern — it returns a path with the symlink unresolved. Skip when
-    # the platform doesn't enforce the cycle guard the way the contract
-    # expects; the GitHub Actions Linux runner does enforce it.
+    # On some filesystems, resolve() does not enforce the cycle guard at all
+    # (it returns the path with the symlink unresolved). copy_demo resolves
+    # strict=True to surface the loop; probe the same way and skip only when
+    # the platform refuses to raise on the cycle under strict resolution.
     try:
-        link_a.resolve(strict=False)
-    except RuntimeError:
+        link_a.resolve(strict=True)
+    except (RuntimeError, OSError):
         pass
     else:
         pytest.skip(
-            "filesystem does not raise RuntimeError on symlink cycles; "
+            "filesystem does not raise on symlink cycles; "
             "DemoPathError path is verified on the CI Linux runner"
         )
 
     with pytest.raises(DemoPathError) as excinfo:
         copy_demo(link_a)
-    # The triggering RuntimeError rides on the cause.
-    assert isinstance(excinfo.value.cause, RuntimeError)
+    # The triggering error rides on the cause: RuntimeError on Python <= 3.12,
+    # OSError(ELOOP) on >= 3.13 (gh-108958).
+    assert isinstance(excinfo.value.cause, RuntimeError | OSError)
+
+
+def test_non_loop_oserror_on_dest_is_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ELOOP ``OSError`` (e.g. ``PermissionError``) from strict
+    resolution of the destination propagates rather than being downgraded
+    to a best-effort ``strict=False`` resolution.
+
+    Issue #96 review (Copilot): only ``FileNotFoundError`` /
+    ``NotADirectoryError`` (a not-yet-existing dest) may fall back; a
+    permission failure must surface.
+    """
+    import errno
+
+    dest = tmp_path / "denied"
+    original_resolve = Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if strict and self.name == "denied":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    with pytest.raises(PermissionError):
+        copy_demo(dest)
 
 
 # ---------------------------------------------------------------------------
