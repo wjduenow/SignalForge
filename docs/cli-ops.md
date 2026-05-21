@@ -57,7 +57,8 @@ After install, the `signalforge` console script is registered via
 
 ## Subcommands
 
-The CLI exposes four subcommands. `signalforge --help` prints the
+The CLI exposes six subcommands: `generate`, `init-demo`, `lint`,
+`prune-existing`, `version`. `signalforge --help` prints the
 top-level help; each subcommand has its own `--help` page (e.g.
 `signalforge generate --help`).
 
@@ -379,6 +380,155 @@ before the first `signalforge generate` call — sub-second, free, and
 catches `extra="forbid"` typos (e.g. `safety: { mdoel: ... }`) plus
 the manifest-version / model-name mistakes that would otherwise
 surface only after a billable LLM round-trip.
+
+### `signalforge prune-existing <model> --schema <path>`
+
+Prune the tests in an externally-authored dbt `schema.yml` against
+real warehouse data. Runs **ingest → prune → diff** — no draft, no
+grade, **no LLM call** — and reports which of your existing tests add
+signal (kept), which could not be evaluated (kept-uncertain), and
+which always pass or fail on known-clean data (dropped). The product
+story: *point SignalForge at your existing dbt tests and let the
+warehouse tell you which ones add no signal* — extending Architectural
+Commitment #1 ("signal over volume") to any generator's tests
+(hand-written, dbt-codegen, dbt Copilot, DinoAI, datapilot). The
+library seam this wraps is `signalforge.ingest.read_schema(...)` (issue
+#104); the subcommand is issue #105 (DEC-002 … DEC-010 of
+[`plans/super/105-prune-existing-cli.md`](../plans/super/105-prune-existing-cli.md)).
+
+Because there is no LLM call, this is strictly cheaper than
+`generate`: the only warehouse cost is exactly what the prune step
+already incurs.
+
+Positional argument:
+
+- `<model>` — Model whose existing tests to prune. Accepts a
+  **bare model name** (e.g. `customers`), a dbt **unique_id**
+  (e.g. `model.proj.customers`), or a **file path** (e.g.
+  `models/marts/customers.sql`). Resolved via the shared
+  `_resolve_model_by_key` helper (DEC-008): bare names match against
+  `Model.name` across enabled nodes; a bare name matching two or more
+  enabled models fails loud with a disambiguation list.
+
+Flag reference:
+
+| Flag | Required | Choices / default | Purpose |
+| --- | --- | --- | --- |
+| `--schema PATH` | **yes** | — | The externally-authored dbt `schema.yml` whose tests to prune. Canonicalised via `canonicalise_user_path` (symlink/containment → `CliPathError`); the `Path` is passed to `read_schema` so the full ingest typed-error surface fires (DEC-005), and the same file's UTF-8 text is fed to the diff renderer as `existing_schema` (DEC-004). |
+| `--project-dir PATH` | no | walk-up default | Absolute assertion: `<PATH>` must contain `dbt_project.yml`; the CLI does NOT walk up from the override (DEC-027). Default: walk up from the current working directory. |
+| `--manifest PATH` | no | `<project_dir>/target/manifest.json` | Override the manifest location. Canonicalised against the resolved project_dir. |
+| `--profiles-dir PATH` | no | dbt default search | Override the `profiles.yml` search location (mirrors dbt-core's flag). Sets `DBT_PROFILES_DIR` in the current process environment. |
+| `--scope {sample,full}` | no | from config | Override `prune.scope`. Applied via `PruneConfig.model_validate` so validators re-run (DEC-002). |
+| `--sample-strategy {oneshot,materialised}` | no | from config | Override `prune.sample_strategy`. Applied via `PruneConfig.model_validate` (DEC-002). |
+| `--format {ansi,markdown,json}` | no | `ansi` | Select the diff renderer. ANSI: coloured terminal output. Markdown: GitHub-friendly report. JSON: stdout receives the JSON sidecar's contents. |
+| `--dry-run` | no | off | Run ingest → prune → diff and print the diff to stdout, but write nothing — suppresses the default-on `.signalforge/diff.json` sidecar. There is **no `--write`** (read-only w.r.t. your `schema.yml`). |
+| `--quiet` | no | off | Suppress per-stage stderr progress lines and the skipped-test report, and raise the log level to `WARNING`. Mutually exclusive with `--verbose`. |
+| `--verbose` | no | off | Raise the log level to `DEBUG`, list each skipped test in detail, and surface panic-path tracebacks. Mutually exclusive with `--quiet`. |
+| `--no-color` | no | off | Strip ANSI colour codes from stdout. Sets `NO_COLOR=1` in the current process environment. |
+
+**Dropped vs. `generate`** (DEC-002 / DEC-003): `--mode`,
+`--min-score`, `--estimate`, `--select`, `--write`. `--mode` shapes
+the LLM payload, which doesn't exist on this path, so it would be a
+dead flag; `--scope` / `--sample-strategy` are the genuinely-relevant
+warehouse knobs that take its place.
+
+#### Read-only by design (DEC-003)
+
+`prune-existing` deliberately ships **no `--write` flag**. The
+`--schema` file is hand-authored, so silently overwriting it would be
+surprising and destructive. The command prints the rendered diff to
+stdout and writes the `.signalforge/diff.json` sidecar by default;
+`--dry-run` suppresses the sidecar for a pure-stdout, zero-disk run.
+Re-pruning into the file is a possible v0.3 follow-up with a
+confirmation/backup story.
+
+#### Unified diff against your file (DEC-004)
+
+The deliverable is a unified diff against your *actual* `schema.yml`:
+the `--schema` content is fed to `render_diff` as `existing_schema`,
+so the diff shows exactly what to remove from that file. There is no
+grading report (`grading_report=None`), so the diff renders **kept /
+kept-uncertain / dropped only — never `flagged`** (the `flagged` tier
+requires a grading report, locked by #104 DEC-011).
+
+> **Cosmetic-reformatting caveat.** The proposed YAML is re-emitted
+> from the kept `CandidateSchema` via the diff emitter, so it may
+> reorder keys or normalise whitespace relative to your hand-authored
+> file, adding cosmetic diff lines. This is accepted and documented;
+> the **kept / kept-uncertain / dropped table is the load-bearing
+> signal**, not the byte-exact diff body.
+
+Exit codes (four-tier taxonomy; see § Four-tier exit-code taxonomy):
+
+- `0` — pipeline completed; diff printed to stdout.
+- `1` — load/parse failure: ingest schema errors
+  (`IngestSchemaNotFoundError` / `IngestSchemaParseError` /
+  `IngestSchemaTooLargeError`), `CliPathError`, `ManifestNotFoundError`,
+  `ProfileNotFoundError`, the panic-path catch.
+- `2` — input-validation failure: `IngestModelNotFoundError` /
+  `IngestAnchorContractError` (a test references a column absent from
+  the model), `ModelNotFoundError`.
+- `3` — external-dependency / fail-closed audit-write failure:
+  `WarehouseAuthError`, `BytesBilledExceededError`, the prune/diff
+  audit-write durability errors.
+
+No bespoke `CliPruneExisting*` wrapper classes exist (DEC-006): the
+five `IngestError` concretes are already first-class in
+`_EXCEPTION_TO_EXIT_CODE` (#104 DEC-004 landed them precisely so #105
+needs no rework), so they route to the correct tier via the
+`map_exception_to_exit_code` MRO walk.
+
+Stderr shapes:
+
+- **Skipped-test summary** (DEC-007) — after `read_schema`, when
+  `IngestResult.skipped` is non-empty and not `--quiet`, one line
+  grouped by `SkipReason`:
+
+  ```text
+  Skipped 3 unsupported tests: custom-or-generic-test×2, unsupported-test-type×1
+  ```
+
+  Under `--verbose`, one indented line per `SkippedTest` follows
+  (`test_name`, `column`, `reason`, `detail`). Emitted via
+  `print_stderr` (the ANSI-safe sink), not `_LOGGER` — it is
+  operator-facing info, not a log event. `--quiet` suppresses both.
+
+- **Errors** — the standard `ERROR: <message>` + optional
+  `  ↳ Remediation: <text>` shape (see § Stderr message shape per
+  tier).
+
+- **Progress** — three stages (DEC-010): `[1/3] ingest`,
+  `[2/3] prune`, `[3/3] diff`, each with a paired `done in <X>` line.
+  TTY-gated via `should_emit_progress`; `--quiet` suppresses,
+  `--verbose` forces on.
+
+Worked example:
+
+```text
+$ cd /repo/dbt/analytics
+$ signalforge prune-existing customers --schema models/marts/schema.yml
+# stderr (TTY): three entry lines + three done lines
+[1/3] ingest: parsing schema.yml...
+[1/3] ingest: done in 0.0s
+Skipped 1 unsupported test: dbt-expectations×1
+[2/3] prune: running 7 existing tests against warehouse...
+[2/3] prune: done in 18.4s
+[3/3] diff: rendering...
+[3/3] diff: done in 0.1s
+# stdout: rendered ANSI diff (kept / kept-uncertain / dropped; never flagged)
+Kept (4):
+  column.customer_id.test.not_null     — caught a real failing row
+  ...
+Dropped (3):
+  column.region.test.not_null          — always-passes
+  ...
+$ echo $?
+0
+```
+
+`--dry-run` would skip the `.signalforge/diff.json` sidecar while
+still printing the diff to stdout. `--format json` would emit the
+JSON sidecar's contents to stdout.
 
 ### `signalforge version`
 
