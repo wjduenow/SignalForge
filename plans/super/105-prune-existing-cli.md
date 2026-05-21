@@ -3,7 +3,7 @@
 ## Meta
 
 - **Ticket:** [#105](https://github.com/wjduenow/SignalForge/issues/105) — feat: `signalforge prune-existing` CLI subcommand (prune external schema.yml tests)
-- **Phase:** published (awaiting approval) — PR [#107](https://github.com/wjduenow/SignalForge/pull/107)
+- **Phase:** devolved — PR [#107](https://github.com/wjduenow/SignalForge/pull/107); epic `bd_1-scaffolding-ad1`
 - **Branch / worktree:** `feature/105-prune-existing-cli` @ `/home/wesd/Projects/worktrees/SignalForge/105-prune-existing-cli` (off `dev`)
 - **Blocked by:** #104 (library seam) — **landed** at `7a97a6d`, so this is unblocked.
 - **Sessions:** 1 (2026-05-21)
@@ -182,4 +182,17 @@ US-002 ─┼─ US-003 ─┬─ US-004 ─┐
 
 ## Beads manifest (Phase 7 — devolved)
 
-_pending devolve_
+- **Epic:** `bd_1-scaffolding-ad1` — #105: signalforge prune-existing CLI subcommand
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/105-prune-existing-cli` (branch `feature/105-prune-existing-cli` off `dev`)
+
+| Bead | Story | Depends on |
+|------|-------|-----------|
+| `bd_1-scaffolding-ad1.1` | US-001 hoist model resolver to `_helpers` | — |
+| `bd_1-scaffolding-ad1.2` | US-002 `prune-existing` add_parser | — |
+| `bd_1-scaffolding-ad1.3` | US-003 `cmd_prune_existing` orchestrator | .1, .2 |
+| `bd_1-scaffolding-ad1.4` | US-004 cli-ops doc + 5-surface parity | .3 |
+| `bd_1-scaffolding-ad1.5` | US-005 subprocess `--help` smoke | .2 |
+| `bd_1-scaffolding-ad1.6` | US-006 Quality Gate | .1, .3, .4, .5 |
+| `bd_1-scaffolding-ad1.7` | US-007 Patterns & Memory (P4) | .6 |
+
+Ready to start: `bd_1-scaffolding-ad1.1` (US-001) and `bd_1-scaffolding-ad1.2` (US-002) — both unblocked.
