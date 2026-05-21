@@ -51,16 +51,16 @@ concurrency:
 
 Saves runner minutes and surfaces the latest result faster.
 
-## Python matrix: 3.11 / 3.12 (uv migration)
+## Python matrix: 3.11 / 3.12 / 3.13 (uv migration)
 
-Originally DEC-003 locked CI to a single Python version (3.11) for v0.1 — the matrix widening was deferred to "when the package has real users running on multiple versions." The uv migration graduated this: `astral-sh/setup-uv` fetches missing interpreters in seconds, so a multi-version matrix costs ~2x runner minutes for a cleanly worth-it signal (PEP 604 / match-statement / type-param syntax issues catch earlier).
+Originally DEC-003 locked CI to a single Python version (3.11) for v0.1 — the matrix widening was deferred to "when the package has real users running on multiple versions." The uv migration graduated this: `astral-sh/setup-uv` fetches missing interpreters in seconds, so a multi-version matrix costs ~Nx runner minutes for a cleanly worth-it signal (PEP 604 / match-statement / type-param syntax issues catch earlier).
 
 The matrix runs ruff + pytest on every Python version. Two steps are gated to one iteration:
 
-- **Pyright** runs only when `matrix.python-version == '3.11'` — pyright's own `pythonVersion = "3.11"` setting pins the type-check to the floor (`python-build.md` issue #46); running it on 3.12 adds no signal.
-- **Codecov upload** runs only when `matrix.python-version == '3.12'` (the current matrix ceiling) — coverage is interpreter-invariant for this codebase, so the choice is conventional. When 3.13 returns to the matrix, flip the gate back to 3.13.
+- **Pyright** runs only when `matrix.python-version == '3.11'` — pyright's own `pythonVersion = "3.11"` setting pins the type-check to the floor (`python-build.md` issue #46); running it on the higher versions adds no signal.
+- **Codecov upload** runs only when `matrix.python-version == '3.13'` (the current matrix ceiling) — coverage is interpreter-invariant for this codebase, so the choice is conventional. When a new ceiling lands, flip the gate to it.
 
-**3.13 is deferred.** Python 3.13 changed `Path.resolve()` to raise `OSError(errno.ELOOP)` instead of `RuntimeError` on cyclic symlinks; six tests under `tests/_common/`, `tests/diff/`, `tests/grade/`, `tests/manifest/` rely on the 3.11/3.12 shape. A follow-up issue tracks the catch-site updates in `signalforge/_common/path_safety.py` + `signalforge/manifest/loader.py`; once those land, 3.13 returns to the matrix.
+**3.13 landed in issue #96.** Python 3.13 changed `Path.resolve()` to raise `OSError(errno.ELOOP)` instead of `RuntimeError` on cyclic symlinks (gh-108958) and made `strict=False` stop raising on a cycle entirely. The three loop-guard sites (`signalforge/_common/path_safety.py`, `signalforge/manifest/loader.py`, `signalforge/demo/__init__.py`) now resolve `strict=True` first and catch both signals — see `python-build.md` § "Python version: advertised floor matches the tested floor". 3.13 is the matrix ceiling.
 
 If a future ticket bumps the matrix floor (e.g., to 3.12), update `requires-python` + `pyright.pythonVersion` + the matrix in lockstep per `python-build.md` issue #46.
 
@@ -88,10 +88,10 @@ Three load-bearing details:
 
 1. **SHA-pin the action** — same `gh api repos/codecov/codecov-action/git/refs/tags/v5` lookup as other actions. Dereference annotated tags. The trailing `# v5.X.Y` comment is for reviewers; the SHA is what executes.
 2. **`fail_ci_if_error: false`** — required for fork-safe CI. Fork PRs via `pull_request` do not receive `secrets.CODECOV_TOKEN` (GitHub strips repository secrets from fork-originated workflows). The upload silently fails; `fail_ci_if_error: false` prevents CI failure on the missing token. This is expected behaviour, not a bug.
-3. **Gate on `matrix.python-version == '3.12'`** — the upload runs from the matrix ceiling iteration only, so coverage doesn't double-upload (codecov rejects duplicate uploads for the same commit). The choice of ceiling over floor is conventional; either matrix endpoint works. When 3.13 returns to the matrix (gated by issue #96), flip this to `'3.13'`.
+3. **Gate on `matrix.python-version == '3.13'`** — the upload runs from the matrix ceiling iteration only, so coverage doesn't double-upload (codecov rejects duplicate uploads for the same commit). The choice of ceiling over floor is conventional; either matrix endpoint works. When a new ceiling lands, flip this to it.
 
 The step must land AFTER the pytest step. `coverage.xml` is produced by `--cov-report=xml` in `pyproject.toml` `addopts` — no workflow-level `--cov` flag is needed.
 
 ## Reference
 
-`plans/super/1-project-scaffolding.md` — DEC-003, DEC-009. `plans/super/27-codecov-coverage.md` — DEC-006, DEC-007. Issue #57 — `release/*` push trigger. `.github/workflows/ci.yml` — current implementation.
+`plans/super/1-project-scaffolding.md` — DEC-003, DEC-009. `plans/super/27-codecov-coverage.md` — DEC-006, DEC-007. Issue #57 — `release/*` push trigger. Issue #96 — Python 3.13 added to the matrix (ELOOP path-safety fix). `.github/workflows/ci.yml` — current implementation.

@@ -44,6 +44,7 @@ Design notes
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -94,25 +95,45 @@ def _canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
     paths whose resolved form is not under the resolved ``project_dir``.
 
     Raises :class:`ModelPathOutsideProjectError` if the resolved path
-    escapes the project tree, or if either path contains a symlink loop
-    (``Path.resolve`` raises :class:`RuntimeError` on cycles regardless of
-    the ``strict=`` flag).
+    escapes the project tree, or if either path contains a symlink loop.
+    Symlink-cycle detection spans Python versions: <= 3.12 raises
+    :class:`RuntimeError` from ``Path.resolve`` regardless of ``strict=``;
+    >= 3.13 (gh-108958) raises ``OSError(errno.ELOOP)`` under ``strict=True``
+    and stops resolving silently under ``strict=False``, so the input path is
+    resolved ``strict=True`` first (falling back to ``strict=False`` only for
+    a genuinely missing target).
     """
     p = Path(input_path)
     try:
         project_resolved = project_dir.resolve(strict=True)
-    except RuntimeError as exc:
+    except RuntimeError as exc:  # Python <= 3.12 symlink cycle
         raise ModelPathOutsideProjectError(
             f"project_dir contains a symlink loop: {project_dir}",
         ) from exc
+    except OSError as exc:  # Python >= 3.13 symlink cycle (gh-108958)
+        if exc.errno == errno.ELOOP:
+            raise ModelPathOutsideProjectError(
+                f"project_dir contains a symlink loop: {project_dir}",
+            ) from exc
+        raise
     if not p.is_absolute():
         p = project_resolved / p
+    # Resolve strict=True first so a symlink cycle raises on every supported
+    # Python (<= 3.12 RuntimeError; >= 3.13 OSError(ELOOP)). A missing target
+    # falls back to strict=False best-effort — under 3.13, strict=False
+    # silently stops at the loop and would otherwise slip past containment.
     try:
-        resolved = p.resolve(strict=False)
-    except RuntimeError as exc:
+        resolved = p.resolve(strict=True)
+    except RuntimeError as exc:  # Python <= 3.12 symlink cycle
         raise ModelPathOutsideProjectError(
             f"Path contains a symlink loop: {p}",
         ) from exc
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:  # Python >= 3.13 symlink cycle (gh-108958)
+            raise ModelPathOutsideProjectError(
+                f"Path contains a symlink loop: {p}",
+            ) from exc
+        resolved = p.resolve(strict=False)
     if not resolved.is_relative_to(project_resolved):
         raise ModelPathOutsideProjectError(
             f"Path {resolved} escapes project_dir {project_resolved}.",

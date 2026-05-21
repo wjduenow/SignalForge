@@ -17,14 +17,20 @@ The three traps preserved here:
 
 1. Resolve symlinks before checking containment
    (:meth:`pathlib.Path.relative_to` does **not** follow symlinks).
-2. Catch :class:`RuntimeError` from :meth:`pathlib.Path.resolve` — it raises
-   on symlink cycles regardless of the ``strict=`` flag.
+2. Detect symlink cycles across Python versions. Python <= 3.12 raises
+   :class:`RuntimeError` from :meth:`pathlib.Path.resolve` on a cycle
+   regardless of the ``strict=`` flag. Python >= 3.13 (gh-108958) instead
+   raises ``OSError(errno.ELOOP)`` under ``strict=True`` and stops resolving
+   *silently* under ``strict=False`` — so the input path is resolved with
+   ``strict=True`` first (falling back to ``strict=False`` only for a
+   genuinely missing target) to surface the loop on every supported version.
 3. Apply the same gate to the *default* path the caller chooses, not just to
    user-supplied overrides — convention is not a security boundary.
 """
 
 from __future__ import annotations
 
+import errno
 from pathlib import Path
 
 
@@ -63,12 +69,18 @@ def canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
     p = Path(input_path)
     try:
         project_resolved = project_dir.resolve(strict=True)
-    except RuntimeError as exc:
+    except RuntimeError as exc:  # Python <= 3.12 symlink cycle
         raise PathContainmentError(f"project_dir {project_dir} contains a symlink loop") from exc
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise PathContainmentError(
             f"project_dir {project_dir} does not exist or is not a directory"
         ) from exc
+    except OSError as exc:  # Python >= 3.13 symlink cycle (gh-108958)
+        if exc.errno == errno.ELOOP:
+            raise PathContainmentError(
+                f"project_dir {project_dir} contains a symlink loop"
+            ) from exc
+        raise
     # `Path.resolve(strict=True)` succeeds on an existing regular file, so the
     # "is not a directory" promise in the docstring would silently break for a
     # bare-file `project_dir` (caught by Copilot on PR #72). Explicit guard:
@@ -79,10 +91,21 @@ def canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
 
     if not p.is_absolute():
         p = project_resolved / p
+    # Resolve strict=True first so a symlink cycle surfaces as a loop on every
+    # supported Python: <= 3.12 raises RuntimeError, >= 3.13 raises
+    # OSError(ELOOP). A genuinely missing target (the input need not exist —
+    # e.g. an audit file about to be created) raises FileNotFoundError /
+    # NotADirectoryError, where we fall back to strict=False best-effort
+    # resolution. (On 3.13 strict=False silently stops at the loop and would
+    # otherwise slip past the containment check.)
     try:
-        resolved = p.resolve(strict=False)
-    except RuntimeError as exc:
+        resolved = p.resolve(strict=True)
+    except RuntimeError as exc:  # Python <= 3.12 symlink cycle
         raise PathContainmentError(f"path {p} contains a symlink loop") from exc
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:  # Python >= 3.13 symlink cycle (gh-108958)
+            raise PathContainmentError(f"path {p} contains a symlink loop") from exc
+        resolved = p.resolve(strict=False)
     if not resolved.is_relative_to(project_resolved):
         raise PathContainmentError(f"path {resolved} escapes project_dir {project_resolved}")
     return resolved

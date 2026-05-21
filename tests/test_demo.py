@@ -260,24 +260,25 @@ def test_copy_demo_with_cyclic_symlink_raises_demo_path_error(tmp_path: Path) ->
     link_a.symlink_to(link_b)
     link_b.symlink_to(link_a)
 
-    # On some filesystems (notably WSL2), resolve() does NOT raise on this
-    # pattern — it returns a path with the symlink unresolved. Skip when
-    # the platform doesn't enforce the cycle guard the way the contract
-    # expects; the GitHub Actions Linux runner does enforce it.
+    # On some filesystems, resolve() does not enforce the cycle guard at all
+    # (it returns the path with the symlink unresolved). copy_demo resolves
+    # strict=True to surface the loop; probe the same way and skip only when
+    # the platform refuses to raise on the cycle under strict resolution.
     try:
-        link_a.resolve(strict=False)
-    except RuntimeError:
+        link_a.resolve(strict=True)
+    except (RuntimeError, OSError):
         pass
     else:
         pytest.skip(
-            "filesystem does not raise RuntimeError on symlink cycles; "
+            "filesystem does not raise on symlink cycles; "
             "DemoPathError path is verified on the CI Linux runner"
         )
 
     with pytest.raises(DemoPathError) as excinfo:
         copy_demo(link_a)
-    # The triggering RuntimeError rides on the cause.
-    assert isinstance(excinfo.value.cause, RuntimeError)
+    # The triggering error rides on the cause: RuntimeError on Python <= 3.12,
+    # OSError(ELOOP) on >= 3.13 (gh-108958).
+    assert isinstance(excinfo.value.cause, RuntimeError | OSError)
 
 
 # ---------------------------------------------------------------------------

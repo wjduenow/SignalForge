@@ -65,10 +65,11 @@ class DemoError(Exception):
 class DemoPathError(DemoError):
     """Raised when the destination path cannot be canonicalised.
 
-    Currently fires on symlink-cycle detection (``Path.resolve()``
-    raises ``RuntimeError`` regardless of ``strict=`` on a cyclic
-    chain). The triggering ``RuntimeError`` rides on the ``cause``
-    kwarg. The CLI wraps this as ``CliPathError`` (tier 1).
+    Currently fires on symlink-cycle detection. The triggering error
+    rides on the ``cause`` kwarg: ``RuntimeError`` on Python <= 3.12,
+    ``OSError(errno.ELOOP)`` on >= 3.13 (gh-108958 changed
+    ``Path.resolve()``'s cycle signal). The CLI wraps this as
+    ``CliPathError`` (tier 1).
     """
 
     default_remediation = "Remove the symlink cycle at the destination or pick a different path."
