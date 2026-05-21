@@ -697,6 +697,51 @@ def test_prune_tests_kept_rate_warning_silent_on_empty_candidate_set(
     assert matching == []
 
 
+def test_prune_tests_empty_candidate_skips_warehouse_on_materialised_sample(
+    tmp_path: Path,
+) -> None:
+    """An empty candidate set on the DEFAULT ``materialised`` + ``sample``
+    path must NOT contact the warehouse (issue #105 ``prune-existing``
+    all-unsupported case).
+
+    Before the empty-candidate short-circuit, ``prune_tests`` entered
+    ``with adapter:`` and issued a real ``materialise_sample`` (a
+    ``CREATE TEMP TABLE ... AS SELECT``) to sample for ZERO tests —
+    incurring warehouse cost for no signal. The fake has NO
+    ``expect_materialise_sample`` / ``expect_get_table`` / ``expect_query``
+    queued, so any warehouse call would raise an ``AssertionError`` for an
+    unexpected query. A clean return with an empty ``PruneResult`` proves
+    no warehouse contact happened.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    empty = CandidateSchema(name="orders", description="Order events.", columns=())
+    # The default cost-optimisation path that would otherwise materialise.
+    config = PruneConfig(scope="sample", sample_strategy="materialised")
+
+    result = prune_tests(
+        model,
+        adapter,
+        empty,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 0
+    assert result.decisions == ()
+    # No warehouse expectations were queued; assert none were consumed.
+    fake.assert_all_expectations_met()
+    # Fail-closed audit invariant holds trivially: zero decisions → no file
+    # (or an empty one) — never a partial/garbage record.
+    assert not audit_path.exists() or audit_path.read_text() == ""
+
+
 def test_prune_tests_kept_rate_warning_fires_on_disabled_short_circuit(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

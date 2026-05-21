@@ -343,10 +343,27 @@ def _emit_skipped_report(skipped: tuple[ingest_module.SkippedTest, ...], *, verb
     noun = "test" if len(skipped) == 1 else "tests"
     print_stderr(f"Skipped {len(skipped)} unsupported {noun}: {breakdown}")
     if verbose:
+        # The verbose per-item fields (test_name / column / detail) come
+        # straight from the operator's YAML, so a crafted value carrying a
+        # raw newline could otherwise inject a fake "  - ..." bullet into the
+        # report. print_stderr already strips ANSI CSI escapes; we additionally
+        # scrub \n / \r / \t so a value cannot break the one-line-per-test
+        # geometry — mirrors the control-char scrub in format_batch_summary.
         for s in skipped:
-            column = s.column if s.column is not None else "<model-level>"
-            detail = f" — {s.detail}" if s.detail else ""
-            print_stderr(f"  - {s.test_name} (column={column}, reason={s.reason}){detail}")
+            test_name = _scrub_control_chars(s.test_name)
+            column = _scrub_control_chars(s.column) if s.column is not None else "<model-level>"
+            detail = f" — {_scrub_control_chars(s.detail)}" if s.detail else ""
+            print_stderr(f"  - {test_name} (column={column}, reason={s.reason}){detail}")
+
+
+def _scrub_control_chars(value: str) -> str:
+    """Replace newline / carriage-return / tab with a single space.
+
+    Defence-in-depth for operator-supplied strings rendered into a
+    one-line-per-item stderr report — mirrors the scrub in
+    :func:`signalforge.cli._helpers.format_batch_summary`.
+    """
+    return value.replace("\n", " ").replace("\r", " ").replace("\t", " ")
 
 
 # ---------------------------------------------------------------------------

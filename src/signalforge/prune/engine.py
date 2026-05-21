@@ -898,6 +898,26 @@ def prune_tests(
             signalforge_version=_SIGNALFORGE_VERSION,
         )
 
+    # Empty-candidate short-circuit. When there are zero candidate tests
+    # to evaluate (e.g. every test in an externally-authored schema.yml
+    # was skip-recorded by the ingest layer — issue #105's
+    # ``prune-existing`` all-unsupported case), there is nothing to
+    # compile, run, or materialise. Return an empty PruneResult WITHOUT
+    # entering ``with adapter:`` — on the default ``materialised`` +
+    # ``sample`` path the adapter would otherwise issue a real
+    # ``CREATE TEMP TABLE ... AS SELECT`` to materialise a sample for
+    # zero tests, incurring warehouse cost for no signal. Mirrors the
+    # disabled short-circuit's no-warehouse-contact posture above; the
+    # fail-closed audit invariant is preserved trivially (zero decisions
+    # → zero PruneEvents).
+    if not pairs:
+        return PruneResult(
+            model_unique_id=model.unique_id,
+            decisions=(),
+            elapsed_ms=max(0, _now_monotonic_ms() - start_ms),
+            signalforge_version=_SIGNALFORGE_VERSION,
+        )
+
     # Validate trusted_models BEFORE any warehouse call (DEC-008).
     _validate_trusted_models(resolved_config, manifest)
 

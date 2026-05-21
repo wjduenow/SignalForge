@@ -315,6 +315,14 @@ def test_format_json_emits_json(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert payload["model_unique_id"] == _MODEL_UNIQUE_ID
     # grading_report=None -> never flagged (DEC-004 / #104 DEC-011).
     assert payload["flagged_count"] == 0
+    # Load-bearing prune assertion (testing-signal.md): the fixture's
+    # _FAILURE_COUNTS=(0,5,0,2) is engineered to produce a real kept/dropped
+    # MIX. Pin the exact counts so a prune regression to keep-everything
+    # (dropped==0) OR drop-everything (kept==0) fails this test loudly — the
+    # whole point of the subcommand is the pruning, so it must be asserted.
+    assert payload["kept_count"] == 7
+    assert payload["dropped_count"] == 3
+    assert payload["kept_uncertain_count"] == 0
 
 
 # ---------------------------------------------------------------------------
