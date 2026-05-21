@@ -59,10 +59,11 @@ def copy_demo(dest: Path | str, *, force: bool = False) -> Path:
     ----------
     dest:
         Destination directory. Resolved via
-        ``Path(dest).expanduser().resolve()`` (strict=True, falling back to
-        strict=False for a not-yet-existing dest) — a relative path resolves
-        against the current working directory; ``~`` expands; symlinks are
-        followed; cycles raise :class:`DemoPathError`.
+        ``Path(dest).expanduser().resolve(strict=True)``, falling back to
+        ``resolve(strict=False)`` only when the destination does not exist
+        yet (``FileNotFoundError`` / ``NotADirectoryError``) — a relative
+        path resolves against the current working directory; ``~`` expands;
+        symlinks are followed; cycles raise :class:`DemoPathError`.
     force:
         If ``True``, a non-empty existing destination is replaced
         atomically (``shutil.rmtree`` then ``shutil.copytree``). The
@@ -104,13 +105,18 @@ def copy_demo(dest: Path | str, *, force: bool = False) -> Path:
             f"failed to resolve destination path {str(raw)!r}: {exc}",
             cause=exc,
         ) from exc
+    except (FileNotFoundError, NotADirectoryError):
+        # Destination does not exist yet (the common case) — fall back to
+        # best-effort resolution. Narrow to these two so a PermissionError /
+        # other OSError surfaces instead of being silently downgraded.
+        resolved_dest = expanded_dest.resolve(strict=False)
     except OSError as exc:
         if exc.errno == errno.ELOOP:  # Python >= 3.13 symlink cycle (gh-108958)
             raise DemoPathError(
                 f"failed to resolve destination path {str(raw)!r}: {exc}",
                 cause=exc,
             ) from exc
-        resolved_dest = expanded_dest.resolve(strict=False)
+        raise
 
     # Symlink + --force blast-radius guard. `resolve()` above followed the
     # link, so if we proceeded with `force=True` the existence gate's

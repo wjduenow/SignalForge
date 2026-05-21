@@ -128,12 +128,17 @@ def _canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
         raise ModelPathOutsideProjectError(
             f"Path contains a symlink loop: {p}",
         ) from exc
+    except (FileNotFoundError, NotADirectoryError):
+        # Target does not exist yet — fall back to best-effort resolution.
+        # Narrow to these two so a PermissionError / other OSError surfaces
+        # instead of being masked as a partially-resolved path.
+        resolved = p.resolve(strict=False)
     except OSError as exc:
         if exc.errno == errno.ELOOP:  # Python >= 3.13 symlink cycle (gh-108958)
             raise ModelPathOutsideProjectError(
                 f"Path contains a symlink loop: {p}",
             ) from exc
-        resolved = p.resolve(strict=False)
+        raise
     if not resolved.is_relative_to(project_resolved):
         raise ModelPathOutsideProjectError(
             f"Path {resolved} escapes project_dir {project_resolved}.",

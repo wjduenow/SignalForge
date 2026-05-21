@@ -17,6 +17,7 @@ The three traps from ``.claude/rules/manifest-readers.md`` are exercised:
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 
@@ -96,6 +97,37 @@ def test_input_symlink_loop_raises(tmp_path: Path) -> None:
 
     with pytest.raises(PathContainmentError, match="symlink loop"):
         canonicalise_path("a", project)
+
+
+@pytest.mark.unit
+def test_non_loop_oserror_on_input_is_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ELOOP ``OSError`` (e.g. ``PermissionError``) from strict
+    resolution of the input path must propagate — NOT be downgraded to a
+    best-effort ``strict=False`` resolution.
+
+    Issue #96 review (Copilot): the ``except OSError`` fallback was too
+    broad. Only ``FileNotFoundError`` / ``NotADirectoryError`` (a genuinely
+    missing target) may fall back to ``strict=False``; masking a permission
+    failure as a partially-resolved path could weaken the containment check.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+
+    original_resolve = Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        # Only the input path (basename "denied") under strict resolution
+        # raises; project_dir resolution proceeds normally.
+        if strict and self.name == "denied":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    with pytest.raises(PermissionError):
+        canonicalise_path("denied", project)
 
 
 @pytest.mark.unit

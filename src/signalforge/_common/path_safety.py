@@ -102,10 +102,17 @@ def canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
         resolved = p.resolve(strict=True)
     except RuntimeError as exc:  # Python <= 3.12 symlink cycle
         raise PathContainmentError(f"path {p} contains a symlink loop") from exc
+    except (FileNotFoundError, NotADirectoryError):
+        # Target does not exist yet (e.g. an audit file about to be created)
+        # — fall back to best-effort lexical resolution. Narrow to exactly
+        # these two so a PermissionError / other OSError is NOT silently
+        # downgraded to a partially-resolved path (which could weaken the
+        # containment check below).
+        resolved = p.resolve(strict=False)
     except OSError as exc:
         if exc.errno == errno.ELOOP:  # Python >= 3.13 symlink cycle (gh-108958)
             raise PathContainmentError(f"path {p} contains a symlink loop") from exc
-        resolved = p.resolve(strict=False)
+        raise
     if not resolved.is_relative_to(project_resolved):
         raise PathContainmentError(f"path {resolved} escapes project_dir {project_resolved}")
     return resolved
