@@ -60,9 +60,15 @@ The parser (`parse_test_entry`) is the compatibility surface across dbt versions
 - `IngestError` added to `_EXCEPTION_MAPPING_EXCLUDED_BASES`. Like `DemoError`, the concretes span tiers 1 and 2, so the base gets **no** single fallback-tier entry in `_EXCEPTION_TO_EXIT_CODE` — it lives only in the excluded set. (Contrast the nine single-tier bases that DO get a dual-registration fallback.)
 - `test_scan_7_discovers_every_per_stage_errors_module` count bumped 10 → 11.
 
-## Deferred: `prune-existing` CLI subcommand (fast-follow #105)
+## `prune-existing` CLI subcommand (shipped — issue #105)
 
-Issue #104 ships the **library seam only**. The operator-facing `signalforge prune-existing <model> --schema <path>` subcommand (ingest → prune → diff, no LLM) is fast-follow [#105](https://github.com/wjduenow/SignalForge/issues/105), blocked on #104. The flag spec lives in `plans/super/104-ingest-external-tests.md` DEC-011. When #105 lands, apply the cli-layer.md library-surface wrap pattern (lib `IngestError` → `CliPruneExisting*Error` at the handler boundary) + 5-surface parity + the `@pytest.mark.cli_subprocess` `--help` smoke.
+Issue #104 shipped the **library seam only**; the operator-facing `signalforge prune-existing <model> --schema <path>` subcommand (ingest → prune → diff, **no LLM**) shipped in fast-follow [#105](https://github.com/wjduenow/SignalForge/issues/105). Design: `plans/super/105-prune-existing-cli.md` (DEC-001 … DEC-010). Three findings from #105 worth carrying forward:
+
+- **No bespoke `CliPruneExisting*` wrappers (#105 DEC-006).** The five `IngestError` concretes were registered in `_EXCEPTION_TO_EXIT_CODE` by #104 specifically so #105 inherits the taxonomy with zero rework — the CLI handler's single `try/except Exception` boundary (`format_error_to_stderr` + `map_exception_to_exit_code` MRO walk) handles them directly. This *deviates* from cli-layer.md's library-surface wrap pattern (which `init-demo` follows): when a lib's typed errors are already first-class in the exit-code table and already carry remediation, per-class CLI wrappers are ceremony. Wrap only when the CLI adds value (distinct remediation, homogeneity that the boundary catch doesn't already provide).
+- **`--mode` is inert on a no-LLM path (#105 DEC-002).** `prune_tests` never consumes the `SafetyPolicy`; the safety sampling mode shapes the LLM payload, which `prune-existing` never builds. The relevant warehouse knobs are prune's `--scope` / `--sample-strategy`. Don't copy `generate`'s flag set wholesale onto a stage that skips the LLM — audit each flag against what the path actually consumes.
+- **Read-only by design (#105 DEC-003/DEC-004).** No `--write` (the `--schema` file is hand-authored; overwriting it is surprising). The diff prints to stdout + a `.signalforge/diff.json` sidecar (default-on; `--dry-run` suppresses it). The external schema.yml is fed to `render_diff(existing_schema=...)` so the unified diff shows what to *remove* from the operator's real file; `grading_report=None` → kept/kept-uncertain/dropped, never `flagged`.
+
+The bare-name model resolver was hoisted to `signalforge.cli._helpers._resolve_model_by_key` (cli-layer.md § "Bare-name model resolution") so `prune-existing` and `lint` share it. The empty-candidate case (every external test skip-recorded → zero candidates) short-circuits in `prune.engine` BEFORE `with adapter:` so an all-unsupported schema.yml incurs no warehouse cost (see `prune-engine.md`).
 
 ## Reference
 
