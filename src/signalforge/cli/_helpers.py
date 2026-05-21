@@ -115,8 +115,10 @@ from signalforge.llm import (
     LLMServerError,
 )
 from signalforge.manifest import (
+    Manifest,
     ManifestError,
     ManifestNotFoundError,
+    Model,
     ModelDisabledError,
     ModelMissingSqlError,
     ModelNotFoundError,
@@ -452,6 +454,62 @@ def canonicalise_user_path(raw: str | Path | None, project_dir: Path) -> Path | 
                 "and does not traverse a symlink loop."
             ),
         ) from exc
+
+
+def _resolve_model_by_key(manifest: Manifest, key: str) -> Model:
+    """Resolve ``key`` to a :class:`Model` across all three input shapes.
+
+    Hoisted from :mod:`signalforge.cli.lint` (DEC-008 of issue #105) so
+    every subcommand that takes a model argument (``lint``, the future
+    ``prune-existing``) shares one resolver rather than copy-pasting the
+    body. The behaviour is identical to the original ``lint``-local
+    helper:
+
+    * ``key.startswith("model.")`` → unique_id branch via
+      :meth:`Manifest.get_model`.
+    * ``"/" in key`` or ``key.endswith(".sql")`` → file-path branch via
+      :meth:`Manifest.get_model`.
+    * Else → bare-name branch: scan :meth:`Manifest.iter_models` for
+      ``Model.name == key``. One match returns the model; zero matches
+      raises :class:`ModelNotFoundError` with a hint suggesting the
+      unique_id / file-path form; multiple matches raises
+      :class:`ModelNotFoundError` with a disambiguation list (capped at
+      five unique_ids to keep stderr readable).
+
+    The bare-name branch sidesteps the ``Manifest.get_model`` gotcha
+    pinned by ``testing-signal.md`` § "Multi-surface drift on user-facing
+    model arguments" where bare names route through the file-path branch
+    and surface a confusing :class:`ModelNotFoundError` even when the
+    model exists under its unique_id. Per ``cli-layer.md`` § "Bare-name
+    model resolution", the bare-name affordance lives in the CLI layer
+    (NOT the manifest layer) because the CLI is the only surface where
+    operators type model arguments by hand.
+    """
+    if key.startswith("model.") or "/" in key or key.endswith(".sql"):
+        return manifest.get_model(key)
+
+    matches = [m for m in manifest.iter_models() if m.name == key]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        sample = ", ".join(m.unique_id for m in matches[:5])
+        more = f" (+{len(matches) - 5} more)" if len(matches) > 5 else ""
+        raise ModelNotFoundError(
+            f"Bare model name {key!r} matches {len(matches)} enabled models: {sample}{more}",
+            remediation=(
+                "Disambiguate by passing the full unique_id "
+                "(model.<pkg>.<name>) or the file path "
+                "(models/path/to/<name>.sql)."
+            ),
+        )
+    raise ModelNotFoundError(
+        f"No enabled model with name {key!r} in the manifest.",
+        remediation=(
+            "Check the model name spelling, or pass the unique_id form "
+            "(model.<pkg>.<name>) / file path (models/path/to/<name>.sql). "
+            "Disabled models do not match bare-name lookup."
+        ),
+    )
 
 
 def setup_logging(verbose: bool, quiet: bool) -> None:
