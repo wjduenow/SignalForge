@@ -395,6 +395,9 @@ Commitment #1 ("signal over volume") to any generator's tests
 library seam this wraps is `signalforge.ingest.read_schema(...)`
 (issue #104); the subcommand is issue #105 (DEC-002 … DEC-010 of
 [`plans/super/105-prune-existing-cli.md`](../plans/super/105-prune-existing-cli.md)).
+For which dbt test shapes are supported vs. skipped (and the `tests:` /
+`data_tests:` and `ref()` / `source()` tolerances), see the
+[ingest layer guide](ingest-ops.md#supported-vs-skipped-tests).
 
 Because there is no LLM call, this is strictly cheaper than
 `generate`: the only warehouse cost is exactly what the prune step
