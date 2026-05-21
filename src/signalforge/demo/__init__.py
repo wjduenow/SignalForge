@@ -100,7 +100,7 @@ def copy_demo(dest: Path | str, *, force: bool = False) -> Path:
     # the loop silently and the cycle guard would never fire.)
     try:
         resolved_dest = expanded_dest.resolve(strict=True)
-    except RuntimeError as exc:  # Python <= 3.12 symlink cycle
+    except RuntimeError as exc:  # pragma: no cover - <=3.12 cycle signal
         raise DemoPathError(
             f"failed to resolve destination path {str(raw)!r}: {exc}",
             cause=exc,

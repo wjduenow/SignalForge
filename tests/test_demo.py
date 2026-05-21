@@ -281,6 +281,33 @@ def test_copy_demo_with_cyclic_symlink_raises_demo_path_error(tmp_path: Path) ->
     assert isinstance(excinfo.value.cause, RuntimeError | OSError)
 
 
+def test_non_loop_oserror_on_dest_is_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ELOOP ``OSError`` (e.g. ``PermissionError``) from strict
+    resolution of the destination propagates rather than being downgraded
+    to a best-effort ``strict=False`` resolution.
+
+    Issue #96 review (Copilot): only ``FileNotFoundError`` /
+    ``NotADirectoryError`` (a not-yet-existing dest) may fall back; a
+    permission failure must surface.
+    """
+    import errno
+
+    dest = tmp_path / "denied"
+    original_resolve = Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if strict and self.name == "denied":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    with pytest.raises(PermissionError):
+        copy_demo(dest)
+
+
 # ---------------------------------------------------------------------------
 # DemoFixtureMissingError — broken-install path
 # ---------------------------------------------------------------------------

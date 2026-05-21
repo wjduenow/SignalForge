@@ -131,6 +131,33 @@ def test_non_loop_oserror_on_input_is_not_swallowed(
 
 
 @pytest.mark.unit
+def test_non_loop_oserror_on_project_dir_is_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ELOOP ``OSError`` from strict resolution of ``project_dir``
+    propagates rather than being misreported as a missing directory.
+
+    Companion to the input-path case (issue #96 review): the
+    ``except OSError`` arm on the ``project_dir`` resolve re-raises any
+    non-ELOOP error instead of masking it.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+
+    original_resolve = Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if strict and self.name == "project":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    with pytest.raises(PermissionError):
+        canonicalise_path("any.txt", project)
+
+
+@pytest.mark.unit
 def test_missing_project_dir_raises(tmp_path: Path) -> None:
     """A non-existent ``project_dir`` raises :class:`PathContainmentError`."""
     missing = tmp_path / "does-not-exist"

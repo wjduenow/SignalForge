@@ -23,6 +23,7 @@ guard for ``manifest_path=`` overrides.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import sys
@@ -503,3 +504,32 @@ def test_symlink_loop_in_explicit_manifest_path_is_rejected(tmp_path: Path) -> N
 
     with pytest.raises(ModelPathOutsideProjectError):
         load(project, manifest_path=project / "a")
+
+
+@pytest.mark.error
+def test_non_loop_oserror_on_input_path_is_not_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ELOOP ``OSError`` (e.g. ``PermissionError``) from strict
+    resolution of the manifest path propagates rather than being downgraded
+    to a best-effort ``strict=False`` resolution.
+
+    Issue #96 review (Copilot): the ``except OSError`` fallback must be
+    narrowed to ``FileNotFoundError`` / ``NotADirectoryError`` so a
+    permission failure is not masked as a partially-resolved path.
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    project_resolved = project.resolve(strict=True)
+
+    original_resolve = Path.resolve
+
+    def fake_resolve(self: Path, strict: bool = False) -> Path:
+        if strict and self.name == "manifest.json":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return original_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+
+    with pytest.raises(PermissionError):
+        _canonicalise_path("manifest.json", project_resolved)

@@ -104,14 +104,19 @@ def _canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
     a genuinely missing target).
     """
     p = Path(input_path)
-    try:
+    # The sole caller (`load`) passes an already-resolved `project_dir`, so a
+    # cycle / missing-dir cannot surface here in the real flow — these arms are
+    # defensive for direct callers and mirror `signalforge._common.path_safety`
+    # (which is exercised directly by its own test suite). Excluded from
+    # coverage to avoid a spurious gap on the pre-resolved path.
+    try:  # pragma: no cover
         project_resolved = project_dir.resolve(strict=True)
-    except RuntimeError as exc:  # Python <= 3.12 symlink cycle
+    except RuntimeError as exc:  # pragma: no cover - defensive (pre-resolved)
         raise ModelPathOutsideProjectError(
             f"project_dir contains a symlink loop: {project_dir}",
         ) from exc
-    except OSError as exc:  # Python >= 3.13 symlink cycle (gh-108958)
-        if exc.errno == errno.ELOOP:
+    except OSError as exc:  # pragma: no cover - defensive (pre-resolved)
+        if exc.errno == errno.ELOOP:  # Python >= 3.13 symlink cycle (gh-108958)
             raise ModelPathOutsideProjectError(
                 f"project_dir contains a symlink loop: {project_dir}",
             ) from exc
@@ -124,7 +129,7 @@ def _canonicalise_path(input_path: Path | str, project_dir: Path) -> Path:
     # silently stops at the loop and would otherwise slip past containment.
     try:
         resolved = p.resolve(strict=True)
-    except RuntimeError as exc:  # Python <= 3.12 symlink cycle
+    except RuntimeError as exc:  # pragma: no cover - <=3.12 cycle signal
         raise ModelPathOutsideProjectError(
             f"Path contains a symlink loop: {p}",
         ) from exc
