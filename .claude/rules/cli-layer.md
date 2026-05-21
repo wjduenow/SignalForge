@@ -173,7 +173,13 @@ Three rules:
 2. **Multiple matches fail loud with a disambiguation list, not first-wins.** Cross-package collisions are ambiguous; list capped at 5 + `(+K more)`.
 3. **Disabled models do NOT match bare-name lookup.** `iter_models()` yields only enabled nodes; disabled models surface only via the unique_id form (which raises `ModelDisabledError`).
 
-When `cmd_generate` (or any future subcommand taking a model arg) wants the same affordance, hoist the resolver to `_helpers` rather than copy-pasting.
+When `cmd_generate` (or any future subcommand taking a model arg) wants the same affordance, hoist the resolver to `_helpers` rather than copy-pasting. **Done in #105:** the resolver is now `signalforge.cli._helpers._resolve_model_by_key(manifest, key) -> Model`; `cmd_lint` keeps a thin `_resolve_model_for_lint` delegating wrapper, and `prune-existing` reuses `_resolve_model_by_key` directly for its positional `<model>`.
+
+## `prune-existing` — library errors already mapped, so no per-class CLI wrappers (issue #105)
+
+`signalforge prune-existing <model> --schema <path>` runs ingest → prune → diff with **no LLM call**. It deviates from the library-surface wrap pattern (§ above, which `init-demo` follows) per #105 DEC-006: the five `IngestError` concretes were already registered in `_EXCEPTION_TO_EXIT_CODE` by #104, so the handler's single boundary catch maps them directly — **no `CliPruneExisting*` wrapper classes**. The rule generalises: wrap a lib error into a `Cli*Error` only when the CLI adds something (distinct remediation, or homogeneity the boundary catch doesn't already give you). When the lib's errors are first-class in the exit-code table AND carry remediation, mechanical wrappers are dead ceremony.
+
+Two more #105 conventions for a no-LLM stage CLI: (1) **audit each inherited flag against what the path consumes** — `--mode` (a `SafetyPolicy` knob) is inert here because `prune_tests` never reads the safety policy, so it was dropped in favour of prune's `--scope` / `--sample-strategy` (DEC-002); (2) **read-only by default** — no `--write` for a command whose `--schema` source is hand-authored; print the diff + a default-on `.signalforge/diff.json` sidecar (`--dry-run` suppresses it), feeding the external schema.yml as `render_diff(existing_schema=...)` for a "what to remove from your file" unified diff (DEC-003/DEC-004).
 
 ## Reference
 
