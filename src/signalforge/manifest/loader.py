@@ -242,20 +242,24 @@ def load(
 
     try:
         with resolved_manifest.open("r", encoding="utf-8") as fh:
-            raw: dict[str, Any] = json.load(fh)
+            # `json.load` returns `Any`; keep it `Any` (not `dict[str, Any]`)
+            # so the root-shape guard below stays live — annotating it as a
+            # dict up front makes pyright treat the isinstance check as dead.
+            loaded: Any = json.load(fh)
     except json.JSONDecodeError as exc:
         raise ManifestError(
             f"Manifest is not valid JSON: {resolved_manifest} ({exc})",
             remediation="Re-run `dbt parse` — the manifest file is corrupt or truncated.",
         ) from exc
 
-    if not isinstance(raw, dict):
+    if not isinstance(loaded, dict):
         raise ManifestError(
             f"Manifest root is not a JSON object: {resolved_manifest}",
             remediation=(
                 "Re-run `dbt parse` — manifest.json must be a JSON object at the top level."
             ),
         )
+    raw: dict[str, Any] = loaded
 
     metadata = raw.get("metadata", {}) or {}
     if not isinstance(metadata, dict):

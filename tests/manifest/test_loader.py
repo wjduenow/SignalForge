@@ -378,6 +378,19 @@ def test_malformed_json_raises_manifest_error(tmp_path: Path) -> None:
         load(project, manifest_path="target/malformed.json")
 
 
+@pytest.mark.error
+def test_non_dict_root_raises_manifest_error(tmp_path: Path) -> None:
+    """A manifest whose JSON root is not an object (e.g. a list) is rejected.
+
+    The payload parses cleanly (it is valid JSON), so the
+    ``json.JSONDecodeError`` guard does not fire — the root-shape
+    ``isinstance(loaded, dict)`` guard is the live branch that catches it.
+    """
+    project = _project_with_error_manifest(tmp_path, "non_dict_root.json")
+    with pytest.raises(ManifestError, match="not a JSON object"):
+        load(project, manifest_path="target/non_dict_root.json")
+
+
 # ---------------------------------------------------------------------------
 # 13. Missing version URL falls through to feature-sniff (does NOT raise)
 # ---------------------------------------------------------------------------
