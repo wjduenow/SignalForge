@@ -192,6 +192,43 @@ def test_read_schema_oversize_content() -> None:
     assert excinfo.value.size > _INGEST_SCHEMA_SIZE_LIMIT_BYTES
 
 
+def test_read_schema_path_oversize_rejected_from_stat_before_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # For a Path input the cap is enforced from stat().st_size BEFORE the file
+    # is read into memory (DEC-005). Shrink the cap so a tiny file trips it;
+    # the reported size comes from stat, not from a slurped read.
+    monkeypatch.setattr("signalforge.ingest.reader._INGEST_SCHEMA_SIZE_LIMIT_BYTES", 10)
+    schema = tmp_path / "schema.yml"
+    schema.write_text("models: []\n")  # > 10 bytes
+    with pytest.raises(IngestSchemaTooLargeError) as excinfo:
+        read_schema(schema, _make_orders_model(), project_dir=tmp_path)
+    assert excinfo.value.limit == 10
+    assert excinfo.value.size == schema.stat().st_size
+
+
+def test_read_schema_stat_failure_raises_parse_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The pre-read stat() can fail (TOCTOU race after is_file). Stub the
+    # canonicalised result so is_file() passes but stat() raises OSError, and
+    # assert it surfaces as IngestSchemaParseError, not an unhandled crash.
+    class _FakeResolved:
+        def is_file(self) -> bool:
+            return True
+
+        def stat(self):  # noqa: ANN202 — mimics Path.stat, only raises here
+            raise OSError("stat boom")
+
+    monkeypatch.setattr(
+        "signalforge.ingest.reader.canonicalise_path",
+        lambda schema, base: _FakeResolved(),
+    )
+    with pytest.raises(IngestSchemaParseError) as excinfo:
+        read_schema(Path("schema.yml"), _make_orders_model(), project_dir=tmp_path)
+    assert "metadata could not be read" in str(excinfo.value)
+
+
 def test_read_schema_anchor_contract_violation() -> None:
     # A test referencing a column the model does not have fails loud.
     raw = (

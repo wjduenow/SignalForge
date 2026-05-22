@@ -110,9 +110,14 @@ def read_schema(
         IngestAnchorContractError: one or more tests reference a column
             absent from ``model.columns`` (whole-file, collect-all).
     """
-    content_bytes = _resolve_input_bytes(schema, project_dir)
+    content_bytes = _resolve_input_bytes(
+        schema, project_dir, size_limit=_INGEST_SCHEMA_SIZE_LIMIT_BYTES
+    )
 
-    # DEC-005: size cap BEFORE any parse.
+    # DEC-005: size cap BEFORE any parse. For a ``Path`` input the cap is
+    # ALSO enforced from ``stat().st_size`` before the file is read into
+    # memory (see ``_resolve_input_bytes``); this post-resolve check covers
+    # the ``str`` (already-in-memory) input and is a backstop for both.
     size = len(content_bytes)
     if size > _INGEST_SCHEMA_SIZE_LIMIT_BYTES:
         raise IngestSchemaTooLargeError(size, _INGEST_SCHEMA_SIZE_LIMIT_BYTES)
@@ -132,8 +137,13 @@ def read_schema(
     return IngestResult(candidate=candidate, skipped=tuple(skipped))
 
 
-def _resolve_input_bytes(schema: str | Path, project_dir: Path | None) -> bytes:
-    """Resolve the ``schema`` argument to raw bytes per the str-vs-Path contract."""
+def _resolve_input_bytes(schema: str | Path, project_dir: Path | None, *, size_limit: int) -> bytes:
+    """Resolve the ``schema`` argument to raw bytes per the str-vs-Path contract.
+
+    For a ``Path`` input the ``size_limit`` cap is enforced from
+    ``stat().st_size`` BEFORE the file is read into memory (DEC-005) — a
+    multi-gigabyte ``schema.yml`` is rejected without first being slurped.
+    """
     if isinstance(schema, Path):
         base = project_dir if project_dir is not None else schema.parent
         try:
@@ -145,6 +155,17 @@ def _resolve_input_bytes(schema: str | Path, project_dir: Path | None) -> bytes:
             ) from exc
         if not resolved.is_file():
             raise IngestSchemaNotFoundError(schema)
+        # DEC-005: cap from the file's metadata BEFORE reading bytes, so an
+        # oversize file never lands in memory.
+        try:
+            stat_size = resolved.stat().st_size
+        except OSError as exc:
+            raise IngestSchemaParseError(
+                f"schema.yml metadata could not be read: {exc}",
+                cause=exc,
+            ) from exc
+        if stat_size > size_limit:
+            raise IngestSchemaTooLargeError(stat_size, size_limit)
         try:
             return resolved.read_bytes()
         except OSError as exc:
