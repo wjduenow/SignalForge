@@ -424,7 +424,7 @@ Flag reference:
 | `--scope {sample,full}` | no | from config | Override `prune.scope`. Applied via `PruneConfig.model_validate` so validators re-run (DEC-002). |
 | `--sample-strategy {oneshot,materialised}` | no | from config | Override `prune.sample_strategy`. Applied via `PruneConfig.model_validate` (DEC-002). |
 | `--format {ansi,markdown,json}` | no | `ansi` | Select the diff renderer. ANSI: coloured terminal output. Markdown: GitHub-friendly report. JSON: stdout receives the JSON sidecar's contents. |
-| `--dry-run` | no | off | Run ingest → prune → diff and print the diff to stdout, but write nothing — suppresses the default-on `.signalforge/diff.json` sidecar. There is **no `--write`** (read-only w.r.t. your `schema.yml`). |
+| `--dry-run` | no | off | Run ingest → prune → diff and print the diff to stdout, suppressing the default-on `.signalforge/diff.json` sidecar. The fail-closed `.signalforge/prune.jsonl` audit is **still written** (every prune run leaves a durable receipt — the cross-stage fail-closed invariant; mirrors `generate`). There is **no `--write`** (read-only w.r.t. your `schema.yml`). |
 | `--quiet` | no | off | Suppress per-stage stderr progress lines and the skipped-test report, and raise the log level to `WARNING`. Mutually exclusive with `--verbose`. |
 | `--verbose` | no | off | Raise the log level to `DEBUG`, list each skipped test in detail, and surface panic-path tracebacks. Mutually exclusive with `--quiet`. |
 | `--no-color` | no | off | Strip ANSI colour codes from stdout. Sets `NO_COLOR=1` in the current process environment. |
@@ -441,8 +441,11 @@ warehouse knobs that take its place.
 `--schema` file is hand-authored, so silently overwriting it would be
 surprising and destructive. The command prints the rendered diff to
 stdout and writes the `.signalforge/diff.json` sidecar by default;
-`--dry-run` suppresses the sidecar for a pure-stdout, zero-disk run.
-Re-pruning into the file is a possible v0.3 follow-up with a
+`--dry-run` suppresses that sidecar for a pure-stdout diff. (The
+fail-closed `.signalforge/prune.jsonl` audit is still written even under
+`--dry-run` — every prune run leaves a durable receipt by design, the
+same as `generate`; `--dry-run` governs only the end-of-run diff
+sidecar.) Re-pruning into the file is a possible v0.3 follow-up with a
 confirmation/backup story.
 
 #### Unified diff against your file (DEC-004)
