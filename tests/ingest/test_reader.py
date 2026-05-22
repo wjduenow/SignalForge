@@ -12,6 +12,7 @@ detector is needed here (see ``tests/ingest/test_models.py``).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -210,6 +211,69 @@ def test_read_schema_nonexistent_path() -> None:
     missing = _FIXTURE.parent / "does_not_exist.yml"
     with pytest.raises(IngestSchemaNotFoundError):
         read_schema(missing, _make_orders_model())
+
+
+def test_read_schema_path_outside_project_dir_raises_parse_error(tmp_path: Path) -> None:
+    # A Path that escapes the symlink-hardened containment of project_dir
+    # re-raises PathContainmentError as IngestSchemaParseError (DEC).
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    outside = tmp_path / "outside.yml"
+    outside.write_text("models: []\n")
+    with pytest.raises(IngestSchemaParseError) as excinfo:
+        read_schema(outside, _make_orders_model(), project_dir=project_dir)
+    assert "canonicalisation" in str(excinfo.value)
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="root / non-POSIX bypasses file-mode perms; unreadable-file path unreachable",
+)
+def test_read_schema_unreadable_file_raises_parse_error(tmp_path: Path) -> None:
+    # A file that exists (is_file True) but cannot be read raises
+    # IngestSchemaParseError via the OSError branch.
+    schema = tmp_path / "schema.yml"
+    schema.write_text("models: []\n")
+    schema.chmod(0o000)
+    try:
+        with pytest.raises(IngestSchemaParseError) as excinfo:
+            read_schema(schema, _make_orders_model(), project_dir=tmp_path)
+        assert "could not be read" in str(excinfo.value)
+    finally:
+        # Restore so pytest's tmp_path teardown can remove the file.
+        schema.chmod(0o644)
+
+
+def test_read_schema_non_dict_column_entry_is_ignored() -> None:
+    # A non-dict entry in `columns:` (e.g. a bare string) is skipped, not a
+    # crash; the well-formed sibling column still parses.
+    raw = (
+        "models:\n"
+        "  - name: orders\n"
+        "    columns:\n"
+        "      - just_a_string\n"
+        "      - name: order_id\n"
+        "        tests:\n"
+        "          - not_null\n"
+    )
+    result = read_schema(raw, _make_orders_model())
+    assert {c.name for c in result.candidate.columns} == {"order_id"}
+
+
+def test_read_schema_column_without_name_is_ignored() -> None:
+    # A column dict missing a usable `name` is skipped; the named sibling
+    # still parses.
+    raw = (
+        "models:\n"
+        "  - name: orders\n"
+        "    columns:\n"
+        "      - description: nameless column\n"
+        "      - name: order_id\n"
+        "        tests:\n"
+        "          - not_null\n"
+    )
+    result = read_schema(raw, _make_orders_model())
+    assert {c.name for c in result.candidate.columns} == {"order_id"}
 
 
 # ---------------------------------------------------------------------------
