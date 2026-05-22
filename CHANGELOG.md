@@ -6,6 +6,25 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 _Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
 
+## [0.2.0] — 2026-05-21
+
+Adds external-test ingestion and a no-LLM prune path, migrates dev tooling to uv, widens the supported Python range to 3.11–3.13, and publishes the docs site.
+
+### Added
+
+- **`signalforge.ingest`** — `read_schema(schema, model, *, project_dir=None) -> IngestResult` parses an externally-authored dbt `schema.yml` (hand-written, dbt-codegen, dbt Copilot, DinoAI, …) into the typed `CandidateSchema` the prune engine consumes, so SignalForge can prune any generator's tests, not just its own LLM drafts. Supported dbt test types (`not_null`, `unique`, `accepted_values`, `relationships`) map directly; everything else is skip-and-recorded. Stale column references fail loud via `IngestAnchorContractError`. (#104)
+- **`signalforge prune-existing <model> --schema <path>`** — operator-facing CLI subcommand running ingest → prune → diff with no LLM call. Point it at an existing dbt `schema.yml` and the warehouse tells you which tests add no signal. Read-only by design; renders a diff of what to remove plus a `.signalforge/diff.json` sidecar. (#105)
+
+### Changed
+
+- Dev tooling migrated to **uv** (`uv sync --dev`, committed `uv.lock`); CI Python matrix widened to **3.11 / 3.12 / 3.13**. `pip install -e ".[dev]"` still works. (#95, #96)
+- Python **3.13 compatibility** for the path-safety layer — the symlink-loop guards now handle 3.13's `OSError(ELOOP)` resolution change across all three canonicalisation sites. (#109)
+- Documentation site published at https://wjduenow.github.io/SignalForge/ via MkDocs Material, redeployed on every push to `main`. (#97)
+
+### Fixed
+
+- Silenced the pydantic `UserWarning` emitted for the deliberate `LLMRequest.schema` field-name shadow, scoped to the class definition (no global filter mutation). (#93)
+
 ## [0.1.0] — 2026-05-20
 
 First public release. Single-model draft + warehouse prune + LLM-as-judge grade + diff renderer, BigQuery only, CLI surface.
@@ -39,5 +58,6 @@ signalforge --version
 - OSS-first, Core-friendly — no dbt Cloud dependency; runs against any dbt-core project, locally or in CI.
 - Explainable diffs — every kept/dropped/flagged artifact ships with a one-line "why"; every run produces a sidecar JSON with reproducibility hashes.
 
-[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.2.0
 [0.1.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.1.0
