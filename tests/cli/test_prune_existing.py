@@ -32,6 +32,7 @@ DEC-009):
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 from pathlib import Path
@@ -517,4 +518,122 @@ def test_bad_project_dir_exit_1(tmp_path: Path, capsys: pytest.CaptureFixture[st
     code = _run(argv)
     err = capsys.readouterr().err
     assert code == 1
+    assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
+# Default project-dir resolution: walk up from cwd (DEC-001)
+# ---------------------------------------------------------------------------
+
+
+def test_walk_up_resolves_project_dir_without_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With no ``--project-dir``, the handler walks up from cwd to the dbt
+    project root (DEC-001)."""
+    project_dir, schema_path = _setup_project(tmp_path)
+    # Run from a nested subdir so the walk-up traverses >=1 parent.
+    nested = project_dir / "models" / "staging"
+    monkeypatch.chdir(nested)
+    argv = [
+        "prune-existing",
+        _MODEL_UNIQUE_ID,
+        "--schema",
+        str(schema_path),
+        "--scope",
+        "full",
+        "--sample-strategy",
+        "oneshot",
+    ]
+    factory = _make_fake_adapter_factory()
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    assert code == 0
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_walk_up_fails_outside_project_exit_1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No ``--project-dir`` and no dbt_project.yml up the tree -> CliPathError
+    -> exit 1, no traceback."""
+    monkeypatch.chdir(tmp_path)
+    argv = [
+        "prune-existing",
+        _MODEL_UNIQUE_ID,
+        "--schema",
+        "schema.yml",
+    ]
+    code = _run(argv)
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "could not find dbt_project.yml" in err
+    assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
+# --no-color env mutation (DEC-023) + empty skipped-report guard
+# ---------------------------------------------------------------------------
+
+
+def test_no_color_sets_env_and_runs(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """``--no-color`` mutates ``NO_COLOR`` and the run still succeeds (DEC-023)."""
+    prior = os.environ.get("NO_COLOR")
+    project_dir, schema_path = _setup_project(tmp_path)
+    argv = [*_base_argv(project_dir, schema_path), "--no-color"]
+    try:
+        code = _run(argv)
+        assert code == 0
+        assert os.environ.get("NO_COLOR") == "1"
+        assert "Traceback" not in capsys.readouterr().err
+    finally:
+        # The handler does NOT restore env (DEC-023); restore here so the
+        # mutation does not leak into sibling tests.
+        if prior is None:
+            os.environ.pop("NO_COLOR", None)
+        else:
+            os.environ["NO_COLOR"] = prior
+
+
+def test_no_skipped_tests_emits_no_summary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A schema with only supported tests produces zero skips -> the
+    skipped-report guard returns early, no summary line."""
+    project_dir, _ = _setup_project(tmp_path)
+    # A minimal schema referencing only real columns with supported tests, so
+    # ingest records ZERO skipped tests.
+    only_supported = project_dir / "models" / "staging" / "supported_only.yml"
+    only_supported.write_text(
+        "version: 2\n"
+        "models:\n"
+        "  - name: stg_bikeshare_trips\n"
+        "    columns:\n"
+        "      - name: trip_id\n"
+        "        tests:\n"
+        "          - not_null\n"
+    )
+    argv = [
+        "prune-existing",
+        _MODEL_UNIQUE_ID,
+        "--schema",
+        str(only_supported),
+        "--project-dir",
+        str(project_dir),
+        "--scope",
+        "full",
+        "--sample-strategy",
+        "oneshot",
+    ]
+    # One supported test -> exactly one COUNT(*) query.
+    factory = _make_fake_adapter_factory(failure_counts=(0,))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "unsupported" not in err
     assert "Traceback" not in err
