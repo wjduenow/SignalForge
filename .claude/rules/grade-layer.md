@@ -119,10 +119,12 @@ The grade-stage block is `{ grade: { model, cache_ttl, max_output_tokens, max_re
 
 ## Schema-version surfaces
 
-Two exported names ship in v0.1 but are not consumed:
+Two exported names ship but are not consumed. **Both re-verified still-reserved on 2026-05-22 (issue #62)** — the v0.1 designs each anticipated remain intact, so neither was promoted:
 
-- `GradeBudgetExceededError` — never raised in v0.1; v0.2 will raise on a hard "the run did nothing" failure (e.g., budget trips before the first pair).
-- `GradeThresholds` — exported but `GradeConfig` carries flat `min_pass_rate`/`min_mean_score` and `GradingReport.thresholds` is a bare `tuple[float, float]`. v0.2 will wire `GradeThresholds` as the canonical container.
+- `GradeBudgetExceededError` — **still reserved.** Never raised; the engine unconditionally degrades un-evaluated pairs to `GradingResult(score=None)` and surfaces a budget-curtailed run via `aggregate_complete=False` (DEC-015). The reservation still matches the design: v0.2 will raise this on a hard "the run did nothing" failure (budget trips before the first pair is graded) — a category genuinely distinct from the partial-degrade case, so routing through `aggregate_complete` alone would lose signal. Keep reserved until a grade-layer rework adds that pre-first-pair hard-fail path. Already registered in the CLI exit-code table (tier 3).
+- `GradeThresholds` — **still reserved.** `GradeConfig` carries flat `min_pass_rate`/`min_mean_score` and `GradingReport.thresholds` is a bare `tuple[float, float]`. The reservation still matches the design: the eventual canonical container should be the `BaseModel` form (already implemented in `rubric.py` with `[0.0, 1.0]` range validation a bare `tuple`/`NamedTuple` can't carry), and v0.2 will wire it so callers pass one object instead of two flat scalars. No grade-layer rework is in flight, so wiring it now would be churn for no caller — leave the flat fields until that rework lands.
+
+A third item originally tracked under issue #62 — `DiffReport.audit_schema_version` — **graduated in #50** (bumped `1 → 2` for the `kept-uncertain` four-tier taxonomy) and is no longer a pending reservation.
 
 Graduated in #9:
 
