@@ -551,6 +551,8 @@ def test_walk_up_resolves_project_dir_without_flag(
     with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
         code = main(argv)
     assert code == 0
+    # Default-on sidecar lands under the walked-up project root (#105).
+    assert (project_dir / ".signalforge" / "diff.json").is_file()
     assert "Traceback" not in capsys.readouterr().err
 
 
@@ -588,6 +590,7 @@ def test_no_color_sets_env_and_runs(tmp_path: Path, capsys: pytest.CaptureFixtur
     try:
         code = _run(argv)
         assert code == 0
+        assert (project_dir / ".signalforge" / "diff.json").is_file()
         assert os.environ.get("NO_COLOR") == "1"
         assert "Traceback" not in capsys.readouterr().err
     finally:
@@ -635,5 +638,6 @@ def test_no_skipped_tests_emits_no_summary(
         code = main(argv)
     err = capsys.readouterr().err
     assert code == 0
+    assert (project_dir / ".signalforge" / "diff.json").is_file()
     assert "unsupported" not in err
     assert "Traceback" not in err
