@@ -108,6 +108,8 @@ SF_RUN_BQ=1 GOOGLE_CLOUD_PROJECT=<billing-project> ANTHROPIC_API_KEY=sk-... pyte
 
 For a one-shot **pre-release** measurement of how much coverage the gated paths contribute (run all gated markers under `--cov` in a single invocation), see `CONTRIBUTING.md` § "Pre-release coverage audit". A maintainer running that before each release catches coverage regressions in the gated paths that the default badge number cannot surface.
 
+The gated markers carry **no Python-version pin** — they run on whatever interpreter `uv run` resolves, and CI runs none of them (all are deselected by `addopts`). For maintainer runs that exercise the wheel-build (`wheel_smoke`) or console-script (`cli_subprocess`) paths, target the **matrix ceiling** (currently 3.13, issue #96) via `uv run --python 3.13 pytest -m <marker> --no-cov` so packaging/entry-point behaviour is checked on the newest supported interpreter. The live-service markers (`bigquery` / `anthropic` / `e2e`) are interpreter-invariant — run them on a single version; don't multiply paid API calls across the matrix.
+
 The `wheel_smoke` marker (issue #47) verifies wheel-build packaging without coupling it to default CI — the test shells out `python -m build --wheel` and asserts the canonical demo file set appears under `signalforge/_demo/`. See `python-build.md` § "Shipping package data".
 
 ## End-to-end gated tests (issue #10)

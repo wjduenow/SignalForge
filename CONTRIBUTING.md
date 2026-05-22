@@ -20,9 +20,8 @@ on the matrix floor (3.11) by default, and writes `uv.lock` (committed).
 Contributors without uv can fall back to `pip install -e ".[dev]"` — the
 `[project.optional-dependencies].dev` extra is kept in sync.
 
-Validate before pushing (CI runs the same four checks on a 3.11 / 3.12
-matrix; pyright is gated to the matrix floor, codecov upload to the ceiling.
-3.13 is deferred — see the open Python-3.13 path-safety follow-up issue):
+Validate before pushing (CI runs the same four checks on a 3.11 / 3.12 / 3.13
+matrix; pyright is gated to the matrix floor, codecov upload to the ceiling):
 
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest
@@ -39,6 +38,12 @@ default marker set. Tests gated behind `bigquery`, `anthropic`, `cli_subprocess`
 `e2e`, and `wheel_smoke` are filtered out by `addopts` (see
 `.claude/rules/testing-signal.md` § "Known gap: excluded markers"), so the
 real-network and packaging paths are not instrumented in the badge number.
+
+Run this audit against the **matrix ceiling** (currently Python 3.13 — the
+highest version CI exercises) by prefixing `uv run --python 3.13`, so the
+gated wheel-build (`wheel_smoke`) and console-script (`cli_subprocess`) paths
+are checked on the newest supported interpreter. The gated markers carry no
+version pin; they run on whatever interpreter `uv run` resolves.
 
 Before cutting a release, run both suites and combine their coverage into one
 total to catch regressions in the gated paths:

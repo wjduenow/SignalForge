@@ -1,0 +1,50 @@
+# Austin-aligned external dbt schema.yml for the `prune-existing` CLI tests
+# (issue #105 / US-003). Its tests reference the REAL columns of
+# `stg_bikeshare_trips` in tests/fixtures/dbt_project_austin/target/manifest.json
+# (trip_id, subscriber_type, bike_id, start_time, start_station_id,
+# end_station_id, duration_minutes), so `read_schema` parses cleanly and the
+# anchor contract holds.
+#
+# Coverage:
+#   - all four supported test types (not_null / unique / accepted_values /
+#     relationships) on real columns
+#   - >=1 unsupported test (a namespaced dbt_utils generic + a bare-string
+#     custom test) so the skipped-test report path is exercised
+#   - the relationships.to points at a model NOT in the manifest, so prune
+#     routes it to `requires-future-data` (dropped, no warehouse query)
+version: 2
+
+models:
+  - name: stg_bikeshare_trips
+    description: "Staging model for Austin bikeshare trips."
+    columns:
+      - name: trip_id
+        description: "Surrogate key for the trip."
+        tests:
+          - not_null
+          - unique
+
+      - name: subscriber_type
+        description: "Rider subscription category."
+        tests:
+          - accepted_values:
+              values: ["Walk Up", "Local365", "24 Hour Walk Up Pass"]
+          # Unsupported namespaced/custom generic — custom-or-generic-test.
+          - dbt_utils.unique_combination_of_columns:
+              combination_of_columns: [trip_id, subscriber_type]
+
+      - name: start_station_id
+        description: "FK to the start station."
+        tests:
+          # relationships.to references a model absent from the manifest =>
+          # prune routes to requires-future-data (dropped, no query).
+          - relationships:
+              to: "ref('stg_stations')"
+              field: station_id
+
+      - name: duration_minutes
+        description: "Trip duration in minutes."
+        tests:
+          - not_null
+          # Bare-string unsupported test — unsupported-test-type.
+          - positive

@@ -593,6 +593,15 @@ _EXCEPTION_MAPPING_EXCLUDED_BASES: frozenset[str] = frozenset(
         # exit code via the MRO walk). The base is excluded per the
         # abstract-base convention.
         "DemoError",
+        # ``IngestError`` (issue #104 / DEC-001) — abstract base of the
+        # ``signalforge.ingest`` typed-error hierarchy (the 11th per-stage
+        # errors.py). Its five concrete subclasses are individually mapped
+        # in ``_EXCEPTION_TO_EXIT_CODE`` (3× tier 1, 2× tier 2). Like
+        # ``DemoError``, the concretes span tiers 1 and 2, so the base gets
+        # NO single fallback-tier entry — it lives only here in the excluded
+        # set; a forgotten concrete falls through to tier 1 and the AST scan
+        # catches the missing per-class entry at test time.
+        "IngestError",
     }
 )
 
@@ -706,7 +715,7 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
     """Sanity: ``_enumerate_error_module_paths`` finds every per-stage
     ``errors.py`` in the project. If a future stage forgets to ship
     ``errors.py`` the scan would still pass (because there'd be nothing
-    to walk for that stage); this test pins the expected set of nine
+    to walk for that stage); this test pins the expected set of eleven
     modules.
     """
     paths = _enumerate_error_module_paths()
@@ -717,14 +726,15 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
         "diff/errors.py",
         "draft/errors.py",
         "grade/errors.py",
+        "ingest/errors.py",
         "llm/errors.py",
         "manifest/errors.py",
         "prune/errors.py",
         "safety/errors.py",
         "warehouse/errors.py",
     ], (
-        "Expected exactly ten per-stage errors.py modules (one per "
-        "stage; demo added in #47); got: "
+        "Expected exactly eleven per-stage errors.py modules (one per "
+        "stage; demo added in #47, ingest in #104); got: "
         f"{rel_names}. If this changes, update Scan 7's expected set."
     )
 

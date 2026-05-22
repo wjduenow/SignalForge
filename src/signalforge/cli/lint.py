@@ -75,6 +75,7 @@ import logging
 from pathlib import Path
 
 from signalforge.cli._helpers import (
+    _resolve_model_by_key,
     canonicalise_user_path,
     format_error_to_stderr,
     map_exception_to_exit_code,
@@ -88,7 +89,6 @@ from signalforge.manifest import (
     Manifest,
     ManifestError,
     Model,
-    ModelNotFoundError,
 )
 from signalforge.manifest import load as load_manifest
 from signalforge.prune import load_prune_config
@@ -229,48 +229,15 @@ def _resolve_project_dir(args: argparse.Namespace) -> Path:
 def _resolve_model_for_lint(manifest: Manifest, key: str) -> Model:
     """Resolve ``key`` to a :class:`Model` across all three input shapes.
 
-    * ``key.startswith("model.")`` → unique_id branch via
-      :meth:`Manifest.get_model`.
-    * ``"/" in key`` or ``key.endswith(".sql")`` → file-path branch via
-      :meth:`Manifest.get_model`.
-    * Else → bare-name branch: scan :meth:`Manifest.iter_models` for
-      ``Model.name == key``. One match returns the model; zero matches
-      raises :class:`ModelNotFoundError` with a hint suggesting the
-      unique_id / file-path form; multiple matches raises
-      :class:`ModelNotFoundError` with a disambiguation list (capped at
-      five unique_ids to keep stderr readable).
-
-    The bare-name branch sidesteps the ``Manifest.get_model`` gotcha
-    pinned by ``testing-signal.md`` § "Multi-surface drift on user-facing
-    model arguments" where bare names route through the file-path branch
-    and surface a confusing ``ModelNotFoundError`` even when the model
-    exists under its unique_id.
+    Thin wrapper over :func:`signalforge.cli._helpers._resolve_model_by_key`
+    (hoisted there by DEC-008 of issue #105 so the future
+    ``prune-existing`` subcommand shares one resolver). The real logic —
+    unique_id / file-path via :meth:`Manifest.get_model`, bare-name via
+    :meth:`Manifest.iter_models` with multi-match disambiguation +
+    disabled-model exclusion — lives in ``_helpers``; this name is kept
+    as a lint-local alias for readability and back-compat.
     """
-    if key.startswith("model.") or "/" in key or key.endswith(".sql"):
-        return manifest.get_model(key)
-
-    matches = [m for m in manifest.iter_models() if m.name == key]
-    if len(matches) == 1:
-        return matches[0]
-    if len(matches) > 1:
-        sample = ", ".join(m.unique_id for m in matches[:5])
-        more = f" (+{len(matches) - 5} more)" if len(matches) > 5 else ""
-        raise ModelNotFoundError(
-            f"Bare model name {key!r} matches {len(matches)} enabled models: {sample}{more}",
-            remediation=(
-                "Disambiguate by passing the full unique_id "
-                "(model.<pkg>.<name>) or the file path "
-                "(models/path/to/<name>.sql)."
-            ),
-        )
-    raise ModelNotFoundError(
-        f"No enabled model with name {key!r} in the manifest.",
-        remediation=(
-            "Check the model name spelling, or pass the unique_id form "
-            "(model.<pkg>.<name>) / file path (models/path/to/<name>.sql). "
-            "Disabled models do not match bare-name lookup."
-        ),
-    )
+    return _resolve_model_by_key(manifest, key)
 
 
 def cmd_lint(args: argparse.Namespace) -> int:

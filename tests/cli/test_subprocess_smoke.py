@@ -163,3 +163,34 @@ def test_signalforge_init_demo_help_via_subprocess() -> None:
     assert "dest" in result.stdout.lower()
     # No-traceback floor — see the ``--version`` test above.
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.cli_subprocess
+def test_signalforge_prune_existing_help_via_subprocess() -> None:
+    """``signalforge prune-existing --help`` exits 0 with the subcommand's help.
+
+    US-005 of ``plans/super/105-prune-existing-cli.md`` (#105) — extends
+    the subprocess-gated smoke to the new ``prune-existing`` subcommand so a
+    ``[project.scripts]`` regression specific to its argparse wiring
+    (subparser deletion, ``add_parser`` typo, console-script wrapper losing
+    the dispatch entry) is caught by ``pytest -m cli_subprocess``. The
+    in-process ``main(argv)`` smoke tests in ``tests/cli/`` cannot catch this
+    class of regression — they bypass the ``[project.scripts]`` table
+    entirely.
+    """
+    result = subprocess.run(
+        ["signalforge", "prune-existing", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    # The presence of the subcommand name plus the ``--schema`` flag (unique
+    # to ``prune-existing``; absent from ``generate`` / ``lint`` /
+    # ``init-demo`` / ``version``) jointly guarantees argparse is rendering
+    # the right subcommand's help, not the top-level usage.
+    assert "prune-existing" in result.stdout
+    assert "--schema" in result.stdout
+    # No-traceback floor — see the ``--version`` test above.
+    assert "Traceback" not in result.stderr
