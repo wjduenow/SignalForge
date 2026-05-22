@@ -376,12 +376,16 @@ def test_skipped_suppressed_by_quiet(tmp_path: Path, capsys: pytest.CaptureFixtu
 
 
 def test_dry_run_writes_no_sidecar(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """``--dry-run`` runs the pipeline but leaves no ``.signalforge/diff.json``."""
+    """``--dry-run`` suppresses the diff.json sidecar but the fail-closed
+    prune.jsonl audit is still written (every prune run leaves a receipt —
+    the cross-stage invariant; mirrors ``generate``)."""
     project_dir, schema_path = _setup_project(tmp_path)
     argv = [*_base_argv(project_dir, schema_path), "--dry-run"]
     code = _run(argv)
     assert code == 0
     assert not (project_dir / ".signalforge" / "diff.json").exists()
+    # The prune audit is fail-closed and written even under --dry-run.
+    assert (project_dir / ".signalforge" / "prune.jsonl").is_file()
     assert "Traceback" not in capsys.readouterr().err
 
 
