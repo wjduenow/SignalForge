@@ -231,3 +231,75 @@ def test_inline_args_with_non_mapping_arguments_key_is_stripped() -> None:
     )
     assert isinstance(result, CandidateTestAcceptedValues)
     assert result.values == ("a", "b")
+
+
+# --- ref() / source() non-quoted + arity edge cases (DEC-009) -------------
+
+
+def test_ref_with_unquoted_arg_is_carried_verbatim() -> None:
+    # `ref(my_var)` matches the ref() shape but carries no QUOTED positional,
+    # so the unwrap finds nothing and returns the string verbatim.
+    result = parse_test_entry({"relationships": {"to": "ref(my_var)", "field": "id"}}, column="fk")
+    assert isinstance(result, CandidateTestRelationships)
+    assert result.to == "ref(my_var)"
+
+
+def test_source_single_arg_unwraps_to_that_arg() -> None:
+    # A one-positional `source('only')` returns that single arg (not dotted).
+    result = parse_test_entry(
+        {"relationships": {"to": "source('only')", "field": "id"}}, column="fk"
+    )
+    assert isinstance(result, CandidateTestRelationships)
+    assert result.to == "only"
+
+
+def test_source_with_unquoted_args_is_carried_verbatim() -> None:
+    # `source(a, b)` matches the source() shape but carries no QUOTED args,
+    # so neither the 2-arg nor 1-arg branch fires; returned verbatim.
+    result = parse_test_entry({"relationships": {"to": "source(a, b)", "field": "id"}}, column="fk")
+    assert isinstance(result, CandidateTestRelationships)
+    assert result.to == "source(a, b)"
+
+
+# --- non-dict bodies + non-conforming entry shapes ------------------------
+
+
+def test_accepted_values_non_dict_body_is_malformed() -> None:
+    # A non-dict body yields no extracted args, so the required `values` is
+    # absent -> malformed-supported-test.
+    result = parse_test_entry({"accepted_values": "not-a-mapping"}, column="status")
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == "accepted_values"
+
+
+def test_multi_key_dict_entry_is_custom_skip() -> None:
+    # A test entry is a single-key dict by dbt's grammar; a multi-key dict is
+    # not a shape we model -> custom-or-generic-test, naming the first key.
+    result = parse_test_entry({"foo": 1, "bar": 2}, column="id")
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "custom-or-generic-test"
+    assert result.test_name == "foo"
+    assert result.column == "id"
+    assert "single-key" in result.detail
+
+
+def test_non_string_non_dict_entry_is_custom_skip() -> None:
+    # An entry that is neither a string nor a mapping (e.g. an int) is skipped
+    # and recorded, never silently dropped.
+    result = parse_test_entry(123, column="id")  # type: ignore[arg-type]
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "custom-or-generic-test"
+    assert result.test_name == "123"
+    assert result.column == "id"
+
+
+def test_model_level_relationships_skips_malformed() -> None:
+    # relationships at model level (column=None) is not representable -> skip.
+    result = parse_test_entry(
+        {"relationships": {"to": "ref('orders')", "field": "id"}}, column=None
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.column is None
+    assert result.test_name == "relationships"
