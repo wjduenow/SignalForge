@@ -136,6 +136,31 @@ def test_ref_version_kwarg_form_resolves() -> None:
 
 
 @pytest.mark.unit
+def test_ref_quoted_version_kwarg_does_not_become_positional() -> None:
+    """Item-1 regression: a QUOTED ``version='1'`` kwarg must NOT be mistaken
+    for a positional name. The old resolver collected every quoted fragment,
+    so ``ref('dim_users', version='1')`` resolved the model name to ``'1'``.
+    The kwarg is split out; the only positional (``dim_users``) is the name."""
+    manifest = _manifest()
+    out = resolve_template_refs(
+        "from {{ ref('dim_users', version='1') }}", _model(manifest), manifest
+    )
+    assert out == f"from {_PROJECT}.{_DATASET}.dim_users"
+
+
+@pytest.mark.unit
+def test_ref_two_arg_with_quoted_version_kwarg_resolves_name_and_package() -> None:
+    """Item-1 regression: package + name positionals plus a quoted version
+    kwarg. The kwarg is ignored; the last positional is the name and the
+    leading positional is the package disambiguator."""
+    manifest = _manifest()
+    out = resolve_template_refs(
+        "from {{ ref('pkg', 'dim_users', version='2') }}", _model(manifest), manifest
+    )
+    assert out == f"from {_PROJECT}.{_DATASET}.dim_users"
+
+
+@pytest.mark.unit
 def test_ref_whitespace_variations_tolerated() -> None:
     manifest = _manifest()
     out = resolve_template_refs("from {{   ref(  'dim_users'  )   }}", _model(manifest), manifest)

@@ -27,12 +27,19 @@ does not hard-code a hash so it can't drift. Latest known rotations:
   (no exclusions) is semantically identical to the prior text but
   has a different line-wrap in the SCOPE paragraph because the enum
   list is now rendered via :func:`str.format` rather than a literal.
-- ``2e465018c1f6db22`` — current. Rotated under #116 when the
+- ``2e465018c1f6db22`` — rotated under #116 when the
   ``custom_sql`` singular-business-rule test type was added to the
   system prompt's test catalogue + SCOPE section (DEC-001 / DEC-015).
   Operator-supplied business rules render into the DYNAMIC (non-cached)
   block, so the cached-block golden below is unchanged — only the
   system prompt (and therefore ``_PROMPT_VERSION``) rotated.
+- ``c9e7ee1f6f465933`` — current. Rotated under #117 review feedback
+  (CodeRabbit/Copilot) when ``custom_sql`` was made to participate in
+  ``exclude_tests`` filtering: the SCOPE phrase now reads
+  "Propose only ..., plus ``custom_sql`` tests" and both the catalogue
+  line and the custom_sql instruction are omitted when ``custom_sql`` is
+  excluded. Only the system prompt changed; the cached-block golden is
+  unchanged.
 
 If this rotates again, update both :data:`_EXPECTED_PROMPT_VERSION` and
 :data:`_CACHED_BLOCK_GOLDEN` in lockstep — the rotation is the signal
@@ -61,7 +68,7 @@ _FIXTURE_PATH = (
 )
 
 
-_EXPECTED_PROMPT_VERSION: str = "2e465018c1f6db22"
+_EXPECTED_PROMPT_VERSION: str = "c9e7ee1f6f465933"
 
 
 # Captured once via ``render_prompt`` against the canonical fixture below.

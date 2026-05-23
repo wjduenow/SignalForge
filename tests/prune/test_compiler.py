@@ -805,6 +805,49 @@ def test_compile_custom_sql_single_table_full_with_partition_filter_wraps_own_ta
     assert "WITH sample" not in actual
 
 
+def test_compile_custom_sql_sample_without_own_table_fails_closed() -> None:
+    """Item-4 regression (single-table sample path): a single-table custom_sql
+    whose resolved SQL never names the model's own table (e.g. it references
+    only ``{{ ref('customers') }}``) cannot be bound to the deterministic
+    sample CTE. The compiler must fail closed (``_InvalidIdentifier`` →
+    kept-without-evidence) rather than full-scanning the wrong table."""
+    test = CandidateTestCustomSQL(sql="select id from {{ ref('customers') }} where id is null")
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "does not reference the model's own table" in result.reason
+
+
+def test_compile_custom_sql_materialised_without_own_table_fails_closed() -> None:
+    """Item-4 regression (materialised-substitution path): under
+    ``sample_strategy='materialised'`` the orchestrator passes the temp
+    sample table as ``table_ref`` (≠ the model's own qualified name) and
+    compiles as effective ``scope='full'``. A custom_sql whose resolved SQL
+    never names the model's own table has nothing to rewrite to the sample,
+    so running it as-is would read the wrong/source table. The compiler must
+    fail closed rather than issue a warehouse query against the wrong table."""
+    materialised_ref = TableRef(project=None, dataset="_SESSION", name="_sf_sample_deadbeef")
+    test = CandidateTestCustomSQL(sql="select id from {{ ref('customers') }} where id is null")
+    result = _compile_test(
+        test,
+        materialised_ref,
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="full",
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "does not reference the model's own table" in result.reason
+
+
 def test_compile_custom_sql_sample_missing_sample_args_raises() -> None:
     """``scope='sample'`` for a single-table custom_sql requires both
     ``sample_size`` and ``sample_bucket`` — the orchestrator computes these

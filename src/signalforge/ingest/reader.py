@@ -438,7 +438,7 @@ def _read_sql_file(sql_path: Path) -> str:
         raise IngestSchemaTooLargeError(stat_size, _INGEST_SCHEMA_SIZE_LIMIT_BYTES)
     try:
         return sql_path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise IngestSchemaParseError(
             f"singular test file could not be read: {exc}",
             cause=exc,

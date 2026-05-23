@@ -180,8 +180,9 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "Override the singular-test directory enumerated for "
             "model-level tests/*.sql files (default: <project_dir>/tests). "
             "Each .sql referencing this model is pruned alongside the "
-            "schema.yml tests; unrelated files are ignored. If the "
-            "directory is absent, only the schema.yml tests are pruned."
+            "schema.yml tests; unrelated files are ignored. The DEFAULT "
+            "directory is optional and silently skipped when absent; an "
+            "explicit --tests-dir that does not exist fails loud."
         ),
     )
     parser.add_argument(
