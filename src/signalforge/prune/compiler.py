@@ -64,7 +64,12 @@ from signalforge.draft.models import (
     CandidateTestRelationships,
     CandidateTestUnique,
 )
-from signalforge.manifest.errors import TemplateResolutionError
+from signalforge.manifest.errors import (
+    AmbiguousRefError,
+    RefNotFoundError,
+    SourceNotFoundError,
+    TemplateResolutionError,
+)
 from signalforge.manifest.template import resolve_template_refs
 from signalforge.warehouse._sql_safety import (
     escape_bq_string_literal,
@@ -557,7 +562,7 @@ def _compile_custom_sql(
     sample_size: int | None,
     sample_bucket: int | None,
     partition_filter: PartitionFilter | None,
-) -> str | _InvalidIdentifier:
+) -> str | _RequiresFutureData | _InvalidIdentifier:
     """Compile a ``custom_sql`` singular test to a failing-rows SELECT.
 
     Per dbt's singular-test contract (DEC-003), ``test.sql`` is itself a
@@ -581,13 +586,21 @@ def _compile_custom_sql(
        :meth:`run_test_sql` owns that envelope, and pre-wrapping here would
        double-count.
 
-    Conservative-bias routing (DEC-006, DEC-008): both Jinja-resolution
-    failure and SQL-safety rejection return an :class:`_InvalidIdentifier`
-    sentinel rather than raising — the orchestrator routes the sentinel to
-    ``kept-without-evidence`` (decision="kept") so a test SignalForge
-    cannot evaluate is shipped, not silently dropped. Compilation stays
-    total (DEC-006): every candidate yields compiled SQL or a structured
-    sentinel.
+    Conservative-bias routing (DEC-006, DEC-008): Jinja-resolution failure
+    (:class:`TemplateResolutionError` / :class:`UnsupportedJinjaError`),
+    :class:`AmbiguousRefError`, and SQL-safety rejection return an
+    :class:`_InvalidIdentifier` sentinel rather than raising — the
+    orchestrator routes the sentinel to ``kept-without-evidence``
+    (decision="kept") so a test SignalForge cannot evaluate is shipped,
+    not silently dropped. An unresolvable ``{{ ref(...) }}`` /
+    ``{{ source(...) }}`` whose target is absent from the manifest
+    (:class:`RefNotFoundError` / :class:`SourceNotFoundError`) returns a
+    :class:`_RequiresFutureData` sentinel instead — the referenced
+    model/source isn't built yet, mirroring the ``relationships``
+    missing-target precedent (DEC-026), so it routes to
+    ``requires-future-data``. None of these errors ever propagate out of
+    the compiler. Compilation stays total (DEC-006): every candidate
+    yields compiled SQL or a structured sentinel.
 
     Single-table vs. multi-table (DEC-006, DEC-009):
 
@@ -617,6 +630,22 @@ def _compile_custom_sql(
 
     try:
         resolved_sql = resolve_template_refs(test.sql, model, manifest)
+    except (RefNotFoundError, SourceNotFoundError) as exc:
+        # The ref()/source() target is not in the manifest yet — the
+        # referenced model/source simply isn't built. Mirror the
+        # relationships missing-target precedent (DEC-026): route to
+        # requires-future-data so the operator revisits when the
+        # dependency lands. NEVER raise — these are ManifestError
+        # siblings of TemplateResolutionError, not subclasses, so the
+        # broader handler below would not catch them.
+        return _RequiresFutureData(
+            reason=f"custom_sql references a manifest-absent target: {type(exc).__name__}"
+        )
+    except AmbiguousRefError as exc:
+        # Genuine user ambiguity (the ref() name matches multiple
+        # packages), not future data. Route to kept-without-evidence so a
+        # reviewer disambiguates with the two-arg ref('pkg','name') form.
+        return _InvalidIdentifier(reason=f"custom_sql ref() is ambiguous: {type(exc).__name__}")
     except TemplateResolutionError as exc:
         # Covers both UnsupportedJinjaError and the residual-{{ }} case.
         return _InvalidIdentifier(

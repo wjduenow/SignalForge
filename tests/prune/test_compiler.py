@@ -856,3 +856,97 @@ def test_compile_custom_sql_is_deterministic() -> None:
         model=_make_orders_model(),
     )
     assert a == b
+
+
+# ---------------------------------------------------------------------------
+# US-019: a custom_sql whose ref()/source() target the resolver can't resolve
+# must NEVER propagate a ManifestError out of the compiler. RefNotFoundError /
+# SourceNotFoundError → _RequiresFutureData (the dependency simply isn't built
+# yet — mirrors the relationships missing-target precedent, DEC-026);
+# AmbiguousRefError → _InvalidIdentifier (genuine user ambiguity, not future
+# data). Compilation stays total (DEC-006); DropReason stays the locked
+# 5-value Literal (no 6th).
+# ---------------------------------------------------------------------------
+
+
+def _make_other_orders_model() -> Model:
+    """A second model also named ``orders`` in a different package, so a bare
+    ``{{ ref('orders') }}`` is ambiguous across packages."""
+    return Model(
+        unique_id="model.other.orders",
+        name="orders",
+        resource_type="model",
+        package_name="other",
+        original_file_path="models/orders.sql",
+        path="orders.sql",
+        database="fake_project",
+        schema="dataset",  # type: ignore[call-arg]
+        columns={"customer_id": Column(name="customer_id")},
+        raw_code="select 1",
+    )
+
+
+def test_compile_custom_sql_unresolvable_ref_returns_requires_future_data() -> None:
+    """``{{ ref('does_not_exist') }}`` raises ``RefNotFoundError`` inside the
+    bounded resolver; the compiler catches it and returns a
+    ``_RequiresFutureData`` sentinel rather than letting the error propagate
+    (which would crash ``prune_tests``). The orchestrator routes the sentinel
+    to ``requires-future-data``."""
+    test = CandidateTestCustomSQL(
+        sql="select o.id from {{ this }} o join {{ ref('does_not_exist') }} d on o.id = d.id"
+    )
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert isinstance(result, _RequiresFutureData)
+    assert "manifest-absent" in result.reason
+    assert "RefNotFoundError" in result.reason
+
+
+def test_compile_custom_sql_unresolvable_source_returns_requires_future_data() -> None:
+    """``{{ source('raw', 'missing') }}`` raises ``SourceNotFoundError``; the
+    compiler routes it to ``_RequiresFutureData`` (the source isn't defined
+    yet), never raising out of the compiler."""
+    test = CandidateTestCustomSQL(
+        sql="select id from {{ this }} t join {{ source('raw', 'missing') }} s on t.id = s.id"
+    )
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest_with_source(),
+        model=_make_orders_model(),
+    )
+    assert isinstance(result, _RequiresFutureData)
+    assert "SourceNotFoundError" in result.reason
+
+
+def test_compile_custom_sql_ambiguous_ref_returns_invalid_identifier() -> None:
+    """A bare ``{{ ref('orders') }}`` that matches two packages raises
+    ``AmbiguousRefError`` — genuine user ambiguity, not future data — so the
+    compiler routes it to ``_InvalidIdentifier`` (kept-without-evidence),
+    never raising out of the compiler."""
+    manifest = Manifest(
+        metadata={"dbt_schema_version": "v12"},
+        nodes={
+            "model.shop.orders": _make_orders_model(),
+            "model.other.orders": _make_other_orders_model(),
+        },
+    )
+    test = CandidateTestCustomSQL(
+        sql="select a.id from {{ this }} a join {{ ref('orders') }} b on a.id = b.id"
+    )
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        manifest,
+        model=_make_orders_model(),
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "ambiguous" in result.reason
+    assert "AmbiguousRefError" in result.reason
