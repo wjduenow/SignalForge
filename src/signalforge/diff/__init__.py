@@ -54,6 +54,8 @@ from signalforge.diff.errors import (
     DiffPruneResultModelMismatchError,
     DiffSidecarRecordTooLargeError,
     DiffSidecarWriteError,
+    DiffTestFileRecordTooLargeError,
+    DiffTestFileWriteError,
 )
 from signalforge.diff.models import DiffEntry, DiffReport, Tier
 
@@ -68,7 +70,7 @@ __all__ = [
     "DiffEntry",
     "DiffReport",
     "Tier",
-    # Errors (7)
+    # Errors (9)
     "DiffError",
     "DiffCandidateModelMismatchError",
     "DiffPruneResultModelMismatchError",
@@ -76,4 +78,6 @@ __all__ = [
     "DiffInputTooLargeError",
     "DiffSidecarRecordTooLargeError",
     "DiffSidecarWriteError",
+    "DiffTestFileRecordTooLargeError",
+    "DiffTestFileWriteError",
 ]
