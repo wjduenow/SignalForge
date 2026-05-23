@@ -230,9 +230,11 @@ by filename for byte-stable order) and classifies each:
 - **Unsupported Jinja is skip-recorded.** A `.sql` carrying Jinja the
   bounded resolver cannot evaluate (control-flow `{% if %}` / `{% for %}`,
   `var()` / `env_var()`, macros) lands in `IngestResult.skipped` with
-  reason `custom-or-generic-test` and a `singular .sql test contains
+  reason `malformed-supported-test` and a `singular .sql test contains
   Jinja the bounded resolver cannot evaluate` detail — never silently
-  dropped.
+  dropped. (The closed 3-value `SkipReason` literal has no singular-test
+  specific value; `malformed-supported-test` is the closest fit since the
+  `.sql` test cannot be compiled to runnable SQL.)
 - **Dedupe across both sources.** Associated tests dedupe by
   `(model, "custom_sql", sql_hash)` where `sql_hash` is a 16-hex
   blake2b-8 of the SQL body. Two `.sql` files with byte-identical SQL

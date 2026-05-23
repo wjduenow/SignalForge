@@ -313,15 +313,18 @@ def test_system_prompt_custom_sql_mentions_jinja_refs() -> None:
     assert "{{ ref('<model>') }}" in _SYSTEM_PROMPT
 
 
-def test_custom_sql_does_not_break_exclude_tests_four_type_contract() -> None:
+def test_custom_sql_survives_when_only_standard_types_excluded() -> None:
     # custom_sql is appended after the (possibly filtered) four standard
-    # types and is never gated by exclude_tests.
+    # types. Excluding standard types only (NOT custom_sql) leaves custom_sql
+    # in the prompt — it participates in exclude_tests but is not affected
+    # unless it is itself named (item-3 fix; see test_exclude_tests.py for the
+    # custom_sql-excluded case).
     from signalforge.draft.prompts import _render_system_prompt
 
     prompt = _render_system_prompt(("not_null", "unique"))
     assert '"type": "not_null"' not in prompt
     assert '"type": "unique"' not in prompt
-    # custom_sql remains regardless.
+    # custom_sql remains because it was not excluded.
     assert '"type": "custom_sql"' in prompt
     assert '"type": "accepted_values"' in prompt
 

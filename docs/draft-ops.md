@@ -292,7 +292,7 @@ neighbours via the standard dbt-Jinja ref helpers:
 - `{{ source('<src>', '<table>') }}` — a source table.
 
 These three are resolved by a **bounded** resolver at prune time
-(`signalforge.manifest.template.resolve_template_refs`) — there is no
+(`signalforge.manifest.resolve_template_refs`) — there is no
 Jinja *engine*. **Control-flow Jinja is unsupported:** `{% if %}` /
 `{% for %}` blocks, `var()` / `env_var()` calls, and macro invocations
 cannot be resolved. A `custom_sql` test carrying unsupported Jinja is

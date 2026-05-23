@@ -239,6 +239,21 @@ def test_read_test_files_empty_dir_yields_empty_candidate(tmp_path: Path) -> Non
     assert result.skipped == ()
 
 
+def test_read_test_files_non_utf8_sql_raises_parse_error(tmp_path: Path) -> None:
+    """Item-2 regression: a ``.sql`` file with non-UTF-8 bytes raises a typed
+    :class:`IngestSchemaParseError` rather than escaping as an unhandled
+    ``UnicodeDecodeError``. ``read_text(encoding="utf-8")`` raises
+    ``UnicodeDecodeError``, which was previously NOT caught by the
+    ``except OSError`` branch in ``_read_sql_file``."""
+    manifest = _manifest()
+    # 0xFF is not valid UTF-8; ``read_text(encoding="utf-8")`` raises
+    # UnicodeDecodeError on it.
+    (tmp_path / "latin1.sql").write_bytes(b"select * from t where col = '\xff'\n")
+    with pytest.raises(IngestSchemaParseError) as excinfo:
+        read_test_files(tmp_path, _orders(manifest), manifest, project_dir=tmp_path)
+    assert "could not be read" in str(excinfo.value)
+
+
 def test_read_test_files_ignores_non_sql_files(tmp_path: Path) -> None:
     manifest = _manifest()
     _write(tmp_path, "readme.md", "not a test")

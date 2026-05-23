@@ -24,15 +24,19 @@ Public API surface (DEC-004 of ``plans/super/8-diff-renderer.md``):
   file (``path`` + ``sql``-with-header-marker), NOT a schema.yml block.
 * :class:`DiffConfig` — user-facing knob block (``frozen=True,
   extra="forbid"``; typos like ``contxt_lines:`` fail loud at load time).
-* :data:`Tier` — the ``Literal["kept", "dropped", "flagged"]``
-  enumeration of per-entry tiers.
-* The seven-class :class:`DiffError` hierarchy: :class:`DiffError`,
+* :data:`Tier` — the
+  ``Literal["kept", "kept-uncertain", "dropped", "flagged"]``
+  enumeration of per-entry tiers (``kept-uncertain`` added in issue #50).
+* The nine-class :class:`DiffError` hierarchy: :class:`DiffError`,
   :class:`DiffCandidateModelMismatchError`,
   :class:`DiffPruneResultModelMismatchError`,
   :class:`DiffGradingReportModelMismatchError`,
   :class:`DiffInputTooLargeError`,
   :class:`DiffSidecarRecordTooLargeError`,
-  :class:`DiffSidecarWriteError`.
+  :class:`DiffSidecarWriteError`,
+  :class:`DiffTestFileRecordTooLargeError`,
+  :class:`DiffTestFileWriteError` (the last two added in issue #116 for
+  the singular ``custom_sql`` test-file writer).
 
 Concrete renderers (``AnsiRenderer``, ``MarkdownRenderer``,
 ``JsonRenderer``) and internal helpers (``_emitter``, ``_sidecar``,

@@ -199,13 +199,21 @@ def test_source_validate_and_relation_name() -> None:
     to the source-table ``name`` (DEC-005 of #116).
     """
     raw = _load_fixture(12)
-    src_dict = next(iter(raw["sources"].values()))
+    # Select the source deterministically by its known key rather than
+    # relying on dict iteration order (P5 fix).
+    src_dict = raw["sources"]["source.signalforge_test_small.raw.users"]
     src = Source.model_validate(src_dict)
     assert src.unique_id.startswith("source.")
     assert src.source_name == "raw"
     assert src.name == "users"
     assert src.schema_ == "raw"  # aliased from ``schema``
-    assert src.relation_name == src.identifier or src.name
+    # ``relation_name`` is ``identifier`` when present, else ``name``. The
+    # fixture carries ``identifier == "users"`` so it equals the identifier.
+    # Parenthesised so the assertion actually tests the fallback rather than
+    # being short-circuited to the always-truthy ``src.name`` (P5 fix).
+    assert src.identifier == "users"
+    assert src.relation_name == (src.identifier or src.name)
+    assert src.relation_name == "users"
 
     # identifier-absent fallback to name.
     no_ident = Source.model_validate(

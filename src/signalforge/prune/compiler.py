@@ -683,6 +683,18 @@ def _compile_custom_sql(
                 "scope='sample' requires both sample_size and sample_bucket; "
                 "the orchestrator should have computed these before calling _compile_test."
             )
+        # Fail closed when the resolved SQL never references the model's own
+        # qualified name: there is nothing to substitute with the ``sample``
+        # CTE alias, so running the SQL as-is would read the full source
+        # table instead of the sample. Route to kept-without-evidence rather
+        # than silently sampling the wrong (unsampled) table.
+        if own_qualified not in resolved_sql:
+            return _InvalidIdentifier(
+                reason=(
+                    "custom_sql does not reference the model's own table "
+                    "({{ this }}); cannot bind the deterministic sample"
+                )
+            )
         # Substitute the model's own table with the ``sample`` CTE alias,
         # then prepend the deterministic-sample CTE bound to the real table.
         # Replace ALL occurrences (P2 fix): a single-table custom_sql that
@@ -709,7 +721,19 @@ def _compile_custom_sql(
     # to the quoted ``table_ref`` so the test reads the sample rather than
     # full-scanning the production source. This mirrors the built-in
     # compilers, which always FROM ``table_ref``.
-    if table_ref.qualified_name != own_qualified and own_qualified in resolved_sql:
+    if table_ref.qualified_name != own_qualified:
+        # The effective table is NOT the model's own source (materialised
+        # sample). Fail closed when the resolved SQL never names the model's
+        # own table: there is nothing to rewrite to the sample table, so
+        # running it as-is would read the wrong/source table rather than the
+        # materialised sample. Route to kept-without-evidence.
+        if own_qualified not in resolved_sql:
+            return _InvalidIdentifier(
+                reason=(
+                    "custom_sql does not reference the model's own table "
+                    "({{ this }}); cannot bind the materialised sample"
+                )
+            )
         return resolved_sql.replace(own_qualified, own_table_quoted)
 
     # No substitution (``table_ref`` IS the model's own table — the oneshot /

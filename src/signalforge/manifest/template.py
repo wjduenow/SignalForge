@@ -64,6 +64,11 @@ _SOURCE_RE = re.compile(r"^source\s*\(\s*(.*?)\s*\)$", re.DOTALL)
 # A single quoted positional arg inside a ref()/source() call.
 _QUOTED_ARG_RE = re.compile(r"""['"]([^'"]*)['"]""")
 
+# A keyword argument token (``version='1'``, ``v = 2``). Used to split the
+# kwargs out of a ref() arg list so they don't get mistaken for positional
+# quoted names. Matches a leading identifier followed by ``=``.
+_KWARG_RE = re.compile(r"^\s*\w+\s*=")
+
 
 def resolve_template_refs(sql: str, model: Model, manifest: Manifest) -> str:
     """Resolve the dbt-Jinja references in ``sql`` to qualified table names.
@@ -139,19 +144,32 @@ def _resolve_expression(body: str, *, model: Model, manifest: Manifest) -> str:
 def _resolve_ref_args(arglist: str, *, manifest: Manifest) -> str:
     """Resolve a ``ref(...)`` arg list to a qualified name.
 
-    The last quoted positional is the model name; a leading positional (the
-    two-arg form) is the package disambiguator. Version kwargs / extra
-    positionals are tolerated for grammar parity — the last positional always
-    wins as the name, mirroring :func:`signalforge.manifest.loader.resolve_ref`.
+    The last quoted POSITIONAL is the model name; a leading positional (the
+    two-arg form) is the package disambiguator. Keyword arguments such as
+    ``version='1'`` are split out and ignored — only positionals participate
+    in name/package resolution, mirroring
+    :func:`signalforge.manifest.loader.resolve_ref`. Without this split a
+    ``ref('orders', version='1')`` would otherwise treat ``'1'`` as a
+    positional and resolve the model name to ``"1"``.
     """
-    args = _QUOTED_ARG_RE.findall(arglist)
-    if not args:
+    positionals: list[str] = []
+    for raw_token in arglist.split(","):
+        token = raw_token.strip()
+        if not token:
+            continue
+        if _KWARG_RE.match(token):
+            # A kwarg (``version='1'``) — not a positional name/package arg.
+            continue
+        quoted = _QUOTED_ARG_RE.search(token)
+        if quoted is not None:
+            positionals.append(quoted.group(1))
+    if not positionals:
         raise UnsupportedJinjaError(
-            "ref() in singular-test SQL has no quoted name argument; the "
-            "bounded resolver cannot evaluate dynamic ref() calls.",
+            "ref() in singular-test SQL has no quoted positional name argument; "
+            "the bounded resolver cannot evaluate dynamic ref() calls.",
         )
-    name = args[-1]
-    package = args[0] if len(args) >= 2 else None
+    name = positionals[-1]
+    package = positionals[0] if len(positionals) >= 2 else None
     return manifest.resolve_ref(name, package=package).qualified_name
 
 
