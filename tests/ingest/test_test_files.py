@@ -323,16 +323,26 @@ def test_read_test_files_stat_oserror_raises_parse_error(
     manifest = _manifest()
     _write(tmp_path, "real.sql", "select * from {{ ref('orders') }} where amount <= 0\n")
 
+    real_is_file = Path.is_file
     real_stat = Path.stat
 
+    # Decouple the is_file() pre-step from the broken stat() so this is robust
+    # across Python versions: in 3.13 ``Path.is_file()`` calls
+    # ``stat(follow_symlinks=...)`` while in 3.11/3.12 it calls a bare
+    # ``stat()`` — keying on the kwarg breaks on 3.12. Instead, force is_file()
+    # True for the target and let the size-check stat() in _read_sql_file be the
+    # only call that blows up (reader 431-433).
+    def _force_is_file(self: Path, *args: object, **kwargs: object) -> bool:
+        if self.name == "real.sql":
+            return True
+        return real_is_file(self, *args, **kwargs)  # type: ignore[arg-type]
+
     def _boom(self: Path, *args: object, **kwargs: object) -> object:
-        # ``is_file()`` calls ``stat(follow_symlinks=...)``; the size check in
-        # ``_read_sql_file`` calls a bare ``stat()``. Only blow up on the bare
-        # call so the glob-and-is_file pre-step still works.
-        if self.name == "real.sql" and "follow_symlinks" not in kwargs:
+        if self.name == "real.sql":
             raise OSError("stat blew up")
         return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
 
+    monkeypatch.setattr(Path, "is_file", _force_is_file)
     monkeypatch.setattr(Path, "stat", _boom)
     with pytest.raises(IngestSchemaParseError) as excinfo:
         read_test_files(tmp_path, _orders(manifest), manifest, project_dir=tmp_path)
