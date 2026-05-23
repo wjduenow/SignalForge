@@ -1,13 +1,16 @@
-"""``signalforge prune-existing`` subcommand (issue #105).
+"""``signalforge prune-existing`` subcommand (issue #105, US-014).
 
-Prunes an externally-authored dbt ``schema.yml`` against real warehouse
-data: it runs **ingest -> prune -> diff** (no draft, no grade, **no LLM
-call**) and reports which of the operator's existing tests add signal and
-which always pass / fail on known-clean data. The product story: *point
-SignalForge at your existing dbt tests and let the warehouse tell you
-which ones add no signal* — extending Architectural Commitment #1
-("signal over volume") to any generator's tests (hand-written,
-dbt-codegen, dbt Copilot, DinoAI, datapilot).
+Prunes an operator's existing dbt tests against real warehouse data: it
+runs **ingest -> prune -> diff** (no draft, no grade, **no LLM call**) and
+reports which of those tests add signal and which always pass / fail on
+known-clean data. Both the externally-authored ``schema.yml`` (``not_null``
+/ ``unique`` / ``accepted_values`` / ``relationships``) **and** the
+project's singular ``tests/*.sql`` business-rule tests (US-014) are
+ingested and pruned in one run. The product story: *point SignalForge at
+your existing dbt tests and let the warehouse tell you which ones add no
+signal* — extending Architectural Commitment #1 ("signal over volume") to
+any generator's tests (hand-written, dbt-codegen, dbt Copilot, DinoAI,
+datapilot).
 
 The module exposes :func:`add_parser` (registering the full flag set,
 US-002) and :func:`cmd_prune_existing` (the end-to-end ingest -> prune ->
@@ -65,6 +68,7 @@ from signalforge.cli._helpers import (
     should_emit_progress,
 )
 from signalforge.cli.errors import CliPathError
+from signalforge.draft.models import CandidateSchema
 from signalforge.warehouse.base import WarehouseAdapter
 
 __all__ = ["add_parser", "cmd_prune_existing"]
@@ -165,6 +169,19 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "Override the default profiles.yml search location. Mirrors "
             "dbt-core's --profiles-dir flag. Sets DBT_PROFILES_DIR in "
             "the current process environment."
+        ),
+    )
+    parser.add_argument(
+        "--tests-dir",
+        dest="tests_dir",
+        metavar="PATH",
+        default=None,
+        help=(
+            "Override the singular-test directory enumerated for "
+            "model-level tests/*.sql files (default: <project_dir>/tests). "
+            "Each .sql referencing this model is pruned alongside the "
+            "schema.yml tests; unrelated files are ignored. If the "
+            "directory is absent, only the schema.yml tests are pruned."
         ),
     )
     parser.add_argument(
@@ -370,6 +387,75 @@ def _scrub_control_chars(value: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Singular tests/*.sql ingestion + merge (US-014, DEC-010 / DEC-013)
+# ---------------------------------------------------------------------------
+
+
+def _ingest_singular_tests(
+    args: argparse.Namespace,
+    *,
+    project_dir: Path,
+    model: manifest_module.Model,
+    manifest: manifest_module.Manifest,
+    schema_candidate: CandidateSchema,
+) -> tuple[CandidateSchema, tuple[ingest_module.SkippedTest, ...]]:
+    """Read the operator's singular ``tests/*.sql`` and merge them into the
+    schema.yml-sourced candidate (US-014, DEC-010 / DEC-013).
+
+    Enumerates ``--tests-dir`` (default ``<project_dir>/tests``) via
+    :func:`signalforge.ingest.read_test_files`, which classifies each
+    ``.sql`` referencing ``model`` into a model-level ``custom_sql``
+    candidate test and dedupes against ``schema_candidate`` (passed as
+    ``existing=``) by SQL hash. The returned candidate's model-level tests
+    are *merged into* the schema.yml candidate so a single combined
+    candidate is fed to :func:`prune_tests`: the warehouse then tells the
+    operator which of their existing tests — schema.yml AND singular — add
+    no signal.
+
+    Singular tests are **optional**. ``read_test_files`` raises
+    :class:`signalforge.ingest.IngestSchemaNotFoundError` for an absent
+    directory, but a project simply may not have a ``tests/`` directory.
+    So the *default* directory is silently skipped when it does not exist;
+    an **explicit** ``--tests-dir`` pointing at a missing directory still
+    surfaces the typed error (the operator asked for that path on purpose).
+
+    Returns ``(merged_candidate, singular_skipped)``. The skipped tuple
+    folds into the caller's combined skipped-test report (DEC-007).
+    """
+    tests_dir_override = getattr(args, "tests_dir", None)
+    if tests_dir_override is not None:
+        tests_dir = canonicalise_user_path(tests_dir_override, project_dir)
+        assert tests_dir is not None  # canonicalise_user_path returns Path for non-None input
+    else:
+        tests_dir = project_dir / "tests"
+        # The default directory is optional — skip silently when absent so a
+        # project without singular tests still prunes its schema.yml tests.
+        if not tests_dir.is_dir():
+            return schema_candidate, ()
+
+    singular_result = ingest_module.read_test_files(
+        tests_dir,
+        model,
+        manifest,
+        project_dir=project_dir,
+        existing=schema_candidate,
+    )
+
+    # Merge the singular model-level ``custom_sql`` tests into the schema.yml
+    # candidate. ``read_test_files`` already deduped them against
+    # ``schema_candidate`` via ``existing=``, so a straight concatenation of
+    # the model-level test tuples is correct (DEC-013). Columns come solely
+    # from the schema.yml candidate (singular tests are model-level, no
+    # columns).
+    if not singular_result.candidate.tests:
+        return schema_candidate, singular_result.skipped
+    merged = schema_candidate.model_copy(
+        update={"tests": schema_candidate.tests + singular_result.candidate.tests}
+    )
+    return merged, singular_result.skipped
+
+
+# ---------------------------------------------------------------------------
 # Subcommand entry point
 # ---------------------------------------------------------------------------
 
@@ -405,8 +491,16 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
        (→ :class:`CliPathError` on symlink/containment — DEC-005).
     6. ``read_schema(schema_path, model, project_dir=project_dir)`` —
        passing the ``Path`` so the full ingest typed-error surface fires.
+       Then ``read_test_files(tests_dir, model, manifest,
+       existing=<schema candidate>)`` (US-014) ingests the operator's
+       singular ``tests/*.sql`` (default ``<project_dir>/tests``,
+       overridable via ``--tests-dir``), deduped against the schema.yml
+       tests; both sets of model-level tests merge into ONE candidate so
+       the warehouse prunes them together (DEC-010 / DEC-013). The default
+       directory is optional and silently skipped when absent.
     7. Skipped-test report (DEC-007) — summary + ``--verbose`` detail,
-       suppressed by ``--quiet``.
+       suppressed by ``--quiet``. Schema.yml and singular-test skips fold
+       into one report grouped by SkipReason.
     8. Load + override :class:`PruneConfig` (``--scope`` /
        ``--sample-strategy`` via ``model_validate`` — DEC-002).
     9. Build the warehouse adapter via :func:`_make_warehouse_adapter`
@@ -469,13 +563,32 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
             emit_progress_entry(1, "ingest", "parsing schema.yml...", total=_TOTAL_STAGES)
         _t0 = time.monotonic()
         ingest_result = ingest_module.read_schema(schema_path, model, project_dir=project_dir)
+        # Also ingest the operator's singular tests/*.sql (US-014). Each
+        # ``.sql`` referencing this model becomes a model-level
+        # ``custom_sql`` candidate test, deduped against the schema.yml
+        # tests via the ``existing=`` param. The merged tests are pruned in
+        # the same run so the warehouse tells the operator which of their
+        # existing tests — schema.yml AND singular — add no signal (DEC-010
+        # / DEC-013). ``read_test_files`` raises IngestSchemaNotFoundError
+        # for a missing directory; singular tests are optional, so a missing
+        # default ``<project_dir>/tests`` is silently skipped (an explicit
+        # ``--tests-dir`` pointing at a missing directory still fails loud).
+        candidate, singular_skipped = _ingest_singular_tests(
+            args,
+            project_dir=project_dir,
+            model=model,
+            manifest=manifest,
+            schema_candidate=ingest_result.candidate,
+        )
         if progress_on:
             emit_progress_done(1, "ingest", time.monotonic() - _t0, total=_TOTAL_STAGES)
 
         # Skipped-test report (DEC-007) — operator info, suppressed by
-        # ``--quiet``.
+        # ``--quiet``. Schema.yml skips and singular-test skips fold into one
+        # report, grouped by SkipReason.
+        all_skipped = ingest_result.skipped + singular_skipped
         if not quiet:
-            _emit_skipped_report(ingest_result.skipped, verbose=verbose)
+            _emit_skipped_report(all_skipped, verbose=verbose)
 
         # ---- 2/3: prune -------------------------------------------------
         # ``--scope`` / ``--sample-strategy`` overrides applied via
@@ -494,7 +607,6 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
                 {**prune_config.model_dump(), **prune_overrides}
             )
 
-        candidate = ingest_result.candidate
         candidate_test_count = sum(len(c.tests) for c in candidate.columns) + len(candidate.tests)
 
         profile = warehouse_module.load_profile(project_dir)
