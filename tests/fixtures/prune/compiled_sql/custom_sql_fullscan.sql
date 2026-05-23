@@ -1,0 +1,1 @@
+select o.order_id from fake_project.dataset.orders as o join fake_project.dataset.customers as c on o.customer_id = c.id where c.id is null

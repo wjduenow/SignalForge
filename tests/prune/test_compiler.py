@@ -25,11 +25,12 @@ import pytest
 
 from signalforge.draft.models import (
     CandidateTestAcceptedValues,
+    CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
     CandidateTestUnique,
 )
-from signalforge.manifest.models import Column, Manifest, Model
+from signalforge.manifest.models import Column, Manifest, Model, Source
 from signalforge.prune.compiler import (
     _compile_test,
     _compute_compiled_sql_hash,
@@ -86,6 +87,26 @@ def _make_manifest(*, with_customers: bool = True) -> Manifest:
     if with_customers:
         nodes["model.shop.customers"] = _make_customers_model()
     return Manifest(metadata={"dbt_schema_version": "v12"}, nodes=nodes)
+
+
+def _make_manifest_with_source() -> Manifest:
+    """A manifest carrying a ``raw.events`` source so a custom_sql test can
+    resolve ``{{ source('raw', 'events') }}`` to a qualified name."""
+    return Manifest(
+        metadata={"dbt_schema_version": "v12"},
+        nodes={"model.shop.orders": _make_orders_model()},
+        sources={
+            "source.shop.raw.events": Source(
+                unique_id="source.shop.raw.events",
+                source_name="raw",
+                name="events",
+                resource_type="source",
+                database="fake_project",
+                schema="raw_dataset",  # type: ignore[call-arg]
+                identifier="events",
+            )
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -636,3 +657,202 @@ def test_compile_relationships_rejects_adversarial_column() -> None:
     result = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
     assert isinstance(result, _InvalidIdentifier)
     assert "column" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# US-007: custom_sql (singular business-rule) test compilation.
+#
+# DEC-003 — arbitrary failing-rows SELECT; DEC-004 — bounded Jinja resolution;
+# DEC-006 — single-table sample-CTE vs multi-table full-scan; DEC-008 — SQL
+# safety pre-flight on the resolved SQL; DEC-009 — deterministic compiled
+# envelope. Snapshot fixtures pin the byte-exact output.
+# ---------------------------------------------------------------------------
+
+
+def test_compile_custom_sql_single_table_full_matches_snapshot() -> None:
+    """Single-table custom_sql, scope=full, no partition filter: the
+    resolved SQL is returned unchanged (the adapter wraps it with the
+    ``COUNT(*)`` envelope, like the four built-ins)."""
+    expected = _read_fixture("custom_sql.sql")
+    test = CandidateTestCustomSQL(sql="select order_id from {{ this }} where total < 0")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert actual == expected
+
+
+def test_compile_custom_sql_single_table_sample_matches_snapshot() -> None:
+    """Single-table custom_sql, scope=sample: the model's own qualified
+    table name is substituted with the ``sample`` CTE alias and the
+    deterministic-sample CTE is prepended (mirrors the built-ins)."""
+    expected = _read_fixture("custom_sql_sample.sql")
+    test = CandidateTestCustomSQL(sql="select order_id from {{ this }} where total < 0")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+
+
+def test_compile_custom_sql_multi_table_full_scan_matches_snapshot() -> None:
+    """A custom_sql test with a JOIN runs full-scan (unsampled) even when
+    scope=sample is requested — sampling one side of a join is semantically
+    wrong (DEC-006). Both {{ this }} and {{ ref() }} resolve to qualified
+    names in the compiled bytes."""
+    expected = _read_fixture("custom_sql_fullscan.sql")
+    test = CandidateTestCustomSQL(
+        sql=(
+            "select o.order_id from {{ this }} as o "
+            "join {{ ref('customers') }} as c on o.customer_id = c.id "
+            "where c.id is null"
+        )
+    )
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        # Even with sample requested, the JOIN forces full-scan.
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+    # No CTE — the join ran full-scan.
+    assert isinstance(actual, str)
+    assert "WITH sample" not in actual
+
+
+def test_compile_custom_sql_resolves_source_into_compiled_bytes() -> None:
+    """``{{ source('s', 't') }}`` resolves to the source's qualified name."""
+    src_manifest = _make_manifest_with_source()
+    test = CandidateTestCustomSQL(
+        sql="select id from {{ source('raw', 'events') }} where id is null"
+    )
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        src_manifest,
+        model=_make_orders_model(),
+    )
+    assert isinstance(actual, str)
+    # The source resolved to its qualified name; no Jinja survives.
+    assert "{{" not in actual and "}}" not in actual
+    assert "events" in actual
+
+
+def test_compile_custom_sql_full_scan_with_partition_filter_wraps_own_table() -> None:
+    """Multi-table full-scan applies a partition filter to the model's own
+    table via a derived-table subquery; the joined parent is untouched."""
+    test = CandidateTestCustomSQL(
+        sql=(
+            "select o.order_id from {{ this }} as o "
+            "join {{ ref('customers') }} as c on o.customer_id = c.id "
+            "where c.id is null"
+        )
+    )
+    pf = PartitionFilter(column="event_dt", op=">=", value="2026-01-01")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="full",
+        partition_filter=pf,
+    )
+    assert isinstance(actual, str)
+    assert "(SELECT * FROM fake_project.dataset.orders WHERE `event_dt` >= '2026-01-01')" in actual
+    # The joined parent table is NOT wrapped.
+    assert "fake_project.dataset.customers as c" in actual
+
+
+def test_compile_custom_sql_unsupported_jinja_returns_sentinel() -> None:
+    """Control-flow Jinja (``{% if %}``) the bounded resolver can't evaluate
+    routes to ``_InvalidIdentifier`` (conservative-bias: kept-without-evidence),
+    never raises out of the compiler (DEC-006)."""
+    test = CandidateTestCustomSQL(sql="select 1 from {{ this }} {% if true %}where 1=1{% endif %}")
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "Jinja" in result.reason
+
+
+def test_compile_custom_sql_var_lookup_returns_sentinel() -> None:
+    """``{{ var(...) }}`` is unsupported → ``_InvalidIdentifier`` sentinel."""
+    test = CandidateTestCustomSQL(sql="select 1 from {{ this }} where x > {{ var('threshold') }}")
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert isinstance(result, _InvalidIdentifier)
+
+
+def test_compile_custom_sql_safety_reject_returns_sentinel() -> None:
+    """A resolved SQL that fails the ``validate_test_sql`` pre-flight
+    (here: an embedded ``;``) routes to ``_InvalidIdentifier`` rather than
+    producing SQL the adapter would reject (DEC-008)."""
+    test = CandidateTestCustomSQL(sql="select 1 from {{ this }}; drop table x")
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "safety" in result.reason
+
+
+def test_compile_custom_sql_without_model_returns_sentinel() -> None:
+    """When ``model`` is not threaded through, custom_sql can't be resolved
+    and routes to ``_InvalidIdentifier`` (defensive — the engine always
+    passes ``model=model``)."""
+    test = CandidateTestCustomSQL(sql="select order_id from {{ this }} where total < 0")
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=None,
+    )
+    assert isinstance(result, _InvalidIdentifier)
+
+
+def test_compile_custom_sql_is_deterministic() -> None:
+    test = CandidateTestCustomSQL(sql="select order_id from {{ this }} where total < 0")
+    a = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    b = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert a == b
