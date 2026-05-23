@@ -5,7 +5,7 @@
 - **Ticket:** #116 — feat: custom business-rule test generation (meta.business_rules + LLM-inferred singular SQL tests)
 - **Branch:** `feature/116-business-rule-tests`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/116-business-rule-tests`
-- **Phase:** detailing (awaiting approval)
+- **Phase:** published (PR #117, awaiting approval)
 - **Sessions:** 1 (2026-05-22)
 - **Research anchor:** `docs/research/dbt-tool-design-sketches.md` §8, Opportunity 2 v2 milestone
 
