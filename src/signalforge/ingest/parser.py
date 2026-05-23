@@ -33,16 +33,27 @@ I/O, and emits ZERO logs (``.claude/rules/manifest-readers.md`` rule #4).
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from signalforge.draft import CandidateTest
 from signalforge.draft.models import (
     CandidateTestAcceptedValues,
+    CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
     CandidateTestUnique,
 )
 from signalforge.ingest.models import SkippedTest
+from signalforge.manifest.errors import (
+    AmbiguousRefError,
+    RefNotFoundError,
+    SourceNotFoundError,
+    TemplateResolutionError,
+)
+from signalforge.manifest.template import resolve_template_refs
+
+if TYPE_CHECKING:
+    from signalforge.manifest.models import Manifest, Model
 
 # Config keys that dbt allows interleaved with test args; never treated as
 # args and never a skip cause when present.
@@ -235,3 +246,82 @@ def _parse_relationships(*, body: Any, column: str | None) -> CandidateTest | Sk
         to=_unwrap_ref_or_source(raw_to),
         field=raw_field,
     )
+
+
+def classify_singular_test(
+    sql: str,
+    *,
+    file_name: str,
+    model: Model,
+    manifest: Manifest,
+) -> CandidateTestCustomSQL | SkippedTest | None:
+    """Classify a dbt singular-test ``.sql`` file against ``model`` (US-013).
+
+    A singular test is a standalone ``.sql`` file under ``tests/`` whose body
+    is a failing-rows SELECT (passes when zero rows return). This maps it to
+    one of three dispositions (DEC-013):
+
+    * **Associated** → a :class:`CandidateTestCustomSQL` (``column=None`` —
+      singular tests are model-level — ``sql`` = the raw file body), when the
+      SQL's resolved dbt references include ``model``. The prune stage runs
+      the test verbatim.
+    * **Unrelated** → ``None``, when the SQL resolves cleanly but references
+      some *other* model. Per DEC-013 these are simply *not included* in the
+      target model's candidate — they are NOT skip-recorded (a test for a
+      different model is not a defect of this model's ingest).
+    * **Skip** → a :class:`SkippedTest` with ``reason="malformed-supported-test"``
+      (the closed 3-value :data:`~signalforge.ingest.models.SkipReason` is NOT
+      extended), when the SQL carries Jinja the bounded resolver cannot
+      evaluate (``{% ... %}`` blocks, ``{{ var(...) }}`` / ``{{ env_var(...) }}``,
+      macro calls) or an unresolved ``{{ ... }}``.
+
+    Association reuses :func:`signalforge.manifest.template.resolve_template_refs`
+    to resolve ``ref()`` / ``source()`` / ``this`` — no regex is duplicated
+    here. A reference to a model the manifest does not contain (or an ambiguous
+    ``ref()``) means the file does not reference *this* model, so it is treated
+    as *unrelated* (``None``), not skip-recorded. ``{{ this }}`` is not expected
+    in a standalone singular test, but if present it resolves to ``model`` and
+    associates.
+
+    Args:
+        sql: The raw ``.sql`` file body.
+        file_name: The file's name, for the skip ``detail`` diagnostic.
+        model: The manifest model the caller is ingesting tests for.
+        manifest: The manifest, used to resolve ``ref()`` / ``source()``.
+
+    Returns:
+        A :class:`CandidateTestCustomSQL` (associated), ``None`` (unrelated, not
+        recorded), or a :class:`SkippedTest` (unsupported Jinja).
+
+    Pure: no I/O, no logging, deterministic for a given input.
+    """
+    target = model.resolve_this().qualified_name
+    try:
+        resolved = resolve_template_refs(sql, model, manifest)
+    except TemplateResolutionError:
+        # UnsupportedJinjaError is a TemplateResolutionError subclass, so this
+        # one branch covers both the unsupported-Jinja and unresolved-``{{ }}``
+        # cases. The closed 3-value SkipReason is preserved (DEC-013): a
+        # singular test we cannot statically resolve is "malformed".
+        return SkippedTest(
+            test_name=file_name,
+            column=None,
+            reason="malformed-supported-test",
+            detail="singular .sql test contains Jinja the bounded resolver cannot evaluate",
+        )
+    except (RefNotFoundError, AmbiguousRefError, SourceNotFoundError):
+        # The SQL is well-formed Jinja but references a model/source absent
+        # from (or ambiguous in) the manifest — it does not reference *this*
+        # model, so it is unrelated, not a defect of this model's ingest.
+        return None
+
+    # The SQL resolved cleanly. Associate iff its resolved references include
+    # the target model's qualified name; otherwise it is a test for a different
+    # model and is silently not included.
+    if target not in resolved:
+        return None
+
+    return CandidateTestCustomSQL(column=None, sql=sql, rationale=None)
+
+
+__all__ = ("classify_singular_test", "parse_test_entry")
