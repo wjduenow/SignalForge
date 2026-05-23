@@ -56,14 +56,18 @@ from signalforge.draft.errors import DraftConfigInvalidError, DraftConfigNotFoun
 _DEFAULT_CONFIG_FILENAME = "signalforge.yml"
 
 VALID_TEST_TYPES: Final[frozenset[str]] = frozenset(
-    {"not_null", "unique", "accepted_values", "relationships"}
+    {"not_null", "unique", "accepted_values", "relationships", "custom_sql"}
 )
-"""The four dbt test types the drafter can propose (mirrors the system
-prompt's SCOPE section and the discriminated union in
-:mod:`signalforge.draft.models`). The :attr:`DraftConfig.exclude_tests`
-validator (issue #54) rejects anything outside this set so a typo like
-``"not_nul"`` fails loud at config-load rather than silently passing the
-LLM call and showing up later as an anchor-contract violation."""
+"""The test types the drafter can propose (mirrors the system prompt's
+SCOPE section and the discriminated union in
+:mod:`signalforge.draft.models`). The four standard dbt schema tests
+(``not_null``, ``unique``, ``accepted_values``, ``relationships``) plus
+the ``custom_sql`` business-rule escape hatch (DEC-002). The
+:attr:`DraftConfig.exclude_tests` validator (issue #54) rejects anything
+outside this set so a typo like ``"not_nul"`` fails loud at config-load
+rather than silently passing the LLM call and showing up later as an
+anchor-contract violation; naming ``"custom_sql"`` suppresses the
+free-form business-rule variant from drafting."""
 
 
 class DraftConfig(BaseModel):
