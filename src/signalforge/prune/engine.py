@@ -1099,6 +1099,7 @@ def prune_tests(
                 compile_table_ref,
                 dialect,
                 manifest,
+                model=model,
                 scope=compile_scope,
                 sample_size=(resolved_config.sample_size if compile_scope == "sample" else None),
                 sample_bucket=sample_bucket,
