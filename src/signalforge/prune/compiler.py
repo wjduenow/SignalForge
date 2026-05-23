@@ -685,7 +685,11 @@ def _compile_custom_sql(
             )
         # Substitute the model's own table with the ``sample`` CTE alias,
         # then prepend the deterministic-sample CTE bound to the real table.
-        sampled_sql = resolved_sql.replace(own_qualified, "sample", 1)
+        # Replace ALL occurrences (P2 fix): a single-table custom_sql that
+        # references its own table more than once (correlated subquery /
+        # self-UNION without a JOIN) would otherwise leave later occurrences
+        # reading the full source table.
+        sampled_sql = resolved_sql.replace(own_qualified, "sample")
         cte = _render_sample_cte(
             own_table_quoted,
             sample_size=sample_size,
@@ -695,13 +699,27 @@ def _compile_custom_sql(
         )
         return f"{cte} {sampled_sql}"
 
-    # scope == "full" single-table: compose a partition filter via derived
-    # table when one is available (uniform with the built-ins).
+    # scope == "full" single-table.
+    #
+    # P0 fix: when the orchestrator substituted a DIFFERENT physical table
+    # for ``table_ref`` than the model's own source (i.e. the materialised
+    # temp table under ``sample_strategy="materialised"`` + ``scope="sample"``,
+    # which the engine compiles as effective ``scope="full"`` against the
+    # temp table), rewrite ALL occurrences of the model's own qualified name
+    # to the quoted ``table_ref`` so the test reads the sample rather than
+    # full-scanning the production source. This mirrors the built-in
+    # compilers, which always FROM ``table_ref``.
+    if table_ref.qualified_name != own_qualified and own_qualified in resolved_sql:
+        return resolved_sql.replace(own_qualified, own_table_quoted)
+
+    # No substitution (``table_ref`` IS the model's own table — the oneshot /
+    # full-strategy path): compose a partition filter via derived table when
+    # one is available (uniform with the built-ins).
     if partition_filter is not None:
         partition_sql = _render_partition_filter(partition_filter, quote_char)
         replacement = f"(SELECT * FROM {own_qualified} WHERE {partition_sql})"
         if own_qualified in resolved_sql:
-            return resolved_sql.replace(own_qualified, replacement, 1)
+            return resolved_sql.replace(own_qualified, replacement)
     return resolved_sql
 
 
