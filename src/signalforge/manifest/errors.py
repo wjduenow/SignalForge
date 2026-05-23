@@ -92,6 +92,50 @@ class ModelMissingSqlError(ManifestError):
     )
 
 
+class RefNotFoundError(ManifestError):
+    """A dbt ``ref(name)`` resolved to no enabled model in the manifest.
+
+    Raised by :func:`signalforge.manifest.loader.resolve_ref` (DEC-005 of #116)
+    when a Jinja ``{{ ref('name') }}`` names a model absent from
+    ``manifest.nodes``. Fails loud rather than silently producing an
+    unresolvable relation.
+    """
+
+    default_remediation = (
+        "Check the ref() target name. Use `Manifest.iter_models()` to list "
+        "known enabled models, and re-run `dbt parse` if the model is new."
+    )
+
+
+class AmbiguousRefError(ManifestError):
+    """A dbt ``ref(name)`` matched more than one enabled model.
+
+    Raised by :func:`signalforge.manifest.loader.resolve_ref` (DEC-005 of #116)
+    when the same model name exists in multiple packages. dbt itself
+    disambiguates with the two-arg ``ref('package', 'name')`` form; we surface
+    the candidate list so the operator knows which package to qualify.
+    """
+
+    default_remediation = (
+        "The model name exists in multiple packages. Disambiguate with the "
+        "two-arg form: ref('<package>', '<name>')."
+    )
+
+
+class SourceNotFoundError(ManifestError):
+    """A dbt ``source(source_name, table_name)`` is absent from the manifest.
+
+    Raised by :func:`signalforge.manifest.loader.resolve_source` (DEC-005 of
+    #116) when the ``(source_name, table_name)`` pair has no matching entry in
+    ``manifest.sources``.
+    """
+
+    default_remediation = (
+        "Check the source() name and table arguments against the project's "
+        "`sources:` definitions, and re-run `dbt parse` if the source is new."
+    )
+
+
 class SelectorParseError(ManifestError):
     """The ``--select`` expression supplied to :func:`parse_selector` is syntactically invalid.
 
