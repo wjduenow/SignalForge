@@ -129,6 +129,8 @@ from signalforge.manifest import (
     RefNotFoundError,
     SelectorParseError,
     SourceNotFoundError,
+    TemplateResolutionError,
+    UnsupportedJinjaError,
     UnsupportedManifestVersionError,
 )
 from signalforge.prune import (
@@ -291,6 +293,13 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     RefNotFoundError: 2,
     AmbiguousRefError: 2,
     SourceNotFoundError: 2,
+    # Bounded Jinja-ref resolution in singular-test SQL (the SQL used an
+    # unsupported Jinja form, or left a reference unresolved — operator-supplied
+    # input the bounded resolver can't act on; #116 US-002). ``UnsupportedJinjaError``
+    # subclasses ``TemplateResolutionError`` and inherits its tier via MRO, but is
+    # listed explicitly so the 7th AST scan finds a direct mapping for each.
+    TemplateResolutionError: 2,
+    UnsupportedJinjaError: 2,
     # Selector grammar (--select expression syntactically invalid; #37
     # DEC-007: tier 2 because the operator supplied a malformed input).
     SelectorParseError: 2,

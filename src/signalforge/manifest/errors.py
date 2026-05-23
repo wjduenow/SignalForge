@@ -136,6 +136,42 @@ class SourceNotFoundError(ManifestError):
     )
 
 
+class TemplateResolutionError(ManifestError):
+    """A dbt-Jinja reference in a singular-test SQL string cannot be resolved.
+
+    Raised by :func:`signalforge.manifest.template.resolve_template_refs`
+    (US-002 of #116) when, after substituting the supported ``{{ this }}`` /
+    ``{{ ref(...) }}`` / ``{{ source(...) }}`` forms, the SQL still contains an
+    unresolved ``{{ ... }}`` expression. The bounded resolver runs NO Jinja
+    engine, so anything it doesn't recognise must fail loud rather than reach
+    the warehouse as broken SQL.
+    """
+
+    default_remediation = (
+        "Only {{ this }}, {{ ref('name') }} / {{ ref('pkg','name') }}, and "
+        "{{ source('src','table') }} are supported in singular-test SQL. "
+        "Resolve other expressions in dbt before pruning."
+    )
+
+
+class UnsupportedJinjaError(TemplateResolutionError):
+    """A singular-test SQL string uses Jinja control-flow or an unsupported tag.
+
+    Raised by :func:`signalforge.manifest.template.resolve_template_refs`
+    (US-002 of #116) when the SQL contains a ``{% ... %}`` statement block, a
+    ``{{ var(...) }}`` / ``{{ env_var(...) }}`` lookup, or a macro call. The
+    bounded resolver has no Jinja engine and refuses to silently mishandle
+    these; subclassing :class:`TemplateResolutionError` lets callers catch
+    both with one ``except`` clause.
+    """
+
+    default_remediation = (
+        "SignalForge resolves dbt-Jinja references with a bounded substituter, "
+        "not a full Jinja engine. Control-flow ({% ... %}), var()/env_var(), and "
+        "macro calls are not supported — pre-render them with dbt first."
+    )
+
+
 class SelectorParseError(ManifestError):
     """The ``--select`` expression supplied to :func:`parse_selector` is syntactically invalid.
 

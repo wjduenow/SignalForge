@@ -26,11 +26,14 @@ from signalforge.manifest.errors import (
     RefNotFoundError,
     SelectorParseError,
     SourceNotFoundError,
+    TemplateResolutionError,
+    UnsupportedJinjaError,
     UnsupportedManifestVersionError,
 )
 from signalforge.manifest.loader import load, resolve_ref, resolve_source
 from signalforge.manifest.models import Manifest, Model, Source
 from signalforge.manifest.select import SelectorAtom, parse_selector, select_models
+from signalforge.manifest.template import resolve_template_refs
 
 __all__ = [
     "load",
@@ -49,6 +52,9 @@ __all__ = [
     "RefNotFoundError",
     "AmbiguousRefError",
     "SourceNotFoundError",
+    "TemplateResolutionError",
+    "UnsupportedJinjaError",
+    "resolve_template_refs",
     "SelectorParseError",
     "SelectorAtom",
     "parse_selector",
