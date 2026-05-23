@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from signalforge.safety import SamplingMode
 
@@ -79,7 +79,24 @@ The four entries are emitted in this fixed order so the rendered prompt
 stays byte-stable when no exclusions apply. When :class:`DraftConfig`
 sets ``exclude_tests``, the excluded entries are dropped before
 rendering and the surviving entries' trailing-comma placement is fixed
-up so the JSON example stays well-formed."""
+up so the JSON example stays well-formed.
+
+The ``custom_sql`` singular-test illustration (issue #116, DEC-001 /
+DEC-015) lives in :data:`_CUSTOM_SQL_CATALOGUE_LINE` rather than here:
+``exclude_tests`` only governs the four standard dbt test types, so
+``custom_sql`` is appended unconditionally after the filtered four. This
+keeps the four-type ``exclude_tests`` contract (and ``VALID_TEST_TYPES``)
+unchanged."""
+
+
+_CUSTOM_SQL_CATALOGUE_LINE: str = (
+    '        {"type": "custom_sql",\n'
+    '         "sql": "<failing-rows SELECT; may use {{ this }} / {{ ref(\'m\') }}>",\n'
+    '         "column": "<col or null>", "rationale": "<1 sentence>"}'
+)
+"""Always-appended JSON-shape illustration for a singular ``custom_sql``
+business-rule test (issue #116). Not part of :data:`_TEST_CATALOGUE_LINES`
+because ``exclude_tests`` does not gate ``custom_sql``."""
 
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -149,8 +166,19 @@ forwarded from the manifest.
 
 ### SCOPE
 
-Propose only {allowed_scope} tests. Other test types (custom singular
-tests, dbt-utils macros) are out of scope for this draft step.
+Propose only {allowed_scope} tests. dbt-utils / dbt-expectations macros
+are out of scope for this draft step.
+
+`custom_sql` tests are full singular-test SELECTs that return the FAILING
+rows: a non-empty result means the assertion failed. The `sql` field
+carries the complete SELECT statement; you may reference the model under
+draft as `{{{{ this }}}}` and neighbours as `{{{{ ref('<model>') }}}}`. Set
+`column` to the column the rule is primarily about, or `null` for a
+model-level rule. If a BUSINESS RULES section appears in the data block
+below, draft one `custom_sql` test per stated rule, translating the
+natural-language rule into a failing-rows SELECT. When no business rules
+are supplied, you MAY still infer `custom_sql` tests from the model SQL
+and column profile where a clear, checkable invariant exists.
 """
 
 
@@ -175,11 +203,14 @@ def _render_system_prompt(exclude_tests: tuple[str, ...]) -> str:
             "at least one type must remain so the drafter has something to propose."
         )
     catalogue_lines = [_TEST_CATALOGUE_LINES[t] for t in allowed]
-    # Strip the trailing comma on the final entry so the JSON example
-    # remains well-formed irrespective of how many types were excluded.
-    last = catalogue_lines[-1]
-    if last.endswith(","):
-        catalogue_lines[-1] = last[:-1]
+    # The four standard entries carry trailing commas; ``custom_sql`` is
+    # always appended last (issue #116) so every preceding entry keeps its
+    # comma. Ensure the four-type lines each end with a comma (the last
+    # standard entry — ``relationships`` — has none in the dict), then add
+    # the comma-less ``custom_sql`` line as the final element so the JSON
+    # example stays well-formed.
+    catalogue_lines = [line if line.endswith(",") else f"{line}," for line in catalogue_lines]
+    catalogue_lines.append(_CUSTOM_SQL_CATALOGUE_LINE)
     test_catalogue = "\n".join(catalogue_lines)
     if len(allowed) == 1:
         scope_phrase = f"`{allowed[0]}`"
@@ -432,6 +463,97 @@ def _render_data_section(request: LLMRequest) -> str:
     return f"{instruction}\n\n{columns_block}\n\n{samples}"
 
 
+def _coerce_business_rules(value: Any) -> list[str]:
+    """Normalise a ``meta.signalforge.business_rules`` value to a rule list.
+
+    Accepts a single natural-language ``str`` (wrapped into a one-element
+    list) OR a ``list`` of rules (each stringified, blank entries dropped).
+    Anything else (``None``, ``dict``, number, …) yields an empty list —
+    business-rule reading is best-effort, never fail-loud (the drafter
+    still works without rules; the inferred fallback covers the gap).
+
+    Whitespace-only strings collapse to nothing so an empty ``meta`` value
+    does not emit an empty BUSINESS RULES section.
+    """
+    if isinstance(value, str):
+        stripped = value.strip()
+        return [stripped] if stripped else []
+    if isinstance(value, list):
+        rules: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                stripped = item.strip()
+                if stripped:
+                    rules.append(stripped)
+        return rules
+    return []
+
+
+def _read_business_rules(model: Model) -> list[str]:
+    """Collect business rules from column- and model-level ``meta``.
+
+    Mirrors the safety layer's ``meta.get("signalforge")`` dict-guard
+    (see :mod:`signalforge.safety.redact`): both ``Column.meta`` and
+    ``Model.config.meta`` may carry a ``signalforge`` sub-dict, and only
+    a genuine ``dict`` value is inspected (a scalar / list under the
+    ``signalforge`` key is configuration noise, not a rules container).
+
+    Rules are emitted model-level first, then per column (columns sorted
+    by name for byte-stability — DEC-019), each prefixed so the LLM knows
+    which column a rule scopes to. Duplicate rule strings are de-duplicated
+    while preserving first-seen order.
+    """
+    collected: list[str] = []
+    seen: set[str] = set()
+
+    def _add(prefix: str, rules: list[str]) -> None:
+        for rule in rules:
+            line = f"{prefix}{rule}"
+            if line not in seen:
+                seen.add(line)
+                collected.append(line)
+
+    # Model-level rules (Model has no top-level meta; it lives in config.meta).
+    model_meta = getattr(model.config, "meta", {}) or {}
+    sf_model_meta = model_meta.get("signalforge")
+    if isinstance(sf_model_meta, dict):
+        _add("(model) ", _coerce_business_rules(sf_model_meta.get("business_rules")))
+
+    # Column-level rules.
+    for column in sorted(model.columns_list, key=lambda c: c.name):
+        column_meta = column.meta or {}
+        sf_meta = column_meta.get("signalforge")
+        if isinstance(sf_meta, dict):
+            _add(f"(column {column.name}) ", _coerce_business_rules(sf_meta.get("business_rules")))
+
+    return collected
+
+
+def _render_business_rules_section(model: Model) -> str:
+    """Render the operator-supplied business rules as a fenced section.
+
+    Returns the empty string when no rules are present so the dynamic
+    block stays byte-identical to the pre-#116 render for the no-rules
+    case (the inferred-fallback path needs no section — the system prompt
+    already permits inferred ``custom_sql`` tests).
+    """
+    rules = _read_business_rules(model)
+    if not rules:
+        return ""
+    lines = [
+        "## BUSINESS RULES",
+        "",
+        (
+            "Operator-supplied business rules for this model. Draft one "
+            "custom_sql test per rule, translating each into a failing-rows "
+            "SELECT (a non-empty result means the rule was violated):"
+        ),
+        "",
+    ]
+    lines.extend(f"- {rule}" for rule in rules)
+    return "\n".join(lines)
+
+
 def _render_dynamic_block(model: Model, request: LLMRequest) -> str:
     """Render the dynamic block: ``<MODEL_SQL>`` envelope + data section.
 
@@ -450,7 +572,11 @@ def _render_dynamic_block(model: Model, request: LLMRequest) -> str:
     if "</MODEL_SQL>" in raw_code:
         raise PromptEnvelopeBreachError(model.unique_id)
     data_section = _render_data_section(request)
-    return f"<MODEL_SQL>\n{raw_code}\n</MODEL_SQL>\n\n{data_section}"
+    business_rules = _render_business_rules_section(model)
+    block = f"<MODEL_SQL>\n{raw_code}\n</MODEL_SQL>\n\n{data_section}"
+    if business_rules:
+        block = f"{block}\n\n{business_rules}"
+    return block
 
 
 # ---------------------------------------------------------------------------

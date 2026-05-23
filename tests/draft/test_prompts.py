@@ -21,11 +21,13 @@ from signalforge.draft.prompts import (
     _MANIFEST_SUMMARY_TEMPLATE,
     _PROMPT_VERSION,
     _SYSTEM_PROMPT,
+    _coerce_business_rules,
+    _read_business_rules,
     _render_dynamic_block,
     _render_manifest_summary,
     render_prompt,
 )
-from signalforge.manifest.models import Manifest, Model
+from signalforge.manifest.models import Column, Config, Manifest, Model
 from signalforge.safety import LLMRequest, SamplingMode
 from signalforge.warehouse.models import ColumnStats
 
@@ -286,6 +288,139 @@ def test_render_prompt_returns_four_strings() -> None:
     assert isinstance(version, str)
     assert system == _SYSTEM_PROMPT
     assert version == _PROMPT_VERSION
+
+
+# ---------------------------------------------------------------------------
+# custom_sql catalogue + SCOPE (issue #116, DEC-001 / DEC-015)
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_advertises_custom_sql_test_type() -> None:
+    # The JSON-shape illustration carries a custom_sql entry.
+    assert '"type": "custom_sql"' in _SYSTEM_PROMPT
+
+
+def test_system_prompt_scope_describes_custom_sql_as_singular_select() -> None:
+    assert "full singular-test SELECTs" in _SYSTEM_PROMPT
+    # Permits both meta-driven and inferred custom_sql tests.
+    assert "BUSINESS RULES section" in _SYSTEM_PROMPT
+    assert "infer `custom_sql` tests" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_custom_sql_mentions_jinja_refs() -> None:
+    # Jinja braces survive str.format (doubled in the template).
+    assert "{{ this }}" in _SYSTEM_PROMPT
+    assert "{{ ref('<model>') }}" in _SYSTEM_PROMPT
+
+
+def test_custom_sql_does_not_break_exclude_tests_four_type_contract() -> None:
+    # custom_sql is appended after the (possibly filtered) four standard
+    # types and is never gated by exclude_tests.
+    from signalforge.draft.prompts import _render_system_prompt
+
+    prompt = _render_system_prompt(("not_null", "unique"))
+    assert '"type": "not_null"' not in prompt
+    assert '"type": "unique"' not in prompt
+    # custom_sql remains regardless.
+    assert '"type": "custom_sql"' in prompt
+    assert '"type": "accepted_values"' in prompt
+
+
+# ---------------------------------------------------------------------------
+# Business-rule meta reading (issue #116, DEC-001)
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_business_rules_accepts_str_and_list() -> None:
+    assert _coerce_business_rules("amount must be positive") == ["amount must be positive"]
+    assert _coerce_business_rules(["rule a", "rule b"]) == ["rule a", "rule b"]
+
+
+def test_coerce_business_rules_drops_blank_and_non_string() -> None:
+    assert _coerce_business_rules("   ") == []
+    assert _coerce_business_rules(["", "  ", "kept", 7, None]) == ["kept"]
+    # Non str/list values yield nothing.
+    assert _coerce_business_rules(None) == []
+    assert _coerce_business_rules({"x": 1}) == []
+    assert _coerce_business_rules(42) == []
+
+
+def _model_with_meta(
+    *,
+    model_meta: dict[str, object] | None = None,
+    column_meta: dict[str, dict[str, object]] | None = None,
+) -> Model:
+    """Build a minimal Model carrying business-rule meta for the tests."""
+    columns: dict[str, Column] = {}
+    for name in ("amount", "order_id"):
+        meta = (column_meta or {}).get(name, {})
+        columns[name] = Column(name=name, data_type="STRING", meta=meta)
+    return Model(
+        unique_id="model.sf.fct",
+        name="fct",
+        resource_type="model",
+        package_name="sf",
+        original_file_path="models/fct.sql",
+        path="fct.sql",
+        raw_code="select 1",
+        config=Config(meta=model_meta or {}),
+        columns=columns,
+    )
+
+
+def test_read_business_rules_model_level_str() -> None:
+    model = _model_with_meta(
+        model_meta={"signalforge": {"business_rules": "every order has a customer"}}
+    )
+    rules = _read_business_rules(model)
+    assert rules == ["(model) every order has a customer"]
+
+
+def test_read_business_rules_column_level_list_sorted_by_column() -> None:
+    model = _model_with_meta(
+        column_meta={
+            "order_id": {"signalforge": {"business_rules": ["order_id is non-empty"]}},
+            "amount": {"signalforge": {"business_rules": ["amount > 0", "amount < 1e9"]}},
+        }
+    )
+    rules = _read_business_rules(model)
+    # amount sorts before order_id.
+    assert rules == [
+        "(column amount) amount > 0",
+        "(column amount) amount < 1e9",
+        "(column order_id) order_id is non-empty",
+    ]
+
+
+def test_read_business_rules_ignores_non_dict_signalforge_meta() -> None:
+    # A scalar/list under the signalforge key is config noise, not a container.
+    model = _model_with_meta(model_meta={"signalforge": "not a dict"})
+    assert _read_business_rules(model) == []
+    model2 = _model_with_meta(column_meta={"amount": {"signalforge": ["nope"]}})
+    assert _read_business_rules(model2) == []
+
+
+def test_read_business_rules_empty_when_absent() -> None:
+    assert _read_business_rules(_model_with_meta()) == []
+
+
+def test_business_rules_render_into_dynamic_block() -> None:
+    model = _model_with_meta(
+        model_meta={"signalforge": {"business_rules": "every order has a customer"}},
+        column_meta={"amount": {"signalforge": {"business_rules": "amount must be positive"}}},
+    )
+    request = _make_request()
+    dynamic = _render_dynamic_block(model, request)
+    assert "## BUSINESS RULES" in dynamic
+    assert "every order has a customer" in dynamic
+    assert "amount must be positive" in dynamic
+
+
+def test_no_business_rules_section_when_absent() -> None:
+    manifest = _load_fixture()
+    request = _make_request()
+    dynamic = _render_dynamic_block(_fct_orders(manifest), request)
+    assert "## BUSINESS RULES" not in dynamic
 
 
 def test_render_dynamic_block_rejects_closing_tag_in_raw_code() -> None:
