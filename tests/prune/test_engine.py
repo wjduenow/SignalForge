@@ -35,6 +35,7 @@ import pytest
 from signalforge.draft.models import (
     CandidateColumn,
     CandidateSchema,
+    CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
 )
@@ -50,6 +51,7 @@ from signalforge.prune.errors import (
 )
 from signalforge.warehouse.adapters.bigquery import BigQueryAdapter
 from signalforge.warehouse.errors import (
+    BytesBilledExceededError,
     MaterialisationFailedError,
     TableNotFoundError,
     UnknownTableSizeError,
@@ -2471,4 +2473,329 @@ def test_prune_tests_disabled_with_empty_candidates_returns_empty_result(
     assert result.dropped_count == 0
     # No candidates → no audit writes → no on-disk artefact.
     assert not audit_path.exists()
+    fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# custom_sql routing matrix (US-008 of #116)
+#
+# The prune ENGINE's routing is deliberately test-type-agnostic: it
+# dispatches on the compiler's return shape (`str` / `_InvalidIdentifier` /
+# `_RequiresFutureData`), the warehouse `failure_count`, and any raised
+# `WarehouseError`. These tests pin that `custom_sql` (the singular
+# business-rule variant added in #116) flows through the SAME decision
+# matrix as the four built-ins — no bespoke engine branch, the locked
+# 5-value `DropReason` literal unchanged.
+# ---------------------------------------------------------------------------
+
+
+def _candidates_with_one_custom_sql_test(
+    sql: str,
+    *,
+    column: str | None = None,
+) -> CandidateSchema:
+    """Build a CandidateSchema carrying a single model-level (or
+    column-scoped) ``custom_sql`` business-rule test.
+
+    Model-level (``column=None``) lands in :attr:`CandidateSchema.tests`;
+    a column-scoped test lands under the named column so the engine
+    iterates it with ``test_anchor=f"column.{column}"``.
+    """
+    if column is None:
+        return CandidateSchema(
+            name="orders",
+            description="Order events.",
+            columns=(),
+            tests=(CandidateTestCustomSQL(sql=sql),),
+        )
+    return CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name=column,
+                description="A column under a business-rule assertion.",
+                tests=(CandidateTestCustomSQL(sql=sql, column=column),),
+            ),
+        ),
+    )
+
+
+def test_prune_tests_custom_sql_always_passes_drops_test(tmp_path: Path) -> None:
+    """A ``custom_sql`` business-rule test that returns zero failing rows
+    is dropped with ``reason="always-passes"`` — signal-over-volume applies
+    to singular tests exactly as to the built-ins (no engine special-case).
+
+    The fake returns ``failures=0`` so the assertion is mathematically
+    guaranteed (testing-signal.md engineered determinism). The
+    ``{{ this }}`` ref resolves to the model's qualified table so a single
+    real SELECT is compiled and dispatched.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_custom_sql_test(
+        "SELECT * FROM {{ this }} WHERE status NOT IN ('open', 'closed')"
+    )
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 1
+    decision = result.decisions[0]
+    assert decision.test.type == "custom_sql"
+    assert decision.decision == "dropped"
+    assert decision.reason == "always-passes"
+    assert decision.failures == 0
+    assert decision.test_anchor == "model"
+    fake.assert_all_expectations_met()
+
+    audit_rows = _read_audit_lines(audit_path)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["reason"] == "always-passes"
+
+
+def test_prune_tests_custom_sql_kept_for_real_failure_untrusted_model(
+    tmp_path: Path,
+) -> None:
+    """A ``custom_sql`` test that returns failing rows on an untrusted
+    model is kept with ``reason="kept"`` — real signal, reviewer should
+    evaluate. Routes through the identical untrusted-failure arm of
+    ``_decide_from_test_result`` as the built-ins.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 4}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_custom_sql_test(
+        "SELECT * FROM {{ this }} WHERE customer_id IS NULL",
+        column="customer_id",
+    )
+    config = PruneConfig(scope="full", capture_failure_rows=0)  # untrusted by default
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "custom_sql"
+    assert decision.decision == "kept"
+    assert decision.reason == "kept"
+    assert decision.failures == 4
+    assert "4 failures" in decision.why
+    assert decision.test_anchor == "column.customer_id"
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_custom_sql_invalid_identifier_routes_to_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """A ``custom_sql`` test carrying unsupported Jinja (here ``var()``)
+    compiles to the ``_InvalidIdentifier`` sentinel and routes to
+    ``kept-without-evidence`` with the existing identifier-rejected
+    ``why`` — NO warehouse call is issued.
+
+    Confirms custom_sql flows through the SAME sentinel branch the
+    built-ins use for a malformed identifier (engine is test-type-agnostic).
+    Unsupported Jinja surfaces from the compiler as ``UnsupportedJinjaError``
+    (a ``TemplateResolutionError`` subclass), which ``_compile_custom_sql``
+    catches and converts to the sentinel.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Intentionally NO expect_query — the sentinel short-circuits before
+    # any warehouse dispatch; an unexpected query would fail the fake.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    # ``{{ var(...) }}`` is unsupported control-flow Jinja → the resolver
+    # raises UnsupportedJinjaError → _InvalidIdentifier sentinel.
+    candidates = _candidates_with_one_custom_sql_test(
+        "SELECT * FROM {{ this }} WHERE region = '{{ var('r') }}'"
+    )
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "custom_sql"
+    assert decision.decision == "kept"
+    assert decision.reason == "kept-without-evidence"
+    # The sentinel's `reason` surfaces verbatim as the decision `why`;
+    # for an unresolvable custom_sql it names the resolution failure.
+    assert "custom_sql" in decision.why.lower()
+    assert decision.compiled_sql == ""
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_custom_sql_warehouse_error_routes_to_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """A typed :class:`WarehouseError` raised while running a ``custom_sql``
+    query routes to ``kept-without-evidence`` via the existing per-test
+    error handler — conservative default keeps the test.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(
+        matching=r"SELECT COUNT\(\*\)",
+        returns=TableNotFoundError(table="fake_project.dataset.orders"),
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_custom_sql_test("SELECT * FROM {{ this }} WHERE amount < 0")
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "custom_sql"
+    assert decision.decision == "kept"
+    assert decision.reason == "kept-without-evidence"
+    assert "TableNotFoundError" in decision.why
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_custom_sql_over_byte_cap_full_scan_routes_to_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """A multi-table ``custom_sql`` business-rule test runs full-scan
+    (the compiler refuses to sample a JOIN — DEC-006); if that full scan
+    exceeds ``maximum_bytes_billed`` the adapter raises
+    :class:`BytesBilledExceededError` (a :class:`WarehouseError` subclass),
+    which the existing per-test handler routes to
+    ``kept-without-evidence``.
+
+    DEC-007 ``why`` decision: the GENERIC per-test handler ``why`` is used
+    (``"Test could not be evaluated: BytesBilledExceededError: ..."``). The
+    typed class name is already in the ``why`` so a reviewer can correlate
+    the byte-cap rejection without a bespoke locked string; adding a
+    distinct ``why`` would require special-casing one WarehouseError
+    subclass in the otherwise error-type-agnostic engine handler. The
+    locked 5-value DropReason literal stays unchanged either way.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(
+        matching=r"SELECT COUNT\(\*\)",
+        returns=BytesBilledExceededError(
+            job_id="job_abc", bytes_billed=5_000_000_000, limit=100_000_000
+        ),
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    # A JOIN survives literal-stripping → compiler classifies multi-table →
+    # full-scan SQL is compiled and dispatched (no sample CTE). The fake
+    # then simulates the over-cap rejection on that full scan.
+    candidates = _candidates_with_one_custom_sql_test(
+        "SELECT o.id FROM {{ this }} AS o "
+        "JOIN {{ this }} AS o2 ON o.customer_id = o2.customer_id "
+        "WHERE o.id <> o2.id"
+    )
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "custom_sql"
+    assert decision.decision == "kept"
+    assert decision.reason == "kept-without-evidence"
+    assert "BytesBilledExceededError" in decision.why
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_custom_sql_audit_invariant_one_event_per_candidate(
+    tmp_path: Path,
+) -> None:
+    """Fail-closed audit invariant holds for ``custom_sql``: exactly one
+    :class:`PruneEvent` row per custom_sql candidate, with no new audit
+    fields (the PruneEvent shape is unchanged by #116).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 2}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestCustomSQL(sql="SELECT * FROM {{ this }} WHERE amount < 0"),
+            CandidateTestCustomSQL(sql="SELECT * FROM {{ this }} WHERE status = ''"),
+        ),
+    )
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 2
+    audit_rows = _read_audit_lines(audit_path)
+    assert len(audit_rows) == 2
+    # Each row round-trips through the read-back PruneEvent unchanged —
+    # confirms the audit shape carries no custom_sql-specific field.
+    for row in audit_rows:
+        event = PruneEvent.model_validate(row)
+        assert event.model_unique_id == "model.shop.orders"
     fake.assert_all_expectations_met()
