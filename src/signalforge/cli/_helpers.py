@@ -71,6 +71,8 @@ from signalforge.diff import (
     DiffPruneResultModelMismatchError,
     DiffSidecarRecordTooLargeError,
     DiffSidecarWriteError,
+    DiffTestFileRecordTooLargeError,
+    DiffTestFileWriteError,
 )
 from signalforge.draft import (
     DraftConfigInvalidError,
@@ -406,6 +408,12 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     LLMResponseAuditRecordTooLargeError: 3,
     DiffSidecarWriteError: 3,
     DiffSidecarRecordTooLargeError: 3,
+    # Generated singular-test ``.sql`` writer (US-011 of #116). Both are
+    # write-path durability errors raised inside the fail-closed writer
+    # (mirrors the diff sidecar precedent above): write-durability and the
+    # pre-open size cap are tier 3 (external-dep / fail-closed write).
+    DiffTestFileWriteError: 3,
+    DiffTestFileRecordTooLargeError: 3,
     # Grade base catches forward-compat subclasses to 3 (every grade-layer
     # leaf has been individually tier-mapped above).
     GradeError: 3,
