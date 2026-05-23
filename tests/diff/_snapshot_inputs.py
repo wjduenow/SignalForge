@@ -56,7 +56,7 @@ from typing import TypedDict
 
 from signalforge.diff._renderers import AnsiRenderer, JsonRenderer, MarkdownRenderer
 from signalforge.diff.config import DiffConfig
-from signalforge.diff.models import DiffEntry, DiffReport
+from signalforge.diff.models import DiffEntry, DiffReport, ProposedTestFile
 
 # ---------------------------------------------------------------------------
 # Stable, deterministic constants for every fixture.
@@ -422,8 +422,61 @@ def _injection_payloads_report() -> DiffReport:
     )
 
 
+def _proposed_test_files_report() -> DiffReport:
+    """Case 11/12 — kept singular ``custom_sql`` tests as standalone files (#116).
+
+    Surfaces two :class:`ProposedTestFile` rows (a column-scoped and a
+    model-level business-rule test) so the ANSI + Markdown snapshots pin
+    the proposed-test-files rendering. The SQL bodies carry the
+    ``-- signalforge:generated <hash>`` header marker exactly as
+    :func:`signalforge.diff._emitter.emit_proposed_test_files` would emit.
+    """
+    entries = (
+        _kept_test(
+            artifact_id="test.column.total_amount.custom_sql",
+            test_type="custom_sql",
+            why="business rule: total_amount must be non-negative.",
+        ),
+    )
+    proposed_test_files = (
+        ProposedTestFile(
+            path="tests/dim_customers__total_amount_custom_sql_a1b2c3d4.sql",
+            sql=(
+                "-- signalforge:generated a1b2c3d4\n\n"
+                "select *\nfrom {{ ref('dim_customers') }}\nwhere total_amount < 0\n"
+            ),
+        ),
+        ProposedTestFile(
+            path="tests/dim_customers__custom_sql_deadbeef.sql",
+            sql=(
+                "-- signalforge:generated deadbeef\n\n"
+                "select count(*) as n\nfrom {{ ref('dim_customers') }}\nhaving n = 0\n"
+            ),
+        ),
+    )
+    return DiffReport(
+        signalforge_version=_PINNED_VERSION,
+        model_unique_id="model.shop.dim_customers",
+        run_id=_PINNED_RUN_ID,
+        duration_seconds=_PINNED_DURATION,
+        proposed_yaml=_PROPOSED_YAML,
+        existing_yaml=_EXISTING_YAML,
+        unified_diff=_UNIFIED_DIFF,
+        entries=entries,
+        proposed_test_files=proposed_test_files,
+        kept_count=1,
+        kept_uncertain_count=0,
+        dropped_count=0,
+        flagged_count=0,
+        has_existing_schema=True,
+        candidate_hash=_PINNED_CANDIDATE_HASH,
+        prune_result_hash=_PINNED_PRUNE_HASH,
+        grading_report_hash=_PINNED_GRADING_HASH,
+    )
+
+
 # ---------------------------------------------------------------------------
-# Recipe table — 10 cases per DEC-017.
+# Recipe table — 12 cases (10 from DEC-017 + 2 for #116 proposed test files).
 # ---------------------------------------------------------------------------
 
 
@@ -550,6 +603,25 @@ CASES: dict[str, tuple[_Builder, _Recipe]] = {
         {
             "surface": "markdown",
             "filename": "injection_payloads.md",
+            "markdown_project_dir": "<project_dir>",
+        },
+    ),
+    # 11. proposed_test_files.ansi — kept custom_sql standalone files (#116).
+    "proposed_test_files.ansi": (
+        _proposed_test_files_report,
+        {
+            "surface": "ansi",
+            "filename": "proposed_test_files.ansi",
+            "terminal_width": 120,
+            "force_color": True,
+        },
+    ),
+    # 12. proposed_test_files.md — markdown surface, same inputs (#116).
+    "proposed_test_files.md": (
+        _proposed_test_files_report,
+        {
+            "surface": "markdown",
+            "filename": "proposed_test_files.md",
             "markdown_project_dir": "<project_dir>",
         },
     ),

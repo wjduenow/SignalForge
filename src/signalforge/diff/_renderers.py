@@ -283,6 +283,14 @@ class AnsiRenderer(Renderer):
         chunks.append(self._render_table(report, narrow=narrow, emit_color=emit_color))
         chunks.append("")
         chunks.append(self._render_diff_section(report))
+        # Issue #116 — proposed standalone ``.sql`` test files (kept
+        # ``custom_sql`` business-rule tests). Only appended when the
+        # report carries any, so prune-only / schema-only renders stay
+        # byte-identical to the pre-#116 output.
+        test_files_section = self._render_test_files_section(report, emit_color=emit_color)
+        if test_files_section:
+            chunks.append("")
+            chunks.append(test_files_section)
         return "\n".join(chunks)
 
     # ------------------------------------------------------------------
@@ -488,6 +496,32 @@ class AnsiRenderer(Renderer):
         clean_lines = [strip_ansi_escapes(line) for line in body.splitlines()]
         return "\n".join(clean_lines)
 
+    def _render_test_files_section(self, report: DiffReport, *, emit_color: bool) -> str:
+        """Render the proposed standalone ``.sql`` test-file section (#116).
+
+        Empty string when ``report.proposed_test_files`` is empty so the
+        caller suppresses the section entirely. For each proposed file,
+        emits a ``+++ <path>`` new-file header line followed by the SQL
+        body with every line ANSI-stripped UNCONDITIONALLY (DEC-007) —
+        the SQL is LLM-authored / manifest-derived content. The renderer
+        does not colourise the SQL body (mirrors the unified-diff body).
+        """
+        if not report.proposed_test_files:
+            return ""
+        lines: list[str] = []
+        heading = self._color("proposed test files:", _BOLD, emit_color=emit_color)
+        lines.append(heading)
+        for proposed in report.proposed_test_files:
+            clean_path = strip_ansi_escapes(proposed.path)
+            # ``+++`` new-file header (mirrors the unified-diff +++ shape
+            # so the operator reads it as "this file would be created").
+            header = self._color(f"+++ {clean_path}", _GREEN, emit_color=emit_color)
+            lines.append("")
+            lines.append(header)
+            for sql_line in proposed.sql.splitlines():
+                lines.append(strip_ansi_escapes(sql_line))
+        return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # MarkdownRenderer — GitHub-flavored Markdown concrete (US-009).
@@ -611,6 +645,14 @@ class MarkdownRenderer(Renderer):
         if diff_block:
             chunks.append("")
             chunks.append(diff_block)
+
+        # Issue #116 — proposed standalone ``.sql`` test files. Only
+        # appended when present so non-custom_sql renders stay
+        # byte-identical to the pre-#116 output.
+        test_files_section = self._render_test_files_section(report)
+        if test_files_section:
+            chunks.append("")
+            chunks.append(test_files_section)
 
         return "\n".join(chunks)
 
@@ -905,6 +947,50 @@ class MarkdownRenderer(Renderer):
             f"... ({dropped_line_count} more lines truncated — "
             f"see {project_dir}/.signalforge/diff.json for full diff)"
         )
+
+    # ------------------------------------------------------------------
+    # Proposed test files section (#116).
+    # ------------------------------------------------------------------
+
+    def _render_test_files_section(self, report: DiffReport) -> str:
+        """Render the proposed standalone ``.sql`` test-file section (#116).
+
+        Empty string when ``report.proposed_test_files`` is empty (the
+        caller suppresses the leading blank line). Otherwise emits a
+        ``## Proposed test files`` heading followed, per file, by a
+        ``### \\`<path>\\``` inline-code sub-heading and a fenced
+        ``` ```sql ``` block carrying the SQL body verbatim.
+
+        The path is rendered inside an inline-code span. It is ALWAYS
+        slug-safe (``anchor_to_filename`` collapses every non-``[A-Za-z0-9]``
+        run to ``_``, leaving only ``[A-Za-z0-9_/.]``), so it carries no
+        backtick / pipe / markdown-structural character; it is still
+        ANSI-stripped per DEC-007 as defence-in-depth even though the
+        builder guarantees no escapes can be present.
+
+        The SQL body is **not** Markdown-escaped — the fence is the
+        defence (backticks / pipes inside a fenced block are inert),
+        identical to the unified-diff block's contract. The fence length
+        is sized dynamically (mirrors :meth:`_render_diff_block`) so a SQL
+        body containing a triple-backtick run cannot close the fence
+        early. The body is still ANSI-stripped line-by-line.
+        """
+        if not report.proposed_test_files:
+            return ""
+        lines: list[str] = ["## Proposed test files"]
+        for proposed in report.proposed_test_files:
+            clean_path = strip_ansi_escapes(proposed.path)
+            clean_sql = "\n".join(
+                strip_ansi_escapes(sql_line) for sql_line in proposed.sql.splitlines()
+            )
+            fence = "`" * max(3, _longest_backtick_run(clean_sql) + 1)
+            lines.append("")
+            lines.append(f"### `{clean_path}`")
+            lines.append("")
+            lines.append(f"{fence}sql")
+            lines.append(clean_sql)
+            lines.append(fence)
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

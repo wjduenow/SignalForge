@@ -39,6 +39,7 @@ _DOCUMENTED_PUBLIC = (
     # Result models + literal
     "DiffEntry",
     "DiffReport",
+    "ProposedTestFile",
     "Tier",
     # Errors (9)
     "DiffError",
@@ -94,6 +95,7 @@ def test_each_public_name_is_importable_via_from_signalforge_diff() -> None:
         DiffSidecarWriteError,
         DiffTestFileRecordTooLargeError,
         DiffTestFileWriteError,
+        ProposedTestFile,
         Tier,
         load_diff_config,
         render_diff,
@@ -110,6 +112,7 @@ def test_each_public_name_is_importable_via_from_signalforge_diff() -> None:
         "Renderer",
         "write_sidecar",
         "emit_proposed_yaml",
+        "emit_proposed_test_files",
         "artifact_id_for",
         "compute_args_hashes",
         "strip_ansi_escapes",

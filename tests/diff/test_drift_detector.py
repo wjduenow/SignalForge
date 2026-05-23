@@ -45,7 +45,7 @@ from typing import Literal
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from signalforge.diff.models import DiffEntry, DiffReport, Tier
+from signalforge.diff.models import DiffEntry, DiffReport, ProposedTestFile, Tier
 from signalforge.prune.models import DropReason
 
 _STRICT = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
@@ -82,18 +82,28 @@ class StrictDiffEntry(BaseModel):
     passed: bool | None = None
 
 
+class StrictProposedTestFile(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`ProposedTestFile` (#116)."""
+
+    model_config = _STRICT
+
+    path: str
+    sql: str
+
+
 class StrictDiffReport(BaseModel):
     """One-off ``extra="forbid"`` mirror of :class:`DiffReport`.
 
     Stamps every field type ``DiffReport`` declares with the same
-    typing — including the ``Literal[1]`` schema sentinels and the
-    nested ``StrictDiffEntry`` for the ``entries`` tuple.
+    typing — including the ``Literal[1]`` / ``Literal[3]`` schema
+    sentinels and the nested ``StrictDiffEntry`` /
+    ``StrictProposedTestFile`` tuples.
     """
 
     model_config = _STRICT
 
     schema_version: Literal[1] = 1
-    audit_schema_version: Literal[2] = 2
+    audit_schema_version: Literal[3] = 3
     signalforge_version: str
     model_unique_id: str
     run_id: str
@@ -102,6 +112,7 @@ class StrictDiffReport(BaseModel):
     existing_yaml: str | None
     unified_diff: str
     entries: tuple[StrictDiffEntry, ...]
+    proposed_test_files: tuple[StrictProposedTestFile, ...] = ()
     kept_count: int
     kept_uncertain_count: int
     dropped_count: int
@@ -195,6 +206,24 @@ def test_diff_entry_field_set_parity() -> None:
     assert not extra_in_strict, (
         f"StrictDiffEntry has fields absent from DiffEntry: "
         f"{extra_in_strict}. Remove from StrictDiffEntry or add to DiffEntry."
+    )
+
+
+def test_proposed_test_file_field_set_parity() -> None:
+    """:class:`StrictProposedTestFile` ``model_fields`` exactly match
+    :class:`ProposedTestFile` ``model_fields`` (#116).
+    """
+    strict_fields = set(StrictProposedTestFile.model_fields.keys())
+    prod_fields = set(ProposedTestFile.model_fields.keys())
+    missing_in_strict = prod_fields - strict_fields
+    extra_in_strict = strict_fields - prod_fields
+    assert not missing_in_strict, (
+        f"StrictProposedTestFile is missing fields present in ProposedTestFile: "
+        f"{missing_in_strict}. Update StrictProposedTestFile to match."
+    )
+    assert not extra_in_strict, (
+        f"StrictProposedTestFile has fields absent from ProposedTestFile: "
+        f"{extra_in_strict}. Remove from StrictProposedTestFile or add to ProposedTestFile."
     )
 
 

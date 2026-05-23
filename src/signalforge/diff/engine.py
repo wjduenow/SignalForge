@@ -67,7 +67,7 @@ from signalforge.diff._artifact_id import (
     _model_test_args_hash,
     artifact_id_for,
 )
-from signalforge.diff._emitter import emit_proposed_yaml
+from signalforge.diff._emitter import emit_proposed_test_files, emit_proposed_yaml
 from signalforge.diff._renderers import (
     AnsiRenderer,
     JsonRenderer,
@@ -935,8 +935,13 @@ def render_diff(
         # diffing an invalid YAML against the proposed.
         yaml.safe_load(existing_schema)
 
-    # 4. Build canonical proposed YAML.
+    # 4. Build canonical proposed YAML + standalone custom_sql proposals.
+    # The YAML emitter skips ``custom_sql`` (singular business-rule tests
+    # are NOT schema.yml blocks — DEC-002 of #116); the companion emitter
+    # surfaces each KEPT ``custom_sql`` test as a standalone ``.sql``
+    # proposal carried on ``DiffReport.proposed_test_files``.
     proposed_yaml = emit_proposed_yaml(candidate, prune_result)
+    proposed_test_files = emit_proposed_test_files(candidate, prune_result)
 
     # 5. Compute unified diff.
     existing_text = existing_schema if existing_schema is not None else ""
@@ -989,6 +994,7 @@ def render_diff(
         existing_yaml=existing_schema,
         unified_diff=unified_diff,
         entries=entries,
+        proposed_test_files=proposed_test_files,
         kept_count=kept_count,
         kept_uncertain_count=kept_uncertain_count,
         dropped_count=dropped_count,
@@ -1124,6 +1130,7 @@ def render_diff(
                 "kept_uncertain": kept_uncertain_count,
                 "dropped": dropped_count,
                 "flagged": flagged_count,
+                "proposed_test_files": len(proposed_test_files),
                 "has_existing_schema": has_existing_schema,
                 "duration_seconds": duration_seconds,
                 "candidate_hash": candidate_hash,

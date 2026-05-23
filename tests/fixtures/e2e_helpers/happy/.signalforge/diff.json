@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "audit_schema_version": 2,
+  "audit_schema_version": 3,
   "signalforge_version": "0.1.0.dev0",
   "model_unique_id": "model.sf_demo.fct_orders",
   "run_id": "0123456789abcdef0123456789abcdef",

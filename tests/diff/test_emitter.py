@@ -380,3 +380,155 @@ def test_emit_is_deterministic_across_calls() -> None:
     first = emit_proposed_yaml(candidate, result)
     second = emit_proposed_yaml(candidate, result)
     assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Singular custom_sql tests (issue #116) — standalone .sql files
+# ---------------------------------------------------------------------------
+
+from signalforge._common.artifact_id import model_test_args_hash  # noqa: E402
+from signalforge.diff._emitter import emit_proposed_test_files  # noqa: E402
+from signalforge.diff._test_file_writer import _GENERATED_MARKER_PREFIX  # noqa: E402
+from signalforge.draft.models import CandidateTestCustomSQL  # noqa: E402
+
+
+def test_custom_sql_is_skipped_from_schema_yml() -> None:
+    """A kept ``custom_sql`` test must NOT appear in the proposed schema.yml.
+
+    Singular business-rule tests are standalone ``.sql`` files (DEC-002 of
+    #116), not schema.yml blocks. The YAML emitter must skip them cleanly —
+    not crash (the pre-#116 ``_render_test`` raised on unknown types).
+    """
+    not_null = CandidateTestNotNull(column="id")
+    custom = CandidateTestCustomSQL(sql="select * from {{ this }} where x < 0", column="id")
+    candidate = CandidateSchema(
+        name="customers",
+        description="One row per customer.",
+        columns=(CandidateColumn(name="id", description="PK.", tests=(not_null, custom)),),
+    )
+    result = _result(
+        _decision(not_null),
+        _decision(custom, test_anchor="column.id"),
+    )
+
+    out = emit_proposed_yaml(candidate, result)
+    parsed = yaml.safe_load(out)
+    col = parsed["models"][0]["columns"][0]
+    # Only the not_null survives in the YAML; custom_sql is excluded.
+    assert col["tests"] == ["not_null"]
+
+
+def test_column_with_only_custom_sql_omits_tests_key() -> None:
+    """A column whose only kept test is ``custom_sql`` emits no ``tests:`` key."""
+    custom = CandidateTestCustomSQL(sql="select 1", column="id")
+    candidate = CandidateSchema(
+        name="customers",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK.", tests=(custom,)),),
+    )
+    result = _result(_decision(custom, test_anchor="column.id"))
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    col = parsed["models"][0]["columns"][0]
+    assert "tests" not in col
+
+
+def test_model_level_custom_sql_skipped_from_schema_yml() -> None:
+    """A model-level ``custom_sql`` test does not produce a model ``tests:`` key."""
+    custom = CandidateTestCustomSQL(sql="select 1", column=None)
+    candidate = CandidateSchema(
+        name="customers",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK."),),
+        tests=(custom,),
+    )
+    result = _result(_decision(custom, test_anchor="model"))
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    assert "tests" not in parsed["models"][0]
+
+
+def test_emit_proposed_test_files_column_scoped() -> None:
+    """A kept column-scoped ``custom_sql`` test yields one proposed ``.sql`` file."""
+    sql = "select * from {{ ref('customers') }} where total < 0"
+    custom = CandidateTestCustomSQL(sql=sql, column="total")
+    candidate = CandidateSchema(
+        name="customers",
+        description="d",
+        columns=(CandidateColumn(name="total", description="amount.", tests=(custom,)),),
+    )
+    result = _result(_decision(custom, test_anchor="column.total"))
+
+    files = emit_proposed_test_files(candidate, result)
+    assert len(files) == 1
+    proposed = files[0]
+    expected_hash = model_test_args_hash(custom)
+    # Path is the safe relative tests/<model>__<descriptor>_<hash>.sql shape.
+    assert proposed.path == f"tests/customers__total_custom_sql_{expected_hash}.sql"
+    # SQL carries the generated-header marker + the original SQL body.
+    assert proposed.sql.startswith(f"{_GENERATED_MARKER_PREFIX} {expected_hash}\n")
+    assert sql in proposed.sql
+
+
+def test_emit_proposed_test_files_model_level() -> None:
+    """A kept model-level ``custom_sql`` test yields a ``custom_sql`` descriptor file."""
+    custom = CandidateTestCustomSQL(sql="select 1 where false", column=None)
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK."),),
+        tests=(custom,),
+    )
+    result = _result(_decision(custom, test_anchor="model"))
+
+    files = emit_proposed_test_files(candidate, result)
+    assert len(files) == 1
+    expected_hash = model_test_args_hash(custom)
+    assert files[0].path == f"tests/orders__custom_sql_{expected_hash}.sql"
+
+
+def test_emit_proposed_test_files_excludes_dropped_custom_sql() -> None:
+    """A DROPPED ``custom_sql`` test produces no proposed ``.sql`` file."""
+    custom = CandidateTestCustomSQL(sql="select 1", column="id")
+    candidate = CandidateSchema(
+        name="customers",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK.", tests=(custom,)),),
+    )
+    result = _result(
+        _decision(custom, decision="dropped", reason="always-passes", test_anchor="column.id")
+    )
+
+    assert emit_proposed_test_files(candidate, result) == ()
+
+
+def test_emit_proposed_test_files_ignores_non_custom_sql() -> None:
+    """Standard schema tests never produce proposed ``.sql`` files."""
+    not_null = CandidateTestNotNull(column="id")
+    candidate = CandidateSchema(
+        name="customers",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK.", tests=(not_null,)),),
+    )
+    result = _result(_decision(not_null))
+    assert emit_proposed_test_files(candidate, result) == ()
+
+
+def test_emit_proposed_test_files_path_is_slug_safe_for_hostile_model_name() -> None:
+    """A crafted model name cannot inject a path separator / traversal token."""
+    custom = CandidateTestCustomSQL(sql="select 1", column=None)
+    candidate = CandidateSchema(
+        name="../../etc/passwd",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK."),),
+        tests=(custom,),
+    )
+    result = _result(_decision(custom, test_anchor="model"))
+
+    files = emit_proposed_test_files(candidate, result)
+    assert len(files) == 1
+    path = files[0].path
+    assert path.startswith("tests/")
+    # No traversal token, no extra separator below tests/.
+    assert ".." not in path
+    assert path.count("/") == 1
