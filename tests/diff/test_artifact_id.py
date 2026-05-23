@@ -35,6 +35,7 @@ from signalforge.draft.models import (
     CandidateColumn,
     CandidateSchema,
     CandidateTestAcceptedValues,
+    CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
     CandidateTestUnique,
@@ -227,6 +228,113 @@ def test_model_and_column_scope_do_not_collide() -> None:
     hashes = compute_args_hashes(candidate)
     assert hashes[id(nn_col)] is None
     assert hashes[id(nn_model)] is None
+
+
+# ---------------------------------------------------------------------------
+# custom_sql variant (US-009) — args-hash domain + dotted-path shapes
+# ---------------------------------------------------------------------------
+
+
+def test_custom_sql_distinct_sql_distinct_hash() -> None:
+    """Two ``custom_sql`` tests with different SQL hash differently."""
+    cs1 = CandidateTestCustomSQL(sql="SELECT 1 WHERE a > 0", column="a")
+    cs2 = CandidateTestCustomSQL(sql="SELECT 1 WHERE a < 0", column="a")
+    h1 = _model_test_args_hash(cs1)
+    h2 = _model_test_args_hash(cs2)
+    assert h1 != h2
+    assert len(h1) == 8
+    assert all(c in "0123456789abcdef" for c in h1)
+
+
+def test_custom_sql_identical_sql_same_hash() -> None:
+    """Two ``custom_sql`` tests with identical SQL + column collide
+    deterministically (same blake2b-4 hash)."""
+    cs1 = CandidateTestCustomSQL(sql="SELECT 1 WHERE total < 0", column="total")
+    cs2 = CandidateTestCustomSQL(sql="SELECT 1 WHERE total < 0", column="total")
+    assert _model_test_args_hash(cs1) == _model_test_args_hash(cs2)
+
+
+def test_custom_sql_column_distinguishes_hash() -> None:
+    """A column-scoped and a model-level ``custom_sql`` with the same SQL
+    hash apart because ``column`` (``None`` vs a string) is in the
+    hash domain."""
+    cs_col = CandidateTestCustomSQL(sql="SELECT 1 WHERE x", column="x")
+    cs_model = CandidateTestCustomSQL(sql="SELECT 1 WHERE x", column=None)
+    assert _model_test_args_hash(cs_col) != _model_test_args_hash(cs_model)
+
+
+def test_custom_sql_shape_column_scope() -> None:
+    """``test.column.<col>.custom_sql`` shape (column-scoped)."""
+    cs = CandidateTestCustomSQL(sql="SELECT 1 WHERE x < 0", column="x")
+    assert artifact_id_for(scope="column", column_name="x", test=cs) == "test.column.x.custom_sql"
+
+
+def test_custom_sql_shape_model_level() -> None:
+    """``test.model.custom_sql`` shape (model-level, column=None)."""
+    cs = CandidateTestCustomSQL(sql="SELECT 1 WHERE total != net + tax", column=None)
+    assert artifact_id_for(scope="model", test=cs) == "test.model.custom_sql"
+
+
+def test_custom_sql_shape_with_args_hash() -> None:
+    """``test.column.<col>.custom_sql.<args_hash>`` (5-part) on collision."""
+    cs = CandidateTestCustomSQL(sql="SELECT 1 WHERE x < 0", column="x")
+    assert (
+        artifact_id_for(scope="column", column_name="x", test=cs, args_hash="abcd1234")
+        == "test.column.x.custom_sql.abcd1234"
+    )
+
+
+def test_custom_sql_collision_distinct_suffixes() -> None:
+    """Two column-scoped ``custom_sql`` tests with different SQL collide on
+    ``test.type`` and get distinct hash suffixes via
+    :func:`compute_args_hashes`."""
+    cs1 = CandidateTestCustomSQL(sql="SELECT 1 WHERE x < 0", column="x")
+    cs2 = CandidateTestCustomSQL(sql="SELECT 1 WHERE x > 100", column="x")
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(CandidateColumn(name="x", description="x", tests=(cs1, cs2)),),
+        tests=(),
+    )
+    hashes = compute_args_hashes(candidate)
+    assert hashes[id(cs1)] is not None
+    assert hashes[id(cs2)] is not None
+    assert hashes[id(cs1)] != hashes[id(cs2)]
+
+
+def test_custom_sql_exact_duplicate_gets_ordinal_suffix() -> None:
+    """Two model-level ``custom_sql`` tests with identical SQL get the
+    same base hash; the second occurrence gets a ``:1`` ordinal suffix."""
+    cs1 = CandidateTestCustomSQL(sql="SELECT 1 WHERE bad", column=None)
+    cs2 = CandidateTestCustomSQL(sql="SELECT 1 WHERE bad", column=None)
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(CandidateColumn(name="x", description="x"),),
+        tests=(cs1, cs2),
+    )
+    hashes = compute_args_hashes(candidate)
+    h1 = hashes[id(cs1)]
+    h2 = hashes[id(cs2)]
+    assert h1 is not None
+    assert h2 is not None
+    assert ":" not in h1
+    assert h2 == f"{h1}:1"
+
+
+def test_custom_sql_cross_stage_parity() -> None:
+    """The grade engine's hash + formatter agree byte-for-byte on the
+    ``custom_sql`` variant (defence-in-depth alongside the identity test)."""
+    cs_col = CandidateTestCustomSQL(sql="SELECT 1 WHERE x < 0", column="x")
+    cs_model = CandidateTestCustomSQL(sql="SELECT 1 WHERE total != net", column=None)
+    assert _model_test_args_hash(cs_col) == _grade_model_test_args_hash(cs_col)
+    assert _model_test_args_hash(cs_model) == _grade_model_test_args_hash(cs_model)
+    assert artifact_id_for(scope="column", column_name="x", test=cs_col) == (
+        _grade_artifact_id_for(scope="column", column_name="x", test=cs_col)
+    )
+    assert artifact_id_for(scope="model", test=cs_model) == (
+        _grade_artifact_id_for(scope="model", test=cs_model)
+    )
 
 
 # ---------------------------------------------------------------------------
