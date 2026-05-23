@@ -16,23 +16,29 @@ top-level namespace.
 """
 
 from signalforge.manifest.errors import (
+    AmbiguousRefError,
     ManifestError,
     ManifestNotFoundError,
     ModelDisabledError,
     ModelMissingSqlError,
     ModelNotFoundError,
     ModelPathOutsideProjectError,
+    RefNotFoundError,
     SelectorParseError,
+    SourceNotFoundError,
     UnsupportedManifestVersionError,
 )
-from signalforge.manifest.loader import load
-from signalforge.manifest.models import Manifest, Model
+from signalforge.manifest.loader import load, resolve_ref, resolve_source
+from signalforge.manifest.models import Manifest, Model, Source
 from signalforge.manifest.select import SelectorAtom, parse_selector, select_models
 
 __all__ = [
     "load",
     "Manifest",
     "Model",
+    "Source",
+    "resolve_ref",
+    "resolve_source",
     "ManifestError",
     "ManifestNotFoundError",
     "UnsupportedManifestVersionError",
@@ -40,6 +46,9 @@ __all__ = [
     "ModelDisabledError",
     "ModelPathOutsideProjectError",
     "ModelMissingSqlError",
+    "RefNotFoundError",
+    "AmbiguousRefError",
+    "SourceNotFoundError",
     "SelectorParseError",
     "SelectorAtom",
     "parse_selector",

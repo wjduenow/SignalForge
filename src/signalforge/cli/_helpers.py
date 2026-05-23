@@ -115,6 +115,7 @@ from signalforge.llm import (
     LLMServerError,
 )
 from signalforge.manifest import (
+    AmbiguousRefError,
     Manifest,
     ManifestError,
     ManifestNotFoundError,
@@ -123,7 +124,9 @@ from signalforge.manifest import (
     ModelMissingSqlError,
     ModelNotFoundError,
     ModelPathOutsideProjectError,
+    RefNotFoundError,
     SelectorParseError,
+    SourceNotFoundError,
     UnsupportedManifestVersionError,
 )
 from signalforge.prune import (
@@ -280,6 +283,12 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # is disabled — caller's fault, not load).
     ModelNotFoundError: 2,
     ModelDisabledError: 2,
+    # Jinja-ref relation resolution (the SQL named a ref/source the manifest
+    # doesn't know, or an ambiguous ref — operator-supplied input that the
+    # warehouse can't act on; #116 DEC-005).
+    RefNotFoundError: 2,
+    AmbiguousRefError: 2,
+    SourceNotFoundError: 2,
     # Selector grammar (--select expression syntactically invalid; #37
     # DEC-007: tier 2 because the operator supplied a malformed input).
     SelectorParseError: 2,

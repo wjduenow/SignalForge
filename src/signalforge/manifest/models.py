@@ -26,9 +26,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+if TYPE_CHECKING:
+    from signalforge.warehouse.models import TableRef
 
 _BASE_MODEL_CONFIG = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
@@ -48,6 +51,41 @@ class Ref(BaseModel):
     # ``version`` is ``int`` in some manifests and ``str`` in others, depending
     # on how the ref was written in the model SQL.
     version: int | str | None = None
+
+
+class Source(BaseModel):
+    """A dbt ``source`` table from ``manifest.sources`` (DEC-005 of #116).
+
+    dbt records sources as ``database.schema.identifier`` relations keyed by
+    ``unique_id`` (``source.<pkg>.<source_name>.<table_name>``). A model
+    references one via ``{{ source('<source_name>', '<table_name>') }}`` and
+    the manifest mirrors that pair into ``Model.sources`` as
+    ``[source_name, table_name]``. The resolvable relation is built from
+    ``database`` (BigQuery project), ``schema_`` (dataset), and ``identifier``
+    (the physical table name — falls back to ``name`` when dbt omits it).
+
+    Surfaced so :func:`signalforge.manifest.loader.resolve_source` can map a
+    ``source(s, t)`` Jinja call to a qualified-name ``TableRef`` without a
+    Jinja engine.
+    """
+
+    model_config = _BASE_MODEL_CONFIG
+
+    unique_id: str
+    source_name: str
+    name: str
+    resource_type: str
+    database: str | None = None
+    # ``schema`` collides with ``BaseModel.schema``; store as ``schema_`` and
+    # alias to dbt's on-disk key (mirrors ``Model.schema_``).
+    schema_: str | None = Field(default=None, alias="schema")
+    # dbt sometimes omits ``identifier`` (defaults to the source-table name).
+    identifier: str | None = None
+
+    @property
+    def relation_name(self) -> str | None:
+        """The physical table name: ``identifier`` if set, else ``name``."""
+        return self.identifier or self.name
 
 
 class Column(BaseModel):
@@ -153,6 +191,19 @@ class Model(BaseModel):
         """Ergonomic accessor: the values of ``columns`` in insertion order."""
         return list(self.columns.values())
 
+    def resolve_this(self) -> TableRef:
+        """Resolve the dbt ``{{ this }}`` reference to this model's ``TableRef``.
+
+        Thin alias for :meth:`signalforge.warehouse.models.TableRef.from_model`
+        (DEC-005 of #116) so a Jinja-ref resolver can map ``{{ this }}`` without
+        reaching across layers. Raises the warehouse-layer
+        ``ManifestProjectNotFoundError`` / ``ManifestSchemaNotFoundError`` when
+        ``database`` / ``schema_`` is absent.
+        """
+        from signalforge.warehouse.models import TableRef
+
+        return TableRef.from_model(self)
+
 
 class Manifest(BaseModel):
     """Top-level manifest document.
@@ -176,6 +227,10 @@ class Manifest(BaseModel):
     metadata: dict[str, Any]
     nodes: dict[str, Model] = Field(default_factory=dict)
     disabled: dict[str, list[Model]] = Field(default_factory=dict)
+    # dbt's parallel ``sources`` registry, keyed by source unique_id. The
+    # loader filters ``resource_type == "source"`` before construction (DEC-005
+    # of #116). Empty dict for projects with no declared sources.
+    sources: dict[str, Source] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Thin method wrappers — delegate to free functions in ``loader.py``.
@@ -197,6 +252,35 @@ class Manifest(BaseModel):
         from signalforge.manifest.loader import iter_models as _iter
 
         return _iter(self)
+
+    def resolve_ref(
+        self,
+        name: str,
+        *,
+        package: str | None = None,
+        version: int | str | None = None,
+    ) -> TableRef:
+        """Resolve a dbt ``ref(name)`` to a qualified-name ``TableRef``.
+
+        Delegates to :func:`signalforge.manifest.loader.resolve_ref`. Raises
+        :class:`RefNotFoundError` (no enabled model named ``name``) or
+        :class:`AmbiguousRefError` (multiple matches; disambiguate with
+        ``package``).
+        """
+        from signalforge.manifest.loader import resolve_ref as _resolve
+
+        return _resolve(self, name, package=package, version=version)
+
+    def resolve_source(self, source_name: str, table_name: str) -> TableRef:
+        """Resolve a dbt ``source(source_name, table_name)`` to a ``TableRef``.
+
+        Delegates to :func:`signalforge.manifest.loader.resolve_source`. Raises
+        :class:`SourceNotFoundError` when the ``(source_name, table_name)`` pair
+        is absent from the manifest's source registry.
+        """
+        from signalforge.manifest.loader import resolve_source as _resolve
+
+        return _resolve(self, source_name, table_name)
 
     @property
     def schema_version(self) -> str:
