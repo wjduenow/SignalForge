@@ -130,19 +130,48 @@ class CandidateTestRelationships(BaseModel):
         return v
 
 
+class CandidateTestCustomSQL(BaseModel):
+    """A custom singular SQL test (DEC-002).
+
+    Carries the raw singular-test SQL the LLM authored. Per dbt's
+    singular-test convention, the SQL returns the *failing* rows: a test
+    passes when the query returns zero rows. ``column`` is optional —
+    ``None`` marks a model-level business-rule assertion; a non-empty
+    string scopes the test to one column. Distinct from the four standard
+    schema-test variants, which compile to known dbt generic tests; this
+    variant is a free-form escape hatch for business rules that the
+    generic catalogue cannot express.
+    """
+
+    model_config = _BASE_CONFIG
+
+    type: Literal["custom_sql"] = "custom_sql"
+    sql: str
+    column: str | None = None
+    rationale: str | None = None
+
+    @field_validator("sql")
+    @classmethod
+    def _sql_non_empty(cls, v: str) -> str:
+        if not v:
+            raise ValueError("CandidateTestCustomSQL.sql must be non-empty")
+        return v
+
+
 CandidateTest = Annotated[
     CandidateTestNotNull
     | CandidateTestUnique
     | CandidateTestAcceptedValues
-    | CandidateTestRelationships,
+    | CandidateTestRelationships
+    | CandidateTestCustomSQL,
     Field(discriminator="type"),
 ]
-"""Discriminated union over the four test variants (DEC-003).
+"""Discriminated union over the five test variants (DEC-003 / DEC-002).
 
 The discriminator field is ``type``; its value space is the closed
-:class:`Literal` union of the four variant strings. Unknown ``type``
+:class:`Literal` union of the five variant strings. Unknown ``type``
 values raise :class:`pydantic.ValidationError` at construction — adding
-a fifth test variant requires extending this union and the
+a sixth test variant requires extending this union and the
 ``Literal`` on each variant class. The drift detector (US-014) catches
 the case where a fixture grows a new test type without the model.
 """
@@ -204,6 +233,7 @@ __all__ = (
     "CandidateSchema",
     "CandidateTest",
     "CandidateTestAcceptedValues",
+    "CandidateTestCustomSQL",
     "CandidateTestNotNull",
     "CandidateTestRelationships",
     "CandidateTestUnique",

@@ -59,11 +59,20 @@ class StrictCandidateTestRelationships(BaseModel):
     rationale: str | None = None
 
 
+class StrictCandidateTestCustomSQL(BaseModel):
+    model_config = _STRICT_BASE
+    type: Literal["custom_sql"] = "custom_sql"
+    sql: str
+    column: str | None = None
+    rationale: str | None = None
+
+
 _StrictCandidateTest = Annotated[
     StrictCandidateTestNotNull
     | StrictCandidateTestUnique
     | StrictCandidateTestAcceptedValues
-    | StrictCandidateTestRelationships,
+    | StrictCandidateTestRelationships
+    | StrictCandidateTestCustomSQL,
     Field(discriminator="type"),
 ]
 

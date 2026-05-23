@@ -584,16 +584,22 @@ def _compile_test(
             sample_bucket=sample_bucket,
             partition_filter=partition_filter,
         )
-    # Only CandidateTestRelationships remains in the discriminated union.
-    return _compile_relationships(
-        test,
-        table_ref,
-        quote_char,
-        manifest,
-        scope=scope,
-        sample_size=sample_size,
-        sample_bucket=sample_bucket,
-        partition_filter=partition_filter,
+    if isinstance(test, CandidateTestRelationships):
+        return _compile_relationships(
+            test,
+            table_ref,
+            quote_char,
+            manifest,
+            scope=scope,
+            sample_size=sample_size,
+            sample_bucket=sample_bucket,
+            partition_filter=partition_filter,
+        )
+    # CandidateTestCustomSQL compilation is a separate ticket; for now the
+    # custom-SQL variant is not compilable by this engine. The orchestrator
+    # routes such tests to "kept-without-evidence" rather than reaching here.
+    raise NotImplementedError(
+        "CandidateTestCustomSQL compilation is not yet supported by the prune engine"
     )
 
 
