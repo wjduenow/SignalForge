@@ -1545,3 +1545,57 @@ def test_generate_no_info_when_prune_enabled_default(
         f"expected no prune-disabled INFO when enabled=True, got "
         f"{[rec.getMessage() for rec in matching]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# _split_marked_sql / _existing_file_is_signalforge_generated — unit-level
+# (US-012 of #116 — DEC-010)
+# ---------------------------------------------------------------------------
+
+
+def test_split_marked_sql_no_marker_returns_empty_hash_and_original() -> None:
+    """A payload without the generated-header marker is treated as the whole
+    body with an empty hash (forward-compat fallback — generate.py line 457)."""
+    from signalforge.cli.generate import _split_marked_sql
+
+    unmarked = "select * from {{ this }} where x < 0"
+    args_hash, body = _split_marked_sql(unmarked)
+    assert args_hash == ""
+    assert body == unmarked
+
+
+def test_split_marked_sql_recovers_hash_and_body_from_marked() -> None:
+    """A marked payload yields the embedded hash and the bare body (the
+    happy path that line 457's fallback complements)."""
+    from signalforge.cli.generate import _split_marked_sql
+    from signalforge.diff._test_file_writer import _GENERATED_MARKER_PREFIX
+
+    marked = f"{_GENERATED_MARKER_PREFIX} deadbeef\n\nselect 1 from t\n"
+    args_hash, body = _split_marked_sql(marked)
+    assert args_hash == "deadbeef"
+    assert body == "select 1 from t\n"
+
+
+def test_existing_file_is_signalforge_generated_unreadable_returns_false(
+    tmp_path: Path,
+) -> None:
+    """A path that cannot be read (here: a directory, which raises
+    ``IsADirectoryError`` — an ``OSError`` subclass) is conservatively treated
+    as NOT ours, so the write path refuses to clobber it (generate.py 482-483)."""
+    from signalforge.cli.generate import _existing_file_is_signalforge_generated
+
+    a_dir = tmp_path / "a_directory.sql"
+    a_dir.mkdir()
+    assert _existing_file_is_signalforge_generated(a_dir) is False
+
+
+def test_existing_file_is_signalforge_generated_marked_returns_true(
+    tmp_path: Path,
+) -> None:
+    """A readable file beginning with our marker is recognised as ours."""
+    from signalforge.cli.generate import _existing_file_is_signalforge_generated
+    from signalforge.diff._test_file_writer import _GENERATED_MARKER_PREFIX
+
+    f = tmp_path / "marked.sql"
+    f.write_text(f"{_GENERATED_MARKER_PREFIX} abc\n\nselect 1\n", encoding="utf-8")
+    assert _existing_file_is_signalforge_generated(f) is True

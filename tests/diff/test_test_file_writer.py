@@ -17,6 +17,7 @@ import ast
 import os
 import stat
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -284,6 +285,23 @@ def test_write_test_file_rejects_relative_path_escape(tmp_path: Path) -> None:
             args_hash="h",
             project_dir=project,
         )
+
+
+# ---------------------------------------------------------------------------
+# write_test_file — short-write loop guard (mirrors sidecar)
+# ---------------------------------------------------------------------------
+
+
+def test_write_test_file_short_write_zero_bytes_raises(tmp_path: Path) -> None:
+    """A zero-byte return from ``os.write`` indicates an unrecoverable I/O
+    failure (disk full, etc.) — the writer raises ``OSError`` rather than
+    spinning forever. Mirrors ``tests/diff/test_sidecar.py``."""
+    rel = anchor_to_filename(model_name="m", descriptor="d", args_hash="h")
+    with (
+        patch("signalforge.diff._test_file_writer.os.write", return_value=0),
+        pytest.raises(OSError, match="os.write returned 0"),
+    ):
+        write_test_file("SELECT 1", relative_path=rel, args_hash="h", project_dir=tmp_path)
 
 
 # ---------------------------------------------------------------------------

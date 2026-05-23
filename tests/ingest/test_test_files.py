@@ -23,6 +23,7 @@ from signalforge.draft.models import CandidateSchema, CandidateTestCustomSQL
 from signalforge.ingest import (
     IngestResult,
     IngestSchemaNotFoundError,
+    IngestSchemaParseError,
     IngestSchemaTooLargeError,
     SkippedTest,
     read_test_files,
@@ -272,6 +273,76 @@ def test_read_test_files_missing_dir_raises_not_found(tmp_path: Path) -> None:
     missing = tmp_path / "no_such_dir"
     with pytest.raises(IngestSchemaNotFoundError):
         read_test_files(missing, _orders(manifest), manifest, project_dir=tmp_path)
+
+
+def test_read_test_files_tests_dir_outside_project_raises_parse_error(tmp_path: Path) -> None:
+    # A tests_dir that escapes the symlink-hardened containment of project_dir
+    # re-raises PathContainmentError as IngestSchemaParseError (reader 375-376).
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    outside = tmp_path / "outside_tests"
+    outside.mkdir()
+    manifest = _manifest()
+    with pytest.raises(IngestSchemaParseError) as excinfo:
+        read_test_files(outside, _orders(manifest), manifest, project_dir=project_dir)
+    assert "canonicalisation" in str(excinfo.value)
+
+
+def test_read_test_files_skips_directory_named_dot_sql(tmp_path: Path) -> None:
+    # A directory whose name ends in ``.sql`` is matched by the glob but is not
+    # a file — the ``not is_file()`` continue skips it (reader line 396).
+    manifest = _manifest()
+    (tmp_path / "a_dir.sql").mkdir()
+    _write(tmp_path, "real.sql", "select * from {{ ref('orders') }} where amount <= 0\n")
+    result = read_test_files(tmp_path, _orders(manifest), manifest, project_dir=tmp_path)
+    custom = [t for t in result.candidate.tests if isinstance(t, CandidateTestCustomSQL)]
+    assert len(custom) == 1
+    assert "amount <= 0" in custom[0].sql
+
+
+def test_read_test_files_stat_oserror_raises_parse_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An OSError from ``stat()`` (metadata read) wraps as IngestSchemaParseError
+    # (reader 432-433).
+    manifest = _manifest()
+    _write(tmp_path, "real.sql", "select * from {{ ref('orders') }} where amount <= 0\n")
+
+    real_stat = Path.stat
+
+    def _boom(self: Path, *args: object, **kwargs: object) -> object:
+        # ``is_file()`` calls ``stat(follow_symlinks=...)``; the size check in
+        # ``_read_sql_file`` calls a bare ``stat()``. Only blow up on the bare
+        # call so the glob-and-is_file pre-step still works.
+        if self.name == "real.sql" and "follow_symlinks" not in kwargs:
+            raise OSError("stat blew up")
+        return real_stat(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "stat", _boom)
+    with pytest.raises(IngestSchemaParseError) as excinfo:
+        read_test_files(tmp_path, _orders(manifest), manifest, project_dir=tmp_path)
+    assert "metadata could not be read" in str(excinfo.value)
+
+
+def test_read_test_files_read_oserror_raises_parse_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An OSError from ``read_text()`` (after the size check passes) wraps as
+    # IngestSchemaParseError (reader 441-442).
+    manifest = _manifest()
+    _write(tmp_path, "real.sql", "select * from {{ ref('orders') }} where amount <= 0\n")
+
+    real_read_text = Path.read_text
+
+    def _boom(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "real.sql":
+            raise OSError("read blew up")
+        return real_read_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    with pytest.raises(IngestSchemaParseError) as excinfo:
+        read_test_files(tmp_path, _orders(manifest), manifest, project_dir=tmp_path)
+    assert "could not be read" in str(excinfo.value)
 
 
 def test_read_test_files_deterministic_sorted_order(tmp_path: Path) -> None:

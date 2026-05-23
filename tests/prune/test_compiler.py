@@ -779,6 +779,51 @@ def test_compile_custom_sql_full_scan_with_partition_filter_wraps_own_table() ->
     assert "fake_project.dataset.customers as c" in actual
 
 
+def test_compile_custom_sql_single_table_full_with_partition_filter_wraps_own_table() -> None:
+    """Single-table custom_sql, scope=full, with a partition_filter: the
+    model's own table is wrapped in a partition-filtered derived table
+    (uniform with the built-ins). ``table_ref`` IS the model's own table
+    (oneshot / full-strategy path), so no temp-table substitution happens —
+    only the partition-filter derived-table wrap (compiler.py lines 718-722)."""
+    test = CandidateTestCustomSQL(sql="select order_id from {{ this }} where total < 0")
+    pf = PartitionFilter(column="event_dt", op=">=", value="2026-01-01")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="full",
+        partition_filter=pf,
+    )
+    assert isinstance(actual, str)
+    # The model's own table is replaced with a partition-filtered subquery.
+    assert "(SELECT * FROM fake_project.dataset.orders WHERE `event_dt` >= '2026-01-01')" in actual
+    # The original bare reference is gone; the predicate body survives.
+    assert "where total < 0" in actual
+    # No sample CTE — scope is full, not sample.
+    assert "WITH sample" not in actual
+
+
+def test_compile_custom_sql_sample_missing_sample_args_raises() -> None:
+    """``scope='sample'`` for a single-table custom_sql requires both
+    ``sample_size`` and ``sample_bucket`` — the orchestrator computes these
+    before calling. Absent them, the compiler raises ``ValueError`` rather
+    than silently full-scanning (compiler.py line 682)."""
+    test = CandidateTestCustomSQL(sql="select order_id from {{ this }} where total < 0")
+    with pytest.raises(ValueError, match="requires both sample_size and sample_bucket"):
+        _compile_test(
+            test,
+            _make_orders_table_ref(),
+            BIGQUERY_DIALECT,
+            _make_manifest(),
+            model=_make_orders_model(),
+            scope="sample",
+            sample_size=None,
+            sample_bucket=None,
+        )
+
+
 def test_compile_custom_sql_unsupported_jinja_returns_sentinel() -> None:
     """Control-flow Jinja (``{% if %}``) the bounded resolver can't evaluate
     routes to ``_InvalidIdentifier`` (conservative-bias: kept-without-evidence),

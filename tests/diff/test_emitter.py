@@ -514,6 +514,27 @@ def test_emit_proposed_test_files_ignores_non_custom_sql() -> None:
     assert emit_proposed_test_files(candidate, result) == ()
 
 
+def test_emit_proposed_test_files_dedupes_same_path() -> None:
+    """Two kept decisions resolving to the same ``.sql`` path collapse to one
+    proposal — the dedupe ``continue`` in ``emit_proposed_test_files`` skips
+    the second (defensive: identical SQL + anchor → identical filename)."""
+    custom = CandidateTestCustomSQL(sql="select 1 where false", column="id")
+    candidate = CandidateSchema(
+        name="customers",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK.", tests=(custom,)),),
+    )
+    # Two decisions for the SAME test → same args_hash → same path.
+    result = _result(
+        _decision(custom, test_anchor="column.id"),
+        _decision(custom, test_anchor="column.id"),
+    )
+    files = emit_proposed_test_files(candidate, result)
+    assert len(files) == 1
+    expected_hash = model_test_args_hash(custom)
+    assert files[0].path == f"tests/customers__id_custom_sql_{expected_hash}.sql"
+
+
 def test_emit_proposed_test_files_path_is_slug_safe_for_hostile_model_name() -> None:
     """A crafted model name cannot inject a path separator / traversal token."""
     custom = CandidateTestCustomSQL(sql="select 1", column=None)
