@@ -90,6 +90,36 @@ def _make_manifest(model: Model) -> Manifest:
     )
 
 
+def _make_other_model() -> Model:
+    """A second model so a multi-table custom_sql ``{{ ref('other_model') }}``
+    resolves to a DISTINCT physical table from ``{{ this }}`` — exercising the
+    multi-table classifier (DEC-006: multi-table is never sampled).
+    """
+    return Model(
+        unique_id="model.shop.other_model",
+        name="other_model",
+        resource_type="model",
+        package_name="shop",
+        original_file_path="models/other_model.sql",
+        path="other_model.sql",
+        database="fake_project",
+        schema="dataset",  # type: ignore[call-arg]
+        columns={"id": Column(name="id"), "customer_id": Column(name="customer_id")},
+        raw_code="select 1",
+    )
+
+
+def _make_manifest_with_other(model: Model) -> Manifest:
+    """Manifest carrying both the model under prune AND ``other_model`` so a
+    multi-table custom_sql test resolves both refs to qualified names.
+    """
+    other = _make_other_model()
+    return Manifest(
+        metadata={"dbt_schema_version": "v12"},
+        nodes={model.unique_id: model, other.unique_id: other},
+    )
+
+
 def _make_adapter(fake: FakeBigQueryClient) -> BigQueryAdapter:
     return BigQueryAdapter(
         project="fake_project",
@@ -2826,8 +2856,20 @@ def test_prune_tests_custom_sql_over_byte_cap_full_scan_routes_to_kept_without_e
     """
     audit_path = tmp_path / "prune.jsonl"
     fake = FakeBigQueryClient(project="fake_project")
+    # The matching regex requires the full-scan JOIN shape AND rejects any
+    # ``WITH sample`` CTE (mirrors
+    # ``test_prune_tests_full_mode_does_not_wrap_with_cte``): the dispatched
+    # SQL must start with the COUNT envelope wrapping a JOIN, NOT a sample
+    # CTE. If the multi-table test were wrongly sampled, the dispatched SQL
+    # would begin ``...FROM (WITH sample AS ...`` and this expectation would
+    # not match — so the test fails loud rather than passing silently.
     fake.expect_query(
-        matching=r"SELECT COUNT\(\*\)",
+        matching=(
+            r"^SELECT COUNT\(\*\) AS failures FROM "
+            r"\(SELECT o\.id FROM fake_project\.dataset\.orders AS o "
+            r"JOIN fake_project\.dataset\.other_model AS d "
+            r"ON o\.customer_id = d\.customer_id WHERE o\.id <> d\.id\) AS t$"
+        ),
         returns=BytesBilledExceededError(
             job_id="job_abc", bytes_billed=5_000_000_000, limit=100_000_000
         ),
@@ -2835,14 +2877,16 @@ def test_prune_tests_custom_sql_over_byte_cap_full_scan_routes_to_kept_without_e
     adapter = _make_adapter(fake)
 
     model = _make_orders_model()
-    manifest = _make_manifest(model)
-    # A JOIN survives literal-stripping → compiler classifies multi-table →
-    # full-scan SQL is compiled and dispatched (no sample CTE). The fake
-    # then simulates the over-cap rejection on that full scan.
+    # Two DISTINCT refs ({{ this }} + {{ ref('other_model') }}) genuinely
+    # exercise the multi-table classifier (DEC-006). A JOIN survives
+    # literal-stripping → compiler classifies multi-table → full-scan SQL is
+    # compiled and dispatched (no sample CTE). The fake then simulates the
+    # over-cap rejection on that full scan.
+    manifest = _make_manifest_with_other(model)
     candidates = _candidates_with_one_custom_sql_test(
         "SELECT o.id FROM {{ this }} AS o "
-        "JOIN {{ this }} AS o2 ON o.customer_id = o2.customer_id "
-        "WHERE o.id <> o2.id"
+        "JOIN {{ ref('other_model') }} AS d ON o.customer_id = d.customer_id "
+        "WHERE o.id <> d.id"
     )
     config = PruneConfig(scope="full", capture_failure_rows=0)
 
@@ -2861,6 +2905,158 @@ def test_prune_tests_custom_sql_over_byte_cap_full_scan_routes_to_kept_without_e
     assert decision.decision == "kept"
     assert decision.reason == "kept-without-evidence"
     assert "BytesBilledExceededError" in decision.why
+    fake.assert_all_expectations_met()
+
+
+_MULTI_TABLE_FULLSCAN_RE = (
+    r"^SELECT COUNT\(\*\) AS failures FROM "
+    r"\(SELECT o\.id FROM fake_project\.dataset\.orders AS o "
+    r"JOIN fake_project\.dataset\.other_model AS d "
+    r"ON o\.customer_id = d\.customer_id WHERE o\.id <> d\.id\) AS t$"
+)
+_MULTI_TABLE_CUSTOM_SQL = (
+    "SELECT o.id FROM {{ this }} AS o "
+    "JOIN {{ ref('other_model') }} AS d ON o.customer_id = d.customer_id "
+    "WHERE o.id <> d.id"
+)
+
+
+def test_prune_tests_custom_sql_multi_table_full_scan_zero_failures_drops(
+    tmp_path: Path,
+) -> None:
+    """A MULTI-TABLE ``custom_sql`` business-rule test compiles to real
+    full-scan SQL (no sample CTE — DEC-006), runs, and routes on
+    ``failures=0 → dropped / always-passes`` exactly like the built-ins.
+
+    The dispatched SQL is pinned to the full-scan JOIN shape: the matching
+    regex requires the COUNT envelope wrapping the JOIN and would reject a
+    ``WITH sample`` CTE, so a regression that wrongly sampled the join fails
+    loud here rather than passing.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=_MULTI_TABLE_FULLSCAN_RE, returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest_with_other(model)
+    candidates = _candidates_with_one_custom_sql_test(_MULTI_TABLE_CUSTOM_SQL)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "custom_sql"
+    assert decision.decision == "dropped"
+    assert decision.reason == "always-passes"
+    # Belt-and-braces: the compiled SQL is the full-scan join, not a sample.
+    assert "WITH sample" not in decision.compiled_sql
+    assert "fake_project.dataset.other_model" in decision.compiled_sql
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_custom_sql_multi_table_full_scan_nonzero_failures_keeps(
+    tmp_path: Path,
+) -> None:
+    """Sibling of the always-passes case: a MULTI-TABLE ``custom_sql`` test
+    that returns non-zero failing rows on an untrusted model is real signal
+    and routes to ``kept`` / ``kept`` (DropReason ``"kept"``). Same full-scan
+    JOIN shape is dispatched (no sample CTE)."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=_MULTI_TABLE_FULLSCAN_RE, returns=[{"failures": 7}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest_with_other(model)
+    candidates = _candidates_with_one_custom_sql_test(_MULTI_TABLE_CUSTOM_SQL)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "custom_sql"
+    assert decision.decision == "kept"
+    assert decision.reason == "kept"
+    assert "WITH sample" not in decision.compiled_sql
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_custom_sql_single_table_references_temp_table_under_materialised(
+    tmp_path: Path,
+) -> None:
+    """P0 fix: under ``sample_strategy="materialised"`` + ``scope="sample"``,
+    a SINGLE-TABLE ``custom_sql`` test's compiled / dispatched SQL references
+    the MATERIALISED temp table (``_SESSION._sf_sample_<run_id>``) and does
+    NOT full-scan the source production table.
+
+    Before the fix, ``_compile_custom_sql`` returned the resolved SQL
+    unchanged on the single-table ``scope="full"`` + no-partition path, so the
+    test silently read the source table even though the engine had
+    materialised a sample — defeating the cost model. Mirrors
+    ``test_prune_tests_compiled_sql_references_temp_table_under_materialised``
+    (which only covers ``not_null``).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_custom_sql_test(
+        "SELECT * FROM {{ this }} WHERE status NOT IN ('open', 'closed')"
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "custom_sql"
+    # The single-table custom_sql now reads the materialised temp table.
+    assert "_SESSION._sf_sample_" in decision.compiled_sql
+    assert re.search(r"_sf_sample_[0-9a-f]{16}", decision.compiled_sql) is not None
+    # The source production table MUST NOT appear — the whole point of
+    # materialisation is amortised cost via the temp table.
+    assert "fake_project.dataset.orders" not in decision.compiled_sql
     fake.assert_all_expectations_met()
 
 
