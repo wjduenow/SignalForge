@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "audit_schema_version": 2,
+  "audit_schema_version": 3,
   "signalforge_version": "0.1.0.dev0",
   "model_unique_id": "model.shop.dim_customers",
   "run_id": "f0e1d2c3b4a5968778695a4b3c2d1e0f",
@@ -53,6 +53,12 @@
       "why": "Grading score 0.45 below threshold 0.50.",
       "score": 0.45,
       "passed": false
+    }
+  ],
+  "proposed_test_files": [
+    {
+      "path": "tests/dim_customers__total_amount_custom_sql_a1b2c3d4.sql",
+      "sql": "-- signalforge:generated a1b2c3d4\n\nselect * from {{ ref('dim_customers') }} where total_amount < 0\n"
     }
   ],
   "kept_count": 2,

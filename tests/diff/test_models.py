@@ -43,7 +43,7 @@ from typing import Literal
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from signalforge.diff.models import DiffEntry, DiffReport, Tier
+from signalforge.diff.models import DiffEntry, DiffReport, ProposedTestFile, Tier
 from signalforge.prune.models import DropReason
 
 _STRICT = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
@@ -77,13 +77,22 @@ class StrictDiffEntry(BaseModel):
     passed: bool | None = None
 
 
+class StrictProposedTestFile(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`ProposedTestFile` (#116)."""
+
+    model_config = _STRICT
+
+    path: str
+    sql: str
+
+
 class StrictDiffReport(BaseModel):
     """One-off ``extra="forbid"`` mirror of :class:`DiffReport`."""
 
     model_config = _STRICT
 
     schema_version: Literal[1] = 1
-    audit_schema_version: Literal[2] = 2
+    audit_schema_version: Literal[3] = 3
     signalforge_version: str
     model_unique_id: str
     run_id: str
@@ -92,6 +101,7 @@ class StrictDiffReport(BaseModel):
     existing_yaml: str | None
     unified_diff: str
     entries: tuple[StrictDiffEntry, ...]
+    proposed_test_files: tuple[StrictProposedTestFile, ...] = ()
     kept_count: int
     kept_uncertain_count: int
     dropped_count: int
@@ -207,7 +217,7 @@ def test_diff_report_constructs_with_canonical_field_set() -> None:
     """Happy-path: :class:`DiffReport` accepts its documented field set."""
     report = _sample_report()
     assert report.schema_version == 1
-    assert report.audit_schema_version == 2
+    assert report.audit_schema_version == 3
     assert report.kept_count == 1
     assert report.kept_uncertain_count == 0
     assert report.has_existing_schema is True
@@ -232,6 +242,43 @@ def test_diff_report_grading_report_hash_can_be_none() -> None:
     """``grading_report_hash is None`` when no grading report was provided."""
     report = _sample_report(grading_report_hash=None)
     assert report.grading_report_hash is None
+
+
+def test_diff_report_proposed_test_files_defaults_empty() -> None:
+    """``proposed_test_files`` defaults to an empty tuple (#116)."""
+    report = _sample_report()
+    assert report.proposed_test_files == ()
+
+
+def test_proposed_test_file_constructs_and_is_frozen() -> None:
+    """:class:`ProposedTestFile` accepts ``path`` + ``sql`` and is frozen (#116)."""
+    proposed = ProposedTestFile(path="tests/m__custom_sql_deadbeef.sql", sql="select 1")
+    assert proposed.path == "tests/m__custom_sql_deadbeef.sql"
+    assert proposed.sql == "select 1"
+    with pytest.raises(ValidationError):
+        proposed.path = "x"  # type: ignore[misc]
+
+
+def test_proposed_test_file_repr_omits_sql_body() -> None:
+    """DEC-020-style minimal repr keeps the (large) SQL body out of logs (#116)."""
+    proposed = ProposedTestFile(
+        path="tests/m__custom_sql_deadbeef.sql",
+        sql="select \x1b[31mevil\x1b[0m from x",
+    )
+    rendered = repr(proposed)
+    assert "tests/m__custom_sql_deadbeef.sql" in rendered
+    assert "evil" not in rendered
+
+
+def test_diff_report_round_trips_proposed_test_files_through_json() -> None:
+    """Sidecar round-trip: ``proposed_test_files`` survives model_dump_json (#116)."""
+    proposed = ProposedTestFile(
+        path="tests/customers__total_custom_sql_a1b2c3d4.sql",
+        sql="-- signalforge:generated a1b2c3d4\n\nselect * from x where total < 0\n",
+    )
+    report = _sample_report(proposed_test_files=(proposed,))
+    rehydrated = DiffReport.model_validate_json(report.model_dump_json(by_alias=True))
+    assert rehydrated.proposed_test_files == (proposed,)
 
 
 # --- Round-trip ------------------------------------------------------------

@@ -18,6 +18,10 @@ Public API surface (DEC-004 of ``plans/super/8-diff-renderer.md``):
   :func:`signalforge.draft.load_draft_config`.
 * :class:`DiffReport`, :class:`DiffEntry` — typed read-back result
   models (``frozen=True, extra="ignore"``).
+* :class:`ProposedTestFile` — typed read-back row on
+  :attr:`DiffReport.proposed_test_files` for each KEPT singular
+  ``custom_sql`` business-rule test (issue #116): a standalone ``.sql``
+  file (``path`` + ``sql``-with-header-marker), NOT a schema.yml block.
 * :class:`DiffConfig` — user-facing knob block (``frozen=True,
   extra="forbid"``; typos like ``contxt_lines:`` fail loud at load time).
 * :data:`Tier` — the ``Literal["kept", "dropped", "flagged"]``
@@ -57,7 +61,7 @@ from signalforge.diff.errors import (
     DiffTestFileRecordTooLargeError,
     DiffTestFileWriteError,
 )
-from signalforge.diff.models import DiffEntry, DiffReport, Tier
+from signalforge.diff.models import DiffEntry, DiffReport, ProposedTestFile, Tier
 
 __all__ = [
     # Orchestrator
@@ -69,6 +73,7 @@ __all__ = [
     # Result models + literal
     "DiffEntry",
     "DiffReport",
+    "ProposedTestFile",
     "Tier",
     # Errors (9)
     "DiffError",

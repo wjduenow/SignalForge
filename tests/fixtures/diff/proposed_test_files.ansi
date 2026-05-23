@@ -1,0 +1,32 @@
+[1mdiff: model.shop.dim_customers[0m  [32mkept=1[0m  [36mkept-uncertain=0[0m  [31mdropped=0[0m  [33mflagged=0[0m
+
+[1mTIER            ARTIFACT                      TEST            REASON                  SCORE    WHY[0m
+[32mkept          [0m  test.column.total_amount.cu…  custom_sql                              —        business rule: total_amount must be non-negative.
+
+--- a/models/dim_customers.yml
++++ b/models/dim_customers.yml
+@@ -1,5 +1,8 @@
+ version: 2
+ models:
+   - name: dim_customers
+     columns:
+       - name: customer_id
++        description: Surrogate key.
++        tests:
++          - not_null
+
+[1mproposed test files:[0m
+
+[32m+++ tests/dim_customers__total_amount_custom_sql_a1b2c3d4.sql[0m
+-- signalforge:generated a1b2c3d4
+
+select *
+from {{ ref('dim_customers') }}
+where total_amount < 0
+
+[32m+++ tests/dim_customers__custom_sql_deadbeef.sql[0m
+-- signalforge:generated deadbeef
+
+select count(*) as n
+from {{ ref('dim_customers') }}
+having n = 0

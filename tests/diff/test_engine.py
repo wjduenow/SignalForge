@@ -163,6 +163,67 @@ def _grading_report_for(
     )
 
 
+def test_render_diff_surfaces_kept_custom_sql_as_proposed_test_file(
+    project_dir: Path,
+) -> None:
+    """End-to-end: a kept ``custom_sql`` test lands in ``proposed_test_files`` (#116).
+
+    The singular business-rule test is NOT a schema.yml block — it must
+    appear on ``DiffReport.proposed_test_files`` (as a standalone ``.sql``
+    proposal) and NOT in ``proposed_yaml``. It still appears as a row in
+    ``entries`` (test_type ``custom_sql``).
+    """
+    from signalforge.draft.models import CandidateTestCustomSQL
+
+    model = _make_model()
+    sql = "select * from {{ ref('orders') }} where order_id is null"
+    custom = CandidateTestCustomSQL(sql=sql, column="order_id")
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact table",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="surrogate key",
+                tests=(custom,),
+            ),
+        ),
+    )
+    decision = PruneDecision(
+        test_anchor="column.order_id",
+        test=custom,
+        decision="kept",
+        reason="kept",
+        failures=3,
+        sampled_rows=1000,
+        scope="sample",
+        elapsed_ms=10,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="select 1",
+        why="ran on 1k sample, 3 failing rows",
+    )
+    prune_result = _make_prune_result(decisions=(decision,))
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+
+    assert len(report.proposed_test_files) == 1
+    proposed = report.proposed_test_files[0]
+    assert proposed.path.startswith("tests/orders__order_id_custom_sql_")
+    assert proposed.path.endswith(".sql")
+    assert sql in proposed.sql
+    assert proposed.sql.startswith("-- signalforge:generated ")
+    # custom_sql never lands in the schema.yml.
+    assert "custom_sql" not in report.proposed_yaml
+    # …but it IS a row in the table.
+    assert any(e.test_type == "custom_sql" for e in report.entries)
+
+
 @pytest.fixture
 def project_dir(tmp_path: Path) -> Path:
     project = tmp_path / "project"
@@ -326,7 +387,7 @@ def test_render_kind_json_writes_json_to_output_path(project_dir: Path) -> None:
     # JsonRenderer output mirrors DiffReport.model_dump_json shape.
     assert parsed["model_unique_id"] == model.unique_id
     assert parsed["schema_version"] == 1
-    assert parsed["audit_schema_version"] == 2
+    assert parsed["audit_schema_version"] == 3
 
 
 def test_render_kind_ansi_writes_ansi_to_output_path(project_dir: Path) -> None:

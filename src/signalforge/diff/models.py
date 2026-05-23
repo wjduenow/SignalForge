@@ -93,6 +93,52 @@ Tier = Literal["kept", "kept-uncertain", "dropped", "flagged"]
 """
 
 
+class ProposedTestFile(BaseModel):
+    """One generated singular-test ``.sql`` file proposed by a diff render.
+
+    Singular ``custom_sql`` business-rule tests (DEC-002 / DEC-010 of
+    ``plans/super/116-business-rule-tests.md``) are NOT schema.yml blocks —
+    dbt models them as standalone ``.sql`` files under ``tests/``. The diff
+    layer surfaces every KEPT ``custom_sql`` test as one
+    :class:`ProposedTestFile` so the renderer can show it as a new-file hunk
+    and a later CLI ``--write`` path can materialise it via
+    :func:`signalforge.diff._test_file_writer.write_test_file`.
+
+    Two fields:
+
+    * :attr:`path` — the safe **relative** ``tests/<model>__<descriptor>_<hash>.sql``
+      filename produced by
+      :func:`signalforge.diff._test_file_writer.anchor_to_filename`. Every
+      component is slugged so a crafted model/column name cannot escape the
+      ``tests/`` directory.
+    * :attr:`sql` — the test SQL body **including** the
+      ``-- signalforge:generated <hash>`` header marker (DEC-010), so the
+      sidecar carries exactly the bytes the writer would persist. The SQL is
+      LLM-authored / manifest-derived content — renderers strip ANSI escapes
+      and markdown-escape it at the sink (DEC-007/008 of diff-renderer.md).
+
+    Read-back-stable: ``frozen=True, extra="ignore"`` per the manifest-readers
+    convention, gated by the drift detector alongside :class:`DiffEntry` /
+    :class:`DiffReport`.
+    """
+
+    model_config = _BASE_CONFIG
+
+    path: str
+    sql: str
+
+    def __repr__(self) -> str:
+        """Minimal repr — omits the (potentially large) SQL body.
+
+        Mirrors :class:`DiffEntry` / :class:`DiffReport`: an accidental
+        ``_LOGGER.warning("file: %s", proposed)`` would otherwise dump the
+        full SQL body (LLM-authored, potentially multi-line) into log
+        sinks. Full content stays accessible via field access /
+        :meth:`pydantic.BaseModel.model_dump`.
+        """
+        return f"ProposedTestFile(path={self.path!r})"
+
+
 class DiffEntry(BaseModel):
     """One row in the rendered kept / dropped / flagged table.
 
@@ -175,9 +221,18 @@ class DiffReport(BaseModel):
       grade #7). Bumped to ``2`` in issue #50 when the
       :data:`Tier` literal gained ``kept-uncertain`` and
       :class:`DiffReport` gained :attr:`kept_uncertain_count`.
-      External sidecar consumers (e.g. the v0.3 GitHub Action) gate
-      on ``audit_schema_version >= 2`` to consume the four-tier
-      taxonomy.
+      Bumped to ``3`` in issue #116 when :class:`DiffReport` gained
+      :attr:`proposed_test_files` (singular ``custom_sql`` tests
+      surfaced as standalone ``.sql`` files). External sidecar
+      consumers (e.g. the v0.3 GitHub Action) gate on
+      ``audit_schema_version >= 3`` to consume the proposed-test-files
+      array, and on ``>= 2`` for the four-tier taxonomy.
+    * :attr:`proposed_test_files` — the tuple of
+      :class:`ProposedTestFile` rows for every KEPT ``custom_sql`` test
+      (issue #116). Empty when the candidate carried no kept
+      ``custom_sql`` tests. These are emitted as standalone ``.sql``
+      files (NOT schema.yml blocks); the YAML emitter skips
+      ``custom_sql`` entirely.
     * :attr:`signalforge_version` — read from
       :data:`signalforge.__version__` at orchestrator entry.
     * :attr:`model_unique_id` — the model under render.
@@ -222,7 +277,7 @@ class DiffReport(BaseModel):
     model_config = _BASE_CONFIG
 
     schema_version: Literal[1] = 1
-    audit_schema_version: Literal[2] = 2
+    audit_schema_version: Literal[3] = 3
     signalforge_version: str
     model_unique_id: str
     run_id: str
@@ -231,6 +286,7 @@ class DiffReport(BaseModel):
     existing_yaml: str | None
     unified_diff: str
     entries: tuple[DiffEntry, ...]
+    proposed_test_files: tuple[ProposedTestFile, ...] = ()
     kept_count: int
     kept_uncertain_count: int
     dropped_count: int
@@ -255,6 +311,7 @@ class DiffReport(BaseModel):
             f"kept_uncertain_count={self.kept_uncertain_count!r}, "
             f"dropped_count={self.dropped_count!r}, "
             f"flagged_count={self.flagged_count!r}, "
+            f"proposed_test_files={len(self.proposed_test_files)!r}, "
             f"has_existing_schema={self.has_existing_schema!r}, "
             f"duration_seconds={self.duration_seconds!r})"
         )
@@ -263,5 +320,6 @@ class DiffReport(BaseModel):
 __all__ = (
     "DiffEntry",
     "DiffReport",
+    "ProposedTestFile",
     "Tier",
 )
