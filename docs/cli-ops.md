@@ -153,14 +153,28 @@ Runtime knob flags:
   table — it only changes the aggregate verdict and (opt-in) exit
   code. Out-of-range values exit 2.
 - `--write` — Write the proposed `schema.yml` to disk under
-  `<project_dir>/<model_dir>/schema.yml`. The JSON sidecar is
-  still written to `<project_dir>/.signalforge/diff.json`.
-  Mutually exclusive with `--dry-run`.
+  `<project_dir>/<model_dir>/schema.yml`. **Additionally** writes
+  each proposed singular `.sql` business-rule test to its
+  `tests/<model>__<descriptor>_<hash>.sql` path under the project
+  (DEC-010/DEC-014 of issue #116); each file is prepended with a
+  `-- signalforge:generated <hash>` header marker. The JSON sidecar
+  is still written to `<project_dir>/.signalforge/diff.json`.
+  Mutually exclusive with `--dry-run`. See `--force` for the
+  `.sql` overwrite policy.
+- `--force` — With `--write`, governs overwrite of an existing
+  proposed `.sql` test file (DEC-010 of issue #116). New files
+  always write. A file that already exists and carries
+  SignalForge's `-- signalforge:generated` marker is overwritten
+  **only** with `--force`; without `--force` it is skipped with a
+  stderr WARNING naming the file. A file that exists **without**
+  the marker (hand-authored) is **never** overwritten, even with
+  `--force` — it is skipped with a clear stderr WARNING (we never
+  clobber human-written tests). No-op without `--write`.
 - `--dry-run` — Run the FULL pipeline (LLM + warehouse + grade)
   and print the diff to stdout, but write nothing — neither the
-  `schema.yml` nor the `.signalforge/diff.json` sidecar.
-  Overrides the default-on sidecar (DEC-010). Mutually exclusive
-  with `--write`.
+  `schema.yml`, the proposed `.sql` test files, nor the
+  `.signalforge/diff.json` sidecar. Overrides the default-on
+  sidecar (DEC-010). Mutually exclusive with `--write`.
 - `--estimate` — Print a pre-flight cost preview and exit
   without making any billable Anthropic or warehouse call. The
   full pipeline prelude still runs (manifest, safety, draft,
@@ -745,6 +759,25 @@ evaluation results — a test that was running when the budget
 tripped is `kept-without-evidence`, not `kept` (failing-rows count
 is unknown). See
 [`docs/prune-ops.md` § Drop-reason taxonomy](prune-ops.md#drop-reason-taxonomy).
+
+### Proposed `.sql` overwrite-skip WARNING (issue #116 DEC-010/DEC-014)
+
+Source: `generate --write` when materialising a proposed singular
+`.sql` business-rule test whose target file already exists and the
+overwrite policy declines to clobber it. Two distinct shapes:
+
+```text
+WARNING: <tests/...sql> already exists; pass --force to overwrite SignalForge-generated tests. Skipping.
+WARNING: refusing to overwrite hand-authored <tests/...sql> (no '-- signalforge:generated' marker); skipping.
+```
+
+The first fires when the existing file carries SignalForge's
+`-- signalforge:generated` marker but `--force` was not passed; the
+second fires when the existing file does NOT carry the marker
+(hand-authored) — that file is **never** overwritten, even with
+`--force`. The run continues and exits `0` for the skip; only the
+named file is left untouched. New files (no existing target) write
+silently.
 
 ## Threshold-fail behaviour
 
