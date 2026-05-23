@@ -124,16 +124,22 @@ def validate_test_sql(sql: str) -> None:
 
 
 def _strip_string_literals(sql: str) -> str:
-    """Remove ``'...'`` and ``"..."`` string literals so token checks can ignore them.
+    """Remove ``'...'``, ``"..."`` and `` `...` `` quoted spans so token checks ignore them.
 
-    Naive — handles ``''`` and ``""`` as escapes. Sufficient for the
-    DEC-013 "cheap rejects, not full SQL parser" contract.
+    Naive — handles ``''`` / ``""`` / `` `` `` doubled-quote escapes. Backtick
+    spans are BigQuery quoted identifiers (e.g. `` `weird;name` ``); stripping
+    them is what makes a stray ``'`` / ``"`` / ``--`` / ``;`` hidden inside a
+    backtick-quoted identifier stop confusing the literal scanner — without it
+    a backtick identifier containing a lone quote (`` `O'Brien` ``) would open
+    a phantom single-quoted literal and swallow a real top-level ``;`` that
+    should have been rejected (DEC-008 of #116). Sufficient for the DEC-013
+    "cheap rejects, not full SQL parser" contract — NOT a SQL parser.
     """
     out: list[str] = []
     i = 0
     while i < len(sql):
         ch = sql[i]
-        if ch in ("'", '"'):
+        if ch in ("'", '"', "`"):
             quote = ch
             i += 1
             while i < len(sql):

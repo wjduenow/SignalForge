@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from signalforge.manifest.models import Model
-from signalforge.warehouse._sql_safety import validate_test_sql
+from signalforge.warehouse._sql_safety import _strip_string_literals, validate_test_sql
 from signalforge.warehouse._test_result_repr import compact_repr
 from signalforge.warehouse.errors import (
     InvalidIdentifierError,
@@ -215,3 +215,78 @@ def test_validate_test_sql_rejects_semicolon() -> None:
     """A trailing ``;`` in candidate test SQL is rejected (DEC-013)."""
     with pytest.raises(QuerySyntaxError):
         validate_test_sql("select 1 from t;")
+
+
+@pytest.mark.unit
+@pytest.mark.error
+def test_validate_test_sql_rejects_statement_stacking_masked_by_backtick() -> None:
+    """A real top-level ``;`` masked by a stray quote inside a backtick identifier.
+
+    Without backtick-awareness, the lone ``'`` inside `` `it's` `` opens a
+    phantom single-quoted literal that swallows the real top-level ``;``, so
+    the statement-stacking check never sees it. Backtick stripping neutralises
+    the backtick span first, exposing the ``;`` to the token scan (DEC-008).
+    """
+    sql = "SELECT * FROM `it's`; DROP TABLE x WHERE a='b'"
+    with pytest.raises(QuerySyntaxError):
+        validate_test_sql(sql)
+
+
+@pytest.mark.unit
+@pytest.mark.error
+def test_validate_test_sql_rejects_semicolon_inside_backtick_then_stacked() -> None:
+    """A ``;`` inside a backtick identifier followed by a stacked statement.
+
+    The backtick span `` `weird;name` `` is stripped, but the genuine
+    statement-separating ``;`` outside it must still be rejected.
+    """
+    sql = "SELECT * FROM `weird;name`; DROP TABLE x"
+    with pytest.raises(QuerySyntaxError):
+        validate_test_sql(sql)
+
+
+@pytest.mark.unit
+def test_validate_test_sql_allows_benign_backtick_identifier() -> None:
+    """A benign backtick-quoted identifier (no top-level tokens) is accepted.
+
+    Even a ``;`` *inside* the backtick span is content, not a statement
+    separator — once the span is stripped, nothing forbidden remains.
+    """
+    # Plain identifier — must not raise.
+    validate_test_sql("SELECT `col` FROM `proj.dataset.tbl`")
+    # A ``;`` that lives ENTIRELY inside the backtick identifier is content,
+    # so once the span is stripped there is no top-level ``;`` left.
+    validate_test_sql("SELECT `weird;name` FROM `t`")
+
+
+@pytest.mark.unit
+def test_validate_test_sql_ignores_comment_markers_inside_quotes_and_backticks() -> None:
+    """``--`` / ``/* */`` inside string literals AND backticks are ignored."""
+    # Comment markers inside single/double-quoted literals: allowed.
+    validate_test_sql("SELECT '--not a comment' AS a, \"/* nope */\" AS b FROM t")
+    # Comment markers inside a backtick identifier: also ignored once stripped.
+    validate_test_sql("SELECT `--col` FROM `/* tbl */`")
+
+
+@pytest.mark.unit
+@pytest.mark.error
+def test_validate_test_sql_balanced_parens_unaffected_by_backticks() -> None:
+    """The balanced-paren check still fires; backtick spans don't perturb it."""
+    # Balanced parens with a backtick identifier present: accepted.
+    validate_test_sql("SELECT COUNT(*) FROM (SELECT `c` FROM `t`) AS x")
+    # A paren hidden inside a backtick must NOT count toward the depth — the
+    # outer SQL is genuinely unbalanced and must be rejected.
+    with pytest.raises(QuerySyntaxError):
+        validate_test_sql("SELECT * FROM `t` WHERE a = (1")
+
+
+@pytest.mark.unit
+def test_strip_string_literals_strips_backtick_spans() -> None:
+    """The helper neutralises backtick-quoted content alongside quotes."""
+    # Backtick span content is removed; surrounding skeleton survives.
+    assert _strip_string_literals("a `;--/*` b") == "a  b"
+    # Doubled backtick is an escape and stays inside the span.
+    assert _strip_string_literals("`a``b`c") == "c"
+    # Single/double quote handling is preserved.
+    assert _strip_string_literals("x '; y' z") == "x  z"
+    assert _strip_string_literals('p "; q" r') == "p  r"
