@@ -18,6 +18,7 @@ from signalforge.draft.models import (
     CandidateSchema,
     CandidateTest,
     CandidateTestAcceptedValues,
+    CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
     CandidateTestUnique,
@@ -116,6 +117,21 @@ def test_candidate_test_relationships_requires_to_and_field() -> None:
     # Missing `field` entirely
     with pytest.raises(ValidationError):
         CandidateTestRelationships(column="x", to="ref('t')")  # type: ignore[call-arg]
+
+
+def test_candidate_test_custom_sql_rejects_empty_sql() -> None:
+    """``CandidateTestCustomSQL.sql`` must be non-empty — the ``_sql_non_empty``
+    field validator raises on an empty string (an empty failing-rows SELECT is
+    meaningless)."""
+    with pytest.raises(ValidationError):
+        CandidateTestCustomSQL(sql="")
+
+
+def test_candidate_test_custom_sql_accepts_non_empty_sql() -> None:
+    """A non-empty ``sql`` passes the validator and is carried verbatim."""
+    test = CandidateTestCustomSQL(sql="select 1 from t where x < 0")
+    assert test.sql == "select 1 from t where x < 0"
+    assert test.type == "custom_sql"
 
 
 def test_candidate_schema_extra_ignore_drops_unknown_field() -> None:

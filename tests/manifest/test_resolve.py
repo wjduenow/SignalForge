@@ -255,6 +255,33 @@ def test_resolve_source_unknown_fails_loud() -> None:
 
 
 @pytest.mark.unit
+def test_resolve_source_missing_schema_fails_loud() -> None:
+    """A matched source whose ``schema`` is absent (malformed manifest) raises
+    :class:`SourceNotFoundError` rather than letting ``TableRef`` raise an
+    opaque validation error (loader.py missing-schema/identifier branch)."""
+    manifest = Manifest.model_validate(
+        {
+            "metadata": {},
+            "nodes": {},
+            "sources": {
+                "source.pkg.raw.events": {
+                    "unique_id": "source.pkg.raw.events",
+                    "source_name": "raw",
+                    "name": "events",
+                    "resource_type": "source",
+                    "database": _PROJECT,
+                    # No ``schema`` key — schema_ defaults to None.
+                    "identifier": "events",
+                }
+            },
+        }
+    )
+    with pytest.raises(SourceNotFoundError) as excinfo:
+        resolve_source(manifest, "raw", "events")
+    assert "missing a schema or identifier" in str(excinfo.value)
+
+
+@pytest.mark.unit
 def test_resolve_source_uses_identifier_when_present() -> None:
     """The physical table name comes from ``identifier`` not ``name``."""
     manifest = Manifest.model_validate(
