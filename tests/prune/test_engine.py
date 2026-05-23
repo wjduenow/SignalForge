@@ -303,6 +303,116 @@ def test_prune_tests_requires_future_data_for_unknown_relationships_parent(
     fake.assert_all_expectations_met()
 
 
+def test_prune_tests_custom_sql_unresolvable_ref_requires_future_data(
+    tmp_path: Path,
+) -> None:
+    """US-019 regression: a ``custom_sql`` test referencing
+    ``{{ ref('does_not_exist') }}`` no longer crashes ``prune_tests``. The
+    compiler catches ``RefNotFoundError`` and returns ``_RequiresFutureData``,
+    which the orchestrator routes to ``reason="requires-future-data"`` with
+    NO warehouse call (the join makes it multi-table, but resolution fails
+    before any SQL is built).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Intentionally NO expect_query — any call is unexpected.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestCustomSQL(
+                sql=(
+                    "select o.id from {{ this }} o "
+                    "join {{ ref('does_not_exist') }} d on o.id = d.id"
+                ),
+            ),
+        ),
+    )
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.decision == "dropped"
+    assert decision.reason == "requires-future-data"
+    assert "manifest-absent" in decision.why
+    # No queries dispatched — resolution failed before any SQL was built.
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_custom_sql_ambiguous_ref_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """US-019 regression: a ``custom_sql`` test whose bare ``{{ ref('orders') }}``
+    matches two packages raises ``AmbiguousRefError`` — genuine user
+    ambiguity, not future data. The compiler routes it to ``_InvalidIdentifier``
+    and the orchestrator keeps it ``kept-without-evidence``, never crashing.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    # Two models named ``orders`` in different packages → ambiguous ref.
+    other = Model(
+        unique_id="model.other.orders",
+        name="orders",
+        resource_type="model",
+        package_name="other",
+        original_file_path="models/orders.sql",
+        path="orders.sql",
+        database="fake_project",
+        schema="dataset",  # type: ignore[call-arg]
+        columns={"id": Column(name="id")},
+        raw_code="select 1",
+    )
+    manifest = Manifest(
+        metadata={"dbt_schema_version": "v12"},
+        nodes={model.unique_id: model, other.unique_id: other},
+    )
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestCustomSQL(
+                sql=("select a.id from {{ this }} a join {{ ref('orders') }} b on a.id = b.id"),
+            ),
+        ),
+    )
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.decision == "kept"
+    assert decision.reason == "kept-without-evidence"
+    assert "ambiguous" in decision.why
+    # No queries dispatched — resolution failed before any SQL was built.
+    fake.assert_all_expectations_met()
+
+
 def test_prune_tests_warehouse_error_routes_to_kept_without_evidence(
     tmp_path: Path,
 ) -> None:
