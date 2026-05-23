@@ -22,6 +22,10 @@ Public API surface:
 * :func:`read_schema` (US-005) — the public entry point: parse an
   external ``schema.yml`` for one model and return an
   :class:`IngestResult`.
+* :func:`read_test_files` (US-013) — read an operator's singular dbt
+  tests (``tests/*.sql``) for one model into model-level
+  :class:`~signalforge.draft.CandidateTestCustomSQL` records, so
+  ``prune-existing`` can later prune them (DEC-013).
 * :class:`IngestResult` / :class:`SkippedTest` / :data:`SkipReason`
   (US-002) — the reader's return shapes.
 * The :class:`IngestError` hierarchy (US-001): :class:`IngestError`,
@@ -43,7 +47,7 @@ from signalforge.ingest.errors import (
     IngestSchemaTooLargeError,
 )
 from signalforge.ingest.models import IngestResult, SkippedTest, SkipReason
-from signalforge.ingest.reader import read_schema
+from signalforge.ingest.reader import read_schema, read_test_files
 
 __all__ = [
     # Errors (6)
@@ -57,6 +61,7 @@ __all__ = [
     "IngestResult",
     "SkippedTest",
     "SkipReason",
-    # Reader orchestrator (US-005) — the public entry point
-    "read_schema",
+    # Reader orchestrators — the public entry points
+    "read_schema",  # schema.yml (US-005)
+    "read_test_files",  # tests/*.sql singular tests (US-013)
 ]
