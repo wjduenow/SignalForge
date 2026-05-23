@@ -5,7 +5,7 @@
 - **Ticket:** #116 — feat: custom business-rule test generation (meta.business_rules + LLM-inferred singular SQL tests)
 - **Branch:** `feature/116-business-rule-tests`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/116-business-rule-tests`
-- **Phase:** published (PR #117, awaiting approval)
+- **Phase:** devolved (PR #117, epic bd_1-scaffolding-48o)
 - **Sessions:** 1 (2026-05-22)
 - **Research anchor:** `docs/research/dbt-tool-design-sketches.md` §8, Opportunity 2 v2 milestone
 
@@ -301,4 +301,29 @@ Every story's AC includes the canonical validation command
 
 ## Beads Manifest
 
-_(Phase 7)_
+- **Epic:** `bd_1-scaffolding-48o` — #116: custom business-rule test generation
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/116-business-rule-tests`
+- **Tasks:** 18 (`.1`–`.18`) under the epic.
+
+| Bead | Story | Depends on |
+|---|---|---|
+| `.1` | US-001 Manifest source registry + resolution | — |
+| `.2` | US-002 Template-ref resolver | .1 |
+| `.3` | US-003 CandidateTestCustomSQL + drift mirror | — |
+| `.4` | US-004 Anchor-contract + exclude_tests | .3 |
+| `.5` | US-005 Drafter business-rule reading + prompt | .3 |
+| `.6` | US-006 SQL-safety hardening | — |
+| `.7` | US-007 Prune compiler _compile_custom_sql | .2 .3 .6 |
+| `.8` | US-008 Prune engine routing + audit | .7 |
+| `.9` | US-009 artifact_id custom_sql branch | .3 |
+| `.10` | US-010 Diff proposed_test_files | .3 .9 |
+| `.11` | US-011 Filename-safety + fail-closed .sql writer | — |
+| `.12` | US-012 CLI generate --write + --force | .10 .11 |
+| `.13` | US-013 Ingest tests/*.sql reader | .2 .3 |
+| `.14` | US-014 prune-existing wiring (read-only) | .13 .8 |
+| `.15` | US-015 e2e gated test | .12 .14 |
+| `.16` | US-016 Documentation (operator-facing) | .15 |
+| `.17` | US-017 Quality Gate (review ×4 + CodeRabbit + docs build) | .1–.16 |
+| `.18` | US-018 Patterns & Memory (P4, runs last) | .17 |
+
+Ready at devolve: `.1`, `.3`, `.6`, `.11` (no dependencies). Next: `/ralph-run`.
