@@ -22,6 +22,12 @@ Six dotted-path shapes the formatter emits (per grade-layer.md DEC-009):
 * ``test.model.<test.type>`` (or ``...<.args_hash>`` when two model-
   level tests share a ``test.type``) — model-level test.
 
+The ``test.<scope>.…`` shape is generic over ``test.type``, so the
+fifth ``custom_sql`` variant emits ``test.column.<col>.custom_sql`` /
+``test.model.custom_sql`` (model-level when ``column`` is ``None``)
+without any change to :func:`artifact_id_for`; only the args-hash
+dispatch in :func:`model_test_args_hash` carries a per-variant branch.
+
 Collision rule (post-QG fix, preserved verbatim from the per-layer
 copies that this module replaces): two tests in the SAME scope
 (model-level OR same-column) sharing a ``test.type`` get an 8-hex
@@ -46,6 +52,7 @@ from signalforge.draft.models import (
     CandidateSchema,
     CandidateTest,
     CandidateTestAcceptedValues,
+    CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
     CandidateTestUnique,
@@ -80,6 +87,18 @@ def model_test_args_hash(test: CandidateTest) -> str:
             "column": test.column,
             "to": test.to,
             "field": test.field,
+        }
+    elif isinstance(test, CandidateTestCustomSQL):
+        # The raw SQL text is the identifying arg: two custom_sql tests
+        # with different SQL must hash differently (so they don't collide
+        # in the artifact_id join), while identical SQL collides
+        # deterministically. ``column`` is included (it may be ``None``
+        # for model-level business-rule assertions) so a column-scoped and
+        # a model-level custom_sql with the same SQL still hash apart.
+        payload = {
+            "type": test.type,
+            "column": test.column,
+            "sql": test.sql,
         }
     else:  # pragma: no cover - exhaustive dispatch over the closed union
         raise ValueError(
