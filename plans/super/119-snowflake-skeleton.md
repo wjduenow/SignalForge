@@ -5,7 +5,7 @@
 - **Ticket:** [#119](https://github.com/wjduenow/SignalForge/issues/119) — `feat: SnowflakeAdapter skeleton — factory dispatch + Dialect + _snowflake_client.py shim`
 - **Epic:** [#118](https://github.com/wjduenow/SignalForge/issues/118) — Snowflake warehouse adapter (v0.2). **#119 lands first; unblocks #120–#124.**
 - **Branch:** `feature/119-snowflake-skeleton` (off `dev`; PR targets `dev`)
-- **Phase:** detailing (awaiting approval)
+- **Phase:** published (PR [#125](https://github.com/wjduenow/SignalForge/pull/125), awaiting approval)
 - **Sessions:** 1 (2026-05-25)
 
 ---
