@@ -92,6 +92,86 @@ class ModelMissingSqlError(ManifestError):
     )
 
 
+class RefNotFoundError(ManifestError):
+    """A dbt ``ref(name)`` resolved to no enabled model in the manifest.
+
+    Raised by :func:`signalforge.manifest.loader.resolve_ref` (DEC-005 of #116)
+    when a Jinja ``{{ ref('name') }}`` names a model absent from
+    ``manifest.nodes``. Fails loud rather than silently producing an
+    unresolvable relation.
+    """
+
+    default_remediation = (
+        "Check the ref() target name. Use `Manifest.iter_models()` to list "
+        "known enabled models, and re-run `dbt parse` if the model is new."
+    )
+
+
+class AmbiguousRefError(ManifestError):
+    """A dbt ``ref(name)`` matched more than one enabled model.
+
+    Raised by :func:`signalforge.manifest.loader.resolve_ref` (DEC-005 of #116)
+    when the same model name exists in multiple packages. dbt itself
+    disambiguates with the two-arg ``ref('package', 'name')`` form; we surface
+    the candidate list so the operator knows which package to qualify.
+    """
+
+    default_remediation = (
+        "The model name exists in multiple packages. Disambiguate with the "
+        "two-arg form: ref('<package>', '<name>')."
+    )
+
+
+class SourceNotFoundError(ManifestError):
+    """A dbt ``source(source_name, table_name)`` is absent from the manifest.
+
+    Raised by :func:`signalforge.manifest.loader.resolve_source` (DEC-005 of
+    #116) when the ``(source_name, table_name)`` pair has no matching entry in
+    ``manifest.sources``.
+    """
+
+    default_remediation = (
+        "Check the source() name and table arguments against the project's "
+        "`sources:` definitions, and re-run `dbt parse` if the source is new."
+    )
+
+
+class TemplateResolutionError(ManifestError):
+    """A dbt-Jinja reference in a singular-test SQL string cannot be resolved.
+
+    Raised by :func:`signalforge.manifest.template.resolve_template_refs`
+    (US-002 of #116) when, after substituting the supported ``{{ this }}`` /
+    ``{{ ref(...) }}`` / ``{{ source(...) }}`` forms, the SQL still contains an
+    unresolved ``{{ ... }}`` expression. The bounded resolver runs NO Jinja
+    engine, so anything it doesn't recognise must fail loud rather than reach
+    the warehouse as broken SQL.
+    """
+
+    default_remediation = (
+        "Only {{ this }}, {{ ref('name') }} / {{ ref('pkg','name') }}, and "
+        "{{ source('src','table') }} are supported in singular-test SQL. "
+        "Resolve other expressions in dbt before pruning."
+    )
+
+
+class UnsupportedJinjaError(TemplateResolutionError):
+    """A singular-test SQL string uses Jinja control-flow or an unsupported tag.
+
+    Raised by :func:`signalforge.manifest.template.resolve_template_refs`
+    (US-002 of #116) when the SQL contains a ``{% ... %}`` statement block, a
+    ``{{ var(...) }}`` / ``{{ env_var(...) }}`` lookup, or a macro call. The
+    bounded resolver has no Jinja engine and refuses to silently mishandle
+    these; subclassing :class:`TemplateResolutionError` lets callers catch
+    both with one ``except`` clause.
+    """
+
+    default_remediation = (
+        "SignalForge resolves dbt-Jinja references with a bounded substituter, "
+        "not a full Jinja engine. Control-flow ({% ... %}), var()/env_var(), and "
+        "macro calls are not supported — pre-render them with dbt first."
+    )
+
+
 class SelectorParseError(ManifestError):
     """The ``--select`` expression supplied to :func:`parse_selector` is syntactically invalid.
 

@@ -297,6 +297,77 @@ class DiffSidecarWriteError(DiffError):
         self.__cause__ = cause
 
 
+class DiffTestFileRecordTooLargeError(DiffError):
+    """A generated singular-test ``.sql`` payload exceeds the per-file size cap.
+
+    US-011 of #116 (DEC-010): generated business-rule tests are written as
+    standalone ``.sql`` files via the fail-closed
+    :func:`signalforge.diff._test_file_writer.write_test_file`. A singular
+    test is a handful of SQL lines plus the ``-- signalforge:generated``
+    header marker, so the cap (1 MB) is two orders of magnitude of headroom;
+    an oversize payload almost certainly indicates a runaway resolved-SQL
+    body. Checked on the encoded byte length BEFORE any ``os.open`` so an
+    oversize payload leaves no on-disk artefact.
+
+    Mirrors :class:`DiffSidecarRecordTooLargeError` and the safety / draft /
+    prune / grade ``*RecordTooLargeError`` precedents.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The generated test-file SQL exceeded the configured byte cap. This "
+        "usually indicates a runaway resolved-SQL body (e.g. an unbounded "
+        "Jinja expansion). Inspect the candidate test's SQL, or raise the "
+        "cap via the writer's `size_limit_bytes` override if the body is "
+        "legitimately large."
+    )
+
+    def __init__(self, size: int, limit: int, *, remediation: str | None = None) -> None:
+        self.size = size
+        self.limit = limit
+        message = f"Generated test-file size {size} exceeds size limit {limit}."
+        if remediation is None:
+            remediation = (
+                f"The generated test-file SQL exceeded its {limit}-byte cap "
+                "(DEC-010 of #116). Inspect the resolved SQL body for runaway "
+                "expansion."
+            )
+        super().__init__(message, remediation=remediation)
+
+
+class DiffTestFileWriteError(DiffError):
+    """The fail-closed generated-test ``.sql`` writer could not durably persist.
+
+    US-011 of #116 (DEC-010): mirrors :class:`DiffSidecarWriteError` and the
+    safety / draft / prune / grade audit-write seams. The writer
+    (:func:`signalforge.diff._test_file_writer.write_test_file`) catches
+    **no** exceptions internally; any ``OSError`` / ``PermissionError`` /
+    encoding failure / ``fsync`` failure / symlink-containment failure
+    propagates out via this class. The CLI write-path must NOT report a
+    generated test as written when the file didn't durably hit disk —
+    silently succeeding when the artefact was lost is exactly the failure
+    mode the fail-closed pattern exists to prevent.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Verify the target `tests/` directory is writable (permissions / "
+        "disk space / SELinux contexts) and that no symlink in the path "
+        "escapes the project directory. Writing the generated test is "
+        "intentionally aborted when the write fails — re-running after "
+        "fixing the underlying I/O issue is the supported recovery path."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: BaseException,
+        remediation: str | None = None,
+    ) -> None:
+        self.cause = cause
+        super().__init__(message, remediation=remediation)
+        self.__cause__ = cause
+
+
 # Sorted alphabetically (mirrors safety / draft / prune / grade / warehouse
 # error modules).
 __all__ = [
@@ -307,4 +378,6 @@ __all__ = [
     "DiffPruneResultModelMismatchError",
     "DiffSidecarRecordTooLargeError",
     "DiffSidecarWriteError",
+    "DiffTestFileRecordTooLargeError",
+    "DiffTestFileWriteError",
 ]

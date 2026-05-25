@@ -153,14 +153,28 @@ Runtime knob flags:
   table — it only changes the aggregate verdict and (opt-in) exit
   code. Out-of-range values exit 2.
 - `--write` — Write the proposed `schema.yml` to disk under
-  `<project_dir>/<model_dir>/schema.yml`. The JSON sidecar is
-  still written to `<project_dir>/.signalforge/diff.json`.
-  Mutually exclusive with `--dry-run`.
+  `<project_dir>/<model_dir>/schema.yml`. **Additionally** writes
+  each proposed singular `.sql` business-rule test to its
+  `tests/<model>__<descriptor>_<hash>.sql` path under the project
+  (DEC-010/DEC-014 of issue #116); each file is prepended with a
+  `-- signalforge:generated <hash>` header marker. The JSON sidecar
+  is still written to `<project_dir>/.signalforge/diff.json`.
+  Mutually exclusive with `--dry-run`. See `--force` for the
+  `.sql` overwrite policy.
+- `--force` — With `--write`, governs overwrite of an existing
+  proposed `.sql` test file (DEC-010 of issue #116). New files
+  always write. A file that already exists and carries
+  SignalForge's `-- signalforge:generated` marker is overwritten
+  **only** with `--force`; without `--force` it is skipped with a
+  stderr WARNING naming the file. A file that exists **without**
+  the marker (hand-authored) is **never** overwritten, even with
+  `--force` — it is skipped with a clear stderr WARNING (we never
+  clobber human-written tests). No-op without `--write`.
 - `--dry-run` — Run the FULL pipeline (LLM + warehouse + grade)
   and print the diff to stdout, but write nothing — neither the
-  `schema.yml` nor the `.signalforge/diff.json` sidecar.
-  Overrides the default-on sidecar (DEC-010). Mutually exclusive
-  with `--write`.
+  `schema.yml`, the proposed `.sql` test files, nor the
+  `.signalforge/diff.json` sidecar. Overrides the default-on
+  sidecar (DEC-010). Mutually exclusive with `--write`.
 - `--estimate` — Print a pre-flight cost preview and exit
   without making any billable Anthropic or warehouse call. The
   full pipeline prelude still runs (manifest, safety, draft,
@@ -383,17 +397,23 @@ surface only after a billable LLM round-trip.
 
 ### `signalforge prune-existing <model> --schema <path>`
 
-Prune the tests in an externally-authored dbt `schema.yml` against
-real warehouse data. Runs **ingest → prune → diff** — no draft, no
-grade, **no LLM call** — and reports which of your existing tests add
-signal (kept), which could not be evaluated (kept-uncertain), and
-which always pass or fail on known-clean data (dropped). The product
-story: *point SignalForge at your existing dbt tests and let the
-warehouse tell you which ones add no signal* — extending Architectural
-Commitment #1 ("signal over volume") to any generator's tests
-(hand-written, dbt-codegen, dbt Copilot, DinoAI, datapilot). The
-library seam this wraps is `signalforge.ingest.read_schema(...)`
-(issue #104); the subcommand is issue #105 (DEC-002 … DEC-010 of
+Prune your existing dbt tests against real warehouse data. Runs
+**ingest → prune → diff** — no draft, no grade, **no LLM call** — and
+reports which of your existing tests add signal (kept), which could not
+be evaluated (kept-uncertain), and which always pass or fail on
+known-clean data (dropped). Both your externally-authored `schema.yml`
+(`not_null` / `unique` / `accepted_values` / `relationships`) **and**
+your project's singular `tests/*.sql` business-rule tests are ingested
+and pruned in one run (US-014): each `.sql` referencing this model
+becomes a model-level `custom_sql` test, deduped against the
+schema.yml tests and pruned alongside them. The product story: *point
+SignalForge at your existing dbt tests and let the warehouse tell you
+which ones add no signal* — extending Architectural Commitment #1
+("signal over volume") to any generator's tests (hand-written,
+dbt-codegen, dbt Copilot, DinoAI, datapilot). The library seams this
+wraps are `signalforge.ingest.read_schema(...)` (issue #104) and
+`signalforge.ingest.read_test_files(...)` (US-014); the subcommand is
+issue #105 (DEC-002 … DEC-010 of
 [`plans/super/105-prune-existing-cli.md`](../plans/super/105-prune-existing-cli.md)).
 For which dbt test shapes are supported vs. skipped (and the `tests:` /
 `data_tests:` and `ref()` / `source()` tolerances), see the
@@ -421,6 +441,7 @@ Flag reference:
 | `--project-dir PATH` | no | walk-up default | Absolute assertion: `<PATH>` must contain `dbt_project.yml`; the CLI does NOT walk up from the override (DEC-027). Default: walk up from the current working directory. |
 | `--manifest PATH` | no | `<project_dir>/target/manifest.json` | Override the manifest location. Canonicalised against the resolved project_dir. |
 | `--profiles-dir PATH` | no | dbt default search | Override the `profiles.yml` search location (mirrors dbt-core's flag). Sets `DBT_PROFILES_DIR` in the current process environment. |
+| `--tests-dir PATH` | no | `<project_dir>/tests` | Override the singular-test directory enumerated for model-level `tests/*.sql` files (US-014). Each `.sql` referencing this model is pruned alongside the schema.yml tests; unrelated files are ignored. The **default** directory is optional — when absent only the schema.yml tests are pruned; an **explicit** `--tests-dir` pointing at a missing directory fails loud (`IngestSchemaNotFoundError`). |
 | `--scope {sample,full}` | no | from config | Override `prune.scope`. Applied via `PruneConfig.model_validate` so validators re-run (DEC-002). |
 | `--sample-strategy {oneshot,materialised}` | no | from config | Override `prune.sample_strategy`. Applied via `PruneConfig.model_validate` (DEC-002). |
 | `--format {ansi,markdown,json}` | no | `ansi` | Select the diff renderer. ANSI: coloured terminal output. Markdown: GitHub-friendly report. JSON: stdout receives the JSON sidecar's contents. |
@@ -463,6 +484,34 @@ requires a grading report, locked by #104 DEC-011).
 > file, adding cosmetic diff lines. This is accepted and documented;
 > the **kept / kept-uncertain / dropped table is the load-bearing
 > signal**, not the byte-exact diff body.
+
+#### Singular `tests/*.sql` business-rule tests (US-014)
+
+In addition to the `--schema` file, `prune-existing` ingests your
+project's **singular tests** — the hand-authored `.sql` files under
+`<project_dir>/tests` (override with `--tests-dir`). Each `.sql` whose
+resolved `ref()` / `source()` / `this` references the model under
+prune becomes a model-level `custom_sql` candidate test and is pruned
+**alongside** the schema.yml tests in the same warehouse run, so the
+warehouse tells you which of *all* your existing tests — schema.yml
+AND singular — add no signal. Specifics:
+
+- **Dedupe across both sources.** A singular `.sql` whose body matches
+  a `custom_sql` test already present in the schema.yml collapses to
+  one (deduped by SQL hash via `read_test_files(..., existing=...)`).
+- **Unrelated `.sql` files are ignored**, not recorded — a singular
+  test referencing a *different* model is simply not included.
+- **Unsupported Jinja folds into the skipped-test report.** A `.sql`
+  carrying control-flow Jinja, `var()` / `env_var()`, or macro calls
+  the bounded resolver cannot evaluate is recorded as
+  `malformed-supported-test` and appears in the same grouped stderr
+  summary as the schema.yml skips.
+- **Multi-table singular tests run full-scan** (within the bytes cap)
+  rather than against a sampled CTE — a business rule spanning a JOIN
+  must see the whole join.
+- **Read-only still holds:** kept `custom_sql` tests surface as
+  standalone `.sql` proposals in the diff; nothing is written back to
+  your test files.
 
 Exit codes (four-tier taxonomy; see § Four-tier exit-code taxonomy):
 
@@ -745,6 +794,25 @@ evaluation results — a test that was running when the budget
 tripped is `kept-without-evidence`, not `kept` (failing-rows count
 is unknown). See
 [`docs/prune-ops.md` § Drop-reason taxonomy](prune-ops.md#drop-reason-taxonomy).
+
+### Proposed `.sql` overwrite-skip WARNING (issue #116 DEC-010/DEC-014)
+
+Source: `generate --write` when materialising a proposed singular
+`.sql` business-rule test whose target file already exists and the
+overwrite policy declines to clobber it. Two distinct shapes:
+
+```text
+WARNING: <tests/...sql> already exists; pass --force to overwrite SignalForge-generated tests. Skipping.
+WARNING: refusing to overwrite hand-authored <tests/...sql> (no '-- signalforge:generated' marker); skipping.
+```
+
+The first fires when the existing file carries SignalForge's
+`-- signalforge:generated` marker but `--force` was not passed; the
+second fires when the existing file does NOT carry the marker
+(hand-authored) — that file is **never** overwritten, even with
+`--force`. The run continues and exits `0` for the skip; only the
+named file is left untouched. New files (no existing target) write
+silently.
 
 ## Threshold-fail behaviour
 

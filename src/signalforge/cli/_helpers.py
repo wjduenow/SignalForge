@@ -71,6 +71,8 @@ from signalforge.diff import (
     DiffPruneResultModelMismatchError,
     DiffSidecarRecordTooLargeError,
     DiffSidecarWriteError,
+    DiffTestFileRecordTooLargeError,
+    DiffTestFileWriteError,
 )
 from signalforge.draft import (
     DraftConfigInvalidError,
@@ -115,6 +117,7 @@ from signalforge.llm import (
     LLMServerError,
 )
 from signalforge.manifest import (
+    AmbiguousRefError,
     Manifest,
     ManifestError,
     ManifestNotFoundError,
@@ -123,7 +126,11 @@ from signalforge.manifest import (
     ModelMissingSqlError,
     ModelNotFoundError,
     ModelPathOutsideProjectError,
+    RefNotFoundError,
     SelectorParseError,
+    SourceNotFoundError,
+    TemplateResolutionError,
+    UnsupportedJinjaError,
     UnsupportedManifestVersionError,
 )
 from signalforge.prune import (
@@ -280,6 +287,19 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # is disabled — caller's fault, not load).
     ModelNotFoundError: 2,
     ModelDisabledError: 2,
+    # Jinja-ref relation resolution (the SQL named a ref/source the manifest
+    # doesn't know, or an ambiguous ref — operator-supplied input that the
+    # warehouse can't act on; #116 DEC-005).
+    RefNotFoundError: 2,
+    AmbiguousRefError: 2,
+    SourceNotFoundError: 2,
+    # Bounded Jinja-ref resolution in singular-test SQL (the SQL used an
+    # unsupported Jinja form, or left a reference unresolved — operator-supplied
+    # input the bounded resolver can't act on; #116 US-002). ``UnsupportedJinjaError``
+    # subclasses ``TemplateResolutionError`` and inherits its tier via MRO, but is
+    # listed explicitly so the 7th AST scan finds a direct mapping for each.
+    TemplateResolutionError: 2,
+    UnsupportedJinjaError: 2,
     # Selector grammar (--select expression syntactically invalid; #37
     # DEC-007: tier 2 because the operator supplied a malformed input).
     SelectorParseError: 2,
@@ -397,6 +417,12 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     LLMResponseAuditRecordTooLargeError: 3,
     DiffSidecarWriteError: 3,
     DiffSidecarRecordTooLargeError: 3,
+    # Generated singular-test ``.sql`` writer (US-011 of #116). Both are
+    # write-path durability errors raised inside the fail-closed writer
+    # (mirrors the diff sidecar precedent above): write-durability and the
+    # pre-open size cap are tier 3 (external-dep / fail-closed write).
+    DiffTestFileWriteError: 3,
+    DiffTestFileRecordTooLargeError: 3,
     # Grade base catches forward-compat subclasses to 3 (every grade-layer
     # leaf has been individually tier-mapped above).
     GradeError: 3,

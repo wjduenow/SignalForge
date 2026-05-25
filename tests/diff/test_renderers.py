@@ -26,7 +26,7 @@ import pytest
 from signalforge.diff import render_to_text
 from signalforge.diff._renderers import AnsiRenderer, MarkdownRenderer, Renderer
 from signalforge.diff.config import DiffConfig
-from signalforge.diff.models import DiffEntry, DiffReport
+from signalforge.diff.models import DiffEntry, DiffReport, ProposedTestFile
 
 # ---------------------------------------------------------------------------
 # Test fixtures.
@@ -38,6 +38,7 @@ def _make_report(
     entries: tuple[DiffEntry, ...] = (),
     unified_diff: str = "",
     model_unique_id: str = "model.proj.customers",
+    proposed_test_files: tuple[ProposedTestFile, ...] = (),
 ) -> DiffReport:
     """Construct a minimal :class:`DiffReport` for renderer tests."""
     kept = sum(1 for e in entries if e.tier == "kept")
@@ -53,6 +54,7 @@ def _make_report(
         existing_yaml=None,
         unified_diff=unified_diff,
         entries=entries,
+        proposed_test_files=proposed_test_files,
         kept_count=kept,
         kept_uncertain_count=kept_uncertain,
         dropped_count=dropped,
@@ -1023,6 +1025,102 @@ def test_json_renderer_serialises_kept_uncertain_tier_literally(
     output = render_to_text(_make_report(entries=(_kept_uncertain_entry(),)), config=cfg)
 
     parsed = _json.loads(output)
-    assert parsed["audit_schema_version"] == 2
+    assert parsed["audit_schema_version"] == 3
     assert parsed["kept_uncertain_count"] == 1
     assert parsed["entries"][0]["tier"] == "kept-uncertain"
+
+
+# ---------------------------------------------------------------------------
+# Proposed test files section (issue #116).
+# ---------------------------------------------------------------------------
+
+
+def test_ansi_renderer_omits_test_files_section_when_empty(
+    default_config: DiffConfig,
+) -> None:
+    """No ``proposed test files`` heading when the report carries none."""
+    report = _make_report(entries=(_kept_entry(),))
+    out = AnsiRenderer(config=default_config, force_color=False).render(report)
+    assert "proposed test files" not in out
+
+
+def test_ansi_renderer_shows_proposed_test_file(default_config: DiffConfig) -> None:
+    """The ANSI renderer shows the proposed ``.sql`` path + SQL body."""
+    proposed = ProposedTestFile(
+        path="tests/customers__total_custom_sql_a1b2c3d4.sql",
+        sql="-- signalforge:generated a1b2c3d4\n\nselect * from x where total < 0\n",
+    )
+    report = _make_report(entries=(_kept_entry(),), proposed_test_files=(proposed,))
+    out = AnsiRenderer(config=default_config, force_color=False).render(report)
+    assert "proposed test files" in out
+    assert "+++ tests/customers__total_custom_sql_a1b2c3d4.sql" in out
+    assert "select * from x where total < 0" in out
+    assert "-- signalforge:generated a1b2c3d4" in out
+
+
+def test_ansi_renderer_strips_ansi_from_hostile_sql(default_config: DiffConfig) -> None:
+    """DEC-007: SQL body ANSI escapes are stripped unconditionally.
+
+    Render with colour OFF so the renderer emits ZERO SGR codes of its
+    own — then any surviving ``\\x1b`` would be a smuggled escape from the
+    SQL body. The strip is independent of colour state (the security
+    boundary), so the hostile escape is removed but the literal ``EVIL``
+    text survives.
+    """
+    proposed = ProposedTestFile(
+        path="tests/m__custom_sql_deadbeef.sql",
+        sql="select \x1b[31mEVIL\x1b[0m from x",
+    )
+    report = _make_report(proposed_test_files=(proposed,))
+    out = AnsiRenderer(config=default_config, force_color=False).render(report)
+    assert "\x1b" not in out
+    assert "select EVIL from x" in out
+
+
+def test_markdown_renderer_omits_test_files_section_when_empty(
+    default_config: DiffConfig,
+) -> None:
+    report = _make_report(entries=(_kept_entry(),))
+    out = MarkdownRenderer(config=default_config).render(report)
+    assert "Proposed test files" not in out
+
+
+def test_markdown_renderer_shows_proposed_test_file(default_config: DiffConfig) -> None:
+    """Markdown renderer shows a heading, inline-code path, and fenced sql block."""
+    proposed = ProposedTestFile(
+        path="tests/customers__total_custom_sql_a1b2c3d4.sql",
+        sql="select * from x where total < 0",
+    )
+    report = _make_report(proposed_test_files=(proposed,))
+    out = MarkdownRenderer(config=default_config).render(report)
+    assert "## Proposed test files" in out
+    assert "### `tests/customers__total_custom_sql_a1b2c3d4.sql`" in out
+    assert "```sql" in out
+    assert "select * from x where total < 0" in out
+
+
+def test_markdown_renderer_dynamic_fence_for_backtick_sql(
+    default_config: DiffConfig,
+) -> None:
+    """A SQL body containing a triple-backtick run gets a longer fence."""
+    proposed = ProposedTestFile(
+        path="tests/m__custom_sql_deadbeef.sql",
+        sql="select '```' as marker",
+    )
+    report = _make_report(proposed_test_files=(proposed,))
+    out = MarkdownRenderer(config=default_config).render(report)
+    # The opening fence must be longer than the 3-backtick run in the body.
+    assert "````sql" in out
+    # The body's backticks survive verbatim inside the longer fence.
+    assert "select '```' as marker" in out
+
+
+def test_markdown_renderer_strips_ansi_from_hostile_sql(default_config: DiffConfig) -> None:
+    proposed = ProposedTestFile(
+        path="tests/m__custom_sql_deadbeef.sql",
+        sql="select \x1b[31mEVIL\x1b[0m from x",
+    )
+    report = _make_report(proposed_test_files=(proposed,))
+    out = MarkdownRenderer(config=default_config).render(report)
+    assert "\x1b[31m" not in out
+    assert "EVIL" in out

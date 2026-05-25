@@ -115,6 +115,7 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
         "GradeAuditRecordTooLargeError",
         "LLMResponseAuditRecordTooLargeError",
         "DiffSidecarRecordTooLargeError",
+        "DiffTestFileRecordTooLargeError",
         "DiffInputTooLargeError",
         "IngestSchemaTooLargeError",
     }:
@@ -226,6 +227,7 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
         "LLMResponseAuditWriteError",
         "GradeLLMError",
         "DiffSidecarWriteError",
+        "DiffTestFileWriteError",
     }:
         return cls(_SENTINEL_MESSAGE, cause=_SENTINEL_CAUSE)
 

@@ -51,18 +51,24 @@ import re
 import warnings
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from signalforge.manifest.errors import (
+    AmbiguousRefError,
     ManifestError,
     ManifestNotFoundError,
     ModelDisabledError,
     ModelMissingSqlError,
     ModelNotFoundError,
     ModelPathOutsideProjectError,
+    RefNotFoundError,
+    SourceNotFoundError,
     UnsupportedManifestVersionError,
 )
 from signalforge.manifest.models import Manifest, Model
+
+if TYPE_CHECKING:
+    from signalforge.warehouse.models import TableRef
 
 MAX_MANIFEST_BYTES = 200 * 1024 * 1024
 """Soft warning threshold (DEC-008). Above this, :func:`load` emits a
@@ -286,6 +292,7 @@ def load(
 
     raw_nodes = raw.get("nodes", {}) or {}
     raw_disabled = raw.get("disabled", {}) or {}
+    raw_sources = raw.get("sources", {}) or {}
 
     # DEC-017: Manifest.nodes is dict[str, Model] of *only* model resources.
     filtered_nodes: dict[str, Any] = {
@@ -306,11 +313,22 @@ def load(
         if model_entries:
             filtered_disabled[k] = model_entries
 
+    # DEC-005 of #116: Manifest.sources is dict[str, Source] of *only* source
+    # resources. dbt only writes ``resource_type == "source"`` entries under
+    # the top-level ``sources`` key, but filter defensively for the same reason
+    # nodes are filtered (forward-compat across schema versions).
+    filtered_sources: dict[str, Any] = {
+        k: v
+        for k, v in raw_sources.items()
+        if isinstance(v, dict) and v.get("resource_type") == "source"
+    }
+
     manifest = Manifest.model_validate(
         {
             "metadata": metadata,
             "nodes": filtered_nodes,
             "disabled": filtered_disabled,
+            "sources": filtered_sources,
         }
     )
 
@@ -342,6 +360,98 @@ def schema_version(manifest: Manifest) -> str:
 def iter_models(manifest: Manifest) -> Iterator[Model]:
     """Iterate over the enabled (``resource_type == "model"``) nodes."""
     return iter(manifest.nodes.values())
+
+
+# ---------------------------------------------------------------------------
+# Jinja-ref relation resolution (DEC-005 of #116)
+# ---------------------------------------------------------------------------
+
+
+def resolve_ref(
+    manifest: Manifest,
+    name: str,
+    *,
+    package: str | None = None,
+    version: int | str | None = None,
+) -> TableRef:
+    """Resolve a dbt ``ref(name)`` to a qualified-name ``TableRef``.
+
+    Matches an enabled model by ``Model.name`` (the dbt ``ref()`` argument is
+    the unversioned model name, not the ``unique_id``). When ``package`` is
+    supplied (the two-arg ``ref('pkg', 'name')`` form), the match is further
+    constrained by ``Model.package_name``. ``version`` is accepted for API
+    parity with the dbt grammar but not used for matching in v0.1 — dbt's
+    versioned models are out of the supported manifest range.
+
+    Raises:
+        :class:`RefNotFoundError`: no enabled model matches ``name`` (and
+            ``package``, when supplied).
+        :class:`AmbiguousRefError`: more than one enabled model matches and no
+            ``package`` was given to disambiguate.
+
+    The returned ``TableRef`` is built via
+    :meth:`signalforge.warehouse.models.TableRef.from_model`, so a model
+    missing ``database`` / ``schema_`` raises the warehouse-layer
+    ``ManifestProjectNotFoundError`` / ``ManifestSchemaNotFoundError``.
+    """
+    from signalforge.warehouse.models import TableRef
+
+    matches = [
+        m
+        for m in manifest.nodes.values()
+        if m.name == name and (package is None or m.package_name == package)
+    ]
+    if not matches:
+        qualified = f"ref('{package}', '{name}')" if package is not None else f"ref('{name}')"
+        raise RefNotFoundError(
+            f"{qualified} matched no enabled model in the manifest.",
+        )
+    if len(matches) > 1:
+        candidates = ", ".join(sorted(repr(m.unique_id) for m in matches))
+        raise AmbiguousRefError(
+            f"ref('{name}') matched {len(matches)} enabled models: {candidates}.",
+        )
+    return TableRef.from_model(matches[0])
+
+
+def resolve_source(
+    manifest: Manifest,
+    source_name: str,
+    table_name: str,
+) -> TableRef:
+    """Resolve a dbt ``source(source_name, table_name)`` to a ``TableRef``.
+
+    Matches a :class:`signalforge.manifest.models.Source` by
+    ``(source_name, name)`` against the manifest's source registry, then builds
+    a ``TableRef`` from the source's ``database`` (project), ``schema_``
+    (dataset), and physical table name (``identifier`` or ``name``).
+
+    Raises:
+        :class:`SourceNotFoundError`: the ``(source_name, table_name)`` pair is
+            absent from ``manifest.sources``.
+    """
+    from signalforge.warehouse.models import TableRef
+
+    for src in manifest.sources.values():
+        if src.source_name == source_name and src.name == table_name:
+            # dbt always populates database/schema/identifier on a source, but
+            # our read-back model types them nullable for forward-compat. A
+            # None here means a malformed manifest — fail loud rather than let
+            # TableRef raise an opaque validation error.
+            relation = src.relation_name
+            if src.schema_ is None or relation is None:
+                raise SourceNotFoundError(
+                    f"source('{source_name}', '{table_name}') is missing a "
+                    f"schema or identifier in the manifest.",
+                )
+            return TableRef(
+                project=src.database,
+                dataset=src.schema_,
+                name=relation,
+            )
+    raise SourceNotFoundError(
+        f"source('{source_name}', '{table_name}') is not present in manifest.sources.",
+    )
 
 
 def _build_indexes(manifest: Manifest) -> dict[str, dict[str, Model]]:

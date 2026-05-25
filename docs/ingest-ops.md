@@ -31,9 +31,15 @@ warehouse SQL:
 | `accepted_values` | column has no values outside the declared set |
 | `relationships` | every child key resolves to a parent key |
 
-Every other test — `dbt_utils.*`, `dbt_expectations.*`, singular/custom
-generics, anything namespaced — is **skipped and recorded**, never
-silently dropped (see [Supported vs skipped](#supported-vs-skipped-tests)).
+Plus a fifth, sourced from a different file: an operator's hand-authored
+**singular** tests under `tests/*.sql` are read into `custom_sql`
+business-rule candidates (issue #116; see
+[Singular `tests/*.sql` tests](#singular-testssql-tests)).
+
+Every *generic* test the schema.yml carries that is not one of the four —
+`dbt_utils.*`, `dbt_expectations.*`, custom generics, anything
+namespaced — is **skipped and recorded**, never silently dropped (see
+[Supported vs skipped](#supported-vs-skipped-tests)).
 
 !!! tip "There's a CLI for this"
     The ingest layer is a **library** entry point — call `read_schema` and
@@ -53,6 +59,10 @@ Import from `signalforge.ingest`.
 - **`read_schema(schema, model, *, project_dir=None) -> IngestResult`** —
   the entry point. Parses an external `schema.yml` for one model and
   returns an `IngestResult`.
+- **`read_test_files(tests_dir, model, manifest, *, project_dir=None, existing=None) -> IngestResult`** —
+  reads the operator's **singular** dbt tests (`tests/*.sql`) for one
+  model into `custom_sql` candidates (issue #116; see
+  [Singular `tests/*.sql` tests](#singular-testssql-tests)).
 
 The `schema` argument is overloaded **by type** — this str-vs-`Path` split
 is the contract:
@@ -181,6 +191,75 @@ single pass. Three checks run:
   `model.columns`.
 
 A clean candidate raises nothing.
+
+## Singular `tests/*.sql` tests
+
+`read_schema` covers *generic* tests declared in YAML. dbt also supports
+**singular** tests — a hand-authored `.sql` file under the project's
+`tests/` directory that *is* a full failing-rows SELECT (a non-empty
+result means the test failed). Those carry exactly the business rules
+the four generic types cannot express ("a refund never exceeds its
+order," "every shipped order has a ship date"). `read_test_files`
+ingests them into the same `custom_sql` candidate variant the drafter
+produces (issue #116), so they prune through the same engine.
+
+```python
+from signalforge.ingest import read_test_files
+
+result = read_test_files(
+    project_dir / "tests",          # directory of *.sql files
+    model,                          # the manifest Model to associate to
+    manifest,                       # used to resolve ref()/source()
+    existing=schema_result.candidate,  # optional: dedupe against schema.yml custom_sql
+)
+```
+
+It enumerates every `*.sql` file **directly under** `tests_dir` (sorted
+by filename for byte-stable order) and classifies each:
+
+- **ref/source/this resolution + association.** Each `.sql`'s
+  dbt-Jinja refs are resolved with the **bounded** resolver
+  (`{{ this }}`, `{{ ref('m') }}`, `{{ source('s','t') }}` — no Jinja
+  *engine*). A file whose resolved refs reference **this** model
+  becomes a model-level `custom_sql` candidate associated to it.
+- **Unrelated files are ignored, not skip-recorded.** A `.sql` that
+  references *some other* model is simply not included — it is not a
+  defect of *this* model's ingest, so it produces no `SkippedTest`
+  record. (A bare SELECT with no resolvable `ref()` is treated as
+  unrelated, not associated.)
+- **Unsupported Jinja is skip-recorded.** A `.sql` carrying Jinja the
+  bounded resolver cannot evaluate (control-flow `{% if %}` / `{% for %}`,
+  `var()` / `env_var()`, macros) lands in `IngestResult.skipped` with
+  reason `malformed-supported-test` and a `singular .sql test contains
+  Jinja the bounded resolver cannot evaluate` detail — never silently
+  dropped. (The closed 3-value `SkipReason` literal has no singular-test
+  specific value; `malformed-supported-test` is the closest fit since the
+  `.sql` test cannot be compiled to runnable SQL.)
+- **Dedupe across both sources.** Associated tests dedupe by
+  `(model, "custom_sql", sql_hash)` where `sql_hash` is a 16-hex
+  blake2b-8 of the SQL body. Two `.sql` files with byte-identical SQL
+  collapse to one candidate; and when `existing` (a schema.yml-sourced
+  candidate, e.g. from a prior `read_schema` call) is passed, any `.sql`
+  whose SQL matches an `existing` `custom_sql` test is dropped so the
+  same rule is not pruned twice.
+
+No anchor-contract check runs here — singular tests are model-level, so
+there is no per-column reference to validate against `model.columns`.
+
+Each `.sql` is **size-capped** (from `stat().st_size`, before it is read
+into memory) by the same 5 MB cap that guards `read_schema`; oversize
+raises `IngestSchemaTooLargeError`. `tests_dir` is symlink-/containment-
+hardened against `project_dir` (defaulting to `tests_dir` itself); a
+missing or non-directory `tests_dir` raises `IngestSchemaNotFoundError`,
+and an unreadable file or canonicalisation failure raises
+`IngestSchemaParseError`.
+
+!!! tip "There's a CLI for this too"
+    The `signalforge prune-existing <model> --schema <path>` subcommand
+    reads singular `tests/*.sql` (override the directory with
+    `--tests-dir`) *alongside* the schema.yml in one run and prunes both
+    — see the
+    [CLI reference](cli-ops.md#singular-testssql-business-rule-tests-us-014).
 
 ## Safety posture
 

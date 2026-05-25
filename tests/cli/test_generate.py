@@ -681,6 +681,194 @@ def test_generate_write_and_dry_run_mutex(
     assert "--write" in err_low or "--dry-run" in err_low or "not allowed" in err_low
 
 
+# ---------------------------------------------------------------------------
+# US-012 of #116 — generate --write writes proposed .sql + --force policy
+# ---------------------------------------------------------------------------
+
+
+def _diff_report_with_test_files(model: Any, candidate: Any) -> Any:
+    """Build a :class:`DiffReport` whose ``proposed_test_files`` carries one
+    marked singular ``.sql`` proposal, mirroring what the diff emitter would
+    produce (``_with_marker``-prefixed ``sql`` + an ``anchor_to_filename`` path).
+    """
+    from signalforge.diff._test_file_writer import _with_marker
+    from signalforge.diff.models import DiffReport, ProposedTestFile
+
+    base = make_diff_report(model, candidate)
+    proposed = ProposedTestFile(
+        path="tests/customers__amount_custom_sql_deadbeef.sql",
+        sql=_with_marker(
+            "SELECT * FROM {{ ref('customers') }} WHERE amount < 0",
+            args_hash="deadbeef",
+        ),
+    )
+    return DiffReport.model_validate({**base.model_dump(), "proposed_test_files": (proposed,)})
+
+
+def test_generate_write_writes_proposed_sql_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--write`` materialises every proposed singular ``.sql`` test to its
+    ``tests/`` path with the ``-- signalforge:generated`` marker (DEC-010)."""
+    from signalforge.diff._test_file_writer import _GENERATED_MARKER_PREFIX
+
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+    model = make_model()
+    candidate = make_candidate(model_name=model.name)
+    mocks["render_diff"].return_value = _diff_report_with_test_files(model, candidate)
+
+    code = main(["generate", "model.shop.customers", "--write"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    written = project_dir / "tests" / "customers__amount_custom_sql_deadbeef.sql"
+    assert written.is_file(), "proposed .sql test should be written under tests/"
+    content = written.read_text(encoding="utf-8")
+    assert content.startswith(f"{_GENERATED_MARKER_PREFIX} deadbeef")
+    assert "WHERE amount < 0" in content
+    assert "Traceback" not in captured.err
+
+
+def test_generate_dry_run_writes_no_sql_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--dry-run`` writes nothing — including no proposed ``.sql`` files."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+    model = make_model()
+    candidate = make_candidate(model_name=model.name)
+    mocks["render_diff"].return_value = _diff_report_with_test_files(model, candidate)
+
+    code = main(["generate", "model.shop.customers", "--dry-run"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    written = project_dir / "tests" / "customers__amount_custom_sql_deadbeef.sql"
+    assert not written.exists(), "--dry-run must not write proposed .sql files"
+
+
+def test_generate_default_no_write_writes_no_sql_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Default (neither --write nor --dry-run): no proposed ``.sql`` files."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+    model = make_model()
+    candidate = make_candidate(model_name=model.name)
+    mocks["render_diff"].return_value = _diff_report_with_test_files(model, candidate)
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    written = project_dir / "tests" / "customers__amount_custom_sql_deadbeef.sql"
+    assert not written.exists()
+
+
+def test_generate_write_force_overwrites_marked_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An existing ``.sql`` carrying our marker is overwritten with --force
+    (DEC-010)."""
+    from signalforge.diff._test_file_writer import _GENERATED_MARKER_PREFIX
+
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+    model = make_model()
+    candidate = make_candidate(model_name=model.name)
+    mocks["render_diff"].return_value = _diff_report_with_test_files(model, candidate)
+
+    target = project_dir / "tests" / "customers__amount_custom_sql_deadbeef.sql"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        f"{_GENERATED_MARKER_PREFIX} stale\n\nSELECT 1 AS old_body\n", encoding="utf-8"
+    )
+
+    code = main(["generate", "model.shop.customers", "--write", "--force"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    content = target.read_text(encoding="utf-8")
+    assert "WHERE amount < 0" in content, "marked file should be overwritten with --force"
+    assert "old_body" not in content
+
+
+def test_generate_write_marked_file_no_force_skips_with_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An existing marked ``.sql`` is skipped WITHOUT --force; stderr WARNING
+    names the file; the file is left untouched (DEC-010)."""
+    from signalforge.diff._test_file_writer import _GENERATED_MARKER_PREFIX
+
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+    model = make_model()
+    candidate = make_candidate(model_name=model.name)
+    mocks["render_diff"].return_value = _diff_report_with_test_files(model, candidate)
+
+    target = project_dir / "tests" / "customers__amount_custom_sql_deadbeef.sql"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    original = f"{_GENERATED_MARKER_PREFIX} stale\n\nSELECT 1 AS old_body\n"
+    target.write_text(original, encoding="utf-8")
+
+    code = main(["generate", "model.shop.customers", "--write"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    # Untouched.
+    assert target.read_text(encoding="utf-8") == original
+    # WARNING names the file and mentions --force.
+    assert "customers__amount_custom_sql_deadbeef.sql" in captured.err
+    assert "--force" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_generate_write_force_never_overwrites_hand_authored_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A hand-authored ``.sql`` (no marker) is NEVER overwritten, even with
+    --force; skipped with a clear stderr WARNING (DEC-010)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+    model = make_model()
+    candidate = make_candidate(model_name=model.name)
+    mocks["render_diff"].return_value = _diff_report_with_test_files(model, candidate)
+
+    target = project_dir / "tests" / "customers__amount_custom_sql_deadbeef.sql"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    hand_authored = "SELECT * FROM customers WHERE amount IS NULL\n"
+    target.write_text(hand_authored, encoding="utf-8")
+
+    code = main(["generate", "model.shop.customers", "--write", "--force"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    # Hand-authored content untouched even with --force.
+    assert target.read_text(encoding="utf-8") == hand_authored
+    assert "hand-authored" in captured.err.lower()
+    assert "customers__amount_custom_sql_deadbeef.sql" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_generate_format_default_ansi(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1357,3 +1545,57 @@ def test_generate_no_info_when_prune_enabled_default(
         f"expected no prune-disabled INFO when enabled=True, got "
         f"{[rec.getMessage() for rec in matching]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# _split_marked_sql / _existing_file_is_signalforge_generated — unit-level
+# (US-012 of #116 — DEC-010)
+# ---------------------------------------------------------------------------
+
+
+def test_split_marked_sql_no_marker_returns_empty_hash_and_original() -> None:
+    """A payload without the generated-header marker is treated as the whole
+    body with an empty hash (forward-compat fallback — generate.py line 457)."""
+    from signalforge.cli.generate import _split_marked_sql
+
+    unmarked = "select * from {{ this }} where x < 0"
+    args_hash, body = _split_marked_sql(unmarked)
+    assert args_hash == ""
+    assert body == unmarked
+
+
+def test_split_marked_sql_recovers_hash_and_body_from_marked() -> None:
+    """A marked payload yields the embedded hash and the bare body (the
+    happy path that line 457's fallback complements)."""
+    from signalforge.cli.generate import _split_marked_sql
+    from signalforge.diff._test_file_writer import _GENERATED_MARKER_PREFIX
+
+    marked = f"{_GENERATED_MARKER_PREFIX} deadbeef\n\nselect 1 from t\n"
+    args_hash, body = _split_marked_sql(marked)
+    assert args_hash == "deadbeef"
+    assert body == "select 1 from t\n"
+
+
+def test_existing_file_is_signalforge_generated_unreadable_returns_false(
+    tmp_path: Path,
+) -> None:
+    """A path that cannot be read (here: a directory, which raises
+    ``IsADirectoryError`` — an ``OSError`` subclass) is conservatively treated
+    as NOT ours, so the write path refuses to clobber it (generate.py 482-483)."""
+    from signalforge.cli.generate import _existing_file_is_signalforge_generated
+
+    a_dir = tmp_path / "a_directory.sql"
+    a_dir.mkdir()
+    assert _existing_file_is_signalforge_generated(a_dir) is False
+
+
+def test_existing_file_is_signalforge_generated_marked_returns_true(
+    tmp_path: Path,
+) -> None:
+    """A readable file beginning with our marker is recognised as ours."""
+    from signalforge.cli.generate import _existing_file_is_signalforge_generated
+    from signalforge.diff._test_file_writer import _GENERATED_MARKER_PREFIX
+
+    f = tmp_path / "marked.sql"
+    f.write_text(f"{_GENERATED_MARKER_PREFIX} abc\n\nselect 1\n", encoding="utf-8")
+    assert _existing_file_is_signalforge_generated(f) is True

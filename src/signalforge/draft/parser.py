@@ -100,6 +100,15 @@ def _validate_anchor_contract(
     filters the test catalogue server-side too, so a well-behaved LLM
     won't emit excluded types; this check is the defence-in-depth
     backstop for a model that ignores the prompt.
+
+    ``custom_sql`` (DEC-002) is the free-form business-rule variant and
+    receives bespoke handling: its ``sql`` body must be non-empty (after
+    strip), and it is EXEMPT from the parent-column-equality rule (a
+    column-scoped custom_sql may reference other columns in its SQL — only
+    membership of its declared ``column`` matters). When its ``column``
+    is ``None`` it is a model-level assertion with no column checks. The
+    SQL's Jinja / safety is NOT validated here — that is the
+    resolver/compiler's job; this is structural validation only.
     """
     violations: list[str] = []
 
@@ -120,15 +129,29 @@ def _validate_anchor_contract(
         not_null_count = 0
         unique_count = 0
         for test in column.tests:
-            if test.column != column.name:
-                violations.append(
-                    f"column test on column={column.name!r} references {test.column!r}"
-                )
-            if test.column not in model_columns:
-                violations.append(
-                    f"test references nonexistent column {test.column!r} "
-                    f"(available: {sorted(model_columns)})"
-                )
+            if test.type == "custom_sql":
+                # custom_sql is exempt from the parent-column-equality
+                # rule: its SQL body may legitimately reference columns
+                # other than the one it is filed under. Only structural
+                # checks apply (non-empty sql + membership of the
+                # declared column, when present).
+                if not test.sql.strip():
+                    violations.append(f"column={column.name!r} custom_sql test has empty sql")
+                if test.column is not None and test.column not in model_columns:
+                    violations.append(
+                        f"custom_sql test references nonexistent column {test.column!r} "
+                        f"(available: {sorted(model_columns)})"
+                    )
+            else:
+                if test.column != column.name:
+                    violations.append(
+                        f"column test on column={column.name!r} references {test.column!r}"
+                    )
+                if test.column not in model_columns:
+                    violations.append(
+                        f"test references nonexistent column {test.column!r} "
+                        f"(available: {sorted(model_columns)})"
+                    )
             if test.type in exclude_tests:
                 violations.append(
                     f"column={column.name!r} test type {test.type!r} is in exclude_tests "
@@ -146,7 +169,17 @@ def _validate_anchor_contract(
     # Model-level tests: nonexistent-column check + excluded-test-type
     # rejection. The parent-column rule is column-scoped by definition.
     for test in candidate.tests:
-        if test.column not in model_columns:
+        if test.type == "custom_sql":
+            # Model-level custom_sql: non-empty sql is mandatory; a
+            # declared column (when present) must exist. column=None is
+            # the canonical model-level business-rule shape — valid.
+            if not test.sql.strip():
+                violations.append("model-level custom_sql test has empty sql")
+            if test.column is not None and test.column not in model_columns:
+                violations.append(
+                    f"model-level custom_sql test references nonexistent column {test.column!r}"
+                )
+        elif test.column not in model_columns:
             violations.append(f"model-level test references nonexistent column {test.column!r}")
         if test.type in exclude_tests:
             violations.append(

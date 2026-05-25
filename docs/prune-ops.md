@@ -47,7 +47,7 @@ Import from `signalforge.prune`. The 14 names exported by `__all__`:
 
 - **`PruneResult`** — Aggregate verdict for one model. Frozen Pydantic model with fields `prune_schema_version: Literal[1]`, `model_unique_id: str`, `decisions: tuple[PruneDecision, ...]`, `elapsed_ms: int`, `signalforge_version: str`. Computed properties: `kept_decisions`, `dropped_decisions`, `kept_count`, `dropped_count`, `total_tests` — all derived from `decisions` (DEC-003) so a `PruneResult` reconstructed from a JSONL log carries identical views to a freshly produced one.
 
-- **`PruneDecision`** — One verdict per candidate test. Carries `test_anchor: str` (`"column.<name>"` or `"model"`), `test: CandidateTest` (the typed discriminated union from the drafter, NOT a loose dict — DEC-004; the grader and diff renderer reuse the drafter's per-variant display logic), `decision: Literal["kept", "dropped"]`, `reason: DropReason`, `failures: int`, `sampled_rows: int | None`, `scope: Scope`, `elapsed_ms: int`, `compiled_sql_hash: str` (16 hex chars; blake2b-8 per DEC-005), `compiled_sql: str`, `why: str`, `sample_failures: tuple[dict[str, Any], ...] | None`.
+- **`PruneDecision`** — One verdict per candidate test. Carries `test_anchor: str` (`"column.<name>"` or `"model"`), `test: CandidateTest` (the typed discriminated union from the drafter — five variants as of issue #116, including `custom_sql`; NOT a loose dict — DEC-004; the grader and diff renderer reuse the drafter's per-variant display logic), `decision: Literal["kept", "dropped"]`, `reason: DropReason`, `failures: int`, `sampled_rows: int | None`, `scope: Scope`, `elapsed_ms: int`, `compiled_sql_hash: str` (16 hex chars; blake2b-8 per DEC-005), `compiled_sql: str`, `why: str`, `sample_failures: tuple[dict[str, Any], ...] | None`.
 
 ### Configuration
 
@@ -137,15 +137,84 @@ so the diff renderer (#8) can branch on the value.
 | Reason | Decision | Why |
 |--------|----------|-----|
 | `always-passes` | dropped | Zero failing rows on the sampled or full set; no signal worth shipping. The load-bearing case for Architectural Commitment #1. |
-| `requires-future-data` | dropped | A `relationships` test references a `to:` parent model not in the loaded manifest. No warehouse call issued — the compiler returns a `_RequiresFutureData` sentinel and the orchestrator routes it directly to this reason (DEC-026). |
+| `requires-future-data` | dropped | A `relationships` test references a `to:` parent model not in the loaded manifest, OR a `custom_sql` test's `{{ ref() }}` / `{{ source() }}` target is absent from the manifest (issue #116). No warehouse call issued — the compiler returns a `_RequiresFutureData` sentinel and the orchestrator routes it directly to this reason (DEC-026). |
 | `failed-on-known-clean-data` | dropped | Test failed AND `model.unique_id` is in `prune.trusted_models`; the test is presumed buggy. Symmetric noise-direction split with `always-passes` — both directions of noise need pruning per `CLAUDE.md`. |
 | `kept` | kept | Test failed on an untrusted model with non-zero failures. Reviewer should evaluate. |
-| `kept-without-evidence` | kept | Could not evaluate — warehouse error (typed `WarehouseError` subclass) or total budget exceeded (DEC-011). Ship conservatively; reviewer decides. |
+| `kept-without-evidence` | kept | Could not evaluate — warehouse error (typed `WarehouseError` subclass), total budget exceeded (DEC-011), or a `custom_sql` test whose SQL carries unsupported Jinja / an ambiguous `ref()` / a SQL-safety rejection (issue #116; see [`custom_sql` evaluation](#custom_sql-evaluation)). Ship conservatively; reviewer decides. |
 
 Conservative bias: when in doubt, keep. Architectural Commitment #1
 penalises always-pass tests (no signal, consumes reviewer attention) but
 does not penalise kept tests with ambiguous evidence — those land in
 front of a human reviewer who can make the final call.
+
+## `custom_sql` evaluation
+
+The drafter's fifth test variant — `custom_sql`, the free-form singular
+SQL business-rule test (issue #116; see
+[`docs/draft-ops.md`](draft-ops.md#custom-business-rule-tests-custom_sql))
+— is pruned through the same orchestrator and routes to the same five
+`DropReason` literals as the four built-ins. There is **no new drop
+reason**; what differs is how the test compiles and gets sampled.
+
+**Jinja resolution first.** `custom_sql.sql` may reference `{{ this }}`,
+`{{ ref('<model>') }}`, and `{{ source('<src>', '<table>') }}`. The
+compiler resolves these via the bounded resolver
+(`signalforge.manifest.template.resolve_template_refs`) before any
+warehouse call. The resolution outcome decides the routing:
+
+- **Resolved cleanly** → the test is sampled / full-scanned and routes
+  to `always-passes` / `kept` / `failed-on-known-clean-data` exactly
+  like a built-in.
+- **`{{ ref() }}` / `{{ source() }}` targets a model/source absent from
+  the manifest** → `requires-future-data` (mirrors the `relationships`
+  missing-target precedent — the referenced model simply isn't built
+  yet; revisit when the dependency lands). No warehouse call.
+- **Control-flow Jinja (`{% if %}`, `{% for %}`, `var()`, `env_var()`,
+  macros), an ambiguous `ref()` (matches multiple packages), or a
+  SQL-safety pre-flight rejection on the resolved SQL** →
+  `kept-without-evidence`. We cannot evaluate it, so we ship it for the
+  reviewer rather than silently dropping it. No warehouse call.
+
+**Single-table vs. multi-table sampling.** Once the SQL resolves, the
+compiler decides how to bound the scan with a cheap heuristic — does a
+word-boundary `JOIN` keyword survive string-literal stripping?
+
+- **Single-table** (no `JOIN`) — the resolved SQL references only the
+  model's own table. In `scope="sample"` the model's table is
+  substituted with the deterministic-sample CTE alias (identical to the
+  built-ins, so per-test bytes stay bounded). In `scope="full"` a
+  partition filter is applied when one is configured.
+- **Multi-table** (a `JOIN` survives literal-stripping) — runs
+  **full-scan (unsampled)**, because sampling only one side of a join is
+  semantically wrong: an orphan-detection join against a *sampled* child
+  would report false orphans for parents that are simply absent from the
+  sample. A partition filter is still applied to the model's own table
+  when one is available.
+
+**The bytes cap is the only guardrail on a multi-table full-scan.** A
+multi-table `custom_sql` test reads every row of the joined tables —
+there is no sample CTE to bound it. The adapter's
+`maximum_bytes_billed` cap (default 100 MB, DEC-005; raise via the
+profile-level `maximum_bytes_billed` field — see
+[`docs/warehouse-adapter-ops.md`](warehouse-adapter-ops.md)) is what
+stops a runaway scan. **Tuning note:** if a multi-table business rule
+spans large fact tables, either raise the cap deliberately (and accept
+the per-test cost) or scope the rule with a `partition_filter` so the
+model's own side is bounded. When the resolved query's pre-execution
+byte estimate exceeds the cap, the warehouse rejects the query before
+execution; the typed `WarehouseError` is caught and the test routes to
+`kept-without-evidence` (`why` carries the warehouse error class) — the
+test ships, unevaluated, for the reviewer.
+
+In the [expected-drop-rate](#expected-drop-rates) framing below,
+`custom_sql` tests behave like the built-ins: a business rule that the
+warehouse data never violates is `always-passes` (dropped, no signal); a
+rule the data *does* violate is `kept` (real signal — exactly the rows a
+reviewer wants to see). The one categorical difference is the higher
+`kept-without-evidence` / `requires-future-data` fraction: free-form SQL
+has more ways to be unevaluable (unsupported Jinja, unbuilt refs) than a
+generic schema test. That is the conservative-bias contract working as
+designed — an unevaluable business rule is shipped, never silently lost.
 
 ## Expected drop rates
 
@@ -468,7 +537,7 @@ concerns are explicitly deferred:
 - **Multi-warehouse adapters.** Snowflake, Postgres, Databricks, Redshift adapters slot in behind `WarehouseAdapter` without prune changes once their adapters land. The prune compiler already dispatches on `Dialect.quote_char` (DEC-025), not on dialect `name`; no SQL paths are BigQuery-specific.
 - **Confidence intervals on `always-passes`.** Surfacing "less than or equal to 3/N upper-bound failure rate at 95 percent confidence" (rule of three) on the decision record so reviewers can calibrate the always-pass verdict. Also covers great-expectations-style `mostly:` thresholds.
 - **Historical always-pass evidence.** Running candidate tests against multiple `run_results.json` snapshots to assert "never failed in last N runs." The Phase-1 plan considers this for the `failed-on-known-clean-data` evidence channel and defers to v0.2.
-- **dbt-utils test types.** `dbt_utils.unique_combination_of_columns`, `dbt_utils.accepted_range`, `dbt_utils.expression_is_true`, etc. The drafter's `CandidateTest` union has exactly four variants in v0.1; the prune compiler compiles exactly four. v0.2 territory.
+- **dbt-utils test types.** `dbt_utils.unique_combination_of_columns`, `dbt_utils.accepted_range`, `dbt_utils.expression_is_true`, etc. The drafter's `CandidateTest` union has five variants — the four generic schema tests plus the `custom_sql` business-rule escape hatch (issue #116); the prune compiler compiles all five. The namespaced dbt-utils / dbt-expectations macros remain v0.2+ territory (a `custom_sql` test can express many of them by hand in the meantime).
 - **`where:` test modifier and `severity: warn` / `mostly:`.** dbt-core supports a `where:` predicate on every test plus `severity` and `mostly` knobs; v0.1 prune does not consume any of these.
 - **`prune_decision_id`-keyed checkpoint / resumption.** Long-running prune runs that resume from disk after a crash. v0.2.
 - **LLM-generated rationale on `kept` decisions.** The grader (#7) produces rubric-scored rationale; prune writes only the structured drop reason plus failure count plus scope.

@@ -7,8 +7,20 @@ the filter; column declaration order is preserved from the candidate;
 tests inside each column are sorted by ``(test_type, args_hash)`` so the
 emitted bytes are stable across runs with the same input.
 
+Singular ``custom_sql`` business-rule tests (DEC-002 of #116) are NOT
+schema.yml blocks — dbt models them as standalone ``.sql`` files under
+``tests/``. The YAML emitter (:func:`emit_proposed_yaml`) therefore
+**skips** every ``custom_sql`` test: :func:`_render_test` returns the
+``_SKIP`` sentinel and the column / model renderers drop it. The
+companion :func:`emit_proposed_test_files` surfaces every KEPT
+``custom_sql`` test as a :class:`signalforge.diff.models.ProposedTestFile`
+carrying a safe relative path (via
+:func:`signalforge.diff._test_file_writer.anchor_to_filename`) and the
+SQL body with the ``-- signalforge:generated <hash>`` header marker.
+
 This is a leaf module — it depends only on the production
-:mod:`signalforge.draft` and :mod:`signalforge.prune` model types.
+:mod:`signalforge.draft` and :mod:`signalforge.prune` model types
+plus the shared args-hash seam and the in-layer filename builder.
 ``yaml.safe_dump`` is invoked with ``sort_keys=False`` so the
 key ordering enforced here (top-level: ``version``, ``models``;
 per-model: ``name``, ``description``, ``columns``, optional ``tests``;
@@ -27,56 +39,47 @@ them; the load-back is the load-bearing assertion.
 
 from __future__ import annotations
 
-import hashlib
-import json
-from typing import Any
+from typing import Any, Final
 
 import yaml
 
+from signalforge._common.artifact_id import model_test_args_hash as _shared_args_hash
+from signalforge.diff._test_file_writer import _with_marker, anchor_to_filename
+from signalforge.diff.models import ProposedTestFile
 from signalforge.draft import CandidateColumn, CandidateSchema, CandidateTest
 from signalforge.draft.models import (
     CandidateTestAcceptedValues,
+    CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
     CandidateTestUnique,
 )
 from signalforge.prune import PruneResult
 
+# Sentinel returned by :func:`_render_test` for a ``custom_sql`` test —
+# singular business-rule tests are NOT schema.yml blocks (DEC-002 of
+# #116); they ship as standalone ``.sql`` files via
+# :func:`emit_proposed_test_files`. The column / model renderers drop
+# any test that renders to this sentinel.
+_SKIP: Final[object] = object()
+
 # ---------------------------------------------------------------------------
-# args_hash — mirrors signalforge.grade.engine._model_test_args_hash
+# args_hash — delegates to the shared seam (signalforge._common.artifact_id)
 # ---------------------------------------------------------------------------
 
 
 def _test_args_hash(test: CandidateTest) -> str:
     """Return the canonical 8-hex args fingerprint of a candidate test.
 
-    Mirrors :func:`signalforge.grade.engine._model_test_args_hash` (DEC-009
-    of the grade layer) so the emitter, the grader, and the diff renderer
-    agree on test identity. The hash domain is the test's identifying
-    args, sorted-key JSON-serialised so equivalent tests produce
-    identical hashes regardless of field-construction order. For
-    ``accepted_values``, the ``values`` tuple is sorted before hashing —
-    a re-ordering of the literal list does not rotate the hash.
+    Delegates to :func:`signalforge._common.artifact_id.model_test_args_hash`
+    (the shared seam, issue #42) so the emitter, the grader, and the diff
+    renderer agree on test identity across every ``CandidateTest`` variant
+    — including the fifth ``custom_sql`` variant (issue #116), which the
+    previous in-module copy did not handle and would have raised on. The
+    shared seam is the single source of truth for the hash domain (sorted
+    ``accepted_values``, raw SQL text for ``custom_sql``, etc.).
     """
-    if isinstance(test, (CandidateTestNotNull, CandidateTestUnique)):
-        payload: dict[str, object] = {"type": test.type, "column": test.column}
-    elif isinstance(test, CandidateTestAcceptedValues):
-        payload = {
-            "type": test.type,
-            "column": test.column,
-            "values": sorted(test.values),
-        }
-    elif isinstance(test, CandidateTestRelationships):
-        payload = {
-            "type": test.type,
-            "column": test.column,
-            "to": test.to,
-            "field": test.field,
-        }
-    else:  # pragma: no cover — exhaustive over the closed union
-        raise ValueError(f"Unknown CandidateTest variant: {type(test).__name__}")
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.blake2b(canonical.encode("utf-8"), digest_size=4).hexdigest()
+    return _shared_args_hash(test)
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +135,13 @@ def _render_test(test: CandidateTest) -> Any:
     parameterised tests render as a single-key dict mapping the type
     name to its args. ``rationale`` is intentionally NOT emitted — it
     is consumed by the grader and the diff "why" line, not by dbt.
+
+    A ``custom_sql`` test (issue #116) returns the :data:`_SKIP` sentinel
+    — singular business-rule tests are NOT schema.yml blocks; they ship
+    as standalone ``.sql`` files via :func:`emit_proposed_test_files`.
+    The column / model renderers drop any test that renders to
+    :data:`_SKIP`, so ``custom_sql`` never lands in the proposed YAML and
+    this function never crashes on the fifth variant.
     """
     if isinstance(test, (CandidateTestNotNull, CandidateTestUnique)):
         return test.type
@@ -139,6 +149,8 @@ def _render_test(test: CandidateTest) -> Any:
         return {test.type: {"values": list(test.values)}}
     if isinstance(test, CandidateTestRelationships):
         return {test.type: {"to": test.to, "field": test.field}}
+    if isinstance(test, CandidateTestCustomSQL):
+        return _SKIP
     raise ValueError(  # pragma: no cover — exhaustive over the closed union
         f"Unknown CandidateTest variant: {type(test).__name__}"
     )
@@ -175,7 +187,13 @@ def _render_column(
     }
     surviving = [t for t in column.tests if _fingerprint("column", column.name, t) in kept]
     if surviving:
-        out["tests"] = [_render_test(t) for t in _sort_tests(tuple(surviving))]
+        # ``custom_sql`` tests render to the ``_SKIP`` sentinel — they
+        # ship as standalone ``.sql`` files, not schema.yml blocks, so
+        # they're dropped from the YAML here (issue #116).
+        rendered = [_render_test(t) for t in _sort_tests(tuple(surviving))]
+        rendered = [r for r in rendered if r is not _SKIP]
+        if rendered:
+            out["tests"] = rendered
     return out
 
 
@@ -215,7 +233,12 @@ def emit_proposed_yaml(candidate: CandidateSchema, prune_result: PruneResult) ->
 
     surviving_model_tests = [t for t in candidate.tests if _fingerprint("model", None, t) in kept]
     if surviving_model_tests:
-        model_doc["tests"] = [_render_test(t) for t in _sort_tests(tuple(surviving_model_tests))]
+        # Drop ``custom_sql`` (``_SKIP`` sentinel) — model-level
+        # business-rule tests ship as standalone ``.sql`` files (#116).
+        rendered_model_tests = [_render_test(t) for t in _sort_tests(tuple(surviving_model_tests))]
+        rendered_model_tests = [r for r in rendered_model_tests if r is not _SKIP]
+        if rendered_model_tests:
+            model_doc["tests"] = rendered_model_tests
 
     document: dict[str, Any] = {
         "version": 2,
@@ -231,4 +254,71 @@ def emit_proposed_yaml(candidate: CandidateSchema, prune_result: PruneResult) ->
     )
 
 
-__all__ = ("emit_proposed_yaml",)
+def emit_proposed_test_files(
+    candidate: CandidateSchema,
+    prune_result: PruneResult,
+) -> tuple[ProposedTestFile, ...]:
+    """Render the KEPT ``custom_sql`` tests as standalone ``.sql`` proposals.
+
+    Singular ``custom_sql`` business-rule tests (DEC-002 of #116) are NOT
+    schema.yml blocks — dbt models them as standalone ``.sql`` files under
+    ``tests/``. This function walks ``prune_result.kept_decisions``,
+    selects the ``custom_sql`` ones, and emits one
+    :class:`signalforge.diff.models.ProposedTestFile` per kept test:
+
+    * :attr:`~signalforge.diff.models.ProposedTestFile.path` —
+      ``tests/<model>__<descriptor>_<hash>.sql`` built via
+      :func:`signalforge.diff._test_file_writer.anchor_to_filename`. The
+      ``descriptor`` is ``<column>_custom_sql`` for a column-scoped test
+      and ``custom_sql`` for a model-level one; the ``<hash>`` is the
+      shared 8-hex args-hash (reuses
+      :func:`signalforge._common.artifact_id.model_test_args_hash`, NOT a
+      re-derivation) so two custom_sql tests on the same column with
+      different SQL never collide on a filename.
+    * :attr:`~signalforge.diff.models.ProposedTestFile.sql` — the SQL body
+      with the ``-- signalforge:generated <hash>`` header marker prepended
+      via :func:`signalforge.diff._test_file_writer._with_marker`, so the
+      sidecar carries exactly the bytes a later
+      :func:`signalforge.diff._test_file_writer.write_test_file` call
+      would persist.
+
+    Only KEPT decisions produce a proposal (mirrors the YAML emitter's
+    "ship only kept" contract). The result is ordered by
+    ``prune_result.kept_decisions`` order, then deduped by ``path`` so two
+    decisions that resolve to the same filename collapse to one proposal
+    (defensive — distinct SQL produces distinct hashes, so a collision
+    means duplicate decisions).
+    """
+    out: list[ProposedTestFile] = []
+    seen_paths: set[str] = set()
+    for decision in prune_result.kept_decisions:
+        test = decision.test
+        if not isinstance(test, CandidateTestCustomSQL):
+            continue
+        anchor = decision.test_anchor
+        if anchor.startswith("column."):
+            column = anchor[len("column.") :]
+            descriptor = f"{column}_custom_sql"
+        else:
+            # Model-level (the literal "model" anchor, plus any
+            # forward-compatible sentinel) — no column in the descriptor.
+            descriptor = "custom_sql"
+        args_hash = _shared_args_hash(test)
+        path = anchor_to_filename(
+            model_name=candidate.name,
+            descriptor=descriptor,
+            args_hash=args_hash,
+        )
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        out.append(
+            ProposedTestFile(
+                path=path,
+                sql=_with_marker(test.sql, args_hash=args_hash),
+            )
+        )
+    return tuple(out)
+
+
+__all__ = ("emit_proposed_test_files", "emit_proposed_yaml")

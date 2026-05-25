@@ -30,6 +30,7 @@ from signalforge.manifest.models import (
     Manifest,
     Model,
     Ref,
+    Source,
 )
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "dbt_project_small" / "target"
@@ -188,6 +189,75 @@ def test_drift_detector_extra_forbid() -> None:
     poisoned["definitely_not_a_real_dbt_field"] = "boom"
     with pytest.raises(ValidationError):
         StrictModel.model_validate(poisoned)
+
+
+@pytest.mark.unit
+def test_source_validate_and_relation_name() -> None:
+    """A real ``manifest.sources`` entry round-trips; ``relation_name`` derives.
+
+    The physical table name is ``identifier`` when present, else falls back
+    to the source-table ``name`` (DEC-005 of #116).
+    """
+    raw = _load_fixture(12)
+    # Select the source deterministically by its known key rather than
+    # relying on dict iteration order (P5 fix).
+    src_dict = raw["sources"]["source.signalforge_test_small.raw.users"]
+    src = Source.model_validate(src_dict)
+    assert src.unique_id.startswith("source.")
+    assert src.source_name == "raw"
+    assert src.name == "users"
+    assert src.schema_ == "raw"  # aliased from ``schema``
+    # ``relation_name`` is ``identifier`` when present, else ``name``. The
+    # fixture carries ``identifier == "users"`` so it equals the identifier.
+    # Parenthesised so the assertion actually tests the fallback rather than
+    # being short-circuited to the always-truthy ``src.name`` (P5 fix).
+    assert src.identifier == "users"
+    assert src.relation_name == (src.identifier or src.name)
+    assert src.relation_name == "users"
+
+    # identifier-absent fallback to name.
+    no_ident = Source.model_validate(
+        {
+            "unique_id": "source.pkg.s.t",
+            "source_name": "s",
+            "name": "t",
+            "resource_type": "source",
+            "database": "db",
+            "schema": "sch",
+        }
+    )
+    assert no_ident.relation_name == "t"
+
+
+@pytest.mark.unit
+def test_source_drift_detector_extra_forbid() -> None:
+    """Drift sentinel for :class:`Source` — mirrors the ``Model`` detector.
+
+    Build a ``StrictSource(Source)`` with ``extra="forbid"``, feed it a real
+    v12 source entry trimmed to the declared keys (round-trip succeeds), then
+    poison an unknown key and assert ``ValidationError``.
+    """
+
+    class StrictSource(Source):
+        model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
+
+    raw = _load_fixture(12)
+    node = next(iter(raw["sources"].values()))
+
+    allowed_keys: set[str] = set()
+    for field_name, field_info in Source.model_fields.items():
+        allowed_keys.add(field_name)
+        if field_info.alias is not None:
+            allowed_keys.add(field_info.alias)
+
+    trimmed = {k: v for k, v in node.items() if k in allowed_keys}
+    strict = StrictSource.model_validate(trimmed)
+    assert strict.unique_id.startswith("source.")
+
+    poisoned = dict(trimmed)
+    poisoned["definitely_not_a_real_dbt_field"] = "boom"
+    with pytest.raises(ValidationError):
+        StrictSource.model_validate(poisoned)
 
 
 @pytest.mark.unit

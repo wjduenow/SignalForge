@@ -93,10 +93,15 @@ def test_exclude_tests_rejects_non_list_non_tuple() -> None:
     assert "list of test-type strings" in str(exc.value)
 
 
-def test_valid_test_types_constant_matches_dbt_four() -> None:
+def test_valid_test_types_constant_matches_known_set() -> None:
     """Pin the canonical set so adding a new test type without updating
-    VALID_TEST_TYPES (and the prompt catalogue) fails loud here."""
-    assert frozenset({"not_null", "unique", "accepted_values", "relationships"}) == VALID_TEST_TYPES
+    VALID_TEST_TYPES (and the prompt catalogue) fails loud here. The four
+    standard dbt schema tests plus the ``custom_sql`` business-rule
+    variant (DEC-002)."""
+    assert (
+        frozenset({"not_null", "unique", "accepted_values", "relationships", "custom_sql"})
+        == VALID_TEST_TYPES
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -119,21 +124,53 @@ def test_render_system_prompt_drops_excluded_from_catalogue() -> None:
 
 def test_render_system_prompt_updates_scope_line() -> None:
     prompt = _render_system_prompt(("accepted_values", "relationships"))
-    # SCOPE line names only the surviving types.
-    assert "Propose only `not_null` and `unique` tests" in prompt
+    # SCOPE line names only the surviving standard types; custom_sql (still
+    # allowed) is appended via the "plus" clause.
+    assert "Propose only `not_null` and `unique`, plus `custom_sql` tests" in prompt
     assert "accepted_values" not in prompt
     assert "relationships" not in prompt
 
 
 def test_render_system_prompt_single_remaining_type_uses_bare_form() -> None:
     prompt = _render_system_prompt(("unique", "accepted_values", "relationships"))
-    assert "Propose only `not_null` tests" in prompt
+    assert "Propose only `not_null`, plus `custom_sql` tests" in prompt
 
 
-def test_render_system_prompt_excluding_all_four_raises() -> None:
+def test_render_system_prompt_excluding_all_four_standard_keeps_custom_sql() -> None:
+    # Excluding the four standard types leaves custom_sql, which is enough
+    # for the drafter to propose (issue #116 — custom_sql is a valid type).
+    prompt = _render_system_prompt(("not_null", "unique", "accepted_values", "relationships"))
+    assert "Propose only `custom_sql` tests" in prompt
+    assert '"type": "custom_sql"' in prompt
+    assert '"type": "not_null"' not in prompt
+
+
+def test_render_system_prompt_excluding_everything_raises() -> None:
     with pytest.raises(ValueError) as exc:
-        _render_system_prompt(("not_null", "unique", "accepted_values", "relationships"))
+        _render_system_prompt(
+            ("not_null", "unique", "accepted_values", "relationships", "custom_sql")
+        )
     assert "at least one type must remain" in str(exc.value)
+
+
+def test_render_system_prompt_excluding_custom_sql_omits_all_mention() -> None:
+    # Item-3 regression: excluding custom_sql must drop both the catalogue
+    # line AND the SCOPE instruction so the prompt never asks for a type the
+    # parser would reject.
+    prompt = _render_system_prompt(("custom_sql",))
+    assert "custom_sql" not in prompt
+    # Standard four still present.
+    assert '"type": "not_null"' in prompt
+    assert '"type": "relationships"' in prompt
+    # Scope line has no "plus custom_sql" clause.
+    assert "plus `custom_sql`" not in prompt
+
+
+def test_render_system_prompt_default_includes_custom_sql() -> None:
+    # Item-3 regression: the unfiltered prompt advertises custom_sql.
+    prompt = _render_system_prompt(())
+    assert '"type": "custom_sql"' in prompt
+    assert "`custom_sql` tests are full singular-test SELECTs" in prompt
 
 
 def test_prompt_version_for_empty_equals_base_constant() -> None:

@@ -221,7 +221,7 @@ the orchestrator returns):
 ```json
 {
   "schema_version": 1,
-  "audit_schema_version": 2,
+  "audit_schema_version": 3,
   "signalforge_version": "0.1.0.dev0",
   "model_unique_id": "model.shop.dim_customers",
   "run_id": "a1b2c3d4e5f6478890aabbccddeeff00",
@@ -249,6 +249,12 @@ the orchestrator returns):
       "passed": null
     }
   ],
+  "proposed_test_files": [
+    {
+      "path": "tests/dim_customers__total_amount_custom_sql_a1b2c3d4.sql",
+      "sql": "-- signalforge:generated a1b2c3d4\n\nselect * from {{ ref('dim_customers') }} where total_amount < 0\n"
+    }
+  ],
   "kept_count": 8,
   "kept_uncertain_count": 1,
   "dropped_count": 2,
@@ -260,12 +266,18 @@ the orchestrator returns):
 }
 ```
 
-**`audit_schema_version: 2`** is the issue-#50 bump (was `1` in
-v0.1). The `kept-uncertain` tier literal + the new
-`kept_uncertain_count` field landed in the same change. External
-sidecar consumers (CI parsers, the v0.3 GitHub Action) gate on
-`audit_schema_version >= 2` to consume the four-tier taxonomy; a
-v0.1 reader gating on `== 1` will reject v0.2 sidecars (the bump is
+**`audit_schema_version: 3`** is the issue-#116 bump (was `2` after
+issue #50, `1` in v0.1). Issue #116 added the `proposed_test_files`
+array — the tuple of standalone `.sql` test files emitted for every
+KEPT singular `custom_sql` business-rule test (these are NOT
+schema.yml blocks, so they never appear in `proposed_yaml` /
+`unified_diff`; each carries a slug-safe relative `path` and the SQL
+body with its `-- signalforge:generated <hash>` header marker). The
+prior issue-#50 bump (`1 → 2`) added the `kept-uncertain` tier literal
++ `kept_uncertain_count`. External sidecar consumers (CI parsers, the
+v0.3 GitHub Action) gate on `audit_schema_version >= 3` to consume the
+proposed-test-files array, and on `>= 2` for the four-tier taxonomy; a
+reader gating on `== 1` / `== 2` will reject newer sidecars (the bump is
 intentionally a hard break — the sidecar is `O_TRUNC` write-only and
 prior runs' bytes are not preserved).
 

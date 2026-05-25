@@ -80,6 +80,18 @@ def _setup_project(tmp_path: Path) -> tuple[Path, Path]:
     return project_dir, schema_path
 
 
+def _write_singular_test(project_dir: Path, name: str, body: str) -> Path:
+    """Write a singular ``tests/<name>.sql`` file under the project (US-014).
+
+    Creates ``<project_dir>/tests`` if absent. Returns the file path.
+    """
+    tests_dir = project_dir / "tests"
+    tests_dir.mkdir(exist_ok=True)
+    path = tests_dir / name
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
 def _make_fake_adapter_factory(failure_counts: tuple[int, ...] = _FAILURE_COUNTS):
     """Return a ``_make_warehouse_adapter`` replacement returning a
     :class:`FakeBigQueryClient`-backed :class:`BigQueryAdapter` whose
@@ -645,3 +657,253 @@ def test_no_skipped_tests_emits_no_summary(
     assert (project_dir / ".signalforge" / "diff.json").is_file()
     assert "unsupported" not in err
     assert "Traceback" not in err
+
+
+# ---------------------------------------------------------------------------
+# US-014 — singular tests/*.sql ingested + pruned alongside schema.yml
+# ---------------------------------------------------------------------------
+
+
+# A schema referencing only real columns with one supported test, so the
+# schema.yml side contributes exactly ONE COUNT(*) query. Combined with the
+# singular .sql tests below, this keeps the fake's expected query count exact.
+_MINIMAL_SCHEMA = (
+    "version: 2\n"
+    "models:\n"
+    "  - name: stg_bikeshare_trips\n"
+    "    columns:\n"
+    "      - name: trip_id\n"
+    "        tests:\n"
+    "          - not_null\n"
+)
+
+
+def _minimal_schema_argv(project_dir: Path, model: str = _MODEL_UNIQUE_ID) -> list[str]:
+    schema_path = project_dir / "models" / "staging" / "minimal_schema.yml"
+    schema_path.write_text(_MINIMAL_SCHEMA, encoding="utf-8")
+    return [
+        "prune-existing",
+        model,
+        "--schema",
+        str(schema_path),
+        "--project-dir",
+        str(project_dir),
+        "--scope",
+        "full",
+        "--sample-strategy",
+        "oneshot",
+    ]
+
+
+def test_singular_test_pruned_alongside_schema(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A singular tests/*.sql referencing the model is pruned in the SAME run
+    as the schema.yml tests, and a singular test that adds no signal
+    (zero failing rows -> always-passes) shows up as dropped in the diff."""
+    import json
+
+    project_dir, _ = _setup_project(tmp_path)
+    # One singular test referencing the model under prune; returns zero
+    # failing rows -> always-passes -> dropped.
+    _write_singular_test(
+        project_dir,
+        "assert_trip_id_present.sql",
+        "select * from {{ this }} where trip_id is null\n",
+    )
+    argv = [*_minimal_schema_argv(project_dir), "--format", "json"]
+    # Two COUNT(*) queries: 1 from schema.yml (not_null trip_id, returns a
+    # failing row -> kept) + 1 from the singular test (returns 0 -> dropped).
+    factory = _make_fake_adapter_factory(failure_counts=(5, 0))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    out = capsys.readouterr().out
+    assert code == 0
+    payload = json.loads(out)
+    # Count only TEST entries (kept_count includes doc descriptions). The
+    # schema.yml not_null kept (failing row) + the singular custom_sql
+    # dropped (always-passes) were BOTH pruned.
+    test_entries = [e for e in payload["entries"] if e["test_type"] is not None]
+    kept_tests = [e for e in test_entries if e["tier"] == "kept"]
+    dropped_tests = [e for e in test_entries if e["tier"] == "dropped"]
+    assert len(kept_tests) == 1
+    assert len(dropped_tests) == 1
+    # The singular .sql is a no-signal test -> shows as dropped in the diff.
+    assert dropped_tests[0]["test_type"] == "custom_sql"
+    assert dropped_tests[0]["drop_reason"] == "always-passes"
+    # The singular custom_sql test surfaces in the entries (model-level).
+    artifact_ids = {e["artifact_id"] for e in payload["entries"]}
+    assert any("custom_sql" in aid for aid in artifact_ids), artifact_ids
+
+
+def test_singular_test_for_other_model_ignored(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A singular .sql referencing a DIFFERENT model is not included (and not
+    skip-recorded) — it is not a defect of this model's ingest."""
+    import json
+
+    project_dir, _ = _setup_project(tmp_path)
+    # References a ref() absent from the manifest -> unrelated, not included.
+    _write_singular_test(
+        project_dir,
+        "assert_other.sql",
+        "select * from {{ ref('some_other_model') }} where x is null\n",
+    )
+    argv = [*_minimal_schema_argv(project_dir), "--format", "json"]
+    # Only the schema.yml test issues a query; the unrelated singular test is
+    # not pruned, so exactly one COUNT(*).
+    factory = _make_fake_adapter_factory(failure_counts=(5,))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    captured = capsys.readouterr()
+    out = captured.out
+    err = captured.err
+    assert code == 0
+    payload = json.loads(out)
+    # Only the one schema.yml test was pruned; the unrelated .sql is absent.
+    test_entries = [e for e in payload["entries"] if e["test_type"] is not None]
+    assert len(test_entries) == 1
+    artifact_ids = {e["artifact_id"] for e in payload["entries"]}
+    assert not any("custom_sql" in aid for aid in artifact_ids)
+    assert "Traceback" not in err
+
+
+def test_singular_tests_dedupe_by_sql_body(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two singular .sql files with identical bodies collapse to one
+    custom_sql test (dedupe by SQL hash in read_test_files, DEC-013)."""
+    import json
+
+    project_dir, _ = _setup_project(tmp_path)
+    body = "select * from {{ this }} where duration_minutes < 0\n"
+    _write_singular_test(project_dir, "rule_a.sql", body)
+    _write_singular_test(project_dir, "rule_b.sql", body)
+    argv = [*_minimal_schema_argv(project_dir), "--format", "json"]
+    # After dedupe: 1 schema.yml not_null + exactly 1 custom_sql = 2 queries
+    # (NOT 3). A non-deduping regression would expect a third query and the
+    # fake would raise on the unmatched call.
+    factory = _make_fake_adapter_factory(failure_counts=(5, 0))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    out = capsys.readouterr().out
+    assert code == 0
+    payload = json.loads(out)
+    # After dedupe: exactly 2 TEST entries (not_null + 1 custom_sql), not 3.
+    test_entries = [e for e in payload["entries"] if e["test_type"] is not None]
+    assert len(test_entries) == 2
+
+
+def test_singular_unsupported_jinja_folds_into_skipped_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A singular .sql with unsupported Jinja folds into the same grouped
+    skipped-test summary as the schema.yml skips."""
+    project_dir, schema_path = _setup_project(tmp_path)
+    # The Austin schema already carries 2 unsupported schema.yml tests.
+    # Add a singular .sql with a {% set %} block (unsupported) -> +1 skip.
+    _write_singular_test(
+        project_dir,
+        "macro_test.sql",
+        "{% set t = 0 %}\nselect * from {{ this }} where duration_minutes < {{ t }}\n",
+    )
+    code = _run(_base_argv(project_dir, schema_path))
+    err = capsys.readouterr().err
+    assert code == 0
+    # 2 schema.yml skips + 1 singular skip = 3 total in ONE summary line.
+    assert "Skipped 3 unsupported tests:" in err
+    # The malformed-supported-test reason (from the singular .sql) appears.
+    assert "malformed-supported-test×1" in err
+    assert "Traceback" not in err
+
+
+def test_missing_default_tests_dir_is_silently_skipped(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A project with no tests/ directory still prunes its schema.yml tests
+    (singular tests are optional; the default dir is silently skipped)."""
+    project_dir, schema_path = _setup_project(tmp_path)
+    assert not (project_dir / "tests").exists()
+    code = _run(_base_argv(project_dir, schema_path))
+    assert code == 0
+    assert (project_dir / ".signalforge" / "diff.json").is_file()
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_explicit_tests_dir_missing_fails_loud(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An explicit --tests-dir pointing at a missing directory fails loud
+    (IngestSchemaNotFoundError -> exit 1)."""
+    project_dir, schema_path = _setup_project(tmp_path)
+    argv = [*_base_argv(project_dir, schema_path), "--tests-dir", str(project_dir / "nope")]
+    code = _run(argv)
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "Traceback" not in err
+    assert "ERROR:" in err
+
+
+def test_tests_dir_override_enumerates_custom_dir(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--tests-dir <path> enumerates singular .sql files in the custom dir."""
+    import json
+
+    project_dir, _ = _setup_project(tmp_path)
+    custom_dir = project_dir / "data_tests"
+    custom_dir.mkdir()
+    (custom_dir / "biz.sql").write_text(
+        "select * from {{ this }} where trip_id is null\n", encoding="utf-8"
+    )
+    argv = [
+        *_minimal_schema_argv(project_dir),
+        "--tests-dir",
+        str(custom_dir),
+        "--format",
+        "json",
+    ]
+    # 1 schema.yml not_null (kept) + 1 singular from custom dir (dropped).
+    factory = _make_fake_adapter_factory(failure_counts=(5, 0))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    out = capsys.readouterr().out
+    assert code == 0
+    payload = json.loads(out)
+    # not_null (schema.yml) + custom_sql (from --tests-dir) = 2 test entries.
+    test_entries = [e for e in payload["entries"] if e["test_type"] is not None]
+    assert len(test_entries) == 2
+    assert any(e["test_type"] == "custom_sql" for e in test_entries)
+
+
+def test_tests_dir_flag_default_is_none() -> None:
+    """``--tests-dir`` defaults to None (handler falls back to <project>/tests)."""
+    from signalforge.cli import _build_parser
+
+    parser = _build_parser()
+    args = parser.parse_args(["prune-existing", "customers", "--schema", "schema.yml"])
+    assert args.tests_dir is None
+
+
+def test_no_sql_file_written_read_only(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Read-only: no .sql is written back to the operator's test files
+    (DEC-003 preserved). A kept singular test surfaces in the diff only."""
+    project_dir, _ = _setup_project(tmp_path)
+    sql_path = _write_singular_test(
+        project_dir,
+        "assert_kept.sql",
+        "select * from {{ this }} where trip_id is null\n",
+    )
+    before = sql_path.read_text(encoding="utf-8")
+    before_files = {p.name for p in (project_dir / "tests").glob("*.sql")}
+    argv = _minimal_schema_argv(project_dir)
+    # singular test returns a failing row -> kept (so it would be "proposed").
+    factory = _make_fake_adapter_factory(failure_counts=(5, 3))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    assert code == 0
+    # The test file is untouched; no new .sql appeared in tests/.
+    assert sql_path.read_text(encoding="utf-8") == before
+    assert {p.name for p in (project_dir / "tests").glob("*.sql")} == before_files
+    assert "Traceback" not in capsys.readouterr().err

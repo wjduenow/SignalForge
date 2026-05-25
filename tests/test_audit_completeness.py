@@ -762,6 +762,10 @@ _FAIL_CLOSED_WRITER_MODULES: tuple[tuple[str, int], ...] = (
     ("prune/audit.py", 1),
     ("grade/audit.py", 2),
     ("diff/_sidecar.py", 1),
+    # US-011 of #116 — sixth fail-closed writer: generated singular-test
+    # ``.sql`` files. One writer function (``write_test_file``) → one
+    # canonical ``Try`` block + one short-write ``While`` loop.
+    ("diff/_test_file_writer.py", 1),
 )
 
 
