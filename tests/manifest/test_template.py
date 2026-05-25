@@ -161,6 +161,26 @@ def test_ref_two_arg_with_quoted_version_kwarg_resolves_name_and_package() -> No
 
 
 @pytest.mark.unit
+def test_ref_trailing_comma_empty_token_skipped() -> None:
+    """Item-3 (PR #117) coverage: an empty fragment in the ref() arg list — a
+    trailing comma (``ref('dim_users', )``) — splits to an empty token that the
+    resolver must ``continue`` past (template.py empty-token guard) rather than
+    treat as a positional. The single real positional resolves the name."""
+    manifest = _manifest()
+    out = resolve_template_refs("from {{ ref('dim_users', ) }}", _model(manifest), manifest)
+    assert out == f"from {_PROJECT}.{_DATASET}.dim_users"
+
+
+@pytest.mark.unit
+def test_ref_interior_empty_token_skipped() -> None:
+    """An interior empty fragment (``ref('pkg', , 'dim_users')``) likewise
+    splits to an empty token that is skipped; package + name still resolve."""
+    manifest = _manifest()
+    out = resolve_template_refs("from {{ ref('pkg', , 'dim_users') }}", _model(manifest), manifest)
+    assert out == f"from {_PROJECT}.{_DATASET}.dim_users"
+
+
+@pytest.mark.unit
 def test_ref_whitespace_variations_tolerated() -> None:
     manifest = _manifest()
     out = resolve_template_refs("from {{   ref(  'dim_users'  )   }}", _model(manifest), manifest)

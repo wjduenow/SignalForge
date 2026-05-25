@@ -50,7 +50,15 @@ from signalforge.manifest.errors import (
     SourceNotFoundError,
     TemplateResolutionError,
 )
-from signalforge.manifest.template import resolve_template_refs
+from signalforge.manifest.template import (
+    _EXPR_RE,
+    _THIS_RE,
+    _resolve_ref_args,
+    resolve_template_refs,
+)
+from signalforge.manifest.template import (
+    _REF_RE as _TEMPLATE_REF_RE,
+)
 
 if TYPE_CHECKING:
     from signalforge.manifest.models import Manifest, Model
@@ -248,6 +256,65 @@ def _parse_relationships(*, body: Any, column: str | None) -> CandidateTest | Sk
     )
 
 
+def _references_qualified_name(resolved_sql: str, target: str) -> bool:
+    """Word-boundary match for ``target`` in ``resolved_sql`` (post-substitution).
+
+    A raw ``target in resolved_sql`` substring check false-matches when the
+    qualified name appears inside a string literal / comment, or as a fragment
+    of a longer dotted identifier (e.g. target ``proj.ds.orders`` inside
+    ``proj.ds.orders_archive``). The boundary assertions ``(?<![\\w.])`` /
+    ``(?![\\w.])`` require the match to be flanked by neither a word char nor a
+    dot, so only a standalone occurrence of the qualified name counts. Full
+    FROM/JOIN parsing is overkill; a bounded boundary check is proportionate.
+    """
+    pattern = r"(?<![\w.])" + re.escape(target) + r"(?![\w.])"
+    return re.search(pattern, resolved_sql) is not None
+
+
+def _raw_sql_references_target(sql: str, *, model: Model, manifest: Manifest) -> bool:
+    """Bounded heuristic: does the RAW ``sql`` plausibly reference ``model``?
+
+    Used when :func:`resolve_template_refs` raises because *some* ``ref()`` /
+    ``source()`` in the body is unresolvable/ambiguous — we must not discard a
+    test that ALSO targets this model just because a sibling reference is
+    unknown. Reuses the template module's expression / ``this`` / ``ref``
+    regexes (NO new Jinja engine, mirroring ``_unwrap_ref_or_source``) and
+    resolves each ``{{ ... }}`` expression *individually*:
+
+    * ``{{ this }}`` → references this model (the target);
+    * a ``ref()`` whose own resolution succeeds AND yields the target's
+      qualified name → references this model.
+
+    A ``{{ source(...) }}`` is intentionally NOT checked: the target of a
+    singular test is always a *model* (``Model.resolve_this()`` → the model's
+    own table), and a source resolves to a source table — it can never equal
+    the target, so a source reference can never make this model the target.
+    Sources are still tolerated as *siblings*: they simply don't associate.
+
+    A per-expression resolution that itself raises (the unresolvable sibling)
+    is swallowed — it just means *that* expression is not the target. We return
+    ``True`` as soon as any expression resolves to the target; ``False`` if none
+    do. Deterministic, pure, no I/O.
+    """
+    target = model.resolve_this().qualified_name
+    for match in _EXPR_RE.finditer(sql):
+        body = match.group(1).strip()
+        if _THIS_RE.match(body):
+            return True
+        ref_match = _TEMPLATE_REF_RE.match(body)
+        if ref_match is None:
+            continue  # source() / unsupported expr — never the model target
+        try:
+            if _resolve_ref_args(ref_match.group(1), manifest=manifest) == target:
+                return True
+        except Exception:  # noqa: BLE001 — sibling ref unresolvable; not the target
+            # This particular ref() can't be resolved (the very condition that
+            # brought us here). It is therefore not the target reference; keep
+            # scanning the remaining expressions.
+            continue
+    return False
+
+
 def classify_singular_test(
     sql: str,
     *,
@@ -277,11 +344,18 @@ def classify_singular_test(
 
     Association reuses :func:`signalforge.manifest.template.resolve_template_refs`
     to resolve ``ref()`` / ``source()`` / ``this`` — no regex is duplicated
-    here. A reference to a model the manifest does not contain (or an ambiguous
-    ``ref()``) means the file does not reference *this* model, so it is treated
-    as *unrelated* (``None``), not skip-recorded. ``{{ this }}`` is not expected
-    in a standalone singular test, but if present it resolves to ``model`` and
-    associates.
+    here. When the whole-body resolve raises because *some* reference is
+    unknown/ambiguous, we fall back to a bounded per-expression heuristic
+    (:func:`_raw_sql_references_target`): if the RAW SQL still plausibly
+    references *this* model (``{{ this }}``, or a ``ref()`` / ``source()`` that
+    resolves to this model) we associate and carry the RAW unresolved SQL into
+    a :class:`CandidateTestCustomSQL` — the prune compiler re-resolves it and
+    routes ``RefNotFoundError`` / ``SourceNotFoundError`` → requires-future-data
+    and ``AmbiguousRefError`` → kept-without-evidence (US-019), so the test is
+    *deferred*, not lost. Only when the target is genuinely NOT referenced do we
+    treat the file as *unrelated* (``None``), not skip-recorded. ``{{ this }}``
+    is not expected in a standalone singular test, but if present it resolves to
+    ``model`` and associates.
 
     Args:
         sql: The raw ``.sql`` file body.
@@ -310,15 +384,24 @@ def classify_singular_test(
             detail="singular .sql test contains Jinja the bounded resolver cannot evaluate",
         )
     except (RefNotFoundError, AmbiguousRefError, SourceNotFoundError):
-        # The SQL is well-formed Jinja but references a model/source absent
-        # from (or ambiguous in) the manifest — it does not reference *this*
-        # model, so it is unrelated, not a defect of this model's ingest.
+        # The SQL is well-formed Jinja but at least one ref()/source() is
+        # absent from (or ambiguous in) the manifest, so the whole-body resolve
+        # could not complete. Do NOT discard yet: a body that references THIS
+        # model AND a sibling unknown model still targets us. Use the bounded
+        # per-expression heuristic; if this model is referenced, carry the RAW
+        # (unresolved) SQL so the prune compiler routes it (requires-future-data
+        # / kept-without-evidence). Otherwise it is genuinely unrelated → None.
+        if _raw_sql_references_target(sql, model=model, manifest=manifest):
+            return CandidateTestCustomSQL(column=None, sql=sql, rationale=None)
         return None
 
     # The SQL resolved cleanly. Associate iff its resolved references include
     # the target model's qualified name; otherwise it is a test for a different
-    # model and is silently not included.
-    if target not in resolved:
+    # model and is silently not included. Use a word-boundary match so the
+    # target name appearing inside a string literal / comment, or as a fragment
+    # of a longer dotted identifier (``my_project.orders_archive``), does NOT
+    # false-match — only a standalone occurrence of the qualified name counts.
+    if not _references_qualified_name(resolved, target):
         return None
 
     return CandidateTestCustomSQL(column=None, sql=sql, rationale=None)

@@ -64,6 +64,17 @@ def _manifest() -> Manifest:
                     "model.shop.customers", name="customers", package="shop"
                 ),
             },
+            "sources": {
+                "source.shop.raw.events": {
+                    "unique_id": "source.shop.raw.events",
+                    "source_name": "raw",
+                    "name": "events",
+                    "resource_type": "source",
+                    "database": _PROJECT,
+                    "schema": "raw",
+                    "identifier": "events",
+                }
+            },
         }
     )
 
@@ -146,6 +157,116 @@ def test_classify_this_resolves_to_target_and_associates() -> None:
     )
     assert isinstance(out, CandidateTestCustomSQL)
     assert out.sql == sql
+
+
+def test_classify_this_plus_unresolvable_ref_associates_with_raw_sql() -> None:
+    # Item 1 (PR #117): a body referencing THIS model ({{ this }}) AND an
+    # unresolvable OTHER ref() must NOT be silently dropped — it targets us.
+    # The RAW unresolved SQL is carried so the prune compiler defers it.
+    manifest = _manifest()
+    sql = "select t.id from {{ this }} t join {{ ref('missing_model') }} m on t.id = m.id"
+    out = classify_singular_test(
+        sql, file_name="join.sql", model=_orders(manifest), manifest=manifest
+    )
+    assert isinstance(out, CandidateTestCustomSQL)
+    assert out.sql == sql  # raw, unresolved — prune re-resolves + routes it
+    assert out.column is None
+
+
+def test_classify_target_ref_plus_unresolvable_ref_associates() -> None:
+    # Same defect via a resolvable ref('orders') (the target) alongside an
+    # unknown ref(): the unknown one makes the whole-body resolve raise, but
+    # the heuristic still detects the target reference.
+    manifest = _manifest()
+    sql = "select o.id from {{ ref('orders') }} o join {{ ref('ghost') }} g on o.id = g.id"
+    out = classify_singular_test(
+        sql, file_name="join2.sql", model=_orders(manifest), manifest=manifest
+    )
+    assert isinstance(out, CandidateTestCustomSQL)
+    assert out.sql == sql
+
+
+def test_classify_source_sibling_then_target_ref_associates() -> None:
+    # A source() sibling (never the model target — skipped by the heuristic),
+    # an unresolvable sibling ref() (swallowed), then the target ref('orders')
+    # (associates). The unknown ref makes the whole-body resolve raise, so the
+    # heuristic decides.
+    manifest = _manifest()
+    sql = (
+        "select o.id from {{ source('raw', 'events') }} e "
+        "join {{ ref('ghost') }} g on e.id = g.id "
+        "join {{ ref('orders') }} o on e.id = o.id"
+    )
+    out = classify_singular_test(
+        sql, file_name="src_join.sql", model=_orders(manifest), manifest=manifest
+    )
+    assert isinstance(out, CandidateTestCustomSQL)
+    assert out.sql == sql
+
+
+def test_classify_source_sibling_only_stays_unrelated() -> None:
+    # A source() sibling (never the model target — skipped) + an unresolvable
+    # ref() (swallowed), no target reference → genuinely unrelated (False).
+    manifest = _manifest()
+    sql = "select * from {{ source('raw', 'events') }} e join {{ ref('ghost') }} g on e.id = g.id"
+    out = classify_singular_test(
+        sql, file_name="src_only.sql", model=_orders(manifest), manifest=manifest
+    )
+    assert out is None
+
+
+def test_classify_only_unresolvable_other_ref_stays_unrelated() -> None:
+    # No {{ this }}, no target ref — only unknown refs → genuinely unrelated.
+    manifest = _manifest()
+    sql = "select * from {{ ref('ghost_a') }} a join {{ ref('ghost_b') }} b on a.id = b.id"
+    out = classify_singular_test(
+        sql, file_name="ghosts.sql", model=_orders(manifest), manifest=manifest
+    )
+    assert out is None
+
+
+def test_classify_target_as_substring_fragment_in_comment_not_associated() -> None:
+    # Item 2 (PR #117): the target qualified name appearing as a SUBSTRING of a
+    # longer token (here inside a comment word ``orders_legacy``) must NOT
+    # word-boundary-match; the real FROM is a different (resolvable) model.
+    # A bare ``target in resolved`` substring check would have false-matched.
+    manifest = _manifest()
+    target = _orders(manifest).resolve_this().qualified_name
+    sql = (
+        f"-- legacy comparison vs {target}_legacy table\n"
+        "select * from {{ ref('customers') }} where x is null"
+    )
+    out = classify_singular_test(
+        sql, file_name="comment.sql", model=_orders(manifest), manifest=manifest
+    )
+    assert out is None
+
+
+def test_classify_target_as_dotted_fragment_not_associated() -> None:
+    # The target qualified name as a fragment of a longer dotted identifier
+    # (``<target>_archive``) must NOT match. Here the body resolves to a
+    # different model; the bare-substring check would have false-matched.
+    manifest = _manifest()
+    target = _orders(manifest).resolve_this().qualified_name
+    sql = (
+        f"select * from {target}_archive a "
+        "join {{ ref('customers') }} c on a.id = c.id where c.x is null"
+    )
+    out = classify_singular_test(
+        sql, file_name="archive.sql", model=_orders(manifest), manifest=manifest
+    )
+    assert out is None
+
+
+def test_classify_normal_from_this_associates() -> None:
+    # Sanity: a standalone ``FROM {{ this }}`` still associates (word-boundary
+    # match on the resolved target succeeds).
+    manifest = _manifest()
+    sql = "select * from {{ this }} where amount < 0"
+    out = classify_singular_test(
+        sql, file_name="ok.sql", model=_orders(manifest), manifest=manifest
+    )
+    assert isinstance(out, CandidateTestCustomSQL)
 
 
 # ---------------------------------------------------------------------------

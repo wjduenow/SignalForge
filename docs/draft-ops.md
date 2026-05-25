@@ -218,10 +218,15 @@ singular-test convention.
   business-rule assertion.
 - **`rationale`** — optional one-line "why," surfaced in the diff.
 
-Unlike the four built-ins, `custom_sql` is **never** excluded by
-`DraftConfig.exclude_tests` — that knob gates only the four standard
-types. The system prompt always appends a `custom_sql` JSON-shape
-illustration after the (possibly filtered) four standard entries.
+Like the four built-ins, `custom_sql` **can** be excluded via
+`DraftConfig.exclude_tests` — it is a member of `VALID_TEST_TYPES`
+(US-021). When `"custom_sql"` is in `exclude_tests`,
+`_render_system_prompt` omits its JSON-shape illustration and drops it
+from the `### SCOPE` line, so a cooperative LLM never proposes one; if
+the LLM defies that, the parser's anchor-contract check rejects the
+`custom_sql` candidate (defence in depth — prompt + parser). Otherwise
+the system prompt appends the `custom_sql` JSON-shape illustration after
+the (possibly filtered) four standard entries.
 
 ### Authoring rules via `meta.signalforge.business_rules`
 
@@ -509,7 +514,7 @@ llm:
   max_retries_429: 3
   max_retries_5xx: 1
   max_retries_conn: 1
-  exclude_tests: []          # subset of [not_null, unique, accepted_values, relationships]
+  exclude_tests: []          # subset of [not_null, unique, accepted_values, relationships, custom_sql]
 ```
 
 Field-by-field:
@@ -527,19 +532,21 @@ Field-by-field:
 - **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — see
   [§7 Retry taxonomy](#retry-taxonomy).
 - **`exclude_tests`** — list of dbt test types the drafter must not
-  propose (issue #54). Each entry must be one of `not_null`,
-  `unique`, `accepted_values`, `relationships`; an unknown value
-  fails loud at config-load. Default `[]` (all four allowed). When
-  non-empty the system prompt's test catalogue + `### SCOPE` line
-  drop the excluded types AND the parser rejects any defiant LLM
-  output via `LLMOutputAnchorContractError`. Excluding all four is
+  propose (issue #54; extended to `custom_sql` in US-021 of #116).
+  Each entry must be one of the five `VALID_TEST_TYPES` — `not_null`,
+  `unique`, `accepted_values`, `relationships`, `custom_sql`; an
+  unknown value fails loud at config-load. Default `[]` (all five
+  allowed). When non-empty the system prompt's test catalogue +
+  `### SCOPE` line drop the excluded types (including `custom_sql`'s
+  JSON-shape illustration) AND the parser rejects any defiant LLM
+  output via `LLMOutputAnchorContractError`. Excluding every type is
   a config error (the drafter has nothing to propose). The prompt
   version hash rotates per exclusion set so Anthropic's prompt cache
   invalidates correctly. Useful for teams that find `accepted_values`
-  noisy on enum columns or want to defer `relationships` to a
-  manual review pass. `exclude_tests` does **not** gate the fifth
-  `custom_sql` business-rule variant (issue #116) — those are always
-  permitted; see [§ Custom business-rule tests](#custom-business-rule-tests-custom_sql).
+  noisy on enum columns, want to defer `relationships` to a manual
+  review pass, or want to suppress `custom_sql` business-rule drafting
+  entirely (issue #116); see
+  [§ Custom business-rule tests](#custom-business-rule-tests-custom_sql).
 
 `DraftConfig` uses `extra="forbid"` (DEC-011, mirroring
 `safety-layer.md` DEC-015). Typos like `mdoel:` instead of `model:`
