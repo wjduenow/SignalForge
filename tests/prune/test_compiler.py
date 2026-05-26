@@ -42,6 +42,7 @@ from signalforge.prune.compiler import (
 from signalforge.warehouse._sql_safety import validate_test_sql
 from signalforge.warehouse.models import (
     BIGQUERY_DIALECT,
+    POSTGRES_DIALECT,
     SNOWFLAKE_DIALECT,
     Dialect,
     PartitionFilter,
@@ -1072,6 +1073,13 @@ def test_quote_preserves_and_backticks_for_bigquery() -> None:
     """BigQuery ``identifier_case='preserve'`` is a no-op fold; the token is
     wrapped in backticks unchanged — keeps the snapshots byte-identical."""
     assert _quote("customer_id", BIGQUERY_DIALECT) == "`customer_id`"
+
+
+def test_quote_folds_lower_for_postgres_dialect() -> None:
+    """``identifier_case='lower'`` folds the token to lower-case before
+    wrapping in the quote char (DEC-003). POSTGRES_DIALECT is the lower-folding
+    dialect; a mixed-case identifier exercises the fold rather than a no-op."""
+    assert _quote("CustomerId", POSTGRES_DIALECT) == '"customerid"'
 
 
 def test_qualified_table_name_per_component_for_snowflake() -> None:
