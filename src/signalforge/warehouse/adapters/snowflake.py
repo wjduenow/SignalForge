@@ -344,7 +344,11 @@ class SnowflakeAdapter(WarehouseAdapter):
         identifier-validated on the :class:`TableRef`. The ``<database>``
         prefix is quoted per the dialect; when ``table.project`` is ``None``
         (direct callers — the prune path always qualifies via
-        ``TableRef.from_model``) it falls back to ``CURRENT_DATABASE()``.
+        ``TableRef.from_model``) the query is left **unqualified**
+        (``INFORMATION_SCHEMA.TABLES``), which Snowflake resolves against the
+        connection's current database. (``CURRENT_DATABASE().INFORMATION_SCHEMA``
+        is invalid — ``CURRENT_DATABASE()`` is a scalar function, not a
+        namespace qualifier.)
 
         Returns ``None`` when no row matches or ``ROW_COUNT`` is ``NULL``
         (views / materialised views do not carry a ``ROW_COUNT``).
@@ -352,7 +356,7 @@ class SnowflakeAdapter(WarehouseAdapter):
         from signalforge.warehouse._sql_safety import escape_bq_string_literal
 
         qc = SNOWFLAKE_DIALECT.quote_char
-        db_prefix = "CURRENT_DATABASE()." if table.project is None else f"{qc}{table.project}{qc}."
+        db_prefix = "" if table.project is None else f"{qc}{table.project}{qc}."
         schema_lit = escape_bq_string_literal(table.dataset)
         name_lit = escape_bq_string_literal(table.name)
         sql = (

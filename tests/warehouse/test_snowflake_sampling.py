@@ -288,13 +288,15 @@ def test_str_partition_filter_value_is_escaped_inside_single_quotes() -> None:
 
 
 # ---------------------------------------------------------------------------
-# CURRENT_DATABASE() fallback when project is None (DEC-005 edge)
+# Unqualified INFORMATION_SCHEMA when project is None (DEC-005 edge)
 # ---------------------------------------------------------------------------
 
 
-def test_project_none_size_query_uses_current_database() -> None:
-    """When ``table.project`` is ``None`` the INFORMATION_SCHEMA lookup falls
-    back to ``CURRENT_DATABASE().`` (documented edge for direct callers)."""
+def test_project_none_size_query_is_unqualified() -> None:
+    """When ``table.project`` is ``None`` the INFORMATION_SCHEMA lookup is left
+    UNQUALIFIED (Snowflake resolves it against the session's current database).
+    A ``CURRENT_DATABASE().INFORMATION_SCHEMA`` namespace path would be invalid
+    Snowflake — ``CURRENT_DATABASE()`` is a scalar function, not a qualifier."""
     conn = _RecordingConnection()
     conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
     conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("ID",)])
@@ -304,7 +306,9 @@ def test_project_none_size_query_uses_current_database() -> None:
     adapter.sample_rows(table, 100)
 
     size_sql = conn.executed[0]
-    assert "CURRENT_DATABASE().INFORMATION_SCHEMA.TABLES" in size_sql
+    # Unqualified: FROM INFORMATION_SCHEMA.TABLES (no database prefix).
+    assert "FROM INFORMATION_SCHEMA.TABLES" in size_sql
+    assert "CURRENT_DATABASE()" not in size_sql
     # Two-part quoting on the sample query when project is None.
     assert '"SCH"."ORDERS"' in conn.executed[1]
 
