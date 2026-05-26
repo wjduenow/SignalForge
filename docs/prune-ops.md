@@ -526,6 +526,47 @@ as `.cause` and on `__cause__`. Common causes:
 - Disk full (`ENOSPC`).
 - Oversize record (raises `PruneAuditRecordTooLargeError` instead — reduce `capture_failure_rows` or trim `compiled_sql` size by simplifying the candidate test; the cap is 4000 bytes for POSIX-atomic concurrent appends).
 
+## Snowflake compiler dialect (v0.2, issue #121)
+
+The prune compiler emits valid Snowflake SQL purely from the `SNOWFLAKE_DIALECT`
+value object — no branching on warehouse name, no warehouse SDK import under
+`signalforge/prune/`. Everything warehouse-specific is read from `Dialect`
+fields: the identifier quote char, per-component vs whole-path qualified-name
+quoting, the deterministic-sample row-hash expression, the date/timestamp
+literal cast form, the sample-CTE alias, and `identifier_case`.
+
+**Identifier case-folding.** Snowflake folds *unquoted* identifiers to
+UPPERCASE and matches *quoted* identifiers verbatim, so a conventional
+`CREATE TABLE … (customer_id …)` stores the column as `CUSTOMER_ID`. The
+compiler therefore folds every identifier (columns and each qualified-name
+component) to UPPER **before** quoting (`"CUSTOMER_ID"`, `"DB"."SCHEMA"."T"`),
+which resolves correctly against conventionally-created Snowflake tables while
+keeping the always-quote injection-safe posture. **Residual:** a table
+genuinely created with quoted-lowercase DDL (`CREATE TABLE … ("customer_id" …)`)
+would not match `"CUSTOMER_ID"` — accepted as the rare case; the conventional
+majority is the right default. BigQuery's `identifier_case="preserve"` is a
+no-op, so BigQuery output is byte-identical to v0.1.
+
+**Sampling reproducibility caveat.** BigQuery's `FARM_FINGERPRINT` is stable
+across time, so the deterministic sample is reproducible indefinitely.
+Snowflake's `HASH()` is deterministic only *within a Snowflake release* —
+Snowflake documents that it may change across versions. This satisfies
+SignalForge's reproducibility commitment (same input → same prune decision
+*within a run*) but is a weaker cross-time guarantee than BigQuery's. Prune
+decisions made in one run are internally consistent regardless.
+
+**`QUALIFY` not used.** Snowflake supports `QUALIFY`, but the `unique` test
+keeps the dialect-portable `GROUP BY … HAVING COUNT(*) > 1` (works on both
+warehouses); `supports_qualify` stays forward-compat metadata.
+
+**Validation.** Snowflake SQL is pinned by byte-exact snapshot fixtures under
+`tests/fixtures/prune/compiled_sql/snowflake/`. A maintainer-only gated suite
+(`uv run pytest -m snowflake --no-cov`) executes the four built-ins through
+`fakesnow` (asserting failing-row *shape* by rule semantics, never `HASH()`
+values) and parses every fixture through `sqlglot`'s Snowflake dialect.
+Real-Snowflake `HASH(*)` semantics, true case-folding, and sampling behaviour
+are validated by the live harness in issue #124.
+
 ## v0.2 deferrals
 
 The prune layer is intentionally narrow in v0.1. The following
@@ -534,7 +575,7 @@ concerns are explicitly deferred:
 - **Per-decision `bytes_billed` recording (DEC-027).** The adapter does not surface job stats in v0.1; the diagnostic probe (US-003) reads them via `INFORMATION_SCHEMA.JOBS_BY_USER` out-of-band rather than through the adapter API. v0.2 extends the adapter's seam to return job stats so the `PruneDecision` can carry the figure natively.
 - **Per-test `timeout_ms` threading.** `PruneConfig.test_timeout_seconds` is documented but not yet threaded through `WarehouseAdapter.run_test_sql` per call. The plumbing exists in `make_query_job_config` (DEC-013, AR-B2 of issue #6); surfacing it through the public adapter signature is a v0.2 task.
 - **Test batching — Q4=B / Q4=C optimisations.** The Phase-1 plan catalogues two cost optimisations (per-column `COUNTIF` batching; temp-table-materialised sample). v0.1 does not adopt either. US-003 produces the data needed to evaluate the temp-table option in v0.2.
-- **Multi-warehouse adapters.** Snowflake, Postgres, Databricks, Redshift adapters slot in behind `WarehouseAdapter` without prune changes once their adapters land. The prune compiler already dispatches on `Dialect.quote_char` (DEC-025), not on dialect `name`; no SQL paths are BigQuery-specific.
+- **Multi-warehouse adapters.** Postgres, Databricks, Redshift adapters slot in behind `WarehouseAdapter` without prune changes once their adapters land. The prune compiler is fully dialect-driven (DEC-025), reading all warehouse-specific SQL from the `Dialect` value object, never branching on dialect `name`. **Snowflake compiler support landed in issue #121** (see § "Snowflake compiler dialect" above); its live warehouse harness is #124. A new vendor populates a `Dialect` and the compiler emits correct SQL with no compiler change.
 - **Confidence intervals on `always-passes`.** Surfacing "less than or equal to 3/N upper-bound failure rate at 95 percent confidence" (rule of three) on the decision record so reviewers can calibrate the always-pass verdict. Also covers great-expectations-style `mostly:` thresholds.
 - **Historical always-pass evidence.** Running candidate tests against multiple `run_results.json` snapshots to assert "never failed in last N runs." The Phase-1 plan considers this for the `failed-on-known-clean-data` evidence channel and defers to v0.2.
 - **dbt-utils test types.** `dbt_utils.unique_combination_of_columns`, `dbt_utils.accepted_range`, `dbt_utils.expression_is_true`, etc. The drafter's `CandidateTest` union has five variants — the four generic schema tests plus the `custom_sql` business-rule escape hatch (issue #116); the prune compiler compiles all five. The namespaced dbt-utils / dbt-expectations macros remain v0.2+ territory (a `custom_sql` test can express many of them by hand in the meantime).

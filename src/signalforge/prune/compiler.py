@@ -131,7 +131,26 @@ class _InvalidIdentifier:
     reason: str
 
 
-def _render_partition_filter(pf: PartitionFilter, quote_char: str) -> str:
+def _fold_identifier(identifier: str, dialect: Dialect) -> str:
+    """Case-fold ``identifier`` per :attr:`Dialect.identifier_case` (DEC-003).
+
+    ``"upper"`` → ``.upper()`` (Snowflake folds unquoted identifiers to
+    UPPERCASE, so a conventional ``CREATE TABLE(customer_id …)`` stores
+    ``CUSTOMER_ID``); ``"lower"`` → ``.lower()`` (Postgres); ``"preserve"``
+    → unchanged (BigQuery — keeps the 11 BigQuery snapshots byte-identical).
+
+    Folding runs BEFORE quoting so the always-quote injection-safe posture
+    is preserved while the quoted name still resolves against conventional
+    Snowflake/dbt tables.
+    """
+    if dialect.identifier_case == "upper":
+        return identifier.upper()
+    if dialect.identifier_case == "lower":
+        return identifier.lower()
+    return identifier
+
+
+def _render_partition_filter(pf: PartitionFilter, dialect: Dialect) -> str:
     """Render a :class:`PartitionFilter` to a SQL fragment for the WHERE clause.
 
     Mirrors :meth:`signalforge.warehouse.adapters.bigquery.BigQueryAdapter._render_partition_filter`
@@ -140,20 +159,22 @@ def _render_partition_filter(pf: PartitionFilter, quote_char: str) -> str:
     matches what the warehouse adapter would emit on its own
     ``sample_rows`` path.
 
-    ``datetime`` → ``TIMESTAMP('…')``; ``date`` → ``DATE('…')``;
-    ``str`` is escaped via :func:`escape_bq_string_literal` for safe
-    inclusion inside a single-quoted BigQuery string literal. The column
-    name is already DEC-013-validated by :class:`PartitionFilter`'s
-    ``__post_init__``.
+    ``datetime`` renders via :attr:`Dialect.timestamp_literal_template`
+    (BigQuery ``TIMESTAMP('…')`` / Snowflake ``'…'::TIMESTAMP``); ``date``
+    via :attr:`Dialect.date_literal_template`; ``str`` is escaped via
+    :func:`escape_bq_string_literal` for safe inclusion inside a
+    single-quoted string literal. The column name is already
+    DEC-013-validated by :class:`PartitionFilter`'s ``__post_init__`` and
+    is folded+quoted per the dialect (DEC-003).
     """
     # ``datetime`` is a subclass of ``date``, so check it first.
     if isinstance(pf.value, datetime):
-        rendered = f"TIMESTAMP('{pf.value.isoformat()}')"
+        rendered = dialect.timestamp_literal_template.format(value=pf.value.isoformat())
     elif isinstance(pf.value, date):
-        rendered = f"DATE('{pf.value.isoformat()}')"
+        rendered = dialect.date_literal_template.format(value=pf.value.isoformat())
     else:
         rendered = f"'{escape_bq_string_literal(str(pf.value))}'"
-    return f"{quote_char}{pf.column}{quote_char} {pf.op} {rendered}"
+    return f"{_quote(pf.column, dialect)} {pf.op} {rendered}"
 
 
 def _render_sample_cte(
@@ -162,7 +183,7 @@ def _render_sample_cte(
     sample_size: int,
     sample_bucket: int,
     partition_filter: PartitionFilter | None,
-    quote_char: str,
+    dialect: Dialect,
 ) -> str:
     """Render a deterministic-sample CTE matching the adapter's
     :meth:`signalforge.warehouse.adapters.bigquery.BigQueryAdapter.sample_rows`
@@ -172,28 +193,34 @@ def _render_sample_cte(
 
         WITH sample AS (
             SELECT * FROM <table> AS t
-            WHERE MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), <bucket>) < 1
+            WHERE MOD(<dialect.sample_row_hash_expr>, <bucket>) < 1
               [AND <partition_filter>]
             LIMIT <sample_size>
         )
         <test SQL targeting sample>
 
-    The hash-mod predicate is identical to the adapter's
-    ``sample_rows`` deterministic-sample shape (DEC-006 of issue #3) so
-    sampling decisions stay consistent between the adapter's internal
-    samples and the prune engine's wrapped tests.
+    The hash-mod predicate is rendered from
+    :attr:`Dialect.sample_row_hash_expr` (BigQuery
+    ``ABS(FARM_FINGERPRINT(TO_JSON_STRING(t)))`` / Snowflake
+    ``ABS(HASH(*))``) so sampling decisions stay consistent between the
+    adapter's internal samples and the prune engine's wrapped tests
+    (DEC-006 of issue #3; DEC-002 of issue #121).
     """
     where_clauses = [
-        f"MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), {sample_bucket}) < 1",
+        f"MOD({dialect.sample_row_hash_expr}, {sample_bucket}) < 1",
     ]
     if partition_filter is not None:
-        where_clauses.append(_render_partition_filter(partition_filter, quote_char))
+        where_clauses.append(_render_partition_filter(partition_filter, dialect))
     where_sql = " AND ".join(where_clauses)
-    return f"WITH sample AS (SELECT * FROM {table} AS t WHERE {where_sql} LIMIT {sample_size})"
+    return (
+        f"WITH {dialect.sample_cte_alias} AS "
+        f"(SELECT * FROM {table} AS t WHERE {where_sql} LIMIT {sample_size})"
+    )
 
 
-def _quote(identifier: str, quote_char: str) -> str:
-    """Wrap ``identifier`` in ``quote_char`` for SQL embedding.
+def _quote(identifier: str, dialect: Dialect) -> str:
+    """Fold (per :attr:`Dialect.identifier_case`) then wrap ``identifier`` in
+    :attr:`Dialect.quote_char` for SQL embedding (DEC-003).
 
     The compiler trusts adapter-validated identifiers on
     :class:`TableRef` — :func:`signalforge.warehouse._sql_safety.validate_identifier`
@@ -203,21 +230,39 @@ def _quote(identifier: str, quote_char: str) -> str:
     pass through the drafter's anchor-contract validator before reaching
     the compiler; the orchestrator's :class:`TableRef` construction is
     the gate, not this function.
+
+    Case folding runs on the already-validated token, so it cannot
+    introduce a quote-breaking character. BigQuery's ``"preserve"`` makes
+    folding a no-op — the existing snapshots stay byte-identical.
     """
-    return f"{quote_char}{identifier}{quote_char}"
+    folded = _fold_identifier(identifier, dialect)
+    return f"{dialect.quote_char}{folded}{dialect.quote_char}"
 
 
-def _qualified_table_name(table_ref: TableRef, quote_char: str) -> str:
+def _qualified_table_name(table_ref: TableRef, dialect: Dialect) -> str:
     """Render a fully-qualified ``project.dataset.name`` table identifier.
 
-    Matches the BigQuery convention ``\\`project.dataset.table\\``` (entire
-    qualified path inside one pair of backticks). Dialects with a different
-    quote_char get the same shape with their own quote character so v0.2
-    ports drop in without compiler changes (DEC-025).
+    Branches on :attr:`Dialect.quote_qualified_per_component` (DEC-002):
+
+    * ``False`` (BigQuery) — the entire dotted path is wrapped in one pair
+      of quote characters (``\\`project.dataset.table\\```). No case folding
+      (BigQuery's ``identifier_case="preserve"``) so the 11 BigQuery
+      snapshots stay byte-identical.
+    * ``True`` (Snowflake) — each component is folded+quoted separately and
+      joined with ``.`` (``"DB"."SCH"."T"``), because a single quoted string
+      spanning dots reads as one literal identifier named ``db.schema.table``.
     """
+    if dialect.quote_qualified_per_component:
+        components = (
+            [table_ref.dataset, table_ref.name]
+            if table_ref.project is None
+            else [table_ref.project, table_ref.dataset, table_ref.name]
+        )
+        return ".".join(_quote(component, dialect) for component in components)
+    qc = dialect.quote_char
     if table_ref.project is None:
-        return f"{quote_char}{table_ref.dataset}.{table_ref.name}{quote_char}"
-    return f"{quote_char}{table_ref.project}.{table_ref.dataset}.{table_ref.name}{quote_char}"
+        return f"{qc}{table_ref.dataset}.{table_ref.name}{qc}"
+    return f"{qc}{table_ref.project}.{table_ref.dataset}.{table_ref.name}{qc}"
 
 
 def _wrap_with_sample_or_partition(
@@ -229,7 +274,7 @@ def _wrap_with_sample_or_partition(
     sample_size: int | None,
     sample_bucket: int | None,
     partition_filter: PartitionFilter | None,
-    quote_char: str,
+    dialect: Dialect,
 ) -> str:
     """Apply scope/sample/partition_filter wrapping to a per-test SELECT.
 
@@ -273,12 +318,12 @@ def _wrap_with_sample_or_partition(
             sample_size=sample_size,
             sample_bucket=sample_bucket,
             partition_filter=partition_filter,
-            quote_char=quote_char,
+            dialect=dialect,
         )
         return f"{cte} {test_sql}"
     # scope == "full"
     if partition_filter is not None:
-        partition_sql = _render_partition_filter(partition_filter, quote_char)
+        partition_sql = _render_partition_filter(partition_filter, dialect)
         # Compose via derived table so per-test WHERE-clause shapes don't
         # have to be edited. Every per-test compiler emits exactly one
         # ``FROM <table_sql>`` fragment for the primary (child) table.
@@ -296,7 +341,7 @@ def _wrap_with_sample_or_partition(
 def _compile_not_null(
     test: CandidateTestNotNull,
     table_ref: TableRef,
-    quote_char: str,
+    dialect: Dialect,
     *,
     scope: Scope,
     sample_size: int | None,
@@ -312,9 +357,9 @@ def _compile_not_null(
                 f"candidate test references an invalid identifier shape: column={test.column!r}"
             )
         )
-    col = _quote(test.column, quote_char)
-    table = _qualified_table_name(table_ref, quote_char)
-    target = "sample" if scope == "sample" else table
+    col = _quote(test.column, dialect)
+    table = _qualified_table_name(table_ref, dialect)
+    target = dialect.sample_cte_alias if scope == "sample" else table
     test_sql = f"SELECT {col} FROM {target} WHERE {col} IS NULL"
     return _wrap_with_sample_or_partition(
         test_sql=test_sql,
@@ -324,14 +369,14 @@ def _compile_not_null(
         sample_size=sample_size,
         sample_bucket=sample_bucket,
         partition_filter=partition_filter,
-        quote_char=quote_char,
+        dialect=dialect,
     )
 
 
 def _compile_unique(
     test: CandidateTestUnique,
     table_ref: TableRef,
-    quote_char: str,
+    dialect: Dialect,
     *,
     scope: Scope,
     sample_size: int | None,
@@ -352,9 +397,9 @@ def _compile_unique(
                 f"candidate test references an invalid identifier shape: column={test.column!r}"
             )
         )
-    col = _quote(test.column, quote_char)
-    table = _qualified_table_name(table_ref, quote_char)
-    target = "sample" if scope == "sample" else table
+    col = _quote(test.column, dialect)
+    table = _qualified_table_name(table_ref, dialect)
+    target = dialect.sample_cte_alias if scope == "sample" else table
     test_sql = (
         f"SELECT {col} FROM {target} WHERE {col} IS NOT NULL GROUP BY {col} HAVING COUNT(*) > 1"
     )
@@ -366,14 +411,14 @@ def _compile_unique(
         sample_size=sample_size,
         sample_bucket=sample_bucket,
         partition_filter=partition_filter,
-        quote_char=quote_char,
+        dialect=dialect,
     )
 
 
 def _compile_accepted_values(
     test: CandidateTestAcceptedValues,
     table_ref: TableRef,
-    quote_char: str,
+    dialect: Dialect,
     *,
     scope: Scope,
     sample_size: int | None,
@@ -399,9 +444,9 @@ def _compile_accepted_values(
                 f"candidate test references an invalid identifier shape: column={test.column!r}"
             )
         )
-    col = _quote(test.column, quote_char)
-    table = _qualified_table_name(table_ref, quote_char)
-    target = "sample" if scope == "sample" else table
+    col = _quote(test.column, dialect)
+    table = _qualified_table_name(table_ref, dialect)
+    target = dialect.sample_cte_alias if scope == "sample" else table
     rendered_values = ", ".join(f"'{escape_bq_string_literal(v)}'" for v in test.values)
     test_sql = (
         f"SELECT {col} FROM {target} WHERE {col} IS NOT NULL AND {col} NOT IN ({rendered_values})"
@@ -414,7 +459,7 @@ def _compile_accepted_values(
         sample_size=sample_size,
         sample_bucket=sample_bucket,
         partition_filter=partition_filter,
-        quote_char=quote_char,
+        dialect=dialect,
     )
 
 
@@ -462,7 +507,7 @@ def _resolve_parent_table_ref(
 def _compile_relationships(
     test: CandidateTestRelationships,
     table_ref: TableRef,
-    quote_char: str,
+    dialect: Dialect,
     manifest: Manifest,
     *,
     scope: Scope,
@@ -506,11 +551,11 @@ def _compile_relationships(
     if isinstance(parent_table_ref, _RequiresFutureData):
         return parent_table_ref
 
-    child_col = _quote(test.column, quote_char)
-    parent_col = _quote(test.field, quote_char)
-    child_table = _qualified_table_name(table_ref, quote_char)
-    parent_table = _qualified_table_name(parent_table_ref, quote_char)
-    child_target = "sample" if scope == "sample" else child_table
+    child_col = _quote(test.column, dialect)
+    parent_col = _quote(test.field, dialect)
+    child_table = _qualified_table_name(table_ref, dialect)
+    parent_table = _qualified_table_name(parent_table_ref, dialect)
+    child_target = dialect.sample_cte_alias if scope == "sample" else child_table
     test_sql = (
         f"SELECT child.{child_col} "
         f"FROM {child_target} AS child "
@@ -526,7 +571,7 @@ def _compile_relationships(
         sample_size=sample_size,
         sample_bucket=sample_bucket,
         partition_filter=partition_filter,
-        quote_char=quote_char,
+        dialect=dialect,
     )
 
 
@@ -554,7 +599,7 @@ def _is_multi_table(resolved_sql: str) -> bool:
 def _compile_custom_sql(
     test: CandidateTestCustomSQL,
     table_ref: TableRef,
-    quote_char: str,
+    dialect: Dialect,
     manifest: Manifest,
     model: Model | None,
     *,
@@ -663,14 +708,14 @@ def _compile_custom_sql(
     # (dialect-neutral ``[project.]dataset.name``) — this is the substring
     # we look for when sampling / partition-filtering the single-table case.
     own_qualified = model.resolve_this().qualified_name
-    own_table_quoted = _qualified_table_name(table_ref, quote_char)
+    own_table_quoted = _qualified_table_name(table_ref, dialect)
 
     if _is_multi_table(resolved_sql):
         # Multi-table: full-scan. Apply a partition filter to the model's
         # own table when available; otherwise return the resolved SQL
         # unchanged. Sampling a join is semantically wrong (DEC-006).
         if partition_filter is not None:
-            partition_sql = _render_partition_filter(partition_filter, quote_char)
+            partition_sql = _render_partition_filter(partition_filter, dialect)
             replacement = f"(SELECT * FROM {own_qualified} WHERE {partition_sql})"
             if own_qualified in resolved_sql:
                 return resolved_sql.replace(own_qualified, replacement, 1)
@@ -701,13 +746,13 @@ def _compile_custom_sql(
         # references its own table more than once (correlated subquery /
         # self-UNION without a JOIN) would otherwise leave later occurrences
         # reading the full source table.
-        sampled_sql = resolved_sql.replace(own_qualified, "sample")
+        sampled_sql = resolved_sql.replace(own_qualified, dialect.sample_cte_alias)
         cte = _render_sample_cte(
             own_table_quoted,
             sample_size=sample_size,
             sample_bucket=sample_bucket,
             partition_filter=partition_filter,
-            quote_char=quote_char,
+            dialect=dialect,
         )
         return f"{cte} {sampled_sql}"
 
@@ -740,7 +785,7 @@ def _compile_custom_sql(
     # full-strategy path): compose a partition filter via derived table when
     # one is available (uniform with the built-ins).
     if partition_filter is not None:
-        partition_sql = _render_partition_filter(partition_filter, quote_char)
+        partition_sql = _render_partition_filter(partition_filter, dialect)
         replacement = f"(SELECT * FROM {own_qualified} WHERE {partition_sql})"
         if own_qualified in resolved_sql:
             return resolved_sql.replace(own_qualified, replacement)
@@ -806,12 +851,11 @@ def _compile_test(
       sample is not a false positive of the parent's missing-from-sample
       row. ``partition_filter`` likewise applies to the child only.
     """
-    quote_char = dialect.quote_char
     if isinstance(test, CandidateTestNotNull):
         return _compile_not_null(
             test,
             table_ref,
-            quote_char,
+            dialect,
             scope=scope,
             sample_size=sample_size,
             sample_bucket=sample_bucket,
@@ -821,7 +865,7 @@ def _compile_test(
         return _compile_unique(
             test,
             table_ref,
-            quote_char,
+            dialect,
             scope=scope,
             sample_size=sample_size,
             sample_bucket=sample_bucket,
@@ -831,7 +875,7 @@ def _compile_test(
         return _compile_accepted_values(
             test,
             table_ref,
-            quote_char,
+            dialect,
             scope=scope,
             sample_size=sample_size,
             sample_bucket=sample_bucket,
@@ -841,7 +885,7 @@ def _compile_test(
         return _compile_relationships(
             test,
             table_ref,
-            quote_char,
+            dialect,
             manifest,
             scope=scope,
             sample_size=sample_size,
@@ -852,7 +896,7 @@ def _compile_test(
         return _compile_custom_sql(
             test,
             table_ref,
-            quote_char,
+            dialect,
             manifest,
             model,
             scope=scope,

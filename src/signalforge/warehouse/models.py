@@ -56,11 +56,39 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Dialect:
-    """Warehouse-flavour capability flags.
+    """Warehouse-flavour capability flags and SQL-fragment templates.
 
     The adapter consults these flags rather than hard-coding warehouse names
     so the v0.2 Snowflake/Postgres ports can add a sibling constant without
     branching the adapter logic on ``isinstance``.
+
+    The five template/flag fields below are read by the **prune compiler**
+    (``signalforge.prune.compiler``, issue #121) so it emits warehouse-correct
+    SQL without branching on the dialect *name*:
+
+    * ``sample_row_hash_expr`` — the inner whole-row hash expression the prune
+      compiler drops into ``MOD(<expr>, <bucket>) < 1`` for deterministic
+      hash-mod sampling. BigQuery uses ``ABS(FARM_FINGERPRINT(TO_JSON_STRING(t)))``
+      (referencing the ``t`` alias); Snowflake uses ``ABS(HASH(*))``.
+    * ``timestamp_literal_template`` — a ``str.format(value=...)`` template that
+      renders a TIMESTAMP literal in a partition filter. BigQuery uses the
+      ``TIMESTAMP('{value}')`` function form; Snowflake uses the
+      ``'{value}'::TIMESTAMP`` cast form. ``{value}`` is an already-escaped
+      ISO value, never raw user input.
+    * ``date_literal_template`` — the DATE analogue of the above.
+    * ``quote_qualified_per_component`` — when ``True`` the compiler quotes
+      each component of a qualified table name separately
+      (``"DB"."SCH"."T"`` — Snowflake); when ``False`` it wraps the whole
+      dotted path in one backtick-quoted pair (BigQuery's ``p.d.t`` form).
+    * ``sample_cte_alias`` — the identifier the deterministic-sample CTE is
+      bound to (``WITH <alias> AS (...) ... FROM <alias>``). BigQuery uses
+      the bare ``sample``; Snowflake uses the **quoted** ``"sample"`` because
+      ``SAMPLE`` is a Snowflake reserved keyword (``TABLESAMPLE``) and an
+      unquoted CTE named ``sample`` is a syntax error there. Quoting bypasses
+      the keyword interpretation while keeping the recognisable name.
+
+    The defaults reproduce BigQuery's SQL byte-for-byte so every existing
+    construction site stays valid unedited (DEC-001 of issue #121).
     """
 
     name: str
@@ -68,6 +96,11 @@ class Dialect:
     supports_qualify: bool
     quote_char: str
     identifier_case: Literal["upper", "lower", "preserve"]
+    sample_row_hash_expr: str = "ABS(FARM_FINGERPRINT(TO_JSON_STRING(t)))"
+    timestamp_literal_template: str = "TIMESTAMP('{value}')"
+    date_literal_template: str = "DATE('{value}')"
+    quote_qualified_per_component: bool = False
+    sample_cte_alias: str = "sample"
 
 
 BIGQUERY_DIALECT = Dialect(
@@ -96,6 +129,21 @@ POSTGRES_DIALECT = Dialect(
   / SYSTEM), though the prune layer prefers deterministic hash-mod
   sampling anyway (DEC-006 of issue #3).
 
+The five issue-#121 SQL-fragment fields (``sample_row_hash_expr``,
+``timestamp_literal_template``, ``date_literal_template``,
+``quote_qualified_per_component``, ``sample_cte_alias``) keep their
+**BigQuery defaults** here because the Postgres adapter's warehouse ops are
+not implemented yet (the #53 stub raises ``NotImplementedError`` from every
+op method), so the prune compiler is never invoked for a Postgres profile.
+Most of these defaults are wrong for Postgres and will be corrected when the
+Postgres adapter's warehouse ops land (DEC-007 of issue #121): Postgres needs
+``quote_qualified_per_component=True`` (it quotes ``"schema"."table"`` per
+component) and the SQL-standard ``TIMESTAMP '...'`` / ``DATE '...'`` literal
+forms rather than BigQuery's ``TIMESTAMP(...)`` / ``DATE(...)`` function form.
+(``sample_cte_alias="sample"`` happens to be Postgres-correct already —
+``SAMPLE`` is not reserved in Postgres, only ``TABLESAMPLE`` is.) Shipping
+knowingly-wrong-but-untested fragments now would be misleading.
+
 Lives alongside :data:`BIGQUERY_DIALECT` per DEC-003 so the prune
 compiler (and any other dialect-aware consumer) imports every flavour
 from one place rather than reaching into adapter modules.
@@ -108,6 +156,11 @@ SNOWFLAKE_DIALECT = Dialect(
     supports_qualify=True,
     quote_char='"',
     identifier_case="upper",
+    sample_row_hash_expr="ABS(HASH(*))",
+    sample_cte_alias='"sample"',
+    timestamp_literal_template="'{value}'::TIMESTAMP",
+    date_literal_template="'{value}'::DATE",
+    quote_qualified_per_component=True,
 )
 """Snowflake-flavoured :class:`Dialect` for the v0.2 adapter (issue #119, DEC-004).
 
@@ -121,6 +174,15 @@ SNOWFLAKE_DIALECT = Dialect(
 * ``supports_tablesample=True`` — ``TABLESAMPLE`` is supported, though the
   prune layer prefers deterministic hash-mod sampling anyway (DEC-006 of
   issue #3).
+* ``sample_row_hash_expr="ABS(HASH(*))"`` — Snowflake's variadic whole-row
+  hash; ``ABS`` before ``MOD`` mirrors the BigQuery structure (issue #121,
+  DEC-002).
+* ``timestamp_literal_template="'{value}'::TIMESTAMP"`` /
+  ``date_literal_template="'{value}'::DATE"`` — the idiomatic Snowflake cast
+  form (vs. BigQuery's ``TIMESTAMP('...')`` function form).
+* ``quote_qualified_per_component=True`` — Snowflake reads a single quoted
+  string spanning dots as one literal identifier named ``db.schema.table``,
+  so each component is quoted separately (``"DB"."SCH"."T"``).
 
 Lives alongside :data:`BIGQUERY_DIALECT` / :data:`POSTGRES_DIALECT` per
 DEC-003 so every dialect-aware consumer imports each flavour from one place
