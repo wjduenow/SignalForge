@@ -5,10 +5,19 @@ ignore[...]`` comment that the ``snowflake-connector-python`` SDK provokes to
 this module — the one-shim-per-vendor SDK seam, mirroring
 :mod:`signalforge.warehouse.adapters._client` (the BigQuery shim). EVERY
 snowflake-connector-python type-ignore in the whole warehouse subpackage must
-live ONLY in this file (DEC-005). The shim exposes a duck-typed
-:class:`_SnowflakeClientProtocol` matching the narrow surface the (future)
-:class:`SnowflakeAdapter` will consume, so the adapter calls the same method
-signatures regardless of how its connection was constructed.
+live ONLY in this file (DEC-005). The shim exposes duck-typed protocols matching
+the narrow surface the (future) :class:`SnowflakeAdapter` will consume, so the
+adapter calls the same method signatures regardless of how its connection was
+constructed.
+
+The protocol split mirrors the real DB-API 2.0 shape ``snowflake.connector``
+exposes — query execution lives on the *cursor*, not the connection
+(``snowflake.connector.SnowflakeConnection`` has ``cursor()`` / ``close()`` but
+no ``execute()`` / ``fetchall()``): :class:`_SnowflakeCursorProtocol` carries
+``execute(...)`` / ``fetchall()``, and :class:`_SnowflakeClientProtocol` (the
+connection) carries ``cursor()`` / ``close()``. Keeping these honest now means
+the #118 implementation's ``conn.cursor().execute(...)`` path type-checks
+against a protocol that actually describes what ``connect()`` returns.
 
 The ``import snowflake.connector`` is lazy — confined to the body of
 :func:`make_real_client` (NOT at module top) — so importing this shim does not
@@ -26,6 +35,23 @@ from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
+class _SnowflakeCursorProtocol(Protocol):
+    """Duck-typed surface of a Snowflake cursor.
+
+    Query execution lives here, not on the connection — the adapter drives a
+    query via ``cursor.execute(...)`` then reads rows via ``cursor.fetchall()``
+    and releases the cursor via ``close()``. Mirrors the DB-API 2.0 cursor
+    shape ``snowflake.connector``'s cursor exposes.
+    """
+
+    def execute(self, command: str, *args: Any, **kwargs: Any) -> Any: ...
+
+    def fetchall(self) -> Any: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
 class _SnowflakeClientProtocol(Protocol):
     """Duck-typed surface common to a real ``SnowflakeConnection`` and a fake.
 
@@ -34,16 +60,14 @@ class _SnowflakeClientProtocol(Protocol):
     regardless of which one was injected. The protocol is intentionally
     narrow — only the surface the adapter actually consumes.
 
-    ``cursor()`` returns a cursor object; the adapter drives queries via the
-    cursor's ``execute(...)`` / ``fetchall()`` and tears the connection down
-    via ``close()``.
+    ``cursor()`` returns a :class:`_SnowflakeCursorProtocol`; the adapter drives
+    queries via that cursor's ``execute(...)`` / ``fetchall()`` and tears the
+    connection down via ``close()``. This matches the real
+    ``snowflake.connector.SnowflakeConnection``, which carries ``cursor()`` /
+    ``close()`` but NOT ``execute()`` / ``fetchall()`` directly.
     """
 
-    def cursor(self) -> Any: ...
-
-    def execute(self, command: str, *args: Any, **kwargs: Any) -> Any: ...
-
-    def fetchall(self) -> Any: ...
+    def cursor(self) -> _SnowflakeCursorProtocol: ...
 
     def close(self) -> None: ...
 
@@ -81,5 +105,6 @@ def make_real_client(
 
 __all__ = [
     "_SnowflakeClientProtocol",
+    "_SnowflakeCursorProtocol",
     "make_real_client",
 ]

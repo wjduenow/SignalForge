@@ -39,18 +39,20 @@ def test_importing_shim_does_not_import_snowflake_connector() -> None:
     )
 
 
-def test_fake_satisfies_protocol() -> None:
-    """A minimal fake exposing cursor/execute/fetchall/close structurally
-    satisfies the ``@runtime_checkable`` ``_SnowflakeClientProtocol``.
+def test_fakes_satisfy_protocols() -> None:
+    """A connection fake exposing ``cursor``/``close`` satisfies
+    ``_SnowflakeClientProtocol``, and a cursor fake exposing
+    ``execute``/``fetchall``/``close`` satisfies ``_SnowflakeCursorProtocol``.
+
+    The split mirrors the real ``snowflake.connector`` DB-API shape — query
+    execution lives on the cursor, not the connection.
     """
     from signalforge.warehouse.adapters._snowflake_client import (
         _SnowflakeClientProtocol,
+        _SnowflakeCursorProtocol,
     )
 
-    class _FakeConn:
-        def cursor(self) -> Any:
-            return self
-
+    class _FakeCursor:
         def execute(self, command: str, *args: Any, **kwargs: Any) -> Any:
             return None
 
@@ -60,29 +62,41 @@ def test_fake_satisfies_protocol() -> None:
         def close(self) -> None:
             return None
 
+    class _FakeConn:
+        def cursor(self) -> _FakeCursor:
+            return _FakeCursor()
+
+        def close(self) -> None:
+            return None
+
+    assert isinstance(_FakeCursor(), _SnowflakeCursorProtocol)
     assert isinstance(_FakeConn(), _SnowflakeClientProtocol)
 
 
 def test_object_missing_method_does_not_satisfy_protocol() -> None:
-    """A class missing one of the four methods must NOT satisfy the
-    protocol — proves the runtime_checkable surface is load-bearing, not a
-    rubber-stamp.
+    """Classes missing a required method must NOT satisfy their protocol —
+    proves both ``@runtime_checkable`` surfaces are load-bearing, not a
+    rubber-stamp. A connection missing ``close`` fails the connection
+    protocol; a cursor missing ``fetchall`` fails the cursor protocol.
     """
     from signalforge.warehouse.adapters._snowflake_client import (
         _SnowflakeClientProtocol,
+        _SnowflakeCursorProtocol,
     )
 
-    class _MissingClose:
+    class _ConnMissingClose:
         def cursor(self) -> Any:
             return self
 
+    class _CursorMissingFetchall:
         def execute(self, command: str, *args: Any, **kwargs: Any) -> Any:
             return None
 
-        def fetchall(self) -> Any:
-            return []
+        def close(self) -> None:
+            return None
 
-    assert not isinstance(_MissingClose(), _SnowflakeClientProtocol)
+    assert not isinstance(_ConnMissingClose(), _SnowflakeClientProtocol)
+    assert not isinstance(_CursorMissingFetchall(), _SnowflakeCursorProtocol)
 
 
 def test_public_names_are_exported() -> None:
@@ -91,6 +105,7 @@ def test_public_names_are_exported() -> None:
 
     assert set(_snowflake_client.__all__) == {
         "_SnowflakeClientProtocol",
+        "_SnowflakeCursorProtocol",
         "make_real_client",
     }
 
