@@ -22,13 +22,19 @@ Snowflake** (``.claude/rules/testing-signal.md`` § "End-to-end gated tests"):
 
 We never assert specific ``HASH()`` values — fakesnow shims onto DuckDB and
 its hash algorithm differs from real Snowflake (DEC-005). For the same reason
-these tests run in **``scope="full"`` only**: the sample-mode SQL uses
-Snowflake's variadic ``HASH(*)`` row-hash predicate AND a CTE literally named
-``sample``, neither of which fakesnow's DuckDB backend accepts
-(``HASH(*)`` needs explicit args; ``sample`` collides with TABLESAMPLE
-parsing). Real-Snowflake sample-mode semantics are deferred to #124's live
-harness; the byte-exact Snowflake snapshot fixtures (US-003) are the
-authoritative gate for sample-mode SQL shape.
+the *execution* tests run in **``scope="full"`` only**: the sample-mode SQL
+uses Snowflake's variadic ``HASH(*)`` row-hash predicate, which fakesnow's
+DuckDB backend cannot execute (its ``HASH`` needs explicit args). Real-Snowflake
+sample-mode *semantics* are deferred to #124's live harness.
+
+The sample-mode SQL *syntax* IS guarded here, though:
+``test_every_snowflake_fixture_parses_under_snowflake_dialect`` parses every
+fixture (full AND sample) through ``sqlglot``'s Snowflake dialect. That guard
+is what caught the reserved-word bug where the sample CTE was the unquoted
+``sample`` (``SAMPLE`` is reserved in Snowflake, so ``WITH sample AS`` is a
+syntax error — the alias is now the quoted ``"sample"``). The byte-exact
+Snowflake snapshot fixtures (US-003) remain the authoritative gate for
+sample-mode SQL *shape*.
 
 Gated behind ``@pytest.mark.snowflake`` (excluded from the default
 ``addopts`` deselection); run with ``uv run pytest -m snowflake --no-cov``.
@@ -40,6 +46,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -277,3 +284,46 @@ def test_relationships_all_matched_returns_zero() -> None:
         cur.execute(f"INSERT INTO {_DB}.{_SCHEMA}.ORDERS VALUES (1), (2), (NULL)")
         cur.execute(f"INSERT INTO {_DB}.{_SCHEMA}.CUSTOMERS VALUES (1), (2)")
         assert _run_failures(cur, sql) == 0
+
+
+# ---------------------------------------------------------------------------
+# Syntax guard: every Snowflake fixture (full AND sample) must PARSE under
+# sqlglot's Snowflake dialect. This is cheaper than execution and reaches the
+# sample-mode fixtures that fakesnow cannot run (HASH(*)). It is the guard that
+# catches reserved-word regressions like an unquoted ``WITH sample AS`` CTE.
+# ---------------------------------------------------------------------------
+
+_SNOWFLAKE_FIXTURES_DIR = (
+    Path(__file__).parent.parent / "fixtures" / "prune" / "compiled_sql" / "snowflake"
+)
+
+_ALL_SNOWFLAKE_FIXTURES = [
+    "not_null.sql",
+    "unique.sql",
+    "accepted_values.sql",
+    "relationships.sql",
+    "not_null_sample.sql",
+    "unique_sample.sql",
+    "accepted_values_sample.sql",
+    "relationships_sample.sql",
+    "custom_sql.sql",
+    "custom_sql_sample.sql",
+    "custom_sql_fullscan.sql",
+]
+
+
+@pytest.mark.parametrize("fixture_name", _ALL_SNOWFLAKE_FIXTURES)
+def test_every_snowflake_fixture_parses_under_snowflake_dialect(fixture_name: str) -> None:
+    """Every emitted Snowflake fixture must parse under sqlglot's snowflake dialect.
+
+    sqlglot ships with fakesnow. A parse error here means the compiler emitted
+    invalid Snowflake SQL — e.g. an unquoted CTE named ``sample`` (``SAMPLE`` is
+    a Snowflake reserved keyword). Unlike the fakesnow execution tests above,
+    this reaches the sample-mode fixtures too (no ``HASH(*)`` execution needed).
+    """
+    import sqlglot
+
+    sql = (_SNOWFLAKE_FIXTURES_DIR / fixture_name).read_text(encoding="utf-8")
+    # Raises sqlglot.errors.ParseError on invalid Snowflake syntax.
+    parsed = sqlglot.parse_one(sql, dialect="snowflake")
+    assert parsed is not None

@@ -1315,8 +1315,11 @@ def test_compile_custom_sql_single_table_sample_snowflake_matches_snapshot() -> 
     assert actual == expected
     assert isinstance(actual, str)
     # The CTE definition references the source table; the test body after the
-    # CTE must read from ``sample``, never re-name the source table.
-    assert "select order_id from sample where total < 0" in actual
+    # CTE must read from the (Snowflake-quoted) ``"sample"`` CTE alias, never
+    # re-name the source table. The alias is quoted because ``SAMPLE`` is a
+    # Snowflake reserved keyword (an unquoted ``WITH sample AS`` is a syntax
+    # error there).
+    assert 'select order_id from "sample" where total < 0' in actual
     body = actual.split(") select", 1)[1]
     assert "orders" not in body
     assert "fake_project.dataset.orders" not in body

@@ -80,6 +80,12 @@ class Dialect:
       each component of a qualified table name separately
       (``"DB"."SCH"."T"`` — Snowflake); when ``False`` it wraps the whole
       dotted path in one backtick-quoted pair (BigQuery's ``p.d.t`` form).
+    * ``sample_cte_alias`` — the identifier the deterministic-sample CTE is
+      bound to (``WITH <alias> AS (...) ... FROM <alias>``). BigQuery uses
+      the bare ``sample``; Snowflake uses the **quoted** ``"sample"`` because
+      ``SAMPLE`` is a Snowflake reserved keyword (``TABLESAMPLE``) and an
+      unquoted CTE named ``sample`` is a syntax error there. Quoting bypasses
+      the keyword interpretation while keeping the recognisable name.
 
     The defaults reproduce BigQuery's SQL byte-for-byte so every existing
     construction site stays valid unedited (DEC-001 of issue #121).
@@ -94,6 +100,7 @@ class Dialect:
     timestamp_literal_template: str = "TIMESTAMP('{value}')"
     date_literal_template: str = "DATE('{value}')"
     quote_qualified_per_component: bool = False
+    sample_cte_alias: str = "sample"
 
 
 BIGQUERY_DIALECT = Dialect(
@@ -145,6 +152,7 @@ SNOWFLAKE_DIALECT = Dialect(
     quote_char='"',
     identifier_case="upper",
     sample_row_hash_expr="ABS(HASH(*))",
+    sample_cte_alias='"sample"',
     timestamp_literal_template="'{value}'::TIMESTAMP",
     date_literal_template="'{value}'::DATE",
     quote_qualified_per_component=True,

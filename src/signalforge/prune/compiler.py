@@ -212,7 +212,10 @@ def _render_sample_cte(
     if partition_filter is not None:
         where_clauses.append(_render_partition_filter(partition_filter, dialect))
     where_sql = " AND ".join(where_clauses)
-    return f"WITH sample AS (SELECT * FROM {table} AS t WHERE {where_sql} LIMIT {sample_size})"
+    return (
+        f"WITH {dialect.sample_cte_alias} AS "
+        f"(SELECT * FROM {table} AS t WHERE {where_sql} LIMIT {sample_size})"
+    )
 
 
 def _quote(identifier: str, dialect: Dialect) -> str:
@@ -356,7 +359,7 @@ def _compile_not_null(
         )
     col = _quote(test.column, dialect)
     table = _qualified_table_name(table_ref, dialect)
-    target = "sample" if scope == "sample" else table
+    target = dialect.sample_cte_alias if scope == "sample" else table
     test_sql = f"SELECT {col} FROM {target} WHERE {col} IS NULL"
     return _wrap_with_sample_or_partition(
         test_sql=test_sql,
@@ -396,7 +399,7 @@ def _compile_unique(
         )
     col = _quote(test.column, dialect)
     table = _qualified_table_name(table_ref, dialect)
-    target = "sample" if scope == "sample" else table
+    target = dialect.sample_cte_alias if scope == "sample" else table
     test_sql = (
         f"SELECT {col} FROM {target} WHERE {col} IS NOT NULL GROUP BY {col} HAVING COUNT(*) > 1"
     )
@@ -443,7 +446,7 @@ def _compile_accepted_values(
         )
     col = _quote(test.column, dialect)
     table = _qualified_table_name(table_ref, dialect)
-    target = "sample" if scope == "sample" else table
+    target = dialect.sample_cte_alias if scope == "sample" else table
     rendered_values = ", ".join(f"'{escape_bq_string_literal(v)}'" for v in test.values)
     test_sql = (
         f"SELECT {col} FROM {target} WHERE {col} IS NOT NULL AND {col} NOT IN ({rendered_values})"
@@ -552,7 +555,7 @@ def _compile_relationships(
     parent_col = _quote(test.field, dialect)
     child_table = _qualified_table_name(table_ref, dialect)
     parent_table = _qualified_table_name(parent_table_ref, dialect)
-    child_target = "sample" if scope == "sample" else child_table
+    child_target = dialect.sample_cte_alias if scope == "sample" else child_table
     test_sql = (
         f"SELECT child.{child_col} "
         f"FROM {child_target} AS child "
@@ -743,7 +746,7 @@ def _compile_custom_sql(
         # references its own table more than once (correlated subquery /
         # self-UNION without a JOIN) would otherwise leave later occurrences
         # reading the full source table.
-        sampled_sql = resolved_sql.replace(own_qualified, "sample")
+        sampled_sql = resolved_sql.replace(own_qualified, dialect.sample_cte_alias)
         cte = _render_sample_cte(
             own_table_quoted,
             sample_size=sample_size,

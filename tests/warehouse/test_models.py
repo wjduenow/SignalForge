@@ -83,6 +83,10 @@ def test_snowflake_dialect_sql_fragment_fields() -> None:
     assert SNOWFLAKE_DIALECT.timestamp_literal_template == "'{value}'::TIMESTAMP"
     assert SNOWFLAKE_DIALECT.date_literal_template == "'{value}'::DATE"
     assert SNOWFLAKE_DIALECT.quote_qualified_per_component is True
+    # ``SAMPLE`` is a Snowflake reserved keyword, so the deterministic-sample
+    # CTE alias is the QUOTED ``"sample"`` (an unquoted ``WITH sample AS`` is a
+    # syntax error on Snowflake).
+    assert SNOWFLAKE_DIALECT.sample_cte_alias == '"sample"'
 
 
 @pytest.mark.unit
@@ -94,6 +98,9 @@ def test_bigquery_dialect_sql_fragment_field_defaults() -> None:
     assert BIGQUERY_DIALECT.timestamp_literal_template == "TIMESTAMP('{value}')"
     assert BIGQUERY_DIALECT.date_literal_template == "DATE('{value}')"
     assert BIGQUERY_DIALECT.quote_qualified_per_component is False
+    # BigQuery's sample-CTE alias is the bare ``sample`` (not a reserved word
+    # there) — keeps the existing BigQuery snapshots byte-identical.
+    assert BIGQUERY_DIALECT.sample_cte_alias == "sample"
 
 
 @pytest.mark.unit
