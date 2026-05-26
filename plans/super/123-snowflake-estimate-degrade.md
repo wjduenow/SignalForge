@@ -6,7 +6,7 @@
 - **Epic:** #118 (Snowflake adapter)
 - **Milestone:** v0.2
 - **Branch:** `feature/123-snowflake-estimate-degrade` (off `dev`)
-- **Phase:** published (PR [#128](https://github.com/wjduenow/SignalForge/pull/128), awaiting approval)
+- **Phase:** devolved (PR [#128](https://github.com/wjduenow/SignalForge/pull/128); beads epic `bd_1-scaffolding-dqf`)
 - **Sessions:** 1 (2026-05-26)
 
 ---
@@ -152,4 +152,11 @@ Tests assert `EstimateNotSupportedError` by name (engine: `warehouse_unavailable
 
 ## Phase 7 — Beads Manifest
 
-_(filled on devolve)_
+- **Epic:** `bd_1-scaffolding-dqf` — #123: Snowflake estimate_query_bytes degrade-first
+- **Tasks:**
+  - `bd_1-scaffolding-dqf.1` — US-001 Engine-level Snowflake degrade test (ready)
+  - `bd_1-scaffolding-dqf.2` — US-002 CLI `--estimate` against a Snowflake profile test (blocked by .1)
+  - `bd_1-scaffolding-dqf.3` — Quality Gate (blocked by .2)
+  - `bd_1-scaffolding-dqf.4` — Patterns & Memory (blocked by .3)
+- **Branch:** `feature/123-snowflake-estimate-degrade`
+- **Dependency chain:** .1 → .2 → .3 → .4
