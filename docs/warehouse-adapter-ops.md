@@ -13,10 +13,28 @@ additive.
 `type: snowflake` to a `SnowflakeAdapter` skeleton — `dialect()` returns the
 Snowflake `Dialect` (`quote_char='"'`, `identifier_case='upper'`,
 `supports_qualify=True`), but the sampling / profiling / test-running methods
-raise `NotImplementedError` naming epic #118 until #120–#124 land. The
+raise `NotImplementedError` naming epic #118 until #122–#124 land. The
 connector is an optional extra — install it with
 `pip install "signalforge-dbt[snowflake]"` (or `uv pip install "signalforge-dbt[snowflake]"`);
 the base install never pulls `snowflake-connector-python`.
+
+**Snowflake profile parsing (v0.2, issue #120).** `load_profile` parses a
+`type: snowflake` target into a `DbtProfileTarget` carrying `account`,
+`user`, `role`, `warehouse`, `database`, `schema`, `threads`, and the auth
+fields. Required keys are `account` / `user` / `warehouse` — a missing one
+raises `IncompleteProfileError` listing every missing key. **Auth methods:**
+v0.2 supports `password`, key-pair (`private_key_path` +
+`private_key_passphrase`), and SSO (`authenticator: externalbrowser`); OAuth
+(`authenticator: oauth` + `token`), inline `private_key`, and MFA
+(`username_password_mfa`) are deferred and fail loud with a remediation
+naming the supported set. **Identifier validation:** `warehouse`,
+`database`, `schema`, and `role` are validated as strict SQL identifiers at
+load time (they become SQL when #122 opens the connection). **Known
+limitation:** the strict identifier grammar rejects Snowflake's legal `$` in
+`warehouse`/`database`/`schema`/`role` names (e.g. `WH$PROD`) — a documented
+v0.x deferral. The `account` locator uses a separate permissive grammar
+(accepts org-account `myorg-account1` and region-suffixed `xy12345.us-east-1`
+forms; rejects quotes, `;`, whitespace, control chars).
 
 ## Quick start
 
@@ -559,6 +577,7 @@ on a `↳ Remediation:` line by `__str__`.
 | `UnsupportedAuthMethodError`             | dbt profile's `method` is not `"oauth"` (or unset).                                                      | `method`                                             | v0.1 supports `method: oauth` (or unset) only; run `gcloud auth application-default login`.     |
 | `ProfileNotFoundError`                   | None of the three search paths yielded a `profiles.yml` (or the project file is missing/malformed).      | `searched_paths`                                     | Create a `profiles.yml` at one of the searched paths, or set `DBT_PROFILES_DIR`.                |
 | `ProfileTargetNotFoundError`             | The profile resolved but the requested `target` is missing. Inherits `ProfileNotFoundError`.             | `profile_name`, `target`, `searched_paths`           | Add the target to `profiles.yml`, or pass an explicit `target=` that exists in the profile.     |
+| `IncompleteProfileError`                 | A profile parsed but is missing required keys for its `type` (e.g. a `snowflake` target without `account`/`user`/`warehouse`). Collect-all — lists every missing key. | `profile_type`, `missing`                            | Add the listed missing key(s) to the target in `profiles.yml`.                                  |
 | `ManifestProjectNotFoundError`           | `Model.database` is `None` so `TableRef.from_model` cannot construct a fully-qualified ref.              | `model_unique_id`                                    | Set `database:` for the model in dbt, or pass an explicit `project=`.                            |
 | `ManifestSchemaNotFoundError`            | `Model.schema_` is `None` so `TableRef.from_model` cannot construct a fully-qualified ref.               | `model_unique_id`                                    | Set `schema:` for the model in dbt, or pass an explicit `dataset=`.                              |
 | `InvalidIdentifierError`                 | A SQL identifier (project / dataset / table / column) failed the `[A-Za-z_][A-Za-z0-9_]*` regex.         | `field`, `value`                                     | Identifiers must match `[A-Za-z_][A-Za-z0-9_]*`.                                                |
