@@ -5,7 +5,7 @@
 - **Ticket:** [#121](https://github.com/wjduenow/SignalForge/issues/121) — `feat: prune compiler Snowflake dialect support (quote_char, QUALIFY, identifier_case=upper)`
 - **Epic:** [#118](https://github.com/wjduenow/SignalForge/issues/118) — Snowflake warehouse adapter (v0.2). Depends on the skeleton [#119](https://github.com/wjduenow/SignalForge/issues/119) (landed — `SNOWFLAKE_DIALECT` exists).
 - **Branch:** `feature/121-prune-snowflake-dialect` (off `dev`; **PR targets `dev`**)
-- **Phase:** detailing (awaiting approval)
+- **Phase:** devolved (PR [#127](https://github.com/wjduenow/SignalForge/pull/127); beads epic `bd_1-scaffolding-mfa`)
 - **Sessions:** 1 (2026-05-25)
 
 ---
@@ -248,4 +248,13 @@ Add a test asserting no `import snowflake`, `from snowflake`, `import google.clo
 
 ## Beads Manifest
 
-*(pending devolve)*
+- **Epic:** `bd_1-scaffolding-mfa` — #121: prune compiler Snowflake dialect support
+- **Worktree:** `../worktrees/SignalForge/121-prune-snowflake-dialect` (branch `feature/121-prune-snowflake-dialect`, off `dev`)
+- **PR:** [#127](https://github.com/wjduenow/SignalForge/pull/127) (draft, targets `dev`)
+- **Tasks** (priority P2, all under the epic):
+  - `bd_1-scaffolding-mfa.1` — US-001 Extend `Dialect` + set `SNOWFLAKE_DIALECT` — *ready*
+  - `bd_1-scaffolding-mfa.2` — US-002 Consume fields in compiler; preserve BQ bytes; import guard — dep: .1
+  - `bd_1-scaffolding-mfa.3` — US-003 Snowflake snapshot fixtures + tests — dep: .2
+  - `bd_1-scaffolding-mfa.4` — US-004 fakesnow gated parse/run — dep: .3
+  - `bd_1-scaffolding-mfa.5` — Quality Gate ×4 + CodeRabbit — dep: .1 .2 .3 .4
+  - `bd_1-scaffolding-mfa.6` — Patterns & Memory (5-surface graduation) — dep: .5
