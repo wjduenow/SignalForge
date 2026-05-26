@@ -4,7 +4,7 @@
 
 - **Ticket:** [#130](https://github.com/wjduenow/SignalForge/issues/130) — `feat: Snowflake estimate_query_bytes — EXPLAIN-based estimation (Phase 2 of #123)`
 - **Milestone:** v0.2 (Snowflake adapter epic #118)
-- **Phase:** detailing (awaiting approval)
+- **Phase:** devolved
 - **Branch:** `feature/130-snowflake-estimate-explain` (based on `dev`)
 - **Sessions:** 1 (2026-05-26)
 
@@ -187,7 +187,8 @@ Update each test's docstring + the `warehouse-adapters.md` #123 note that says S
 
 ## Beads Manifest
 
-*(filled on devolve)*
-- Epic: —
-- Tasks: —
-- Worktree: `feature/130-snowflake-estimate-explain`
+- **Epic:** `bd_1-scaffolding-2wl`
+- **Tasks:** `bd_1-scaffolding-2wl.1` … `.8` (US-001…US-006 + Quality Gate + Patterns & Memory)
+- **Dependency chain:** .1 → .2 → .3 → {.4, .5}; .4 → .6; Quality Gate (.7) ← {.4, .5, .6}; Patterns & Memory (.8) ← .7
+- **Ready now:** `bd_1-scaffolding-2wl.1` (US-001)
+- **Branch:** `feature/130-snowflake-estimate-explain`
