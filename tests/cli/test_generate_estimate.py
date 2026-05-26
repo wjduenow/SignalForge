@@ -368,6 +368,9 @@ def test_generate_estimate_snowflake_adapter_degrades_to_exit_zero(
     assert code == 0, f"stderr={captured.err}"
     assert "<unavailable: EstimateNotSupportedError>" in captured.out
     assert "Traceback" not in captured.err
+    # Strictness: pin exact count_tokens consumption so a drift to fewer
+    # calls (which would leave queued expectations unconsumed) fails loud.
+    fa.assert_all_expectations_met()
 
 
 def test_from_profile_dispatches_snowflake_to_snowflake_adapter() -> None:

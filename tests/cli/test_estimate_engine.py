@@ -398,6 +398,11 @@ def test_estimate_degrades_on_snowflake_estimate_not_supported(
     assert "<unavailable: EstimateNotSupportedError>" in rendered
     assert "Total estimated warehouse: <unknown>" in rendered
 
+    # Strictness: a drift to FEWER count_tokens calls would leave queued
+    # expectations unconsumed (extra calls already raise). Pin exact
+    # consumption so the LLM-cost half stays load-bearing under refactor.
+    fake_anthropic.assert_all_expectations_met()
+
 
 def test_estimate_emits_warning_on_warehouse_degrade(
     model: Model,
