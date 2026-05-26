@@ -49,11 +49,17 @@ from signalforge.warehouse.models import (
 )
 
 _FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "prune" / "compiled_sql"
+_SNOWFLAKE_FIXTURES_DIR = _FIXTURES_DIR / "snowflake"
 
 
 def _read_fixture(name: str) -> str:
     """Read a snapshot fixture file as raw text (no normalisation)."""
     return (_FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+
+def _read_snowflake_fixture(name: str) -> str:
+    """Read a Snowflake snapshot fixture file as raw text (no normalisation)."""
+    return (_SNOWFLAKE_FIXTURES_DIR / name).read_text(encoding="utf-8")
 
 
 def _make_orders_table_ref() -> TableRef:
@@ -1164,3 +1170,227 @@ def test_snowflake_relationships_per_component_and_folded() -> None:
     assert 'child."CUSTOMER_ID"' in sql
     assert 'parent."ID"' in sql
     assert "`" not in sql
+
+
+# ---------------------------------------------------------------------------
+# US-003 (#121): byte-exact Snowflake snapshot fixtures + tests for all four
+# built-in test types (full + sample modes) and custom_sql (single-table full,
+# single-table sample, multi-table full-scan). These mirror the BigQuery
+# snapshot set but assert against ``tests/fixtures/prune/compiled_sql/snowflake/``.
+# Fixtures are captured from real compiler output with SNOWFLAKE_DIALECT — they
+# pin the ``"``-quoted, per-component-qualified, UPPER-folded, ``HASH(*)``-sample
+# shape (DEC-002, DEC-003).
+# ---------------------------------------------------------------------------
+
+
+def test_compile_not_null_snowflake_matches_snapshot() -> None:
+    expected = _read_snowflake_fixture("not_null.sql")
+    test = CandidateTestNotNull(column="customer_id")
+    actual = _compile_test(test, _make_orders_table_ref(), SNOWFLAKE_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_unique_snowflake_matches_snapshot() -> None:
+    expected = _read_snowflake_fixture("unique.sql")
+    test = CandidateTestUnique(column="customer_id")
+    actual = _compile_test(test, _make_orders_table_ref(), SNOWFLAKE_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_accepted_values_snowflake_matches_snapshot() -> None:
+    expected = _read_snowflake_fixture("accepted_values.sql")
+    test = CandidateTestAcceptedValues(column="status", values=("placed", "shipped", "cancelled"))
+    actual = _compile_test(test, _make_orders_table_ref(), SNOWFLAKE_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_relationships_snowflake_matches_snapshot() -> None:
+    expected = _read_snowflake_fixture("relationships.sql")
+    test = CandidateTestRelationships(column="customer_id", to="customers", field="id")
+    actual = _compile_test(test, _make_orders_table_ref(), SNOWFLAKE_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_not_null_sample_snowflake_matches_snapshot() -> None:
+    expected = _read_snowflake_fixture("not_null_sample.sql")
+    test = CandidateTestNotNull(column="customer_id")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+
+
+def test_compile_unique_sample_snowflake_matches_snapshot() -> None:
+    expected = _read_snowflake_fixture("unique_sample.sql")
+    test = CandidateTestUnique(column="customer_id")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+
+
+def test_compile_accepted_values_sample_snowflake_matches_snapshot() -> None:
+    expected = _read_snowflake_fixture("accepted_values_sample.sql")
+    test = CandidateTestAcceptedValues(column="status", values=("placed", "shipped", "cancelled"))
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+
+
+def test_compile_relationships_sample_snowflake_matches_snapshot() -> None:
+    """Sample-mode relationships samples the CHILD table only; the parent
+    stays at the full per-component-quoted qualified name."""
+    expected = _read_snowflake_fixture("relationships_sample.sql")
+    test = CandidateTestRelationships(column="customer_id", to="customers", field="id")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+    # Belt-and-braces: the parent table is NOT sampled — verify the
+    # full per-component-quoted parent identifier survives the wrap.
+    assert isinstance(actual, str)
+    assert 'LEFT JOIN "FAKE_PROJECT"."DATASET"."CUSTOMERS" AS parent' in actual
+
+
+def test_compile_custom_sql_single_table_full_snowflake_matches_snapshot() -> None:
+    """Single-table custom_sql, scope=full: the resolved SQL is returned
+    unchanged (the adapter wraps it with the ``COUNT(*)`` envelope). The
+    ``{{ this }}`` resolves to the unquoted qualified name via the bounded
+    Jinja resolver (mirrors the BigQuery custom_sql fixture shape)."""
+    expected = _read_snowflake_fixture("custom_sql.sql")
+    test = CandidateTestCustomSQL(sql="select order_id from {{ this }} where total < 0")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert actual == expected
+
+
+def test_compile_custom_sql_single_table_sample_snowflake_matches_snapshot() -> None:
+    """Single-table custom_sql, scope=sample: the model's own qualified table
+    name is substituted with the ``sample`` CTE alias and the deterministic-
+    sample CTE (Snowflake-quoted, ``HASH(*)``) is prepended. The #116
+    materialised-sample substitution invariant under the Snowflake quote char:
+    the body references the ``sample`` CTE alias and NEVER the source table."""
+    expected = _read_snowflake_fixture("custom_sql_sample.sql")
+    test = CandidateTestCustomSQL(sql="select order_id from {{ this }} where total < 0")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+    assert isinstance(actual, str)
+    # The CTE definition references the source table; the test body after the
+    # CTE must read from ``sample``, never re-name the source table.
+    assert "select order_id from sample where total < 0" in actual
+    body = actual.split(") select", 1)[1]
+    assert "orders" not in body
+    assert "fake_project.dataset.orders" not in body
+
+
+def test_compile_custom_sql_multi_table_full_scan_snowflake_matches_snapshot() -> None:
+    """A custom_sql test with a JOIN runs full-scan (unsampled) even when
+    scope=sample is requested (DEC-006). Both ``{{ this }}`` and ``{{ ref() }}``
+    resolve to qualified names; no sample CTE is emitted."""
+    expected = _read_snowflake_fixture("custom_sql_fullscan.sql")
+    test = CandidateTestCustomSQL(
+        sql=(
+            "select o.order_id from {{ this }} as o "
+            "join {{ ref('customers') }} as c on o.customer_id = c.id "
+            "where c.id is null"
+        )
+    )
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+    assert isinstance(actual, str)
+    assert "WITH sample" not in actual
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "not_null.sql",
+        "unique.sql",
+        "accepted_values.sql",
+        "relationships.sql",
+        "not_null_sample.sql",
+        "unique_sample.sql",
+        "accepted_values_sample.sql",
+        "relationships_sample.sql",
+        "custom_sql.sql",
+        "custom_sql_sample.sql",
+        "custom_sql_fullscan.sql",
+    ],
+)
+def test_snowflake_fixtures_use_double_quote_never_backtick(fixture_name: str) -> None:
+    """Guard: every Snowflake fixture uses the ``"`` quote char and never a
+    backtick. A backtick would be a sign the BigQuery quote leaked into the
+    Snowflake snapshot (DEC-002/003)."""
+    text = _read_snowflake_fixture(fixture_name)
+    assert "`" not in text
+    # custom_sql full + fullscan resolve {{ this }}/{{ ref() }} to unquoted
+    # qualified names (the bounded-Jinja resolver, not _qualified_table_name),
+    # so they carry no quote char at all; the other nine carry ``"``.
+    if fixture_name not in {"custom_sql.sql", "custom_sql_fullscan.sql"}:
+        assert '"' in text
+
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    [
+        "not_null_sample.sql",
+        "unique_sample.sql",
+        "accepted_values_sample.sql",
+        "relationships_sample.sql",
+        "custom_sql_sample.sql",
+    ],
+)
+def test_snowflake_sample_fixtures_use_hash_never_farm_fingerprint(fixture_name: str) -> None:
+    """Guard: every Snowflake sample fixture renders the ``HASH(*)`` row-hash
+    predicate and never BigQuery's ``FARM_FINGERPRINT`` (DEC-002)."""
+    text = _read_snowflake_fixture(fixture_name)
+    assert "MOD(ABS(HASH(*)), 10) < 1" in text
+    assert "FARM_FINGERPRINT" not in text

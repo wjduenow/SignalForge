@@ -1,0 +1,1 @@
+WITH sample AS (SELECT * FROM "FAKE_PROJECT"."DATASET"."ORDERS" AS t WHERE MOD(ABS(HASH(*)), 10) < 1 LIMIT 100000) select order_id from sample where total < 0
