@@ -92,8 +92,13 @@ def validate_snowflake_account(field: str, value: str) -> None:
     - bare account locator: ``ab12345``
     - mixed underscores/hyphens/dots: ``MY_ORG-acct.us_east_1``
 
-    Rejects empty input, whitespace, quoting (``'`` / ``"``), SQL fragments
-    (``;`` / ``--``), backticks, and over-long (> 254 char) values.
+    Rejects empty input, whitespace, quoting (``'`` / ``"``), ``;``,
+    backticks, control characters, and over-long (> 254 char) values.
+
+    Note: a doubled hyphen (``--``) is **accepted** — hyphens are legal in
+    account locators and the value never reaches SQL, so ``--`` is not the
+    line-comment token here. The intent is to reject whitespace / quotes /
+    backticks / ``;`` / control chars, not every SQL metacharacter.
     """
     from signalforge.warehouse.errors import InvalidIdentifierError
 

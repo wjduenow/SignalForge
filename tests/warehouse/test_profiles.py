@@ -482,6 +482,30 @@ def test_snowflake_target_parses_full() -> None:
     assert target.password == "s3cr3t"
 
 
+def test_snowflake_secrets_excluded_from_repr() -> None:
+    """`repr()` / `str()` must NOT leak credential material — `password`,
+    `private_key_passphrase`, `private_key_path` carry `repr=False` so a
+    debug print, log line, or exception context can't expose them."""
+    target = DbtProfileTarget.model_validate(
+        _snowflake_target(
+            password="hunter2-secret",
+            private_key_path="/keys/rsa_key.p8",
+            private_key_passphrase="topsecret-pp",
+            authenticator="snowflake",
+        )
+    )
+    rendered = repr(target)
+
+    assert "hunter2-secret" not in rendered
+    assert "topsecret-pp" not in rendered
+    assert "/keys/rsa_key.p8" not in rendered
+    # The values are still accessible via attribute — only the repr is redacted.
+    assert target.password == "hunter2-secret"
+    assert target.private_key_passphrase == "topsecret-pp"
+    # A non-secret identifying field still renders (sanity: repr isn't empty).
+    assert "xy12345.us-east-1" in rendered
+
+
 @pytest.mark.parametrize(
     ("drop", "expected_missing"),
     [

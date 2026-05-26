@@ -156,9 +156,14 @@ class DbtProfileTarget(BaseModel):
     role: str | None = None
     warehouse: str | None = None
     database: str | None = None
-    password: str | None = None
-    private_key_path: str | None = None
-    private_key_passphrase: str | None = None
+    # Secret / credential material: `repr=False` keeps these out of the
+    # Pydantic-generated `repr()` / `str()` so a debug print, log line, or
+    # exception context can't leak them (mirrors SnowflakeAdapter.__repr__
+    # redaction). `private_key_path` is a filesystem path, not a secret, but
+    # is excluded too for defence-in-depth.
+    password: str | None = Field(default=None, repr=False)
+    private_key_path: str | None = Field(default=None, repr=False)
+    private_key_passphrase: str | None = Field(default=None, repr=False)
     authenticator: str | None = None
 
     @field_validator("method")
