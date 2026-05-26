@@ -9,6 +9,16 @@ for v0.2; the public ABC (`WarehouseAdapter`) and the `from_profile`
 factory are warehouse-agnostic so adding a sibling adapter is purely
 additive.
 
+**Snowflake skeleton (v0.2, issue #119).** `from_profile` now dispatches
+`type: snowflake` to a `SnowflakeAdapter` skeleton — `dialect()` returns the
+Snowflake `Dialect` (`quote_char='"'`, `identifier_case='upper'`,
+`supports_qualify=True`), but the sampling / profiling / test-running methods
+raise `NotImplementedError` naming epic #118 until #120–#124 land. The
+connector is an optional extra — install it with
+`pip install "signalforge-dbt[snowflake]"` (or `uv pip install
+"signalforge-dbt[snowflake]"`); the base install never pulls
+`snowflake-connector-python`.
+
 ## Quick start
 
 One-time, on a fresh machine:
