@@ -35,10 +35,18 @@ from signalforge.prune.compiler import (
     _compile_test,
     _compute_compiled_sql_hash,
     _InvalidIdentifier,
+    _qualified_table_name,
+    _quote,
     _RequiresFutureData,
 )
 from signalforge.warehouse._sql_safety import validate_test_sql
-from signalforge.warehouse.models import BIGQUERY_DIALECT, Dialect, PartitionFilter, TableRef
+from signalforge.warehouse.models import (
+    BIGQUERY_DIALECT,
+    SNOWFLAKE_DIALECT,
+    Dialect,
+    PartitionFilter,
+    TableRef,
+)
 
 _FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "prune" / "compiled_sql"
 
@@ -1038,3 +1046,121 @@ def test_compile_custom_sql_ambiguous_ref_returns_invalid_identifier() -> None:
     assert isinstance(result, _InvalidIdentifier)
     assert "ambiguous" in result.reason
     assert "AmbiguousRefError" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# US-002 (#121): the compiler consumes the four new Dialect fragment fields +
+# identifier_case so it emits Snowflake-correct SQL purely from the Dialect —
+# no branching on dialect name. BigQuery output stays byte-identical (the 11
+# snapshot tests above are the regression gate).
+# ---------------------------------------------------------------------------
+
+
+def test_quote_folds_and_quotes_for_snowflake() -> None:
+    """``identifier_case='upper'`` folds the token to UPPER before wrapping
+    in the Snowflake quote char (DEC-003)."""
+    assert _quote("customer_id", SNOWFLAKE_DIALECT) == '"CUSTOMER_ID"'
+
+
+def test_quote_preserves_and_backticks_for_bigquery() -> None:
+    """BigQuery ``identifier_case='preserve'`` is a no-op fold; the token is
+    wrapped in backticks unchanged — keeps the snapshots byte-identical."""
+    assert _quote("customer_id", BIGQUERY_DIALECT) == "`customer_id`"
+
+
+def test_qualified_table_name_per_component_for_snowflake() -> None:
+    """Snowflake quotes each component separately and folds to UPPER so a
+    dotted path is not read as one literal identifier named
+    ``db.schema.table`` (DEC-002)."""
+    ref = TableRef(project="prod_db", dataset="sch", name="orders")
+    assert _qualified_table_name(ref, SNOWFLAKE_DIALECT) == '"PROD_DB"."SCH"."ORDERS"'
+
+
+def test_qualified_table_name_per_component_two_part_for_snowflake() -> None:
+    """``project=None`` yields a two-part per-component qualified name."""
+    ref = TableRef(project=None, dataset="sch", name="orders")
+    assert _qualified_table_name(ref, SNOWFLAKE_DIALECT) == '"SCH"."ORDERS"'
+
+
+def test_qualified_table_name_whole_path_for_bigquery_unchanged() -> None:
+    """BigQuery wraps the whole dotted path in one backtick pair — byte-
+    identical to the legacy behaviour."""
+    ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    assert _qualified_table_name(ref, BIGQUERY_DIALECT) == "`fake_project.dataset.orders`"
+
+
+def test_snowflake_sample_cte_uses_hash_not_farm_fingerprint() -> None:
+    """The Snowflake sample predicate is rendered from
+    ``sample_row_hash_expr`` → ``MOD(ABS(HASH(*)), <bucket>) < 1``; the
+    BigQuery ``FARM_FINGERPRINT`` form never appears (DEC-002)."""
+    test = CandidateTestNotNull(column="customer_id")
+    sql = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert isinstance(sql, str)
+    assert "MOD(ABS(HASH(*)), 10) < 1" in sql
+    assert "FARM_FINGERPRINT" not in sql
+    # Folded + per-component quoted identifiers throughout; no backticks.
+    assert '"CUSTOMER_ID"' in sql
+    assert "`" not in sql
+
+
+def test_snowflake_datetime_partition_filter_uses_cast_form() -> None:
+    """A ``datetime`` partition filter under Snowflake renders the
+    ``'...'::TIMESTAMP`` cast form, not BigQuery's ``TIMESTAMP('...')``
+    function form (DEC-002)."""
+    from datetime import datetime
+
+    test = CandidateTestNotNull(column="customer_id")
+    pf = PartitionFilter(column="event_ts", op=">=", value=datetime(2026, 1, 1, 0, 0, 0))
+    sql = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        scope="full",
+        partition_filter=pf,
+    )
+    assert isinstance(sql, str)
+    assert "'2026-01-01T00:00:00'::TIMESTAMP" in sql
+    assert "TIMESTAMP(" not in sql
+    # The partition column is folded + quoted the Snowflake way.
+    assert '"EVENT_TS" >=' in sql
+
+
+def test_snowflake_date_partition_filter_uses_cast_form() -> None:
+    """A ``date`` partition filter under Snowflake renders ``'...'::DATE``."""
+    from datetime import date as _date
+
+    test = CandidateTestNotNull(column="customer_id")
+    pf = PartitionFilter(column="event_dt", op=">=", value=_date(2026, 1, 1))
+    sql = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        scope="full",
+        partition_filter=pf,
+    )
+    assert isinstance(sql, str)
+    assert "'2026-01-01'::DATE" in sql
+    assert "DATE(" not in sql
+
+
+def test_snowflake_relationships_per_component_and_folded() -> None:
+    """End-to-end relationships under Snowflake: both child and parent
+    tables are per-component quoted + UPPER-folded; columns folded+quoted."""
+    test = CandidateTestRelationships(column="customer_id", to="customers", field="id")
+    sql = _compile_test(test, _make_orders_table_ref(), SNOWFLAKE_DIALECT, _make_manifest())
+    assert isinstance(sql, str)
+    assert '"FAKE_PROJECT"."DATASET"."ORDERS"' in sql
+    assert '"FAKE_PROJECT"."DATASET"."CUSTOMERS"' in sql
+    assert 'child."CUSTOMER_ID"' in sql
+    assert 'parent."ID"' in sql
+    assert "`" not in sql
