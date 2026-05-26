@@ -21,12 +21,14 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from signalforge.warehouse import profiles as profiles_module
 from signalforge.warehouse.errors import (
+    IncompleteProfileError,
+    InvalidIdentifierError,
     ProfileEnvVarUnsetError,
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
     UnsupportedAuthMethodError,
 )
-from signalforge.warehouse.profiles import load_profile
+from signalforge.warehouse.profiles import DbtProfileTarget, load_profile
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "profiles"
 
@@ -440,6 +442,153 @@ def test_load_profile_env_var_preserves_yaml_quoting(
     target = load_profile(project_dir)
     assert target.project == "12345"
     assert isinstance(target.project, str)
+
+
+# ---------------------------------------------------------------------------
+# 6c. Snowflake profile parsing + cross-field validator (US-003, #120)
+# ---------------------------------------------------------------------------
+
+
+def _snowflake_target(**overrides: object) -> dict[str, object]:
+    """A representative valid ``type: snowflake`` target dict."""
+    base: dict[str, object] = {
+        "type": "snowflake",
+        "account": "xy12345.us-east-1",
+        "user": "svc_signalforge",
+        "role": "TRANSFORMER",
+        "warehouse": "ANALYTICS_WH",
+        "database": "ANALYTICS",
+        "schema": "public",
+        "threads": 4,
+        "password": "s3cr3t",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_snowflake_target_parses_full() -> None:
+    """A representative Snowflake target parses; every new field populates."""
+    target = DbtProfileTarget.model_validate(_snowflake_target())
+
+    assert target.type == "snowflake"
+    assert target.account == "xy12345.us-east-1"
+    assert target.user == "svc_signalforge"
+    assert target.role == "TRANSFORMER"
+    assert target.warehouse == "ANALYTICS_WH"
+    assert target.database == "ANALYTICS"
+    # Snowflake's `schema:` key continues to populate `dataset` (alias).
+    assert target.dataset == "public"
+    assert target.threads == 4
+    assert target.password == "s3cr3t"
+
+
+@pytest.mark.parametrize(
+    ("drop", "expected_missing"),
+    [
+        (["account"], "account"),
+        (["user"], "user"),
+        (["warehouse"], "warehouse"),
+        (["account", "user", "warehouse"], "warehouse"),
+    ],
+)
+def test_snowflake_missing_required_keys_raises(drop: list[str], expected_missing: str) -> None:
+    """Missing account / user / warehouse → IncompleteProfileError naming the key(s)."""
+    target = _snowflake_target()
+    for key in drop:
+        del target[key]
+
+    with pytest.raises((IncompleteProfileError, ValidationError)) as excinfo:
+        DbtProfileTarget.model_validate(target)
+    assert expected_missing in str(excinfo.value)
+
+
+def test_snowflake_authenticator_externalbrowser_parses() -> None:
+    """`authenticator: externalbrowser` is an accepted SSO method."""
+    # password is optional once SSO is in play.
+    target_dict = _snowflake_target(authenticator="externalbrowser")
+    del target_dict["password"]
+    target = DbtProfileTarget.model_validate(target_dict)
+    assert target.authenticator == "externalbrowser"
+
+
+@pytest.mark.parametrize("authenticator", ["oauth", "username_password_mfa"])
+def test_snowflake_deferred_authenticator_raises(authenticator: str) -> None:
+    """Deferred auth methods → UnsupportedAuthMethodError (deferred-auth remediation)."""
+    with pytest.raises((UnsupportedAuthMethodError, ValidationError)) as excinfo:
+        DbtProfileTarget.model_validate(_snowflake_target(authenticator=authenticator))
+    assert authenticator in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("warehouse", "wh;DROP"),
+        ("database", "db-with-dash"),
+        ("schema", "sch;ema"),
+    ],
+)
+def test_snowflake_bad_identifier_raises(field: str, bad_value: str) -> None:
+    """Bad warehouse / database / schema identifiers → InvalidIdentifierError."""
+    with pytest.raises((InvalidIdentifierError, ValidationError)) as excinfo:
+        DbtProfileTarget.model_validate(_snowflake_target(**{field: bad_value}))
+    assert bad_value in str(excinfo.value)
+
+
+def test_snowflake_bad_account_raises() -> None:
+    """A garbage account locator (embedded quote) → InvalidIdentifierError."""
+    with pytest.raises((InvalidIdentifierError, ValidationError)) as excinfo:
+        DbtProfileTarget.model_validate(_snowflake_target(account="a'b"))
+    assert "a'b" in str(excinfo.value) or "account" in str(excinfo.value)
+
+
+def test_snowflake_good_account_parses() -> None:
+    """A region-suffixed legacy locator parses cleanly."""
+    target = DbtProfileTarget.model_validate(_snowflake_target(account="xy12345.us-east-1"))
+    assert target.account == "xy12345.us-east-1"
+
+
+def test_snowflake_foreign_bigquery_field_rejected() -> None:
+    """A BigQuery-only field (location) on a snowflake target → ValidationError."""
+    with pytest.raises(ValidationError) as excinfo:
+        DbtProfileTarget.model_validate(_snowflake_target(location="US"))
+    assert "location" in str(excinfo.value)
+
+
+def test_snowflake_foreign_max_bytes_billed_rejected() -> None:
+    """`maximum_bytes_billed` (BigQuery-only) on a snowflake target → ValidationError."""
+    with pytest.raises(ValidationError) as excinfo:
+        DbtProfileTarget.model_validate(_snowflake_target(maximum_bytes_billed=1_000_000))
+    assert "maximum_bytes_billed" in str(excinfo.value)
+
+
+def test_bigquery_foreign_snowflake_field_rejected() -> None:
+    """A Snowflake-only field (account) on a bigquery target → ValidationError."""
+    with pytest.raises(ValidationError) as excinfo:
+        DbtProfileTarget.model_validate(
+            {
+                "type": "bigquery",
+                "method": "oauth",
+                "project": "p",
+                "schema": "d",
+                "account": "xy12345",
+            }
+        )
+    assert "account" in str(excinfo.value)
+
+
+def test_bigquery_with_threads_parses() -> None:
+    """A BigQuery profile carrying `threads: 4` now parses (previously tripped forbid)."""
+    target = DbtProfileTarget.model_validate(
+        {
+            "type": "bigquery",
+            "method": "oauth",
+            "project": "p",
+            "schema": "d",
+            "threads": 4,
+        }
+    )
+    assert target.threads == 4
+    assert target.type == "bigquery"
 
 
 # ---------------------------------------------------------------------------

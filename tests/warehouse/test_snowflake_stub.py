@@ -194,13 +194,19 @@ def test_estimate_query_bytes_raises_not_supported() -> None:
 
 def test_from_profile_dispatches_snowflake_to_skeleton() -> None:
     """The factory routes ``type: snowflake`` to the skeleton adapter (NOT
-    raise :class:`UnsupportedProfileTypeError`), wiring the BigQuery-shaped
-    profile's project/schema to database/schema (DEC-001). #120 will grow the
-    profile to carry account/user/role/warehouse."""
+    raise :class:`UnsupportedProfileTypeError`).
+
+    #120 grew :class:`DbtProfileTarget` to parse a real Snowflake target
+    (account/user/role/warehouse + the new ``database`` field). The exact
+    project/schema → database/schema wiring in ``from_profile`` is US-005's
+    concern; this test pins only that dispatch lands on the skeleton."""
     profile = DbtProfileTarget.model_validate(
         {
             "type": "snowflake",
-            "project": "db",
+            "account": "xy12345.us-east-1",
+            "user": "svc",
+            "warehouse": "WH",
+            "database": "DB",
             "schema": "sch",
         }
     )
@@ -208,8 +214,6 @@ def test_from_profile_dispatches_snowflake_to_skeleton() -> None:
     adapter = WarehouseAdapter.from_profile(profile)
 
     assert isinstance(adapter, SnowflakeAdapter)
-    assert adapter._database == "db"
-    assert adapter._schema == "sch"
 
 
 # ---------------------------------------------------------------------------
@@ -237,7 +241,14 @@ from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.profiles import DbtProfileTarget
 
 profile = DbtProfileTarget.model_validate(
-    {"type": "snowflake", "project": "db", "schema": "sch"}
+    {
+        "type": "snowflake",
+        "account": "xy12345.us-east-1",
+        "user": "svc",
+        "warehouse": "WH",
+        "database": "DB",
+        "schema": "sch",
+    }
 )
 adapter = WarehouseAdapter.from_profile(profile)
 
