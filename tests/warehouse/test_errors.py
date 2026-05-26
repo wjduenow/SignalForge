@@ -14,6 +14,7 @@ from signalforge.warehouse import errors as errors_module
 from signalforge.warehouse.errors import (
     BytesBilledExceededError,
     ColumnNotFoundError,
+    EstimateUnavailableError,
     IncompleteProfileError,
     InvalidIdentifierError,
     ManifestProjectNotFoundError,
@@ -60,6 +61,7 @@ _CONSTRUCT_KWARGS: dict[str, dict[str, object]] = {
     "MaterialisationFailedError": {"message": "BigQuery refused the CTAS"},
     "MaterialisationNotSupportedError": {"adapter_name": "SnowflakeAdapter"},
     "EstimateNotSupportedError": {"adapter_name": "SnowflakeAdapter"},
+    "EstimateUnavailableError": {"detail": "EXPLAIN plan lacked GlobalStats"},
     "IncompleteProfileError": {
         "profile_type": "snowflake",
         "missing": ["account", "warehouse"],
@@ -98,11 +100,12 @@ def test_each_subclass_has_default_remediation() -> None:
     # EstimateNotSupportedError → 19; issue #47 adds
     # ProfileEnvVarUnsetError (supports init-demo profile env_var
     # rendering) → 20.
-    assert len(errors_module.__all__) == 21, (
+    assert len(errors_module.__all__) == 22, (
         "DEC-026 enumerates 15 typed subclasses + 1 base; #22 US-001 "
         "adds 2 more (MaterialisationFailed/NotSupported); #36 US-002 "
         "adds EstimateNotSupportedError; #47 QG pass-3 adds "
-        "ProfileEnvVarUnsetError; #120 US-002 adds IncompleteProfileError. "
+        "ProfileEnvVarUnsetError; #120 US-002 adds IncompleteProfileError; "
+        "#130 US-001 adds EstimateUnavailableError. "
         "Update tests and __all__ together if this changes."
     )
     for name in errors_module.__all__:
@@ -350,3 +353,58 @@ def test_incomplete_profile_error_collects_all_missing_keys() -> None:
     # through.
     missing.append("role")
     assert err.missing == ["account", "warehouse"]
+
+
+@pytest.mark.unit
+def test_estimate_unavailable_error_subclasses_warehouse_error() -> None:
+    """``EstimateUnavailableError`` subclasses :class:`WarehouseError` so the
+    CLI's tier-3 ``WarehouseError`` MRO walk in ``_EXCEPTION_TO_EXIT_CODE``
+    covers it via inheritance (DEC-003 of issue #130). A regression dropping
+    the base would silently route it into the panic-path tier; the
+    ``isinstance`` assertion is the gate."""
+    err = EstimateUnavailableError(detail="EXPLAIN plan lacked GlobalStats")
+    assert isinstance(err, WarehouseError)
+
+
+@pytest.mark.unit
+def test_estimate_unavailable_error_str_renders_message_and_remediation() -> None:
+    """``__str__`` renders the diagnostic message AND the
+    ``↳ Remediation:`` line via the layer-base pattern. The ``detail`` field
+    is repr-quoted (DEC-022) so adversarial planner output can't smuggle a
+    raw newline / control char into a log viewer; the field also round-trips
+    as an attribute for programmatic access."""
+    detail = "GlobalStats\nmissing"
+    err = EstimateUnavailableError(detail=detail)
+    rendered = str(err)
+    # repr() of the value appears verbatim; raw multi-line form does not.
+    assert repr(detail) in rendered
+    assert "Query-bytes estimate unavailable:" in rendered
+    assert "↳ Remediation:" in rendered
+    assert err.detail == detail
+
+
+@pytest.mark.unit
+def test_estimate_unavailable_error_remediation_locked_verbatim() -> None:
+    """DEC-003 of issue #130's plan — the default remediation is locked
+    byte-for-byte. Changing this text is a contract break: the CLI's
+    ``--estimate`` degrade path surfaces it to operators, and downstream
+    tooling / CI parsers may key on it."""
+    expected = (
+        "The query plan carried no parseable byte estimate; the run falls "
+        "back to a price-only cost preview. EXPLAIN figures are planner "
+        "estimates and may be absent for some query shapes — re-run "
+        "without --estimate to skip the preview entirely."
+    )
+    assert EstimateUnavailableError.default_remediation == expected
+
+
+@pytest.mark.unit
+def test_estimate_unavailable_distinct_from_not_supported() -> None:
+    """The two estimation errors are sibling concretes, not parent/child:
+    ``EstimateUnavailableError`` ("ran but no figure") must NOT be an
+    instance of ``EstimateNotSupportedError`` ("does no estimation at all").
+    Conflating them would let the engine misreport which degrade fired."""
+    from signalforge.warehouse.errors import EstimateNotSupportedError
+
+    unavailable = EstimateUnavailableError(detail="x")
+    assert not isinstance(unavailable, EstimateNotSupportedError)
