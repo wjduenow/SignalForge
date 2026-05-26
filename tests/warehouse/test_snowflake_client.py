@@ -53,6 +53,8 @@ def test_fakes_satisfy_protocols() -> None:
     )
 
     class _FakeCursor:
+        description: Any = None
+
         def execute(self, command: str, *args: Any, **kwargs: Any) -> Any:
             return None
 
@@ -107,6 +109,7 @@ def test_public_names_are_exported() -> None:
         "_SnowflakeClientProtocol",
         "_SnowflakeCursorProtocol",
         "make_real_client",
+        "map_snowflake_exception",
     }
 
 
