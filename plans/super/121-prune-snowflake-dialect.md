@@ -5,8 +5,8 @@
 - **Ticket:** [#121](https://github.com/wjduenow/SignalForge/issues/121) — `feat: prune compiler Snowflake dialect support (quote_char, QUALIFY, identifier_case=upper)`
 - **Epic:** [#118](https://github.com/wjduenow/SignalForge/issues/118) — Snowflake warehouse adapter (v0.2). Depends on the skeleton [#119](https://github.com/wjduenow/SignalForge/issues/119) (landed — `SNOWFLAKE_DIALECT` exists).
 - **Branch:** `feature/121-prune-snowflake-dialect` (off `dev`; **PR targets `dev`**)
-- **Phase:** devolved (PR [#127](https://github.com/wjduenow/SignalForge/pull/127); beads epic `bd_1-scaffolding-mfa`)
-- **Sessions:** 1 (2026-05-25)
+- **Phase:** implemented — all 6 beads landed; PR [#127](https://github.com/wjduenow/SignalForge/pull/127) open and awaiting review (beads epic `bd_1-scaffolding-mfa`, closed)
+- **Sessions:** 2 (2026-05-25 plan; 2026-05-26 Ralph implementation + closeout)
 
 ---
 

@@ -24,7 +24,7 @@ _PRUNE_DIR = Path(__file__).resolve().parents[2] / "src" / "signalforge" / "prun
 
 # Module prefixes that must never be imported under prune/. A module name
 # matches when it equals the prefix or begins with ``<prefix>.`` (so
-# ``google.cloud.bigquery`` matches ``google.cloud`` but ``googleftover``
+# ``google.cloud.bigquery`` matches ``google.cloud`` but ``google_leftover``
 # does not).
 _FORBIDDEN_PREFIXES = ("snowflake", "google.cloud")
 
