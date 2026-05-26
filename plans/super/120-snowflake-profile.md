@@ -5,7 +5,7 @@
 - **Ticket:** [#120](https://github.com/wjduenow/SignalForge/issues/120) — `feat: parse Snowflake target in dbt profiles.yml (DbtProfileTarget type=snowflake)`
 - **Epic:** [#118](https://github.com/wjduenow/SignalForge/issues/118) — Snowflake warehouse adapter (v0.2). **#119 (skeleton) landed; #120 grows the profile model so the rest of the epic has typed inputs.**
 - **Branch:** `feature/120-snowflake-profile` (off `dev`; PR targets `dev`)
-- **Phase:** published (PR [#126](https://github.com/wjduenow/SignalForge/pull/126))
+- **Phase:** devolved (PR [#126](https://github.com/wjduenow/SignalForge/pull/126); beads epic `bd_1-scaffolding-ohz`)
 - **Sessions:** 1 (2026-05-25)
 
 ---
@@ -183,4 +183,14 @@ _Pending detailing approval._
 
 ## Beads Manifest
 
-_Pending devolve._
+- **Epic:** `bd_1-scaffolding-ohz`
+- **Worktree:** `../worktrees/SignalForge/120-snowflake-profile` (branch `feature/120-snowflake-profile`, off `dev`)
+- **Tasks:**
+  - `bd_1-scaffolding-ohz.1` — US-001 `validate_snowflake_account` _(ready)_
+  - `bd_1-scaffolding-ohz.2` — US-002 `IncompleteProfileError` + exit-code _(ready)_
+  - `bd_1-scaffolding-ohz.3` — US-003 grow `DbtProfileTarget` + validator _(blocked by .1, .2)_
+  - `bd_1-scaffolding-ohz.4` — US-004 adapter `__init__`/`__repr__` _(ready)_
+  - `bd_1-scaffolding-ohz.5` — US-005 `from_profile` wiring + fixtures + drift _(blocked by .3, .4)_
+  - `bd_1-scaffolding-ohz.6` — US-006 Quality Gate _(blocked by .5)_
+  - `bd_1-scaffolding-ohz.7` — US-007 Patterns & Memory _(blocked by .6)_
+- **Ready to start:** `.1`, `.2`, `.4`.
