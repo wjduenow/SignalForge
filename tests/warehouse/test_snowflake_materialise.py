@@ -23,13 +23,14 @@ engineered by asserting the exact SQL bytes / run_id, not just behaviour.
 from __future__ import annotations
 
 import re
+from datetime import date
 
 import pytest
 
 from signalforge.warehouse._sample_id import _compute_run_id
 from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
-from signalforge.warehouse.errors import MaterialisationFailedError
-from signalforge.warehouse.models import SNOWFLAKE_DIALECT, TableRef
+from signalforge.warehouse.errors import MaterialisationFailedError, QuerySyntaxError
+from signalforge.warehouse.models import SNOWFLAKE_DIALECT, PartitionFilter, TableRef
 from tests.warehouse._fake_snowflake import FakeSnowflakeConnection
 
 # Source table: ``project`` is the database (GCP-style project-id grammar);
@@ -365,3 +366,51 @@ def test_run_test_sql_validates_sql_first() -> None:
         adapter.run_test_sql("SELECT 1; DROP TABLE t")
 
     conn.assert_all_expectations_met()
+
+
+def test_materialise_applies_partition_filter_in_ctas() -> None:
+    """A ``PartitionFilter`` lands ONCE in the CTAS ``WHERE`` (rendered via the
+    Snowflake dialect literal template) alongside the hash-mod predicate."""
+    conn = _RecordingConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    adapter = _make_adapter(conn)
+
+    pf = PartitionFilter(column="DT", op=">=", value=date(2026, 1, 1))
+    adapter.materialise_sample(_TABLE, 100, partition_filter=pf)
+
+    ctas = conn.executed[1]
+    assert "MOD(ABS(HASH(*)), 10) < 1" in ctas
+    # Rendered via SNOWFLAKE_DIALECT.date_literal_template: '{value}'::DATE.
+    assert "'2026-01-01'::DATE" in ctas
+    assert ctas.count("'2026-01-01'::DATE") == 1
+
+
+def test_run_test_sql_programming_error_maps_to_query_syntax_error() -> None:
+    """A connector ``ProgrammingError`` from the COUNT(*) wrap maps to
+    :class:`QuerySyntaxError` (the ``run_test_sql`` mapped-error branch)."""
+    pytest.importorskip("snowflake.connector")
+    from snowflake.connector import errors as sfe
+
+    conn = FakeSnowflakeConnection()
+    conn.expect_execute(
+        matching=_COUNT_QUERY,
+        returns=sfe.ProgrammingError("SQL compilation error"),
+    )
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError):
+        adapter.run_test_sql('SELECT "ID" FROM "DB"."SCH"."T" WHERE "ID" IS NULL')
+
+
+def test_run_test_sql_unmapped_error_passes_through_unchanged() -> None:
+    """An exception ``map_snowflake_exception`` does not map is re-raised
+    unchanged from ``run_test_sql`` — the passthrough branch."""
+    sentinel = RuntimeError("transient network blip")
+    conn = FakeSnowflakeConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=sentinel)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        adapter.run_test_sql('SELECT "ID" FROM "DB"."SCH"."T" WHERE "ID" IS NULL')
+    assert exc_info.value is sentinel

@@ -346,3 +346,91 @@ def test_sdk_programming_error_maps_to_query_syntax_error() -> None:
 
     with pytest.raises(QuerySyntaxError):
         adapter.sample_rows(_TABLE, 100)
+
+
+def test_size_query_programming_error_maps_to_query_syntax_error() -> None:
+    """A connector ``ProgrammingError`` from the INFORMATION_SCHEMA size query
+    maps to :class:`QuerySyntaxError` (the ``_execute`` mapped-error branch)."""
+    pytest.importorskip("snowflake.connector")
+    from snowflake.connector import errors as sfe
+
+    conn = FakeSnowflakeConnection()
+    conn.expect_execute(
+        matching=_SIZE_QUERY,
+        returns=sfe.ProgrammingError("SQL compilation error: bad table"),
+    )
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError):
+        adapter.sample_rows(_TABLE, 100)
+
+
+def test_size_query_unmapped_error_passes_through_unchanged() -> None:
+    """An exception ``map_snowflake_exception`` does not map (``mapped is exc``)
+    is re-raised unchanged from ``_execute`` — the passthrough branch."""
+    sentinel = RuntimeError("transient network blip")
+    conn = FakeSnowflakeConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=sentinel)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        adapter.sample_rows(_TABLE, 100)
+    assert exc_info.value is sentinel
+
+
+def test_sample_query_unmapped_error_passes_through_unchanged() -> None:
+    """An unmapped exception from the sample query is re-raised unchanged from
+    ``_execute_to_dicts`` — the passthrough branch."""
+    sentinel = RuntimeError("transient network blip")
+    conn = FakeSnowflakeConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=sentinel)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        adapter.sample_rows(_TABLE, 100)
+    assert exc_info.value is sentinel
+
+
+def test_sample_rows_passes_through_dict_rows_unchanged() -> None:
+    """A connection that vends mapping rows (DictCursor-style) is handled by
+    ``_rows_to_dicts``'s dict passthrough branch — no description needed."""
+    conn = FakeSnowflakeConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(
+        matching=_SAMPLE_QUERY,
+        returns=[{"ID": 1, "AMOUNT": 10}, {"ID": 2, "AMOUNT": 20}],
+    )
+    adapter = _make_adapter(conn)
+
+    rows = adapter.sample_rows(_TABLE, 100)
+
+    assert rows == [{"ID": 1, "AMOUNT": 10}, {"ID": 2, "AMOUNT": 20}]
+
+
+def test_get_connection_lazily_builds_real_client_when_none_injected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no ``connection=`` injected, ``_get_connection`` lazily builds via
+    the shim's ``make_real_client`` (and pins it as ``_active_session``)."""
+    built = FakeSnowflakeConnection()
+    built.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    built.expect_execute(matching=_SAMPLE_QUERY, returns=[], description=[("ID",)])
+    calls: list[dict[str, object]] = []
+
+    def _fake_make_real_client(**kwargs: object) -> FakeSnowflakeConnection:
+        calls.append(kwargs)
+        return built
+
+    monkeypatch.setattr(
+        "signalforge.warehouse.adapters._snowflake_client.make_real_client",
+        _fake_make_real_client,
+    )
+    adapter = SnowflakeAdapter(account="acme-prod", warehouse="WH")
+
+    assert adapter._get_connection() is built
+    assert adapter._active_session is built
+    assert len(calls) == 1
+    # A second call reuses the built connection (no re-build).
+    assert adapter._get_connection() is built
+    assert len(calls) == 1
