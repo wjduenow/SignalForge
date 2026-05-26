@@ -233,6 +233,8 @@ def test_snowflake_dispatch_does_not_import_bigquery_sdk() -> None:
         [sys.executable, "-c", _NO_BQ_SDK_DRIVER],
         capture_output=True,
         text=True,
+        timeout=10,
+        check=False,
     )
     assert result.returncode == 0, (
         f"subprocess failed (rc={result.returncode}):\n"
