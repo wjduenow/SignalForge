@@ -109,7 +109,7 @@ SNOWFLAKE_DIALECT = Dialect(
     quote_char='"',
     identifier_case="upper",
 )
-"""Snowflake-flavoured :class:`Dialect` for the v0.3 adapter (issue #119, DEC-004).
+"""Snowflake-flavoured :class:`Dialect` for the v0.2 adapter (issue #119, DEC-004).
 
 * ``quote_char='"'`` — Snowflake uses double-quote for identifier quoting.
 * ``identifier_case='upper'`` — unquoted identifiers fold to UPPERCASE.
