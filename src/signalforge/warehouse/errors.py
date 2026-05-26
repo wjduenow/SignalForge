@@ -19,6 +19,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import ClassVar
 
+# Reused by the profiles model validator (US-003) to remediate a Snowflake
+# profile that declares an auth method SignalForge's v0.2 adapter does not yet
+# support. Names the supported methods so the operator knows the working set;
+# names the deferred ones so the message isn't a dead end.
+_SNOWFLAKE_DEFERRED_AUTH_REMEDIATION = (
+    "v0.2 Snowflake auth supports: password (set `password:`), key-pair (set "
+    "`private_key_path:`), and SSO (set `authenticator: externalbrowser`). "
+    "oauth, inline `private_key:`, and MFA-token methods are deferred to a "
+    "later release."
+)
+
 
 def _format_value(v: object) -> str:
     """Quote a user-supplied value via ``repr()`` for safe inclusion in
@@ -464,6 +475,43 @@ class EstimateNotSupportedError(WarehouseError):
         super().__init__(message, remediation=remediation)
 
 
+class IncompleteProfileError(WarehouseError):
+    """A dbt profile parsed but is missing required keys for its ``type``.
+
+    Raised (US-003) when, e.g., a ``type: snowflake`` target omits
+    ``account`` / ``warehouse``. The constructor collects EVERY missing key
+    (collect-all, mirroring the anchor-contract validators elsewhere in the
+    codebase) so the operator can fix them in one pass rather than discovering
+    them one error at a time. The profile type and each missing key render via
+    :func:`_format_value` (i.e. ``repr()``) so adversarial values can't smuggle
+    control characters into log viewers (DEC-022).
+
+    Tier-1 in the CLI exit-code taxonomy (load/parse failure — a profile-config
+    problem, alongside :class:`UnsupportedAuthMethodError`).
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Add the missing key(s) to this target in profiles.yml, or pass an "
+        "explicit `target=` that is fully configured for its warehouse type."
+    )
+
+    def __init__(
+        self,
+        profile_type: str,
+        missing: list[str],
+        *,
+        remediation: str | None = None,
+    ) -> None:
+        self.profile_type = profile_type
+        self.missing = list(missing)
+        rendered_missing = ", ".join(_format_value(k) for k in self.missing)
+        message = (
+            f"Profile of type {_format_value(profile_type)} is missing required "
+            f"key(s): [{rendered_missing}]."
+        )
+        super().__init__(message, remediation=remediation)
+
+
 class MaterialisationNotSupportedError(WarehouseError):
     """The :class:`WarehouseAdapter` ABC default impl of
     ``materialise_sample`` raises this; concrete adapters override the
@@ -496,6 +544,7 @@ __all__ = [
     "BytesBilledExceededError",
     "ColumnNotFoundError",
     "EstimateNotSupportedError",
+    "IncompleteProfileError",
     "InvalidIdentifierError",
     "ManifestProjectNotFoundError",
     "ManifestSchemaNotFoundError",

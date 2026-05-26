@@ -89,6 +89,8 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
         return cls("default", "dev")
     if name in {"UnsupportedProfileTypeError", "UnsupportedAuthMethodError"}:
         return cls("synthetic")
+    if name == "IncompleteProfileError":
+        return cls("snowflake", ["account", "warehouse"])
     if name in {"ManifestProjectNotFoundError", "ManifestSchemaNotFoundError"}:
         return cls("model.test.x")
 

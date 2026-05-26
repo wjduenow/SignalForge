@@ -68,7 +68,9 @@ def test_dialect_method_returns_snowflake_dialect_by_identity() -> None:
 def test_repr_shows_only_safe_fields_never_credentials() -> None:
     """:meth:`__repr__` renders ONLY ``account`` + ``warehouse``. A
     debug-print / log line must never leak ``user`` / ``password`` / ``role``
-    / ``database`` / ``schema`` (DEC-003)."""
+    / ``database`` / ``schema`` — nor the key-pair / SSO auth fields
+    ``private_key_path`` / ``private_key_passphrase`` / ``authenticator``
+    (DEC-003 / DEC-008)."""
     adapter = SnowflakeAdapter(
         account="ac123",
         user="bob",
@@ -77,6 +79,9 @@ def test_repr_shows_only_safe_fields_never_credentials() -> None:
         warehouse="WH",
         database="db",
         schema="sch",
+        private_key_path="/keys/rsa_key.p8",
+        private_key_passphrase="topsecret",
+        authenticator="externalbrowser",
     )
     rendered = repr(adapter)
 
@@ -94,6 +99,28 @@ def test_repr_shows_only_safe_fields_never_credentials() -> None:
     assert "role" not in rendered
     assert "database" not in rendered
     assert "schema" not in rendered
+
+    # Key-pair / SSO auth fields must not leak — neither values nor labels.
+    assert "topsecret" not in rendered
+    assert "/keys/rsa_key.p8" not in rendered
+    assert "private_key" not in rendered
+    assert "passphrase" not in rendered
+    assert "authenticator" not in rendered
+
+
+def test_init_stores_key_pair_and_sso_auth_fields() -> None:
+    """The constructor captures the three forward-compat auth params on
+    ``self._private_key_path`` / ``self._private_key_passphrase`` /
+    ``self._authenticator`` so #122 can open a real connection (DEC-008)."""
+    adapter = SnowflakeAdapter(
+        private_key_path="/keys/rsa_key.p8",
+        private_key_passphrase="topsecret",
+        authenticator="externalbrowser",
+    )
+
+    assert adapter._private_key_path == "/keys/rsa_key.p8"
+    assert adapter._private_key_passphrase == "topsecret"
+    assert adapter._authenticator == "externalbrowser"
 
 
 # ---------------------------------------------------------------------------
@@ -167,22 +194,34 @@ def test_estimate_query_bytes_raises_not_supported() -> None:
 
 def test_from_profile_dispatches_snowflake_to_skeleton() -> None:
     """The factory routes ``type: snowflake`` to the skeleton adapter (NOT
-    raise :class:`UnsupportedProfileTypeError`), wiring the BigQuery-shaped
-    profile's project/schema to database/schema (DEC-001). #120 will grow the
-    profile to carry account/user/role/warehouse."""
+    raise :class:`UnsupportedProfileTypeError`) and wires EVERY parsed field
+    through (#120, US-005). Snowflake's ``schema:`` key hydrates
+    ``profile.dataset`` via the alias, which the factory passes as the
+    adapter's ``schema`` kwarg."""
     profile = DbtProfileTarget.model_validate(
         {
             "type": "snowflake",
-            "project": "db",
+            "account": "xy12345.us-east-1",
+            "user": "svc",
+            "role": "TRANSFORMER",
+            "warehouse": "WH",
+            "database": "DB",
             "schema": "sch",
+            "password": "s3cret",
         }
     )
 
     adapter = WarehouseAdapter.from_profile(profile)
 
     assert isinstance(adapter, SnowflakeAdapter)
-    assert adapter._database == "db"
+    # Full wiring: every parsed field reaches the adapter.
+    assert adapter._account == "xy12345.us-east-1"
+    assert adapter._user == "svc"
+    assert adapter._role == "TRANSFORMER"
+    assert adapter._warehouse == "WH"
+    assert adapter._database == "DB"
     assert adapter._schema == "sch"
+    assert adapter._password == "s3cret"
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +249,14 @@ from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.profiles import DbtProfileTarget
 
 profile = DbtProfileTarget.model_validate(
-    {"type": "snowflake", "project": "db", "schema": "sch"}
+    {
+        "type": "snowflake",
+        "account": "xy12345.us-east-1",
+        "user": "svc",
+        "warehouse": "WH",
+        "database": "DB",
+        "schema": "sch",
+    }
 )
 adapter = WarehouseAdapter.from_profile(profile)
 

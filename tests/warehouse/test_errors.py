@@ -14,6 +14,7 @@ from signalforge.warehouse import errors as errors_module
 from signalforge.warehouse.errors import (
     BytesBilledExceededError,
     ColumnNotFoundError,
+    IncompleteProfileError,
     InvalidIdentifierError,
     ManifestProjectNotFoundError,
     ManifestSchemaNotFoundError,
@@ -59,6 +60,10 @@ _CONSTRUCT_KWARGS: dict[str, dict[str, object]] = {
     "MaterialisationFailedError": {"message": "BigQuery refused the CTAS"},
     "MaterialisationNotSupportedError": {"adapter_name": "SnowflakeAdapter"},
     "EstimateNotSupportedError": {"adapter_name": "SnowflakeAdapter"},
+    "IncompleteProfileError": {
+        "profile_type": "snowflake",
+        "missing": ["account", "warehouse"],
+    },
 }
 
 
@@ -93,12 +98,12 @@ def test_each_subclass_has_default_remediation() -> None:
     # EstimateNotSupportedError → 19; issue #47 adds
     # ProfileEnvVarUnsetError (supports init-demo profile env_var
     # rendering) → 20.
-    assert len(errors_module.__all__) == 20, (
+    assert len(errors_module.__all__) == 21, (
         "DEC-026 enumerates 15 typed subclasses + 1 base; #22 US-001 "
         "adds 2 more (MaterialisationFailed/NotSupported); #36 US-002 "
         "adds EstimateNotSupportedError; #47 QG pass-3 adds "
-        "ProfileEnvVarUnsetError. Update tests and __all__ together "
-        "if this changes."
+        "ProfileEnvVarUnsetError; #120 US-002 adds IncompleteProfileError. "
+        "Update tests and __all__ together if this changes."
     )
     for name in errors_module.__all__:
         cls = getattr(errors_module, name)
@@ -319,3 +324,29 @@ def test_both_new_errors_inherit_from_warehouse_error() -> None:
     not_supported = MaterialisationNotSupportedError(adapter_name="X")
     assert isinstance(failed, WarehouseError)
     assert isinstance(not_supported, WarehouseError)
+
+
+@pytest.mark.unit
+@pytest.mark.error
+def test_incomplete_profile_error_collects_all_missing_keys() -> None:
+    """``IncompleteProfileError`` names the profile type, lists EVERY missing
+    key (collect-all, #120 US-002 / DEC-004), and renders the standard
+    ``↳ Remediation:`` line. ``.profile_type`` and ``.missing`` round-trip as
+    attributes for programmatic access; ``.missing`` is a copied list, not the
+    caller's reference."""
+    missing = ["account", "warehouse"]
+    err = IncompleteProfileError(profile_type="snowflake", missing=missing)
+    rendered = str(err)
+    # Every missing key appears (repr-quoted per DEC-022).
+    assert repr("account") in rendered
+    assert repr("warehouse") in rendered
+    # The profile type is named and repr-quoted.
+    assert repr("snowflake") in rendered
+    assert "↳ Remediation:" in rendered
+    # Attributes round-trip.
+    assert err.profile_type == "snowflake"
+    assert err.missing == ["account", "warehouse"]
+    # The stored list is a copy — mutating the caller's list must not bleed
+    # through.
+    missing.append("role")
+    assert err.missing == ["account", "warehouse"]

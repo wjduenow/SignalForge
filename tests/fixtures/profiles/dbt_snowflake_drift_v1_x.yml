@@ -1,0 +1,37 @@
+# Drift-detector fixture for dbt-snowflake (issue #120). Mirrors the
+# commonly-documented field set for a dbt-snowflake 1.8/1.9 target
+# (https://docs.getdbt.com/docs/core/connect-data-platform/snowflake-setup).
+#
+# The drift test constructs a one-off `StrictSnowflakeModel(BaseModel)` with
+# `extra="forbid"` and validates this fixture's outputs.dev block against it.
+# If a future dbt-snowflake release adds a new top-level target field and
+# someone mirrors it here without also adding it to StrictSnowflakeModel (and,
+# if SignalForge needs it, to `DbtProfileTarget`), the strict model fails to
+# validate and the test trips loudly. (DEC-017.)
+#
+# Bump this file when dbt-snowflake releases a new minor version: rename to
+# `dbt_snowflake_drift_v1_X.yml`, refresh the fields, and update
+# `DbtProfileTarget` for any field SignalForge needs to surface.
+signalforge_test:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: xy12345.us-east-1
+      user: svc_user
+      role: TRANSFORMER
+      database: ANALYTICS
+      warehouse: TRANSFORMING
+      schema: PUBLIC
+      threads: 4
+      password: hunter2
+      private_key_path: null
+      private_key_passphrase: null
+      authenticator: snowflake
+      client_session_keep_alive: false
+      query_tag: signalforge
+      connect_retries: 1
+      connect_timeout: 10
+      retry_on_database_errors: false
+      retry_all: false
+      reuse_connections: true
