@@ -62,7 +62,7 @@ class Dialect:
     so the v0.2 Snowflake/Postgres ports can add a sibling constant without
     branching the adapter logic on ``isinstance``.
 
-    The four template/flag fields below are read by the **prune compiler**
+    The five template/flag fields below are read by the **prune compiler**
     (``signalforge.prune.compiler``, issue #121) so it emits warehouse-correct
     SQL without branching on the dialect *name*:
 
@@ -129,15 +129,20 @@ POSTGRES_DIALECT = Dialect(
   / SYSTEM), though the prune layer prefers deterministic hash-mod
   sampling anyway (DEC-006 of issue #3).
 
-The four issue-#121 SQL-fragment fields (``sample_row_hash_expr``,
+The five issue-#121 SQL-fragment fields (``sample_row_hash_expr``,
 ``timestamp_literal_template``, ``date_literal_template``,
-``quote_qualified_per_component``) keep their **BigQuery defaults** here
-because the Postgres adapter's warehouse ops are not implemented yet (the
-#53 stub raises ``NotImplementedError`` from every op method), so the prune
-compiler is never invoked for a Postgres profile. These values will be
-corrected to Postgres-correct fragments when the Postgres adapter's
-warehouse ops land (DEC-007 of issue #121); shipping knowingly-wrong-but-
-untested fragments now would be misleading.
+``quote_qualified_per_component``, ``sample_cte_alias``) keep their
+**BigQuery defaults** here because the Postgres adapter's warehouse ops are
+not implemented yet (the #53 stub raises ``NotImplementedError`` from every
+op method), so the prune compiler is never invoked for a Postgres profile.
+Most of these defaults are wrong for Postgres and will be corrected when the
+Postgres adapter's warehouse ops land (DEC-007 of issue #121): Postgres needs
+``quote_qualified_per_component=True`` (it quotes ``"schema"."table"`` per
+component) and the SQL-standard ``TIMESTAMP '...'`` / ``DATE '...'`` literal
+forms rather than BigQuery's ``TIMESTAMP(...)`` / ``DATE(...)`` function form.
+(``sample_cte_alias="sample"`` happens to be Postgres-correct already —
+``SAMPLE`` is not reserved in Postgres, only ``TABLESAMPLE`` is.) Shipping
+knowingly-wrong-but-untested fragments now would be misleading.
 
 Lives alongside :data:`BIGQUERY_DIALECT` per DEC-003 so the prune
 compiler (and any other dialect-aware consumer) imports every flavour

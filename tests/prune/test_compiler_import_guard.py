@@ -43,7 +43,10 @@ def _forbidden_imports(source: str) -> list[str]:
 
     Catches both ``import X`` / ``import X as Y`` (``ast.Import``) and
     ``from X import Y`` (``ast.ImportFrom``) forms, including relative-free
-    dotted ``from google.cloud import bigquery``.
+    dotted ``from google.cloud import bigquery`` AND the namespace-split
+    ``from google import cloud`` form (where ``node.module`` is only a
+    prefix-ancestor of the forbidden module and the imported *name* completes
+    it).
     """
     hits: list[str] = []
     tree = ast.parse(source)
@@ -52,12 +55,20 @@ def _forbidden_imports(source: str) -> list[str]:
             for alias in node.names:
                 if _module_matches_forbidden(alias.name):
                     hits.append(f"import {alias.name}")
-        elif isinstance(node, ast.ImportFrom) and _module_matches_forbidden(node.module):
+        elif isinstance(node, ast.ImportFrom):
             # ``node.module`` is None for ``from . import x`` (relative);
             # such an import cannot name a forbidden vendor module, and
             # ``_module_matches_forbidden(None)`` short-circuits to False.
-            names = ", ".join(a.name for a in node.names)
-            hits.append(f"from {node.module} import {names}")
+            if _module_matches_forbidden(node.module):
+                names = ", ".join(a.name for a in node.names)
+                hits.append(f"from {node.module} import {names}")
+            elif node.module is not None:
+                # Namespace-split: ``from google import cloud`` has
+                # module="google" (not itself forbidden) but the imported
+                # name "cloud" completes the forbidden ``google.cloud``.
+                for alias in node.names:
+                    if _module_matches_forbidden(f"{node.module}.{alias.name}"):
+                        hits.append(f"from {node.module} import {alias.name}")
     return hits
 
 
@@ -90,10 +101,12 @@ def test_detector_flags_planted_violations() -> None:
         "import google.cloud\n"
         "from google.cloud import bigquery\n"
         "import google.cloud.bigquery as bq\n"
+        # namespace-split: module='google', imported name completes 'google.cloud'
+        "from google import cloud\n"
     )
     hits = _forbidden_imports(planted)
-    # Every line above is a violation — 8 statements.
-    assert len(hits) == 8, hits
+    # Every line above is a violation — 9 statements.
+    assert len(hits) == 9, hits
 
 
 def test_detector_does_not_false_positive() -> None:

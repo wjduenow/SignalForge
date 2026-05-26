@@ -75,9 +75,10 @@ def test_snowflake_dialect_values() -> None:
 def test_snowflake_dialect_sql_fragment_fields() -> None:
     """SNOWFLAKE_DIALECT carries the issue-#121 SQL-fragment values (DEC-002).
 
-    These four fields drive the prune compiler's warehouse-specific SQL
+    These five fields drive the prune compiler's warehouse-specific SQL
     without name-branching: the whole-row hash expression, the date/timestamp
-    literal cast templates, and per-component qualified-name quoting.
+    literal cast templates, per-component qualified-name quoting, and the
+    sample-CTE alias.
     """
     assert SNOWFLAKE_DIALECT.sample_row_hash_expr == "ABS(HASH(*))"
     assert SNOWFLAKE_DIALECT.timestamp_literal_template == "'{value}'::TIMESTAMP"
@@ -91,7 +92,7 @@ def test_snowflake_dialect_sql_fragment_fields() -> None:
 
 @pytest.mark.unit
 def test_bigquery_dialect_sql_fragment_field_defaults() -> None:
-    """BIGQUERY_DIALECT carries the BigQuery-shaped defaults for the four
+    """BIGQUERY_DIALECT carries the BigQuery-shaped defaults for the five
     issue-#121 fields (DEC-001) — these reproduce current BigQuery SQL
     byte-for-byte so the existing snapshot suite stays green."""
     assert BIGQUERY_DIALECT.sample_row_hash_expr == "ABS(FARM_FINGERPRINT(TO_JSON_STRING(t)))"
@@ -106,7 +107,7 @@ def test_bigquery_dialect_sql_fragment_field_defaults() -> None:
 @pytest.mark.unit
 def test_dialect_constructs_without_new_field_args() -> None:
     """Constructing a Dialect with ONLY the five original fields still
-    succeeds — the four issue-#121 fields carry BigQuery defaults (DEC-001).
+    succeeds — the five issue-#121 fields carry BigQuery defaults (DEC-001).
 
     This guards every pre-#121 construction site (e.g. the prune compiler's
     dispatch-test custom dialect) so they stay valid unedited.
@@ -123,6 +124,7 @@ def test_dialect_constructs_without_new_field_args() -> None:
     assert d.timestamp_literal_template == "TIMESTAMP('{value}')"
     assert d.date_literal_template == "DATE('{value}')"
     assert d.quote_qualified_per_component is False
+    assert d.sample_cte_alias == "sample"
 
 
 @pytest.mark.unit
