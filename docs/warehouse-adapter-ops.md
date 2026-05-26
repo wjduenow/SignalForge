@@ -367,8 +367,10 @@ v0.2 so the `signalforge generate --estimate` cost-preview flow can
 estimate how many bytes a candidate query would process WITHOUT
 actually scanning the source table. The BigQuery override uses
 `QueryJobConfig(dry_run=True)` and reads `job.total_bytes_processed`
-off the returned job; non-BigQuery adapters inherit the ABC's default
-`EstimateNotSupportedError` raise.
+off the returned job; the Snowflake override (issue #130) runs
+`EXPLAIN USING JSON` and parses `GlobalStats.bytesAssigned` from the
+returned plan. Adapters without their own primitive inherit the ABC's
+default `EstimateNotSupportedError` raise.
 
 ABC signature (`signalforge.warehouse.base`):
 
@@ -396,18 +398,45 @@ The same `_sql_safety.validate_test_sql` cheap-reject pass that
 top-level `;`, a `--` comment, a `/* */` block comment, or unbalanced
 parens raises `QuerySyntaxError` and never reaches BigQuery.
 
-**v0.2 → v0.3 migration story for non-BQ adapters.** Snowflake and
-Postgres adapters in v0.2 (and v0.3 multi-warehouse) inherit the
-default `estimate_query_bytes` → `EstimateNotSupportedError` raise
-until each grows its own override (Snowflake's `EXPLAIN` /
-Postgres's `EXPLAIN` are the natural primitives). The CLI's
-`--estimate` flow surfaces the typed error with the locked
-remediation so operators see the v0.3 expansion plan inline. The
-Snowflake `--estimate` degrade path is verified end-to-end (issue #123):
-the CLI prints `<unavailable: EstimateNotSupportedError>` and exits 0.
-EXPLAIN-based Snowflake estimation (parsing `bytesAssigned` / partitions)
-is tracked separately in issue #130 — it's blocked on live Snowflake
-connectivity (epic #118 / connection seam #122).
+**Snowflake override mechanism (issue #130).** The Snowflake adapter
+validates the caller SQL through the same `_sql_safety.validate_test_sql`
+pass, then prepends the literal `EXPLAIN USING JSON ` prefix and runs the
+EXPLAIN through its connection cursor. Snowflake has no BigQuery-style
+`dry_run` (bytes-without-billing); `EXPLAIN` is the closest primitive,
+reporting the query planner's estimated partitions and bytes in a single
+JSON cell. The override parses `GlobalStats.bytesAssigned` from that plan
+as the `int`-bytes estimate. `EXPLAIN` is planner-only — it scans no
+partitions and bills no bytes.
+
+**Planner-estimate accuracy caveat.** The figure `EXPLAIN USING JSON`
+returns is the planner's *estimate*, not a measured scan. It can differ
+from the bytes a real query ultimately processes, and the planner's
+output may vary across Snowflake releases (the same caveat that applies
+to Snowflake's `HASH()` row-sampling expression — see
+`prune-engine.md`). It is a cost *preview*, calibrated for "is this
+roughly cheap or roughly expensive," not a billing guarantee.
+
+**Estimation-unavailable degrade (`EstimateUnavailableError`).** When the
+Snowflake `EXPLAIN` *succeeds* but the returned plan carries no parseable
+`GlobalStats.bytesAssigned` — a metadata-only query, a plan-shape change
+across Snowflake versions, or a malformed cell — the adapter raises
+`EstimateUnavailableError` rather than fabricating a number (a `return 0`
+would silently report $0 cost on a future plan-shape change). This is
+distinct from `EstimateNotSupportedError`: the adapter *supports*
+estimation, it just couldn't extract the figure for THIS query. The
+`--estimate` engine catches it at the supplementary-source boundary
+(issue #36 DEC-005) and renders `<unavailable: EstimateUnavailableError>`,
+falling back to a price-only preview rather than aborting the run.
+
+**v0.2 → v0.3 migration story for remaining adapters.** The Postgres stub
+still inherits the default `estimate_query_bytes` →
+`EstimateNotSupportedError` raise until it grows its own override
+(Postgres's `EXPLAIN` is the natural primitive). The CLI's `--estimate`
+flow surfaces the typed error with the locked remediation so operators
+see the expansion plan inline. Snowflake's `--estimate` path is no longer
+a degrade: it returns a real EXPLAIN-based estimate (issue #130), having
+graduated from the issue #123 `<unavailable: EstimateNotSupportedError>`
+placeholder once the connection seam landed (#122).
 
 ## Session cleanup & manual recovery
 
@@ -595,7 +624,8 @@ on a `↳ Remediation:` line by `__str__`.
 | `UnknownTableSizeError`                  | `Table.num_rows` is `None`/`0` and no `PartitionFilter` was supplied.                                    | `table`                                              | Provide `partition_filter`, or call `adapter.refresh_table_metadata` once `num_rows` is populated. |
 | `MaterialisationFailedError` (v0.2)      | `BigQueryAdapter.materialise_sample` wraps an SDK / network / quota failure during the materialisation query. | `cause`                                              | Inspect `.cause` for the underlying exception; falls back to `prune.sample_strategy: oneshot` to bypass materialisation. |
 | `MaterialisationNotSupportedError` (v0.2)| `WarehouseAdapter.materialise_sample` default impl raised because the concrete adapter doesn't override it (any non-BigQuery adapter in v0.2). | _(none)_                                             | Set `prune.sample_strategy: oneshot` in `signalforge.yml` to fall back to per-test sampling, or wait for v0.3 multi-warehouse materialisation support. |
-| `EstimateNotSupportedError` (v0.2)       | `WarehouseAdapter.estimate_query_bytes` default impl raised because the concrete adapter doesn't override it (any non-BigQuery adapter in v0.2). | `adapter_name`                                       | Use `--estimate` with a BigQuery profile, or wait for v0.3 multi-warehouse estimation support. |
+| `EstimateNotSupportedError` (v0.2)       | `WarehouseAdapter.estimate_query_bytes` default impl raised because the concrete adapter doesn't override it (the Postgres stub in v0.2; BigQuery + Snowflake both override). | `adapter_name`                                       | Use `--estimate` with a BigQuery or Snowflake profile, or wait for v0.3 multi-warehouse estimation support. |
+| `EstimateUnavailableError` (v0.2, #130)  | The adapter *supports* estimation but couldn't extract a figure for THIS query — e.g. Snowflake's `EXPLAIN USING JSON` ran but the plan carried no parseable `GlobalStats.bytesAssigned` (metadata-only query / plan-shape change / malformed cell). The `--estimate` engine degrades to a price-only preview. | `detail`                                             | The query plan carried no parseable byte estimate; the run falls back to a price-only cost preview. EXPLAIN figures are planner estimates and may be absent for some query shapes — re-run without `--estimate` to skip the preview entirely. |
 
 ## v0.2 follow-ups
 
