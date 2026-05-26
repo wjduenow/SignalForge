@@ -241,12 +241,22 @@ class WarehouseAdapter(abc.ABC):
             # rather than the v0.1 UnsupportedProfileTypeError.
             from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
 
-            # #120 will grow DbtProfileTarget to carry account / user / role /
-            # warehouse and wire them here. For now the BigQuery-shaped profile
-            # only supplies database (project) + schema (dataset).
+            # #120 grew DbtProfileTarget to parse a real Snowflake target
+            # (account / user / role / warehouse / database + the key-pair / SSO
+            # auth fields) and wires every parsed field through here. Snowflake's
+            # `schema:` key continues to hydrate `profile.dataset` via the
+            # existing alias, so the adapter's `schema` kwarg reads from there.
             return SnowflakeAdapter(
-                database=profile.project,
+                account=profile.account,
+                user=profile.user,
+                password=profile.password,
+                role=profile.role,
+                warehouse=profile.warehouse,
+                database=profile.database,
                 schema=profile.dataset,
+                private_key_path=profile.private_key_path,
+                private_key_passphrase=profile.private_key_passphrase,
+                authenticator=profile.authenticator,
             )
         raise UnsupportedProfileTypeError(profile_type=profile.type)
 

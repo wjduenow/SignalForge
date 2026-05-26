@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from signalforge.warehouse import profiles as profiles_module
 from signalforge.warehouse.errors import (
@@ -643,6 +643,86 @@ def test_drift_detector_extra_forbid() -> None:
     assert model.type == "bigquery"
     assert model.method == "oauth"
     assert model.maximum_bytes_billed == 1000000000
+
+
+class StrictSnowflakeModel(BaseModel):
+    """Test-only mirror of dbt-snowflake's commonly-documented target fields.
+
+    ``extra="forbid"`` so adding a new field to the Snowflake drift fixture
+    without updating BOTH this model and (if SignalForge needs it) the
+    production :class:`DbtProfileTarget` trips the test loudly — the same
+    forward-compat compensation the BigQuery :class:`StrictModel` provides
+    (DEC-017).
+
+    The field list mirrors ``tests/fixtures/profiles/dbt_snowflake_drift_v1_x.yml``.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    type: str
+    account: str | None = None
+    user: str | None = None
+    role: str | None = None
+    database: str | None = None
+    warehouse: str | None = None
+    # `schema` shadows Pydantic's deprecated BaseModel.schema(); mirror the
+    # production model's approach and alias the dbt `schema:` key to a
+    # differently-named attribute (safety-layer.md § field-name shadow).
+    dataset: str | None = Field(default=None, alias="schema")
+    threads: int | None = None
+    password: str | None = None
+    private_key_path: str | None = None
+    private_key_passphrase: str | None = None
+    authenticator: str | None = None
+    client_session_keep_alive: bool | None = None
+    query_tag: str | None = None
+    connect_retries: int | None = None
+    connect_timeout: int | None = None
+    retry_on_database_errors: bool | None = None
+    retry_all: bool | None = None
+    reuse_connections: bool | None = None
+
+
+def test_drift_detector_snowflake_extra_forbid() -> None:
+    """The Snowflake drift fixture validates against StrictSnowflakeModel —
+    bumping fixture fields without updating StrictSnowflakeModel/DbtProfileTarget
+    fails this test loudly (DEC-017)."""
+    with (FIXTURES / "dbt_snowflake_drift_v1_x.yml").open("r", encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh)
+    target_dict = raw["signalforge_test"]["outputs"]["dev"]
+
+    model = StrictSnowflakeModel.model_validate(target_dict)
+
+    # Sanity-check a couple of fields so this catches at least one corruption
+    # mode (not just structural validation).
+    assert model.type == "snowflake"
+    assert model.account == "xy12345.us-east-1"
+    assert model.warehouse == "TRANSFORMING"
+
+
+def test_load_profile_parses_snowflake_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``load_profile`` parses a ``type: snowflake`` target end-to-end: the
+    Snowflake-shaped fields populate, and ``schema:`` hydrates ``dataset`` via
+    the alias (#120, US-005)."""
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake_home")
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _write_dbt_project(project_dir)
+    shutil.copy(FIXTURES / "snowflake_password.yml", project_dir / "profiles.yml")
+
+    target = load_profile(project_dir)
+
+    assert target.type == "snowflake"
+    assert target.account == "xy12345.us-east-1"
+    assert target.user == "svc_user"
+    assert target.warehouse == "TRANSFORMING"
+    assert target.database == "ANALYTICS"
+    # Snowflake's `schema:` key hydrates `dataset` via the alias.
+    assert target.dataset == "PUBLIC"
 
 
 def test_module_uses_warehouse_logger() -> None:

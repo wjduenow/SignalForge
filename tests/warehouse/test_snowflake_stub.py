@@ -194,26 +194,34 @@ def test_estimate_query_bytes_raises_not_supported() -> None:
 
 def test_from_profile_dispatches_snowflake_to_skeleton() -> None:
     """The factory routes ``type: snowflake`` to the skeleton adapter (NOT
-    raise :class:`UnsupportedProfileTypeError`).
-
-    #120 grew :class:`DbtProfileTarget` to parse a real Snowflake target
-    (account/user/role/warehouse + the new ``database`` field). The exact
-    project/schema → database/schema wiring in ``from_profile`` is US-005's
-    concern; this test pins only that dispatch lands on the skeleton."""
+    raise :class:`UnsupportedProfileTypeError`) and wires EVERY parsed field
+    through (#120, US-005). Snowflake's ``schema:`` key hydrates
+    ``profile.dataset`` via the alias, which the factory passes as the
+    adapter's ``schema`` kwarg."""
     profile = DbtProfileTarget.model_validate(
         {
             "type": "snowflake",
             "account": "xy12345.us-east-1",
             "user": "svc",
+            "role": "TRANSFORMER",
             "warehouse": "WH",
             "database": "DB",
             "schema": "sch",
+            "password": "s3cret",
         }
     )
 
     adapter = WarehouseAdapter.from_profile(profile)
 
     assert isinstance(adapter, SnowflakeAdapter)
+    # Full wiring: every parsed field reaches the adapter.
+    assert adapter._account == "xy12345.us-east-1"
+    assert adapter._user == "svc"
+    assert adapter._role == "TRANSFORMER"
+    assert adapter._warehouse == "WH"
+    assert adapter._database == "DB"
+    assert adapter._schema == "sch"
+    assert adapter._password == "s3cret"
 
 
 # ---------------------------------------------------------------------------
