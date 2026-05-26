@@ -118,7 +118,7 @@ No blockers. Two concerns resolved into DEC-003 / DEC-006 / DEC-007.
 - `src/signalforge/warehouse/base.py` — add the `if profile.type == "snowflake":` branch: lazy-import `SnowflakeAdapter`, return `SnowflakeAdapter(database=profile.project, schema=profile.dataset)`; update the `from_profile` docstring's supported-types list.
 
 **TDD:**
-- `from_profile(DbtProfileTarget(type="snowflake", project="db", schema="sch"))` returns a `SnowflakeAdapter` with `_database=="db"`, `_schema=="sch"`.
+- `from_profile(DbtProfileTarget(type="snowflake", project="db", schema="sch"))` returns a `SnowflakeAdapter` with `_database=="db"`, `_schema=="sch"`. (No `dataset`/`schema` mismatch: `DbtProfileTarget.dataset` carries `alias="schema"` with `populate_by_name=True`, so the dbt-facing `schema="sch"` YAML key populates the `dataset` field — `profile.dataset` then yields `"sch"`, which the dispatch passes as `schema=`.)
 - The dispatch does **not** import `google.cloud.bigquery` (DEC-007 — assert SDK module absent from `sys.modules` after a clean dispatch, or via an import tracker).
 - `dialect()` returns `SNOWFLAKE_DIALECT` by identity.
 - `repr(SnowflakeAdapter(account="ac", user="u", password="secret", warehouse="wh"))` contains `account`/`warehouse`, contains neither `"u"`-as-user nor `"secret"`.
