@@ -59,11 +59,34 @@ class _SnowflakeCursorProtocol(Protocol):
     # because the real descriptor tuple shape is connector-specific and
     # the adapter only ever indexes ``[0]``.
     @property
-    def description(self) -> Any: ...
+    def description(self) -> Any: """
+Cursor description following the DB-API 7-tuple format or None when unavailable.
 
-    def execute(self, command: str, *args: Any, **kwargs: Any) -> Any: ...
+Returns:
+    A sequence of 7-tuples describing result columns (typically where the first element is the column name), or `None` if no description is available (e.g., before a query has been executed).
+"""
+...
 
-    def fetchall(self) -> Any: ...
+    def execute(self, command: str, *args: Any, **kwargs: Any) -> Any: """
+Execute an SQL statement on the cursor.
+
+Parameters:
+    command (str): The SQL statement to execute.
+    *args (Any): Positional parameters for parameter substitution in the statement.
+    **kwargs (Any): Driver-specific execution options (e.g., parameter styles or execution flags).
+
+Returns:
+    Any: Driver-specific execution result (commonly the cursor itself or a result proxy).
+"""
+...
+
+    def fetchall(self) -> Any: """
+Fetch all remaining rows produced by the executed query.
+
+Returns:
+    rows: The result set as a sequence of rows (commonly a list/tuple of row tuples or row-like objects); an empty sequence if no rows remain.
+"""
+...
 
     def close(self) -> None: ...
 
@@ -99,13 +122,13 @@ def make_real_client(
     database: str | None = None,
     schema: str | None = None,
 ) -> _SnowflakeClientProtocol:  # pragma: no cover - requires the SDK + live creds
-    """Construct a real ``snowflake.connector`` connection.
-
-    The ``snowflake.connector`` import is lazy (inside the body) so this
-    module imports cleanly without the connector installed —
-    ``snowflake-connector-python`` ships only under the ``[snowflake]``
-    optional-dependency extra. The single ``# type: ignore[import-not-found]``
-    for the SDK import is confined here per DEC-005.
+    """
+    Create a Snowflake connection using the provided credentials.
+    
+    The Snowflake SDK is imported lazily inside this function so the module can be imported without the optional SDK installed.
+    
+    Returns:
+        A connection object implementing _SnowflakeClientProtocol.
     """
     import snowflake.connector  # type: ignore[import-not-found]
 
@@ -121,32 +144,17 @@ def make_real_client(
 
 
 def map_snowflake_exception(exc: Exception, *, context: dict[str, Any] | None = None) -> Exception:
-    """Translate a ``snowflake.connector`` exception into a typed warehouse error.
-
-    Mirrors :func:`signalforge.warehouse.adapters._client.map_bq_exception`'s
-    shape and return convention: returns the *new* exception so the caller can
-    ``raise mapped from exc``; returns ``exc`` unchanged when no specific
-    mapping fits — the caller should re-raise the original in that case rather
-    than swallow it.
-
-    v0.2 minimal taxonomy (DEC-009 of issue #122; a full taxonomy mirroring
-    ``map_bq_exception`` is deferred to #124):
-
-    * a connector ``ForbiddenError`` / auth-flavoured operational failure
-      (bad credentials, incorrect username/password) → :class:`WarehouseAuthError`;
-    * a ``ProgrammingError`` (SQL compilation / syntax) → :class:`QuerySyntaxError`;
-    * anything else → returned unchanged.
-
-    The ``snowflake.connector.errors`` import is **lazy** — confined to this
-    function body — so the one-shim-per-vendor rule holds (every
-    snowflake-connector type/pyright-ignore lives only in this file, DEC-005)
-    and importing this shim never requires the connector to be installed. If
-    the connector is absent, the exception is returned unchanged.
-
-    The optional ``context`` kwarg carries adapter-side state the raw connector
-    exception doesn't expose (e.g. ``{"table": ..., "max_bytes_billed": ...}``),
-    mirroring ``map_bq_exception``; v0.2 uses it only to enrich the
-    :class:`QuerySyntaxError` detail with the offending table when present.
+    """
+    Map a snowflake.connector exception to a typed warehouse error when a known mapping applies.
+    
+    Attempts a lazy import of snowflake.connector.errors; if the connector is unavailable or no mapping matches, returns the original exception unchanged. When provided, the optional context may include a "table" key whose string value is appended to QuerySyntaxError details.
+    
+    Parameters:
+        exc (Exception): The original exception raised by the Snowflake connector.
+        context (dict[str, Any] | None): Optional adapter context (e.g., {"table": ...}) used to enrich mapped errors.
+    
+    Returns:
+        Exception: A newly constructed warehouse error (e.g., QuerySyntaxError or WarehouseAuthError) when a mapping applies, otherwise the original `exc`.
     """
     try:
         from snowflake.connector import errors as sfe  # type: ignore[import-not-found]

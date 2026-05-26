@@ -59,6 +59,12 @@ class _FakeSnowflakeCursor:
     """
 
     def __init__(self, connection: FakeSnowflakeConnection) -> None:
+        """
+        Initialize a fake Snowflake cursor bound to a parent FakeSnowflakeConnection.
+        
+        Parameters:
+            connection (FakeSnowflakeConnection): Parent fake connection whose expectation queue and behavior this cursor uses. Initializes internal state for stored fetch rows, the DB-API-like `description`, and a closed flag.
+        """
         self._connection = connection
         self._fetch_rows: list[Any] = []
         self._description: list[Any] | None = None
@@ -66,18 +72,46 @@ class _FakeSnowflakeCursor:
 
     @property
     def description(self) -> list[Any] | None:
+        """
+        Current cursor description metadata produced by the most recent execute.
+        
+        Returns:
+            The DB-API cursor `description` (a list of column description sequences) set by the last `execute`, or `None` if no description has been set.
+        """
         return self._description
 
     def execute(self, command: str, *args: Any, **kwargs: Any) -> _FakeSnowflakeCursor:
+        """
+        Execute a SQL command against the connection's queued expectations and populate the cursor's fetch state.
+        
+        Parameters:
+            command (str): SQL text to match against the connection's next expected execute pattern.
+            *args: Additional positional arguments accepted for DB-API compatibility; ignored by the fake.
+            **kwargs: Additional keyword arguments accepted for DB-API compatibility; ignored by the fake.
+        
+        Returns:
+            _FakeSnowflakeCursor: The same cursor instance with its internal fetch rows and `description` set to the matched expectation's values.
+        """
         rows, description = self._connection._consume_execute(command)
         self._fetch_rows = rows
         self._description = description
         return self
 
     def fetchall(self) -> list[Any]:
+        """
+        Return the rows produced by the last executed command on this cursor.
+        
+        Returns:
+            list[Any]: The list of rows populated by the most recent `execute` call (may be empty).
+        """
         return self._fetch_rows
 
     def close(self) -> None:
+        """
+        Mark the cursor as closed.
+        
+        Sets the cursor's internal closed flag so the object is treated as closed by callers.
+        """
         self._closed = True
 
 
@@ -99,6 +133,16 @@ class FakeSnowflakeConnection:
         session_id: str = "fake-session-0001",
         close_raises: Exception | None = None,
     ) -> None:
+        """
+        Initialize the fake Snowflake connection used for expectation-driven tests.
+        
+        Parameters:
+            session_id (str): Identifier exposed on the connection for test logging/cleanup (default "fake-session-0001").
+            close_raises (Exception | None): Optional exception to raise when `close()` is called; if `None`, `close()` is a no-op.
+        
+        Description:
+            Sets up internal tracking fields including `close_call_count` and the queue of expected execute calls.
+        """
         self.session_id = session_id
         self._close_raises = close_raises
         self.close_call_count = 0
@@ -129,6 +173,12 @@ class FakeSnowflakeConnection:
         )
 
     def assert_all_expectations_met(self) -> None:
+        """
+        Ensure all queued execute expectations have been consumed.
+        
+        Raises:
+            AssertionError: If any execute expectations remain unconsumed; message includes the remaining count.
+        """
         if self._execute_expectations:
             raise AssertionError(
                 f"Unconsumed expectations: {len(self._execute_expectations)} execute expectations"
@@ -137,9 +187,23 @@ class FakeSnowflakeConnection:
     # ---- snowflake.connector connection surface ---------------------------
 
     def cursor(self) -> _FakeSnowflakeCursor:
+        """
+        Create a new fake Snowflake DB-API cursor bound to this fake connection.
+        
+        The returned cursor shares this connection's expectation queue and state, so executing SQL on it will consume expectations registered on the connection.
+        
+        Returns:
+            _FakeSnowflakeCursor: A cursor instance bound to this connection.
+        """
         return _FakeSnowflakeCursor(self)
 
     def close(self) -> None:
+        """
+        Increment the connection's close call count and optionally raise a configured exception to simulate a failing close.
+        
+        Raises:
+            Exception: If the connection was constructed with an exception to raise on close.
+        """
         self.close_call_count += 1
         if self._close_raises is not None:
             raise self._close_raises
@@ -147,9 +211,18 @@ class FakeSnowflakeConnection:
     # ---- internal ---------------------------------------------------------
 
     def _consume_execute(self, sql: str) -> tuple[list[Any], list[Any] | None]:
-        """Walk the expectation queue for a match against ``sql``; consume one
-        matching entry. Returns ``(rows, description)`` on success; raises the
-        registered exception when ``returns`` is an :class:`Exception`.
+        """
+        Consume the first queued execute expectation that matches the given SQL and return its queued rows and description.
+        
+        Parameters:
+            sql (str): The executed SQL statement to match against queued expectations.
+        
+        Returns:
+            tuple[list[Any], list[Any] | None]: A pair `(rows, description)` where `rows` is the queued result rows and `description` is the DB-API cursor description or `None`.
+        
+        Raises:
+            Exception: Re-raises the exception stored in the matching expectation if its `returns` is an `Exception`.
+            AssertionError: If no queued expectation matches `sql`.
         """
         for i, exp in enumerate(self._execute_expectations):
             if exp.matching.search(sql):

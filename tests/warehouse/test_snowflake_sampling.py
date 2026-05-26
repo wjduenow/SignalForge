@@ -43,6 +43,15 @@ _TABLE = TableRef(project="mydatabase", dataset="SCH", name="ORDERS")
 
 
 def _make_adapter(conn: FakeSnowflakeConnection) -> SnowflakeAdapter:
+    """
+    Create a SnowflakeAdapter bound to the provided FakeSnowflakeConnection.
+    
+    Parameters:
+        conn (FakeSnowflakeConnection): Fake or recording connection to use for the adapter.
+    
+    Returns:
+        SnowflakeAdapter: Adapter instance that uses the supplied connection.
+    """
     return SnowflakeAdapter(connection=conn)
 
 
@@ -55,10 +64,30 @@ class _RecordingConnection(FakeSnowflakeConnection):
     """A :class:`FakeSnowflakeConnection` that records every executed SQL."""
 
     def __init__(self, **kwargs: object) -> None:
+        """
+        Initialize the recording connection and prepare the executed-SQL log.
+        
+        This constructor forwards all keyword arguments to the base connection initializer and creates
+        an `executed` list that will capture every SQL string executed by the connection in order.
+        
+        Attributes:
+            executed (list[str]): Recorded SQL statements appended in execution order.
+        """
         super().__init__(**kwargs)  # type: ignore[arg-type]
         self.executed: list[str] = []
 
     def _consume_execute(self, sql: str):  # type: ignore[override]
+        """
+        Record the executed SQL string and forward execution to the underlying implementation.
+        
+        This appends the provided SQL to self.executed as a record of executed statements, then returns whatever value the underlying execution method returns.
+        
+        Parameters:
+            sql (str): The SQL statement that was executed.
+        
+        Returns:
+            The result returned by the underlying execution implementation.
+        """
         self.executed.append(sql)
         return super()._consume_execute(sql)
 
@@ -69,8 +98,11 @@ class _RecordingConnection(FakeSnowflakeConnection):
 
 
 def test_sample_sql_is_byte_identical_across_two_calls() -> None:
-    """Identical ``(table, n, partition_filter)`` → byte-identical executed
-    sample SQL across two calls. Pins the deterministic hash-mod contract."""
+    """
+    Verify that calling sample_rows with the same table, n, and partition_filter produces byte-identical sample SQL across separate runs.
+    
+    Asserts the generated sample query is identical across two independent connections and contains the expected deterministic sampling constructs: the hash-mod bucket expression, an ORDER BY on ABS(HASH(*)), a LIMIT matching the requested sample size, and fully qualified, per-component double-quoted table identifiers.
+    """
     sample_sqls: list[str] = []
     for _ in range(2):
         conn = _RecordingConnection()
@@ -147,7 +179,11 @@ def test_null_row_count_with_filter_uses_bucket_1000() -> None:
 
 
 def test_huge_row_count_no_filter_raises_requires_partition_filter() -> None:
-    """``ROW_COUNT >= 100M`` + no partition_filter → fail loud."""
+    """
+    Verifies that sampling a table with ROW_COUNT >= 100,000,000 and no partition filter raises SamplingRequiresPartitionFilterError.
+    
+    This test fakes the INFORMATION_SCHEMA row count to be 100,000,000 and asserts that calling sample_rows without a partition_filter fails with the specific guard error.
+    """
     conn = FakeSnowflakeConnection()
     conn.expect_execute(matching=_SIZE_QUERY, returns=[(100_000_000,)])
     adapter = _make_adapter(conn)
@@ -331,8 +367,11 @@ def test_size_query_embeds_escaped_string_literals_case_insensitively() -> None:
 
 
 def test_sdk_programming_error_maps_to_query_syntax_error() -> None:
-    """A connector ``ProgrammingError`` from the sample query maps to
-    :class:`QuerySyntaxError` via ``map_snowflake_exception``."""
+    """
+    Verifies that a Snowflake `ProgrammingError` raised during the sample query is converted to `QuerySyntaxError`.
+    
+    The test injects a fake connection that returns a `snowflake.connector.errors.ProgrammingError` for the sampling SQL and asserts that `sample_rows` raises `QuerySyntaxError`.
+    """
     pytest.importorskip("snowflake.connector")
     from snowflake.connector import errors as sfe
 
@@ -419,6 +458,15 @@ def test_get_connection_lazily_builds_real_client_when_none_injected(
     calls: list[dict[str, object]] = []
 
     def _fake_make_real_client(**kwargs: object) -> FakeSnowflakeConnection:
+        """
+        Record any keyword arguments passed to the fake client factory and return a prebuilt FakeSnowflakeConnection.
+        
+        Parameters:
+        	kwargs (object): Arbitrary keyword arguments supplied when constructing a real client; each call's kwargs are appended to the outer `calls` list for inspection.
+        
+        Returns:
+        	built (FakeSnowflakeConnection): The preconstructed fake Snowflake connection instance returned for tests.
+        """
         calls.append(kwargs)
         return built
 

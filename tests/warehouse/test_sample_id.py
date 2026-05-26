@@ -94,12 +94,32 @@ class _StandInCursor:
     description = None
 
     def execute(self, command: str, *args: object, **kwargs: object) -> object:
+        """
+        Execute a SQL command on the cursor.
+        
+        Parameters:
+            command (str): SQL statement or command to execute.
+            *args: Positional parameters for the command.
+            **kwargs: Keyword parameters for the command.
+        
+        Returns:
+            None: This implementation does not return a result.
+        """
         return None
 
     def fetchall(self) -> object:
+        """
+        Return all rows from the last executed query.
+        
+        Returns:
+            list: The fetched result rows; this implementation always returns an empty list.
+        """
         return []
 
     def close(self) -> None:
+        """
+        Close the cursor and release any associated resources.
+        """
         return None
 
 
@@ -117,6 +137,11 @@ def test_cursor_protocol_satisfied_by_object_with_description() -> None:
 
 
 def test_map_snowflake_programming_error_to_query_syntax_error() -> None:
+    """
+    Verify that a Snowflake ProgrammingError is mapped to a QuerySyntaxError and that provided context is included in the mapped error detail.
+    
+    Asserts that map_snowflake_exception converts a snowflake.connector.errors.ProgrammingError indicative of a SQL syntax issue into a QuerySyntaxError and that the supplied context (e.g., "table") appears in the mapped error's detail.
+    """
     from snowflake.connector import errors as sfe
 
     exc = sfe.ProgrammingError(msg="001003: SQL compilation error: syntax error", errno=1003)

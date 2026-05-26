@@ -56,6 +56,17 @@ def test_fakes_satisfy_protocols() -> None:
         description: Any = None
 
         def execute(self, command: str, *args: Any, **kwargs: Any) -> Any:
+            """
+            Execute a database command on the cursor (test stub).
+            
+            Parameters:
+            	command (str): SQL command or statement to execute.
+            	*args: Positional parameters for the command.
+            	**kwargs: Keyword parameters for the command.
+            
+            Returns:
+            	None
+            """
             return None
 
         def fetchall(self) -> Any:

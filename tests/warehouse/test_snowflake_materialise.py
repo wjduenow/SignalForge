@@ -51,19 +51,48 @@ class _RecordingConnection(FakeSnowflakeConnection):
     connection — is observable)."""
 
     def __init__(self, **kwargs: object) -> None:
+        """
+        Initialize the recording connection and prepare an execution log.
+        
+        Forwards all keyword arguments to the parent connection initializer and creates an empty `self.executed` list used to record every SQL statement executed by this connection.
+        """
         super().__init__(**kwargs)  # type: ignore[arg-type]
         self.executed: list[str] = []
 
     def _consume_execute(self, sql: str):  # type: ignore[override]
+        """
+        Record the executed SQL string in self.executed and delegate execution to the parent.
+        
+        Parameters:
+            sql (str): SQL statement to execute.
+        
+        Returns:
+            The result returned by the parent `_consume_execute` implementation.
+        """
         self.executed.append(sql)
         return super()._consume_execute(sql)
 
 
 def _make_adapter(conn: FakeSnowflakeConnection) -> SnowflakeAdapter:
+    """
+    Create a SnowflakeAdapter configured to use the provided FakeSnowflakeConnection.
+    
+    Parameters:
+        conn (FakeSnowflakeConnection): Connection instance to bind to the adapter.
+    
+    Returns:
+        SnowflakeAdapter: Adapter whose `connection` is `conn`.
+    """
     return SnowflakeAdapter(connection=conn)
 
 
 def _expected_run_id() -> str:
+    """
+    Compute the deterministic run identifier for the module's canonical test table using a sample size of 100 and no partition filter.
+    
+    Returns:
+        str: The run identifier string used to name the deterministic temp-table (used as the suffix in `_sf_sample_<run_id>`).
+    """
     return _compute_run_id(table=_TABLE, n=100, partition_filter=None)
 
 
@@ -369,8 +398,11 @@ def test_run_test_sql_validates_sql_first() -> None:
 
 
 def test_materialise_applies_partition_filter_in_ctas() -> None:
-    """A ``PartitionFilter`` lands ONCE in the CTAS ``WHERE`` (rendered via the
-    Snowflake dialect literal template) alongside the hash-mod predicate."""
+    """
+    Ensure a PartitionFilter is included exactly once in the CTAS WHERE clause and that the filter value is rendered using the Snowflake DATE literal template.
+    
+    This test also verifies that the hash-mod sampling predicate is present alongside the partition filter.
+    """
     conn = _RecordingConnection()
     conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
     conn.expect_execute(matching=_CTAS_QUERY, returns=[])

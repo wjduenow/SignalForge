@@ -1031,12 +1031,19 @@ class BigQueryAdapter(WarehouseAdapter):
 
 
 def _normalise_schema(schema: Any) -> list[tuple[str, str]]:
-    """Convert a BigQuery ``Table.schema`` into ``(name, bq_type)`` pairs.
-
-    ``google.cloud.bigquery.SchemaField`` exposes ``.name`` and
-    ``.field_type``. The :class:`tests.warehouse._fake.FakeTable.schema`
-    is already a ``list[tuple[str, str]]``. Anything else is best-effort
-    coerced.
+    """
+    Normalize a BigQuery table schema into a list of (name, bq_type) tuples.
+    
+    Accepts:
+    - An iterable of two-element tuples (name, bq_type).
+    - Objects with attributes `name` and either `field_type` or `type` (e.g., google.cloud.bigquery.SchemaField).
+    Coerces both components to `str`. If `schema` is falsy or entries cannot be interpreted, returns an empty list or skips invalid entries.
+    
+    Parameters:
+        schema (Any): Schema representation to normalize.
+    
+    Returns:
+        list[tuple[str, str]]: A list of (column_name, bigquery_type) tuples.
     """
     out: list[tuple[str, str]] = []
     for entry in schema or []:

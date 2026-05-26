@@ -93,12 +93,11 @@ def test_repr_still_shows_only_account_and_warehouse() -> None:
 
 
 def test_exit_closes_connection_once_and_resets_session_state() -> None:
-    """``__exit__`` calls ``conn.close()`` exactly once and resets
-    ``_active_session`` to ``None`` (DEC-003). It deliberately does NOT null
-    ``self._connection`` — idempotency comes from the ``_active_session is
-    None`` early-return, and nulling an injected connection would route a later
-    call into a real lazy-build (mirrors BigQuery, which never nulls its
-    client)."""
+    """
+    Ensure adapter context exit closes the active connection once and resets session state.
+    
+    Asserts that exiting the adapter context calls the injected connection's `close()` exactly once, sets `adapter._active_session` to `None`, and preserves the injected `adapter._connection` reference (does not null it).
+    """
     conn = FakeSnowflakeConnection()
     adapter = SnowflakeAdapter(connection=conn)
 

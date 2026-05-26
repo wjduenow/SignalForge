@@ -27,24 +27,29 @@ from signalforge.warehouse.models import PartitionFilter, TableRef
 
 
 def _hash_session_id(session_id: str) -> str:
-    """DEC-003 of #22 — emit ``blake2b-4(session_id).hexdigest()`` (8 hex
-    chars).
-
-    Mirrors :mod:`signalforge.safety.redact`'s column-name redaction
-    (DEC-010 of #4) — the LLM / log-aggregator boundary never sees the
-    raw session id; the hash is enough to correlate records emitted by
-    the same materialisation run.
+    """
+    Produce a short redacted identifier for a session id.
+    
+    Parameters:
+        session_id (str): Original session identifier to redact.
+    
+    Returns:
+        str: An 8-character hexadecimal string representing the redacted session id.
     """
     return blake2b(session_id.encode("utf-8"), digest_size=4).hexdigest()
 
 
 def _canonical_partition_filter(pf: PartitionFilter | None) -> str:
-    """Render a :class:`PartitionFilter` to a canonical JSON string for
-    inclusion in the DEC-001 ``run_id`` blake2b input.
-
-    Stable ordering + ``isoformat()`` for ``date`` / ``datetime`` so two
-    callers building the same logical filter produce byte-equal
-    canonical text — the run_id stays deterministic across runs.
+    """
+    Render a PartitionFilter to a canonical JSON string for deterministic run-id hashing.
+    
+    If `pf` is None, returns the literal string "null". When `pf` is provided, the filter is encoded as JSON with keys "column", "op", and "value"; if `pf.value` is a date or datetime it is rendered using `isoformat()`, otherwise `str()` is used. The JSON uses stable key ordering and compact separators to ensure byte-for-byte determinism.
+    
+    Parameters:
+        pf (PartitionFilter | None): The partition filter to canonicalize, or `None`.
+    
+    Returns:
+        str: The canonical JSON string for the filter, or the literal "null".
     """
     if pf is None:
         return "null"

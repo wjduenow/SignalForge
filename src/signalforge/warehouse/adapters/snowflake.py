@@ -148,6 +148,17 @@ class SnowflakeAdapter(WarehouseAdapter):
         # DEC-001 of #122 — injectable connection seam (mirrors BigQuery's
         # ``client=``). ``None`` triggers a lazy ``make_real_client(...)`` build
         # on first :meth:`_get_connection`; tests inject a fake.
+        """
+        Initialize the adapter with optional credentials and an injectable Snowflake client, and set up lazy session tracking.
+        
+        If `connection` is None, a real client will be created lazily on first use; providing a `connection` is intended as a test seam. This initializer does not open a network connection. It stores connection/authentication parameters (including forward-compatible key-pair / SSO fields) and initializes session tracking fields (`_active_session` and `_session_started_at`) for session-scoped temporary table management.
+        
+        Parameters:
+            connection: Optional pre-built Snowflake client to use instead of creating one lazily.
+            private_key_path: Optional path to a private key file for key-pair authentication.
+            private_key_passphrase: Optional passphrase for the private key.
+            authenticator: Optional authenticator string for SSO/forward-compatible auth methods.
+        """
         self._connection = connection
         self._account = account
         self._user = user
@@ -178,20 +189,22 @@ class SnowflakeAdapter(WarehouseAdapter):
         # DEC-003: render ONLY non-credential identifying fields. NEVER user,
         # password, role, database, schema, private_key_path,
         # private_key_passphrase, or authenticator.
+        """
+        Return a concise, non-credential debug representation of the adapter.
+        
+        Returns:
+            repr_str (str): A string containing only the adapter's account and warehouse identifiers suitable for logging or debugging.
+        """
         return f"<SnowflakeAdapter account={self._account!r} warehouse={self._warehouse!r}>"
 
     def _get_connection(self) -> _SnowflakeClientProtocol:
-        """Return the live Snowflake connection (DEC-001 of #122).
-
-        Lazily builds the connection via
-        :func:`signalforge.warehouse.adapters._snowflake_client.make_real_client`
-        from the stored auth params on first use, caching it on
-        ``self._connection``. Also records the connection as
-        ``self._active_session`` on first open (DEC-002) so the ``__exit__``
-        cleanup boundary has something to tear down. The SDK shim import is
-        lazy (inside this body) so importing the adapter never requires
-        ``snowflake-connector-python`` (it ships only under the ``[snowflake]``
-        extra).
+        """
+        Lazily create and return the Snowflake client connection.
+        
+        On first call, build and cache the client using stored authentication fields; also set self._active_session to the cached client if not already set. Subsequent calls return the cached client.
+        
+        Returns:
+            _SnowflakeClientProtocol: The cached Snowflake client instance.
         """
         if self._connection is None:
             from signalforge.warehouse.adapters._snowflake_client import make_real_client
@@ -210,6 +223,12 @@ class SnowflakeAdapter(WarehouseAdapter):
         return self._connection
 
     def __enter__(self) -> WarehouseAdapter:
+        """
+        Enter a context manager and provide this adapter instance for use inside the with-block.
+        
+        Returns:
+            WarehouseAdapter: This adapter instance (self) to be used as the context manager target.
+        """
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -217,15 +236,18 @@ class SnowflakeAdapter(WarehouseAdapter):
         # connection ends the Snowflake session and reaps its session-scoped
         # temp tables. Failure is swallowed-and-warned; state always resets so
         # a subsequent ``__exit__`` is a no-op.
+        """
+        Perform best-effort, fail-soft cleanup of the adapter's active Snowflake session.
+        
+        If a session is active, attempt to close it (which will drop session-scoped temporary tables); on failure, log a warning but still reset internal session tracking so repeated exits are no-ops.
+        """
         self._cleanup_active_session()
 
     def _cleanup_active_session(self) -> None:
-        """DEC-003 of #122 — best-effort, fail-soft session cleanup.
-
-        Splits out from :meth:`__exit__` so the test surface can exercise the
-        cleanup path without entering an actual ``with`` block. Idempotent:
-        returns immediately when ``self._active_session`` is ``None`` (mirrors
-        the BigQuery cleanup-boundary fail-soft pattern, #22 DEC-013/DEC-014).
+        """
+        Close the active Snowflake session if present and reset the adapter's session tracking.
+        
+        Attempts to close the currently tracked connection; this operation is idempotent (no-op if there is no active session). On a successful close an informational log is emitted containing a hash of the session id when available; if closing fails a single WARNING is emitted including the raw session id for operator correlation. Always clears internal session state (_active_session and _session_started_at) but does not modify the injected/pooled client object.
         """
         conn = self._active_session
         if conn is None:
@@ -280,6 +302,12 @@ class SnowflakeAdapter(WarehouseAdapter):
             self._session_started_at = None
 
     def dialect(self) -> Dialect:
+        """
+        Get the SQL dialect used by this adapter.
+        
+        Returns:
+            Dialect: The Snowflake dialect used for SQL generation and quoting.
+        """
         return SNOWFLAKE_DIALECT
 
     # ------------------------------------------------------------------
@@ -287,18 +315,14 @@ class SnowflakeAdapter(WarehouseAdapter):
     # ------------------------------------------------------------------
 
     def _quote(self, ref: TableRef) -> str:
-        """Render a fully-qualified Snowflake table identifier (DEC-006).
-
-        Snowflake quotes each component separately — ``"DB"."SCHEMA"."NAME"``
-        — because a single quoted string spanning dots reads as ONE literal
-        identifier named ``db.schema.name`` (unlike BigQuery's single
-        backtick wrapping the whole path). Two-part ``"SCHEMA"."NAME"`` when
-        ``project`` is ``None``. Mirrors the prune compiler's
-        ``_qualified_table_name`` under ``quote_qualified_per_component=True``
-        so the adapter's sample SQL is consistent with the compiler's CTE.
-
-        The dataset / name are already DEC-013-validated by :class:`TableRef`'s
-        ``__post_init__``, so no re-validation is needed before quoting.
+        """
+        Produce a fully-qualified Snowflake table identifier with each component quoted.
+        
+        Parameters:
+            ref (TableRef): Table reference whose project, dataset (schema), and name will be quoted. If `ref.project` is None, the result contains two components (schema and name); otherwise it contains three (database, schema, name).
+        
+        Returns:
+            str: The dot-joined, per-component quoted identifier, for example `"DB"."SCHEMA"."NAME"` or `"SCHEMA"."NAME"`.
         """
         qc = SNOWFLAKE_DIALECT.quote_char
         components = (
@@ -334,20 +358,11 @@ class SnowflakeAdapter(WarehouseAdapter):
         return f"{qc}{pf.column}{qc} {pf.op} {rendered}"
 
     def _get_num_rows(self, table: TableRef) -> int | None:
-        """Look up ``ROW_COUNT`` from ``INFORMATION_SCHEMA.TABLES`` (DEC-005).
-
-        Case-insensitive on ``TABLE_SCHEMA`` / ``TABLE_NAME`` (Snowflake folds
-        unquoted identifiers to upper-case). The schema / name are embedded as
-        single-quoted STRING LITERALS — escaped via
-        :func:`escape_bq_string_literal` (backslash escaping inside single
-        quotes is correct for Snowflake) even though they are already
-        identifier-validated on the :class:`TableRef`. The ``<database>``
-        prefix is quoted per the dialect; when ``table.project`` is ``None``
-        (direct callers — the prune path always qualifies via
-        ``TableRef.from_model``) it falls back to ``CURRENT_DATABASE()``.
-
-        Returns ``None`` when no row matches or ``ROW_COUNT`` is ``NULL``
-        (views / materialised views do not carry a ``ROW_COUNT``).
+        """
+        Lookup the table's stored row count from INFORMATION_SCHEMA.TABLES.
+        
+        Returns:
+            int | None: The integer ROW_COUNT for the specified table, or `None` if no matching entry exists or the ROW_COUNT is NULL. The lookup compares schema and table name case-insensitively and uses CURRENT_DATABASE() when `table.project` is None.
         """
         from signalforge.warehouse._sql_safety import escape_bq_string_literal
 
@@ -376,19 +391,21 @@ class SnowflakeAdapter(WarehouseAdapter):
         *,
         partition_filter: PartitionFilter | None,
     ) -> int:
-        """Size the deterministic-sample bucket via the fail-loud sizing
-        pathway shared by :meth:`sample_rows` and :meth:`materialise_sample`
-        (DEC-005, single source of truth — no duplicated sizing logic).
-
-        Mirrors BigQuery's sizing exactly:
-
-        * ``num_rows`` unknown + no ``partition_filter`` →
-          :class:`UnknownTableSizeError`.
-        * ``num_rows`` unknown + ``partition_filter`` present → ``bucket = 1000``
-          (DEBUG-logged fallback).
-        * ``num_rows >= _LARGE_TABLE_THRESHOLD`` + no ``partition_filter`` →
-          :class:`SamplingRequiresPartitionFilterError`.
-        * else → ``bucket = max(num_rows // n, 1)``.
+        """
+        Determine the deterministic sampling bucket size for a table given a target sample size.
+        
+        Behavior:
+        - If the table row count is unknown and no partition_filter is provided, raises UnknownTableSizeError.
+        - If the table row count is unknown and a partition_filter is provided, returns 1000.
+        - If the table row count is >= _LARGE_TABLE_THRESHOLD and no partition_filter is provided, raises SamplingRequiresPartitionFilterError.
+        - Otherwise returns max(num_rows // n, 1).
+        
+        Returns:
+            int: The sampling bucket size to use.
+        
+        Raises:
+            UnknownTableSizeError: When the table size is unknown and no partition_filter is supplied.
+            SamplingRequiresPartitionFilterError: When the table is very large and no partition_filter is supplied.
         """
         num_rows = self._get_num_rows(table)
         if num_rows is None or num_rows == 0:
@@ -406,12 +423,13 @@ class SnowflakeAdapter(WarehouseAdapter):
         return max(num_rows // n, 1)
 
     def _execute(self, sql: str, *, table: TableRef) -> list[Any]:
-        """Run ``sql`` on the connection's cursor, returning ``fetchall()``.
-
-        Any SDK exception is routed through
-        :func:`signalforge.warehouse.adapters._snowflake_client.map_snowflake_exception`
-        (DEC-009): a mapped typed error is re-raised ``from`` the original; an
-        unchanged passthrough re-raises the original.
+        """
+        Execute the given SQL on the adapter's connection and return all fetched rows.
+        
+        On database/SDK errors, the exception is mapped to a typed error using the table context and re-raised with the original exception as the cause; if mapping returns the original exception object, that original is re-raised unchanged.
+        
+        Returns:
+            list[Any]: Rows returned by the query (as produced by cursor.fetchall()).
         """
         from signalforge.warehouse.adapters._snowflake_client import map_snowflake_exception
 
@@ -426,11 +444,20 @@ class SnowflakeAdapter(WarehouseAdapter):
             raise mapped from exc
 
     def _execute_to_dicts(self, sql: str, *, table: TableRef) -> list[dict[str, Any]]:
-        """Run ``sql`` and shape tuple ``fetchall()`` rows into dicts (DEC-010).
-
-        Reads ``cursor.description`` (DB-API: each descriptor's ``[0]`` is the
-        column name) so the adapter builds ``dict`` rows from tuple results
-        without depending on a ``DictCursor``.
+        """
+        Execute `sql` and convert the query result rows into a list of dictionaries.
+        
+        Uses the cursor's `description` to derive column names (each descriptor's index 0)
+        and builds one dict per row mapping column name -> value; does not require a
+        DictCursor.
+        
+        Parameters:
+            sql (str): SQL statement to execute.
+            table (TableRef): Source table reference used for error mapping/context.
+        
+        Returns:
+            list[dict[str, Any]]: List of row dictionaries where keys are column names and
+            values are the corresponding row values.
         """
         from signalforge.warehouse.adapters._snowflake_client import map_snowflake_exception
 
@@ -470,32 +497,23 @@ class SnowflakeAdapter(WarehouseAdapter):
         *,
         partition_filter: PartitionFilter | None = None,
     ) -> list[dict[str, Any]]:
-        """Sample up to ``n`` rows deterministically (DEC-005 / DEC-006).
-
-        Algorithm (mirrors BigQuery's ``sample_rows`` exactly, Snowflake-flavoured):
-
-        1. Look up ``ROW_COUNT`` via :meth:`_get_num_rows`.
-        2. Decision:
-
-           * ``num_rows`` unknown + no ``partition_filter`` →
-             :class:`UnknownTableSizeError`.
-           * ``num_rows`` unknown + ``partition_filter`` present →
-             ``bucket = 1000``; debug-log the fallback.
-           * ``num_rows >= _LARGE_TABLE_THRESHOLD`` + no ``partition_filter`` →
-             :class:`SamplingRequiresPartitionFilterError`.
-           * else → ``bucket = max(num_rows // n, 1)``.
-        3. Issue ``SELECT * FROM <quoted> AS t WHERE
-           MOD(<dialect.sample_row_hash_expr>, <bucket>) < 1
-           [AND <partition_filter>] ORDER BY <dialect.sample_row_hash_expr>
-           LIMIT n``.
-
-        The hash-mod approach (``MOD(ABS(HASH(*)), bucket)``) is deterministic
-        across runs (same input → same prune decision) and works on views /
-        MVs / CTEs where ``TABLESAMPLE`` does not. The hash expression is read
-        from :data:`SNOWFLAKE_DIALECT` (NOT hard-coded) so the adapter's sample
-        SQL is byte-consistent with the prune compiler's sample CTE. The
-        ``ORDER BY`` makes ``LIMIT`` truncation deterministic when the WHERE
-        filter retains more than ``n`` rows.
+        """
+        Return up to n deterministically sampled rows from the given table.
+        
+        Uses a deterministic hash-mod sampling expression (from SNOWFLAKE_DIALECT) so the same input produces the same sample. If provided, the optional partition_filter is applied before sampling; sizing rules may require a partition_filter for very large or unknown tables.
+        
+        Parameters:
+            table (TableRef): Source table reference to sample from.
+            n (int): Maximum number of rows to return; must be greater than 0.
+            partition_filter (PartitionFilter | None): Optional filter applied before sampling.
+        
+        Returns:
+            list[dict[str, Any]]: Up to `n` rows represented as dictionaries keyed by column name.
+        
+        Raises:
+            ValueError: If `n <= 0`.
+            UnknownTableSizeError: When the table row count is unknown and no partition_filter is provided.
+            SamplingRequiresPartitionFilterError: When the table is considered large and no partition_filter is provided.
         """
         if n <= 0:
             raise ValueError(f"sample_rows requires n > 0; got n={n}")
@@ -525,57 +543,22 @@ class SnowflakeAdapter(WarehouseAdapter):
         partition_filter: PartitionFilter | None = None,
         ttl_seconds: int = 3600,
     ) -> TableRef:
-        """Materialise a deterministic sample into a session-scoped Snowflake
-        ``TEMPORARY TABLE``; return a :class:`TableRef` pointing at it.
-
-        DEC-008 — the ``run_id`` reuses the shared
-        :func:`signalforge.warehouse._sample_id._compute_run_id` recipe so the
-        temp-table name ``_sf_sample_<run_id>`` is byte-identical to the
-        BigQuery adapter's for the same ``(table, n, partition_filter)`` tuple
-        under the same ``signalforge.__version__``.
-
-        DEC-002 — the temp table is created on the live connection's session;
-        the connection embodies the session that scopes the temp table. We pin
-        the connection as ``self._active_session`` so a subsequent
-        :meth:`run_test_sql` on the same connection reaches the temp table (no
-        ``connection_properties`` routing needed, unlike BigQuery).
-
-        DEC-006 — the deterministic ``MOD(<dialect.sample_row_hash_expr>,
-        <bucket>) < 1`` predicate + ``ORDER BY <dialect.sample_row_hash_expr>``
-        are read from :data:`SNOWFLAKE_DIALECT` (NOT hard-coded) so the CTAS
-        bytes stay consistent with :meth:`sample_rows` and the prune compiler's
-        sample CTE (Architectural Commitment #5). ``partition_filter`` lands
-        ONCE here, in the CTAS ``WHERE``; per-test queries against the temp
-        table do not re-apply it.
-
-        DEC-007 — the ``TEMP TABLE`` is colocated with the SOURCE (created as
-        ``<source db>.<source schema>._sf_sample_<run_id>``) and the returned
-        :class:`TableRef` is fully-qualified via the source DB / schema.
-
-        Args:
-            table: Source production table to sample from.
-            n: Target sample size; bucket sizing mirrors :meth:`sample_rows`
-                (deterministic hash-mod, fail-loud size guards).
-            partition_filter: Optional :class:`PartitionFilter` applied ONCE
-                inside the CTAS ``WHERE`` clause.
-            ttl_seconds: accepted for ABC parity with BigQuery but IGNORED by
-                Snowflake — there is no client-side TTL knob and the cleanup
-                WARNING quotes no countdown; Snowflake reaps idle sessions on a
-                server-side, account-configurable timeout.
-
+        """
+        Create a deterministic, session-scoped Snowflake temporary table containing up to `n` sampled rows from `table`.
+        
+        Parameters:
+            table (TableRef): Source table to sample from.
+            n (int): Target sample size; must be greater than zero.
+            partition_filter (PartitionFilter | None): Optional partition filter applied once inside the CTAS WHERE clause.
+            ttl_seconds (int): Accepted for API parity but ignored for Snowflake.
+        
         Returns:
-            :class:`TableRef` with ``project=table.project``,
-            ``dataset=table.dataset``, ``name="_sf_sample_<run_id>"`` — the
-            session-scoped temp table, fully-qualified via the source DB /
-            schema.
-
+            TableRef: Reference to the created temporary table with project=table.project, dataset=table.dataset and name="_sf_sample_<run_id>".
+        
         Raises:
-            ValueError: ``n <= 0``.
-            MaterialisationFailedError: any SDK / network / quota failure
-                during the CTAS (wraps the original via ``cause=``).
-            UnknownTableSizeError, SamplingRequiresPartitionFilterError:
-                propagated from :meth:`_resolve_sample_bucket` (the shared
-                fail-loud sizing contract).
+            ValueError: If `n <= 0`.
+            MaterialisationFailedError: If the CTAS operation fails (wraps the original error as `cause`).
+            UnknownTableSizeError, SamplingRequiresPartitionFilterError: Propagated from the sampling bucket resolution logic.
         """
         if n <= 0:
             raise ValueError(f"materialise_sample requires n > 0; got n={n}")
@@ -652,29 +635,17 @@ class SnowflakeAdapter(WarehouseAdapter):
     # ------------------------------------------------------------------
 
     def run_test_sql(self, sql: str, *, capture_failures: int = 0) -> TestResult:
-        """Run a candidate failing-rows SELECT and return a typed
-        :class:`TestResult` (DEC-004).
-
-        The candidate is sanity-checked by
-        :func:`signalforge.warehouse._sql_safety.validate_test_sql` (no ``;``,
-        no ``--`` comments, balanced parens) before wrapping.
-
-        ``capture_failures == 0`` wraps the candidate in a plain
-        ``SELECT COUNT(*) AS failures FROM (<sql>) AS t``. ``capture_failures >
-        0`` additionally captures up to ``capture_failures`` example failing
-        rows via Snowflake's ``ARRAY_AGG(OBJECT_CONSTRUCT(*))`` over a
-        ``LIMIT``-bounded subquery, with the full failing-row ``COUNT(*)``
-        computed over the whole set:
-
-        ``SELECT (SELECT COUNT(*) FROM (<sql>) AS c) AS failures,
-        (SELECT ARRAY_AGG(OBJECT_CONSTRUCT(*)) FROM (SELECT * FROM (<sql>) AS s
-        LIMIT <capture_failures>) AS l) AS samples``
-
-        Executes on ``self._active_session`` (the connection
-        :meth:`_get_connection` returns / a prior :meth:`materialise_sample`
-        pinned), so a materialised temp table is reachable. SDK errors route
-        through :func:`map_snowflake_exception`; ``row_schema`` is ``None`` in
-        v0.2 (mirrors BigQuery).
+        """
+        Execute a failing-rows test query and return a typed TestResult.
+        
+        The input SQL is validated for test-safety before execution. If capture_failures is 0 the wrapped query returns only the total failing-row count; if capture_failures > 0 the wrapped query also returns up to that many example failing rows.
+        
+        Parameters:
+            sql (str): A SELECT expression representing candidate failing rows.
+            capture_failures (int): Maximum number of example failing rows to collect; 0 disables sampling.
+        
+        Returns:
+            TestResult: `passed` is True when the failure count is 0; `failure_count` is the integer count of failing rows; `sample_failures` is a list of row dicts when capture was requested or `None` otherwise; `row_schema` is `None`.
         """
         validate_test_sql(sql)
 
@@ -730,6 +701,19 @@ class SnowflakeAdapter(WarehouseAdapter):
         )
 
     def column_stats(self, table: TableRef, column: str) -> ColumnStats:
+        """
+        Compute statistics for a single column of a table.
+        
+        Parameters:
+            table (TableRef): Reference to the table containing the column.
+            column (str): Name of the column to profile.
+        
+        Returns:
+            ColumnStats: Metrics describing the column's distribution (e.g., null fraction, distinct count, min/max where applicable).
+        
+        Raises:
+            NotImplementedError: This operation is not implemented in v0.2 and raises with a remediation message.
+        """
         raise NotImplementedError(f"column_stats: {_V02_REMEDIATION}")
 
 
