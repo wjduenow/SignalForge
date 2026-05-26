@@ -405,6 +405,9 @@ Postgres's `EXPLAIN` are the natural primitives). The CLI's
 remediation so operators see the v0.3 expansion plan inline. The
 Snowflake `--estimate` degrade path is verified end-to-end (issue #123):
 the CLI prints `<unavailable: EstimateNotSupportedError>` and exits 0.
+EXPLAIN-based Snowflake estimation (parsing `bytesAssigned` / partitions)
+is tracked separately in issue #130 — it's blocked on live Snowflake
+connectivity (epic #118 / connection seam #122).
 
 ## Session cleanup & manual recovery
 
