@@ -6,7 +6,7 @@
 - **Epic:** #118 (Snowflake warehouse adapter, v0.2)
 - **Branch / worktree:** `feature/122-snowflake-sampling` → `../worktrees/SignalForge/122-snowflake-sampling`
 - **Base:** `dev` @ `1f8cc51` (includes #119 skeleton, #120 profile, #121 compiler-dialect)
-- **Phase:** devolved
+- **Phase:** complete (all 6 stories shipped; QG fixed 1 BUG + the #116 test + docstrings)
 - **Sessions:** 1 (2026-05-26)
 
 ---
