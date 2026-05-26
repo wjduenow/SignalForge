@@ -475,6 +475,43 @@ class EstimateNotSupportedError(WarehouseError):
         super().__init__(message, remediation=remediation)
 
 
+class EstimateUnavailableError(WarehouseError):
+    """The active adapter *supports* query-bytes estimation but could not
+    extract the figure for THIS particular query (DEC-003 of issue #130).
+
+    Distinct from :class:`EstimateNotSupportedError` (which means "this
+    adapter does no estimation at all"). This one fires when, e.g., the
+    Snowflake adapter runs ``EXPLAIN USING JSON`` successfully but the
+    returned plan carries no parseable ``GlobalStats.bytesAssigned`` —
+    the seam ran, but produced nothing we can turn into a byte count.
+
+    The ``detail`` field carries the diagnostic (rendered via
+    :func:`_format_value`, i.e. ``repr()``, per DEC-022 so adversarial
+    planner output can't smuggle control characters into log viewers).
+    The ``--estimate`` engine catches this at the supplementary-source
+    boundary and renders ``<unavailable: EstimateUnavailableError>``,
+    falling back to a price-only preview rather than aborting the run.
+
+    Tier-3 in the CLI exit-code taxonomy (external-dep failure) via
+    inheritance from :class:`WarehouseError`.
+    """
+
+    # Locked verbatim per DEC-003 of plans/super/130-snowflake-estimate-explain.md;
+    # changing this text breaks a contract test pinning the byte-equal
+    # remediation string (test_estimateunavailableerror_remediation_locked_verbatim).
+    default_remediation: ClassVar[str] = (
+        "The query plan carried no parseable byte estimate; the run falls "
+        "back to a price-only cost preview. EXPLAIN figures are planner "
+        "estimates and may be absent for some query shapes — re-run "
+        "without --estimate to skip the preview entirely."
+    )
+
+    def __init__(self, *, detail: str, remediation: str | None = None) -> None:
+        self.detail = detail
+        message = f"Query-bytes estimate unavailable: {_format_value(detail)}"
+        super().__init__(message, remediation=remediation)
+
+
 class IncompleteProfileError(WarehouseError):
     """A dbt profile parsed but is missing required keys for its ``type``.
 
@@ -544,6 +581,7 @@ __all__ = [
     "BytesBilledExceededError",
     "ColumnNotFoundError",
     "EstimateNotSupportedError",
+    "EstimateUnavailableError",
     "IncompleteProfileError",
     "InvalidIdentifierError",
     "ManifestProjectNotFoundError",
