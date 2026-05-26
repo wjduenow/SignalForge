@@ -9,6 +9,15 @@ for v0.2; the public ABC (`WarehouseAdapter`) and the `from_profile`
 factory are warehouse-agnostic so adding a sibling adapter is purely
 additive.
 
+**Snowflake skeleton (v0.2, issue #119).** `from_profile` now dispatches
+`type: snowflake` to a `SnowflakeAdapter` skeleton — `dialect()` returns the
+Snowflake `Dialect` (`quote_char='"'`, `identifier_case='upper'`,
+`supports_qualify=True`), but the sampling / profiling / test-running methods
+raise `NotImplementedError` naming epic #118 until #120–#124 land. The
+connector is an optional extra — install it with
+`pip install "signalforge-dbt[snowflake]"` (or `uv pip install "signalforge-dbt[snowflake]"`);
+the base install never pulls `snowflake-connector-python`.
+
 ## Quick start
 
 One-time, on a fresh machine:
@@ -38,10 +47,13 @@ with WarehouseAdapter.from_profile(profile) as adapter:
     )
 ```
 
-`WarehouseAdapter.from_profile` dispatches on `profile.type`. v0.1 only
-supports `profile.type == "bigquery"`; anything else raises
-`UnsupportedProfileTypeError` with a remediation pointing at the v0.2
-roadmap entry.
+`WarehouseAdapter.from_profile` dispatches on `profile.type`.
+`profile.type == "bigquery"` is fully implemented; `profile.type ==
+"postgres"` (v0.2 stub, #53) and `profile.type == "snowflake"` (v0.2
+skeleton, #119) dispatch to their adapters, whose warehouse-operation
+methods raise `NotImplementedError` until the full implementations land.
+Any other `profile.type` raises `UnsupportedProfileTypeError` with a
+remediation pointing at the v0.2 roadmap entry.
 
 ## dbt profile resolution
 
@@ -543,7 +555,7 @@ on a `↳ Remediation:` line by `__str__`.
 | ---------------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `WarehouseError`                         | Base class; never raised directly.                                                                       | `message`, `remediation`                             | _(no remediation set — base class)_                                                             |
 | `WarehouseAuthError`                     | Wraps `google.auth.exceptions.DefaultCredentialsError` / `RefreshError`.                                 | `message`                                            | Run `gcloud auth application-default login` to set up ADC.                                      |
-| `UnsupportedProfileTypeError`            | dbt profile's `type` is not `"bigquery"`.                                                                | `profile_type`                                       | v0.1 supports `type: bigquery` only; Snowflake/Postgres tracked for v0.2.                        |
+| `UnsupportedProfileTypeError`            | dbt profile's `type` is not `"bigquery"`, `"postgres"`, or `"snowflake"`.                                 | `profile_type`                                       | `bigquery` is fully implemented; `postgres`/`snowflake` dispatch to v0.2 stub/skeleton adapters (warehouse ops raise `NotImplementedError`). Other types are unsupported.  |
 | `UnsupportedAuthMethodError`             | dbt profile's `method` is not `"oauth"` (or unset).                                                      | `method`                                             | v0.1 supports `method: oauth` (or unset) only; run `gcloud auth application-default login`.     |
 | `ProfileNotFoundError`                   | None of the three search paths yielded a `profiles.yml` (or the project file is missing/malformed).      | `searched_paths`                                     | Create a `profiles.yml` at one of the searched paths, or set `DBT_PROFILES_DIR`.                |
 | `ProfileTargetNotFoundError`             | The profile resolved but the requested `target` is missing. Inherits `ProfileNotFoundError`.             | `profile_name`, `target`, `searched_paths`           | Add the target to `profiles.yml`, or pass an explicit `target=` that exists in the profile.     |

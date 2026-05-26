@@ -100,18 +100,21 @@ def test_from_profile_dispatches_bigquery() -> None:
 
 
 def test_from_profile_raises_for_unknown_type() -> None:
-    """Anything other than 'bigquery' must raise UnsupportedProfileTypeError.
+    """A warehouse the factory does not dispatch must raise
+    UnsupportedProfileTypeError.
 
     DbtProfileTarget.type is typed ``str`` (no Literal narrowing) precisely
     so this dispatch path can reject unsupported warehouses with a typed
-    error rather than a Pydantic ValidationError.
+    error rather than a Pydantic ValidationError. ``"databricks"`` is used as
+    the unsupported example because ``"bigquery"`` / ``"postgres"`` (issue #53)
+    / ``"snowflake"`` (issue #119) all now dispatch to a concrete adapter.
     """
-    profile = DbtProfileTarget.model_validate({"type": "snowflake"})
+    profile = DbtProfileTarget.model_validate({"type": "databricks"})
 
     with pytest.raises(UnsupportedProfileTypeError) as exc_info:
         WarehouseAdapter.from_profile(profile)
 
-    assert exc_info.value.profile_type == "snowflake"
+    assert exc_info.value.profile_type == "databricks"
 
 
 def test_from_profile_uses_default_max_bytes_when_unset() -> None:
