@@ -6,7 +6,7 @@
 - **Epic:** #118 (Snowflake warehouse adapter, v0.2)
 - **Branch / worktree:** `feature/122-snowflake-sampling` → `../worktrees/SignalForge/122-snowflake-sampling`
 - **Base:** `dev` @ `1f8cc51` (includes #119 skeleton, #120 profile, #121 compiler-dialect)
-- **Phase:** published
+- **Phase:** devolved
 - **Sessions:** 1 (2026-05-26)
 
 ---
@@ -234,4 +234,13 @@ Canonical validation command (run after every story):
 
 ## Beads Manifest
 
-_(filled on devolve)_
+- **Epic:** `bd_1-scaffolding-lqr`
+- **Tasks (linear chain):**
+  - `bd_1-scaffolding-lqr.1` — US-001 Shared `_sample_id` helpers + cursor `description` + error mapper
+  - `bd_1-scaffolding-lqr.2` — US-002 `FakeSnowflakeClient` + connection seam + `__exit__` cleanup (← .1)
+  - `bd_1-scaffolding-lqr.3` — US-003 `sample_rows` (← .2)
+  - `bd_1-scaffolding-lqr.4` — US-004 `materialise_sample` + `run_test_sql` + #116 substitution (← .3)
+  - `bd_1-scaffolding-lqr.5` — US-005 Quality Gate (← .4)
+  - `bd_1-scaffolding-lqr.6` — US-006 Patterns & Memory (← .5)
+- **Worktree:** `../worktrees/SignalForge/122-snowflake-sampling`
+- **Devolved:** 2026-05-26
