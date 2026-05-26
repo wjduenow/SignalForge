@@ -12,8 +12,9 @@ Stage-2 of the SignalForge pipeline. Public surface (DEC-017, mirroring
 - :class:`Dialect`, :class:`TableRef`, :class:`PartitionFilter`,
   :class:`ColumnStats`, :class:`TestResult`, :class:`DbtProfileTarget` —
   warehouse-agnostic value objects callers consume / construct.
-- :data:`BIGQUERY_DIALECT` — the canonical :class:`Dialect` instance for
-  BigQuery (DEC-003).
+- :data:`BIGQUERY_DIALECT`, :data:`POSTGRES_DIALECT`,
+  :data:`SNOWFLAKE_DIALECT` — the canonical :class:`Dialect` instances for
+  each supported warehouse flavour (DEC-003).
 - The full :class:`WarehouseError` hierarchy, so callers can catch typed
   failures without reaching into private modules.
 
@@ -50,6 +51,7 @@ from signalforge.warehouse.errors import (
 from signalforge.warehouse.models import (
     BIGQUERY_DIALECT,
     POSTGRES_DIALECT,
+    SNOWFLAKE_DIALECT,
     ColumnStats,
     Dialect,
     PartitionFilter,
@@ -82,6 +84,7 @@ __all__ = [
     "ProfileNotFoundError",
     "ProfileTargetNotFoundError",
     "QuerySyntaxError",
+    "SNOWFLAKE_DIALECT",
     "SamplingError",
     "SamplingRequiresPartitionFilterError",
     "TableNotFoundError",
