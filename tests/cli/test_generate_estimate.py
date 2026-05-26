@@ -46,7 +46,7 @@ def _install_estimate_patches(
     *,
     fake_anthropic: FakeAnthropicClient | None = None,
     fake_bq: FakeBigQueryClient | None = None,
-    adapter: object | None = None,
+    adapter: WarehouseAdapter | None = None,
 ) -> tuple[FakeAnthropicClient, FakeBigQueryClient]:
     """Patch the four CLI seams that the ``--estimate`` short-circuit
     consumes (manifest load, warehouse profile load, warehouse adapter
@@ -71,7 +71,7 @@ def _install_estimate_patches(
     fa = fake_anthropic if fake_anthropic is not None else FakeAnthropicClient(project="fake")
     fb = fake_bq if fake_bq is not None else FakeBigQueryClient(project="fake_project")
 
-    resolved_adapter: object = (
+    resolved_adapter: WarehouseAdapter = (
         adapter
         if adapter is not None
         else BigQueryAdapter(
