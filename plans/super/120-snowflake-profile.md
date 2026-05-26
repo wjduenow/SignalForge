@@ -5,7 +5,7 @@
 - **Ticket:** [#120](https://github.com/wjduenow/SignalForge/issues/120) — `feat: parse Snowflake target in dbt profiles.yml (DbtProfileTarget type=snowflake)`
 - **Epic:** [#118](https://github.com/wjduenow/SignalForge/issues/118) — Snowflake warehouse adapter (v0.2). **#119 (skeleton) landed; #120 grows the profile model so the rest of the epic has typed inputs.**
 - **Branch:** `feature/120-snowflake-profile` (off `dev`; PR targets `dev`)
-- **Phase:** discovery
+- **Phase:** published (PR [#126](https://github.com/wjduenow/SignalForge/pull/126))
 - **Sessions:** 1 (2026-05-25)
 
 ---
