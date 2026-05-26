@@ -6,7 +6,7 @@
 - **Epic:** #118 (Snowflake adapter)
 - **Milestone:** v0.2
 - **Branch:** `feature/123-snowflake-estimate-degrade` (off `dev`)
-- **Phase:** detailing
+- **Phase:** published (PR [#128](https://github.com/wjduenow/SignalForge/pull/128), awaiting approval)
 - **Sessions:** 1 (2026-05-26)
 
 ---
