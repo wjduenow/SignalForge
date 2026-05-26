@@ -184,6 +184,11 @@ class WarehouseAdapter(abc.ABC):
           (issue #53); its warehouse-operation methods raise
           :class:`NotImplementedError` until the full implementation
           lands.
+        * ``"snowflake"`` — returns the v0.2 skeleton
+          :class:`signalforge.warehouse.adapters.snowflake.SnowflakeAdapter`
+          (issue #119; epic #118); its warehouse-operation methods raise
+          :class:`NotImplementedError` until the full implementation
+          lands.
 
         Anything else raises :class:`UnsupportedProfileTypeError`.
 
@@ -225,6 +230,22 @@ class WarehouseAdapter(abc.ABC):
 
             return PostgresAdapter(
                 dbname=profile.project,
+                schema=profile.dataset,
+            )
+        if profile.type == "snowflake":
+            # v0.2 skeleton (issue #119; epic #118) — validates the
+            # warehouse-agnostic seam by routing a third profile.type through
+            # the factory. The adapter's warehouse-operation methods
+            # (sample_rows / column_stats / run_test_sql) raise
+            # NotImplementedError; operators see a clear "v0.2 pending" signal
+            # rather than the v0.1 UnsupportedProfileTypeError.
+            from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
+
+            # #120 will grow DbtProfileTarget to carry account / user / role /
+            # warehouse and wire them here. For now the BigQuery-shaped profile
+            # only supplies database (project) + schema (dataset).
+            return SnowflakeAdapter(
+                database=profile.project,
                 schema=profile.dataset,
             )
         raise UnsupportedProfileTypeError(profile_type=profile.type)
