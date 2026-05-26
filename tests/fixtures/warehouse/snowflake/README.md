@@ -23,5 +23,22 @@ EXPLAIN USING JSON SELECT customer_id, order_total FROM analytics.public.orders;
 The single cell of the single returned row is the JSON document. Pretty-print it
 (`json.dumps(..., indent=2)`) and drop it in here, keeping `bytesAssigned` a round
 number so the determinism assertion stays readable. The gated
-`@pytest.mark.snowflake` live test (issue #130 US-005) certifies the shape against
+`@pytest.mark.snowflake` live test (issue #130 US-005,
+`tests/warehouse/test_snowflake_estimate_live.py`) certifies the shape against
 a real EXPLAIN; these committed fixtures pin the parse offline.
+
+To run the gated live certification (maintainer-only — needs real creds):
+
+```bash
+export SF_RUN_SNOWFLAKE=1
+export SNOWFLAKE_ACCOUNT=<org-account>
+export SNOWFLAKE_USER=<user>
+export SNOWFLAKE_PASSWORD=<password>
+export SNOWFLAKE_WAREHOUSE=<warehouse>
+# optional context: SNOWFLAKE_ROLE / SNOWFLAKE_DATABASE / SNOWFLAKE_SCHEMA
+uv run pytest -m snowflake --no-cov
+```
+
+`--no-cov` is required because `--cov-fail-under` in `addopts` would fail a
+marker-specific run. Without the env vars the test skips with a reason naming
+the missing prerequisite (belt-and-suspenders gating).
