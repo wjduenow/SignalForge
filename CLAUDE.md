@@ -35,10 +35,8 @@ Stated in the README as design principles, not aspirations. New code must respec
 ## Architecture map
 
 The pipeline is a chain of subpackages, each with a distilled rules file in
-`docs/rules/` and an operational reference in `docs/*-ops.md`.
-**The rules files are the working contract** — read the relevant one (the table below
-maps layer → file) before touching a layer. They are *not* auto-loaded into context;
-load the file for the layer you're working in.
+`.claude/rules/` (auto-loaded into context) and an operational reference in `docs/*-ops.md`.
+**The rules files are the working contract** — read the relevant one before touching a layer.
 
 | Subpackage | Role | Rules file |
 |---|---|---|
@@ -63,7 +61,7 @@ matching `docs/*-ops.md`. Internals are `_`-prefixed and not part of the public 
 ## History
 
 `CHANGELOG.md` is the curated, release-facing record (versioned sections). Per-issue design
-decisions live in `plans/super/<n>-<topic>.md` (DEC-numbered ADRs). The `docs/rules/`
+decisions live in `plans/super/<n>-<topic>.md` (DEC-numbered ADRs). The `.claude/rules/`
 files distil the durable working conventions from those plans. Don't re-narrate shipped
 work here — those three places own it.
 
@@ -83,7 +81,7 @@ Canonical local command (CI runs the same four checks across a 3.11 / 3.12 / 3.1
 uv sync --dev && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest
 ```
 
-The repo is uv-managed (see `docs/rules/python-build.md`); `uv.lock` is committed.
+The repo is uv-managed (see `.claude/rules/python-build.md`); `uv.lock` is committed.
 `pip install -e ".[dev]"` still works for contributors without uv. Gated test markers
 (`bigquery`, `anthropic`, `cli_subprocess`, `e2e`, `wheel_smoke`, `snowflake`) are excluded
 by default and run with `--no-cov` (see `testing-signal.md`).

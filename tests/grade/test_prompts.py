@@ -19,7 +19,7 @@ Exercises every locked invariant of the prompt seam:
   unresolvable ids.
 
 Each test is capable of failing if its target is broken (per
-``docs/rules/testing-signal.md``); no ``assert True``-shaped no-ops.
+``.claude/rules/testing-signal.md``); no ``assert True``-shaped no-ops.
 """
 
 from __future__ import annotations

@@ -29,14 +29,14 @@ uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run 
 
 **Coverage:** see [`docs/codecov-ops.md`](docs/codecov-ops.md) for Codecov setup, badge interpretation, and threshold bumps.
 
-**Docs:** the [published docs site](https://wjduenow.github.io/SignalForge/) is built by MkDocs Material on every push to `main`. Edits to `docs/*.md` and `README.md` land on `dev` like any other PR; the published site picks them up on the next `dev → main` merge. Local preview with `uv run mkdocs serve`. See [`docs/rules/docs-publishing.md`](docs/rules/docs-publishing.md) for the full deploy contract.
+**Docs:** the [published docs site](https://wjduenow.github.io/SignalForge/) is built by MkDocs Material on every push to `main`. Edits to `docs/*.md` and `README.md` land on `dev` like any other PR; the published site picks them up on the next `dev → main` merge. Local preview with `uv run mkdocs serve`. See [`.claude/rules/docs-publishing.md`](.claude/rules/docs-publishing.md) for the full deploy contract.
 
 ## Pre-release coverage audit
 
 The default `pytest` run — and therefore the coverage badge — measures only the
 default marker set. Tests gated behind `bigquery`, `anthropic`, `cli_subprocess`,
 `e2e`, and `wheel_smoke` are filtered out by `addopts` (see
-`docs/rules/testing-signal.md` § "Known gap: excluded markers"), so the
+`.claude/rules/testing-signal.md` § "Known gap: excluded markers"), so the
 real-network and packaging paths are not instrumented in the badge number.
 
 Run this audit against the **matrix ceiling** (currently Python 3.13 — the

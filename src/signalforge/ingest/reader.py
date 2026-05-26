@@ -31,7 +31,7 @@ Steps (in order):
 7. Return :class:`IngestResult`.
 
 **No logging** anywhere in this module — ingest is a stage-0 reader
-(``docs/rules/manifest-readers.md`` rule #4). Observability lives in
+(``.claude/rules/manifest-readers.md`` rule #4). Observability lives in
 the consuming prune / grade stages.
 """
 

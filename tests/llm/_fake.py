@@ -6,7 +6,7 @@ Tests register expectations via :meth:`expect_count_tokens` and
 unexpected calls raise loudly.
 
 Mirrors the precedent set by ``tests/warehouse/_fake.py::FakeBigQueryClient``
-(see ``docs/rules/warehouse-adapters.md`` — "Test fakes use an
+(see ``.claude/rules/warehouse-adapters.md`` — "Test fakes use an
 ``expect_*`` helper API"). Hand-rolled rather than ``MagicMock``-driven
 because ``MagicMock`` auto-passes everything, which would silently mask
 mismatches and violate ``testing-signal.md``.

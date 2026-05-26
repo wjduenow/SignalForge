@@ -10,7 +10,7 @@ emits to its callers and to its on-disk sidecar:
   and reproducibility hashes (DEC-016, DEC-020).
 
 Both models are ``frozen=True, extra="ignore"`` per the project's
-manifest-readers convention (``docs/rules/manifest-readers.md``):
+manifest-readers convention (``.claude/rules/manifest-readers.md``):
 ``frozen=True`` makes them immutable post-construction, ``extra="ignore"``
 survives forward-compat field additions in the persisted sidecar JSON.
 The drift detector at :mod:`tests.diff.test_models` pairs each model
@@ -44,7 +44,7 @@ orchestrator's responsibility (US-008); this module stores them as
 plain ``str`` fields.
 
 This module declares only data shapes — it has no logging, no I/O, and
-no LLM calls. Per ``docs/rules/manifest-readers.md`` ("no logging /
+no LLM calls. Per ``.claude/rules/manifest-readers.md`` ("no logging /
 metrics in stage-0 modules"), observability lives in the orchestrator
 that consumes these shapes.
 """

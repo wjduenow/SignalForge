@@ -13,7 +13,7 @@ Covers the three read-back-shaped Pydantic models:
   pinned to 1.
 
 Every test must be capable of failing if its target is broken
-(:file:`docs/rules/testing-signal.md`); no ``assert True``-shaped
+(:file:`.claude/rules/testing-signal.md`); no ``assert True``-shaped
 tests.
 """
 

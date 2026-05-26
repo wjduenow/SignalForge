@@ -12,11 +12,11 @@ grader-layer read-back models covered here:
 * :class:`signalforge.grade.models.GradingReport`
 * :class:`signalforge.grade.models.GradeEvent`
 
-Reference: ``docs/rules/manifest-readers.md`` (drift detectors
+Reference: ``.claude/rules/manifest-readers.md`` (drift detectors
 mandatory for ``extra="ignore"`` reader-shaped models),
-``docs/rules/safety-layer.md`` DEC-014 / DEC-015 (pair every
+``.claude/rules/safety-layer.md`` DEC-014 / DEC-015 (pair every
 read-back model with a one-off ``extra="forbid"`` mirror),
-``docs/rules/prune-engine.md`` DEC-010 (production change == strict
+``.claude/rules/prune-engine.md`` DEC-010 (production change == strict
 change == fixture refresh, in the same commit).
 """
 

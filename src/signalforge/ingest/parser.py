@@ -27,7 +27,7 @@ dependency. A ``to`` string matching no pattern is carried verbatim.
 
 This module is a **pure mapping** consumed by the ingest reader (a later
 story); it is NOT part of the public ``signalforge.ingest`` surface, takes no
-I/O, and emits ZERO logs (``docs/rules/manifest-readers.md`` rule #4).
+I/O, and emits ZERO logs (``.claude/rules/manifest-readers.md`` rule #4).
 """
 
 from __future__ import annotations

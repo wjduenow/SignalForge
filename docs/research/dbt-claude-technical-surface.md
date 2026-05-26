@@ -451,7 +451,7 @@ async with ClaudeSDKClient(options) as client:
 
 ### 3.3 Claude Code as a subprocess (clauditor's pattern)
 
-Spawn `claude -p "<prompt>" --output-format stream-json --verbose`, read NDJSON from stdout. clauditor's runner (`src/clauditor/runner.py`) is the reference shape — defensive parsing per `docs/rules/stream-json-schema.md`, four-layer error classification, watchdog timeout. See also `docs/transport-architecture.md`.
+Spawn `claude -p "<prompt>" --output-format stream-json --verbose`, read NDJSON from stdout. clauditor's runner (`src/clauditor/runner.py`) is the reference shape — defensive parsing per `.claude/rules/stream-json-schema.md`, four-layer error classification, watchdog timeout. See also `docs/transport-architecture.md`.
 
 **Pros for a CI tool:** zero SDK dependency, leverages user's existing Claude Code config (subagents, MCP servers, permissions), inherits subscription auth (Pro/Max/Teams) without an API key. Same auth surface as developer's local Claude Code.
 

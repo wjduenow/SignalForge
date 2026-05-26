@@ -80,7 +80,7 @@ class IngestError(Exception):
     tiers 1 and 2, so the base gets **no** single fallback-tier entry in
     ``_EXCEPTION_TO_EXIT_CODE`` — a forgotten concrete falls through to
     tier 1 and the AST scan catches the missing per-class entry at test
-    time (see ``docs/rules/cli-layer.md`` § dual registration).
+    time (see ``.claude/rules/cli-layer.md`` § dual registration).
     """
 
     default_remediation: ClassVar[str] = "(no remediation set — this is the base class)"

@@ -330,7 +330,7 @@ signal.
 
 **Why kept-uncertain is its own tier (issue #50).** Architectural
 Commitment #5 ("explainable diffs") and the prune layer's conservative
-bias (`docs/rules/prune-engine.md` DEC-006, DEC-011) jointly say:
+bias (`.claude/rules/prune-engine.md` DEC-006, DEC-011) jointly say:
 a test we couldn't positively evaluate is shipped (kept) but the
 reviewer must see "we shipped this without evidence" distinctly from
 "this test caught a real failing row." Pre-#50 the diff renderer
@@ -563,7 +563,7 @@ operator's eyes are the merge boundary. v0.2 may wire a
   [`docs/draft-ops.md`](draft-ops.md).
 - Manifest reader conventions
   (`frozen` / `extra="ignore"` / drift-detector pattern):
-  [`docs/rules/manifest-readers.md`](../docs/rules/manifest-readers.md).
+  [`.claude/rules/manifest-readers.md`](../.claude/rules/manifest-readers.md).
 
 Cross-reference DECs (from `plans/super/8-diff-renderer.md`):
 DEC-002 (boundary checks), DEC-003 (drift detectors), DEC-004

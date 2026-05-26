@@ -598,10 +598,10 @@ on type rather than sniffing message text.
 - Design record: [`plans/super/5-llm-draft-pipeline.md`](../plans/super/5-llm-draft-pipeline.md).
 - Safety-layer counterpart (the layer the draft pipeline mirrors most
   patterns from): [`docs/safety-ops.md`](safety-ops.md) and
-  [`docs/rules/safety-layer.md`](../docs/rules/safety-layer.md).
+  [`.claude/rules/safety-layer.md`](../.claude/rules/safety-layer.md).
 - Manifest reader conventions
   (frozen / `extra="ignore"` / drift detector pattern):
-  [`docs/rules/manifest-readers.md`](../docs/rules/manifest-readers.md).
+  [`.claude/rules/manifest-readers.md`](../.claude/rules/manifest-readers.md).
 - Warehouse adapter conventions (the adapter seam pattern this layer
   mirrors for the SDK shim):
   [`docs/warehouse-adapter-ops.md`](warehouse-adapter-ops.md).

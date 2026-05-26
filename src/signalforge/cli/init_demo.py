@@ -90,7 +90,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
     """Register the ``init-demo`` subcommand on the top-level parser.
 
     Mirrors the registration shape of :mod:`signalforge.cli.lint` and
-    :mod:`signalforge.cli.version` (DEC-009 of ``docs/rules/cli-layer.md``
+    :mod:`signalforge.cli.version` (DEC-009 of ``.claude/rules/cli-layer.md``
     — one flat module per subcommand). Two surfaces:
 
     * Positional ``dest`` — optional (``nargs="?"``) with a string
@@ -144,7 +144,7 @@ def cmd_init_demo(args: argparse.Namespace) -> int:
     """Copy the bundled demo project to ``args.dest`` and print next steps.
 
     Returns the integer exit code per the four-tier CLI taxonomy
-    (DEC-008 of ``docs/rules/cli-layer.md``):
+    (DEC-008 of ``.claude/rules/cli-layer.md``):
 
     * ``0`` — copy succeeded; next-steps message printed to stdout.
     * ``1`` — broken install (:class:`CliInitDemoFixtureMissingError`),

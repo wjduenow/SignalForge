@@ -1,7 +1,7 @@
 """Fail-closed JSONL response-audit writer for the draft layer (US-012).
 
 Mirrors :mod:`signalforge.safety.audit` exactly — same fail-closed contract
-(DEC-011 of ``docs/rules/safety-layer.md``), same POSIX-atomic-append size
+(DEC-011 of ``.claude/rules/safety-layer.md``), same POSIX-atomic-append size
 cap, same ``O_APPEND | O_CREAT | 0o600`` open + ``os.fsync`` + close shape.
 This is the *second* instance of the convention; reach for it (not ad-hoc
 ``Path.write_text`` calls) any time a new pipeline stage needs a durable,

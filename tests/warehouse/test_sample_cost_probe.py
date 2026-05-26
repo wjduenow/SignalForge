@@ -48,7 +48,7 @@ To run locally::
 The ``--no-cov`` is required because ``--cov-fail-under`` in
 ``addopts`` would otherwise fail this marker-specific run that
 exercises only a fraction of the codebase (see
-``docs/rules/testing-signal.md`` § Coverage / "Known gap: excluded
+``.claude/rules/testing-signal.md`` § Coverage / "Known gap: excluded
 markers").
 
 Each cost test captures ``total_bytes_billed`` directly off the

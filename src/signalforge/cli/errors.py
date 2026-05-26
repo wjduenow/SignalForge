@@ -291,7 +291,7 @@ class CliInitDemoFixtureMissingError(CliError):
     Wraps :class:`signalforge.demo.DemoFixtureMissingError`. Tier 1
     (load — the wheel install is broken and there is no work that can
     proceed). The wheel-packaging convention in
-    ``docs/rules/python-build.md`` makes this practically unreachable
+    ``.claude/rules/python-build.md`` makes this practically unreachable
     on a clean ``pip install signalforge-dbt`` run, but a corrupted
     install (partial wheel extract, hand-edited site-packages) would
     surface here. DEC-011 of ``plans/super/47-init-demo.md``.

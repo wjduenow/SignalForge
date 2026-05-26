@@ -25,7 +25,7 @@ the warehouse as broken SQL:
 
 This module lives in the manifest layer (stage-0): it depends only on the
 manifest's resolvers, returns a ``str``, emits ZERO logs, and is deterministic
-for a given input (``docs/rules/manifest-readers.md``). The
+for a given input (``.claude/rules/manifest-readers.md``). The
 :class:`RefNotFoundError` / :class:`AmbiguousRefError` / :class:`SourceNotFoundError`
 raised by the underlying resolvers propagate unchanged.
 """

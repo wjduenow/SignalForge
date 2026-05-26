@@ -19,7 +19,7 @@ Exercises every locked invariant of :func:`load_grade_config` and
   ``GradeConfigError``.
 
 Each test is capable of failing if its target is broken (per
-``docs/rules/testing-signal.md``); no ``assert True``-shaped no-ops.
+``.claude/rules/testing-signal.md``); no ``assert True``-shaped no-ops.
 """
 
 from __future__ import annotations

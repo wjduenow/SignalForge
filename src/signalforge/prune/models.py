@@ -30,7 +30,7 @@ Design commitments operationalised here:
   handled by ``extra="ignore"`` plus a one-off ``extra="forbid"``
   drift detector (US-010). Read-back semantics — no ``extra="forbid"``
   on these models, that's reserved for config-shaped models per
-  ``docs/rules/safety-layer.md``.
+  ``.claude/rules/safety-layer.md``.
 * **Transitive immutability** — sequences are :class:`tuple` rather
   than :class:`list` so a caller cannot mutate ``decisions`` after
   construction; ``frozen=True`` blocks attribute reassignment.

@@ -17,7 +17,7 @@ regenerate. The drift detector at :mod:`tests.diff.test_drift_detector`
 covers the schema-shape side of the same defence.
 
 Reference: ``plans/super/8-diff-renderer.md`` US-011 + DEC-017,
-``docs/rules/testing-signal.md`` (no ``assert True``-shaped tests;
+``.claude/rules/testing-signal.md`` (no ``assert True``-shaped tests;
 each snapshot byte-equality is capable of failing if its target
 breaks).
 """

@@ -18,9 +18,9 @@ in production (DEC-015), so no drift gate is needed there.
 responsibility and is covered by :mod:`tests.draft` — this module reuses
 the discriminated union as-is for the ``test:`` field on each event.
 
-Reference: ``docs/rules/manifest-readers.md`` (DEC-008 — drift detectors
+Reference: ``.claude/rules/manifest-readers.md`` (DEC-008 — drift detectors
 mandatory for ``extra="ignore"`` reader-shaped models),
-``docs/rules/safety-layer.md`` (DEC-014 / DEC-015 — pair every read-back
+``.claude/rules/safety-layer.md`` (DEC-014 / DEC-015 — pair every read-back
 model with a one-off ``extra="forbid"`` mirror).
 """
 

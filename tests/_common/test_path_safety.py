@@ -7,7 +7,7 @@ wrappers re-raise as their own typed error. This file pins the four
 failure modes at the source so a regression surfaces here even if every
 layer wrapper still translates correctly.
 
-The three traps from ``docs/rules/manifest-readers.md`` are exercised:
+The three traps from ``.claude/rules/manifest-readers.md`` are exercised:
 
 1. Resolve symlinks BEFORE checking containment.
 2. Catch :class:`RuntimeError` from :meth:`pathlib.Path.resolve` on cycles.

@@ -9,7 +9,7 @@ exactly as the warehouse adapter does
 the expected failing-row *shape*.
 
 Determinism is engineered by **rule semantics, not value-equality with real
-Snowflake** (``docs/rules/testing-signal.md`` § "End-to-end gated tests"):
+Snowflake** (``.claude/rules/testing-signal.md`` § "End-to-end gated tests"):
 
 * a ``not_null`` over a column with one NULL row returns ``failures >= 1``;
   over a column with no NULLs returns ``0``;

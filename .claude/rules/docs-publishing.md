@@ -46,7 +46,7 @@ uv run mkdocs serve  # localhost:8000 with hot reload
 uv run mkdocs build  # writes site/ — same recipe CI uses
 ```
 
-Do NOT use `--strict` locally. The ops docs link to `plans/super/*.md`, `docs/rules/*.md`, and other repo-internal paths that are deliberately not part of the published site; `--strict` rejects them as broken links. The non-strict build still emits the warnings to stdout — useful as a sanity check that the doc set is internally consistent, but not a CI gate.
+Do NOT use `--strict` locally. The ops docs link to `plans/super/*.md`, `.claude/rules/*.md`, and other repo-internal paths that are deliberately not part of the published site; `--strict` rejects them as broken links. The non-strict build still emits the warnings to stdout — useful as a sanity check that the doc set is internally consistent, but not a CI gate.
 
 ## When to update mkdocs.yml vs the docs themselves
 

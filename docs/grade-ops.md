@@ -648,7 +648,7 @@ CLI exits 0 once the diff renders.
   [`docs/safety-ops.md`](safety-ops.md).
 - Manifest reader conventions
   (`frozen` / `extra="ignore"` / drift-detector pattern):
-  [`docs/rules/manifest-readers.md`](../docs/rules/manifest-readers.md).
+  [`.claude/rules/manifest-readers.md`](../.claude/rules/manifest-readers.md).
 
 Cross-reference DECs: DEC-001 (public API surface), DEC-002 (per-pair
 score shape + threshold-AND aggregate), DEC-004 (per-criterion
