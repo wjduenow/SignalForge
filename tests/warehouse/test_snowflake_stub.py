@@ -128,19 +128,6 @@ def test_init_stores_key_pair_and_sso_auth_fields() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sample_rows_raises_not_implemented() -> None:
-    """The v0.2 skeleton raises :class:`NotImplementedError` on
-    :meth:`sample_rows` naming the epic so the implementation work has a
-    single grep target (DEC-008)."""
-    adapter = SnowflakeAdapter()
-    table = TableRef(project=None, dataset="public", name="t")
-
-    with pytest.raises(NotImplementedError) as exc_info:
-        adapter.sample_rows(table, 100)
-
-    assert "issue #118" in str(exc_info.value)
-
-
 def test_column_stats_raises_not_implemented() -> None:
     """:meth:`column_stats` is part of the v0.2 skeleton surface."""
     adapter = SnowflakeAdapter()

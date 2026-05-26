@@ -29,9 +29,13 @@ Scope (deliberately minimal):
 * :meth:`dialect` returns the :data:`SNOWFLAKE_DIALECT` constant from
   :mod:`signalforge.warehouse.models` (``quote_char='"'``,
   ``identifier_case='upper'``, ``supports_qualify=True``).
-* The three warehouse-operation methods (:meth:`sample_rows`,
-  :meth:`column_stats`, :meth:`run_test_sql`) raise
-  :class:`NotImplementedError` naming the epic (#118) so the v0.2
+* :meth:`sample_rows` is implemented (#122 US-003) — deterministic hash-mod
+  sampling (``MOD(ABS(HASH(*)), bucket)``) sized from
+  ``INFORMATION_SCHEMA.TABLES.ROW_COUNT``, mirroring BigQuery's fail-loud
+  sizing (:class:`UnknownTableSizeError` /
+  :class:`SamplingRequiresPartitionFilterError`).
+* :meth:`column_stats` and :meth:`run_test_sql` still raise
+  :class:`NotImplementedError` naming the epic (#118) so the remaining v0.2
   implementation work has a single grep target (DEC-008).
 * :meth:`materialise_sample` / :meth:`estimate_query_bytes` are NOT overridden
   — the ABC defaults (raising :class:`MaterialisationNotSupportedError` /
@@ -61,18 +65,32 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import TYPE_CHECKING
+from datetime import date, datetime
+from typing import TYPE_CHECKING, Any
 
 from signalforge.warehouse._sample_id import _hash_session_id
 from signalforge.warehouse.base import WarehouseAdapter
+from signalforge.warehouse.errors import (
+    SamplingRequiresPartitionFilterError,
+    UnknownTableSizeError,
+)
 from signalforge.warehouse.models import SNOWFLAKE_DIALECT, ColumnStats, Dialect, TestResult
 
 if TYPE_CHECKING:
-    from signalforge.warehouse.adapters._snowflake_client import _SnowflakeClientProtocol
+    from signalforge.warehouse.adapters._snowflake_client import (
+        _SnowflakeClientProtocol,
+        _SnowflakeCursorProtocol,
+    )
     from signalforge.warehouse.models import PartitionFilter, TableRef
 
 
 _LOGGER = logging.getLogger("signalforge.warehouse")
+
+# Mirror of :data:`signalforge.warehouse.adapters.bigquery._LARGE_TABLE_THRESHOLD`
+# (100M). Re-declared (not imported) so this module never pulls in the BigQuery
+# adapter — keeping one source of truth where reasonable, but the value is the
+# load-bearing contract: identical sizing behaviour across vendors (DEC-005).
+_LARGE_TABLE_THRESHOLD: int = 100_000_000
 
 # Module-level alias so tests can reassign to a deterministic stand-in
 # (mirrors prune-engine.md DEC-019 / llm-drafter.md DEC-004 — never
@@ -85,13 +103,13 @@ _V02_REMEDIATION = "SnowflakeAdapter is a v0.2 skeleton (issue #118) — full im
 
 
 class SnowflakeAdapter(WarehouseAdapter):
-    """Skeleton :class:`WarehouseAdapter` for Snowflake profiles.
+    """:class:`WarehouseAdapter` for Snowflake profiles (v0.2, in progress).
 
-    Forward-compat only; every warehouse-operation method
-    (:meth:`sample_rows` / :meth:`column_stats` / :meth:`run_test_sql`) still
-    raises :class:`NotImplementedError`. #122 US-002 wired the connection seam
-    (:meth:`_get_connection`) and the fail-soft ``__exit__`` cleanup; the
-    sampling / materialise / run-test work lands in later #122 stories.
+    #122 US-002 wired the connection seam (:meth:`_get_connection`) and the
+    fail-soft ``__exit__`` cleanup; #122 US-003 implements :meth:`sample_rows`
+    (deterministic hash-mod sampling). :meth:`column_stats` /
+    :meth:`run_test_sql` still raise :class:`NotImplementedError`; the
+    materialise / run-test work lands in later #122 stories.
     """
 
     def __init__(
@@ -237,14 +255,214 @@ class SnowflakeAdapter(WarehouseAdapter):
     def dialect(self) -> Dialect:
         return SNOWFLAKE_DIALECT
 
+    # ------------------------------------------------------------------
+    # sample_rows — DEC-005 / DEC-006 / DEC-009 / DEC-010 of issue #122.
+    # ------------------------------------------------------------------
+
+    def _quote(self, ref: TableRef) -> str:
+        """Render a fully-qualified Snowflake table identifier (DEC-006).
+
+        Snowflake quotes each component separately — ``"DB"."SCHEMA"."NAME"``
+        — because a single quoted string spanning dots reads as ONE literal
+        identifier named ``db.schema.name`` (unlike BigQuery's single
+        backtick wrapping the whole path). Two-part ``"SCHEMA"."NAME"`` when
+        ``project`` is ``None``. Mirrors the prune compiler's
+        ``_qualified_table_name`` under ``quote_qualified_per_component=True``
+        so the adapter's sample SQL is consistent with the compiler's CTE.
+
+        The dataset / name are already DEC-013-validated by :class:`TableRef`'s
+        ``__post_init__``, so no re-validation is needed before quoting.
+        """
+        qc = SNOWFLAKE_DIALECT.quote_char
+        components = (
+            [ref.dataset, ref.name] if ref.project is None else [ref.project, ref.dataset, ref.name]
+        )
+        return ".".join(f"{qc}{component}{qc}" for component in components)
+
+    def _render_partition_filter(self, pf: PartitionFilter) -> str:
+        """Render a :class:`PartitionFilter` to a Snowflake SQL fragment (DEC-006).
+
+        ``datetime`` → ``'…'::TIMESTAMP``; ``date`` → ``'…'::DATE`` (via the
+        dialect literal templates); ``str`` is escaped via
+        :func:`escape_bq_string_literal` for safe inclusion inside a
+        single-quoted literal (Snowflake uses backslash escaping inside
+        single quotes, so the BigQuery helper is correct here). The column
+        name is per-component quoted and already DEC-013-validated by
+        :class:`PartitionFilter`'s ``__post_init__``.
+
+        Mirrors the prune compiler's ``_render_partition_filter(pf, dialect)``.
+        """
+        qc = SNOWFLAKE_DIALECT.quote_char
+        # ``datetime`` is a subclass of ``date``, so check it first.
+        if isinstance(pf.value, datetime):
+            rendered = SNOWFLAKE_DIALECT.timestamp_literal_template.format(
+                value=pf.value.isoformat()
+            )
+        elif isinstance(pf.value, date):
+            rendered = SNOWFLAKE_DIALECT.date_literal_template.format(value=pf.value.isoformat())
+        else:
+            from signalforge.warehouse._sql_safety import escape_bq_string_literal
+
+            rendered = f"'{escape_bq_string_literal(str(pf.value))}'"
+        return f"{qc}{pf.column}{qc} {pf.op} {rendered}"
+
+    def _get_num_rows(self, table: TableRef) -> int | None:
+        """Look up ``ROW_COUNT`` from ``INFORMATION_SCHEMA.TABLES`` (DEC-005).
+
+        Case-insensitive on ``TABLE_SCHEMA`` / ``TABLE_NAME`` (Snowflake folds
+        unquoted identifiers to upper-case). The schema / name are embedded as
+        single-quoted STRING LITERALS — escaped via
+        :func:`escape_bq_string_literal` (backslash escaping inside single
+        quotes is correct for Snowflake) even though they are already
+        identifier-validated on the :class:`TableRef`. The ``<database>``
+        prefix is quoted per the dialect; when ``table.project`` is ``None``
+        (direct callers — the prune path always qualifies via
+        ``TableRef.from_model``) it falls back to ``CURRENT_DATABASE()``.
+
+        Returns ``None`` when no row matches or ``ROW_COUNT`` is ``NULL``
+        (views / materialised views do not carry a ``ROW_COUNT``).
+        """
+        from signalforge.warehouse._sql_safety import escape_bq_string_literal
+
+        qc = SNOWFLAKE_DIALECT.quote_char
+        db_prefix = "CURRENT_DATABASE()." if table.project is None else f"{qc}{table.project}{qc}."
+        schema_lit = escape_bq_string_literal(table.dataset)
+        name_lit = escape_bq_string_literal(table.name)
+        sql = (
+            f"SELECT ROW_COUNT FROM {db_prefix}INFORMATION_SCHEMA.TABLES "
+            f"WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema_lit}') "
+            f"AND UPPER(TABLE_NAME) = UPPER('{name_lit}')"
+        )
+        rows = self._execute(sql, table=table)
+        if not rows:
+            return None
+        first = rows[0]
+        value = first[0] if isinstance(first, (list, tuple)) else first
+        if value is None:
+            return None
+        return int(value)
+
+    def _execute(self, sql: str, *, table: TableRef) -> list[Any]:
+        """Run ``sql`` on the connection's cursor, returning ``fetchall()``.
+
+        Any SDK exception is routed through
+        :func:`signalforge.warehouse.adapters._snowflake_client.map_snowflake_exception`
+        (DEC-009): a mapped typed error is re-raised ``from`` the original; an
+        unchanged passthrough re-raises the original.
+        """
+        from signalforge.warehouse.adapters._snowflake_client import map_snowflake_exception
+
+        cursor = self._get_connection().cursor()
+        try:
+            cursor.execute(sql)
+            return list(cursor.fetchall())
+        except Exception as exc:
+            mapped = map_snowflake_exception(exc, context={"table": table.qualified_name})
+            if mapped is exc:
+                raise
+            raise mapped from exc
+
+    def _execute_to_dicts(self, sql: str, *, table: TableRef) -> list[dict[str, Any]]:
+        """Run ``sql`` and shape tuple ``fetchall()`` rows into dicts (DEC-010).
+
+        Reads ``cursor.description`` (DB-API: each descriptor's ``[0]`` is the
+        column name) so the adapter builds ``dict`` rows from tuple results
+        without depending on a ``DictCursor``.
+        """
+        from signalforge.warehouse.adapters._snowflake_client import map_snowflake_exception
+
+        cursor = self._get_connection().cursor()
+        try:
+            cursor.execute(sql)
+            rows = list(cursor.fetchall())
+        except Exception as exc:
+            mapped = map_snowflake_exception(exc, context={"table": table.qualified_name})
+            if mapped is exc:
+                raise
+            raise mapped from exc
+        return self._rows_to_dicts(cursor, rows)
+
+    @staticmethod
+    def _rows_to_dicts(cursor: _SnowflakeCursorProtocol, rows: list[Any]) -> list[dict[str, Any]]:
+        """Build dict rows from tuple ``fetchall()`` results via ``description``.
+
+        Each DB-API descriptor's element ``[0]`` is the column name. A row that
+        is already a mapping passes through unchanged (defensive against a
+        ``DictCursor``-style connection).
+        """
+        description = cursor.description
+        column_names = [desc[0] for desc in description] if description else []
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            if isinstance(row, dict):
+                result.append(dict(row))
+            else:
+                result.append(dict(zip(column_names, row, strict=False)))
+        return result
+
     def sample_rows(
         self,
         table: TableRef,
         n: int,
         *,
         partition_filter: PartitionFilter | None = None,
-    ) -> list[dict]:
-        raise NotImplementedError(f"sample_rows: {_V02_REMEDIATION}")
+    ) -> list[dict[str, Any]]:
+        """Sample up to ``n`` rows deterministically (DEC-005 / DEC-006).
+
+        Algorithm (mirrors BigQuery's ``sample_rows`` exactly, Snowflake-flavoured):
+
+        1. Look up ``ROW_COUNT`` via :meth:`_get_num_rows`.
+        2. Decision:
+
+           * ``num_rows`` unknown + no ``partition_filter`` →
+             :class:`UnknownTableSizeError`.
+           * ``num_rows`` unknown + ``partition_filter`` present →
+             ``bucket = 1000``; debug-log the fallback.
+           * ``num_rows >= _LARGE_TABLE_THRESHOLD`` + no ``partition_filter`` →
+             :class:`SamplingRequiresPartitionFilterError`.
+           * else → ``bucket = max(num_rows // n, 1)``.
+        3. Issue ``SELECT * FROM <quoted> AS t WHERE
+           MOD(<dialect.sample_row_hash_expr>, <bucket>) < 1
+           [AND <partition_filter>] ORDER BY <dialect.sample_row_hash_expr>
+           LIMIT n``.
+
+        The hash-mod approach (``MOD(ABS(HASH(*)), bucket)``) is deterministic
+        across runs (same input → same prune decision) and works on views /
+        MVs / CTEs where ``TABLESAMPLE`` does not. The hash expression is read
+        from :data:`SNOWFLAKE_DIALECT` (NOT hard-coded) so the adapter's sample
+        SQL is byte-consistent with the prune compiler's sample CTE. The
+        ``ORDER BY`` makes ``LIMIT`` truncation deterministic when the WHERE
+        filter retains more than ``n`` rows.
+        """
+        if n <= 0:
+            raise ValueError(f"sample_rows requires n > 0; got n={n}")
+
+        num_rows = self._get_num_rows(table)
+
+        if num_rows is None or num_rows == 0:
+            if partition_filter is None:
+                raise UnknownTableSizeError(table=table.qualified_name)
+            bucket = 1000
+            _LOGGER.debug(
+                "Sampling table with unknown num_rows; using bucket=1000 (table=%s)",
+                table.qualified_name,
+            )
+        elif num_rows >= _LARGE_TABLE_THRESHOLD and partition_filter is None:
+            raise SamplingRequiresPartitionFilterError(
+                table=table.qualified_name, num_rows=num_rows
+            )
+        else:
+            bucket = max(num_rows // n, 1)
+
+        hash_expr = SNOWFLAKE_DIALECT.sample_row_hash_expr
+        quoted = self._quote(table)
+        where_clauses = [f"MOD({hash_expr}, {bucket}) < 1"]
+        if partition_filter is not None:
+            where_clauses.append(self._render_partition_filter(partition_filter))
+        where_sql = " AND ".join(where_clauses)
+        sql = f"SELECT * FROM {quoted} AS t WHERE {where_sql} ORDER BY {hash_expr} LIMIT {n}"
+
+        return self._execute_to_dicts(sql, table=table)
 
     def column_stats(self, table: TableRef, column: str) -> ColumnStats:
         raise NotImplementedError(f"column_stats: {_V02_REMEDIATION}")
