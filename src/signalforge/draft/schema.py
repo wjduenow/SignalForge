@@ -31,7 +31,7 @@ Design commitments operationalised here:
   any other location). This module calls
   :func:`signalforge.draft.audit._build_response_event` instead.
 * **DEC-015** — Lazy-format JSON in every ``_LOGGER`` call (mirroring
-  ``.claude/rules/safety-layer.md`` DEC-022). f-string interpolation on
+  ``docs/rules/safety-layer.md`` DEC-022). f-string interpolation on
   user-controlled values is a log-injection seam; ``json.dumps`` is the
   defence.
 * **DEC-016** — :class:`DraftOutcome` carries the :class:`LLMRequest`

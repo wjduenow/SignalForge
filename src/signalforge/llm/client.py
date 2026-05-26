@@ -23,7 +23,7 @@ Implements the single entry point through which every Anthropic
 
 Observability discipline:
 
-- Lazy-format JSON for every log call (``.claude/rules/safety-layer.md``
+- Lazy-format JSON for every log call (``docs/rules/safety-layer.md``
   DEC-022). Never f-string user-controlled values; the grep gate in the
   test suite asserts zero ``_LOGGER\\.\\w+\\(f"`` hits in this file.
 - The shim itself does not import the ``anthropic`` SDK — exception

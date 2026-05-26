@@ -734,7 +734,7 @@ def _kept_uncertain_decision_for(
     is the prune-layer signal the diff layer projects to
     ``tier="kept-uncertain"``. ``why`` defaults to the canonical
     budget-exhaustion message that's stable across runs and pinned in
-    ``.claude/rules/prune-engine.md``.
+    ``docs/rules/prune-engine.md``.
     """
     return PruneDecision(
         test_anchor=test_anchor,

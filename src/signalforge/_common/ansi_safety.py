@@ -12,7 +12,7 @@ The CLI shares the same threat surface for its stderr-print path
 (model ids, file paths, formatted error messages produced by
 ``format_error_to_stderr``). ``signalforge.cli._helpers.print_stderr``
 routes through this stripper so the "escape at the sink" principle
-(``.claude/rules/diff-renderer.md`` DEC-007) applies to every stderr
+(``docs/rules/diff-renderer.md`` DEC-007) applies to every stderr
 write originating in ``signalforge.cli`` too.
 """
 

@@ -4,7 +4,7 @@ Each test pins exactly one entry shape: bare strings, single-key dicts with
 inline and ``arguments:``-nested args, config-key tolerance, malformed
 supported types, custom/namespaced tests, and the ``ref()`` / ``source()``
 unwrap (DEC-009). No ``assert True``-shaped tests — every assertion can fail
-on a real regression (``.claude/rules/testing-signal.md``).
+on a real regression (``docs/rules/testing-signal.md``).
 """
 
 from __future__ import annotations

@@ -5,7 +5,7 @@ with a one-off StrictAuditEvent (extra='forbid') validated against a committed
 JSONL fixture. Adding a field to production AuditEvent without updating the
 fixture or this strict model breaks the test loudly.
 
-Reference: .claude/rules/testing-signal.md (drift detection pattern).
+Reference: docs/rules/testing-signal.md (drift detection pattern).
 """
 
 from __future__ import annotations

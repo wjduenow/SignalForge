@@ -27,9 +27,13 @@ theme:
     - content.code.copy
 
 # Research docs are internal analysis (dbt-pain-deep-dive, dbt-research-index,
-# etc.) — not user-facing. Excluded from the published site.
+# etc.) — not user-facing. The rules/ tree holds the per-layer working contracts
+# (moved out of .claude/ so they are not auto-loaded into every Claude session);
+# they cross-link to plans/super/ and are internal, not user-facing. Both excluded
+# from the published site.
 exclude_docs: |
   research/
+  rules/
 
 plugins:
   - search

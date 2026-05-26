@@ -7,7 +7,7 @@ import the typed surface this module exposes and stay pyright-clean.
 
 Mirrors the precedent established by
 :mod:`signalforge.warehouse.adapters._client` for the BigQuery SDK (see
-``.claude/rules/warehouse-adapters.md`` — "_client.py contains every #
+``docs/rules/warehouse-adapters.md`` — "_client.py contains every #
 pyright: ignore"). When a future v0.2 LLM provider is added, it should get its
 own ``_client.py`` shim under ``signalforge.llm`` for the same reason; do not
 pool SDK ignores into a generic util module.

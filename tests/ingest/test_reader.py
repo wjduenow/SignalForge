@@ -316,7 +316,7 @@ def test_read_schema_column_without_name_is_ignored() -> None:
 # ---------------------------------------------------------------------------
 # Bonus: prune accepts the produced candidate end-to-end without a warehouse
 # (disabled-prune path short-circuits before any warehouse call — see
-# .claude/rules/prune-engine.md issue #35).
+# docs/rules/prune-engine.md issue #35).
 # ---------------------------------------------------------------------------
 
 

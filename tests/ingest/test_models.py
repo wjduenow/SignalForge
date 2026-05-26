@@ -4,7 +4,7 @@ NOTE — no ``extra="forbid"`` drift detector lives here, and that is
 deliberate: ``IngestResult`` / ``SkippedTest`` are produced *in process*
 by the ingest reader and handed straight to the prune stage. They are NOT
 serialised to a JSONL audit / sidecar and read back from disk, so the
-read-back drift-detector convention (``.claude/rules/testing-signal.md``
+read-back drift-detector convention (``docs/rules/testing-signal.md``
 § "Drift detection" — pair every ``extra="ignore"`` *parser* with a
 one-off ``StrictModel(extra="forbid")``) does not apply. Their
 ``extra="ignore"`` is forward-compat for a future field we add ourselves,

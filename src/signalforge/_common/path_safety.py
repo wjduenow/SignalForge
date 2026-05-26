@@ -1,7 +1,7 @@
 """Layer-neutral symlink-hardened path canonicalisation.
 
 This module is the single canonical home for the project's symlink /
-containment defence (the three traps from ``.claude/rules/manifest-readers.md``).
+containment defence (the three traps from ``docs/rules/manifest-readers.md``).
 Layers (warehouse, safety, cli, diff, grade, prune) call into here directly
 and either catch :class:`PathContainmentError` to re-raise as their own
 layer-typed error, or let it propagate to a single boundary catch.

@@ -11,7 +11,7 @@ callers and to its on-disk audit log:
   (DEC-006, DEC-010, DEC-019, DEC-020).
 
 Every read-back model uses ``extra="ignore"`` per
-``.claude/rules/manifest-readers.md`` (forward-compat), pairs with a
+``docs/rules/manifest-readers.md`` (forward-compat), pairs with a
 ``Strict<X>(extra="forbid")`` mirror in
 ``tests/grade/test_drift_detector.py`` validated against committed
 fixtures, and exposes a minimal ``__repr__`` per DEC-022 of issue #6 so

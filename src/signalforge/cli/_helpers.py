@@ -626,7 +626,7 @@ def print_stderr(message: str, *, end: str = "\n", flush: bool = False) -> None:
     """Write ``message`` to stderr after stripping ANSI CSI escapes.
 
     Single stderr-write sink for ``signalforge.cli``. Mirrors the diff
-    renderer's "escape at the sink" principle (.claude/rules/diff-renderer.md
+    renderer's "escape at the sink" principle (docs/rules/diff-renderer.md
     DEC-007) for the CLI: every stderr-bound string passes through
     :func:`signalforge._common.ansi_safety.strip_ansi_escapes` so an
     upstream-controlled value (a model unique_id, a path, a typed-error

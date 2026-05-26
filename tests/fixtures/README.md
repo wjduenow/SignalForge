@@ -195,7 +195,7 @@ and get caught by the drift detector.
 Hand-authoring is acceptable here because dbt profiles are user-authored
 YAML in the wild — drift-from-tool-output isn't the failure mode (unlike
 `manifest.json`, which dbt itself generates). The tradeoff is documented in
-[`testing-signal.md`](../../.claude/rules/testing-signal.md): regenerate via
+[`testing-signal.md`](../../docs/rules/testing-signal.md): regenerate via
 ephemeral `uvx` when the tool emits the artefact, hand-author when humans do.
 
 # Safety
@@ -233,7 +233,7 @@ regenerate against, since users author these by hand in the wild.
 Hand-authoring is appropriate here for the same reason as the
 [`profiles/`](#profiles) fixtures: drift-from-tool-output is not the failure
 mode. The trade-off is documented in
-[`testing-signal.md`](../../.claude/rules/testing-signal.md).
+[`testing-signal.md`](../../docs/rules/testing-signal.md).
 
 ## `manifest_with_pii_meta.json` — hand-derived
 

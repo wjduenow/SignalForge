@@ -689,7 +689,7 @@ def test_every_typed_error_is_in_exit_code_mapping_table() -> None:
             "Add each class to the mapping with the correct exit-code "
             "tier (1=load, 2=input, 3=API). See DEC-024 of "
             "plans/super/9-cli-entrypoint.md for the taxonomy and "
-            ".claude/rules/cli-layer.md when it lands. The four-tier "
+            "docs/rules/cli-layer.md when it lands. The four-tier "
             "exit-code contract is load-bearing — the AST scan exists "
             "exactly to catch this drift."
         )

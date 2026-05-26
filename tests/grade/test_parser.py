@@ -3,7 +3,7 @@
 Covers the locked nine-value :data:`GradeOutputViolationType` literal
 taxonomy at the parser surface: every malformed-LLM-response shape
 routes to a typed :class:`GradeOutputError` with a ``violation_type``
-from the finite Literal. Per ``.claude/rules/testing-signal.md`` every
+from the finite Literal. Per ``docs/rules/testing-signal.md`` every
 test is capable of failing if its target is broken.
 """
 

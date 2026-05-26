@@ -27,9 +27,9 @@ Tests fall into four groups:
    confirms ``extra="forbid"`` is wired up — a silently-accepted
    unknown field would defeat the entire drift gate.
 
-Reference: ``.claude/rules/manifest-readers.md`` (drift detectors
+Reference: ``docs/rules/manifest-readers.md`` (drift detectors
 mandatory for ``extra="ignore"`` reader-shaped models),
-``.claude/rules/prune-engine.md`` DEC-010 (production change == strict
+``docs/rules/prune-engine.md`` DEC-010 (production change == strict
 change == fixture refresh, in the same commit), and
 ``plans/super/8-diff-renderer.md`` US-002.
 """

@@ -85,7 +85,7 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
     """Register the ``prune-existing`` subcommand on the top-level parser.
 
     Mirrors the registration shape of :mod:`signalforge.cli.generate` and
-    :mod:`signalforge.cli.lint` (DEC-009 of ``.claude/rules/cli-layer.md``
+    :mod:`signalforge.cli.lint` (DEC-009 of ``docs/rules/cli-layer.md``
     — one flat module per subcommand). The full flag set (DEC-002):
 
     * positional ``<model>`` — accepts a bare model name, a dbt

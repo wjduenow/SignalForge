@@ -13,10 +13,10 @@ the AST scan catches both:
    (issue #60 PR-review feedback); the gate now rejects it.
 
 A direct stderr write anywhere outside ``_helpers.py`` defeats the
-"escape at the sink" principle (.claude/rules/diff-renderer.md DEC-007)
+"escape at the sink" principle (docs/rules/diff-renderer.md DEC-007)
 for the CLI's stderr path.
 
-AST-based per ``.claude/rules/testing-signal.md`` § "Source-scan gates:
+AST-based per ``docs/rules/testing-signal.md`` § "Source-scan gates:
 AST over per-line regex (issue #45)". A per-line regex would miss the
 multi-line bypass::
 

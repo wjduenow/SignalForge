@@ -11,7 +11,7 @@ build loudly), and the structural rubric-level guards
 rubric).
 
 Each test is capable of failing if its target is broken (per
-``.claude/rules/testing-signal.md``); no ``assert True``-shaped
+``docs/rules/testing-signal.md``); no ``assert True``-shaped
 no-ops.
 """
 

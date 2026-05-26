@@ -92,7 +92,7 @@ def test_init_demo_help_via_main_entrypoint(capsys: pytest.CaptureFixture[str]) 
     dispatch path catches that drift. argparse's ``--help`` action
     raises :class:`SystemExit(0)`; :func:`signalforge.cli.main` catches
     it and returns ``0`` so the ``-> int`` contract holds (see
-    ``.claude/rules/cli-layer.md`` § "No traceback ever leaks").
+    ``docs/rules/cli-layer.md`` § "No traceback ever leaks").
     """
     rc = main(["init-demo", "--help"])
     # argparse --help exits 0; main() returns it as an int.

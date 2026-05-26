@@ -253,7 +253,7 @@ def load_diff_config(project_dir: Path, path: Path | None = None) -> DiffConfig:
     # Symlink-harden the resolved config path BEFORE reading it.
     # Mirrors the orchestrator-level canonicalisation applied to
     # ``output_path`` / ``sidecar_path`` (post-QG fix; see
-    # ``.claude/rules/diff-renderer.md``). A symlinked
+    # ``docs/rules/diff-renderer.md``). A symlinked
     # ``signalforge.yml`` pointing outside ``project_dir`` (or a
     # cycle) is rejected here, well before
     # :meth:`pathlib.Path.read_text`.

@@ -642,7 +642,7 @@ exactly four values. Ported from clauditor's
 `llm-cli-exit-code-taxonomy.md` rule and pinned by the AST scan in
 `tests/test_audit_completeness.py` (DEC-019 / DEC-024) and the
 parametrized tests in `tests/cli/test_exit_codes.py`. See
-[`.claude/rules/cli-layer.md`](../.claude/rules/cli-layer.md) for the
+[`docs/rules/cli-layer.md`](../docs/rules/cli-layer.md) for the
 canonical statement of the rule.
 
 | Exit | Tier | Meaning | Example sources |
@@ -1174,7 +1174,7 @@ entry or a console-script wrapper regression after a wheel rebuild.
   `<model>` resolver, manifest schema-version tolerance.
 - [`docs/warehouse-adapter-ops.md`](warehouse-adapter-ops.md) —
   profile loader, BigQuery adapter, sampling cost defaults.
-- [`.claude/rules/cli-layer.md`](../.claude/rules/cli-layer.md) —
+- [`docs/rules/cli-layer.md`](../docs/rules/cli-layer.md) —
   CLI rules distilled from this ticket (load-bearing for
   contributors).
 - [`plans/super/9-cli-entrypoint.md`](../plans/super/9-cli-entrypoint.md)

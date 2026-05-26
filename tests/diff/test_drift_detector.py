@@ -27,11 +27,11 @@ consolidation can drop the duplicate; for v0.1 the explicit pairing
 keeps the rules-doc reference (DEC-003) directly traceable to a file
 named ``test_drift_detector.py``.
 
-Reference: ``.claude/rules/manifest-readers.md`` (drift detectors
+Reference: ``docs/rules/manifest-readers.md`` (drift detectors
 mandatory for ``extra="ignore"`` reader-shaped models),
-``.claude/rules/grade-layer.md`` (drift detectors are mandatory for
+``docs/rules/grade-layer.md`` (drift detectors are mandatory for
 read-back models),
-``.claude/rules/prune-engine.md`` DEC-010 (production change == strict
+``docs/rules/prune-engine.md`` DEC-010 (production change == strict
 change == fixture refresh, in the same commit),
 ``plans/super/8-diff-renderer.md`` US-011 + DEC-003.
 """

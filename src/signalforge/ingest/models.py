@@ -17,7 +17,7 @@ future ``prune-existing`` CLI's "N tests skipped, here's why" report.
 These models are produced **in process** and handed straight to the prune
 stage; they are NOT serialised to a JSONL audit / sidecar and read back
 from disk. Per the read-back drift-detector convention
-(``.claude/rules/testing-signal.md`` § "Drift detection"), they therefore
+(``docs/rules/testing-signal.md`` § "Drift detection"), they therefore
 need NO ``extra="forbid"`` drift detector — ``extra="ignore"`` is for
 forward-compat with a future field, not for tolerating an upstream
 on-disk schema we don't control.
