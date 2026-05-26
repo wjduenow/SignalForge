@@ -30,7 +30,8 @@ import pytest
 
 from signalforge.cli import main
 from signalforge.llm.errors import LLMAuthError
-from signalforge.warehouse import BigQueryAdapter, WarehouseAuthError
+from signalforge.warehouse import BigQueryAdapter, WarehouseAdapter, WarehouseAuthError
+from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
 from tests.cli._factories import make_fake_dbt_project, make_manifest, make_model
 from tests.llm._fake import FakeAnthropicClient, FakeCountTokensResponse
 from tests.warehouse._fake import FakeBigQueryClient
@@ -45,6 +46,7 @@ def _install_estimate_patches(
     *,
     fake_anthropic: FakeAnthropicClient | None = None,
     fake_bq: FakeBigQueryClient | None = None,
+    adapter: object | None = None,
 ) -> tuple[FakeAnthropicClient, FakeBigQueryClient]:
     """Patch the four CLI seams that the ``--estimate`` short-circuit
     consumes (manifest load, warehouse profile load, warehouse adapter
@@ -52,6 +54,14 @@ def _install_estimate_patches(
 
     Returns the ``(fake_anthropic, fake_bq)`` pair so the caller can
     queue ``expect_count_tokens`` / ``expect_dry_run`` expectations.
+
+    By default ``_make_warehouse_adapter`` returns a :class:`BigQueryAdapter`
+    backed by the returned ``FakeBigQueryClient``. Pass ``adapter=<obj>`` to
+    substitute a different adapter (e.g. a real :class:`SnowflakeAdapter`) so a
+    test can exercise the ABC's graceful-degrade path
+    (``estimate_query_bytes`` → ``EstimateNotSupportedError``). When
+    ``adapter`` is supplied, ``_make_warehouse_adapter`` returns it instead
+    of the BigQuery one, so no ``expect_dry_run`` expectation is consumed.
     """
     from signalforge.cli import generate as gen_mod
 
@@ -61,18 +71,24 @@ def _install_estimate_patches(
     fa = fake_anthropic if fake_anthropic is not None else FakeAnthropicClient(project="fake")
     fb = fake_bq if fake_bq is not None else FakeBigQueryClient(project="fake_project")
 
-    adapter = BigQueryAdapter(
-        project="fake_project",
-        location="US",
-        max_bytes_billed=100_000_000,
-        client=fb,
+    resolved_adapter: object = (
+        adapter
+        if adapter is not None
+        else BigQueryAdapter(
+            project="fake_project",
+            location="US",
+            max_bytes_billed=100_000_000,
+            client=fb,
+        )
     )
 
     monkeypatch.setattr(gen_mod.manifest_module, "load", MagicMock(return_value=manifest))
     monkeypatch.setattr(
         gen_mod.warehouse_module, "load_profile", MagicMock(return_value=MagicMock())
     )
-    monkeypatch.setattr(gen_mod, "_make_warehouse_adapter", MagicMock(return_value=adapter))
+    monkeypatch.setattr(
+        gen_mod, "_make_warehouse_adapter", MagicMock(return_value=resolved_adapter)
+    )
     monkeypatch.setattr(gen_mod, "_make_anthropic_client", MagicMock(return_value=fa))
 
     return fa, fb
@@ -315,3 +331,73 @@ def test_generate_estimate_no_traceback_leaks(
     fb.expect_dry_run(sql_matching=r"SELECT", returns_bytes=WarehouseAuthError("creds"))
     main(["generate", "--estimate", "model.shop.customers"])
     assert "Traceback" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# US-002 of issue #123 — Snowflake adapter degrades the warehouse-bytes half
+# ---------------------------------------------------------------------------
+
+
+def test_generate_estimate_snowflake_adapter_degrades_to_exit_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """US-002 of issue #123: the full ``--estimate`` short-circuit degrades
+    cleanly when the warehouse adapter is a :class:`SnowflakeAdapter`.
+
+    A real ``SnowflakeAdapter()`` inherits the ABC's
+    ``estimate_query_bytes`` default, which raises
+    :class:`EstimateNotSupportedError` (a ``WarehouseError`` subclass). The
+    estimate engine's DEC-005 conservative-bias degrade captures that into
+    ``warehouse_unavailable_reason``; the renderer prints
+    ``<unavailable: EstimateNotSupportedError>`` and the command exits 0 —
+    the LLM-cost half of the report still computes via the
+    ``count_tokens`` calls. DEC-016: no traceback leaks.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    fa, _fb = _install_estimate_patches(monkeypatch, adapter=SnowflakeAdapter())
+    _queue_default_count_tokens(fa)
+    # No ``expect_dry_run`` queued — SnowflakeAdapter.estimate_query_bytes
+    # raises EstimateNotSupportedError before any client call.
+
+    code = main(["generate", "--estimate", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 0, f"stderr={captured.err}"
+    assert "<unavailable: EstimateNotSupportedError>" in captured.out
+    assert "Traceback" not in captured.err
+
+
+def test_from_profile_dispatches_snowflake_to_snowflake_adapter() -> None:
+    """Pins the dispatch wiring that makes the test above meaningful:
+    ``WarehouseAdapter.from_profile(<snowflake profile>)`` returns a
+    :class:`SnowflakeAdapter` (issue #123 secondary assertion).
+
+    Builds the ``DbtProfileTarget`` from the committed
+    ``snowflake_password.yml`` fixture's ``dev`` output block — the same
+    fields ``load_profile`` would hydrate — then exercises the
+    ``profile.type == "snowflake"`` factory branch directly. Constructing
+    the target from the fixture (rather than driving the full
+    ``load_profile`` dbt_project.yml / profiles.yml search path) keeps the
+    dispatch assertion decoupled from the profile-resolution plumbing
+    already pinned in ``tests/warehouse/test_profiles.py``.
+    """
+    import yaml
+
+    from signalforge.warehouse import DbtProfileTarget
+
+    fixture = (
+        Path(__file__).resolve().parents[1] / "fixtures" / "profiles" / "snowflake_password.yml"
+    )
+    raw = yaml.safe_load(fixture.read_text(encoding="utf-8"))
+    output = raw["signalforge_test"]["outputs"]["dev"]
+    # The fixture's password is a dbt env_var() template; supply a literal so
+    # the typed model validates without dbt-style rendering.
+    output = {**output, "password": "s3cret"}
+
+    profile = DbtProfileTarget.model_validate(output)
+    adapter = WarehouseAdapter.from_profile(profile)
+
+    assert isinstance(adapter, SnowflakeAdapter)
