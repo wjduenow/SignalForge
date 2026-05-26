@@ -52,18 +52,17 @@ Scope (deliberately minimal):
   ``NotImplementedError`` rather than the v0.1
   :class:`UnsupportedProfileTypeError`.
 
-What this skeleton does NOT do:
+Still pending (NOT implemented here):
 
-* Real Snowflake connectivity. No ``snowflake.connector`` import — that is
-  confined to :mod:`signalforge.warehouse.adapters._snowflake_client`, the
-  one-shim-per-vendor SDK seam, when the full implementation lands.
-* Extend :class:`DbtProfileTarget` to carry Snowflake-specific fields
-  (``account`` / ``user`` / ``role`` / ``warehouse``). The current profile
-  model is BigQuery-shaped; growing it to wire those fields into the factory
-  is issue #120's work.
+* :meth:`column_stats` — raises :class:`NotImplementedError` naming the epic
+  (#118); the per-column profiling path lands in a later v0.2 issue.
+* :meth:`estimate_query_bytes` — NOT overridden; the ABC default
+  (:class:`EstimateNotSupportedError`) is the correct degrade pending #123.
 
-When the v0.2 implementation lands (issue #118), replace every
-``NotImplementedError`` with the real adapter call.
+The ``snowflake.connector`` import stays confined to
+:mod:`signalforge.warehouse.adapters._snowflake_client` (the one-shim-per-vendor
+SDK seam); this module opens connections only through that shim's
+``make_real_client`` and never imports the connector directly.
 """
 
 from __future__ import annotations
@@ -108,9 +107,12 @@ _LARGE_TABLE_THRESHOLD: int = 100_000_000
 
 # Module-level alias so tests can reassign to a deterministic stand-in
 # (mirrors prune-engine.md DEC-019 / llm-drafter.md DEC-004 — never
-# monkey-patch ``time.monotonic`` globally). Set at the first successful
-# ``materialise_sample`` (#122 US-003/US-004) to drive the cleanup-WARNING
-# ``auto-expire`` text.
+# monkey-patch ``time.monotonic`` globally). Used to stamp
+# ``_session_started_at`` at the first successful ``materialise_sample`` as
+# run provenance. NOTE: unlike BigQuery, the Snowflake cleanup WARNING does
+# NOT quote a client-side ``auto-expire in <N>s`` countdown — Snowflake reaps
+# idle sessions on a server-side, account-configurable timeout we can't
+# compute, so ``_session_started_at`` is recorded for provenance only.
 _monotonic = time.monotonic
 
 _V02_REMEDIATION = "SnowflakeAdapter is a v0.2 skeleton (issue #118) — full implementation pending."
@@ -119,11 +121,13 @@ _V02_REMEDIATION = "SnowflakeAdapter is a v0.2 skeleton (issue #118) — full im
 class SnowflakeAdapter(WarehouseAdapter):
     """:class:`WarehouseAdapter` for Snowflake profiles (v0.2, in progress).
 
-    #122 US-002 wired the connection seam (:meth:`_get_connection`) and the
-    fail-soft ``__exit__`` cleanup; #122 US-003 implements :meth:`sample_rows`
-    (deterministic hash-mod sampling). :meth:`column_stats` /
-    :meth:`run_test_sql` still raise :class:`NotImplementedError`; the
-    materialise / run-test work lands in later #122 stories.
+    Issue #122 implements the sampling surface: :meth:`sample_rows`
+    (deterministic hash-mod), :meth:`materialise_sample` (session-scoped
+    ``TEMPORARY TABLE``), and :meth:`run_test_sql` (``COUNT(*)`` failing-rows
+    wrap), all on a connection wired via :meth:`_get_connection` with a
+    fail-soft ``__exit__`` cleanup. :meth:`column_stats` still raises
+    :class:`NotImplementedError` (a later v0.2 issue); :meth:`estimate_query_bytes`
+    inherits the ABC degrade (pending #123).
     """
 
     def __init__(
@@ -163,8 +167,10 @@ class SnowflakeAdapter(WarehouseAdapter):
         # runs on the one connection). Set on the first :meth:`_get_connection`;
         # reset to ``None`` in :meth:`_cleanup_active_session` so a second
         # ``__exit__`` is a no-op. ``_session_started_at`` (monotonic) is set at
-        # the first successful ``materialise_sample`` (#122 US-003/US-004) and
-        # drives the cleanup-WARNING ``auto-expire`` text.
+        # the first successful ``materialise_sample`` as run provenance only —
+        # the Snowflake cleanup WARNING deliberately does NOT quote a
+        # client-side ``auto-expire in <N>s`` countdown (server-side reap; see
+        # the ``_monotonic`` note above).
         self._active_session: _SnowflakeClientProtocol | None = None
         self._session_started_at: float | None = None
 
@@ -262,9 +268,16 @@ class SnowflakeAdapter(WarehouseAdapter):
                     payload["session_id_hash"] = _hash_session_id(str(raw_session_id))
                 _LOGGER.info("session closed: %s", json.dumps(payload))
         finally:
+            # Reset only the session-tracking state — NOT ``self._connection``.
+            # Idempotency comes from the ``_active_session is None`` early-return
+            # above, so a second ``__exit__`` is a no-op regardless. Nulling
+            # ``self._connection`` here would be wrong: a later call would route
+            # back through ``_get_connection()``'s lazy-build branch and
+            # silently construct a *real* connection from (possibly empty)
+            # creds, discarding a test-injected fake — mirrors BigQuery's
+            # cleanup, which resets ``_active_session_id`` but never the client.
             self._active_session = None
             self._session_started_at = None
-            self._connection = None
 
     def dialect(self) -> Dialect:
         return SNOWFLAKE_DIALECT
@@ -545,9 +558,10 @@ class SnowflakeAdapter(WarehouseAdapter):
                 (deterministic hash-mod, fail-loud size guards).
             partition_filter: Optional :class:`PartitionFilter` applied ONCE
                 inside the CTAS ``WHERE`` clause.
-            ttl_seconds: OUR-side hint to the cleanup-WARNING text only; not
-                passed to Snowflake (which enforces its own server-side
-                idle-session reap). Accepted for ABC parity with BigQuery.
+            ttl_seconds: accepted for ABC parity with BigQuery but IGNORED by
+                Snowflake — there is no client-side TTL knob and the cleanup
+                WARNING quotes no countdown; Snowflake reaps idle sessions on a
+                server-side, account-configurable timeout.
 
         Returns:
             :class:`TableRef` with ``project=table.project``,
@@ -598,8 +612,8 @@ class SnowflakeAdapter(WarehouseAdapter):
         )
 
         # Open / reuse the connection (also sets self._active_session) and stamp
-        # the session start so the cleanup-WARNING ``auto-expire`` text has a
-        # reference point.
+        # the session-open time as run provenance (NOT consumed by the cleanup
+        # WARNING — Snowflake quotes no client-side TTL countdown).
         conn = self._get_connection()
         self._session_started_at = _monotonic()
         from signalforge.warehouse.adapters._snowflake_client import map_snowflake_exception

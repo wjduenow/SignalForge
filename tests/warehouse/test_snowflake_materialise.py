@@ -181,13 +181,21 @@ def test_materialised_temp_table_is_reachable_via_same_connection() -> None:
 
 
 def test_compiler_substitutes_temp_table_not_source() -> None:
-    """The #116 materialised-sample-substitution gotcha: the prune compiler,
-    fed the returned temp :class:`TableRef` with :data:`SNOWFLAKE_DIALECT`,
-    emits SQL referencing the ``_sf_sample_<run_id>`` temp table and NOT the
-    source table name. A self-FROM test type that bypassed this would silently
-    full-scan production under the materialised strategy."""
-    from signalforge.draft.models import CandidateTestNotNull
-    from signalforge.manifest.models import Manifest
+    """The #116 materialised-sample-substitution gotcha, exercised on the test
+    type that can ACTUALLY bypass it: a self-FROM ``custom_sql`` singular test
+    (``SELECT ... FROM {{ this }} ...``). Fed the materialised temp
+    :class:`TableRef` with :data:`SNOWFLAKE_DIALECT` at ``scope="full"`` (the
+    shape the engine uses after materialising), the compiler must rewrite the
+    resolved ``{{ this }}`` source name to the ``_sf_sample_<run_id>`` temp
+    table. A bypass here would silently full-scan production under the
+    materialised strategy.
+
+    (The four built-in variants — ``not_null`` etc. — always ``FROM`` the
+    passed ``table_ref`` and so can never bypass substitution; only the
+    self-FROM ``custom_sql`` path can, which is why the gotcha is pinned here.)
+    """
+    from signalforge.draft.models import CandidateTestCustomSQL
+    from signalforge.manifest.models import Column, Manifest, Model
     from signalforge.prune.compiler import _compile_test
 
     conn = _RecordingConnection()
@@ -196,22 +204,42 @@ def test_compiler_substitutes_temp_table_not_source() -> None:
     adapter = _make_adapter(conn)
 
     temp_ref = adapter.materialise_sample(_TABLE, 100)
-    manifest = Manifest(metadata={"dbt_schema_version": "v12"}, nodes={})
+
+    # A model whose ``resolve_this()`` == the SOURCE table (mydatabase.SCH.ORDERS),
+    # so the custom_sql ``{{ this }}`` resolves to the source and the compiler
+    # must rewrite it to the temp ``table_ref`` (because temp != source).
+    model = Model(
+        unique_id="model.shop.orders",
+        name="ORDERS",
+        resource_type="model",
+        package_name="shop",
+        original_file_path="models/orders.sql",
+        path="orders.sql",
+        database="mydatabase",
+        schema="SCH",  # type: ignore[call-arg]
+        columns={"AMOUNT": Column(name="AMOUNT")},
+        raw_code="select 1",
+    )
+    manifest = Manifest(
+        metadata={"dbt_schema_version": "v12"},
+        nodes={"model.shop.orders": model},
+    )
 
     compiled = _compile_test(
-        CandidateTestNotNull(column="ID"),
+        CandidateTestCustomSQL(sql="SELECT * FROM {{ this }} WHERE AMOUNT < 0"),
         temp_ref,
         SNOWFLAKE_DIALECT,
         manifest,
+        model=model,
+        scope="full",
     )
 
     assert isinstance(compiled, str)
-    # The compiled SQL references the temp table name (the compiler folds
-    # identifiers to UPPER for Snowflake, so compare case-insensitively) ...
+    # The self-FROM ``{{ this }}`` was rewritten to the materialised temp table
+    # (the compiler folds identifiers to UPPER for Snowflake) ...
     assert temp_ref.name.upper() in compiled.upper()
-    # ... and NEVER the source table's bare name (engineered distinct from the
-    # _sf_sample_<hash> temp name). A self-FROM test type that bypassed the
-    # substitution would leak the source name here.
+    # ... and the source table's bare name never leaks (a bypass would leave
+    # the resolved source ``ORDERS`` here, full-scanning production).
     assert "ORDERS" not in compiled.upper()
 
 

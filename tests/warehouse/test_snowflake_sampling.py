@@ -110,6 +110,18 @@ def test_null_row_count_no_filter_raises_unknown_table_size() -> None:
         adapter.sample_rows(_TABLE, 100)
 
 
+def test_zero_row_count_no_filter_raises_unknown_table_size() -> None:
+    """``ROW_COUNT`` of 0 + no partition_filter routes through the same
+    unknown-size pathway as NULL (mirrors BigQuery's ``num_rows == 0`` branch)
+    → fail loud. Guards against a regression that split 0 from None."""
+    conn = FakeSnowflakeConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(0,)])
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(UnknownTableSizeError):
+        adapter.sample_rows(_TABLE, 100)
+
+
 def test_no_matching_row_count_row_raises_unknown_table_size() -> None:
     """No INFORMATION_SCHEMA row at all (empty fetchall) → unknown size."""
     conn = FakeSnowflakeConnection()

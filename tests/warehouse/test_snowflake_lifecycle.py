@@ -92,9 +92,13 @@ def test_repr_still_shows_only_account_and_warehouse() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_exit_closes_connection_once_and_resets_state() -> None:
+def test_exit_closes_connection_once_and_resets_session_state() -> None:
     """``__exit__`` calls ``conn.close()`` exactly once and resets
-    ``_active_session`` / ``_connection`` to ``None`` (DEC-003)."""
+    ``_active_session`` to ``None`` (DEC-003). It deliberately does NOT null
+    ``self._connection`` — idempotency comes from the ``_active_session is
+    None`` early-return, and nulling an injected connection would route a later
+    call into a real lazy-build (mirrors BigQuery, which never nulls its
+    client)."""
     conn = FakeSnowflakeConnection()
     adapter = SnowflakeAdapter(connection=conn)
 
@@ -103,7 +107,8 @@ def test_exit_closes_connection_once_and_resets_state() -> None:
 
     assert conn.close_call_count == 1
     assert adapter._active_session is None
-    assert adapter._connection is None
+    # The injected connection reference is retained (not discarded on cleanup).
+    assert adapter._connection is conn
 
 
 def test_second_exit_is_a_no_op() -> None:
@@ -182,9 +187,10 @@ def test_cleanup_failure_warns_with_raw_session_id_and_resets_state(
     # The reason carries the exception class name.
     assert "RuntimeError" in message
 
-    # State still reset despite the failure.
+    # Session state still reset despite the failure; the connection reference
+    # is retained (not nulled on cleanup — see the close-once test).
     assert adapter._active_session is None
-    assert adapter._connection is None
+    assert adapter._connection is conn
 
 
 def test_cleanup_failure_does_not_raise() -> None:
