@@ -10,8 +10,10 @@ rather than during the real Snowflake implementation (issue #118).
 Scope (deliberately minimal):
 
 * :meth:`__init__` captures connection params (``account`` / ``user`` /
-  ``password`` / ``role`` / ``warehouse`` / ``database`` / ``schema``) for
-  forward-compat (DEC-002). No connection is opened.
+  ``password`` / ``role`` / ``warehouse`` / ``database`` / ``schema``) plus the
+  key-pair / SSO auth params (``private_key_path`` /
+  ``private_key_passphrase`` / ``authenticator``) for forward-compat (DEC-002 /
+  DEC-008). No connection is opened; #122 consumes these when opening one.
 * :meth:`__repr__` renders ONLY non-credential identifying fields — ``account``
   and ``warehouse`` — so a debug-print or log line never leaks ``user`` /
   ``password`` / ``role`` / ``database`` / ``schema`` (DEC-003).
@@ -80,6 +82,9 @@ class SnowflakeAdapter(WarehouseAdapter):
         warehouse: str | None = None,
         database: str | None = None,
         schema: str | None = None,
+        private_key_path: str | None = None,
+        private_key_passphrase: str | None = None,
+        authenticator: str | None = None,
     ) -> None:
         self._account = account
         self._user = user
@@ -88,10 +93,14 @@ class SnowflakeAdapter(WarehouseAdapter):
         self._warehouse = warehouse
         self._database = database
         self._schema = schema
+        self._private_key_path = private_key_path
+        self._private_key_passphrase = private_key_passphrase
+        self._authenticator = authenticator
 
     def __repr__(self) -> str:
         # DEC-003: render ONLY non-credential identifying fields. NEVER user,
-        # password, role, database, or schema.
+        # password, role, database, schema, private_key_path,
+        # private_key_passphrase, or authenticator.
         return f"<SnowflakeAdapter account={self._account!r} warehouse={self._warehouse!r}>"
 
     def __enter__(self) -> WarehouseAdapter:

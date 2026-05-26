@@ -49,10 +49,16 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from signalforge.warehouse._path_safety import canonicalise_path
+from signalforge.warehouse._sql_safety import (
+    validate_identifier,
+    validate_snowflake_account,
+)
 from signalforge.warehouse.errors import (
+    _SNOWFLAKE_DEFERRED_AUTH_REMEDIATION,
+    IncompleteProfileError,
     ProfileEnvVarUnsetError,
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
@@ -69,24 +75,96 @@ _SUPPORTED_METHODS: frozenset[str] = frozenset({"oauth"})
 """Auth methods SignalForge v0.1 accepts. ``None`` is also accepted at the
 field level (means "let dbt-bigquery default to ADC")."""
 
+_BIGQUERY_ONLY: frozenset[str] = frozenset(
+    {"project", "location", "priority", "maximum_bytes_billed", "method"}
+)
+"""Fields that only belong on a ``type: bigquery`` target. Present on a
+Snowflake target → foreign-field rejection."""
+
+_SNOWFLAKE_ONLY: frozenset[str] = frozenset(
+    {
+        "account",
+        "user",
+        "role",
+        "warehouse",
+        "database",
+        "password",
+        "private_key_path",
+        "private_key_passphrase",
+        "authenticator",
+    }
+)
+"""Fields that only belong on a ``type: snowflake`` target. Present on a
+BigQuery target → foreign-field rejection."""
+
+_SNOWFLAKE_REQUIRED: tuple[str, ...] = ("account", "user", "warehouse")
+"""Minimum connection keys a Snowflake target must declare."""
+
+_SNOWFLAKE_SUPPORTED_AUTHENTICATORS: frozenset[str] = frozenset({"snowflake", "externalbrowser"})
+"""``authenticator`` values the v0.2 Snowflake adapter handles. ``None`` is
+also accepted (means default password auth). Everything else (``oauth``,
+``username_password_mfa``, …) is deferred."""
+
 
 class DbtProfileTarget(BaseModel):
     """The subset of a dbt ``profiles.yml`` target SignalForge consumes.
 
+    Unified across warehouse types: the same model parses both a
+    ``type: bigquery`` and a ``type: snowflake`` target (US-003, #120). A
+    cross-field ``@model_validator(mode="after")`` enforces the per-type
+    rules — required keys, foreign-field rejection, identifier and
+    authenticator validation — so an operator pointing SignalForge at a
+    Snowflake project gets a loud, typed error rather than a silent
+    mis-parse.
+
     Strict by design (DEC-017): ``extra="forbid"`` means an unknown key
     raises a Pydantic ``ValidationError``. Forward-compat against new
     dbt-bigquery fields is the drift-detector test's responsibility.
+
+    Snowflake ``$``-in-identifier deferral
+    --------------------------------------
+
+    Snowflake permits ``$`` in unquoted identifiers (e.g. a warehouse named
+    ``WH$PROD``). The strict :func:`validate_identifier` regex
+    (``[A-Za-z_][A-Za-z0-9_]*``) rejects ``$``, so such names fail to
+    parse today. This is a documented v0.x deferral — mirroring the
+    domain-scoped-project-ID deferral noted in ``_sql_safety.py`` — rather
+    than a relaxed regex, because identifier hygiene is the right
+    conservative default until a real project needs the ``$`` form.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
 
     type: str
+    # Shared across warehouse types — every real Snowflake (and many
+    # BigQuery) profiles set `threads`; adding it here keeps extra="forbid"
+    # from tripping on a routine connection knob.
+    threads: int | None = None
+
+    # BigQuery-shaped fields.
     method: str | None = None
     project: str | None = None
     dataset: str | None = Field(default=None, alias="schema")
     location: str | None = None
     priority: str | None = None
     maximum_bytes_billed: int | None = None
+
+    # Snowflake-shaped fields (US-003). `database:` is NEW here; Snowflake's
+    # `schema:` key continues to hydrate `dataset` via the existing alias.
+    account: str | None = None
+    user: str | None = None
+    role: str | None = None
+    warehouse: str | None = None
+    database: str | None = None
+    # Secret / credential material: `repr=False` keeps these out of the
+    # Pydantic-generated `repr()` / `str()` so a debug print, log line, or
+    # exception context can't leak them (mirrors SnowflakeAdapter.__repr__
+    # redaction). `private_key_path` is a filesystem path, not a secret, but
+    # is excluded too for defence-in-depth.
+    password: str | None = Field(default=None, repr=False)
+    private_key_path: str | None = Field(default=None, repr=False)
+    private_key_passphrase: str | None = Field(default=None, repr=False)
+    authenticator: str | None = None
 
     @field_validator("method")
     @classmethod
@@ -98,6 +176,58 @@ class DbtProfileTarget(BaseModel):
         if v not in _SUPPORTED_METHODS:
             raise UnsupportedAuthMethodError(method=v)
         return v
+
+    @model_validator(mode="after")
+    def _validate_type_field_coherence(self) -> DbtProfileTarget:
+        # The model is frozen — this after-validator only inspects and
+        # raises; it NEVER mutates / model_copy (safety-layer.md: a
+        # model_copy(update=...) would silently skip the re-run).
+        if self.type == "snowflake":
+            missing = [k for k in _SNOWFLAKE_REQUIRED if getattr(self, k) is None]
+            if missing:
+                # IncompleteProfileError is reserved for the MISSING-required
+                # case (it is semantically "missing", not "foreign").
+                raise IncompleteProfileError(profile_type="snowflake", missing=sorted(missing))
+
+            # Foreign-field rejection is a DIFFERENT failure than "missing", so
+            # IncompleteProfileError does not fit. There is no dedicated
+            # foreign-field typed error; raising a plain ValueError surfaces
+            # loudly as a Pydantic ValidationError (same shape as a config
+            # error from the `method` field_validator).
+            for name in _BIGQUERY_ONLY:
+                if getattr(self, name) is not None:
+                    raise ValueError(f"field {name!r} is not valid for a snowflake profile target")
+
+            # Identifier hygiene on the names that become SQL downstream
+            # (#122 opens the connection + interpolates these). `role` is
+            # included because Snowflake interpolates it as `USE ROLE <role>`;
+            # `account` uses the permissive locator grammar (never SQL).
+            if self.account is not None:
+                validate_snowflake_account("account", self.account)
+            if self.warehouse is not None:
+                validate_identifier("warehouse", self.warehouse)
+            if self.database is not None:
+                validate_identifier("database", self.database)
+            if self.dataset is not None:
+                validate_identifier("schema", self.dataset)
+            if self.role is not None:
+                validate_identifier("role", self.role)
+
+            # Authenticator scope: None / snowflake / externalbrowser only.
+            if self.authenticator is not None and (
+                self.authenticator not in _SNOWFLAKE_SUPPORTED_AUTHENTICATORS
+            ):
+                raise UnsupportedAuthMethodError(
+                    method=self.authenticator,
+                    remediation=_SNOWFLAKE_DEFERRED_AUTH_REMEDIATION,
+                )
+        elif self.type == "bigquery":
+            # Symmetric foreign-field rejection for BigQuery targets.
+            for name in _SNOWFLAKE_ONLY:
+                if getattr(self, name) is not None:
+                    raise ValueError(f"field {name!r} is not valid for a bigquery profile target")
+
+        return self
 
 
 # ---------------------------------------------------------------------------
