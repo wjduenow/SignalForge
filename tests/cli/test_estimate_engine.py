@@ -22,7 +22,7 @@ import logging
 
 import pytest
 
-from signalforge.cli._estimate import CriterionEstimate, EstimateReport, estimate
+from signalforge.cli._estimate import CriterionEstimate, EstimateReport, estimate, render
 from signalforge.draft.config import DraftConfig
 from signalforge.grade.config import GradeConfig
 from signalforge.grade.rubric import DEFAULT_RUBRIC
@@ -32,6 +32,7 @@ from signalforge.llm.pricing import lookup as pricing_lookup
 from signalforge.manifest.models import Column, Manifest, Model
 from signalforge.prune.config import PruneConfig
 from signalforge.warehouse import BigQueryAdapter, WarehouseAuthError
+from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
 from tests.llm._fake import FakeAnthropicClient, FakeCountTokensResponse
 from tests.warehouse._fake import FakeBigQueryClient
 
@@ -344,6 +345,58 @@ def test_estimate_warehouse_unavailable_reason_carries_error_class_name(
     # Class name prefix is the load-bearing pin; the message body
     # may be truncated but the class-name boundary is exact.
     assert report.warehouse_unavailable_reason.startswith("WarehouseAuthError: ")
+
+
+def test_estimate_degrades_on_snowflake_estimate_not_supported(
+    model: Model,
+    manifest: Manifest,
+    draft_config: DraftConfig,
+    grade_config: GradeConfig,
+    prune_config: PruneConfig,
+    fake_anthropic: FakeAnthropicClient,
+) -> None:
+    """DEC-005 (#123): a real ``SnowflakeAdapter`` inherits the ABC default
+    ``estimate_query_bytes`` which raises ``EstimateNotSupportedError`` (a
+    ``WarehouseError`` subclass). The engine must catch it, degrade the
+    warehouse-bytes section into ``warehouse_unavailable_reason``, and still
+    compute the LLM-cost half.
+
+    This test would FAIL if the engine's ``except WarehouseError`` in
+    ``signalforge/cli/_estimate.py`` were narrowed to exclude
+    ``EstimateNotSupportedError`` (since it subclasses ``WarehouseError``,
+    the current catch handles it). The assertion keys specifically on the
+    ``EstimateNotSupportedError`` class name so a narrowing refactor breaks
+    the test.
+
+    No fake warehouse client is needed: ``SnowflakeAdapter.estimate_query_bytes``
+    raises before any connection, and the ``--estimate`` path's
+    ``_build_representative_sql`` only touches ``dialect()`` +
+    ``TableRef.from_model`` — never the ``NotImplementedError`` skeleton ops.
+    """
+    n_criteria = len(DEFAULT_RUBRIC)
+    _queue_count_tokens(fake_anthropic, draft=1000, per_criterion=500, n_criteria=n_criteria)
+    adapter = SnowflakeAdapter()
+
+    report = estimate(
+        model,
+        manifest,
+        draft_config,
+        grade_config,
+        prune_config,
+        adapter,
+        fake_anthropic,
+    )
+
+    assert report.warehouse_unavailable_reason is not None
+    assert report.warehouse_unavailable_reason.startswith("EstimateNotSupportedError:")
+    assert report.warehouse_total_bytes is None
+    assert report.warehouse_bytes_per_row is None
+    # The LLM-cost half of the report is unaffected by the warehouse degrade.
+    assert report.total_llm_usd > 0
+
+    rendered = render(report)
+    assert "<unavailable: EstimateNotSupportedError>" in rendered
+    assert "Total estimated warehouse: <unknown>" in rendered
 
 
 def test_estimate_emits_warning_on_warehouse_degrade(
