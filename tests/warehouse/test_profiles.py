@@ -497,7 +497,7 @@ def test_snowflake_missing_required_keys_raises(drop: list[str], expected_missin
     for key in drop:
         del target[key]
 
-    with pytest.raises((IncompleteProfileError, ValidationError)) as excinfo:
+    with pytest.raises(IncompleteProfileError) as excinfo:
         DbtProfileTarget.model_validate(target)
     assert expected_missing in str(excinfo.value)
 
@@ -514,7 +514,7 @@ def test_snowflake_authenticator_externalbrowser_parses() -> None:
 @pytest.mark.parametrize("authenticator", ["oauth", "username_password_mfa"])
 def test_snowflake_deferred_authenticator_raises(authenticator: str) -> None:
     """Deferred auth methods → UnsupportedAuthMethodError (deferred-auth remediation)."""
-    with pytest.raises((UnsupportedAuthMethodError, ValidationError)) as excinfo:
+    with pytest.raises(UnsupportedAuthMethodError) as excinfo:
         DbtProfileTarget.model_validate(_snowflake_target(authenticator=authenticator))
     assert authenticator in str(excinfo.value)
 
@@ -525,18 +525,19 @@ def test_snowflake_deferred_authenticator_raises(authenticator: str) -> None:
         ("warehouse", "wh;DROP"),
         ("database", "db-with-dash"),
         ("schema", "sch;ema"),
+        ("role", "r;DROP"),
     ],
 )
 def test_snowflake_bad_identifier_raises(field: str, bad_value: str) -> None:
-    """Bad warehouse / database / schema identifiers → InvalidIdentifierError."""
-    with pytest.raises((InvalidIdentifierError, ValidationError)) as excinfo:
+    """Bad warehouse / database / schema / role identifiers → InvalidIdentifierError."""
+    with pytest.raises(InvalidIdentifierError) as excinfo:
         DbtProfileTarget.model_validate(_snowflake_target(**{field: bad_value}))
     assert bad_value in str(excinfo.value)
 
 
 def test_snowflake_bad_account_raises() -> None:
     """A garbage account locator (embedded quote) → InvalidIdentifierError."""
-    with pytest.raises((InvalidIdentifierError, ValidationError)) as excinfo:
+    with pytest.raises(InvalidIdentifierError) as excinfo:
         DbtProfileTarget.model_validate(_snowflake_target(account="a'b"))
     assert "a'b" in str(excinfo.value) or "account" in str(excinfo.value)
 

@@ -193,7 +193,10 @@ class DbtProfileTarget(BaseModel):
                 if getattr(self, name) is not None:
                     raise ValueError(f"field {name!r} is not valid for a snowflake profile target")
 
-            # Identifier hygiene on the names that COULD be interpolated.
+            # Identifier hygiene on the names that become SQL downstream
+            # (#122 opens the connection + interpolates these). `role` is
+            # included because Snowflake interpolates it as `USE ROLE <role>`;
+            # `account` uses the permissive locator grammar (never SQL).
             if self.account is not None:
                 validate_snowflake_account("account", self.account)
             if self.warehouse is not None:
@@ -202,6 +205,8 @@ class DbtProfileTarget(BaseModel):
                 validate_identifier("database", self.database)
             if self.dataset is not None:
                 validate_identifier("schema", self.dataset)
+            if self.role is not None:
+                validate_identifier("role", self.role)
 
             # Authenticator scope: None / snowflake / externalbrowser only.
             if self.authenticator is not None and (
