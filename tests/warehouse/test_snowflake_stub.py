@@ -13,11 +13,11 @@ pin the four issue ACs:
 4. SDK type-ignores are confined to ``_snowflake_client.py`` — pinned by
    ``tests/warehouse/test_snowflake_client_confinement.py``, not here.
 
-The three warehouse-operation methods raise :class:`NotImplementedError` naming
-the epic (#118); ``__enter__`` / ``__exit__`` are no-ops so the ``with adapter:``
-contract works without conditional logic at the call site;
-``materialise_sample`` / ``estimate_query_bytes`` inherit the ABC defaults
-(raising the typed not-supported errors) — they are deliberately NOT overridden.
+``column_stats`` still raises :class:`NotImplementedError` naming the epic
+(#118) — ``sample_rows`` (#122 US-003), ``materialise_sample`` / ``run_test_sql``
+(#122 US-004) are now implemented and exercised in the sampling / materialise
+suites. ``estimate_query_bytes`` inherits the ABC default (raising the typed
+:class:`EstimateNotSupportedError`) pending issue #123.
 """
 
 from __future__ import annotations
@@ -29,10 +29,7 @@ import pytest
 
 from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
 from signalforge.warehouse.base import WarehouseAdapter
-from signalforge.warehouse.errors import (
-    EstimateNotSupportedError,
-    MaterialisationNotSupportedError,
-)
+from signalforge.warehouse.errors import EstimateNotSupportedError
 from signalforge.warehouse.models import SNOWFLAKE_DIALECT, Dialect, TableRef
 from signalforge.warehouse.profiles import DbtProfileTarget
 
@@ -139,30 +136,9 @@ def test_column_stats_raises_not_implemented() -> None:
     assert "issue #118" in str(exc_info.value)
 
 
-def test_run_test_sql_raises_not_implemented() -> None:
-    """:meth:`run_test_sql` is part of the v0.2 skeleton surface."""
-    adapter = SnowflakeAdapter()
-
-    with pytest.raises(NotImplementedError) as exc_info:
-        adapter.run_test_sql("SELECT 1")
-
-    assert "issue #118" in str(exc_info.value)
-
-
 # ---------------------------------------------------------------------------
 # ABC-default graceful-degrade methods (NOT overridden)
 # ---------------------------------------------------------------------------
-
-
-def test_materialise_sample_raises_not_supported() -> None:
-    """``materialise_sample`` is deliberately NOT overridden — the ABC default
-    (raising :class:`MaterialisationNotSupportedError`) is the correct v0.2
-    behaviour for a warehouse without a materialisation primitive (DEC-008)."""
-    adapter = SnowflakeAdapter()
-    table = TableRef(project=None, dataset="public", name="t")
-
-    with pytest.raises(MaterialisationNotSupportedError):
-        adapter.materialise_sample(table, 100)
 
 
 def test_estimate_query_bytes_raises_not_supported() -> None:
