@@ -157,6 +157,7 @@ from signalforge.warehouse import (
     BytesBilledExceededError,
     ColumnNotFoundError,
     EstimateNotSupportedError,
+    IncompleteProfileError,
     InvalidIdentifierError,
     ManifestProjectNotFoundError,
     ManifestSchemaNotFoundError,
@@ -234,6 +235,10 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     ProfileTargetNotFoundError: 1,
     UnsupportedProfileTypeError: 1,
     UnsupportedAuthMethodError: 1,
+    # Profile parsed but missing required keys for its type (#120 US-002 /
+    # DEC-004). Tier 1 alongside UnsupportedAuthMethodError — both are
+    # profile-config-shape failures that fire before any warehouse work.
+    IncompleteProfileError: 1,
     ManifestProjectNotFoundError: 1,
     ManifestSchemaNotFoundError: 1,
     # Per-stage config-load errors.
