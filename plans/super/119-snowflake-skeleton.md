@@ -5,7 +5,7 @@
 - **Ticket:** [#119](https://github.com/wjduenow/SignalForge/issues/119) — `feat: SnowflakeAdapter skeleton — factory dispatch + Dialect + _snowflake_client.py shim`
 - **Epic:** [#118](https://github.com/wjduenow/SignalForge/issues/118) — Snowflake warehouse adapter (v0.2). **#119 lands first; unblocks #120–#124.**
 - **Branch:** `feature/119-snowflake-skeleton` (off `dev`; PR targets `dev`)
-- **Phase:** published (PR [#125](https://github.com/wjduenow/SignalForge/pull/125), awaiting approval)
+- **Phase:** devolved (PR [#125](https://github.com/wjduenow/SignalForge/pull/125); beads epic `bd_1-scaffolding-cx3`)
 - **Sessions:** 1 (2026-05-25)
 
 ---
@@ -166,4 +166,10 @@ No blockers. Two concerns resolved into DEC-003 / DEC-006 / DEC-007.
 
 ## Beads Manifest
 
-*(filled on devolve)*
+- **Epic:** `bd_1-scaffolding-cx3`
+- **US-001** dialect → `bd_1-scaffolding-cx3.1` (ready)
+- **US-002** shim + dep → `bd_1-scaffolding-cx3.2` (ready)
+- **US-003** adapter + dispatch → `bd_1-scaffolding-cx3.3` (blocked on .1, .2)
+- **Quality Gate** → `bd_1-scaffolding-cx3.4` (blocked on .3)
+- **Patterns & Memory** → `bd_1-scaffolding-cx3.5` (blocked on .4)
+- **Branch:** `feature/119-snowflake-skeleton`
