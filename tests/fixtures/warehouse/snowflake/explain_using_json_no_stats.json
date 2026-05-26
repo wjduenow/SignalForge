@@ -1,0 +1,11 @@
+{
+  "Operations": [
+    [
+      {
+        "id": 0,
+        "operation": "Result",
+        "expressions": ["1"]
+      }
+    ]
+  ]
+}

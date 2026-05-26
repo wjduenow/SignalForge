@@ -77,6 +77,7 @@ from signalforge.warehouse._sample_id import _compute_run_id, _hash_session_id
 from signalforge.warehouse._sql_safety import validate_identifier, validate_test_sql
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
+    EstimateUnavailableError,
     MaterialisationFailedError,
     SamplingRequiresPartitionFilterError,
     UnknownTableSizeError,
@@ -116,6 +117,79 @@ _LARGE_TABLE_THRESHOLD: int = 100_000_000
 _monotonic = time.monotonic
 
 _V02_REMEDIATION = "SnowflakeAdapter is a v0.2 skeleton (issue #118) — full implementation pending."
+
+
+def _parse_explain_json_bytes(cell: str | dict[str, Any]) -> int:
+    """Extract the planner's estimated-bytes figure from an ``EXPLAIN USING
+    JSON`` result cell (DEC-001 / DEC-002 / DEC-006 of issue #130).
+
+    ``EXPLAIN USING JSON <sql>`` returns a single row / single cell carrying a
+    JSON document with a top-level ``GlobalStats`` object
+    (``partitionsTotal`` / ``partitionsAssigned`` / ``bytesAssigned``).
+    ``GlobalStats.bytesAssigned`` is the estimated bytes scanned — the analogue
+    of BigQuery's ``total_bytes_processed`` (which is why it maps directly onto
+    the ``int``-bytes contract the ``--estimate`` engine consumes).
+
+    Pure: no connection, no warehouse call, no logging. The Snowflake connector
+    may hand the cell back as a JSON ``str`` OR an already-parsed ``dict``
+    depending on its configuration, so both shapes are accepted:
+
+    * ``str`` → ``json.loads`` it (malformed → :class:`EstimateUnavailableError`).
+    * ``dict`` → used directly.
+
+    Every failure to extract a usable byte count raises
+    :class:`EstimateUnavailableError` with an operator-useful ``detail`` —
+    NEVER a fabricated number and NEVER ``0`` (DEC-002). A ``return 0`` would
+    conflate "metadata-only query / plan-shape change" with "parser broke" and
+    silently report a ``$0`` cost. The ``--estimate`` engine catches this typed
+    error at the supplementary-source boundary and degrades to a price-only
+    preview.
+
+    Defensive on the value itself: a ``bool`` is rejected (``bool`` is an
+    ``int`` subclass in Python, but ``True`` is not a byte count), as is a
+    negative value; anything not coercible to a non-negative ``int`` raises.
+
+    :param cell: the EXPLAIN result cell — JSON ``str`` or parsed ``dict``.
+    :returns: ``int(GlobalStats.bytesAssigned)`` — a non-negative byte count.
+    :raises EstimateUnavailableError: on unparseable JSON, a non-mapping
+        document, a missing/non-mapping ``GlobalStats``, a missing
+        ``bytesAssigned``, or a ``bytesAssigned`` that is not a non-negative
+        non-bool integer.
+    """
+    if isinstance(cell, str):
+        try:
+            document: Any = json.loads(cell)
+        except (ValueError, TypeError) as exc:
+            raise EstimateUnavailableError(
+                detail=f"EXPLAIN USING JSON cell was not valid JSON: {exc}"
+            ) from exc
+    else:
+        document = cell
+
+    if not isinstance(document, dict):
+        raise EstimateUnavailableError(
+            detail=f"EXPLAIN plan document was not a JSON object (got {type(document).__name__})"
+        )
+
+    global_stats = document.get("GlobalStats")
+    if not isinstance(global_stats, dict):
+        raise EstimateUnavailableError(detail="EXPLAIN plan carried no GlobalStats object")
+
+    if "bytesAssigned" not in global_stats:
+        raise EstimateUnavailableError(
+            detail="EXPLAIN plan GlobalStats carried no bytesAssigned field"
+        )
+
+    raw = global_stats["bytesAssigned"]
+    # ``bool`` is an ``int`` subclass, so reject it explicitly before the
+    # ``int`` check — a ``True`` byte count is meaningless.
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise EstimateUnavailableError(
+            detail=f"GlobalStats.bytesAssigned was not an integer (got {type(raw).__name__})"
+        )
+    if raw < 0:
+        raise EstimateUnavailableError(detail=f"GlobalStats.bytesAssigned was negative ({raw})")
+    return int(raw)
 
 
 class SnowflakeAdapter(WarehouseAdapter):
