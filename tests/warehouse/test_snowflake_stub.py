@@ -294,11 +294,15 @@ def test_snowflake_dispatch_does_not_import_bigquery_sdk() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_context_manager_is_a_no_op() -> None:
-    """The skeleton honours the ABC's ``with adapter:`` contract so callers can
-    swap a Snowflake profile in without conditional ``with`` logic. The
-    ``__exit__`` is a no-op; cleanup work lands when the v0.x implementation
-    does."""
+def test_context_manager_with_no_opened_connection_is_a_clean_no_op() -> None:
+    """The adapter honours the ABC's ``with adapter:`` contract so callers can
+    swap a Snowflake profile in without conditional ``with`` logic. When no
+    connection was ever opened (``_active_session is None``), ``__exit__``'s
+    fail-soft cleanup (#122 US-002) returns immediately — a clean no-op (no
+    connection build, no close call)."""
     with SnowflakeAdapter() as adapter:
         assert isinstance(adapter, SnowflakeAdapter)
         assert adapter.dialect() is SNOWFLAKE_DIALECT
+    # No connection was opened, so cleanup left state untouched.
+    assert adapter._connection is None
+    assert adapter._active_session is None
