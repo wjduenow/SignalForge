@@ -68,7 +68,9 @@ def test_dialect_method_returns_snowflake_dialect_by_identity() -> None:
 def test_repr_shows_only_safe_fields_never_credentials() -> None:
     """:meth:`__repr__` renders ONLY ``account`` + ``warehouse``. A
     debug-print / log line must never leak ``user`` / ``password`` / ``role``
-    / ``database`` / ``schema`` (DEC-003)."""
+    / ``database`` / ``schema`` — nor the key-pair / SSO auth fields
+    ``private_key_path`` / ``private_key_passphrase`` / ``authenticator``
+    (DEC-003 / DEC-008)."""
     adapter = SnowflakeAdapter(
         account="ac123",
         user="bob",
@@ -77,6 +79,9 @@ def test_repr_shows_only_safe_fields_never_credentials() -> None:
         warehouse="WH",
         database="db",
         schema="sch",
+        private_key_path="/keys/rsa_key.p8",
+        private_key_passphrase="topsecret",
+        authenticator="externalbrowser",
     )
     rendered = repr(adapter)
 
@@ -94,6 +99,28 @@ def test_repr_shows_only_safe_fields_never_credentials() -> None:
     assert "role" not in rendered
     assert "database" not in rendered
     assert "schema" not in rendered
+
+    # Key-pair / SSO auth fields must not leak — neither values nor labels.
+    assert "topsecret" not in rendered
+    assert "/keys/rsa_key.p8" not in rendered
+    assert "private_key" not in rendered
+    assert "passphrase" not in rendered
+    assert "authenticator" not in rendered
+
+
+def test_init_stores_key_pair_and_sso_auth_fields() -> None:
+    """The constructor captures the three forward-compat auth params on
+    ``self._private_key_path`` / ``self._private_key_passphrase`` /
+    ``self._authenticator`` so #122 can open a real connection (DEC-008)."""
+    adapter = SnowflakeAdapter(
+        private_key_path="/keys/rsa_key.p8",
+        private_key_passphrase="topsecret",
+        authenticator="externalbrowser",
+    )
+
+    assert adapter._private_key_path == "/keys/rsa_key.p8"
+    assert adapter._private_key_passphrase == "topsecret"
+    assert adapter._authenticator == "externalbrowser"
 
 
 # ---------------------------------------------------------------------------
