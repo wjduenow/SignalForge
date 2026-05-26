@@ -102,6 +102,32 @@ from one place rather than reaching into adapter modules.
 """
 
 
+SNOWFLAKE_DIALECT = Dialect(
+    name="snowflake",
+    supports_tablesample=True,
+    supports_qualify=True,
+    quote_char='"',
+    identifier_case="upper",
+)
+"""Snowflake-flavoured :class:`Dialect` for the v0.3 adapter (issue #119, DEC-004).
+
+* ``quote_char='"'`` — Snowflake uses double-quote for identifier quoting.
+* ``identifier_case='upper'`` — unquoted identifiers fold to UPPERCASE.
+  This is the **opposite** of Postgres (``identifier_case='lower'``) and is
+  **load-bearing** for the Snowflake compiler (issue #121): identifier-case
+  folding drives how quoted vs. unquoted names resolve, so the two dialects
+  must not share a casing rule.
+* ``supports_qualify=True`` — Snowflake supports the ``QUALIFY`` clause.
+* ``supports_tablesample=True`` — ``TABLESAMPLE`` is supported, though the
+  prune layer prefers deterministic hash-mod sampling anyway (DEC-006 of
+  issue #3).
+
+Lives alongside :data:`BIGQUERY_DIALECT` / :data:`POSTGRES_DIALECT` per
+DEC-003 so every dialect-aware consumer imports each flavour from one place
+rather than reaching into adapter modules.
+"""
+
+
 # ---------------------------------------------------------------------------
 # TableRef
 # ---------------------------------------------------------------------------
@@ -280,6 +306,7 @@ __all__ = [
     "ColumnStats",
     "Dialect",
     "POSTGRES_DIALECT",
+    "SNOWFLAKE_DIALECT",
     "PartitionFilter",
     "TableRef",
     "TestResult",

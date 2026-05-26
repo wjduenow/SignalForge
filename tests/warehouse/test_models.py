@@ -23,7 +23,9 @@ from signalforge.warehouse.errors import (
 )
 from signalforge.warehouse.models import (
     BIGQUERY_DIALECT,
+    SNOWFLAKE_DIALECT,
     ColumnStats,
+    Dialect,
     PartitionFilter,
     TableRef,
     TestResult,
@@ -52,6 +54,29 @@ def test_bigquery_dialect_constant_is_frozen() -> None:
     """Mutating BIGQUERY_DIALECT raises FrozenInstanceError (DEC-003)."""
     with pytest.raises(dataclasses.FrozenInstanceError):
         BIGQUERY_DIALECT.name = "snowflake"  # type: ignore[misc]
+
+
+@pytest.mark.unit
+def test_snowflake_dialect_values() -> None:
+    """SNOWFLAKE_DIALECT carries the Snowflake capability flags (issue #119, DEC-004).
+
+    ``identifier_case='upper'`` is the opposite of Postgres ('lower') and is
+    load-bearing for the Snowflake compiler (issue #121).
+    """
+    assert isinstance(SNOWFLAKE_DIALECT, Dialect)
+    assert SNOWFLAKE_DIALECT.name == "snowflake"
+    assert SNOWFLAKE_DIALECT.quote_char == '"'
+    assert SNOWFLAKE_DIALECT.identifier_case == "upper"
+    assert SNOWFLAKE_DIALECT.supports_qualify is True
+    assert SNOWFLAKE_DIALECT.supports_tablesample is True
+
+
+@pytest.mark.unit
+def test_snowflake_dialect_importable_from_package_top_level() -> None:
+    """SNOWFLAKE_DIALECT is re-exported from signalforge.warehouse."""
+    from signalforge.warehouse import SNOWFLAKE_DIALECT as pkg_dialect
+
+    assert pkg_dialect is SNOWFLAKE_DIALECT
 
 
 @pytest.mark.unit
