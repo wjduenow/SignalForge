@@ -62,6 +62,7 @@ _CONSTRUCT_KWARGS: dict[str, dict[str, object]] = {
     "MaterialisationNotSupportedError": {"adapter_name": "SnowflakeAdapter"},
     "EstimateNotSupportedError": {"adapter_name": "SnowflakeAdapter"},
     "EstimateUnavailableError": {"detail": "EXPLAIN plan lacked GlobalStats"},
+    "RowCountNotSupportedError": {"adapter_name": "PostgresAdapter"},
     "IncompleteProfileError": {
         "profile_type": "snowflake",
         "missing": ["account", "warehouse"],
@@ -100,12 +101,13 @@ def test_each_subclass_has_default_remediation() -> None:
     # EstimateNotSupportedError → 19; issue #47 adds
     # ProfileEnvVarUnsetError (supports init-demo profile env_var
     # rendering) → 20.
-    assert len(errors_module.__all__) == 22, (
+    assert len(errors_module.__all__) == 23, (
         "DEC-026 enumerates 15 typed subclasses + 1 base; #22 US-001 "
         "adds 2 more (MaterialisationFailed/NotSupported); #36 US-002 "
         "adds EstimateNotSupportedError; #47 QG pass-3 adds "
         "ProfileEnvVarUnsetError; #120 US-002 adds IncompleteProfileError; "
-        "#130 US-001 adds EstimateUnavailableError. "
+        "#130 US-001 adds EstimateUnavailableError; #140 adds "
+        "RowCountNotSupportedError. "
         "Update tests and __all__ together if this changes."
     )
     for name in errors_module.__all__:

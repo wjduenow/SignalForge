@@ -366,9 +366,10 @@ the v0.2 stop-gap, not a permanent surface.
 > (`SELECT * EXCLUDE (_sf_sample_hash) FROM (SELECT t.*, ABS(HASH(*)) AS
 > _sf_sample_hash …)`) so the `HASH(*)` row-hash sits in the SELECT projection
 > rather than the rejected `WHERE`/`ORDER BY` position. **`materialised`
-> sample-mode prune now works on live Snowflake.** The `oneshot` strategy
-> remains blocked at a separate engine seam (its row-count routes through a
-> BigQuery-only `_get_client`); see "Known limitations on live Snowflake" below.
+> sample-mode prune now works on live Snowflake.** The `oneshot` strategy works
+> too since #140 routed its sample row-count through the vendor-neutral
+> `WarehouseAdapter.get_row_count` seam (it previously reached a BigQuery-only
+> `_get_client`); see "Known limitations on live Snowflake" below.
 
 ## Query-bytes estimation (v0.2, issue #36)
 
@@ -615,8 +616,9 @@ materialised sampling against a read-only shared database (e.g.
 projection-subquery shape from #139 (`SELECT * EXCLUDE (_sf_sample_hash) FROM
 (SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash …)`), so `prune.scope: sample` +
 `prune.sample_strategy: materialised` works on live Snowflake (against a
-writable source). The `oneshot` strategy is still blocked at a separate engine
-seam — see "Known limitations" below.
+writable source). The `oneshot` strategy also works since #140 routed its
+sample row-count through the vendor-neutral `WarehouseAdapter.get_row_count`
+seam (no CTAS, so no writable source needed) — see "Known limitations" below.
 
 **Session cleanup is fail-soft with no manual command.** A Snowflake temp
 table is unreachable outside its owning session, so there is no
@@ -644,22 +646,26 @@ passes through unchanged. No `BytesBilledExceededError` equivalent —
 Snowflake has no bytes-billed cap (cost is governed by warehouse size +
 auto-suspend, see below).
 
-**Known limitations on live Snowflake (v0.2) — use `safety: schema-only`; for
-sampling prefer `prune.sample_strategy: materialised`.** Two
-deferred/defective paths remain after #139 fixed the `HASH(*)`-in-predicate bug.
-The combination certified green by the gated live e2e is `safety: schema-only` +
-`prune.scope: sample` + `prune.sample_strategy: materialised` (or
-`prune.scope: full`):
+**Known limitations on live Snowflake (v0.2) — use `safety: schema-only`.** One
+deferred path remains after #139 fixed the `HASH(*)`-in-predicate bug and #140
+added the vendor-neutral row-count seam. Both `prune.sample_strategy` values now
+work; the combinations certified green by the gated live e2e are
+`safety: schema-only` + `prune.scope: full`, or `prune.scope: sample` with
+either `prune.sample_strategy: materialised` or `oneshot`:
 
 - **`safety: aggregate-only` — unsupported.** Profiles columns via
   `adapter.column_stats`, which `SnowflakeAdapter` leaves as a deferred
   `NotImplementedError` (the one v0.2 method not yet implemented).
   `generate` with `safety.mode: aggregate-only` fails (exit 1).
-- **`prune.scope: sample` with `prune.sample_strategy: oneshot` — blocked** at
-  the engine seam: the sample row-count is fetched through a BigQuery-only
-  `_get_client`; `SnowflakeAdapter` exposes `_get_num_rows` instead. Needs a
-  vendor-neutral `WarehouseAdapter.get_table_metadata` seam (bead
-  `bd_1-scaffolding-tft`). Use `materialised` (the default) instead.
+
+**Fixed by #140:** `prune.scope: sample` + `prune.sample_strategy: oneshot` on a
+non-BigQuery adapter no longer raises at the engine seam. The sample row-count is
+now fetched through the vendor-neutral `WarehouseAdapter.get_row_count` seam
+(BigQuery wraps its cached `get_table`; Snowflake wraps
+`_get_num_rows` → `INFORMATION_SCHEMA.TABLES.ROW_COUNT`) rather than a
+BigQuery-only `_get_client`. Certified by the gated live
+`test_prune_drops_always_passes_not_null_live_oneshot_sample`
+(`bd_1-scaffolding-tft`).
 
 **Fixed by #139:** the deterministic row-hash sampling SQL no longer emits
 `MOD(ABS(HASH(*)), n) < 1` in `WHERE`/`ORDER BY` (which Snowflake rejected with
@@ -724,8 +730,8 @@ covers both the offline `fakesnow`/`sqlglot` suites (which run with no env
 vars) and the gated live tests (which self-skip without credentials):
 `tests/prune/test_compiler_fakesnow.py`,
 `tests/warehouse/test_snowflake_adapter_fakesnow.py` (offline);
-`tests/warehouse/test_snowflake_prune_live.py` (live, materialised, writable
-schema), `tests/warehouse/test_snowflake_estimate_live.py` (live EXPLAIN),
+`tests/warehouse/test_snowflake_prune_live.py` (live, materialised + oneshot,
+writable schema), `tests/warehouse/test_snowflake_estimate_live.py` (live EXPLAIN),
 `tests/cli/test_e2e_snowflake_smoke.py` (live full pipeline vs `TPCH_SF1`,
 `oneshot`).
 

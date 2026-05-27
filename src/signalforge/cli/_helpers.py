@@ -168,6 +168,7 @@ from signalforge.warehouse import (
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
     QuerySyntaxError,
+    RowCountNotSupportedError,
     SamplingError,
     SamplingRequiresPartitionFilterError,
     TableNotFoundError,
@@ -414,6 +415,13 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # price-only preview and renders ``<unavailable: ...>`` rather than
     # misclassifying it as input-shape.
     EstimateUnavailableError: 3,
+    # Row-count seam (issue #140): the active adapter does not expose a
+    # ``get_row_count`` primitive (the Postgres stub, or any future
+    # adapter that has not grown one). Sample-scope prune routes the
+    # bucket-sizing lookup through this seam; the typed exception carries
+    # its own ``prune.scope: full`` remediation. External-dep tier, like
+    # the sibling ``*NotSupportedError`` adapter-capability signals.
+    RowCountNotSupportedError: 3,
     # Audit-write durability across every fail-closed seam — when any of
     # these fire the disk hand-off didn't happen, which is an external-dep
     # state we couldn't recover.

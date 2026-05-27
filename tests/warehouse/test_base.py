@@ -27,6 +27,7 @@ from signalforge.warehouse.adapters.bigquery import BigQueryAdapter
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
     MaterialisationNotSupportedError,
+    RowCountNotSupportedError,
     UnsupportedProfileTypeError,
 )
 from signalforge.warehouse.models import (
@@ -206,6 +207,34 @@ def test_materialise_sample_default_impl_raises_not_supported() -> None:
     assert "_StubAdapter" in rendered
     assert "↳ Remediation:" in rendered
     assert "prune.sample_strategy: oneshot" in rendered
+
+
+def test_get_row_count_default_impl_raises_not_supported() -> None:
+    """An adapter that does NOT override ``get_row_count`` inherits the ABC
+    default which raises :class:`RowCountNotSupportedError` (issue #140).
+
+    Pins the seam introduced to replace ``_resolve_sample_bucket``'s
+    BigQuery-only ``getattr(adapter, "_get_client")`` crack. The error must
+    be a typed ``WarehouseError`` subclass (not ``NotImplementedError``) so
+    the four-tier exit-code taxonomy maps it to CLI tier 3 and the operator
+    sees the ``prune.scope: full`` remediation.
+    """
+    adapter = _StubAdapter()
+    table = TableRef(project="my-project", dataset="ds", name="t")
+
+    with pytest.raises(RowCountNotSupportedError) as exc_info:
+        adapter.get_row_count(table)
+
+    err = exc_info.value
+    assert err.default_remediation == (
+        "Set 'prune.scope: full' in signalforge.yml to skip "
+        "deterministic-sample sizing, or wait for this adapter to grow a "
+        "get_row_count override."
+    )
+    rendered = str(err)
+    assert "_StubAdapter" in rendered
+    assert "↳ Remediation:" in rendered
+    assert "prune.scope: full" in rendered
 
 
 def test_materialise_sample_signature_matches_dec_004() -> None:

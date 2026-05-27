@@ -113,6 +113,34 @@ def test_sample_sql_is_byte_identical_across_two_calls() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# get_row_count — issue #140 (vendor-neutral row-count seam)
+# ---------------------------------------------------------------------------
+
+
+def test_get_row_count_returns_information_schema_row_count() -> None:
+    """The Snowflake override returns ``INFORMATION_SCHEMA.TABLES.ROW_COUNT``
+    via :meth:`_get_num_rows` (issue #140). This is the seam the prune engine
+    calls under ``prune.scope: sample`` — before #140 it reached for a
+    BigQuery-only ``_get_client`` and raised on every Snowflake table."""
+    conn = FakeSnowflakeConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(2_500_000,)])
+    adapter = _make_adapter(conn)
+
+    assert adapter.get_row_count(_TABLE) == 2_500_000
+
+
+def test_get_row_count_returns_none_for_view_without_row_count() -> None:
+    """``ROW_COUNT`` NULL (view / materialised view) surfaces as ``None`` —
+    a first-class result. The prune layer treats unknown as fail-loud; the
+    adapter just reports what INFORMATION_SCHEMA returns (issue #140)."""
+    conn = FakeSnowflakeConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(None,)])
+    adapter = _make_adapter(conn)
+
+    assert adapter.get_row_count(_TABLE) is None
+
+
 def test_null_row_count_no_filter_raises_unknown_table_size() -> None:
     """``ROW_COUNT`` NULL (view/MV) + no partition_filter → fail loud."""
     conn = FakeSnowflakeConnection()

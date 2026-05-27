@@ -481,6 +481,22 @@ class SnowflakeAdapter(WarehouseAdapter):
             return None
         return int(value)
 
+    def get_row_count(self, table: TableRef) -> int | None:
+        """Return ``ROW_COUNT`` for ``table``, or ``None`` when unknown
+        (issue #140).
+
+        Overrides the ABC default (which raises
+        :class:`RowCountNotSupportedError`). Thin wrapper over
+        :meth:`_get_num_rows` (``INFORMATION_SCHEMA.TABLES.ROW_COUNT``),
+        which already returns ``None`` for views / materialised views and
+        for tables absent from ``INFORMATION_SCHEMA``. This is the seam
+        :func:`signalforge.prune.engine._resolve_sample_bucket` calls to
+        size the deterministic-sample bucket under ``prune.scope: sample``
+        — before #140 it reached for a BigQuery-only ``_get_client`` and
+        raised on every Snowflake table.
+        """
+        return self._get_num_rows(table)
+
     def _resolve_sample_bucket(
         self,
         table: TableRef,
