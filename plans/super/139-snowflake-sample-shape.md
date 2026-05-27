@@ -6,7 +6,7 @@
 - **Type:** bug · **Priority:** P2
 - **Milestone:** v0.2 (Snowflake adapter epic #118; scope of #121/#122; discovered by #124's live harness)
 - **Beads ref:** `bd_1-scaffolding-cdp`
-- **Phase:** detailing (awaiting approval)
+- **Phase:** devolved
 - **Branch:** `feature/139-snowflake-sample-shape` (based on `dev`)
 - **Sessions:** 1 (2026-05-27)
 
@@ -227,8 +227,12 @@ The `_sf_sample_hash` alias is emitted **unquoted**; Snowflake folds it to `_SF_
 
 ## Phase 5 — Beads Manifest
 
-_(filled on devolve)_
-
-- Epic: —
-- Tasks: US-001 … US-006 + Quality Gate + Patterns & Memory
-- Worktree: `../worktrees/SignalForge/139-snowflake-sample-shape`
+- **Epic:** `bd_1-scaffolding-kay`
+- **Tasks (linear dependency chain):**
+  - `bd_1-scaffolding-kay.1` — US-001 Dialect shape fields + shared helper *(ready)*
+  - `bd_1-scaffolding-kay.2` — US-002 compiler sample CTE + Snowflake snapshots *(blocked on .1)*
+  - `bd_1-scaffolding-kay.3` — US-003 SnowflakeAdapter sample_rows + materialise_sample *(blocked on .2)*
+  - `bd_1-scaffolding-kay.4` — US-004 live e2e at scope=sample + 5-surface docs *(blocked on .3)*
+  - `bd_1-scaffolding-kay.5` — Quality Gate *(blocked on .4)*
+  - `bd_1-scaffolding-kay.6` — Patterns & Memory *(blocked on .5)*
+- **Worktree:** `../worktrees/SignalForge/139-snowflake-sample-shape`
