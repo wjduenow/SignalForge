@@ -143,7 +143,14 @@ Without this, running the test in place pollutes the committed fixture across ru
 
 ### Engineered determinism for LLM-driven assertions
 
-When an assertion depends on what the LLM drafts (non-deterministic across runs), engineer the INPUT so the assertion is mathematically guaranteed. Issue #10's example: the AC required at least one `drop_reason="always-passes"` decision. The fixture ships an engineered literal column (`'austin' AS region`) and a `COALESCE`'d column (`COALESCE(start_time, TIMESTAMP '...') AS start_time_safe`). The LLM reliably proposes `not_null` on every column; `not_null` on a literal is mathematically guaranteed to always-pass.
+When an assertion depends on what the LLM drafts (non-deterministic across runs), engineer the INPUT so the assertion is mathematically guaranteed. The AC for both warehouse e2e smokes requires at least one `reason="always-passes"` drop; the LLM reliably proposes `not_null` on every column, and `not_null` over a column with zero NULL rows on the sample is mathematically guaranteed to always-pass.
+
+**WHERE the always-pass column must live depends on whether the model is materialised (issue #124 QG lesson — read this before copying the trick).** The prune engine runs the candidate test against the model's **relation** (`TableRef.from_model`), NOT against the model's `raw_code`. Two fixture shapes, two correct sources of the always-pass:
+
+- **Source-as-model alias trick (no `dbt run`; the v0.1/v0.2 e2e path).** The model's `alias` is overridden so its relation resolves directly to a real, pre-existing **source** table (BigQuery `bikeshare_trips`; Snowflake `TPCH_SF1.CUSTOMER`). Under `oneshot` (or any strategy that samples the source), prune queries that **source table** — so every declared column MUST exist on the source, and the always-pass must come from a **natural NOT NULL real source column** (BigQuery `trip_id`/`start_time`; Snowflake's `c_custkey` primary key). An engineered literal/`COALESCE` column (`'austin' AS region`) lives only in the never-executed `raw_code`; declaring it as a model column makes the drafted `not_null` compile to an "invalid identifier" against the source → `kept-without-evidence`, never `always-passes`, and the AC can never hold live. (This exact mistake shipped in #124's first seed and was caught only at the Quality Gate — the seed declared renamed/engineered columns that don't exist on `TPCH_SF1.CUSTOMER`.)
+- **Materialised model (a real `dbt run` built the relation).** Only here does an engineered literal/`COALESCE` column physically exist on the queried relation, so `'literal' AS region` / `COALESCE(...) AS x` is a valid always-pass source.
+
+The austin BigQuery fixture (`tests/fixtures/dbt_project_austin`) and the TPCH Snowflake seed (`tests/fixtures/snowflake`) are both the source-as-model shape and both rely on **natural NOT NULL columns** — match that when adding a third warehouse's e2e. Do NOT copy a literal-column trick onto a source-as-model fixture.
 
 ### Hand-crafted manifest seed when workers can't run live tooling
 

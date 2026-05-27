@@ -4,7 +4,9 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 ## [Unreleased]
 
-_Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
+### Added
+
+- **Snowflake test harness + ops docs (#124)** — closes the Snowflake adapter epic (#118). Full `map_snowflake_exception` taxonomy mirroring the BigQuery mapper (`ProgrammingError` "object does not exist" → `TableNotFoundError`, "invalid identifier" → `ColumnNotFoundError`, residual → `QuerySyntaxError`; auth → `WarehouseAuthError`; else passthrough), reusing existing typed errors. A fakesnow-backed adapter harness executes the adapter's non-`HASH` SQL offline and sqlglot-parses the `HASH(*)` sample-mode SQL. Two gated `@pytest.mark.snowflake` live e2e tests — a warehouse+prune-only run (materialised sample, writable schema, always-passes drop) and a full `generate`-pipeline run against `SNOWFLAKE_SAMPLE_DATA.TPCH_SF1` (`oneshot`). A consolidated "Snowflake adapter (v0.2)" section in `docs/warehouse-adapter-ops.md` (profile keys, dialect, session lifecycle, sampling, estimate, error taxonomy, cost guidance, running the gated tests).
 
 ## [0.2.0] — 2026-05-21
 
