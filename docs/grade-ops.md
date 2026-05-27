@@ -107,15 +107,16 @@ DEC-020 — every pipeline stage gets one top-level key). Sibling keys
 (`safety:`, `llm:`, `prune:`, future `diff:` …) are reserved for other
 stages and silently ignored by the grade loader.
 
-The full schema (every knob, every default, all v0.1 types) — extracted
-verbatim from `tests/fixtures/grade/example_config.yml` and exercised
-by `test_load_grade_config_doc_example_round_trips` so the doc and the
-loader cannot drift:
+The full schema (every knob, every default, all v0.1 types), mirroring
+`tests/fixtures/grade/example_config.yml` (exercised by
+`test_load_grade_config_doc_example_round_trips` so the example and the
+loader cannot drift):
 
 ```yaml
 # signalforge.yml — grade stage configuration (v0.1)
 grade:
-  model: claude-sonnet-4-6        # Anthropic model id (default)
+  provider: anthropic             # registry-validated; only "anthropic" registered today
+  model: claude-sonnet-4-6        # model id (default)
   cache_ttl: 1h                   # Prompt-cache TTL ('5m' or '1h')
   max_output_tokens: 256          # Per-criterion JSON response cap
   max_retries_429: 3              # Rate-limit retry budget
@@ -156,10 +157,11 @@ grade:
 
 Field-by-field:
 
-- **`model`** — The Anthropic model id used by every per-pair judge call. Default `claude-sonnet-4-6`. Mirrors `DraftConfig.model` default. Haiku 4.5 is documented as a v0.2 cost-conscious option but not exposed in v0.1.
+- **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point (#136 OpenAI / #137 Gemini register more providers); today only `anthropic` is registered.
+- **`model`** — The model id used by every per-pair judge call. Default `claude-sonnet-4-6`. Mirrors `DraftConfig.model` default. Haiku 4.5 is documented as a v0.2 cost-conscious option but not exposed in v0.1.
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
 - **`max_output_tokens`** — Per-criterion judge response cap. Default `256`. The expected JSON response is ~150 tokens; 256 gives 2× safety. Independent of `DraftConfig.max_output_tokens`.
-- **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised `signalforge.llm.call_anthropic` seam (#5 DEC-012). Defaults `3 / 1 / 1` mirror `DraftConfig`; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.
+- **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised, provider-neutral `signalforge.llm.call_llm` seam (#5 DEC-012; #135 DEC-005). Defaults `3 / 1 / 1` mirror `DraftConfig`; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.
 - **`total_budget_seconds`** — Whole-run wall-clock budget. Default `300` (5 minutes — ~3× safety on 60 calls × 1s p50). Mirrors `PruneConfig.total_budget_seconds` semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped. **Crucially** the LLM-layer retry budget does NOT count against this — `total_budget_seconds` is a top-of-loop wall-clock check; an in-flight call is allowed to complete before the next iteration's check fires.
 - **`min_pass_rate`** — Floor on the fraction of `(artefact, criterion)` pairs that scored `passed=True` for the rubric to count as passed overall. Default `0.7`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_pass_rate`.
 - **`min_mean_score`** — Floor on the mean numeric score across non-null verdicts. Default `0.5`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_mean_score`.
@@ -473,10 +475,16 @@ default fan-out is too expensive for their use case:
   off the output-token bill at marginal risk of truncated JSON
   (handled by `GradeOutputError(violation_type="json_parse")` and the
   degraded path).
-- **`cache_ttl: "1h"`** (default) — Cache-read economics. The cached
-  block (system prompt + rubric block) is constant across every call
-  in one `grade_artifacts` invocation; a 60-call run reads the cache
-  ~59 times after one write. Cache reads are 0.1× input pricing vs.
+- **`cache_ttl: "1h"`** (default) — Cache-read economics. Prompt
+  caching is a **provider capability** (issue #135): the `cache_control`
+  marker, the extended-cache-ttl beta header, and the pre-send
+  `count_tokens` gate are emitted only when the selected `LLMProvider`
+  reports `supports_prompt_caching` / `supports_token_count`. A provider
+  that supports neither reports 0 cache tokens and skips the marker; the
+  default `anthropic` provider supports both, so the economics below are
+  unchanged. The cached block (system prompt + rubric block) is constant
+  across every call in one `grade_artifacts` invocation; a 60-call run
+  reads the cache ~59 times after one write. Cache reads are 0.1× input pricing vs.
   1.25× for writes; the break-even is ~2 reads per write. Switching
   to `cache_ttl: "5m"` is rarely worth it — the only failure mode the
   shorter TTL catches is a multi-hour run where the cache would otherwise
