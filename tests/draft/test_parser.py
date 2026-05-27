@@ -75,6 +75,28 @@ def test_parse_draft_response_happy_path() -> None:
     assert {c.name for c in result.columns} == _FCT_ORDERS_COLUMNS
 
 
+def test_parse_draft_response_tolerates_prose_preamble() -> None:
+    """Issue #144: claude-sonnet-4-6 narrates before the `{` on the
+    business-rules path and the model rejects an assistant prefill, so the
+    parser must strip the preamble and still parse the embedded JSON."""
+    raw = (
+        "I need to analyze the business rules carefully. The first rule is a "
+        "tautology, so I'll only propose tests that add signal.\n\n"
+    ) + _read("llm_response_valid.json")
+    result = parse_draft_response(raw, _FCT_ORDERS_COLUMNS, llm_result_meta=_meta())
+    assert isinstance(result, CandidateSchema)
+    assert result.name == "fct_orders"
+    assert {c.name for c in result.columns} == _FCT_ORDERS_COLUMNS
+
+
+def test_parse_draft_response_pure_prose_still_raises_json_error() -> None:
+    """A response with no JSON object at all still fails loud (the preamble
+    tolerance must not mask a genuinely empty/garbage response)."""
+    raw = "I cannot help with that request."
+    with pytest.raises(LLMOutputJSONError):
+        parse_draft_response(raw, _FCT_ORDERS_COLUMNS, llm_result_meta=_meta())
+
+
 def test_parse_draft_response_truncated_raises_json_error() -> None:
     raw = _read("llm_response_truncated.json")
     with pytest.raises(LLMOutputJSONError) as excinfo:

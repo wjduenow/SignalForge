@@ -47,6 +47,7 @@ from __future__ import annotations
 import json
 import math
 
+from signalforge._common.json_payload import extract_json_payload
 from signalforge.grade.errors import GradeOutputError
 from signalforge.grade.models import GradingResult
 from signalforge.grade.rubric import Criterion
@@ -99,7 +100,12 @@ def parse_grade_response(
     with a ``violation_type`` from the locked taxonomy on every
     malformed shape.
     """
-    cleaned = _strip_code_fence(response_text)
+    # Strip a Markdown code fence, then extract the embedded JSON object —
+    # the judge (claude-sonnet-4-6) can narrate a prose preamble before the
+    # `{`, and the model does not support an assistant-turn prefill to force
+    # JSON-only output (issue #144). `extract_json_payload` returns the text
+    # unchanged when no JSON value is present so the error path still fires.
+    cleaned = extract_json_payload(_strip_code_fence(response_text))
     try:
         payload = json.loads(cleaned)
     except json.JSONDecodeError as exc:
