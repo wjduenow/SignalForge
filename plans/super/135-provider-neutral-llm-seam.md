@@ -5,8 +5,21 @@
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/135
 - **Parent epic:** #134 (pluggable LLM provider for grading — OpenAI/Gemini). Milestone v0.3.
 - **Blocks:** #136 (OpenAI grading), #137 (Gemini grading).
-- **Phase:** published (PR #148, draft, → dev)
-- **Branch:** (to create) `feature/135-provider-neutral-llm-seam`
+- **Phase:** devolved (PR #148 → dev)
+- **Branch:** `feature/135-provider-neutral-llm-seam`
+
+## Beads manifest
+
+- **Epic:** `bd_1-scaffolding-j2c`
+- **Tasks** (linear chain; each blocks the next):
+  - `.1` US-001 — Provider foundation (READY)
+  - `.2` US-002 — AnthropicProvider + rename + AST scan
+  - `.3` US-003 — Generic `call_llm`
+  - `.4` US-004 — config provider + CLI migration
+  - `.5` US-005 — no-cache provider neutrality proof
+  - `.6` US-006 — docs + parity
+  - `.7` Quality Gate
+  - `.8` Patterns & Memory
 - **Sessions:** 1 (2026-05-27)
 
 ## What / Why
