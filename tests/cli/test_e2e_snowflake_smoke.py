@@ -5,8 +5,8 @@ US-005 of the Snowflake epic (#118). The Snowflake analogue of
 generate`` pipeline (LLM draft -> prune -> grade -> diff) against the
 read-only ``SNOWFLAKE_SAMPLE_DATA.TPCH_SF1`` sample dataset and pins the
 same invariants the BigQuery e2e pins — chiefly that the prune step drops
-at least one ``always-passes`` test (the v0.1 differentiator) on an
-engineered always-pass column.
+at least one ``always-passes`` test (the v0.1 differentiator) on a natural
+NOT NULL source column (the TPCH primary key ``c_custkey``).
 
 ``oneshot`` sampling is MANDATORY here, not a tuning choice.
 ``SNOWFLAKE_SAMPLE_DATA`` is a read-only shared database present in every
@@ -67,10 +67,14 @@ Asserts the invariants from the BigQuery e2e (DEC-009 of
 3. ``kept_count + flagged_count + dropped_count >= 1`` (non-empty diff).
 4. A :class:`PruneDecision` with ``decision == "dropped"`` and
    ``reason == "always-passes"`` exists in the prune audit — the v0.1
-   differentiator. The seed ships engineered always-pass columns
-   (``'us' AS region``, ``COALESCE(c_acctbal, 0) AS acctbal_safe``); the
-   LLM reliably drafts ``not_null`` on every column and ``not_null`` on a
-   literal / NULL-guarded column is mathematically always-pass.
+   differentiator. Under ``oneshot`` sampling prune queries the read-only
+   source ``TPCH_SF1.CUSTOMER`` directly, so the seed declares only REAL
+   TPCH columns; the LLM reliably drafts ``not_null`` on every column and
+   ``not_null`` on ``c_custkey`` (the TPCH primary key, naturally NOT NULL)
+   returns zero failing rows → always-passes (mirrors the Austin bikeshare
+   natural-NOT-NULL pattern, NOT engineered literals — a renamed/engineered
+   column would not exist on the source and would route to
+   kept-without-evidence).
 5. ``GradingReport.aggregate_complete is True`` (no degraded grade calls).
 6. ``"Traceback" not in stderr`` (DEC-016 of ``cli-layer.md`` — no
    traceback ever leaks).
@@ -243,20 +247,20 @@ def test_e2e_signalforge_generate_against_tpch_sf1(
         f"dropped={report.dropped_count}"
     )
 
-    # 4. At least one always-passes drop — the v0.1 differentiator. The seed's
-    #    engineered always-pass columns (``'us' AS region``, ``COALESCE(...) AS
-    #    acctbal_safe``) make a drafted ``not_null`` mathematically always-pass;
-    #    the prune engine sees zero failing rows and drops them.
+    # 4. At least one always-passes drop — the v0.1 differentiator. Under
+    #    ``oneshot`` prune queries the read-only source ``TPCH_SF1.CUSTOMER``
+    #    directly, so the seed declares only REAL TPCH columns; a drafted
+    #    ``not_null`` on ``c_custkey`` (the TPCH primary key, naturally NOT
+    #    NULL) sees zero failing rows and drops as always-passes.
     decisions = read_prune_decisions(project_dir)
     has_always_passes_drop = any(
         d.decision == "dropped" and d.reason == "always-passes" for d in decisions
     )
     assert has_always_passes_drop, (
         "expected at least one PruneDecision with decision='dropped' and "
-        "reason='always-passes' (the v0.1 differentiator). The TPCH seed's "
-        "engineered always-pass columns ('us' AS region, COALESCE(...) AS "
-        "acctbal_safe) guarantee a drafted not_null can never produce a "
-        "failing row."
+        "reason='always-passes' (the v0.1 differentiator). The TPCH seed "
+        "declares real NOT NULL source columns (e.g. the primary key "
+        "c_custkey) so a drafted not_null returns zero failing rows."
     )
 
     # 5. Grade aggregate_complete — no degraded calls.

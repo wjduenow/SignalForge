@@ -20,26 +20,33 @@ _PROJECT = "signalforge_test_tpch"
 _MODEL_UID = f"model.{_PROJECT}.stg_tpch_customers"
 _SOURCE_UID = f"source.{_PROJECT}.tpch_sf1.customer"
 
-# Raw SQL: a curated subset of TPCH_SF1.CUSTOMER columns plus TWO engineered
-# always-pass columns:
-#   * ``'us' AS region`` — a string literal; a drafted not_null on it can
-#     never produce a failing row (mathematically always-pass).
-#   * ``COALESCE(c_acctbal, 0) AS acctbal_safe`` — a NULL-guarded column; a
-#     drafted not_null on it is likewise guaranteed to always-pass.
-# Mirrors the Austin bikeshare engineered-determinism pattern (issue #10).
+# Raw SQL: a curated subset of REAL, UNRENAMED TPCH_SF1.CUSTOMER columns.
+# The model's ``alias`` is overridden to ``customer`` so its relation resolves
+# directly to the read-only source SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER —
+# under ``oneshot`` sampling SignalForge prunes against that SOURCE table, so
+# every declared column MUST exist on it (a renamed/engineered column would
+# compile to an "invalid identifier" and route to kept-without-evidence, never
+# always-passes). The ``always-passes`` drop signal for the full-pipeline e2e
+# (US-005) therefore relies on a NATURAL NOT NULL source column — ``c_custkey``,
+# the TPCH primary key — rather than engineered literals (mirrors the Austin
+# bikeshare natural-NOT-NULL pattern; see tests/fixtures/dbt_project_austin).
 _RAW_CODE = (
-    "-- Hand-crafted TPCH seed model (issue #124, US-003). Targets the\n"
-    "-- Snowflake sample dataset SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER.\n"
-    "-- Two engineered columns guarantee an always-pass drafted not_null so\n"
-    "-- the full generate-pipeline live e2e (US-005) has a deterministic\n"
-    "-- drop signal (mirrors the Austin bikeshare 'region' literal trick).\n"
+    "-- Hand-crafted TPCH seed model (issue #124, US-003). The model's `alias`\n"
+    "-- is overridden to `customer` so its relation resolves directly to the\n"
+    "-- read-only source SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER (SignalForge\n"
+    "-- runs against the materialised relation; no `dbt run` needed). Declares\n"
+    "-- only REAL TPCH source columns — the `always-passes` drop signal for the\n"
+    "-- full-pipeline e2e (US-005) relies on a NATURAL NOT NULL column\n"
+    "-- (`c_custkey`, the primary key) because under `oneshot` prune queries the\n"
+    "-- source table directly (mirrors the Austin bikeshare natural-NOT-NULL\n"
+    "-- pattern).\n"
     "SELECT\n"
-    "    c_custkey AS customer_id,\n"
-    "    c_name AS customer_name,\n"
-    "    c_nationkey AS nation_id,\n"
-    "    c_acctbal AS account_balance,\n"
-    "    'us' AS region,\n"
-    "    COALESCE(c_acctbal, 0) AS acctbal_safe\n"
+    "    c_custkey,\n"
+    "    c_name,\n"
+    "    c_nationkey,\n"
+    "    c_phone,\n"
+    "    c_acctbal,\n"
+    "    c_mktsegment\n"
     "FROM {{ source('tpch_sf1', 'customer') }}\n"
 )
 
@@ -57,37 +64,32 @@ def _col(name: str, description: str) -> dict[str, object]:
 
 
 _MODEL_COLUMNS = {
-    "customer_id": _col(
-        "customer_id",
-        "Unique key for each customer (source column `c_custkey`). Natural "
-        "primary key; no two source rows share a value.",
+    "c_custkey": _col(
+        "c_custkey",
+        "Unique customer key — the TPCH primary key. NATURAL NOT NULL: every "
+        "source row has a value, so a drafted `not_null` on it returns zero "
+        "failing rows and prunes as always-passes (the US-005 drop signal).",
     ),
-    "customer_name": _col(
-        "customer_name",
-        "Customer display name (source column `c_name`), e.g. "
-        "`Customer#000000001`. Free-form STRING.",
+    "c_name": _col(
+        "c_name",
+        "Customer display name, e.g. `Customer#000000001`. Free-form STRING; "
+        "non-null in the TPCH dataset.",
     ),
-    "nation_id": _col(
-        "nation_id",
-        "Foreign key into the TPCH `NATION` table (source column "
-        "`c_nationkey`). Resolves the customer's nation.",
+    "c_nationkey": _col(
+        "c_nationkey",
+        "Foreign key into the TPCH `NATION` table. Resolves the customer's nation; non-null.",
     ),
-    "account_balance": _col(
-        "account_balance",
-        "Customer account balance (source column `c_acctbal`). NUMBER; may be "
-        "negative in the TPCH dataset.",
+    "c_phone": _col(
+        "c_phone",
+        "Customer phone number. Fixed-width STRING; non-null.",
     ),
-    "region": _col(
-        "region",
-        "Engineered literal `'us' AS region` — a constant STRING. A drafted "
-        "not_null on this column is mathematically always-pass (the literal "
-        "is never NULL), so it exercises the prune always-pass drop path.",
+    "c_acctbal": _col(
+        "c_acctbal",
+        "Customer account balance. NUMBER; may be negative in the TPCH dataset but is non-null.",
     ),
-    "acctbal_safe": _col(
-        "acctbal_safe",
-        "Engineered NULL-guarded balance `COALESCE(c_acctbal, 0)`. A drafted "
-        "not_null on this column is always-pass because COALESCE removes the "
-        "only NULL source.",
+    "c_mktsegment": _col(
+        "c_mktsegment",
+        "Market segment (e.g. `BUILDING`, `AUTOMOBILE`). STRING; non-null.",
     ),
 }
 
@@ -162,12 +164,13 @@ _MANIFEST: dict[str, object] = {
             "description": (
                 "Source-as-model passthrough over the Snowflake sample "
                 "dataset's `TPCH_SF1.CUSTOMER` table. Each row is one TPCH "
-                "customer. Exposes a curated subset of source columns plus two "
-                "engineered always-pass columns (`region`, `acctbal_safe`) so "
+                "customer. Exposes a curated subset of REAL source columns so "
                 "the SignalForge generate-pipeline live e2e (US-005) has a "
-                "deterministic prune drop signal. The model's `alias` is "
-                "overridden to `customer` so `relation_name` resolves directly "
-                "to `SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER`, sidestepping a "
+                "deterministic prune drop signal — a drafted `not_null` on the "
+                "natural NOT NULL primary key `c_custkey` prunes as "
+                "always-passes. The model's `alias` is overridden to `customer` "
+                "so `relation_name` resolves directly to "
+                "`SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER`, sidestepping a "
                 "`dbt run` materialisation step."
             ),
             "columns": _MODEL_COLUMNS,

@@ -1,13 +1,17 @@
--- Hand-crafted TPCH seed model (issue #124, US-003). Targets the
--- Snowflake sample dataset SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER.
--- Two engineered columns guarantee an always-pass drafted not_null so
--- the full generate-pipeline live e2e (US-005) has a deterministic
--- drop signal (mirrors the Austin bikeshare 'region' literal trick).
+-- Hand-crafted TPCH seed model (issue #124, US-003). The model's `alias`
+-- is overridden to `customer` so its relation resolves directly to the
+-- read-only source SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER (SignalForge
+-- runs against the materialised relation; no `dbt run` needed). Declares
+-- only REAL TPCH source columns — the `always-passes` drop signal for the
+-- full-pipeline e2e (US-005) relies on a NATURAL NOT NULL column
+-- (`c_custkey`, the primary key) because under `oneshot` prune queries the
+-- source table directly (mirrors the Austin bikeshare natural-NOT-NULL
+-- pattern).
 SELECT
-    c_custkey AS customer_id,
-    c_name AS customer_name,
-    c_nationkey AS nation_id,
-    c_acctbal AS account_balance,
-    'us' AS region,
-    COALESCE(c_acctbal, 0) AS acctbal_safe
+    c_custkey,
+    c_name,
+    c_nationkey,
+    c_phone,
+    c_acctbal,
+    c_mktsegment
 FROM {{ source('tpch_sf1', 'customer') }}

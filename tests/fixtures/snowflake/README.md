@@ -29,15 +29,19 @@ is a source-as-model passthrough over `TPCH_SF1.CUSTOMER`. Its `alias` is
 overridden to `customer` so `relation_name` resolves directly to
 `SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER` (no `dbt run` materialisation needed).
 
-It exposes a curated subset of source columns (`customer_id`,
-`customer_name`, `nation_id`, `account_balance`) plus **two engineered
-always-pass columns** so the live e2e has a deterministic prune drop signal,
-mirroring the Austin bikeshare `'austin' AS region` trick (issue #10):
+It exposes a curated subset of **real, unrenamed** TPCH source columns
+(`c_custkey`, `c_name`, `c_nationkey`, `c_phone`, `c_acctbal`,
+`c_mktsegment`). Under `oneshot` sampling the prune stage queries the read-only
+source table directly, so every declared column **must exist on the source** —
+a renamed or engineered (`'us' AS region`) column would compile to an
+"invalid identifier" and route to `kept-without-evidence`, never
+`always-passes`.
 
-- `'us' AS region` — a string literal. A drafted `not_null` on it can never
-  produce a failing row → mathematically always-pass → dropped by prune.
-- `COALESCE(c_acctbal, 0) AS acctbal_safe` — a NULL-guarded column. A drafted
-  `not_null` on it is likewise guaranteed to always-pass.
+The deterministic prune drop signal therefore relies on a **natural NOT NULL**
+column rather than engineered literals (mirroring the Austin bikeshare
+fixture's natural-NOT-NULL pattern, issue #10): `c_custkey` is the TPCH
+primary key — every source row has a value, so a drafted `not_null` on it
+returns zero failing rows → mathematically always-pass → dropped by prune.
 
 ## Maintainer-only live regeneration
 

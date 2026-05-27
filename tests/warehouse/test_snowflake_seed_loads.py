@@ -40,7 +40,7 @@ def test_tpch_manifest_loads_via_signalforge() -> None:
     # Loader strips empty raw_code → None; reaching this line means raw_code
     # survived parsing and the source ref is present.
     assert model.raw_code is not None
-    assert "customer_id" in model.raw_code
+    assert "c_custkey" in model.raw_code
 
 
 def test_tpch_seed_targets_tpch_sf1_customer() -> None:
@@ -57,23 +57,28 @@ def test_tpch_seed_targets_tpch_sf1_customer() -> None:
     assert model.resolve_this().qualified_name == "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.customer"
 
 
-def test_tpch_seed_carries_engineered_always_pass_columns() -> None:
-    """The engineered always-pass columns are present for the US-005 drop signal.
+def test_tpch_seed_carries_natural_not_null_always_pass_column() -> None:
+    """The natural NOT NULL key column is present for the US-005 drop signal.
 
-    ``region`` is a string literal (`'us' AS region`) and ``acctbal_safe`` is a
-    ``COALESCE``-guarded column. A drafted ``not_null`` on either is
-    mathematically always-pass, giving the live e2e a deterministic prune drop
-    (mirrors the Austin bikeshare engineered-determinism pattern, issue #10).
+    Under ``oneshot`` sampling prune queries the SOURCE table directly, so the
+    declared columns must be REAL TPCH columns (a renamed/engineered column
+    would compile to an "invalid identifier" and route to
+    kept-without-evidence, never always-passes). The drop signal therefore
+    relies on ``c_custkey`` — the TPCH primary key, naturally NOT NULL — so a
+    drafted ``not_null`` on it returns zero failing rows and prunes as
+    always-passes (mirrors the Austin bikeshare natural-NOT-NULL pattern).
     """
     manifest = load(_FIXTURE_DIR)
     model = manifest.get_model(_MODEL_UID)
 
-    assert "region" in model.columns
-    assert "acctbal_safe" in model.columns
-    # The literal + COALESCE survive into raw_code so prune compiles always-pass.
+    # Only REAL, unrenamed TPCH CUSTOMER columns — no engineered literals.
+    assert "c_custkey" in model.columns
+    assert {"region", "acctbal_safe", "customer_id"}.isdisjoint(model.columns)
+    # c_custkey survives into raw_code (the always-passes target); no literals.
     assert model.raw_code is not None
-    assert "'us' AS region" in model.raw_code
-    assert "COALESCE(c_acctbal, 0) AS acctbal_safe" in model.raw_code
+    assert "c_custkey" in model.raw_code
+    assert "'us' AS region" not in model.raw_code
+    assert "COALESCE" not in model.raw_code
 
 
 def test_tpch_seed_has_exactly_one_enabled_model() -> None:

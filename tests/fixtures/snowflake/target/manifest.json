@@ -63,56 +63,56 @@
                 "access": "protected"
             },
             "tags": [],
-            "description": "Source-as-model passthrough over the Snowflake sample dataset's `TPCH_SF1.CUSTOMER` table. Each row is one TPCH customer. Exposes a curated subset of source columns plus two engineered always-pass columns (`region`, `acctbal_safe`) so the SignalForge generate-pipeline live e2e (US-005) has a deterministic prune drop signal. The model's `alias` is overridden to `customer` so `relation_name` resolves directly to `SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER`, sidestepping a `dbt run` materialisation step.",
+            "description": "Source-as-model passthrough over the Snowflake sample dataset's `TPCH_SF1.CUSTOMER` table. Each row is one TPCH customer. Exposes a curated subset of REAL source columns so the SignalForge generate-pipeline live e2e (US-005) has a deterministic prune drop signal \u2014 a drafted `not_null` on the natural NOT NULL primary key `c_custkey` prunes as always-passes. The model's `alias` is overridden to `customer` so `relation_name` resolves directly to `SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER`, sidestepping a `dbt run` materialisation step.",
             "columns": {
-                "customer_id": {
-                    "name": "customer_id",
-                    "description": "Unique key for each customer (source column `c_custkey`). Natural primary key; no two source rows share a value.",
+                "c_custkey": {
+                    "name": "c_custkey",
+                    "description": "Unique customer key \u2014 the TPCH primary key. NATURAL NOT NULL: every source row has a value, so a drafted `not_null` on it returns zero failing rows and prunes as always-passes (the US-005 drop signal).",
                     "meta": {},
                     "data_type": null,
                     "constraints": [],
                     "quote": null,
                     "tags": []
                 },
-                "customer_name": {
-                    "name": "customer_name",
-                    "description": "Customer display name (source column `c_name`), e.g. `Customer#000000001`. Free-form STRING.",
+                "c_name": {
+                    "name": "c_name",
+                    "description": "Customer display name, e.g. `Customer#000000001`. Free-form STRING; non-null in the TPCH dataset.",
                     "meta": {},
                     "data_type": null,
                     "constraints": [],
                     "quote": null,
                     "tags": []
                 },
-                "nation_id": {
-                    "name": "nation_id",
-                    "description": "Foreign key into the TPCH `NATION` table (source column `c_nationkey`). Resolves the customer's nation.",
+                "c_nationkey": {
+                    "name": "c_nationkey",
+                    "description": "Foreign key into the TPCH `NATION` table. Resolves the customer's nation; non-null.",
                     "meta": {},
                     "data_type": null,
                     "constraints": [],
                     "quote": null,
                     "tags": []
                 },
-                "account_balance": {
-                    "name": "account_balance",
-                    "description": "Customer account balance (source column `c_acctbal`). NUMBER; may be negative in the TPCH dataset.",
+                "c_phone": {
+                    "name": "c_phone",
+                    "description": "Customer phone number. Fixed-width STRING; non-null.",
                     "meta": {},
                     "data_type": null,
                     "constraints": [],
                     "quote": null,
                     "tags": []
                 },
-                "region": {
-                    "name": "region",
-                    "description": "Engineered literal `'us' AS region` \u2014 a constant STRING. A drafted not_null on this column is mathematically always-pass (the literal is never NULL), so it exercises the prune always-pass drop path.",
+                "c_acctbal": {
+                    "name": "c_acctbal",
+                    "description": "Customer account balance. NUMBER; may be negative in the TPCH dataset but is non-null.",
                     "meta": {},
                     "data_type": null,
                     "constraints": [],
                     "quote": null,
                     "tags": []
                 },
-                "acctbal_safe": {
-                    "name": "acctbal_safe",
-                    "description": "Engineered NULL-guarded balance `COALESCE(c_acctbal, 0)`. A drafted not_null on this column is always-pass because COALESCE removes the only NULL source.",
+                "c_mktsegment": {
+                    "name": "c_mktsegment",
+                    "description": "Market segment (e.g. `BUILDING`, `AUTOMOBILE`). STRING; non-null.",
                     "meta": {},
                     "data_type": null,
                     "constraints": [],
@@ -133,7 +133,7 @@
             },
             "created_at": 0,
             "relation_name": "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER",
-            "raw_code": "-- Hand-crafted TPCH seed model (issue #124, US-003). Targets the\n-- Snowflake sample dataset SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER.\n-- Two engineered columns guarantee an always-pass drafted not_null so\n-- the full generate-pipeline live e2e (US-005) has a deterministic\n-- drop signal (mirrors the Austin bikeshare 'region' literal trick).\nSELECT\n    c_custkey AS customer_id,\n    c_name AS customer_name,\n    c_nationkey AS nation_id,\n    c_acctbal AS account_balance,\n    'us' AS region,\n    COALESCE(c_acctbal, 0) AS acctbal_safe\nFROM {{ source('tpch_sf1', 'customer') }}\n",
+            "raw_code": "-- Hand-crafted TPCH seed model (issue #124, US-003). The model's `alias`\n-- is overridden to `customer` so its relation resolves directly to the\n-- read-only source SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER (SignalForge\n-- runs against the materialised relation; no `dbt run` needed). Declares\n-- only REAL TPCH source columns \u2014 the `always-passes` drop signal for the\n-- full-pipeline e2e (US-005) relies on a NATURAL NOT NULL column\n-- (`c_custkey`, the primary key) because under `oneshot` prune queries the\n-- source table directly (mirrors the Austin bikeshare natural-NOT-NULL\n-- pattern).\nSELECT\n    c_custkey,\n    c_name,\n    c_nationkey,\n    c_phone,\n    c_acctbal,\n    c_mktsegment\nFROM {{ source('tpch_sf1', 'customer') }}\n",
             "language": "sql",
             "refs": [],
             "sources": [
