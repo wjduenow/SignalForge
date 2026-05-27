@@ -236,3 +236,20 @@ The `_sf_sample_hash` alias is emitted **unquoted**; Snowflake folds it to `_SF_
   - `bd_1-scaffolding-kay.5` — Quality Gate *(blocked on .4)*
   - `bd_1-scaffolding-kay.6` — Patterns & Memory *(blocked on .5)*
 - **Worktree:** `../worktrees/SignalForge/139-snowflake-sample-shape`
+
+---
+
+## Outcome (2026-05-27)
+
+All 6 stories landed on `feature/139-snowflake-sample-shape`:
+
+- **US-001 … US-003** — `Dialect.sample_hash_in_projection` / `sample_hash_alias` + the shared `warehouse/_sample_sql.render_sample_select` helper; the prune compiler sample CTE and both `SnowflakeAdapter` sample methods (`sample_rows`, `materialise_sample`) wired to it; Snowflake `*_sample.sql` snapshots regenerated to the projection-subquery form; BigQuery compiled-SQL fixtures verified byte-unchanged.
+- **US-004** — live materialised prune e2e flipped to `scope="sample"` + the 5-surface graduation (DEC-005): `warehouse-adapters.md` (`Dialect` fields + live-harness note marking `bd_1-scaffolding-cdp` **FIXED**), `prune-engine.md` (compiler-dialect field list + `render_sample_select` delegation), `docs/warehouse-adapter-ops.md` (Known limitations now reflect HASH(*) fixed, materialised sample-mode works, oneshot's row-count seam `bd_1-scaffolding-tft` still open).
+- **US-005 (Quality Gate)** — code reviewer ran **4 passes**; real findings fixed, notably a self-introduced lint **E501** and a **stale `test_e2e_snowflake_smoke.py` docstring** that still claimed materialised sampling emits the buggy `HASH(*)`-in-`WHERE`/`ORDER BY` form (the shape bug is fixed for *both* strategies; that test's remaining `scope=full` reason is the read-only `SNOWFLAKE_SAMPLE_DATA` share + oneshot's open row-count seam, not the shape bug). The name-agnostic helper test was also hardened with a symmetric inline-direction assertion.
+- **US-006 (Patterns & Memory, this story)** — verified the US-004 rule/doc graduation is coherent and complete (no re-edit needed there); added the generalised engineering lesson to `prune-engine.md` § "Adding a new vendor dialect" (a single inline SQL-fragment *string* can't express a clause-POSITION constraint — when the SQL *shape* differs, add a structural `Dialect` field + shared renderer; sqlglot parses but cannot certify Snowflake acceptance, so the live-gated test is the real merge gate).
+
+**Offline validation green:** `2394 passed`, `pyright` 0 errors, offline `-m snowflake` `33 passed / 4 live-skipped`, `ruff check`/`ruff format --check` clean.
+
+**Live Snowflake certification (DEC-006) is PENDING — maintainer-run.** `uv run pytest -m snowflake --no-cov` with `SF_RUN_SNOWFLAKE=1` + conn vars + a writable `SNOWFLAKE_DATABASE`/`SCHEMA` is the **merge gate**: it certifies the projection-subquery shape actually executes on live Snowflake and resolves DEC-004's open question — whether the **primary** form (`ORDER BY <alias>` of an `EXCLUDE`-d column) is accepted, or the **fallback** (drop the outer `ORDER BY`) must be pinned in the fixtures. The offline tiers (snapshots + sqlglot) certify shape only; only the live run certifies Snowflake acceptance.
+
+The DECs above are unchanged.
