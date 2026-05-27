@@ -30,17 +30,17 @@ session and does not hit that seam.) This module is the belt-and-suspenders half
 end against a live warehouse and asserts the v0.1 differentiator (Architectural
 Commitment #1: an always-pass test is dropped, not shipped).
 
-**DEC-004 primary/fallback note.** The emitted SQL uses the PRIMARY form:
-``ORDER BY _sf_sample_hash`` at the outer level where ``_sf_sample_hash`` is
-``SELECT * EXCLUDE``-d from the output projection. There is a genuine open
-question — resolvable only by this live run — whether Snowflake accepts
-``ORDER BY <col>`` when that column is ``SELECT * EXCLUDE``-d. If live Snowflake
-rejects ``ORDER BY`` of an EXCLUDE-d column, the fallback (DEC-004) is to drop
-the outer ``ORDER BY`` in ``render_sample_select`` + the fixtures; the
-deterministic ``MOD`` filter alone defines sample membership (matches the
-prune compiler CTE, which already emits no ``ORDER BY``). The fallback is NOT
-implemented here — the code ships the primary form; this docstring records the
-decision point the maintainer's live run resolves.
+**DEC-004 — RESOLVED in favour of the PRIMARY form (live-certified 2026-05-27).**
+The emitted SQL uses the primary form: ``ORDER BY _sf_sample_hash`` at the outer
+level where ``_sf_sample_hash`` is ``SELECT * EXCLUDE``-d from the output
+projection. The open question — whether Snowflake accepts ``ORDER BY <col>`` when
+that column is ``SELECT * EXCLUDE``-d — was answered by this test's live run:
+Snowflake **accepts** it, so the primary form ships and the shipped fixtures
+stand. The documented fallback (drop the outer ``ORDER BY`` in
+``render_sample_select`` + the fixtures, leaning on the deterministic ``MOD``
+filter alone, matching the prune compiler CTE which emits no ``ORDER BY``) was
+therefore **not** needed; it remains on record only as the contingency had live
+rejected the primary form.
 
 NO LLM, NO ``generate`` CLI: this test builds the :class:`Model`,
 :class:`Manifest`, the :class:`CandidateSchema` (one

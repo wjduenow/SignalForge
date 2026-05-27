@@ -612,8 +612,8 @@ colocated with the source (each component fold-to-UPPER then quoted, per
 **Cost-relevant consequence:** the source table must be **writable** —
 materialised sampling against a read-only shared database (e.g.
 `SNOWFLAKE_SAMPLE_DATA`) fails the CTAS. The materialised-sample CTAS uses the
-#139 projection-subquery shape (`SELECT * EXCLUDE (_sf_sample_hash) FROM (SELECT
-t.*, ABS(HASH(*)) AS _sf_sample_hash …)`), so `prune.scope: sample` +
+projection-subquery shape from #139 (`SELECT * EXCLUDE (_sf_sample_hash) FROM
+(SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash …)`), so `prune.scope: sample` +
 `prune.sample_strategy: materialised` works on live Snowflake (against a
 writable source). The `oneshot` strategy is still blocked at a separate engine
 seam — see "Known limitations" below.

@@ -118,11 +118,11 @@ def render_sample_select(
 Reads `dialect.sample_row_hash_expr`, `dialect.sample_hash_in_projection`, `dialect.sample_hash_alias`. Two branches, switched on the **boolean** (never `dialect.name`):
 
 - **Inline (BigQuery, `sample_hash_in_projection=False`)** — byte-identical to today's compiler CTE body / would-be adapter form:
-  ```
+  ```sql
   SELECT * FROM <table_sql> AS t WHERE MOD(<hash_expr>, <bucket>) < 1[ AND <extra_where>][ ORDER BY <hash_expr>] LIMIT <n>
   ```
 - **Projection-subquery (Snowflake, `sample_hash_in_projection=True`)**:
-  ```
+  ```sql
   SELECT * EXCLUDE (<alias>) FROM (SELECT t.*, <hash_expr> AS <alias> FROM <table_sql> AS t) WHERE MOD(<alias>, <bucket>) < 1[ AND <extra_where>][ ORDER BY <alias>] LIMIT <n>
   ```
 
