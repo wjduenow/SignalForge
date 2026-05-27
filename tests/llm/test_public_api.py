@@ -21,7 +21,7 @@ import signalforge.llm as llm_pkg
 
 _DOCUMENTED_PUBLIC = (
     # Function
-    "call_anthropic",
+    "call_llm",
     # Result model
     "LLMResult",
     # Client protocol (issue #44 — promoted from the private
@@ -96,7 +96,7 @@ def test_each_public_name_is_importable_via_from_signalforge_llm() -> None:
         ModelPricing,
         UnknownProviderError,
         UsageMetrics,
-        call_anthropic,
+        call_llm,
         lookup,
         provider_for,
         register_provider,

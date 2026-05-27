@@ -122,7 +122,7 @@ from signalforge.grade.rubric import (
     validate_rubric,
 )
 from signalforge.llm import AnthropicClientProtocol
-from signalforge.llm.client import call_anthropic
+from signalforge.llm.client import call_llm
 from signalforge.llm.errors import LLMError
 from signalforge.manifest.models import Model
 from signalforge.prune.models import PruneResult
@@ -303,7 +303,7 @@ def _grade_one(
     # 2. Issue the LLM call. Wrap LLMError -> GradeLLMError once at
     #    the seam (DEC-015 of #5 mirror: one-level adapter).
     try:
-        result = call_anthropic(
+        result = call_llm(
             system=_SYSTEM_PROMPT,
             cached_block=rubric_block,
             dynamic_block=dynamic_block,

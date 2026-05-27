@@ -22,7 +22,7 @@ reasonable smoke-test budget at ~$0.005 per call on Sonnet 4.6.
 What this proves end-to-end:
 
 * ``ANTHROPIC_API_KEY`` is present and valid.
-* :func:`signalforge.llm.client.call_anthropic` reaches Anthropic and
+* :func:`signalforge.llm.client.call_llm` reaches Anthropic and
   returns a parseable response under the grader prompt template.
 * :func:`signalforge.grade.parser.parse_grade_response` validates the
   LLM-judge output through :class:`GradingResult`.
