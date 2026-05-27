@@ -13,9 +13,14 @@ The parser converts a raw LLM-response text into a typed
 
 1. Strip surrounding whitespace and a single optional Markdown code
    fence (the model occasionally wraps its JSON in `````json ...
-   `````; we strip the common cases but do **not** attempt to
-   extract JSON from arbitrary prose).
-2. ``json.loads`` the stripped text. A :class:`json.JSONDecodeError`
+   `````), then extract the embedded JSON value via
+   :func:`signalforge._common.json_payload.extract_json_payload` — the
+   judge can narrate a prose preamble before the ``{`` and the model
+   does not support an assistant-turn prefill to force JSON-only output
+   (issue #144). Extraction decodes at the first ``{``/``[`` only and
+   returns the text unchanged when no JSON value is present, so a
+   genuinely prose-only / truncated response still fails loud at step 2.
+2. ``json.loads`` the extracted text. A :class:`json.JSONDecodeError`
    raises :class:`GradeOutputError` with
    ``violation_type="json_parse"``; a top-level non-object payload
    (list / scalar / etc.) likewise raises ``violation_type="json_parse"``
@@ -47,6 +52,7 @@ from __future__ import annotations
 import json
 import math
 
+from signalforge._common.json_payload import extract_json_payload
 from signalforge.grade.errors import GradeOutputError
 from signalforge.grade.models import GradingResult
 from signalforge.grade.rubric import Criterion
@@ -99,7 +105,12 @@ def parse_grade_response(
     with a ``violation_type`` from the locked taxonomy on every
     malformed shape.
     """
-    cleaned = _strip_code_fence(response_text)
+    # Strip a Markdown code fence, then extract the embedded JSON object —
+    # the judge (claude-sonnet-4-6) can narrate a prose preamble before the
+    # `{`, and the model does not support an assistant-turn prefill to force
+    # JSON-only output (issue #144). `extract_json_payload` returns the text
+    # unchanged when no JSON value is present so the error path still fires.
+    cleaned = extract_json_payload(_strip_code_fence(response_text))
     try:
         payload = json.loads(cleaned)
     except json.JSONDecodeError as exc:

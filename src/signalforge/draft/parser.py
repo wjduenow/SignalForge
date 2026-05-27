@@ -42,6 +42,7 @@ from dataclasses import dataclass
 
 from pydantic import ValidationError
 
+from signalforge._common.json_payload import extract_json_payload
 from signalforge.draft.errors import (
     LLMOutputAnchorContractError,
     LLMOutputJSONError,
@@ -207,8 +208,18 @@ def parse_draft_response(
     sniff message text to render an incident report.
     """
     # Stage 1 — JSON parse + Pydantic validation.
+    #
+    # Extract the embedded JSON object first (issue #144): some models
+    # (notably claude-sonnet-4-6 on the business-rules path) narrate a
+    # prose preamble before the `{`, and the model does not support an
+    # assistant-turn prefill to force JSON-only output. `extract_json_payload`
+    # strips the preamble; on a response with no JSON it returns the text
+    # unchanged so the error path below still fires with the right excerpt.
+    # The error envelopes keep the ORIGINAL `raw_text` so incident reports
+    # show exactly what the model emitted, preamble included.
+    payload = extract_json_payload(raw_text)
     try:
-        candidate = CandidateSchema.model_validate_json(raw_text)
+        candidate = CandidateSchema.model_validate_json(payload)
     except ValidationError as exc:
         if _is_json_invalid_error(exc):
             # Recover (line, column) positional context by re-parsing
@@ -218,7 +229,7 @@ def parse_draft_response(
             # stdlib parser), fall through to the validation-error path
             # so we never lose the failure signal.
             try:
-                json.loads(raw_text)
+                json.loads(payload)
             except json.JSONDecodeError as decode_exc:
                 raise LLMOutputJSONError(
                     "LLM response was not valid JSON.",
