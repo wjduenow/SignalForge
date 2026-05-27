@@ -1,8 +1,13 @@
 """Tests for ``SnowflakeAdapter.sample_rows`` (issue #122, US-003).
 
 Deterministic hash-mod sampling, the Snowflake analog of BigQuery's
-``MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), bucket)`` →
-``MOD(ABS(HASH(*)), bucket)`` (DEC-006). Same fail-loud sizing guards as
+``MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), bucket)``. Since issue #139 the
+Snowflake form is the projection-subquery shape — ``HASH(*)`` is invalid in a
+Snowflake ``WHERE``/``ORDER BY`` predicate, so the hash is computed once in an
+inner ``SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash`` and the outer
+``MOD(_sf_sample_hash, bucket) < 1`` references the alias, with
+``SELECT * EXCLUDE (_sf_sample_hash)`` stripping the helper column (DEC-006 of
+#122 + #139). Same fail-loud sizing guards as
 BigQuery (:class:`UnknownTableSizeError`,
 :class:`SamplingRequiresPartitionFilterError`; DEC-005). Tuple ``fetchall()``
 results are shaped into dicts via ``cursor.description`` (DEC-010); SDK
@@ -32,8 +37,10 @@ from tests.warehouse._fake_snowflake import FakeSnowflakeConnection
 # A regex that matches the INFORMATION_SCHEMA size lookup but NOT the sample
 # query, so the two expectations can't accidentally cross-match.
 _SIZE_QUERY = r"INFORMATION_SCHEMA\.TABLES"
-# The sample query starts with SELECT * and never touches INFORMATION_SCHEMA.
-_SAMPLE_QUERY = r"SELECT \* FROM"
+# The sample query carries the projection-subquery hash alias (issue #139) and
+# never touches INFORMATION_SCHEMA, so this distinguishes it from the size
+# lookup without cross-matching.
+_SAMPLE_QUERY = r"_sf_sample_hash"
 
 # ``project`` is the database; it follows :class:`TableRef`'s GCP-style
 # project-id grammar (lowercase start, >= 6 chars), but Snowflake quotes it
@@ -87,9 +94,13 @@ def test_sample_sql_is_byte_identical_across_two_calls() -> None:
 
     assert sample_sqls[0] == sample_sqls[1]
     sql = sample_sqls[0]
-    # num_rows=1000, n=100 → bucket = max(1000//100, 1) = 10.
-    assert "MOD(ABS(HASH(*)), 10) < 1" in sql
-    assert "ORDER BY ABS(HASH(*))" in sql
+    # num_rows=1000, n=100 → bucket = max(1000//100, 1) = 10. Projection-
+    # subquery shape (#139): hash in the inner projection, alias in the outer
+    # predicate / order-by.
+    assert "SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash" in sql
+    assert "SELECT * EXCLUDE (_sf_sample_hash)" in sql
+    assert "MOD(_sf_sample_hash, 10) < 1" in sql
+    assert "ORDER BY _sf_sample_hash" in sql
     assert "LIMIT 100" in sql
     # Per-component double-quoting, fold-to-UPPER first (#124): lowercase
     # project "mydatabase" folds to "MYDATABASE" so it resolves against the
@@ -145,7 +156,7 @@ def test_null_row_count_with_filter_uses_bucket_1000() -> None:
     adapter.sample_rows(_TABLE, 100, partition_filter=pf)
 
     sample_sql = conn.executed[1]
-    assert "MOD(ABS(HASH(*)), 1000) < 1" in sample_sql
+    assert "MOD(_sf_sample_hash, 1000) < 1" in sample_sql
 
 
 def test_huge_row_count_no_filter_raises_requires_partition_filter() -> None:
@@ -169,7 +180,7 @@ def test_huge_row_count_with_filter_proceeds() -> None:
     adapter.sample_rows(_TABLE, 100, partition_filter=pf)
 
     # bucket = max(200_000_000 // 100, 1) = 2_000_000.
-    assert "MOD(ABS(HASH(*)), 2000000) < 1" in conn.executed[1]
+    assert "MOD(_sf_sample_hash, 2000000) < 1" in conn.executed[1]
 
 
 def test_normal_row_count_buckets_num_rows_over_n() -> None:
@@ -182,7 +193,7 @@ def test_normal_row_count_buckets_num_rows_over_n() -> None:
     adapter.sample_rows(_TABLE, 100)
 
     # bucket = max(5000 // 100, 1) = 50.
-    assert "MOD(ABS(HASH(*)), 50) < 1" in conn.executed[1]
+    assert "MOD(_sf_sample_hash, 50) < 1" in conn.executed[1]
 
 
 def test_tiny_table_buckets_floor_at_one() -> None:
@@ -194,7 +205,7 @@ def test_tiny_table_buckets_floor_at_one() -> None:
 
     adapter.sample_rows(_TABLE, 100)
 
-    assert "MOD(ABS(HASH(*)), 1) < 1" in conn.executed[1]
+    assert "MOD(_sf_sample_hash, 1) < 1" in conn.executed[1]
 
 
 # ---------------------------------------------------------------------------

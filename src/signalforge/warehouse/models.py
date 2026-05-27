@@ -87,8 +87,24 @@ class Dialect:
       unquoted CTE named ``sample`` is a syntax error there. Quoting bypasses
       the keyword interpretation while keeping the recognisable name.
 
+    Two further fields (issue #139) describe **where** the row-hash expression
+    is legal so the deterministic-sample SELECT builder
+    (``signalforge.warehouse._sample_sql.render_sample_select``) can switch
+    shape without name-branching:
+
+    * ``sample_hash_in_projection`` — when ``False`` (BigQuery default) the
+      hash expression is placed inline in ``WHERE``/``ORDER BY``; when ``True``
+      (Snowflake) the hash is computed once in an inner ``SELECT`` projection
+      and referenced by alias in the outer ``WHERE``/``ORDER BY``. Snowflake's
+      ``HASH(*)`` is rejected as a predicate (``002079: Use of * as a function
+      argument``) and is legal **only** in the SELECT projection.
+    * ``sample_hash_alias`` — the column alias the projected hash binds to in
+      the projection-subquery shape (emitted unquoted; Snowflake folds it
+      consistently in both the projection and the ``EXCLUDE`` clause).
+
     The defaults reproduce BigQuery's SQL byte-for-byte so every existing
-    construction site stays valid unedited (DEC-001 of issue #121).
+    construction site stays valid unedited (DEC-001 of issue #121; DEC-001 of
+    issue #139).
     """
 
     name: str
@@ -101,6 +117,8 @@ class Dialect:
     date_literal_template: str = "DATE('{value}')"
     quote_qualified_per_component: bool = False
     sample_cte_alias: str = "sample"
+    sample_hash_in_projection: bool = False
+    sample_hash_alias: str = "_sf_sample_hash"
 
 
 BIGQUERY_DIALECT = Dialect(
@@ -161,6 +179,7 @@ SNOWFLAKE_DIALECT = Dialect(
     timestamp_literal_template="'{value}'::TIMESTAMP",
     date_literal_template="'{value}'::DATE",
     quote_qualified_per_component=True,
+    sample_hash_in_projection=True,
 )
 """Snowflake-flavoured :class:`Dialect` for the v0.2 adapter (issue #119, DEC-004).
 
@@ -183,6 +202,11 @@ SNOWFLAKE_DIALECT = Dialect(
 * ``quote_qualified_per_component=True`` — Snowflake reads a single quoted
   string spanning dots as one literal identifier named ``db.schema.table``,
   so each component is quoted separately (``"DB"."SCH"."T"``).
+* ``sample_hash_in_projection=True`` — Snowflake's ``HASH(*)`` is rejected as
+  a ``WHERE``/``ORDER BY`` predicate (``002079``) and is legal only in the
+  SELECT projection, so the deterministic-sample SELECT computes the hash in
+  an inner projection and references the ``sample_hash_alias`` column in the
+  outer clauses (issue #139, DEC-001/DEC-004).
 
 Lives alongside :data:`BIGQUERY_DIALECT` / :data:`POSTGRES_DIALECT` per
 DEC-003 so every dialect-aware consumer imports each flavour from one place

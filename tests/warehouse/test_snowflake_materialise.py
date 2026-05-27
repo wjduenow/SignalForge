@@ -75,8 +75,11 @@ def _expected_run_id() -> str:
 def test_materialise_ctas_sql_shape_and_temp_name() -> None:
     """The CTAS contains ``CREATE TEMPORARY TABLE``, the deterministic
     ``_sf_sample_<run_id>`` name (run_id byte-identical to the shared recipe),
-    the ``MOD(ABS(HASH(*)), <bucket>) < 1`` predicate, ``ORDER BY
-    ABS(HASH(*))``, ``LIMIT n``; the source is per-component quoted."""
+    the projection-subquery sample body (#139) — inner
+    ``SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash`` with outer
+    ``MOD(_sf_sample_hash, <bucket>) < 1`` + ``ORDER BY _sf_sample_hash`` +
+    ``SELECT * EXCLUDE (_sf_sample_hash)``, ``LIMIT n``; the source is
+    per-component quoted."""
     conn = _RecordingConnection()
     # num_rows=1000, n=100 → bucket = max(1000//100, 1) = 10.
     conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
@@ -94,9 +97,15 @@ def test_materialise_ctas_sql_shape_and_temp_name() -> None:
     # upper-cased in the emitted SQL (the returned TableRef.name stays the
     # lowercase recipe output — folding happens only at quote time).
     assert temp_name.upper() in ctas
-    # Deterministic hash-mod predicate (read from the dialect, not hard-coded).
-    assert "MOD(ABS(HASH(*)), 10) < 1" in ctas
-    assert "ORDER BY ABS(HASH(*))" in ctas
+    # Projection-subquery shape (#139): hash in the inner projection, alias in
+    # the outer predicate / order-by; EXCLUDE strips the helper column so the
+    # temp table's schema equals the source schema. Read from the dialect, not
+    # hard-coded. The old inline HASH(*)-in-WHERE form is GONE.
+    assert "SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash" in ctas
+    assert "SELECT * EXCLUDE (_sf_sample_hash)" in ctas
+    assert "MOD(_sf_sample_hash, 10) < 1" in ctas
+    assert "ORDER BY _sf_sample_hash" in ctas
+    assert "MOD(ABS(HASH(*)), 10)" not in ctas
     assert ctas.rstrip().endswith("LIMIT 100")
     # Source is per-component quoted + fold-to-UPPER: "MYDATABASE"."SCH"."ORDERS".
     assert '"MYDATABASE"."SCH"."ORDERS"' in ctas
@@ -384,7 +393,9 @@ def test_materialise_applies_partition_filter_in_ctas() -> None:
     adapter.materialise_sample(_TABLE, 100, partition_filter=pf)
 
     ctas = conn.executed[1]
-    assert "MOD(ABS(HASH(*)), 10) < 1" in ctas
+    # Projection-subquery shape (#139): the partition predicate is ANDed at the
+    # OUTER level alongside the alias-based hash-mod predicate.
+    assert "MOD(_sf_sample_hash, 10) < 1 AND " in ctas
     # Rendered via SNOWFLAKE_DIALECT.date_literal_template: '{value}'::DATE.
     assert "'2026-01-01'::DATE" in ctas
     assert ctas.count("'2026-01-01'::DATE") == 1

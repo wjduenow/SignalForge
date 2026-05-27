@@ -10,19 +10,21 @@ NOT NULL source column (the TPCH primary key ``c_custkey``).
 
 ``safety: schema-only`` + ``prune.scope: full`` is MANDATORY here, not a
 tuning choice — it is the only configuration that works against live
-Snowflake today. Both sample strategies are non-functional on a real
-warehouse: ``materialised`` issues a ``CREATE TEMPORARY TABLE`` colocated
-with the source (rejected by the read-only ``SNOWFLAKE_SAMPLE_DATA`` share),
-and BOTH ``oneshot`` and ``materialised`` emit ``MOD(ABS(HASH(*)), n)`` in
-``WHERE`` / ``ORDER BY``, which Snowflake rejects (``HASH(*)`` is valid only
-in the ``SELECT`` projection); ``oneshot`` additionally routes the sample
-row-count through a BigQuery-only ``_get_client`` seam. ``safety:
-aggregate-only`` would invoke the deferred ``column_stats``. ``scope: full``
-runs each test against the full (tiny) ``TPCH_SF1.CUSTOMER`` table directly —
-no sampling, no temp table — and still drives the full draft -> prune ->
-grade -> diff pipeline. The sample-mode bugs are tracked as separate
-#121/#122 follow-ups; the per-run ``signalforge.yml`` (written into
-``tmp_path`` below) pins ``prune.scope: full`` for exactly this reason.
+Snowflake today against THIS dataset, for distinct reasons: ``materialised``
+issues a ``CREATE TEMPORARY TABLE`` colocated with the source, which the
+read-only ``SNOWFLAKE_SAMPLE_DATA`` share rejects; ``oneshot`` routes the
+sample row-count through a BigQuery-only ``_get_client`` seam (tracked as
+``bd_1-scaffolding-tft``). The earlier ``MOD(ABS(HASH(*)), n)``-in-``WHERE`` /
+``ORDER BY`` shape bug (``HASH(*)`` is valid only in the ``SELECT``
+projection) was FIXED in #139 — every Snowflake sample path now emits the
+projection-subquery ``SELECT * EXCLUDE`` form — so it is no longer a reason to
+avoid sampling. ``safety: aggregate-only`` would invoke the deferred
+``column_stats``. ``scope: full`` runs each test against the full (tiny)
+``TPCH_SF1.CUSTOMER`` table directly — no sampling, no temp table — and still
+drives the full draft -> prune -> grade -> diff pipeline. The per-run
+``signalforge.yml`` (written into ``tmp_path`` below) pins ``prune.scope:
+full`` because the shared sample dataset is read-only (materialised) and
+oneshot's row-count seam is still open (``bd_1-scaffolding-tft``).
 
 Gated by FIVE prerequisites — this is a FULL-STACK test (warehouse + LLM):
 
@@ -201,15 +203,17 @@ def test_e2e_signalforge_generate_against_tpch_sf1(
 
     # The seed ships no ``signalforge.yml``; write one into the per-run copy
     # pinning ``prune.scope: full``. ``scope: full`` is REQUIRED on Snowflake
-    # today: both sample strategies are non-functional against a live warehouse
-    # (oneshot needs the not-yet-built ``WarehouseAdapter.get_table_metadata``
-    # seam — engine.py routes the sample row-count through a BigQuery-only
-    # ``_get_client``; materialised emits ``MOD(ABS(HASH(*)), n)`` in WHERE /
-    # ORDER BY, which Snowflake rejects — ``HASH(*)`` is only valid in the
-    # SELECT projection). Tracked as separate #121/#122 bug beads. ``scope:
-    # full`` runs each test against the full source table (TPCH_SF1.CUSTOMER is
-    # small) and still exercises the full draft → prune → grade → diff path +
-    # the always-passes drop this test certifies.
+    # today against THIS dataset: both sample strategies are non-functional for
+    # distinct reasons (oneshot needs the not-yet-built
+    # ``WarehouseAdapter.get_table_metadata`` seam — engine.py routes the sample
+    # row-count through a BigQuery-only ``_get_client``, tracked as
+    # ``bd_1-scaffolding-tft``; materialised's ``CREATE TEMPORARY TABLE`` is
+    # rejected by the read-only ``SNOWFLAKE_SAMPLE_DATA`` share). The earlier
+    # ``MOD(ABS(HASH(*)), n)``-in-WHERE/ORDER-BY shape bug was FIXED in #139
+    # (projection-subquery ``SELECT * EXCLUDE`` form), so it is no longer a
+    # blocker. ``scope: full`` runs each test against the full source table
+    # (TPCH_SF1.CUSTOMER is small) and still exercises the full draft → prune →
+    # grade → diff path + the always-passes drop this test certifies.
     #
     # ``safety: schema-only`` is REQUIRED on Snowflake: ``aggregate-only``
     # invokes ``adapter.column_stats``, which SnowflakeAdapter leaves as a

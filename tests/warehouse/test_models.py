@@ -88,6 +88,10 @@ def test_snowflake_dialect_sql_fragment_fields() -> None:
     # CTE alias is the QUOTED ``"sample"`` (an unquoted ``WITH sample AS`` is a
     # syntax error on Snowflake).
     assert SNOWFLAKE_DIALECT.sample_cte_alias == '"sample"'
+    # issue #139: HASH(*) is projection-only on Snowflake, so the sample SELECT
+    # computes it in an inner projection and references the alias.
+    assert SNOWFLAKE_DIALECT.sample_hash_in_projection is True
+    assert SNOWFLAKE_DIALECT.sample_hash_alias == "_sf_sample_hash"
 
 
 @pytest.mark.unit
@@ -102,6 +106,10 @@ def test_bigquery_dialect_sql_fragment_field_defaults() -> None:
     # BigQuery's sample-CTE alias is the bare ``sample`` (not a reserved word
     # there) — keeps the existing BigQuery snapshots byte-identical.
     assert BIGQUERY_DIALECT.sample_cte_alias == "sample"
+    # issue #139: BigQuery's FARM_FINGERPRINT hash is valid inline, so the
+    # sample SELECT keeps the inline (non-projection) shape.
+    assert BIGQUERY_DIALECT.sample_hash_in_projection is False
+    assert BIGQUERY_DIALECT.sample_hash_alias == "_sf_sample_hash"
 
 
 @pytest.mark.unit
@@ -125,6 +133,8 @@ def test_dialect_constructs_without_new_field_args() -> None:
     assert d.date_literal_template == "DATE('{value}')"
     assert d.quote_qualified_per_component is False
     assert d.sample_cte_alias == "sample"
+    assert d.sample_hash_in_projection is False
+    assert d.sample_hash_alias == "_sf_sample_hash"
 
 
 @pytest.mark.unit

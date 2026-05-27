@@ -71,6 +71,7 @@ from signalforge.manifest.errors import (
     TemplateResolutionError,
 )
 from signalforge.manifest.template import resolve_template_refs
+from signalforge.warehouse._sample_sql import render_sample_select
 from signalforge.warehouse._sql_safety import (
     escape_bq_string_literal,
     validate_identifier,
@@ -205,17 +206,29 @@ def _render_sample_cte(
     ``ABS(HASH(*))``) so sampling decisions stay consistent between the
     adapter's internal samples and the prune engine's wrapped tests
     (DEC-006 of issue #3; DEC-002 of issue #121).
+
+    The CTE body is built by the shared
+    :func:`signalforge.warehouse._sample_sql.render_sample_select` so the
+    compiler's sample CTE and the warehouse adapter's sample ``SELECT``
+    stay byte-consistent (issue #139, DEC-002). The compiler CTE carries
+    **no** ``ORDER BY`` (``order_by_hash=False``); the partition predicate
+    is rendered by the compiler's own dialect-correct
+    :func:`_render_partition_filter` and passed as ``extra_where``.
     """
-    where_clauses = [
-        f"MOD({dialect.sample_row_hash_expr}, {sample_bucket}) < 1",
-    ]
-    if partition_filter is not None:
-        where_clauses.append(_render_partition_filter(partition_filter, dialect))
-    where_sql = " AND ".join(where_clauses)
-    return (
-        f"WITH {dialect.sample_cte_alias} AS "
-        f"(SELECT * FROM {table} AS t WHERE {where_sql} LIMIT {sample_size})"
+    extra_where = (
+        _render_partition_filter(partition_filter, dialect)
+        if partition_filter is not None
+        else None
     )
+    body = render_sample_select(
+        table,
+        dialect=dialect,
+        sample_bucket=sample_bucket,
+        sample_size=sample_size,
+        extra_where=extra_where,
+        order_by_hash=False,
+    )
+    return f"WITH {dialect.sample_cte_alias} AS ({body})"
 
 
 def _quote(identifier: str, dialect: Dialect) -> str:
