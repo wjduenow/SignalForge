@@ -368,18 +368,50 @@ class SnowflakeAdapter(WarehouseAdapter):
         — because a single quoted string spanning dots reads as ONE literal
         identifier named ``db.schema.name`` (unlike BigQuery's single
         backtick wrapping the whole path). Two-part ``"SCHEMA"."NAME"`` when
-        ``project`` is ``None``. Mirrors the prune compiler's
-        ``_qualified_table_name`` under ``quote_qualified_per_component=True``
-        so the adapter's sample SQL is consistent with the compiler's CTE.
+        ``project`` is ``None``.
+
+        **Fold-then-quote, mirroring the prune compiler's ``_quote`` /
+        ``_fold_identifier`` (issue #124).** Each component is case-folded per
+        :attr:`Dialect.identifier_case` (``"upper"`` for Snowflake) BEFORE the
+        quote chars are added, so a conventionally-cased manifest identifier
+        (dbt lowercases ``database`` / ``schema`` / ``alias``) resolves against
+        the real upper-folded Snowflake object (`"CUSTOMER"`, not the
+        case-sensitive-and-missing `"customer"`). This is load-bearing for the
+        ``materialised`` strategy: ``materialise_sample`` CREATEs the temp
+        table via this method and the compiler REFERENCES it via its own
+        fold-then-quote — both must fold identically or the quoted (and thus
+        case-sensitive) names diverge and the failing-rows SQL points at a
+        table the CTAS never created. Before #124 this method preserved case
+        while the compiler folded, so the two diverged on any non-upper
+        identifier — caught by US-004's gated live materialised e2e.
 
         The dataset / name are already DEC-013-validated by :class:`TableRef`'s
-        ``__post_init__``, so no re-validation is needed before quoting.
+        ``__post_init__`` (ASCII identifier shape), so folding cannot introduce
+        a quote-breaking character.
         """
         qc = SNOWFLAKE_DIALECT.quote_char
         components = (
             [ref.dataset, ref.name] if ref.project is None else [ref.project, ref.dataset, ref.name]
         )
-        return ".".join(f"{qc}{component}{qc}" for component in components)
+        return ".".join(f"{qc}{self._fold(c)}{qc}" for c in components)
+
+    @staticmethod
+    def _fold(identifier: str) -> str:
+        """Case-fold one identifier per :attr:`Dialect.identifier_case` (#124).
+
+        Mirrors the prune compiler's ``_fold_identifier`` so the adapter and the
+        compiler quote identifiers byte-identically — load-bearing for the
+        ``materialised`` strategy (the temp table CREATEd by the adapter and
+        REFERENCEd by the compiler must fold to the same case, since Snowflake
+        quoted identifiers are case-sensitive). Folds an already-validated
+        ASCII identifier, so it cannot introduce a quote-breaking character.
+        """
+        case = SNOWFLAKE_DIALECT.identifier_case
+        if case == "upper":
+            return identifier.upper()
+        if case == "lower":
+            return identifier.lower()
+        return identifier
 
     def _render_partition_filter(self, pf: PartitionFilter) -> str:
         """Render a :class:`PartitionFilter` to a Snowflake SQL fragment (DEC-006).
@@ -431,7 +463,7 @@ class SnowflakeAdapter(WarehouseAdapter):
         from signalforge.warehouse._sql_safety import escape_bq_string_literal
 
         qc = SNOWFLAKE_DIALECT.quote_char
-        db_prefix = "" if table.project is None else f"{qc}{table.project}{qc}."
+        db_prefix = "" if table.project is None else f"{qc}{self._fold(table.project)}{qc}."
         schema_lit = escape_bq_string_literal(table.dataset)
         name_lit = escape_bq_string_literal(table.name)
         sql = (
@@ -796,7 +828,18 @@ class SnowflakeAdapter(WarehouseAdapter):
 
         sample_failures: list[dict[str, Any]] | None
         if capture_failures > 0:
-            raw_samples = lowered.get("samples") or []
+            raw_samples = lowered.get("samples")
+            # Snowflake returns the ``ARRAY_AGG(OBJECT_CONSTRUCT(*))`` column as a
+            # VARIANT, which the connector surfaces as a JSON STRING (not a Python
+            # list); `ARRAY_AGG` over zero rows yields NULL → None. Parse the
+            # string before iterating. A fake/DictCursor that already returns a
+            # Python list passes through unchanged (the `isinstance(str)` guard).
+            if raw_samples is None:
+                raw_samples = []
+            elif isinstance(raw_samples, str):
+                raw_samples = json.loads(raw_samples)
+            # Each element is an OBJECT_CONSTRUCT(*) → already a dict after parse;
+            # `dict(r)` is a defensive copy (and coerces a fake's mapping rows).
             sample_failures = [dict(r) for r in raw_samples]
         else:
             sample_failures = None

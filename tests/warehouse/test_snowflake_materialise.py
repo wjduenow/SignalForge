@@ -90,15 +90,19 @@ def test_materialise_ctas_sql_shape_and_temp_name() -> None:
     temp_name = f"_sf_sample_{run_id}"
 
     assert ctas.startswith("CREATE TEMPORARY TABLE")
-    assert temp_name in ctas
+    # _quote folds to UPPER then quotes (#124), so the temp name appears
+    # upper-cased in the emitted SQL (the returned TableRef.name stays the
+    # lowercase recipe output — folding happens only at quote time).
+    assert temp_name.upper() in ctas
     # Deterministic hash-mod predicate (read from the dialect, not hard-coded).
     assert "MOD(ABS(HASH(*)), 10) < 1" in ctas
     assert "ORDER BY ABS(HASH(*))" in ctas
     assert ctas.rstrip().endswith("LIMIT 100")
-    # Source is per-component quoted: "mydatabase"."SCH"."ORDERS".
-    assert '"mydatabase"."SCH"."ORDERS"' in ctas
-    # Temp table colocated with the source DB / schema, per-component quoted.
-    assert f'"mydatabase"."SCH"."{temp_name}"' in ctas
+    # Source is per-component quoted + fold-to-UPPER: "MYDATABASE"."SCH"."ORDERS".
+    assert '"MYDATABASE"."SCH"."ORDERS"' in ctas
+    # Temp table colocated with the source DB / schema, per-component quoted,
+    # upper-folded — byte-identical to how the compiler will REFERENCE it.
+    assert f'"MYDATABASE"."SCH"."{temp_name.upper()}"' in ctas
 
 
 def test_materialise_returns_fully_qualified_temp_ref() -> None:

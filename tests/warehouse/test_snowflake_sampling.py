@@ -91,8 +91,10 @@ def test_sample_sql_is_byte_identical_across_two_calls() -> None:
     assert "MOD(ABS(HASH(*)), 10) < 1" in sql
     assert "ORDER BY ABS(HASH(*))" in sql
     assert "LIMIT 100" in sql
-    # Per-component double-quoting.
-    assert '"mydatabase"."SCH"."ORDERS"' in sql
+    # Per-component double-quoting, fold-to-UPPER first (#124): lowercase
+    # project "mydatabase" folds to "MYDATABASE" so it resolves against the
+    # real conventionally-named Snowflake object.
+    assert '"MYDATABASE"."SCH"."ORDERS"' in sql
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +328,9 @@ def test_size_query_embeds_escaped_string_literals_case_insensitively() -> None:
     size_sql = conn.executed[0]
     assert "UPPER(TABLE_SCHEMA) = UPPER('SCH')" in size_sql
     assert "UPPER(TABLE_NAME) = UPPER('ORDERS')" in size_sql
-    assert '"mydatabase".INFORMATION_SCHEMA.TABLES' in size_sql
+    # Database prefix folds to UPPER then quotes (#124) so it resolves against
+    # the real conventionally-named database.
+    assert '"MYDATABASE".INFORMATION_SCHEMA.TABLES' in size_sql
 
 
 # ---------------------------------------------------------------------------

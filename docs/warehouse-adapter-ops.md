@@ -360,6 +360,15 @@ non-BigQuery adapter then ships its own session-equivalent in v0.3
 `CREATE TEMP TABLE` inside a transaction). The ABC default-raise is
 the v0.2 stop-gap, not a permanent surface.
 
+> **Snowflake update (#122/#124):** Snowflake no longer inherits the
+> `MaterialisationNotSupportedError` default — `materialise_sample` is
+> implemented. However, neither sample strategy is functional against a
+> *live* Snowflake yet (the `HASH(*)` sample SQL is rejected in
+> `WHERE`/`ORDER BY`, and oneshot's row-count routes through a BigQuery-only
+> seam). On Snowflake use **`prune.scope: full`**, NOT
+> `prune.sample_strategy: oneshot`; see "Known limitations on live Snowflake"
+> below.
+
 ## Query-bytes estimation (v0.2, issue #36)
 
 The `WarehouseAdapter` ABC ships an `estimate_query_bytes` method in
@@ -550,22 +559,162 @@ suppressed). Operators with permission to abort each session can
 reuse the manual recovery command above with the per-row
 `session_info.session_id`.
 
+## Snowflake adapter (v0.2, epic #118)
+
+The Snowflake seam ships across issues #119 (skeleton), #120 (profile),
+#121 (compiler dialect), #122 (sampling + session), #130 (EXPLAIN
+estimate), and #124 (test harness + ops docs). This section consolidates
+what an operator running SignalForge against Snowflake needs; the
+cross-cutting sections above (sampling, materialised sampling, estimation,
+error reference) carry the BigQuery + Snowflake detail inline.
+
+**Install.** `pip install "signalforge-dbt[snowflake]"` (or `uv pip install
+"signalforge-dbt[snowflake]"`). The base install never pulls
+`snowflake-connector-python`; it lives only under the `[snowflake]` extra.
+
+**Profile keys.** A `type: snowflake` target requires `account`, `user`,
+and `warehouse`; `database` / `schema` / `role` are optional (dbt allows
+them at model level / via the user's default role). Auth scope:
+password, key-pair (`private_key_path` + optional `private_key_passphrase`),
+and SSO (`authenticator: externalbrowser`). `oauth` /
+`username_password_mfa` are deferred (raise `UnsupportedAuthMethodError`).
+Known limitation: the strict identifier grammar rejects Snowflake's legal
+`$` in identifiers.
+
+**Dialect.** `SNOWFLAKE_DIALECT` sets `quote_char='"'`,
+`identifier_case='upper'` (Snowflake folds unquoted identifiers to
+upper-case, so the compiler folds-then-quotes — `"CUSTOMER_ID"` resolves
+against conventional unquoted DDL), per-component quoting
+(`"DB"."SCHEMA"."T"`), `ABS(HASH(*))` as the deterministic row-sample
+hash, `'{value}'::TIMESTAMP/::DATE` partition-filter literals, and a
+quoted `"sample"` CTE alias (`SAMPLE` is a Snowflake reserved word, so an
+unquoted `WITH sample AS …` is a syntax error). `HASH()` is deterministic
+only *within a Snowflake release* — sufficient for within-run prune
+determinism, not cross-time stable (mirrors the EXPLAIN planner-estimate
+caveat).
+
+**Connection-bound session.** Unlike BigQuery (which threads a server-side
+`session_id` on every query), the Snowflake *connection* holds the session
+— `materialise_sample` creates a session-scoped
+`CREATE TEMPORARY TABLE "<SRC DB>"."<SRC SCHEMA>"."_SF_SAMPLE_<RUN_ID>"`
+colocated with the source (each component fold-to-UPPER then quoted, per
+`_quote`), and `__exit__` closes the connection (reaping its temp tables).
+**Cost-relevant consequence:** the source table must be **writable** —
+materialised sampling against a read-only shared database (e.g.
+`SNOWFLAKE_SAMPLE_DATA`) fails the CTAS. Note that *all* sample-mode prune
+is currently non-functional on live Snowflake regardless (see "Known
+limitations" below); use `prune.scope: full` today.
+
+**Session cleanup is fail-soft with no manual command.** A Snowflake temp
+table is unreachable outside its owning session, so there is no
+`bq`-style abort command and no `auto-expire in <N>s` countdown — the
+honest durable fallback is Snowflake's server-side idle-session reap. On a
+cleanup failure the adapter swallows the error and emits one
+operator-actionable WARNING quoting the raw `session_id` (the only path
+where the raw id appears; success logs hash it). `--quiet` does **not**
+suppress this WARNING.
+
+**Estimate.** `signalforge generate --estimate` runs `EXPLAIN USING JSON`
+and parses `GlobalStats.bytesAssigned` (see [§ Query-bytes
+estimation](#query-bytes-estimation-v02-issue-36)). EXPLAIN figures are
+*planner estimates* — a calibration signal, not a billing guarantee — and
+may be absent for metadata-only queries (`EstimateUnavailableError` →
+the engine degrades to a price-only preview).
+
+**Error taxonomy (#124).** `map_snowflake_exception` mirrors
+`map_bq_exception`: a connector `ProgrammingError` for "object does not
+exist" (errno 002003) → `TableNotFoundError`; "invalid identifier"
+(errno 000904) → `ColumnNotFoundError`; residual `ProgrammingError` →
+`QuerySyntaxError`; `ForbiddenError` / auth-flavoured
+`DatabaseError`/`OperationalError` → `WarehouseAuthError`; everything else
+passes through unchanged. No `BytesBilledExceededError` equivalent —
+Snowflake has no bytes-billed cap (cost is governed by warehouse size +
+auto-suspend, see below).
+
+**Known limitations on live Snowflake (v0.2) — use `safety: schema-only` +
+`prune.scope: full`.** Three deferred/defective paths mean a live Snowflake
+run today must stick to schema-only drafting and full-scope prune (the
+combination certified green by the gated live e2e). Each is tracked for a
+later fix:
+
+- **`safety: aggregate-only` — unsupported.** Profiles columns via
+  `adapter.column_stats`, which `SnowflakeAdapter` leaves as a deferred
+  `NotImplementedError` (the one v0.2 method not yet implemented).
+  `generate` with `safety.mode: aggregate-only` fails (exit 1).
+- **`safety: sample` and `prune.sample_strategy` (oneshot / materialised) —
+  unsupported.** All sampling emits the deterministic row-hash predicate
+  `MOD(ABS(HASH(*)), n) < 1` in `WHERE` / `ORDER BY`, which Snowflake rejects
+  (`002079`: `HASH(*)` is valid only in the `SELECT` projection). Needs a
+  projection-subquery sample shape (a Snowflake dialect-design gap).
+- **`prune.scope: sample` (oneshot) — also blocked** at the engine seam: the
+  sample row-count is fetched through a BigQuery-only `_get_client`;
+  `SnowflakeAdapter` exposes `_get_num_rows` instead. Needs a vendor-neutral
+  `WarehouseAdapter.get_table_metadata` seam.
+
+`schema-only` (redacted column names/types to the LLM) + `prune.scope: full`
+runs the full draft → prune → grade → diff pipeline against Snowflake today;
+`run_test_sql` (full-scope test execution) and `estimate_query_bytes` are
+implemented and certified live.
+
+**Cost guidance — read before running any live Snowflake test.** Snowflake
+bills compute by warehouse-second, so an unbounded or forgotten run costs
+real money. **Set a resource monitor on your account FIRST** (a hard
+credit ceiling with a suspend action), use an **XS warehouse**, and
+configure **aggressive auto-suspend** (e.g. 60s) so an idle warehouse
+stops billing promptly. The gated live tests (below) sample with `LIMIT`
+and target the tiny `TPCH_SF1` / a small engineered table to keep scans
+minimal, but the resource monitor is the load-bearing guardrail.
+
+**Offline test harness.** The adapter's emitted SQL is validated offline
+two ways without a live warehouse: (1) `fakesnow` (in-memory DuckDB
+Snowflake emulator) **executes** the non-`HASH` SQL (`run_test_sql`
+COUNT-wrapper, `INFORMATION_SCHEMA.TABLES.ROW_COUNT` sizing) with
+rule-semantic assertions — never `HASH()` value-equality; (2) the
+hash-mod sample-mode SQL (which fakesnow's DuckDB `HASH` cannot execute)
+is asserted to **parse** under `sqlglot`'s Snowflake dialect — the syntax
+gate that caught the `"sample"` reserved-word bug. A hand-rolled
+`FakeSnowflakeConnection` (`expect_execute` / `assert_all_expectations_met`)
+covers session/cleanup/error-mapping behaviour. Real `HASH` execution +
+case-folding are certified only by the gated live tests.
+
 ## Integration tests (maintainer-only)
 
 The default `pytest` invocation skips warehouse-touching tests via
-`addopts = -m 'not bigquery'` (DEC-021). To run them locally:
+`addopts = -m 'not bigquery and ... and not snowflake'`. To run them locally:
 
 ```bash
-SF_RUN_BQ=1 pytest -m bigquery --no-cov
+# BigQuery (free under the 1 TB/month tier; bills GOOGLE_CLOUD_PROJECT)
+SF_RUN_BQ=1 uv run pytest -m bigquery --no-cov
+
+# Snowflake — set a resource monitor + XS warehouse + auto-suspend FIRST (bills compute)
+export SF_RUN_SNOWFLAKE=1
+export SNOWFLAKE_ACCOUNT=<org-account> SNOWFLAKE_USER=<user> SNOWFLAKE_PASSWORD=<pw>
+export SNOWFLAKE_WAREHOUSE=<xs-warehouse>
+# warehouse+prune live e2e additionally needs a WRITABLE target:
+export SNOWFLAKE_DATABASE=<your-db> SNOWFLAKE_SCHEMA=<your-schema>
+# full generate-pipeline e2e additionally needs an LLM key:
+export ANTHROPIC_API_KEY=sk-...
+uv run pytest -m snowflake --no-cov
 ```
 
-The `SF_RUN_BQ=1` env-var gate lives on top of the marker so even an
-explicit `-m bigquery` will not fire BigQuery requests in CI by accident.
+The `SF_RUN_BQ=1` / `SF_RUN_SNOWFLAKE=1` env-var gates live on top of the
+markers so even an explicit `-m bigquery` / `-m snowflake` will not fire
+warehouse requests in CI by accident. Each test surfaces a distinct
+skip-with-reason when a prerequisite is missing. The `snowflake` marker
+covers both the offline `fakesnow`/`sqlglot` suites (which run with no env
+vars) and the gated live tests (which self-skip without credentials):
+`tests/prune/test_compiler_fakesnow.py`,
+`tests/warehouse/test_snowflake_adapter_fakesnow.py` (offline);
+`tests/warehouse/test_snowflake_prune_live.py` (live, materialised, writable
+schema), `tests/warehouse/test_snowflake_estimate_live.py` (live EXPLAIN),
+`tests/cli/test_e2e_snowflake_smoke.py` (live full pipeline vs `TPCH_SF1`,
+`oneshot`).
 
-Fixtures use `bigquery-public-data.samples.shakespeare`, which is free
-under BigQuery's 1 TB/month query tier. There is no CI job for these
-tests in v0.1; revisit when external contributors arrive and a billing
-account on the project is available.
+Fixtures use `bigquery-public-data.samples.shakespeare` (BigQuery, free
+under the 1 TB/month tier) and `SNOWFLAKE_SAMPLE_DATA.TPCH_SF1` plus a
+hand-crafted seed at `tests/fixtures/snowflake/` (Snowflake). There is no
+CI job for these tests; they run on whatever interpreter `uv run` resolves
+(target the matrix ceiling for packaging-sensitive paths).
 
 ## Debugging
 
