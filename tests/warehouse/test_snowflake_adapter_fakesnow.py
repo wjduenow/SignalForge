@@ -340,30 +340,39 @@ def test_get_num_rows_returns_none_for_absent_table() -> None:
 
 
 def test_sample_rows_emitted_sql_parses_under_snowflake_dialect() -> None:
-    """``sample_rows`` emits ``MOD(ABS(HASH(*)), <bucket>) < 1`` + ``ORDER BY
-    ABS(HASH(*))`` — fakesnow's DuckDB ``HASH`` cannot RUN it (variadic
-    ``HASH(*)``; DEC-005 of #121), so this is parse-only. The SQL MUST parse as
-    valid Snowflake."""
+    """``sample_rows`` emits the projection-subquery shape (issue #139): an
+    inner ``SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash`` with the outer
+    ``WHERE MOD(_sf_sample_hash, <bucket>) < 1`` + ``ORDER BY _sf_sample_hash``
+    + ``SELECT * EXCLUDE (_sf_sample_hash)``. ``HASH(*)`` is invalid in a
+    Snowflake WHERE/ORDER BY predicate, so the old inline form is GONE.
+    fakesnow's DuckDB ``HASH`` cannot RUN variadic ``HASH(*)`` (DEC-005 of
+    #121), so this is parse-only. The SQL MUST parse as valid Snowflake."""
     conn = _RecordingConnection()
     # num_rows=1000, n=100 → bucket = max(1000 // 100, 1) = 10.
     conn.expect_execute(matching=r"INFORMATION_SCHEMA", returns=[(1000,)])
-    conn.expect_execute(matching=r"MOD\(ABS\(HASH", returns=[], description=[])
+    conn.expect_execute(matching=r"_sf_sample_hash", returns=[], description=[])
     adapter = SnowflakeAdapter(connection=conn)
 
     adapter.sample_rows(_TABLE, 100)
 
     sample_sql = conn.executed[1]
-    assert "MOD(ABS(HASH(*)), 10) < 1" in sample_sql
-    assert "ORDER BY ABS(HASH(*))" in sample_sql
+    assert "SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash" in sample_sql
+    assert "SELECT * EXCLUDE (_sf_sample_hash)" in sample_sql
+    assert "MOD(_sf_sample_hash, 10) < 1" in sample_sql
+    assert "ORDER BY _sf_sample_hash" in sample_sql
+    # The old inline predicate / order-by forms are GONE.
+    assert "MOD(ABS(HASH(*)), 10)" not in sample_sql
+    assert "ORDER BY ABS(HASH(*))" not in sample_sql
     _parse_snowflake(sample_sql)
 
 
 def test_materialise_ctas_emitted_sql_parses_under_snowflake_dialect() -> None:
     """The ``materialise_sample`` CTAS emits ``CREATE TEMPORARY TABLE
-    "<db>"."<schema>"."_sf_sample_<run_id>" AS SELECT ... HASH(*) ...`` —
-    fakesnow rejects a qualified temp-table name ("TEMPORARY table names can
-    *only* use the 'temp' catalog") AND cannot run ``HASH(*)``, so this is
-    parse-only. The SQL MUST parse as valid Snowflake."""
+    "<db>"."<schema>"."_sf_sample_<run_id>" AS <projection-subquery SELECT>``
+    (issue #139). fakesnow rejects a qualified temp-table name ("TEMPORARY
+    table names can *only* use the 'temp' catalog") AND cannot run variadic
+    ``HASH(*)``, so this is parse-only. The SQL MUST parse as valid
+    Snowflake."""
     conn = _RecordingConnection()
     conn.expect_execute(matching=r"INFORMATION_SCHEMA", returns=[(1000,)])
     conn.expect_execute(matching=r"CREATE TEMPORARY TABLE", returns=[])
@@ -373,7 +382,12 @@ def test_materialise_ctas_emitted_sql_parses_under_snowflake_dialect() -> None:
 
     ctas = conn.executed[1]
     assert ctas.startswith("CREATE TEMPORARY TABLE")
-    assert "MOD(ABS(HASH(*)), 10) < 1" in ctas
+    assert "SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash" in ctas
+    assert "SELECT * EXCLUDE (_sf_sample_hash)" in ctas
+    assert "MOD(_sf_sample_hash, 10) < 1" in ctas
+    assert "ORDER BY _sf_sample_hash" in ctas
+    # The old inline predicate form is GONE.
+    assert "MOD(ABS(HASH(*)), 10)" not in ctas
     _parse_snowflake(ctas)
 
 

@@ -73,6 +73,7 @@ from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from signalforge.warehouse._sample_id import _compute_run_id, _hash_session_id
+from signalforge.warehouse._sample_sql import render_sample_select
 from signalforge.warehouse._sql_safety import validate_identifier, validate_test_sql
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
@@ -595,31 +596,53 @@ class SnowflakeAdapter(WarehouseAdapter):
            * ``num_rows >= _LARGE_TABLE_THRESHOLD`` + no ``partition_filter`` →
              :class:`SamplingRequiresPartitionFilterError`.
            * else → ``bucket = max(num_rows // n, 1)``.
-        3. Issue ``SELECT * FROM <quoted> AS t WHERE
-           MOD(<dialect.sample_row_hash_expr>, <bucket>) < 1
-           [AND <partition_filter>] ORDER BY <dialect.sample_row_hash_expr>
-           LIMIT n``.
+        3. Emit the deterministic sample SELECT via the shared
+           :func:`signalforge.warehouse._sample_sql.render_sample_select`
+           helper (``order_by_hash=True``). For Snowflake
+           (``sample_hash_in_projection=True``) this is the projection-subquery
+           form (issue #139)::
 
-        The hash-mod approach (``MOD(ABS(HASH(*)), bucket)``) is deterministic
-        across runs (same input → same prune decision) and works on views /
-        MVs / CTEs where ``TABLESAMPLE`` does not. The hash expression is read
-        from :data:`SNOWFLAKE_DIALECT` (NOT hard-coded) so the adapter's sample
-        SQL is byte-consistent with the prune compiler's sample CTE. The
+               SELECT * EXCLUDE (_sf_sample_hash) FROM
+               (SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash FROM <quoted> AS t)
+               WHERE MOD(_sf_sample_hash, <bucket>) < 1[ AND <partition_filter>]
+               ORDER BY _sf_sample_hash LIMIT n
+
+           ``HASH(*)`` is invalid in a Snowflake ``WHERE``/``ORDER BY``
+           predicate (``002079``); it is legal only in the SELECT projection,
+           so the hash is computed once in an inner projection bound to
+           ``_sf_sample_hash`` and the outer clauses reference that alias.
+           ``SELECT * EXCLUDE (_sf_sample_hash)`` strips the helper column so
+           returned dict rows carry only the source columns.
+
+        The hash-mod approach is deterministic across runs (same input → same
+        prune decision) and works on views / MVs / CTEs where ``TABLESAMPLE``
+        does not. The hash expression and sample SHAPE are read from
+        :data:`SNOWFLAKE_DIALECT` (NOT hard-coded) so the adapter's sample SQL
+        is byte-consistent with the prune compiler's sample CTE. The
         ``ORDER BY`` makes ``LIMIT`` truncation deterministic when the WHERE
-        filter retains more than ``n`` rows.
+        filter retains more than ``n`` rows. The partition filter is rendered
+        by the adapter's own :meth:`_render_partition_filter` and passed to the
+        helper as ``extra_where`` — the helper never renders partition filters.
         """
         if n <= 0:
             raise ValueError(f"sample_rows requires n > 0; got n={n}")
 
         bucket = self._resolve_sample_bucket(table, n, partition_filter=partition_filter)
 
-        hash_expr = SNOWFLAKE_DIALECT.sample_row_hash_expr
         quoted = self._quote(table)
-        where_clauses = [f"MOD({hash_expr}, {bucket}) < 1"]
-        if partition_filter is not None:
-            where_clauses.append(self._render_partition_filter(partition_filter))
-        where_sql = " AND ".join(where_clauses)
-        sql = f"SELECT * FROM {quoted} AS t WHERE {where_sql} ORDER BY {hash_expr} LIMIT {n}"
+        extra_where = (
+            self._render_partition_filter(partition_filter)
+            if partition_filter is not None
+            else None
+        )
+        sql = render_sample_select(
+            quoted,
+            dialect=SNOWFLAKE_DIALECT,
+            sample_bucket=bucket,
+            sample_size=n,
+            extra_where=extra_where,
+            order_by_hash=True,
+        )
 
         return self._execute_to_dicts(sql, table=table)
 
@@ -651,13 +674,22 @@ class SnowflakeAdapter(WarehouseAdapter):
         :meth:`run_test_sql` on the same connection reaches the temp table (no
         ``connection_properties`` routing needed, unlike BigQuery).
 
-        DEC-006 — the deterministic ``MOD(<dialect.sample_row_hash_expr>,
-        <bucket>) < 1`` predicate + ``ORDER BY <dialect.sample_row_hash_expr>``
-        are read from :data:`SNOWFLAKE_DIALECT` (NOT hard-coded) so the CTAS
-        bytes stay consistent with :meth:`sample_rows` and the prune compiler's
-        sample CTE (Architectural Commitment #5). ``partition_filter`` lands
-        ONCE here, in the CTAS ``WHERE``; per-test queries against the temp
-        table do not re-apply it.
+        DEC-006 — the deterministic sample SELECT body is built by the shared
+        :func:`signalforge.warehouse._sample_sql.render_sample_select` helper
+        (``order_by_hash=True``), which for Snowflake emits the
+        projection-subquery shape (issue #139): the hash is computed once in an
+        inner ``SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash`` and the outer
+        ``WHERE``/``ORDER BY`` reference the alias, with
+        ``SELECT * EXCLUDE (_sf_sample_hash)`` stripping the helper column so
+        the temp table's schema equals the SOURCE schema (load-bearing —
+        downstream prune queries the temp table by its real columns). The hash
+        expression and shape are read from :data:`SNOWFLAKE_DIALECT` (NOT
+        hard-coded) so the CTAS bytes stay consistent with :meth:`sample_rows`
+        and the prune compiler's sample CTE (Architectural Commitment #5).
+        ``partition_filter`` lands ONCE here, in the CTAS ``WHERE`` (rendered by
+        :meth:`_render_partition_filter` and passed to the helper as
+        ``extra_where``); per-test queries against the temp table do not
+        re-apply it.
 
         DEC-007 — the ``TEMP TABLE`` is colocated with the SOURCE (created as
         ``<source db>.<source schema>._sf_sample_<run_id>``) and the returned
@@ -703,24 +735,29 @@ class SnowflakeAdapter(WarehouseAdapter):
         # Shared fail-loud sizing pathway (same as sample_rows; DEC-005).
         bucket = self._resolve_sample_bucket(table, n, partition_filter=partition_filter)
 
-        hash_expr = SNOWFLAKE_DIALECT.sample_row_hash_expr
         quoted_source = self._quote(table)
         # The TEMP TABLE is colocated with the source (DEC-007): same DB /
         # schema, per-component quoted, with the deterministic temp name.
         temp_ref = TableRef(project=table.project, dataset=table.dataset, name=temp_name)
         quoted_temp = self._quote(temp_ref)
 
-        where_clauses = [f"MOD({hash_expr}, {bucket}) < 1"]
-        if partition_filter is not None:
-            where_clauses.append(self._render_partition_filter(partition_filter))
-        where_sql = " AND ".join(where_clauses)
-        sql = (
-            f"CREATE TEMPORARY TABLE {quoted_temp} AS "
-            f"SELECT * FROM {quoted_source} AS t "
-            f"WHERE {where_sql} "
-            f"ORDER BY {hash_expr} "
-            f"LIMIT {n}"
+        extra_where = (
+            self._render_partition_filter(partition_filter)
+            if partition_filter is not None
+            else None
         )
+        # The projection-subquery SELECT body (issue #139): SELECT * EXCLUDE
+        # (_sf_sample_hash) so the CTAS temp table's schema equals the source
+        # schema — no extra hash column leaks into the materialised sample.
+        select_body = render_sample_select(
+            quoted_source,
+            dialect=SNOWFLAKE_DIALECT,
+            sample_bucket=bucket,
+            sample_size=n,
+            extra_where=extra_where,
+            order_by_hash=True,
+        )
+        sql = f"CREATE TEMPORARY TABLE {quoted_temp} AS {select_body}"
 
         # Open / reuse the connection (also sets self._active_session) and stamp
         # the session-open time as run provenance (NOT consumed by the cleanup
