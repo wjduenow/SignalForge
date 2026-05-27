@@ -47,11 +47,12 @@ Required env vars (each missing one yields its own distinct skip reason):
   ``1``/``true``/``yes``/``on``).
 * ``SNOWFLAKE_ACCOUNT`` / ``SNOWFLAKE_USER`` / ``SNOWFLAKE_PASSWORD`` — the
   minimal password-auth connection triple.
-* ``SNOWFLAKE_WAREHOUSE`` — compute context for the CTAS + per-test queries.
+* ``SNOWFLAKE_WAREHOUSE`` — compute context for the engineered ``CREATE TABLE``
+  + the full-scope per-test ``COUNT(*)``.
 * ``SNOWFLAKE_DATABASE`` + ``SNOWFLAKE_SCHEMA`` — the **WRITABLE** target where
   the engineered table is created. The read-only ``SNOWFLAKE_SAMPLE_DATA`` share
-  cannot accept a ``CREATE TABLE`` / CTAS, so a writable namespace is required;
-  the table is dropped in teardown.
+  cannot accept a ``CREATE TABLE``, so a writable namespace is required; the
+  table is dropped in teardown.
 
 **Cost guidance — set a Snowflake resource monitor FIRST.** Before running,
 create a resource monitor with a hard credit cap so a runaway query cannot bill
@@ -135,9 +136,9 @@ def _skip_reason() -> str | None:
 
     Returns ``None`` only when the opt-in flag AND every connection env var is
     present — the test then proceeds to make real Snowflake calls (CREATE TABLE,
-    materialised sample, COUNT(*), DROP TABLE). Each missing prerequisite yields
-    its own distinct reason so a maintainer running ``pytest -m snowflake`` sees
-    exactly what to set.
+    a full-scope per-test ``COUNT(*)``, DROP TABLE). Each missing prerequisite
+    yields its own distinct reason so a maintainer running ``pytest -m
+    snowflake`` sees exactly what to set.
     """
     if not _snowflake_runs_enabled():
         return "SF_RUN_SNOWFLAKE=1 required (live test talks to a real Snowflake warehouse)"
@@ -171,12 +172,13 @@ def _make_adapter() -> SnowflakeAdapter:
 def _quoted_table(database: str, schema: str, name: str) -> str:
     """Per-component quoted, UPPER-folded Snowflake identifier (#124).
 
-    Must fold to UPPER then quote — byte-identical to ``SnowflakeAdapter._quote``
-    — so the table this test CREATEs/DROPs directly is the same case-sensitive
-    object the adapter's ``materialise_sample`` READs from. A case-preserved
-    helper would create ``"…<lowercase>"`` while the adapter references the
-    upper-folded ``"…<UPPERCASE>"`` → "Table not found" on the materialised
-    path (Snowflake quoted identifiers are case-sensitive).
+    Must fold to UPPER then quote — byte-identical to the prune compiler's
+    ``_quote`` / ``SnowflakeAdapter._quote`` — so the table this test
+    CREATEs/DROPs directly is the same case-sensitive object the compiled
+    full-scope ``not_null`` (run via ``run_test_sql``) REFERENCEs. A
+    case-preserved helper would create ``"…<lowercase>"`` while the compiler
+    references the upper-folded ``"…<UPPERCASE>"`` → "Table not found"
+    (Snowflake quoted identifiers are case-sensitive).
     """
     return f'"{database.upper()}"."{schema.upper()}"."{name.upper()}"'
 

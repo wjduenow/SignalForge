@@ -69,16 +69,27 @@ fakesnow = pytest.importorskip("fakesnow")
 
 # A GCP-style project-id (6-30 chars, hyphen-permissive grammar — see
 # ``validate_project_id``) is the database component; the schema / name use the
-# strict identifier regex. ``fake_project`` mirrors the prune fixtures.
+# strict identifier regex. ``fake_project`` mirrors the prune fixtures: the
+# ``TableRef`` carries the lower-cased, dbt-style identifier, exactly what a real
+# manifest yields and what the adapter receives.
 _DB = "fake_project"
 _SCHEMA = "SCH"
 _TABLE = TableRef(project=_DB, dataset=_SCHEMA, name="ORDERS")
 
+# ``SnowflakeAdapter._quote`` folds every component to UPPER then quotes, so the
+# adapter's emitted SQL references ``"FAKE_PROJECT"."SCH"."ORDERS"``. Create and
+# reference the fixture objects in that *folded* namespace so the execution path
+# is representative of real (case-sensitive) Snowflake — NOT accidentally
+# resolving via DuckDB's case-insensitive quoted-identifier handling. ``_SCHEMA``
+# and the table names are already upper, so only the database component changes.
+_DB_FOLDED = _DB.upper()
+_SCHEMA_FOLDED = _SCHEMA.upper()
+
 # fakesnow's DuckDB backend requires the catalog (database) + schema to exist
 # before a qualified CREATE TABLE; the per-component-quoted three-part name the
 # adapter emits then resolves.
-_QUOTED_ORDERS = f'"{_DB}"."{_SCHEMA}"."ORDERS"'
-_QUOTED_CUSTOMERS = f'"{_DB}"."{_SCHEMA}"."CUSTOMERS"'
+_QUOTED_ORDERS = f'"{_DB_FOLDED}"."{_SCHEMA_FOLDED}"."ORDERS"'
+_QUOTED_CUSTOMERS = f'"{_DB_FOLDED}"."{_SCHEMA_FOLDED}"."CUSTOMERS"'
 
 
 @contextmanager
@@ -94,8 +105,8 @@ def _fakesnow_connection() -> Iterator[Any]:
         conn = snowflake.connector.connect()
         try:
             cur = conn.cursor()
-            cur.execute(f"CREATE DATABASE IF NOT EXISTS {_DB}")
-            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {_DB}.{_SCHEMA}")
+            cur.execute(f"CREATE DATABASE IF NOT EXISTS {_DB_FOLDED}")
+            cur.execute(f"CREATE SCHEMA IF NOT EXISTS {_DB_FOLDED}.{_SCHEMA_FOLDED}")
             cur.close()
             yield conn
         finally:

@@ -8,16 +8,21 @@ same invariants the BigQuery e2e pins — chiefly that the prune step drops
 at least one ``always-passes`` test (the v0.1 differentiator) on a natural
 NOT NULL source column (the TPCH primary key ``c_custkey``).
 
-``oneshot`` sampling is MANDATORY here, not a tuning choice.
-``SNOWFLAKE_SAMPLE_DATA`` is a read-only shared database present in every
-Snowflake account. The default ``prune.sample_strategy: materialised``
-issues a ``CREATE TEMPORARY TABLE ... AS SELECT`` colocated with the
-source database — which a read-only shared database rejects. ``oneshot``
-``sample_rows`` reads ``TPCH_SF1.CUSTOMER`` directly with a hash-mod
-predicate and never writes, so it is the only strategy that works against
-the shared sample data. The per-run ``signalforge.yml`` (written into
-``tmp_path`` below) pins ``prune.sample_strategy: oneshot`` for exactly
-this reason.
+``safety: schema-only`` + ``prune.scope: full`` is MANDATORY here, not a
+tuning choice — it is the only configuration that works against live
+Snowflake today. Both sample strategies are non-functional on a real
+warehouse: ``materialised`` issues a ``CREATE TEMPORARY TABLE`` colocated
+with the source (rejected by the read-only ``SNOWFLAKE_SAMPLE_DATA`` share),
+and BOTH ``oneshot`` and ``materialised`` emit ``MOD(ABS(HASH(*)), n)`` in
+``WHERE`` / ``ORDER BY``, which Snowflake rejects (``HASH(*)`` is valid only
+in the ``SELECT`` projection); ``oneshot`` additionally routes the sample
+row-count through a BigQuery-only ``_get_client`` seam. ``safety:
+aggregate-only`` would invoke the deferred ``column_stats``. ``scope: full``
+runs each test against the full (tiny) ``TPCH_SF1.CUSTOMER`` table directly —
+no sampling, no temp table — and still drives the full draft -> prune ->
+grade -> diff pipeline. The sample-mode bugs are tracked as separate
+#121/#122 follow-ups; the per-run ``signalforge.yml`` (written into
+``tmp_path`` below) pins ``prune.scope: full`` for exactly this reason.
 
 Gated by FIVE prerequisites — this is a FULL-STACK test (warehouse + LLM):
 
@@ -41,7 +46,7 @@ EXPLAIN suites). Cost guidance — set up FIRST:
 * Create a **resource monitor** on the test warehouse with a hard cap
   BEFORE running, so a runaway query can't bill unbounded credits.
 * Use an **XS warehouse** (smallest compute) — TPCH_SF1 is tiny and a
-  ``oneshot`` hash-mod sample over ~150K CUSTOMER rows is sub-second.
+  full-scope ``COUNT(*)`` over ~150K CUSTOMER rows is sub-second.
 * Set **aggressive auto-suspend** (e.g. 60s) so the warehouse parks
   immediately after the run.
 
@@ -67,14 +72,14 @@ Asserts the invariants from the BigQuery e2e (DEC-009 of
 3. ``kept_count + flagged_count + dropped_count >= 1`` (non-empty diff).
 4. A :class:`PruneDecision` with ``decision == "dropped"`` and
    ``reason == "always-passes"`` exists in the prune audit — the v0.1
-   differentiator. Under ``oneshot`` sampling prune queries the read-only
-   source ``TPCH_SF1.CUSTOMER`` directly, so the seed declares only REAL
-   TPCH columns; the LLM reliably drafts ``not_null`` on every column and
-   ``not_null`` on ``c_custkey`` (the TPCH primary key, naturally NOT NULL)
-   returns zero failing rows → always-passes (mirrors the Austin bikeshare
-   natural-NOT-NULL pattern, NOT engineered literals — a renamed/engineered
-   column would not exist on the source and would route to
-   kept-without-evidence).
+   differentiator. Under ``prune.scope: full`` prune runs each test against
+   the read-only source ``TPCH_SF1.CUSTOMER`` directly (full scan, no
+   sampling), so the seed declares only REAL TPCH columns; the LLM reliably
+   drafts ``not_null`` on every column and ``not_null`` on ``c_custkey`` (the
+   TPCH primary key, naturally NOT NULL) returns zero failing rows →
+   always-passes (mirrors the Austin bikeshare natural-NOT-NULL pattern, NOT
+   engineered literals — a renamed/engineered column would not exist on the
+   source and would route to kept-without-evidence).
 5. ``GradingReport.aggregate_complete is True`` (no degraded grade calls).
 6. ``"Traceback" not in stderr`` (DEC-016 of ``cli-layer.md`` — no
    traceback ever leaks).
@@ -258,10 +263,11 @@ def test_e2e_signalforge_generate_against_tpch_sf1(
     )
 
     # 4. At least one always-passes drop — the v0.1 differentiator. Under
-    #    ``oneshot`` prune queries the read-only source ``TPCH_SF1.CUSTOMER``
-    #    directly, so the seed declares only REAL TPCH columns; a drafted
-    #    ``not_null`` on ``c_custkey`` (the TPCH primary key, naturally NOT
-    #    NULL) sees zero failing rows and drops as always-passes.
+    #    ``prune.scope: full`` prune queries the read-only source
+    #    ``TPCH_SF1.CUSTOMER`` directly (full scan), so the seed declares only
+    #    REAL TPCH columns; a drafted ``not_null`` on ``c_custkey`` (the TPCH
+    #    primary key, naturally NOT NULL) sees zero failing rows and drops as
+    #    always-passes.
     decisions = read_prune_decisions(project_dir)
     has_always_passes_drop = any(
         d.decision == "dropped" and d.reason == "always-passes" for d in decisions

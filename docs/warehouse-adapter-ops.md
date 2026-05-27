@@ -360,6 +360,15 @@ non-BigQuery adapter then ships its own session-equivalent in v0.3
 `CREATE TEMP TABLE` inside a transaction). The ABC default-raise is
 the v0.2 stop-gap, not a permanent surface.
 
+> **Snowflake update (#122/#124):** Snowflake no longer inherits the
+> `MaterialisationNotSupportedError` default — `materialise_sample` is
+> implemented. However, neither sample strategy is functional against a
+> *live* Snowflake yet (the `HASH(*)` sample SQL is rejected in
+> `WHERE`/`ORDER BY`, and oneshot's row-count routes through a BigQuery-only
+> seam). On Snowflake use **`prune.scope: full`**, NOT
+> `prune.sample_strategy: oneshot`; see "Known limitations on live Snowflake"
+> below.
+
 ## Query-bytes estimation (v0.2, issue #36)
 
 The `WarehouseAdapter` ABC ships an `estimate_query_bytes` method in
@@ -586,14 +595,15 @@ caveat).
 
 **Connection-bound session.** Unlike BigQuery (which threads a server-side
 `session_id` on every query), the Snowflake *connection* holds the session
-— `materialise_sample` creates a session-scoped `CREATE TEMPORARY TABLE
-"<src db>"."<src schema>"._sf_sample_<run_id>` colocated with the source,
-and `__exit__` closes the connection (reaping its temp tables).
+— `materialise_sample` creates a session-scoped
+`CREATE TEMPORARY TABLE "<SRC DB>"."<SRC SCHEMA>"."_SF_SAMPLE_<RUN_ID>"`
+colocated with the source (each component fold-to-UPPER then quoted, per
+`_quote`), and `__exit__` closes the connection (reaping its temp tables).
 **Cost-relevant consequence:** the source table must be **writable** —
 materialised sampling against a read-only shared database (e.g.
-`SNOWFLAKE_SAMPLE_DATA`) fails the CTAS. Point materialised runs at your
-own schema, or set `prune.sample_strategy: oneshot` to sample read-only
-data directly without a temp table.
+`SNOWFLAKE_SAMPLE_DATA`) fails the CTAS. Note that *all* sample-mode prune
+is currently non-functional on live Snowflake regardless (see "Known
+limitations" below); use `prune.scope: full` today.
 
 **Session cleanup is fail-soft with no manual command.** A Snowflake temp
 table is unreachable outside its owning session, so there is no
