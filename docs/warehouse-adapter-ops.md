@@ -360,14 +360,15 @@ non-BigQuery adapter then ships its own session-equivalent in v0.3
 `CREATE TEMP TABLE` inside a transaction). The ABC default-raise is
 the v0.2 stop-gap, not a permanent surface.
 
-> **Snowflake update (#122/#124):** Snowflake no longer inherits the
+> **Snowflake update (#122/#124/#139):** Snowflake no longer inherits the
 > `MaterialisationNotSupportedError` default — `materialise_sample` is
-> implemented. However, neither sample strategy is functional against a
-> *live* Snowflake yet (the `HASH(*)` sample SQL is rejected in
-> `WHERE`/`ORDER BY`, and oneshot's row-count routes through a BigQuery-only
-> seam). On Snowflake use **`prune.scope: full`**, NOT
-> `prune.sample_strategy: oneshot`; see "Known limitations on live Snowflake"
-> below.
+> implemented, and (since #139) emits a **projection-subquery** sample shape
+> (`SELECT * EXCLUDE (_sf_sample_hash) FROM (SELECT t.*, ABS(HASH(*)) AS
+> _sf_sample_hash …)`) so the `HASH(*)` row-hash sits in the SELECT projection
+> rather than the rejected `WHERE`/`ORDER BY` position. **`materialised`
+> sample-mode prune now works on live Snowflake.** The `oneshot` strategy
+> remains blocked at a separate engine seam (its row-count routes through a
+> BigQuery-only `_get_client`); see "Known limitations on live Snowflake" below.
 
 ## Query-bytes estimation (v0.2, issue #36)
 
@@ -591,7 +592,16 @@ quoted `"sample"` CTE alias (`SAMPLE` is a Snowflake reserved word, so an
 unquoted `WITH sample AS …` is a syntax error). `HASH()` is deterministic
 only *within a Snowflake release* — sufficient for within-run prune
 determinism, not cross-time stable (mirrors the EXPLAIN planner-estimate
-caveat).
+caveat). Since #139 `SNOWFLAKE_DIALECT` also sets
+`sample_hash_in_projection=True` + `sample_hash_alias="_sf_sample_hash"`:
+`HASH(*)` is rejected as a `WHERE`/`ORDER BY` predicate (`002079`), so the
+shared `render_sample_select` helper computes the hash once in an inner
+`SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash` projection and references the
+`_sf_sample_hash` alias in the outer `WHERE MOD(…)`/`ORDER BY`, with
+`SELECT * EXCLUDE (_sf_sample_hash)` stripping the helper column so sampled
+rows carry only original columns. BigQuery keeps the default
+(`sample_hash_in_projection=False`) — its `FARM_FINGERPRINT` row hash is legal
+inline, so its emitted bytes are unchanged.
 
 **Connection-bound session.** Unlike BigQuery (which threads a server-side
 `session_id` on every query), the Snowflake *connection* holds the session
@@ -601,9 +611,12 @@ colocated with the source (each component fold-to-UPPER then quoted, per
 `_quote`), and `__exit__` closes the connection (reaping its temp tables).
 **Cost-relevant consequence:** the source table must be **writable** —
 materialised sampling against a read-only shared database (e.g.
-`SNOWFLAKE_SAMPLE_DATA`) fails the CTAS. Note that *all* sample-mode prune
-is currently non-functional on live Snowflake regardless (see "Known
-limitations" below); use `prune.scope: full` today.
+`SNOWFLAKE_SAMPLE_DATA`) fails the CTAS. The materialised-sample CTAS uses the
+#139 projection-subquery shape (`SELECT * EXCLUDE (_sf_sample_hash) FROM (SELECT
+t.*, ABS(HASH(*)) AS _sf_sample_hash …)`), so `prune.scope: sample` +
+`prune.sample_strategy: materialised` works on live Snowflake (against a
+writable source). The `oneshot` strategy is still blocked at a separate engine
+seam — see "Known limitations" below.
 
 **Session cleanup is fail-soft with no manual command.** A Snowflake temp
 table is unreachable outside its owning session, so there is no
@@ -631,30 +644,36 @@ passes through unchanged. No `BytesBilledExceededError` equivalent —
 Snowflake has no bytes-billed cap (cost is governed by warehouse size +
 auto-suspend, see below).
 
-**Known limitations on live Snowflake (v0.2) — use `safety: schema-only` +
-`prune.scope: full`.** Three deferred/defective paths mean a live Snowflake
-run today must stick to schema-only drafting and full-scope prune (the
-combination certified green by the gated live e2e). Each is tracked for a
-later fix:
+**Known limitations on live Snowflake (v0.2) — use `safety: schema-only`; for
+sampling prefer `prune.sample_strategy: materialised`.** Two
+deferred/defective paths remain after #139 fixed the `HASH(*)`-in-predicate bug.
+The combination certified green by the gated live e2e is `safety: schema-only` +
+`prune.scope: sample` + `prune.sample_strategy: materialised` (or
+`prune.scope: full`):
 
 - **`safety: aggregate-only` — unsupported.** Profiles columns via
   `adapter.column_stats`, which `SnowflakeAdapter` leaves as a deferred
   `NotImplementedError` (the one v0.2 method not yet implemented).
   `generate` with `safety.mode: aggregate-only` fails (exit 1).
-- **`safety: sample` and `prune.sample_strategy` (oneshot / materialised) —
-  unsupported.** All sampling emits the deterministic row-hash predicate
-  `MOD(ABS(HASH(*)), n) < 1` in `WHERE` / `ORDER BY`, which Snowflake rejects
-  (`002079`: `HASH(*)` is valid only in the `SELECT` projection). Needs a
-  projection-subquery sample shape (a Snowflake dialect-design gap).
-- **`prune.scope: sample` (oneshot) — also blocked** at the engine seam: the
-  sample row-count is fetched through a BigQuery-only `_get_client`;
-  `SnowflakeAdapter` exposes `_get_num_rows` instead. Needs a vendor-neutral
-  `WarehouseAdapter.get_table_metadata` seam.
+- **`prune.scope: sample` with `prune.sample_strategy: oneshot` — blocked** at
+  the engine seam: the sample row-count is fetched through a BigQuery-only
+  `_get_client`; `SnowflakeAdapter` exposes `_get_num_rows` instead. Needs a
+  vendor-neutral `WarehouseAdapter.get_table_metadata` seam (bead
+  `bd_1-scaffolding-tft`). Use `materialised` (the default) instead.
 
-`schema-only` (redacted column names/types to the LLM) + `prune.scope: full`
-runs the full draft → prune → grade → diff pipeline against Snowflake today;
-`run_test_sql` (full-scope test execution) and `estimate_query_bytes` are
-implemented and certified live.
+**Fixed by #139:** the deterministic row-hash sampling SQL no longer emits
+`MOD(ABS(HASH(*)), n) < 1` in `WHERE`/`ORDER BY` (which Snowflake rejected with
+`002079`). The shared `render_sample_select` helper now emits the
+projection-subquery form (`SELECT * EXCLUDE (_sf_sample_hash) FROM (SELECT t.*,
+ABS(HASH(*)) AS _sf_sample_hash …)`), so `safety: sample` and
+`prune.scope: sample` + `prune.sample_strategy: materialised` work on live
+Snowflake (against a writable source — `materialise_sample` colocates its temp
+table in the source db/schema).
+
+`schema-only` (redacted column names/types to the LLM) runs the full
+draft → prune → grade → diff pipeline against Snowflake today; `run_test_sql`
+(test execution), `materialise_sample` (materialised sampling), and
+`estimate_query_bytes` are implemented and certified live.
 
 **Cost guidance — read before running any live Snowflake test.** Snowflake
 bills compute by warehouse-second, so an unbounded or forgotten run costs

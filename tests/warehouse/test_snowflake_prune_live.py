@@ -1,25 +1,46 @@
-"""Gated live warehouse + prune-only e2e against a real Snowflake (#124 US-004).
+"""Gated live materialised-sample prune e2e against a real Snowflake (#139 US-004).
 
-The offline `fakesnow` / `sqlglot` suite (`tests/prune/test_compiler_fakesnow.py`)
-pins the compiled Snowflake SQL's *shape* and parse-validity, and the sampling
-adapter is exercised via injected fakes in the default suite. Neither can
-certify the full prune-against-a-real-table path: create an engineered table,
-run a hand-crafted candidate test against it under ``prune.scope: full``, and
-watch the engine drop a `not_null` over a guaranteed-non-null column as
+This is the **live certification for the projection-subquery sample shape** —
+the #139 fix for Snowflake's ``HASH(*)``-in-predicate rejection. The offline
+``fakesnow`` / ``sqlglot`` suite (``tests/prune/test_compiler_fakesnow.py``,
+``tests/warehouse/test_snowflake_adapter_fakesnow.py``) pins the compiled
+Snowflake SQL's *shape* and ``sqlglot`` parse-validity, but neither certifies
+that a **real** Snowflake accepts the new sample SQL: ``fakesnow``'s DuckDB
+backend cannot execute the variadic ``HASH(*)``, and ``sqlglot`` parses the
+*old* (invalid) inline form without complaint. Only a live run certifies the
+projection-subquery shape — create an engineered writable table, run a
+hand-crafted candidate test against it under
+``prune.scope: sample`` + ``prune.sample_strategy: materialised`` (which
+exercises ``materialise_sample``'s ``CREATE TEMPORARY TABLE … AS SELECT * EXCLUDE
+(_sf_sample_hash) FROM (SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash …)`` CTAS),
+and watch the engine drop a ``not_null`` over a guaranteed-non-null column as
 ``always-passes``.
 
-``scope: full`` (not a sample strategy) is load-bearing: live Snowflake
-sample-mode prune is NOT yet functional — ``oneshot`` needs the not-yet-built
-``WarehouseAdapter.get_table_metadata`` seam (the engine routes the sample
-row-count through a BigQuery-only ``_get_client``), and ``materialised`` emits
-``MOD(ABS(HASH(*)), n)`` in WHERE / ORDER BY, which Snowflake rejects
-(``HASH(*)`` is valid only in the SELECT projection). Both are tracked as
-separate #121/#122 bug beads; this test certifies the ``scope: full`` path that
-DOES work today. This module is the belt-and-suspenders half — a
-``@pytest.mark.snowflake``-gated test that drives a **real**
+Before #139, ``materialised`` sample-mode emitted ``MOD(ABS(HASH(*)), n)`` in
+WHERE / ORDER BY, which Snowflake rejects (``002079``: ``HASH(*)`` is valid only
+in the SELECT projection); that bug (bead ``bd_1-scaffolding-cdp``) is fixed by
+the projection-subquery shape + ``render_sample_select``. (A *separate*,
+still-open bug — ``oneshot`` routes the sample row-count through a BigQuery-only
+``_get_client`` / the not-yet-built ``WarehouseAdapter.get_table_metadata`` seam,
+bead ``bd_1-scaffolding-tft`` — is NOT in scope here; this test exercises the
+``materialised`` path, which colocates its temp table via the connection-bound
+session and does not hit that seam.) This module is the belt-and-suspenders half
+— a ``@pytest.mark.snowflake``-gated test that drives a **real**
 :class:`SnowflakeAdapter` through :func:`signalforge.prune.prune_tests` end to
 end against a live warehouse and asserts the v0.1 differentiator (Architectural
 Commitment #1: an always-pass test is dropped, not shipped).
+
+**DEC-004 primary/fallback note.** The emitted SQL uses the PRIMARY form:
+``ORDER BY _sf_sample_hash`` at the outer level where ``_sf_sample_hash`` is
+``SELECT * EXCLUDE``-d from the output projection. There is a genuine open
+question — resolvable only by this live run — whether Snowflake accepts
+``ORDER BY <col>`` when that column is ``SELECT * EXCLUDE``-d. If live Snowflake
+rejects ``ORDER BY`` of an EXCLUDE-d column, the fallback (DEC-004) is to drop
+the outer ``ORDER BY`` in ``render_sample_select`` + the fixtures; the
+deterministic ``MOD`` filter alone defines sample membership (matches the
+prune compiler CTE, which already emits no ``ORDER BY``). The fallback is NOT
+implemented here — the code ships the primary form; this docstring records the
+decision point the maintainer's live run resolves.
 
 NO LLM, NO ``generate`` CLI: this test builds the :class:`Model`,
 :class:`Manifest`, the :class:`CandidateSchema` (one
@@ -47,8 +68,9 @@ Required env vars (each missing one yields its own distinct skip reason):
   ``1``/``true``/``yes``/``on``).
 * ``SNOWFLAKE_ACCOUNT`` / ``SNOWFLAKE_USER`` / ``SNOWFLAKE_PASSWORD`` — the
   minimal password-auth connection triple.
-* ``SNOWFLAKE_WAREHOUSE`` — compute context for the engineered ``CREATE TABLE``
-  + the full-scope per-test ``COUNT(*)``.
+* ``SNOWFLAKE_WAREHOUSE`` — compute context for the engineered ``CREATE TABLE``,
+  the materialised-sample ``CREATE TEMPORARY TABLE … AS SELECT`` CTAS, and the
+  per-test ``COUNT(*)``.
 * ``SNOWFLAKE_DATABASE`` + ``SNOWFLAKE_SCHEMA`` — the **WRITABLE** target where
   the engineered table is created. The read-only ``SNOWFLAKE_SAMPLE_DATA`` share
   cannot accept a ``CREATE TABLE``, so a writable namespace is required; the
@@ -83,7 +105,9 @@ test is hand-crafted. The engineered table's ``region`` column is the literal
 rows on any sample → the prune engine routes it to ``always-passes`` (drop)
 mathematically, not probabilistically.
 
-Traces to: #124 US-004 (warehouse + prune-only gated live e2e).
+Traces to: #139 US-004 (live certification of the projection-subquery sample
+shape via materialised sample-mode prune); originally #124 US-004 (warehouse +
+prune-only gated live e2e, then pinned to ``scope=full``).
 """
 
 from __future__ import annotations
@@ -136,9 +160,9 @@ def _skip_reason() -> str | None:
 
     Returns ``None`` only when the opt-in flag AND every connection env var is
     present — the test then proceeds to make real Snowflake calls (CREATE TABLE,
-    a full-scope per-test ``COUNT(*)``, DROP TABLE). Each missing prerequisite
-    yields its own distinct reason so a maintainer running ``pytest -m
-    snowflake`` sees exactly what to set.
+    a materialised-sample CTAS, a per-test ``COUNT(*)``, DROP TABLE). Each
+    missing prerequisite yields its own distinct reason so a maintainer running
+    ``pytest -m snowflake`` sees exactly what to set.
     """
     if not _snowflake_runs_enabled():
         return "SF_RUN_SNOWFLAKE=1 required (live test talks to a real Snowflake warehouse)"
@@ -184,29 +208,36 @@ def _quoted_table(database: str, schema: str, name: str) -> str:
 
 
 @pytest.mark.snowflake
-def test_prune_drops_always_passes_not_null_live_full_scope() -> None:
-    """Prune a hand-crafted ``not_null`` against a live engineered table.
+def test_prune_drops_always_passes_not_null_live_materialised_sample() -> None:
+    """Prune a hand-crafted ``not_null`` against a live engineered table in
+    materialised sample-mode (the #139 projection-subquery sample shape).
 
     Skips cleanly under ``pytest -m snowflake`` when any prerequisite is
     missing. With credentials present:
 
     1. Creates a tiny engineered table in the writable
        ``SNOWFLAKE_DATABASE.SNOWFLAKE_SCHEMA`` — two columns where ``region`` is
-       the literal ``'austin'`` on every row (guaranteed non-null).
+       the literal ``'austin'`` on every row (guaranteed non-null). The table
+       MUST be in a writable schema: ``materialise_sample`` colocates its
+       ``CREATE TEMPORARY TABLE`` in the source db/schema, so read-only shared
+       data (``SNOWFLAKE_SAMPLE_DATA``) cannot be the source.
     2. Builds an in-process :class:`Model` / :class:`Manifest` /
        :class:`CandidateSchema` carrying ONE :class:`CandidateTestNotNull` over
        the guaranteed-non-null ``region`` column.
-    3. Calls :func:`prune_tests` with ``scope="full"`` — the engine runs the
-       compiled ``not_null`` against the full engineered table directly (no
-       sampling, no temp table). ``scope: full`` is required because live
-       Snowflake sample-mode prune is not yet functional (see module docstring
-       + #121/#122 bug beads); the engineered table is tiny so a full scan is
-       cheap.
+    3. Calls :func:`prune_tests` with ``scope="sample"`` +
+       ``sample_strategy="materialised"`` — the engine materialises a temp-table
+       sample via the projection-subquery CTAS (``CREATE TEMPORARY TABLE … AS
+       SELECT * EXCLUDE (_sf_sample_hash) FROM (SELECT t.*, ABS(HASH(*)) AS
+       _sf_sample_hash …)``) and runs the compiled ``not_null`` against it. This
+       is the #139 fix: pre-fix, the ``MOD(ABS(HASH(*)), n)``-in-WHERE/ORDER-BY
+       form was rejected by Snowflake (``002079``).
     4. Asserts at least one :class:`PruneDecision` is
        ``decision == "dropped"`` with ``reason == "always-passes"`` — the v0.1
        differentiator (Architectural Commitment #1).
     5. Tears the engineered table down with ``DROP TABLE IF EXISTS`` in a
-       ``finally`` (idempotent; tolerates a partial-setup failure).
+       ``finally`` (idempotent; tolerates a partial-setup failure). The
+       materialised temp table is session-scoped and reaped when ``prune_tests``
+       closes the prune adapter's connection.
     """
     if reason := _skip_reason():
         pytest.skip(reason)
@@ -218,10 +249,11 @@ def test_prune_drops_always_passes_not_null_live_full_scope() -> None:
     quoted = _quoted_table(database, schema, table_name)
 
     # --- Setup: create the engineered table (own short-lived adapter). --------
-    # ``prune_tests`` (scope=full) runs the compiled ``not_null`` against this
-    # table on its OWN adapter/connection, so the table must persist beyond the
-    # setup session — a regular (non-temp) table created here, dropped in
-    # teardown.
+    # ``prune_tests`` (scope=sample, materialised) materialises a temp-table
+    # sample FROM this source table on its OWN adapter/connection, so the source
+    # must persist beyond the setup session — a regular (non-temp) table created
+    # here, dropped in teardown. (The materialised sample temp table is
+    # session-scoped and reaped when the prune adapter closes its connection.)
     setup_adapter = _make_adapter()
     with setup_adapter:
         cursor = setup_adapter._get_connection().cursor()
@@ -279,11 +311,13 @@ def test_prune_drops_always_passes_not_null_live_full_scope() -> None:
             ),
         )
 
-        # ``scope="full"`` — run the test against the full (tiny) engineered
-        # table. Sample-mode (oneshot / materialised) is not yet functional on
-        # live Snowflake (#121/#122 bug beads), and a full scan of a handful of
-        # rows is cheap.
-        config = PruneConfig(scope="full")
+        # ``scope="sample"`` + ``sample_strategy="materialised"`` — the engine
+        # materialises a temp-table sample via the #139 projection-subquery CTAS,
+        # then runs the compiled ``not_null`` against it. This exercises the
+        # exact path the #139 fix repairs (``HASH(*)`` moved into an inner
+        # SELECT projection + ``SELECT * EXCLUDE``). The engineered table is a
+        # handful of rows, so the CTAS + COUNT(*) are cheap.
+        config = PruneConfig(scope="sample", sample_strategy="materialised")
 
         # ``prune_tests`` owns the ``with adapter:`` block — pass a NOT-entered
         # adapter and do not wrap this call in our own ``with``.
