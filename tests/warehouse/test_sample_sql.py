@@ -131,3 +131,30 @@ def test_branch_switches_on_flag_not_dialect_name() -> None:
     assert sql.startswith("SELECT * EXCLUDE (_sf_sample_hash) FROM (SELECT t.*, ")
     assert "MOD(_sf_sample_hash, 3) < 1" in sql
     assert "ORDER BY _sf_sample_hash" in sql
+
+    # Symmetric direction: a synthetic dialect with a likewise-unrecognised
+    # ``name`` but ``sample_hash_in_projection=False`` renders the INLINE form,
+    # never the projection one — defeating a ``dialect.name``-based dispatch in
+    # both directions, not just the projection arm.
+    madeup_inline = Dialect(
+        name="madeup",
+        supports_tablesample=True,
+        supports_qualify=False,
+        quote_char='"',
+        identifier_case="preserve",
+        sample_row_hash_expr="ABS(HASH(*))",
+        sample_hash_in_projection=False,
+    )
+    inline_sql = render_sample_select(
+        '"X"',
+        dialect=madeup_inline,
+        sample_bucket=3,
+        sample_size=9,
+        order_by_hash=True,
+    )
+    assert (
+        inline_sql
+        == 'SELECT * FROM "X" AS t WHERE MOD(ABS(HASH(*)), 3) < 1 ORDER BY ABS(HASH(*)) LIMIT 9'
+    )
+    assert "EXCLUDE" not in inline_sql
+    assert "_sf_sample_hash" not in inline_sql
