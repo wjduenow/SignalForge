@@ -14,7 +14,7 @@ import pytest
 
 from signalforge._common.json_payload import extract_json_payload
 
-pytestmark = pytest.mark.draft
+pytestmark = pytest.mark.unit
 
 
 def test_plain_json_object_passthrough() -> None:

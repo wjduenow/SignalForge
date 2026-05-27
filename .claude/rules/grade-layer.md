@@ -54,7 +54,7 @@ Sequential, not parallel (mirrors prune DEC-028). `asyncio.gather` deferred to v
 
 The cached prompt block is the rubric criterion list (constant per run); the dynamic block is the per-pair `<ARTIFACT>...</ARTIFACT>` envelope. Anthropic prompt-cache TTL defaults to `"1h"` for the grader (vs. drafter's `"5m"`) — 60 sequential calls fit easily with margin for stalls.
 
-**Tolerant JSON extraction (issue #144).** `parse_grade_response` routes the response through `signalforge._common.json_payload.extract_json_payload` (after `_strip_code_fence`) so a judge that narrates a prose preamble before the `{` still parses. The judge model (`claude-sonnet-4-6`) does NOT support an assistant-turn prefill (API 400), so the parser is the only JSON-only guardrail. Same first-brace-only decode rule as the drafter — see `llm-drafter.md` § "Tolerant JSON extraction"; a no-JSON response still routes to `GradeOutputError(violation_type="json_parse")` and the conservative degrade.
+**Tolerant JSON extraction (issue #144).** `parse_grade_response` routes the response through `signalforge._common.json_payload.extract_json_payload` (after `_strip_code_fence`) so a judge that narrates a prose preamble before the `{` still parses. The judge model (`claude-sonnet-4-6`) does NOT support an assistant-turn prefill (API 400), so the parser is the only JSON-only guardrail. Same decode rule as the drafter — decode at the first structural char (`{` or `[`) only, return unchanged on failure — see `llm-drafter.md` § "Tolerant JSON extraction"; a no-JSON response still routes to `GradeOutputError(violation_type="json_parse")` and the conservative degrade.
 
 ## Reproducibility hash fields on every GradeEvent (DEC-010, DEC-019)
 
