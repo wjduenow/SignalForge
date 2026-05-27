@@ -5,7 +5,7 @@
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/135
 - **Parent epic:** #134 (pluggable LLM provider for grading — OpenAI/Gemini). Milestone v0.3.
 - **Blocks:** #136 (OpenAI grading), #137 (Gemini grading).
-- **Phase:** detailing
+- **Phase:** published (PR #148, draft, → dev)
 - **Branch:** (to create) `feature/135-provider-neutral-llm-seam`
 - **Sessions:** 1 (2026-05-27)
 
