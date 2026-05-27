@@ -16,7 +16,7 @@ The tests use a real :class:`FakeAnthropicClient` and a real
 :class:`BigQueryAdapter`-with-:class:`FakeBigQueryClient` so the engine
 runs end-to-end. The CLI's stage entry points
 (``manifest.load`` / ``warehouse.load_profile`` /
-``_make_warehouse_adapter`` / ``_make_anthropic_client``) are patched
+``_make_warehouse_adapter`` / ``AnthropicProvider.make_client``) are patched
 so no real disk / network is touched, but ``signalforge.cli._estimate``
 itself is NOT patched — that's the whole point of the AC-4 contract.
 """
@@ -64,7 +64,8 @@ def _install_estimate_patches(
 ) -> tuple[FakeAnthropicClient, FakeBigQueryClient]:
     """Patch the four CLI seams that the ``--estimate`` short-circuit
     consumes (manifest load, warehouse profile load, warehouse adapter
-    factory, anthropic client factory) with explicit fakes.
+    factory, and the provider's ``make_client`` — the LLM-client seam after
+    issue #135 DEC-006) with explicit fakes.
 
     Returns the ``(fake_anthropic, fake_bq)`` pair so the caller can
     queue ``expect_count_tokens`` / ``expect_dry_run`` expectations.
@@ -103,7 +104,13 @@ def _install_estimate_patches(
     monkeypatch.setattr(
         gen_mod, "_make_warehouse_adapter", MagicMock(return_value=resolved_adapter)
     )
-    monkeypatch.setattr(gen_mod, "_make_anthropic_client", MagicMock(return_value=fa))
+    # DEC-006 of #135 — the ``--estimate`` short-circuit builds its concrete
+    # client via ``provider_for(draft_config.provider).make_client()`` (default
+    # provider "anthropic"), so patch the AnthropicProvider's ``make_client`` to
+    # hand back the FakeAnthropicClient rather than a CLI helper.
+    from signalforge.llm.providers import AnthropicProvider
+
+    monkeypatch.setattr(AnthropicProvider, "make_client", lambda self: fa)
 
     return fa, fb
 

@@ -194,6 +194,7 @@ def draft_from_request(
         max_retries_429=config.max_retries_429,
         max_retries_5xx=config.max_retries_5xx,
         max_retries_conn=config.max_retries_conn,
+        provider=config.provider,
         client=_client,
     )
 

@@ -148,13 +148,11 @@ def _install_batch_happy_patches(
         "load_diff_config": MagicMock(return_value=MagicMock(render_kind="ansi")),
         "render_diff": MagicMock(return_value=diff_report),
         "render_to_text": MagicMock(return_value="--- DIFF OUTPUT MARKER ---"),
-        "make_anthropic_client": MagicMock(return_value=None),
     }
 
     monkeypatch.setattr(gen_mod.manifest_module, "load", mocks["manifest_load"])
     monkeypatch.setattr(gen_mod.warehouse_module, "load_profile", mocks["load_profile"])
     monkeypatch.setattr(gen_mod, "_make_warehouse_adapter", mocks["make_warehouse_adapter"])
-    monkeypatch.setattr(gen_mod, "_make_anthropic_client", mocks["make_anthropic_client"])
     monkeypatch.setattr(gen_mod.safety_module, "load_safety_config", mocks["load_safety_config"])
     monkeypatch.setattr(gen_mod.draft_module, "load_draft_config", mocks["load_draft_config"])
     monkeypatch.setattr(gen_mod.draft_module, "draft_schema", mocks["draft_schema"])

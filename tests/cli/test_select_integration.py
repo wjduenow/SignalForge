@@ -218,7 +218,6 @@ def _install_integration_patches(
     mocks: dict[str, MagicMock] = {
         "load_profile": MagicMock(return_value=MagicMock(name="profile")),
         "make_warehouse_adapter": MagicMock(side_effect=_fresh_adapter),
-        "make_anthropic_client": MagicMock(return_value=None),
         "load_safety_config": MagicMock(return_value=MagicMock(name="policy")),
         "load_draft_config": MagicMock(return_value=MagicMock(model="claude-fake")),
         "draft_schema": draft_mock,
@@ -235,7 +234,6 @@ def _install_integration_patches(
 
     monkeypatch.setattr(gen_mod.warehouse_module, "load_profile", mocks["load_profile"])
     monkeypatch.setattr(gen_mod, "_make_warehouse_adapter", mocks["make_warehouse_adapter"])
-    monkeypatch.setattr(gen_mod, "_make_anthropic_client", mocks["make_anthropic_client"])
     monkeypatch.setattr(gen_mod.safety_module, "load_safety_config", mocks["load_safety_config"])
     monkeypatch.setattr(gen_mod.draft_module, "load_draft_config", mocks["load_draft_config"])
     monkeypatch.setattr(gen_mod.draft_module, "draft_schema", mocks["draft_schema"])

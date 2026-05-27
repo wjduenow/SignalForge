@@ -47,13 +47,23 @@ Project-root resolution (DEC-001 + DEC-027):
   up from the override (DEC-027) — passing the flag means "use this
   project, not whatever's above me".
 
-Test-injection seam (DEC-013): two private factory functions
-:func:`_make_anthropic_client` and :func:`_make_warehouse_adapter` are
-patched by tests in ``tests/cli/test_generate.py`` to return
-:class:`tests.llm._fake.FakeAnthropicClient` /
-:class:`tests.warehouse._fake.FakeBigQueryClient`-backed adapters. Both
-are ``_``-prefixed (DEC of safety-layer.md / llm-drafter.md / etc.) —
-not part of the public CLI contract.
+Test-injection seam (DEC-013): the private factory
+:func:`_make_warehouse_adapter` is patched by tests in
+``tests/cli/test_generate.py`` to return a
+:class:`tests.warehouse._fake.FakeBigQueryClient`-backed adapter. It is
+``_``-prefixed (DEC of safety-layer.md / llm-drafter.md / etc.) — not part
+of the public CLI contract.
+
+LLM-client construction (DEC-006 of #135): the real-run pipeline no longer
+builds an Anthropic client in the CLI. ``draft_schema`` / ``grade_artifacts``
+thread ``client=None`` into :func:`signalforge.llm.call_llm`, which
+lazy-builds the real client via the provider strategy resolved from the
+stage's registry-validated ``provider`` config field. Tests inject a fake by
+patching the provider's ``make_client`` (e.g.
+``AnthropicProvider.make_client``) rather than a CLI helper. The
+``--estimate`` short-circuit, which needs a concrete client up front for its
+Anthropic-specific ``count_tokens`` probe, builds one via
+``provider_for(draft_config.provider).make_client()``.
 
 Stage-order test (DEC-025): ``test_generate_calls_stages_in_documented_order``
 patches every stage entry point and asserts the documented
@@ -83,6 +93,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from signalforge import diff as diff_module
 from signalforge import draft as draft_module
@@ -117,6 +128,7 @@ from signalforge.diff._test_file_writer import (
 from signalforge.diff.models import DiffReport, ProposedTestFile
 from signalforge.grade.rubric import DEFAULT_RUBRIC
 from signalforge.llm import AnthropicClientProtocol
+from signalforge.llm.providers import provider_for
 from signalforge.manifest import select_models
 from signalforge.manifest.errors import SelectorParseError
 from signalforge.manifest.models import Manifest, Model
@@ -403,17 +415,6 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
 # ---------------------------------------------------------------------------
 # Test-injection seams (DEC-013)
 # ---------------------------------------------------------------------------
-
-
-def _make_anthropic_client() -> AnthropicClientProtocol | None:
-    """Return the Anthropic client to inject into the draft / grade stages.
-
-    Default implementation returns ``None`` so the underlying stage's
-    own ``client = anthropic.Anthropic(...)`` lazy construction (gated
-    by the single SDK seam at :mod:`signalforge.llm._anthropic_client`) runs.
-    Tests patch this to return a :class:`tests.llm._fake.FakeAnthropicClient`.
-    """
-    return None
 
 
 def _make_warehouse_adapter(profile: warehouse_module.DbtProfileTarget) -> WarehouseAdapter:
@@ -803,19 +804,25 @@ def _run_single_model(
                     {**prune_config.model_dump(), **prune_overrides}
                 )
             diff_module.load_diff_config(project_dir)
-            client = _make_anthropic_client()
-            if client is None:
-                # The default factory returns None to let the underlying
-                # stages lazy-construct via signalforge.llm._anthropic_client.
-                # The estimate engine needs a concrete client; build one
-                # here through the same single SDK seam so any
-                # LLMAuthError surfaces at the existing panic boundary
-                # → tier 3 via _EXCEPTION_TO_EXIT_CODE.
-                from signalforge.llm._anthropic_client import (
-                    _make_anthropic_client as _llm_make_client,
-                )
-
-                client = _llm_make_client()
+            # DEC-006 of #135 — the four pipeline orchestrators now let
+            # ``call_llm`` lazy-build the client via the configured provider,
+            # so the CLI no longer constructs one for the real-run path. The
+            # ``--estimate`` engine, however, needs a concrete client up front
+            # (it issues ``count_tokens`` directly, an Anthropic-specific
+            # surface), so it builds one through the provider registry keyed on
+            # the drafter's configured provider. Any auth failure surfaces at
+            # the existing panic boundary → tier 3 via _EXCEPTION_TO_EXIT_CODE.
+            #
+            # ``make_client`` returns ``object`` (the provider-neutral seam
+            # type, #135 DEC-012); the ``--estimate`` engine's pre-flight cost
+            # preview is Anthropic-specific (it calls ``count_tokens`` on the
+            # ``AnthropicClientProtocol`` surface — #36), so cast to that
+            # protocol here. A non-Anthropic provider's ``--estimate`` path is
+            # out of scope until #136/#137 wire those vendors.
+            client = cast(
+                "AnthropicClientProtocol",
+                provider_for(draft_config.provider).make_client(),
+            )
             report = estimate_module.estimate(
                 model,
                 manifest,
@@ -867,8 +874,13 @@ def _run_single_model(
             emit_progress_done(1, "safety", time.monotonic() - _t0)
 
         # ---- 2/5: draft -------------------------------------------------
+        # DEC-006 of #135 — the CLI no longer constructs an Anthropic client
+        # for the real-run path. ``draft_schema`` threads ``_client=None``
+        # into ``call_llm``, which lazy-builds the real client via the
+        # provider strategy resolved from ``draft_config.provider`` (the
+        # registry-validated config field, DEC-007). Tests inject a fake by
+        # patching the provider's ``make_client`` rather than a CLI helper.
         draft_config = draft_module.load_draft_config(project_dir)
-        client = _make_anthropic_client()
         if progress_on:
             emit_progress_entry(2, "draft", f"calling LLM (model {draft_config.model})...")
         _t0 = time.monotonic()
@@ -878,7 +890,7 @@ def _run_single_model(
             policy,
             manifest,
             config=draft_config,
-            _client=client,
+            _client=None,
         )
         if progress_on:
             emit_progress_done(2, "draft", time.monotonic() - _t0)
@@ -996,12 +1008,15 @@ def _run_single_model(
                 ),
             )
         _t0 = time.monotonic()
+        # DEC-006 of #135 — ``client=None`` lets ``grade_artifacts`` thread it
+        # into ``call_llm``, which lazy-builds via the provider resolved from
+        # ``grade_config.provider`` (independent of the drafter's provider).
         grade_report = grade_module.grade_artifacts(
             model,
             draft_outcome.candidate,
             prune_result,
             config=grade_config,
-            client=client,
+            client=None,
             project_dir=project_dir,
         )
         if progress_on:

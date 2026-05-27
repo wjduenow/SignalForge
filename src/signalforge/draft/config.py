@@ -110,6 +110,20 @@ class DraftConfig(BaseModel):
     max_retries_conn: int = 1
     """Connection / transport-error retry budget."""
 
+    provider: str = "anthropic"
+    """LLM provider strategy name, resolved against the
+    :mod:`signalforge.llm.providers` registry (issue #135 DEC-007).
+
+    Threaded into :func:`signalforge.llm.call_llm` from
+    :func:`signalforge.draft.draft_schema` so a non-Anthropic provider
+    (#136 OpenAI / #137 Gemini) is selected per stage. Deliberately a
+    registry-validated ``str``, NOT a ``Literal`` (DEC-007): the provider
+    registry is a plugin point designed to grow, so a new provider
+    registers itself rather than editing a ``Literal`` in two config
+    modules. The field validator fails loud on an unknown value — listing
+    the registered provider names — mirroring ``prune``'s
+    ``trusted_models`` validate-at-entry fail-loud."""
+
     exclude_tests: tuple[str, ...] = ()
     """Test types to omit from drafting entirely (issue #54).
 
@@ -127,6 +141,32 @@ class DraftConfig(BaseModel):
     def _max_output_tokens_positive(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("max_output_tokens must be positive")
+        return v
+
+    @field_validator("provider")
+    @classmethod
+    def _provider_registered(cls, v: str) -> str:
+        """Reject an unknown provider name at config-load (issue #135 DEC-007).
+
+        Membership is checked against the live
+        :mod:`signalforge.llm.providers` registry via
+        :func:`signalforge.llm.providers.provider_for`, which raises
+        :class:`signalforge.llm.errors.UnknownProviderError` listing the
+        available provider names. Import is local to the validator to keep
+        the draft-config module free of any import-time coupling to the LLM
+        provider registry (no cycle exists today, but the local import is
+        the conservative choice per DEC-007).
+
+        Pydantic v2 wraps only ``ValueError`` / ``TypeError`` /
+        ``AssertionError`` into a ``ValidationError``; ``UnknownProviderError``
+        is an ``LLMError`` (an ``Exception`` subclass), so it propagates raw —
+        the config loader's ``load_draft_config`` surfaces it directly with
+        its available-keys remediation rather than burying it in a Pydantic
+        ``ValidationError``.
+        """
+        from signalforge.llm.providers import provider_for
+
+        provider_for(v)
         return v
 
     @field_validator("exclude_tests", mode="before")
