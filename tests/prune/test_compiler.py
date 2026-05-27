@@ -1104,9 +1104,12 @@ def test_qualified_table_name_whole_path_for_bigquery_unchanged() -> None:
 
 
 def test_snowflake_sample_cte_uses_hash_not_farm_fingerprint() -> None:
-    """The Snowflake sample predicate is rendered from
-    ``sample_row_hash_expr`` → ``MOD(ABS(HASH(*)), <bucket>) < 1``; the
-    BigQuery ``FARM_FINGERPRINT`` form never appears (DEC-002)."""
+    """The Snowflake sample CTE uses the projection-subquery shape (issue
+    #139): ``ABS(HASH(*))`` is computed once in an inner projection bound
+    to ``_sf_sample_hash`` and the outer ``WHERE`` references that alias
+    (``HASH(*)`` is rejected as a predicate by Snowflake), while
+    ``SELECT * EXCLUDE (_sf_sample_hash)`` strips the helper column. The
+    BigQuery ``FARM_FINGERPRINT`` form never appears (DEC-002/DEC-004)."""
     test = CandidateTestNotNull(column="customer_id")
     sql = _compile_test(
         test,
@@ -1118,7 +1121,13 @@ def test_snowflake_sample_cte_uses_hash_not_farm_fingerprint() -> None:
         sample_bucket=10,
     )
     assert isinstance(sql, str)
-    assert "MOD(ABS(HASH(*)), 10) < 1" in sql
+    # The hash is computed in the inner projection, referenced by alias in
+    # the outer WHERE, and excluded from the output.
+    assert "SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash" in sql
+    assert "MOD(_sf_sample_hash, 10) < 1" in sql
+    assert "SELECT * EXCLUDE (_sf_sample_hash) FROM (" in sql
+    # The raw HASH(*)-in-predicate form (rejected live by Snowflake) is gone.
+    assert "MOD(ABS(HASH(*)), 10) < 1" not in sql
     assert "FARM_FINGERPRINT" not in sql
     # Folded + per-component quoted identifiers throughout; no backticks.
     assert '"CUSTOMER_ID"' in sql
@@ -1400,8 +1409,14 @@ def test_snowflake_fixtures_use_double_quote_never_backtick(fixture_name: str) -
     ],
 )
 def test_snowflake_sample_fixtures_use_hash_never_farm_fingerprint(fixture_name: str) -> None:
-    """Guard: every Snowflake sample fixture renders the ``HASH(*)`` row-hash
-    predicate and never BigQuery's ``FARM_FINGERPRINT`` (DEC-002)."""
+    """Guard: every Snowflake sample fixture computes the ``HASH(*)`` row-hash
+    once in an inner projection (the projection-subquery shape, issue #139),
+    references it by alias in the outer ``WHERE``, excludes it from the output,
+    and never uses BigQuery's ``FARM_FINGERPRINT`` (DEC-002/DEC-004)."""
     text = _read_snowflake_fixture(fixture_name)
-    assert "MOD(ABS(HASH(*)), 10) < 1" in text
+    assert "SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash" in text
+    assert "MOD(_sf_sample_hash, 10) < 1" in text
+    assert "SELECT * EXCLUDE (_sf_sample_hash) FROM (" in text
+    # The HASH(*)-in-predicate form (rejected live by Snowflake) must be gone.
+    assert "MOD(ABS(HASH(*)), 10) < 1" not in text
     assert "FARM_FINGERPRINT" not in text
