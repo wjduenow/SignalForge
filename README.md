@@ -285,7 +285,10 @@ projects, see [Running across many
 models](docs/cli-ops.md#running-across-many-models) for the
 `--select` flag and shell-loop pattern. Maintainer-only walkthrough
 of the same flow as a gated test (`pytest -m e2e --no-cov`):
-[docs/e2e-smoke-test.md](docs/e2e-smoke-test.md).
+[docs/e2e-smoke-test.md](docs/e2e-smoke-test.md). To run the
+Snowflake-backed gated tests (`pytest -m snowflake --no-cov`),
+start from [docs/snowflake-e2e-setup.md](docs/snowflake-e2e-setup.md)
+(account setup, cost guardrails, and the `.env.example` template).
 
 ## Prune the tests you already have
 
