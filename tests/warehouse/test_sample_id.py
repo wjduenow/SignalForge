@@ -122,8 +122,12 @@ def test_map_snowflake_programming_error_to_query_syntax_error() -> None:
     exc = sfe.ProgrammingError(msg="001003: SQL compilation error: syntax error", errno=1003)
     mapped = map_snowflake_exception(exc, context={"table": "fake_project.ds.orders"})
     assert isinstance(mapped, QuerySyntaxError)
-    # ``context["table"]`` enriches the detail (mirrors map_bq_exception).
-    assert "fake_project.ds.orders" in mapped.detail
+    # The residual-ProgrammingError arm carries the raw connector message in
+    # ``.detail`` (mirrors ``map_bq_exception``, which passes ``detail=msg``
+    # without threading the context table). #124's full taxonomy dropped the
+    # ``(table=...)`` enrichment the #122 minimal mapper appended; ``context``
+    # now only feeds the Table/Column arms.
+    assert "syntax error" in mapped.detail
 
 
 def test_map_snowflake_auth_error_to_warehouse_auth_error() -> None:
