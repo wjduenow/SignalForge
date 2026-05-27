@@ -195,24 +195,36 @@ def test_e2e_signalforge_generate_against_tpch_sf1(
     (project_dir / "profiles.yml").write_text(yaml.safe_dump(profile, sort_keys=False))
 
     # The seed ships no ``signalforge.yml``; write one into the per-run copy
-    # pinning ``prune.sample_strategy: oneshot``. ``oneshot`` is MANDATORY —
-    # TPCH_SF1 is read-only, so the default ``materialised`` strategy's
-    # ``CREATE TEMPORARY TABLE`` colocated with the source database would be
-    # rejected. ``oneshot`` ``sample_rows`` reads TPCH directly and never
-    # writes. ``total_budget_seconds`` is bumped above the 300s default so the
-    # ~12 sequential grade calls fit at p99 LLM latency.
+    # pinning ``prune.scope: full``. ``scope: full`` is REQUIRED on Snowflake
+    # today: both sample strategies are non-functional against a live warehouse
+    # (oneshot needs the not-yet-built ``WarehouseAdapter.get_table_metadata``
+    # seam — engine.py routes the sample row-count through a BigQuery-only
+    # ``_get_client``; materialised emits ``MOD(ABS(HASH(*)), n)`` in WHERE /
+    # ORDER BY, which Snowflake rejects — ``HASH(*)`` is only valid in the
+    # SELECT projection). Tracked as separate #121/#122 bug beads. ``scope:
+    # full`` runs each test against the full source table (TPCH_SF1.CUSTOMER is
+    # small) and still exercises the full draft → prune → grade → diff path +
+    # the always-passes drop this test certifies.
+    #
+    # ``safety: schema-only`` is REQUIRED on Snowflake: ``aggregate-only``
+    # invokes ``adapter.column_stats``, which SnowflakeAdapter leaves as a
+    # deferred NotImplementedError (the one v0.2 method not yet implemented).
+    # schema-only sends redacted column names/types to the LLM and still drives
+    # the full pipeline; prune's own ``run_test_sql`` (implemented) does the
+    # warehouse work. ``total_budget_seconds`` is bumped above the 300s default
+    # so the sequential grade calls fit at p99 LLM latency.
     (project_dir / "signalforge.yml").write_text(
         textwrap.dedent(
             """\
-            # Snowflake live e2e config (issue #124, US-005). The ``oneshot``
-            # sample strategy is load-bearing: TPCH_SF1 is a read-only shared
-            # database and rejects the default ``materialised`` CTAS.
+            # Snowflake live e2e config (issue #124, US-005). ``scope: full`` is
+            # load-bearing: live Snowflake sample-mode prune is not yet
+            # functional (see the inline comment above + #121/#122 bug beads).
             llm:
               model: claude-sonnet-4-6
             safety:
-              mode: aggregate-only
+              mode: schema-only
             prune:
-              sample_strategy: oneshot
+              scope: full
             grade:
               total_budget_seconds: 600
             """

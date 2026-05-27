@@ -621,6 +621,31 @@ passes through unchanged. No `BytesBilledExceededError` equivalent —
 Snowflake has no bytes-billed cap (cost is governed by warehouse size +
 auto-suspend, see below).
 
+**Known limitations on live Snowflake (v0.2) — use `safety: schema-only` +
+`prune.scope: full`.** Three deferred/defective paths mean a live Snowflake
+run today must stick to schema-only drafting and full-scope prune (the
+combination certified green by the gated live e2e). Each is tracked for a
+later fix:
+
+- **`safety: aggregate-only` — unsupported.** Profiles columns via
+  `adapter.column_stats`, which `SnowflakeAdapter` leaves as a deferred
+  `NotImplementedError` (the one v0.2 method not yet implemented).
+  `generate` with `safety.mode: aggregate-only` fails (exit 1).
+- **`safety: sample` and `prune.sample_strategy` (oneshot / materialised) —
+  unsupported.** All sampling emits the deterministic row-hash predicate
+  `MOD(ABS(HASH(*)), n) < 1` in `WHERE` / `ORDER BY`, which Snowflake rejects
+  (`002079`: `HASH(*)` is valid only in the `SELECT` projection). Needs a
+  projection-subquery sample shape (a Snowflake dialect-design gap).
+- **`prune.scope: sample` (oneshot) — also blocked** at the engine seam: the
+  sample row-count is fetched through a BigQuery-only `_get_client`;
+  `SnowflakeAdapter` exposes `_get_num_rows` instead. Needs a vendor-neutral
+  `WarehouseAdapter.get_table_metadata` seam.
+
+`schema-only` (redacted column names/types to the LLM) + `prune.scope: full`
+runs the full draft → prune → grade → diff pipeline against Snowflake today;
+`run_test_sql` (full-scope test execution) and `estimate_query_bytes` are
+implemented and certified live.
+
 **Cost guidance — read before running any live Snowflake test.** Snowflake
 bills compute by warehouse-second, so an unbounded or forgotten run costs
 real money. **Set a resource monitor on your account FIRST** (a hard

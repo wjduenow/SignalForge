@@ -828,7 +828,18 @@ class SnowflakeAdapter(WarehouseAdapter):
 
         sample_failures: list[dict[str, Any]] | None
         if capture_failures > 0:
-            raw_samples = lowered.get("samples") or []
+            raw_samples = lowered.get("samples")
+            # Snowflake returns the ``ARRAY_AGG(OBJECT_CONSTRUCT(*))`` column as a
+            # VARIANT, which the connector surfaces as a JSON STRING (not a Python
+            # list); `ARRAY_AGG` over zero rows yields NULL → None. Parse the
+            # string before iterating. A fake/DictCursor that already returns a
+            # Python list passes through unchanged (the `isinstance(str)` guard).
+            if raw_samples is None:
+                raw_samples = []
+            elif isinstance(raw_samples, str):
+                raw_samples = json.loads(raw_samples)
+            # Each element is an OBJECT_CONSTRUCT(*) → already a dict after parse;
+            # `dict(r)` is a defensive copy (and coerces a fake's mapping rows).
             sample_failures = [dict(r) for r in raw_samples]
         else:
             sample_failures = None
