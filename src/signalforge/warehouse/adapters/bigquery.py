@@ -456,6 +456,23 @@ class BigQueryAdapter(WarehouseAdapter):
             cache[table] = meta
         return meta
 
+    def get_row_count(self, table: TableRef) -> int | None:
+        """Return ``Table.num_rows`` for ``table``, or ``None`` when the
+        BigQuery ``Table`` resource does not carry it (issue #140).
+
+        Overrides the ABC default (which raises
+        :class:`RowCountNotSupportedError`). Routes through the cached
+        :meth:`_get_table` so a sample-bucket lookup inside an active
+        context reuses the same metadata fetch the per-test path uses.
+        ``num_rows`` is ``None`` for some resource shapes (freshly
+        materialised tables with stale metadata, certain views) — the
+        prune layer treats that as a fail-loud condition; the adapter just
+        reports what the SDK returns.
+        """
+        meta = self._get_table(table)
+        num_rows: int | None = getattr(meta, "num_rows", None)
+        return num_rows
+
     # ------------------------------------------------------------------
     # sample_rows — DEC-006 / DEC-024.
     # ------------------------------------------------------------------

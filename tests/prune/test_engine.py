@@ -43,13 +43,15 @@ from signalforge.manifest.models import Column, Manifest, Model
 from signalforge.prune import engine as engine_module
 from signalforge.prune.audit import PruneEvent
 from signalforge.prune.config import PruneConfig
-from signalforge.prune.engine import prune_tests
+from signalforge.prune.engine import _resolve_sample_bucket, prune_tests
 from signalforge.prune.errors import (
     PruneAuditRecordTooLargeError,
     PruneAuditWriteError,
+    PruneError,
     PruneTrustedModelNotFoundError,
 )
 from signalforge.warehouse.adapters.bigquery import BigQueryAdapter
+from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
     BytesBilledExceededError,
     MaterialisationFailedError,
@@ -1425,6 +1427,103 @@ def test_prune_tests_sample_mode_unknown_num_rows_raises_prune_error(
             project_dir=tmp_path,
         )
     fake.assert_all_expectations_met()
+
+
+class _RowCountOnlyAdapter(WarehouseAdapter):
+    """A non-BigQuery adapter that implements ONLY the vendor-neutral
+    ``get_row_count`` seam and deliberately exposes NO ``_get_client``.
+
+    Regression guard for issue #140: before the fix,
+    :func:`_resolve_sample_bucket` reached for ``getattr(adapter,
+    "_get_client")`` and raised on any adapter (e.g. Snowflake) that did
+    not expose that BigQuery-internal seam. This stub proves the engine
+    now sizes the bucket through ``get_row_count`` alone.
+    """
+
+    def __init__(self, num_rows: int | None) -> None:
+        self._num_rows = num_rows
+        self.get_row_count_calls: list[TableRef] = []
+
+    def __enter__(self) -> WarehouseAdapter:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def dialect(self):  # type: ignore[no-untyped-def]
+        from signalforge.warehouse.models import SNOWFLAKE_DIALECT
+
+        return SNOWFLAKE_DIALECT
+
+    def sample_rows(self, table, n, *, partition_filter=None):  # type: ignore[no-untyped-def]
+        raise NotImplementedError("not exercised")
+
+    def column_stats(self, table, column):  # type: ignore[no-untyped-def]
+        raise NotImplementedError("not exercised")
+
+    def run_test_sql(self, sql, *, capture_failures=0):  # type: ignore[no-untyped-def]
+        raise NotImplementedError("not exercised")
+
+    def get_row_count(self, table: TableRef) -> int | None:
+        self.get_row_count_calls.append(table)
+        return self._num_rows
+
+
+def test_resolve_sample_bucket_uses_vendor_neutral_get_row_count() -> None:
+    """``_resolve_sample_bucket`` sizes the bucket through the vendor-neutral
+    ``get_row_count`` seam — NOT a BigQuery-only ``_get_client`` (issue #140).
+
+    The stub adapter has no ``_get_client`` attribute at all; before #140
+    this raised ``PruneError`` on any non-BigQuery adapter. The bucket is
+    ``max(num_rows // sample_size, 1)`` mirroring the adapter's own
+    ``sample_rows`` derivation.
+    """
+    adapter = _RowCountOnlyAdapter(num_rows=1_000_000)
+    assert not hasattr(adapter, "_get_client")  # the exact crack #140 removed
+    table_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+
+    bucket = _resolve_sample_bucket(
+        adapter=adapter,
+        table_ref=table_ref,
+        scope="sample",
+        sample_size=1000,
+    )
+
+    assert bucket == 1000
+    assert adapter.get_row_count_calls == [table_ref]
+
+
+def test_resolve_sample_bucket_full_scope_skips_row_count_lookup() -> None:
+    """``scope="full"`` returns ``None`` and never calls ``get_row_count`` —
+    full-scan prune does no deterministic-sample sizing (issue #140)."""
+    adapter = _RowCountOnlyAdapter(num_rows=1_000_000)
+    table_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+
+    bucket = _resolve_sample_bucket(
+        adapter=adapter,
+        table_ref=table_ref,
+        scope="full",
+        sample_size=1000,
+    )
+
+    assert bucket is None
+    assert adapter.get_row_count_calls == []
+
+
+def test_resolve_sample_bucket_unknown_count_raises_prune_error() -> None:
+    """An unknown row count (``None``) from the seam fails loud with a
+    :class:`PruneError` rather than silently degrading to "every row"
+    (issue #140 preserves the pre-existing fail-loud cost-model guard)."""
+    adapter = _RowCountOnlyAdapter(num_rows=None)
+    table_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+
+    with pytest.raises(PruneError):
+        _resolve_sample_bucket(
+            adapter=adapter,
+            table_ref=table_ref,
+            scope="sample",
+            sample_size=1000,
+        )
 
 
 # ---------------------------------------------------------------------------

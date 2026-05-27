@@ -19,12 +19,12 @@ and watch the engine drop a ``not_null`` over a guaranteed-non-null column as
 Before #139, ``materialised`` sample-mode emitted ``MOD(ABS(HASH(*)), n)`` in
 WHERE / ORDER BY, which Snowflake rejects (``002079``: ``HASH(*)`` is valid only
 in the SELECT projection); that bug (bead ``bd_1-scaffolding-cdp``) is fixed by
-the projection-subquery shape + ``render_sample_select``. (A *separate*,
-still-open bug — ``oneshot`` routes the sample row-count through a BigQuery-only
-``_get_client`` / the not-yet-built ``WarehouseAdapter.get_table_metadata`` seam,
-bead ``bd_1-scaffolding-tft`` — is NOT in scope here; this test exercises the
-``materialised`` path, which colocates its temp table via the connection-bound
-session and does not hit that seam.) This module is the belt-and-suspenders half
+the projection-subquery shape + ``render_sample_select``. (The ``oneshot`` sample path —
+which routes the sample row-count through the vendor-neutral
+``WarehouseAdapter.get_row_count`` seam introduced by issue #140, bead
+``bd_1-scaffolding-tft`` — is certified by the second test in this module,
+``test_prune_drops_always_passes_not_null_live_oneshot_sample``.) This module
+is the belt-and-suspenders half
 — a ``@pytest.mark.snowflake``-gated test that drives a **real**
 :class:`SnowflakeAdapter` through :func:`signalforge.prune.prune_tests` end to
 end against a live warehouse and asserts the v0.1 differentiator (Architectural
@@ -338,6 +338,119 @@ def test_prune_drops_always_passes_not_null_live_materialised_sample() -> None:
         # A fresh adapter — the prune adapter's session has been closed by its
         # own ``__exit__``. ``IF EXISTS`` tolerates a partial setup where the
         # table was never created.
+        teardown_adapter = _make_adapter()
+        with teardown_adapter:
+            teardown_cursor = teardown_adapter._get_connection().cursor()
+            try:
+                teardown_cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
+            finally:
+                teardown_cursor.close()
+
+
+@pytest.mark.snowflake
+def test_prune_drops_always_passes_not_null_live_oneshot_sample() -> None:
+    """Prune a hand-crafted ``not_null`` against a live engineered table in
+    ``oneshot`` sample-mode — the live certification for the issue #140
+    vendor-neutral ``get_row_count`` seam (bead ``bd_1-scaffolding-tft``).
+
+    The ``oneshot`` path sizes the deterministic-sample bucket by calling
+    :func:`signalforge.prune.engine._resolve_sample_bucket`, which (post-#140)
+    reaches the row count through :meth:`SnowflakeAdapter.get_row_count`
+    (``INFORMATION_SCHEMA.TABLES.ROW_COUNT``) rather than the BigQuery-only
+    ``getattr(adapter, "_get_client")`` crack that previously made every
+    Snowflake ``oneshot`` prune raise ``PruneError``. Then it samples the
+    SOURCE table directly (no temp-table CTAS — that is the ``materialised``
+    path's job) via the #139 projection-subquery sample CTE and runs the
+    compiled ``not_null`` against it.
+
+    Same engineered-determinism contract as the materialised sibling: the
+    ``region`` column is the literal ``'austin'`` on every row, so a
+    ``not_null`` over it returns zero failing rows → ``always-passes`` (drop),
+    mathematically not probabilistically.
+
+    Skips cleanly under ``pytest -m snowflake`` when any prerequisite is
+    missing. Creates + drops its own per-run-unique engineered table (the
+    ``oneshot`` path needs no writable temp table, but the SOURCE table must
+    still exist and carry a populated ``ROW_COUNT`` — Snowflake maintains
+    ``INFORMATION_SCHEMA.TABLES.ROW_COUNT`` promptly after the INSERT commits,
+    the same dependency the materialised sibling already relies on).
+    """
+    if reason := _skip_reason():
+        pytest.skip(reason)
+
+    database = os.environ["SNOWFLAKE_DATABASE"]
+    schema = os.environ["SNOWFLAKE_SCHEMA"]
+    table_name = _unique_table_name()
+    quoted = _quoted_table(database, schema, table_name)
+
+    setup_adapter = _make_adapter()
+    with setup_adapter:
+        cursor = setup_adapter._get_connection().cursor()
+        try:
+            cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
+            cursor.execute(f"CREATE TABLE {quoted} (id INTEGER, region VARCHAR)")
+            cursor.execute(
+                f"INSERT INTO {quoted} (id, region) VALUES "
+                f"(1, 'austin'), (2, 'austin'), (3, 'austin'), (4, 'austin')"
+            )
+        finally:
+            cursor.close()
+
+    try:
+        model = Model.model_validate(
+            {
+                "unique_id": f"model.signalforge_live.{table_name}",
+                "name": table_name,
+                "resource_type": "model",
+                "package_name": "signalforge_live",
+                "original_file_path": f"models/{table_name}.sql",
+                "path": f"{table_name}.sql",
+                "database": database,
+                "schema": schema,
+                "columns": {
+                    "id": Column(name="id"),
+                    "region": Column(name="region"),
+                },
+                "config": Config(materialized="table"),
+            }
+        )
+        manifest = Manifest(metadata={}, nodes={model.unique_id: model})
+
+        candidates = CandidateSchema(
+            name=table_name,
+            description="engineered live-e2e table",
+            columns=(
+                CandidateColumn(
+                    name="region",
+                    description="literal region constant",
+                    tests=(
+                        CandidateTestNotNull(
+                            column="region",
+                            rationale="region is a literal constant; not_null should always pass",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        # ``scope="sample"`` + ``sample_strategy="oneshot"`` — the engine sizes
+        # the bucket via ``_resolve_sample_bucket`` → ``adapter.get_row_count``
+        # (the #140 seam) and samples the SOURCE table directly. NO temp-table
+        # CTAS. Pre-#140 this raised ``PruneError`` on any Snowflake table.
+        config = PruneConfig(scope="sample", sample_strategy="oneshot")
+
+        result = prune_tests(model, _make_adapter(), candidates, manifest, config=config)
+
+        always_passes_drops = [
+            d for d in result.decisions if d.decision == "dropped" and d.reason == "always-passes"
+        ]
+        assert always_passes_drops, (
+            "expected at least one PruneDecision with decision='dropped' and "
+            "reason='always-passes' under oneshot sample-mode — proving the "
+            "#140 get_row_count seam sized the bucket without a BigQuery-only "
+            f"_get_client. Got decisions={result.decisions!r}"
+        )
+    finally:
         teardown_adapter = _make_adapter()
         with teardown_adapter:
             teardown_cursor = teardown_adapter._get_connection().cursor()

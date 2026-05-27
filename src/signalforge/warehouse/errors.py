@@ -576,6 +576,40 @@ class MaterialisationNotSupportedError(WarehouseError):
         super().__init__(message, remediation=remediation)
 
 
+class RowCountNotSupportedError(WarehouseError):
+    """The :class:`WarehouseAdapter` ABC default impl of ``get_row_count``
+    raises this; concrete adapters override the method to provide a real
+    implementation (issue #140).
+
+    ``get_row_count`` is the vendor-neutral seam the prune layer uses to
+    size the deterministic-sample bucket under ``prune.scope: sample``
+    (it replaced the BigQuery-only ``getattr(adapter, "_get_client")``
+    crack). v0.2 ships the BigQuery and Snowflake overrides; the Postgres
+    stub (and any future adapter without a row-count primitive) inherits
+    the default raise.
+
+    Mirrors :class:`MaterialisationNotSupportedError` /
+    :class:`EstimateNotSupportedError`: the default raise IS the correct
+    behaviour for an adapter that has not grown the primitive yet — the
+    remediation tells the operator to fall back to ``prune.scope: full``,
+    which sizes nothing and so needs no row count.
+
+    Tier-3 in the CLI exit-code taxonomy via inheritance from
+    :class:`WarehouseError`.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Set 'prune.scope: full' in signalforge.yml to skip "
+        "deterministic-sample sizing, or wait for this adapter to grow a "
+        "get_row_count override."
+    )
+
+    def __init__(self, adapter_name: str, *, remediation: str | None = None) -> None:
+        self.adapter_name = adapter_name
+        message = f"Adapter {_format_value(adapter_name)} does not support row-count lookup."
+        super().__init__(message, remediation=remediation)
+
+
 # Sorted alphabetically (verified by tests/warehouse/test_errors.py).
 __all__ = [
     "BytesBilledExceededError",
@@ -592,6 +626,7 @@ __all__ = [
     "ProfileNotFoundError",
     "ProfileTargetNotFoundError",
     "QuerySyntaxError",
+    "RowCountNotSupportedError",
     "SamplingError",
     "SamplingRequiresPartitionFilterError",
     "TableNotFoundError",

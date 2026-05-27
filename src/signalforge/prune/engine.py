@@ -607,50 +607,33 @@ def _resolve_sample_bucket(
     (DEC-006 of issue #3) so samples drawn through this seam align with
     samples the adapter would draw on its own.
 
-    Reaches through the warehouse adapter's
-    :func:`signalforge.warehouse.adapters._client._get_client` path to
-    fetch ``Table.num_rows``. The adapter's own :meth:`sample_rows`
-    encapsulates this lookup but does not surface row count separately;
-    the prune layer needs the row count BEFORE issuing tests, so we
-    accept the minor encapsulation crack here. v0.2 may add an explicit
-    :meth:`WarehouseAdapter.get_table_metadata` seam.
+    Routes through the vendor-neutral
+    :meth:`WarehouseAdapter.get_row_count` seam (issue #140). Before #140
+    this reached for a BigQuery-only ``getattr(adapter, "_get_client")``
+    crack, so sample-scope prune raised on any non-BigQuery adapter; the
+    seam lets BigQuery and Snowflake (and future adapters) supply the
+    row count without the prune layer knowing which warehouse it is. The
+    adapter's own :meth:`sample_rows` encapsulates this lookup but does
+    not surface the row count separately, and the prune layer needs it
+    BEFORE issuing tests.
 
-    Raises :class:`PruneError` when ``num_rows`` is unknown — sampling
-    against an unsized table would silently degrade to "every row" and
-    defeat US-003's cost model. The fail-loud signal lands in front of
-    the operator.
+    An adapter without a row-count primitive raises
+    :class:`RowCountNotSupportedError` from the seam's ABC default; that
+    propagates (it is a :class:`WarehouseError`) carrying its own
+    ``prune.scope: full`` remediation.
+
+    Raises :class:`PruneError` when the row count is unknown (``None`` /
+    ``0``) — sampling against an unsized table would silently degrade to
+    "every row" and defeat US-003's cost model. The fail-loud signal
+    lands in front of the operator.
     """
     if scope != "sample":
         return None
-    # Reach through the SDK shim to fetch row count. ``_get_client`` is
-    # the documented internal seam on the BigQuery adapter (DEC-019 of
-    # issue #3 — every SDK-noise comment lives in
-    # ``adapters/_client.py``); the abstract base does NOT declare it,
-    # so we route through ``getattr`` to keep pyright clean. v0.2 may
-    # add an explicit ``WarehouseAdapter.get_table_metadata`` seam to
-    # avoid the encapsulation crack; for now the prune layer needs
-    # ``num_rows`` BEFORE issuing tests and the adapter's public
-    # ``sample_rows`` does not surface it.
-    get_client = getattr(adapter, "_get_client", None)
-    if get_client is None:  # pragma: no cover - defensive; v0.1 only ships BigQuery
-        raise PruneError(
-            "sample-mode prune requires the adapter to expose `_get_client`; "
-            f"{type(adapter).__name__} does not.",
-            remediation=(
-                "Set `prune.scope: full` in signalforge.yml until the v0.2 "
-                "WarehouseAdapter.get_table_metadata seam lands."
-            ),
-        )
-    try:
-        client = get_client()
-        meta = client.get_table(table_ref)
-    except WarehouseError:
-        # Adapter mapped the SDK exception. Re-raise as PruneError so
-        # the caller's catch surface stays homogeneous: any failure to
-        # establish the deterministic-sample bucket is a prune-layer
-        # configuration / setup error.
-        raise
-    num_rows = getattr(meta, "num_rows", None)
+    # Vendor-neutral row-count seam (issue #140). May raise a
+    # WarehouseError (incl. RowCountNotSupportedError for an adapter that
+    # has no row-count primitive yet); those propagate to the caller's
+    # homogeneous WarehouseError catch surface with their own remediation.
+    num_rows = adapter.get_row_count(table_ref)
     if num_rows is None or num_rows == 0:
         raise PruneError(
             f"sample-mode prune requires Table.num_rows for "
