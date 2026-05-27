@@ -289,7 +289,15 @@ def call_llm(
     # count gate. ``cache_marker_active`` is the orchestrator's resolved
     # decision threaded into ``build_create_kwargs``; ``cached_block_tokens``
     # / ``min_required`` are only meaningful when the count gate ran.
-    cache_marker_active = supports_caching
+    #
+    # The marker requires BOTH caching support AND token-count support: the
+    # count gate is what enforces the sub-minimum drop + the oversize cap, so
+    # attaching a marker without it would send an unvalidated cache_control
+    # (sub-minimum blocks silently no-op the marker; oversize blocks bypass
+    # LLMCacheTooLargeError). A provider that supports caching but not
+    # token-counting degrades safely to no-caching rather than an unguarded
+    # marker. Anthropic is True/True so this is a no-op for the default path.
+    cache_marker_active = supports_caching and strategy.supports_token_count
     cached_block_tokens: int | None = None
     min_required: int | None = None
 

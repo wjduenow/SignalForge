@@ -286,7 +286,8 @@ class AnthropicProvider(LLMProvider):
 
         The count is issued against ``system`` + the cached block only — that's
         the surface the cache marker covers. Block-1 here carries NO
-        ``cache_control`` marker (matching the inline ``call_anthropic`` probe).
+        ``cache_control`` marker: the marker is irrelevant to the returned
+        ``input_tokens`` count, so it is intentionally omitted from the probe.
         """
         return {
             "model": model,
