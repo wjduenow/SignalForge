@@ -80,6 +80,7 @@ Traces to: #124 US-004 (warehouse + prune-only gated live e2e).
 from __future__ import annotations
 
 import os
+import uuid
 
 import pytest
 
@@ -101,10 +102,18 @@ _REQUIRED_CONN_VARS = (
     "SNOWFLAKE_SCHEMA",
 )
 
-# Engineered table name (a valid bare identifier — passes the strict
-# DEC-013 identifier regex used by ``TableRef``). The ``region`` column is a
+# Engineered-table name PREFIX. The full name gets a per-run random suffix
+# (see ``_unique_table_name``) so two concurrent maintainer runs against the
+# same writable schema cannot race on the same `DROP TABLE` / clobber an
+# unrelated leftover object. The prefix + suffix are a valid bare identifier
+# (strict DEC-013 regex used by ``TableRef``). The ``region`` column is a
 # literal constant on every row so ``not_null`` over it always passes.
-_ENGINEERED_TABLE = "sf_prune_live_engineered"
+_ENGINEERED_TABLE_PREFIX = "sf_prune_live_engineered"
+
+
+def _unique_table_name() -> str:
+    """A per-run engineered-table name: prefix + 12 random hex chars."""
+    return f"{_ENGINEERED_TABLE_PREFIX}_{uuid.uuid4().hex[:12]}"
 
 
 def _snowflake_runs_enabled() -> bool:
@@ -183,7 +192,9 @@ def test_prune_drops_always_passes_not_null_live_materialised() -> None:
 
     database = os.environ["SNOWFLAKE_DATABASE"]
     schema = os.environ["SNOWFLAKE_SCHEMA"]
-    quoted = _quoted_table(database, schema, _ENGINEERED_TABLE)
+    # Per-run unique name so concurrent runs don't race on DROP / clobber.
+    table_name = _unique_table_name()
+    quoted = _quoted_table(database, schema, table_name)
 
     # --- Setup: create the engineered table (own short-lived adapter). --------
     # A regular (non-temp) table is required: ``prune_tests`` under the
@@ -193,14 +204,17 @@ def test_prune_drops_always_passes_not_null_live_materialised() -> None:
     setup_adapter = _make_adapter()
     with setup_adapter:
         cursor = setup_adapter._get_connection().cursor()
-        cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
-        cursor.execute(f"CREATE TABLE {quoted} (id INTEGER, region VARCHAR)")
-        # ``region`` is the literal 'austin' on every row → never NULL, so the
-        # ``not_null`` candidate is mathematically always-pass.
-        cursor.execute(
-            f"INSERT INTO {quoted} (id, region) VALUES "
-            f"(1, 'austin'), (2, 'austin'), (3, 'austin'), (4, 'austin')"
-        )
+        try:
+            cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
+            cursor.execute(f"CREATE TABLE {quoted} (id INTEGER, region VARCHAR)")
+            # ``region`` is the literal 'austin' on every row → never NULL, so the
+            # ``not_null`` candidate is mathematically always-pass.
+            cursor.execute(
+                f"INSERT INTO {quoted} (id, region) VALUES "
+                f"(1, 'austin'), (2, 'austin'), (3, 'austin'), (4, 'austin')"
+            )
+        finally:
+            cursor.close()
 
     try:
         # --- Build the in-process pipeline inputs. ----------------------------
@@ -210,12 +224,12 @@ def test_prune_drops_always_passes_not_null_live_materialised() -> None:
         # ``CandidateSchema.name`` (the diff/anchor convention across stages).
         model = Model.model_validate(
             {
-                "unique_id": f"model.signalforge_live.{_ENGINEERED_TABLE}",
-                "name": _ENGINEERED_TABLE,
+                "unique_id": f"model.signalforge_live.{table_name}",
+                "name": table_name,
                 "resource_type": "model",
                 "package_name": "signalforge_live",
-                "original_file_path": f"models/{_ENGINEERED_TABLE}.sql",
-                "path": f"{_ENGINEERED_TABLE}.sql",
+                "original_file_path": f"models/{table_name}.sql",
+                "path": f"{table_name}.sql",
                 "database": database,
                 "schema": schema,
                 "columns": {
@@ -228,7 +242,7 @@ def test_prune_drops_always_passes_not_null_live_materialised() -> None:
         manifest = Manifest(metadata={}, nodes={model.unique_id: model})
 
         candidates = CandidateSchema(
-            name=_ENGINEERED_TABLE,
+            name=table_name,
             description="engineered live-e2e table",
             columns=(
                 CandidateColumn(
@@ -270,4 +284,8 @@ def test_prune_drops_always_passes_not_null_live_materialised() -> None:
         # table was never created.
         teardown_adapter = _make_adapter()
         with teardown_adapter:
-            teardown_adapter._get_connection().cursor().execute(f"DROP TABLE IF EXISTS {quoted}")
+            teardown_cursor = teardown_adapter._get_connection().cursor()
+            try:
+                teardown_cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
+            finally:
+                teardown_cursor.close()

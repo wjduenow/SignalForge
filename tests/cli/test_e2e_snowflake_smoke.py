@@ -89,6 +89,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 
 from signalforge.cli import main
 from signalforge.grade import GradingReport
@@ -174,27 +175,24 @@ def test_e2e_signalforge_generate_against_tpch_sf1(
     # ``relation_name`` already resolves to
     # ``SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER`` independently, so the SOURCE
     # table is unchanged.
-    account = os.environ["SNOWFLAKE_ACCOUNT"]
-    user = os.environ["SNOWFLAKE_USER"]
-    password = os.environ["SNOWFLAKE_PASSWORD"]
-    warehouse = os.environ["SNOWFLAKE_WAREHOUSE"]
-    role = os.environ.get("SNOWFLAKE_ROLE", "")
-    role_line = f"      role: {role}\n" if role else ""
-    (project_dir / "profiles.yml").write_text(
-        "tpch:\n"
-        "  target: dev\n"
-        "  outputs:\n"
-        "    dev:\n"
-        "      type: snowflake\n"
-        f"      account: {account}\n"
-        f"      user: {user}\n"
-        f"      password: {password}\n"
-        f"      warehouse: {warehouse}\n"
-        f"{role_line}"
-        "      database: SNOWFLAKE_SAMPLE_DATA\n"
-        "      schema: TPCH_SF1\n"
-        "      threads: 1\n"
-    )
+    # Serialise from a structured mapping via ``yaml.safe_dump`` rather than
+    # interpolating raw env vars into a YAML string — a credential containing
+    # ``#``/``:``/quotes/newlines would otherwise change the parsed value or
+    # make the file invalid, failing the smoke test before it reaches the CLI.
+    output: dict[str, object] = {
+        "type": "snowflake",
+        "account": os.environ["SNOWFLAKE_ACCOUNT"],
+        "user": os.environ["SNOWFLAKE_USER"],
+        "password": os.environ["SNOWFLAKE_PASSWORD"],
+        "warehouse": os.environ["SNOWFLAKE_WAREHOUSE"],
+        "database": "SNOWFLAKE_SAMPLE_DATA",
+        "schema": "TPCH_SF1",
+        "threads": 1,
+    }
+    if role := os.environ.get("SNOWFLAKE_ROLE"):
+        output["role"] = role
+    profile = {"tpch": {"target": "dev", "outputs": {"dev": output}}}
+    (project_dir / "profiles.yml").write_text(yaml.safe_dump(profile, sort_keys=False))
 
     # The seed ships no ``signalforge.yml``; write one into the per-run copy
     # pinning ``prune.sample_strategy: oneshot``. ``oneshot`` is MANDATORY —

@@ -18,8 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from signalforge.manifest import load
-from signalforge.manifest.models import Manifest
+from signalforge.manifest import Manifest, load
 
 _FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "snowflake"
 

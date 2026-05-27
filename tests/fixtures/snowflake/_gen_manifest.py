@@ -14,11 +14,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-_HERE = Path(__file__).resolve().parent
+_HERE: Path = Path(__file__).resolve().parent
 
-_PROJECT = "signalforge_test_tpch"
-_MODEL_UID = f"model.{_PROJECT}.stg_tpch_customers"
-_SOURCE_UID = f"source.{_PROJECT}.tpch_sf1.customer"
+_PROJECT: str = "signalforge_test_tpch"
+_MODEL_UID: str = f"model.{_PROJECT}.stg_tpch_customers"
+_SOURCE_UID: str = f"source.{_PROJECT}.tpch_sf1.customer"
 
 # Raw SQL: a curated subset of REAL, UNRENAMED TPCH_SF1.CUSTOMER columns.
 # The model's ``alias`` is overridden to ``customer`` so its relation resolves
@@ -30,7 +30,7 @@ _SOURCE_UID = f"source.{_PROJECT}.tpch_sf1.customer"
 # (US-005) therefore relies on a NATURAL NOT NULL source column — ``c_custkey``,
 # the TPCH primary key — rather than engineered literals (mirrors the Austin
 # bikeshare natural-NOT-NULL pattern; see tests/fixtures/dbt_project_austin).
-_RAW_CODE = (
+_RAW_CODE: str = (
     "-- Hand-crafted TPCH seed model (issue #124, US-003). The model's `alias`\n"
     "-- is overridden to `customer` so its relation resolves directly to the\n"
     "-- read-only source SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER (SignalForge\n"
@@ -63,7 +63,7 @@ def _col(name: str, description: str) -> dict[str, object]:
     }
 
 
-_MODEL_COLUMNS = {
+_MODEL_COLUMNS: dict[str, dict[str, object]] = {
     "c_custkey": _col(
         "c_custkey",
         "Unique customer key — the TPCH primary key. NATURAL NOT NULL: every "
@@ -93,7 +93,7 @@ _MODEL_COLUMNS = {
     ),
 }
 
-_SOURCE_COLUMNS = {
+_SOURCE_COLUMNS: dict[str, dict[str, object]] = {
     "c_custkey": _col("c_custkey", "Unique customer key."),
     "c_name": _col("c_name", "Customer name."),
     "c_address": _col("c_address", "Customer street address."),
@@ -104,7 +104,7 @@ _SOURCE_COLUMNS = {
     "c_comment": _col("c_comment", "Free-form comment."),
 }
 
-_RELATION_NAME = "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER"
+_RELATION_NAME: str = "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER"
 
 _MANIFEST: dict[str, object] = {
     "metadata": {

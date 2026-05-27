@@ -649,7 +649,7 @@ The default `pytest` invocation skips warehouse-touching tests via
 
 ```bash
 # BigQuery (free under the 1 TB/month tier; bills GOOGLE_CLOUD_PROJECT)
-SF_RUN_BQ=1 pytest -m bigquery --no-cov
+SF_RUN_BQ=1 uv run pytest -m bigquery --no-cov
 
 # Snowflake — set a resource monitor + XS warehouse + auto-suspend FIRST (bills compute)
 export SF_RUN_SNOWFLAKE=1
