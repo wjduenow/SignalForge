@@ -8,12 +8,12 @@ Covers:
   also satisfies the protocol — confirms the structural shape both real and
   test clients commit to.
 * DEC-012 enforcement at the regex level: no ``# pyright: ignore`` /
-  ``# type: ignore`` comments outside ``_client.py`` in
+  ``# type: ignore`` comments outside ``_anthropic_client.py`` in
   :mod:`signalforge.llm`. (US-014 lands a stricter AST scan; this is the
   cheap floor.)
-* No direct ``anthropic.Anthropic(`` construction outside ``_client.py``
-  in :mod:`signalforge.llm`. Mirrors the safety AST scan precedent at the
-  regex level; full AST scan is US-014's job.
+* No direct ``anthropic.Anthropic(`` construction outside
+  ``_anthropic_client.py`` in :mod:`signalforge.llm`. Mirrors the safety AST
+  scan precedent at the regex level; full AST scan is US-014's job.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 
 from signalforge.llm import AnthropicClientProtocol
-from signalforge.llm._client import _make_anthropic_client
+from signalforge.llm._anthropic_client import _make_anthropic_client
 
 from ._fake import _StubAnthropicClient
 
@@ -35,8 +35,8 @@ _LLM_SRC_DIR = Path(__file__).resolve().parents[2] / "src" / "signalforge" / "ll
 
 
 def _llm_py_files_excluding_client() -> list[Path]:
-    """All ``.py`` under ``src/signalforge/llm/`` except ``_client.py``."""
-    return [p for p in _LLM_SRC_DIR.rglob("*.py") if p.name != "_client.py"]
+    """All ``.py`` under ``src/signalforge/llm/`` except ``_anthropic_client.py``."""
+    return [p for p in _LLM_SRC_DIR.rglob("*.py") if p.name != "_anthropic_client.py"]
 
 
 def test_make_anthropic_client_returns_protocol_satisfying_object() -> None:
@@ -65,10 +65,10 @@ def test_stub_satisfies_protocol() -> None:
 
 
 def test_no_pyright_ignores_outside_client_shim() -> None:
-    """DEC-012: every Anthropic-SDK ``# pyright: ignore`` lives in ``_client.py``.
+    """DEC-012: every Anthropic-SDK ``# pyright: ignore`` lives in ``_anthropic_client.py``.
 
     Walks every ``.py`` under ``src/signalforge/llm/`` (except
-    ``_client.py``) and asserts that no line contains ``# pyright: ignore``
+    ``_anthropic_client.py``) and asserts that no line contains ``# pyright: ignore``
     or ``# type: ignore``. US-014's AST scan will be more thorough; this is
     the cheap floor.
     """
@@ -79,9 +79,10 @@ def test_no_pyright_ignores_outside_client_shim() -> None:
             if pattern.search(line):
                 offenders.append((path, lineno, line))
     assert offenders == [], (
-        "Found `# pyright: ignore` / `# type: ignore` outside _client.py — "
+        "Found `# pyright: ignore` / `# type: ignore` outside _anthropic_client.py — "
         "DEC-012 requires Anthropic-SDK noise be confined to "
-        "signalforge.llm._client. Offenders: " + ", ".join(f"{p}:{n}" for p, n, _ in offenders)
+        "signalforge.llm._anthropic_client. Offenders: "
+        + ", ".join(f"{p}:{n}" for p, n, _ in offenders)
     )
 
 
@@ -98,7 +99,7 @@ def test_anthropic_client_construction_only_in_shim() -> None:
             if needle in line:
                 offenders.append((path, lineno, line))
     assert offenders == [], (
-        "Found `anthropic.Anthropic(` construction outside _client.py — "
+        "Found `anthropic.Anthropic(` construction outside _anthropic_client.py — "
         "DEC-012 requires the SDK be instantiated only via "
         "_make_anthropic_client. Offenders: " + ", ".join(f"{p}:{n}" for p, n, _ in offenders)
     )

@@ -8,7 +8,7 @@ this module adds the remaining scans:
 
 * **Scan 2** — ``AuditEvent(...)`` outside ``signalforge.safety.request``.
 * **Scan 3** — ``anthropic.Anthropic(...)`` outside
-  ``signalforge.llm._client``.
+  ``signalforge.llm._anthropic_client``.
 * **Scan 4** — ``LLMResponseEvent(...)`` outside
   ``signalforge.draft.audit``.
 * **Scan 5** — ``PruneEvent(...)`` outside ``signalforge.prune.audit``.
@@ -315,25 +315,25 @@ def test_audit_event_construction_in_safety_request_module_is_present() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scan 3 — anthropic.Anthropic only in llm._client
+# Scan 3 — anthropic.Anthropic only in llm._anthropic_client
 # ---------------------------------------------------------------------------
 
 
 # DEC-012 / DEC-013: every Anthropic SDK ``# pyright: ignore`` and the
-# SDK construction call itself live in ``_client.py``. Stricter than the
-# regex check in tests/llm/test_client_shim.py — this scans the AST.
+# SDK construction call itself live in ``_anthropic_client.py``. Stricter
+# than the regex check in tests/llm/test_client_shim.py — this scans the AST.
 _LLM_ANTHROPIC_EXCLUSIONS: set[str] = {
-    # _client.py is the sole SDK seam: it lazy-imports ``anthropic`` and
-    # constructs ``anthropic.Anthropic(api_key=...)`` inside
-    # ``_make_anthropic_client``.
-    "_client.py",
+    # _anthropic_client.py is the sole SDK seam: it lazy-imports
+    # ``anthropic`` and constructs ``anthropic.Anthropic(api_key=...)``
+    # inside ``_make_anthropic_client``.
+    "_anthropic_client.py",
 }
 
 
 def test_anthropic_client_construction_only_in_llm_client_shim() -> None:
     """DEC-013: ``anthropic.Anthropic(...)`` outside
-    ``signalforge.llm._client`` violates the SDK-confinement convention.
-    The AST scan is stricter than the regex check in
+    ``signalforge.llm._anthropic_client`` violates the SDK-confinement
+    convention. The AST scan is stricter than the regex check in
     ``tests/llm/test_client_shim.py`` (catches multi-line / commented
     forms the regex would miss).
     """
@@ -346,7 +346,7 @@ def test_anthropic_client_construction_only_in_llm_client_shim() -> None:
     formatted = "\n".join(f"  {p}:{line}" for p, line in hits)
     assert not hits, (
         "anthropic.Anthropic(...) constructed outside "
-        "signalforge.llm._client:\n"
+        "signalforge.llm._anthropic_client:\n"
         f"{formatted}\n"
         "Construct only via _make_anthropic_client — DEC-012 confines "
         "Anthropic-SDK noise to the shim."
@@ -354,16 +354,17 @@ def test_anthropic_client_construction_only_in_llm_client_shim() -> None:
 
 
 def test_anthropic_client_construction_in_llm_client_shim_is_present() -> None:
-    """Sanity: at least one ``anthropic.Anthropic(...)`` in ``_client.py``.
-    If this fails the scan above is no longer load-bearing.
+    """Sanity: at least one ``anthropic.Anthropic(...)`` in
+    ``_anthropic_client.py``. If this fails the scan above is no longer
+    load-bearing.
     """
-    client_path = _LLM_DIR / "_client.py"
+    client_path = _LLM_DIR / "_anthropic_client.py"
     tree = ast.parse(client_path.read_text(encoding="utf-8"))
     finder = _AttributeCallFinder("anthropic", "Anthropic")
     finder.visit(tree)
     assert finder.calls, (
         "Expected anthropic.Anthropic(...) call in "
-        "signalforge.llm._client — the AST-scan above is no longer "
+        "signalforge.llm._anthropic_client — the AST-scan above is no longer "
         "load-bearing if the legitimate constructor disappears."
     )
 

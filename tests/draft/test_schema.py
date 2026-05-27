@@ -489,6 +489,7 @@ def test_public_api_imports_match_dec_020() -> None:
         "PRICES",
         "PRICE_TABLE_VERSION",
         "AnthropicClientProtocol",
+        "AnthropicProvider",
         "EstimateUnknownModelError",
         "ExceptionCategory",
         "LLMAuthError",

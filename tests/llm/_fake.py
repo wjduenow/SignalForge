@@ -25,7 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from signalforge.llm._client import _AnthropicMessagesProtocol
+from signalforge.llm._anthropic_client import _AnthropicMessagesProtocol
 
 
 @dataclass
