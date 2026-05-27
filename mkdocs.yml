@@ -57,4 +57,5 @@ nav:
       - Diff Renderer: diff-ops.md
   - Audits & Sidecars: audits.md
   - End-to-End Smoke Test: e2e-smoke-test.md
+  - Snowflake E2E Setup: snowflake-e2e-setup.md
   - Coverage Setup: codecov-ops.md
