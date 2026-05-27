@@ -37,6 +37,7 @@ adapter where the stage label is known (mirrors ``_client.py`` DEC-027).
 
 from __future__ import annotations
 
+import re
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -129,13 +130,26 @@ def map_snowflake_exception(exc: Exception, *, context: dict[str, Any] | None = 
     mapping fits — the caller should re-raise the original in that case rather
     than swallow it.
 
-    v0.2 minimal taxonomy (DEC-009 of issue #122; a full taxonomy mirroring
-    ``map_bq_exception`` is deferred to #124):
+    Full taxonomy (issue #124, mirroring ``map_bq_exception``):
 
-    * a connector ``ForbiddenError`` / auth-flavoured operational failure
-      (bad credentials, incorrect username/password) → :class:`WarehouseAuthError`;
-    * a ``ProgrammingError`` (SQL compilation / syntax) → :class:`QuerySyntaxError`;
+    * a connector ``ForbiddenError`` / auth-flavoured ``DatabaseError`` /
+      ``OperationalError`` (bad credentials, incorrect username/password)
+      → :class:`WarehouseAuthError`;
+    * a ``ProgrammingError`` whose ``errno`` is ``2003`` ("object does not
+      exist", message marker ``"does not exist"``) → :class:`TableNotFoundError`
+      (``table`` from ``context`` or ``"<unknown>"``);
+    * a ``ProgrammingError`` whose ``errno`` is ``904`` ("invalid identifier",
+      message marker ``"invalid identifier"``) → :class:`ColumnNotFoundError`
+      (``column`` extracted from the message);
+    * any residual ``ProgrammingError`` (SQL compilation / syntax)
+      → :class:`QuerySyntaxError`;
     * anything else → returned unchanged.
+
+    The Table/Column split runs BEFORE the broad ``ProgrammingError`` →
+    :class:`QuerySyntaxError` fallthrough. No new ``WarehouseError`` subclass is
+    introduced (that would force exit-code-table + AST-scan changes);
+    ``BytesBilledExceededError`` is deliberately omitted because Snowflake has
+    no bytes-billed cap.
 
     The ``snowflake.connector.errors`` import is **lazy** — confined to this
     function body — so the one-shim-per-vendor rule holds (every
@@ -144,26 +158,41 @@ def map_snowflake_exception(exc: Exception, *, context: dict[str, Any] | None = 
     the connector is absent, the exception is returned unchanged.
 
     The optional ``context`` kwarg carries adapter-side state the raw connector
-    exception doesn't expose (e.g. ``{"table": ..., "max_bytes_billed": ...}``),
-    mirroring ``map_bq_exception``; v0.2 uses it only to enrich the
-    :class:`QuerySyntaxError` detail with the offending table when present.
+    exception doesn't expose (e.g. ``{"table": ...}``), mirroring
+    ``map_bq_exception``; it supplies the ``table`` identifier for the
+    Table/Column arms so the typed ``.table`` field stays a stable identifier
+    rather than a truncated connector message.
     """
     try:
         from snowflake.connector import errors as sfe  # type: ignore[import-not-found]
     except ImportError:  # pragma: no cover - snowflake-connector ships under [snowflake]
         return exc
 
-    from signalforge.warehouse.errors import QuerySyntaxError, WarehouseAuthError
+    from signalforge.warehouse.errors import (
+        ColumnNotFoundError,
+        QuerySyntaxError,
+        TableNotFoundError,
+        WarehouseAuthError,
+    )
 
-    table_id = str(context["table"]) if context is not None and "table" in context else None
+    table_id = str(context["table"]) if context is not None and "table" in context else "<unknown>"
 
     # ``ProgrammingError`` is a ``DatabaseError`` subclass; check it BEFORE the
     # broader auth buckets so a SQL compilation error never mis-maps to auth.
     if isinstance(exc, sfe.ProgrammingError):
-        detail = str(exc)
-        if table_id is not None:
-            detail = f"{detail} (table={table_id})"
-        return QuerySyntaxError(detail=detail)
+        errno = getattr(exc, "errno", None)
+        msg_lower = str(exc).lower()
+        # Object does not exist — Snowflake errno 002003 (key on errno where
+        # reliable; fall back to the message marker for resilience to wording
+        # / errno-attribute shifts).
+        if errno == 2003 or "does not exist" in msg_lower:
+            return TableNotFoundError(table=table_id)
+        # Invalid identifier (unknown column) — Snowflake errno 000904.
+        if errno == 904 or "invalid identifier" in msg_lower:
+            column = _extract_invalid_identifier(str(exc))
+            return ColumnNotFoundError(table=table_id, column=column)
+        # Residual ``ProgrammingError`` — "your SQL is malformed".
+        return QuerySyntaxError(detail=str(exc))
 
     # Bad credentials / forbidden access. Snowflake's connector raises
     # ``ForbiddenError`` for HTTP 403 and ``DatabaseError`` /
@@ -186,6 +215,27 @@ def map_snowflake_exception(exc: Exception, *, context: dict[str, Any] | None = 
             return WarehouseAuthError(message=str(exc))
 
     return exc
+
+
+_INVALID_IDENTIFIER_RE = re.compile(
+    r"invalid identifier\s+'?([A-Za-z_][A-Za-z0-9_.$]*)'?",
+    re.IGNORECASE,
+)
+
+
+def _extract_invalid_identifier(message: str) -> str:
+    """Best-effort pull of a column identifier out of Snowflake's
+    ``000904: ... invalid identifier 'FOO'`` message.
+
+    Returns the bare identifier if found; otherwise the full message.
+    Falling back to the message keeps :class:`ColumnNotFoundError`'s
+    ``column`` field non-empty even when Snowflake's wording shifts (mirrors
+    ``_client._extract_unrecognized_column``).
+    """
+    m = _INVALID_IDENTIFIER_RE.search(message)
+    if m:
+        return m.group(1)
+    return message
 
 
 __all__ = [
