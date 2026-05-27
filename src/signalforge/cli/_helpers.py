@@ -115,6 +115,7 @@ from signalforge.llm import (
     LLMRateLimitError,
     LLMResponseFormatError,
     LLMServerError,
+    UnknownProviderError,
 )
 from signalforge.manifest import (
     AmbiguousRefError,
@@ -345,6 +346,10 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # See US-001 of issue #36 and the AC tying tier 2 to "looked-up
     # identifier not in a static table" failures.
     EstimateUnknownModelError: 2,
+    # Provider-registry: the operator selected a provider name not in the
+    # registry — same "looked-up identifier not in a static table" input-shape
+    # category as ``EstimateUnknownModelError`` (US-001 of issue #135).
+    UnknownProviderError: 2,
     # CLI-layer input-shape errors.
     CliInputError: 2,
     # Selector-failure wrappers (issue #37 / DEC-007 — US-002): both

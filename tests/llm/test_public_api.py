@@ -41,11 +41,19 @@ _DOCUMENTED_PUBLIC = (
     "LLMCacheTooLargeError",
     # Errors — estimate cost preview (US-001 of #36)
     "EstimateUnknownModelError",
+    # Errors — provider registry (US-001 of #135)
+    "UnknownProviderError",
     # Pricing surface (US-001 of #36)
     "PRICE_TABLE_VERSION",
     "PRICES",
     "ModelPricing",
     "lookup",
+    # Provider seam (US-001 of #135) — neutral value objects + ABC + registry.
+    "ExceptionCategory",
+    "UsageMetrics",
+    "LLMProvider",
+    "register_provider",
+    "provider_for",
 )
 
 
@@ -71,18 +79,24 @@ def test_each_public_name_is_importable_via_from_signalforge_llm() -> None:
         PRICES,
         AnthropicClientProtocol,
         EstimateUnknownModelError,
+        ExceptionCategory,
         LLMAuthError,
         LLMCacheTooLargeError,
         LLMConnectionError,
         LLMError,
         LLMHelperError,
+        LLMProvider,
         LLMRateLimitError,
         LLMResponseFormatError,
         LLMResult,
         LLMServerError,
         ModelPricing,
+        UnknownProviderError,
+        UsageMetrics,
         call_anthropic,
         lookup,
+        provider_for,
+        register_provider,
     )
 
 
@@ -101,6 +115,7 @@ def test_typed_errors_subclass_llm_error() -> None:
         LLMRateLimitError,
         LLMResponseFormatError,
         LLMServerError,
+        UnknownProviderError,
     )
 
     for cls in (
@@ -112,5 +127,6 @@ def test_typed_errors_subclass_llm_error() -> None:
         LLMRateLimitError,
         LLMResponseFormatError,
         LLMServerError,
+        UnknownProviderError,
     ):
         assert issubclass(cls, LLMError), f"{cls.__name__} is not an LLMError subclass"
