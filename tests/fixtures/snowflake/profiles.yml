@@ -1,0 +1,24 @@
+# Committed alongside the fixture so the maintainer regen note (README.md) can
+# invoke `dbt parse` against the live SNOWFLAKE_SAMPLE_DATA.TPCH_SF1 dataset.
+#
+# The connection fields below are placeholders. SNOWFLAKE_SAMPLE_DATA is a
+# read-only shared database present in every Snowflake account, so the
+# maintainer fills in their own `account` / `user` / auth before regenerating
+# the manifest. The Snowflake live e2e (US-005) overwrites this file in
+# `tmp_path` from environment variables (account / user / role / warehouse)
+# before invoking `signalforge generate`; the committed values are regen-only.
+# Do NOT run `signalforge generate` directly against this directory without
+# rewriting the profile first.
+tpch:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: REPLACE_WITH_ACCOUNT
+      user: REPLACE_WITH_USER
+      authenticator: externalbrowser
+      role: REPLACE_WITH_ROLE
+      warehouse: REPLACE_WITH_WAREHOUSE
+      database: SNOWFLAKE_SAMPLE_DATA
+      schema: TPCH_SF1
+      threads: 1

@@ -1,0 +1,28 @@
+version: 2
+
+sources:
+  - name: tpch_sf1
+    description: Snowflake sample TPCH_SF1 dataset.
+    database: SNOWFLAKE_SAMPLE_DATA
+    schema: TPCH_SF1
+    tables:
+      - name: customer
+        identifier: CUSTOMER
+        description: One row per TPCH customer.
+        columns:
+          - name: c_custkey
+            description: Unique customer key.
+          - name: c_name
+            description: Customer name.
+          - name: c_address
+            description: Customer street address.
+          - name: c_nationkey
+            description: Foreign key into NATION.
+          - name: c_phone
+            description: Customer phone number.
+          - name: c_acctbal
+            description: Customer account balance.
+          - name: c_mktsegment
+            description: Market segment.
+          - name: c_comment
+            description: Free-form comment.
