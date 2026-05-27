@@ -12,6 +12,7 @@ from signalforge.llm.errors import (
     LLMRateLimitError,
     LLMResponseFormatError,
     LLMServerError,
+    UnknownProviderError,
 )
 from signalforge.llm.models import LLMResult
 from signalforge.llm.pricing import (
@@ -20,22 +21,35 @@ from signalforge.llm.pricing import (
     ModelPricing,
     lookup,
 )
+from signalforge.llm.providers import (
+    ExceptionCategory,
+    LLMProvider,
+    UsageMetrics,
+    provider_for,
+    register_provider,
+)
 
 __all__ = (
     "PRICES",
     "PRICE_TABLE_VERSION",
     "AnthropicClientProtocol",
     "EstimateUnknownModelError",
+    "ExceptionCategory",
     "LLMAuthError",
     "LLMCacheTooLargeError",
     "LLMConnectionError",
     "LLMError",
     "LLMHelperError",
+    "LLMProvider",
     "LLMRateLimitError",
     "LLMResponseFormatError",
     "LLMResult",
     "LLMServerError",
     "ModelPricing",
+    "UnknownProviderError",
+    "UsageMetrics",
     "call_anthropic",
     "lookup",
+    "provider_for",
+    "register_provider",
 )

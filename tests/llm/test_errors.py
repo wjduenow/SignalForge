@@ -39,6 +39,7 @@ _CONSTRUCT_KWARGS: dict[str, dict[str, object]] = {
     "LLMResponseFormatError": {"message": "missing content block"},
     "LLMCacheTooLargeError": {"cached_block_tokens": 9000},
     "EstimateUnknownModelError": {"model": "fake-model-id"},
+    "UnknownProviderError": {"name": "bogus", "available": ("anthropic",)},
 }
 
 
@@ -55,19 +56,20 @@ def test_llm_error_renders_remediation() -> None:
 @pytest.mark.unit
 @pytest.mark.llm
 def test_all_is_sorted_and_complete() -> None:
-    """``__all__`` is alphabetically sorted and lists 8 classes total
-    (LLMError + 7 subclasses)."""
+    """``__all__`` is alphabetically sorted and lists 10 classes total
+    (LLMError + 9 subclasses)."""
     assert errors_module.__all__ == sorted(errors_module.__all__)
     # 1 base (LLMError) + 1 umbrella (LLMHelperError) + 5 helper subclasses
     # (Auth/RateLimit/Server/Connection/ResponseFormat) + 1 cache-size
     # subclass (TooLarge) + 1 estimate subclass (EstimateUnknownModelError,
-    # US-001 of #36) = 9 classes. (LLMCacheTooSmallError was dropped
+    # US-001 of #36) + 1 provider-registry subclass (UnknownProviderError,
+    # US-001 of #135) = 10 classes. (LLMCacheTooSmallError was dropped
     # in #10's follow-up — Anthropic silently no-ops a sub-minimum cache
     # marker, so the production code drops the marker and continues
     # rather than raising.)
-    assert len(errors_module.__all__) == 9, (
-        "US-003 + US-001 of #36 enumerate 8 typed subclasses + 1 base; "
-        "update tests and __all__ together if this changes."
+    assert len(errors_module.__all__) == 10, (
+        "US-003 + US-001 of #36 + US-001 of #135 enumerate 9 typed subclasses "
+        "+ 1 base; update tests and __all__ together if this changes."
     )
 
 
