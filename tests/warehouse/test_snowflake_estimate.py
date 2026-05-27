@@ -116,7 +116,7 @@ def test_negative_bytes_assigned_raises() -> None:
 # SnowflakeAdapter.estimate_query_bytes override (US-003, DEC-001/004/005/008).
 # ---------------------------------------------------------------------------
 
-from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter  # noqa: E402
+from signalforge.warehouse import SnowflakeAdapter  # noqa: E402
 from signalforge.warehouse.errors import QuerySyntaxError, WarehouseError  # noqa: E402
 from tests.warehouse._fake_snowflake import FakeSnowflakeConnection  # noqa: E402
 
@@ -213,3 +213,18 @@ def test_estimate_query_bytes_reraises_unmapped_connector_exception() -> None:
         adapter.estimate_query_bytes("SELECT * FROM analytics.public.orders")
     # Same object re-raised (not wrapped in a WarehouseError).
     assert excinfo.value is original_exc
+
+
+def test_estimate_query_bytes_normalises_dict_row_to_first_cell() -> None:
+    """A DictCursor-style mapping row (e.g. ``{"EXPLAIN": "<json>"}``) is
+    normalised to its first value before parsing — the whole row dict must NOT
+    reach the parser (that would be the ROW, not the plan, and trip a false
+    degrade)."""
+    fake = FakeSnowflakeConnection()
+    fake.expect_execute(
+        matching=r"^EXPLAIN USING JSON ",
+        returns=[{"EXPLAIN": _load("explain_using_json_sample.json")}],
+    )
+    adapter = SnowflakeAdapter(connection=fake)
+    assert adapter.estimate_query_bytes("SELECT * FROM analytics.public.orders") == _EXPECTED_BYTES
+    fake.assert_all_expectations_met()

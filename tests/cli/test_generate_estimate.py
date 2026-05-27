@@ -30,14 +30,20 @@ import pytest
 
 from signalforge.cli import main
 from signalforge.llm.errors import LLMAuthError
-from signalforge.warehouse import BigQueryAdapter, WarehouseAdapter, WarehouseAuthError
-from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
+from signalforge.warehouse import (
+    BigQueryAdapter,
+    SnowflakeAdapter,
+    WarehouseAdapter,
+    WarehouseAuthError,
+)
 from tests.cli._factories import make_fake_dbt_project, make_manifest, make_model
 from tests.llm._fake import FakeAnthropicClient, FakeCountTokensResponse
 from tests.warehouse._fake import FakeBigQueryClient
 from tests.warehouse._fake_snowflake import FakeSnowflakeConnection
 
-_SNOWFLAKE_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "warehouse" / "snowflake"
+_SNOWFLAKE_FIXTURES: Path = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "warehouse" / "snowflake"
+)
 
 
 def _load_snowflake_fixture(name: str) -> str:

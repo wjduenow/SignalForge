@@ -846,6 +846,12 @@ class SnowflakeAdapter(WarehouseAdapter):
         if not rows:
             return None
         first = rows[0]
+        # Normalise a row to its first cell. A DictCursor-style connection hands
+        # back mapping rows (e.g. {"EXPLAIN": "<json>"}); returning the whole
+        # dict would feed the ROW (not the plan) to the parser and trip a false
+        # degrade, so extract the first value for mappings too.
+        if isinstance(first, dict):
+            return next(iter(first.values()), None)
         return first[0] if isinstance(first, (list, tuple)) else first
 
     def estimate_query_bytes(self, sql: str) -> int:

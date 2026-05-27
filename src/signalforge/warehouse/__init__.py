@@ -25,6 +25,7 @@ package's top-level namespace.
 """
 
 from signalforge.warehouse.adapters.bigquery import BigQueryAdapter
+from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
     BytesBilledExceededError,
@@ -91,6 +92,7 @@ __all__ = [
     "SNOWFLAKE_DIALECT",
     "SamplingError",
     "SamplingRequiresPartitionFilterError",
+    "SnowflakeAdapter",
     "TableNotFoundError",
     "TableRef",
     "TestResult",

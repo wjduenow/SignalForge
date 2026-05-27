@@ -31,9 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
+from signalforge.warehouse import EstimateUnavailableError, SnowflakeAdapter
 from signalforge.warehouse.base import WarehouseAdapter
-from signalforge.warehouse.errors import EstimateUnavailableError
 from signalforge.warehouse.models import SNOWFLAKE_DIALECT, Dialect, TableRef
 from signalforge.warehouse.profiles import DbtProfileTarget
 from tests.warehouse._fake_snowflake import FakeSnowflakeConnection
@@ -263,7 +262,7 @@ profile = DbtProfileTarget.model_validate(
 )
 adapter = WarehouseAdapter.from_profile(profile)
 
-from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
+from signalforge.warehouse import SnowflakeAdapter
 
 assert isinstance(adapter, SnowflakeAdapter)
 assert "google.cloud.bigquery" not in sys.modules, (

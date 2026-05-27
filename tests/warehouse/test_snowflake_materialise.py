@@ -27,8 +27,8 @@ from datetime import date
 
 import pytest
 
+from signalforge.warehouse import SnowflakeAdapter
 from signalforge.warehouse._sample_id import _compute_run_id
-from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
 from signalforge.warehouse.errors import MaterialisationFailedError, QuerySyntaxError
 from signalforge.warehouse.models import SNOWFLAKE_DIALECT, PartitionFilter, TableRef
 from tests.warehouse._fake_snowflake import FakeSnowflakeConnection

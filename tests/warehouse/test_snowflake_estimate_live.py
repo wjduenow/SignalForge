@@ -63,10 +63,12 @@ import os
 
 import pytest
 
-from signalforge.warehouse.adapters.snowflake import (
-    SnowflakeAdapter,
-    _parse_explain_json_bytes,
-)
+from signalforge.warehouse import SnowflakeAdapter
+
+# ``_parse_explain_json_bytes`` is a deliberately-private pure helper with no
+# public re-export; this maintainer-gated live test white-box-imports it to
+# certify the parse against a real EXPLAIN cell (there is no public seam for it).
+from signalforge.warehouse.adapters.snowflake import _parse_explain_json_bytes
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 

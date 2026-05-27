@@ -32,8 +32,7 @@ from signalforge.llm.pricing import PRICE_TABLE_VERSION
 from signalforge.llm.pricing import lookup as pricing_lookup
 from signalforge.manifest.models import Column, Manifest, Model
 from signalforge.prune.config import PruneConfig
-from signalforge.warehouse import BigQueryAdapter, WarehouseAuthError
-from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
+from signalforge.warehouse import BigQueryAdapter, SnowflakeAdapter, WarehouseAuthError
 from tests.llm._fake import FakeAnthropicClient, FakeCountTokensResponse
 from tests.warehouse._fake import FakeBigQueryClient
 from tests.warehouse._fake_snowflake import FakeSnowflakeConnection

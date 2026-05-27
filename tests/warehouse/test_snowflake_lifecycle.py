@@ -24,8 +24,8 @@ import logging
 
 import pytest
 
+from signalforge.warehouse import SnowflakeAdapter
 from signalforge.warehouse._sample_id import _hash_session_id
-from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
 
 from ._fake_snowflake import FakeSnowflakeConnection
 

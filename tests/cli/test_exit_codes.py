@@ -586,7 +586,7 @@ def test_estimate_unavailable_error_maps_to_tier_3() -> None:
     ever dropped. ``map_exception_to_exit_code`` resolves a constructed
     instance via the MRO walk to confirm the table entry is live."""
     from signalforge.cli._helpers import map_exception_to_exit_code
-    from signalforge.warehouse.errors import EstimateUnavailableError
+    from signalforge.warehouse import EstimateUnavailableError
 
     assert EstimateUnavailableError in _EXCEPTION_TO_EXIT_CODE, (
         "EstimateUnavailableError missing from _EXCEPTION_TO_EXIT_CODE; the "

@@ -381,7 +381,9 @@ def estimate_query_bytes(self, sql: str) -> int: ...
 The default ABC implementation raises `EstimateNotSupportedError` with
 the locked remediation: `"Use --estimate with a BigQuery profile, or
 wait for v0.3 multi-warehouse estimation support."` Concrete adapters
-override; v0.2 ships the BigQuery override only.
+override; v0.2 ships the BigQuery override (`dry_run`) and the Snowflake
+override (`EXPLAIN USING JSON`, issue #130). The Postgres stub still
+inherits the default raise pending its own `EXPLAIN` override.
 
 **BigQuery override mechanism.** A `dry_run=True` query asks BigQuery
 to validate the SQL server-side and return the estimated bytes
@@ -400,8 +402,8 @@ parens raises `QuerySyntaxError` and never reaches BigQuery.
 
 **Snowflake override mechanism (issue #130).** The Snowflake adapter
 validates the caller SQL through the same `_sql_safety.validate_test_sql`
-pass, then prepends the literal `EXPLAIN USING JSON ` prefix and runs the
-EXPLAIN through its connection cursor. Snowflake has no BigQuery-style
+pass, then prepends the literal `EXPLAIN USING JSON` prefix (with a single
+trailing space) and runs the EXPLAIN through its connection cursor. Snowflake has no BigQuery-style
 `dry_run` (bytes-without-billing); `EXPLAIN` is the closest primitive,
 reporting the query planner's estimated partitions and bytes in a single
 JSON cell. The override parses `GlobalStats.bytesAssigned` from that plan
