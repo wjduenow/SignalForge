@@ -4,7 +4,7 @@
 
 - **Ticket:** [#124](https://github.com/wjduenow/SignalForge/issues/124) — `test+docs: fakesnow harness + FakeSnowflakeClient + gated live e2e (TPCH_SF1) + ops docs`
 - **Milestone:** v0.2 (Snowflake adapter epic [#118](https://github.com/wjduenow/SignalForge/issues/118)) — **lands last**
-- **Phase:** approved
+- **Phase:** devolved
 - **Branch:** `feature/124-snowflake-test-docs` (based on `dev`)
 - **Sessions:** 1 (2026-05-26)
 
@@ -229,4 +229,19 @@ Draft PR opened against `dev` (2026-05-26); breakdown approved in-session same d
 
 ## Beads Manifest
 
-_(pending devolve)_
+- **Epic:** `bd_1-scaffolding-88t` — #124: Snowflake test harness + gated live e2e + ops docs
+- **Branch:** `feature/124-snowflake-test-docs` (PR #133, base `dev`)
+- **Tasks:**
+
+| Bead | Story | Depends on |
+|---|---|---|
+| `bd_1-scaffolding-88t.1` | US-001 — Full `map_snowflake_exception` taxonomy + offline tests | — |
+| `bd_1-scaffolding-88t.2` | US-002 — fakesnow adapter harness (execute + sqlglot-parse) | — |
+| `bd_1-scaffolding-88t.3` | US-003 — TPCH manifest seed + loads-only test | — |
+| `bd_1-scaffolding-88t.4` | US-004 — Warehouse+prune-only live e2e (materialised) | — |
+| `bd_1-scaffolding-88t.5` | US-005 — Full generate-pipeline live e2e (TPCH_SF1, oneshot) | .3 |
+| `bd_1-scaffolding-88t.6` | US-006 — Ops docs + rules distillation | .1, .4, .5 |
+| `bd_1-scaffolding-88t.7` | Quality Gate — review ×4 + CodeRabbit | .1–.6 |
+| `bd_1-scaffolding-88t.8` | Patterns & Memory (P3) | .7 |
+
+Ready at devolve: `.1`, `.2`, `.3`, `.4` (mutually independent).
