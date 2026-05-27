@@ -196,3 +196,18 @@ def test_estimate_query_bytes_empty_result_raises_unavailable() -> None:
     adapter = SnowflakeAdapter(connection=fake)
     with pytest.raises(EstimateUnavailableError):
         adapter.estimate_query_bytes("SELECT * FROM analytics.public.orders")
+
+
+def test_estimate_query_bytes_reraises_unmapped_connector_exception() -> None:
+    """An exception ``map_snowflake_exception`` does NOT recognise (i.e. not an
+    auth/SQL connector error) passes through unchanged and is re-raised as-is —
+    the ``mapped is exc`` passthrough arm of ``_execute_scalar`` (DEC-005). The
+    original exception propagates rather than being swallowed or re-wrapped."""
+    fake = FakeSnowflakeConnection()
+    original_exc = RuntimeError("transient cursor failure")
+    fake.expect_execute(matching=r"^EXPLAIN USING JSON ", returns=original_exc)
+    adapter = SnowflakeAdapter(connection=fake)
+    with pytest.raises(RuntimeError) as excinfo:
+        adapter.estimate_query_bytes("SELECT * FROM analytics.public.orders")
+    # Same object re-raised (not wrapped in a WarehouseError).
+    assert excinfo.value is original_exc
