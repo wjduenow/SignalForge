@@ -30,11 +30,25 @@ import pytest
 
 from signalforge.cli import main
 from signalforge.llm.errors import LLMAuthError
-from signalforge.warehouse import BigQueryAdapter, WarehouseAdapter, WarehouseAuthError
-from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
+from signalforge.warehouse import (
+    BigQueryAdapter,
+    SnowflakeAdapter,
+    WarehouseAdapter,
+    WarehouseAuthError,
+)
 from tests.cli._factories import make_fake_dbt_project, make_manifest, make_model
 from tests.llm._fake import FakeAnthropicClient, FakeCountTokensResponse
 from tests.warehouse._fake import FakeBigQueryClient
+from tests.warehouse._fake_snowflake import FakeSnowflakeConnection
+
+_SNOWFLAKE_FIXTURES: Path = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "warehouse" / "snowflake"
+)
+
+
+def _load_snowflake_fixture(name: str) -> str:
+    return (_SNOWFLAKE_FIXTURES / name).read_text(encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # Patch helper — install fakes for the estimate short-circuit path
@@ -57,9 +71,9 @@ def _install_estimate_patches(
 
     By default ``_make_warehouse_adapter`` returns a :class:`BigQueryAdapter`
     backed by the returned ``FakeBigQueryClient``. Pass ``adapter=<obj>`` to
-    substitute a different adapter (e.g. a real :class:`SnowflakeAdapter`) so a
-    test can exercise the ABC's graceful-degrade path
-    (``estimate_query_bytes`` → ``EstimateNotSupportedError``). When
+    substitute a different adapter (e.g. a :class:`SnowflakeAdapter` wired to a
+    :class:`FakeSnowflakeConnection`) so a test can exercise the Snowflake
+    EXPLAIN-based estimate path (#130 US-003) — happy or degrade. When
     ``adapter`` is supplied, ``_make_warehouse_adapter`` returns it instead
     of the BigQuery one, so no ``expect_dry_run`` expectation is consumed.
     """
@@ -334,8 +348,45 @@ def test_generate_estimate_no_traceback_leaks(
 
 
 # ---------------------------------------------------------------------------
-# US-002 of issue #123 — Snowflake adapter degrades the warehouse-bytes half
+# #130 US-003 — Snowflake adapter reports a real EXPLAIN-based estimate
 # ---------------------------------------------------------------------------
+
+
+def test_generate_estimate_snowflake_adapter_reports_real_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#130 US-003: the full ``--estimate`` short-circuit reports a REAL
+    warehouse-bytes estimate when the adapter is a :class:`SnowflakeAdapter`
+    wired to a fake connection returning a captured EXPLAIN cell.
+
+    The adapter now runs ``EXPLAIN USING JSON`` and parses
+    ``GlobalStats.bytesAssigned`` (replacing the #123 behaviour where it
+    inherited the ABC default and raised ``EstimateNotSupportedError``). The
+    command exits 0, prints a real estimate (no ``<unavailable: ...>``), and no
+    traceback leaks.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    fake_conn = FakeSnowflakeConnection()
+    fake_conn.expect_execute(
+        matching=r"^EXPLAIN USING JSON ",
+        returns=[(_load_snowflake_fixture("explain_using_json_sample.json"),)],
+    )
+    fa, _fb = _install_estimate_patches(monkeypatch, adapter=SnowflakeAdapter(connection=fake_conn))
+    _queue_default_count_tokens(fa)
+
+    code = main(["generate", "--estimate", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 0, f"stderr={captured.err}"
+    assert "<unavailable:" not in captured.out
+    assert "Total estimated warehouse: <unknown>" not in captured.out
+    assert "Total estimated warehouse:" in captured.out
+    assert "Traceback" not in captured.err
+    fake_conn.assert_all_expectations_met()
+    fa.assert_all_expectations_met()
 
 
 def test_generate_estimate_snowflake_adapter_degrades_to_exit_zero(
@@ -343,33 +394,37 @@ def test_generate_estimate_snowflake_adapter_degrades_to_exit_zero(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """US-002 of issue #123: the full ``--estimate`` short-circuit degrades
-    cleanly when the warehouse adapter is a :class:`SnowflakeAdapter`.
+    """#130 DEC-007: the full ``--estimate`` short-circuit degrades cleanly
+    when the Snowflake EXPLAIN plan carries no parseable byte stat.
 
-    A real ``SnowflakeAdapter()`` inherits the ABC's
-    ``estimate_query_bytes`` default, which raises
-    :class:`EstimateNotSupportedError` (a ``WarehouseError`` subclass). The
-    estimate engine's DEC-005 conservative-bias degrade captures that into
-    ``warehouse_unavailable_reason``; the renderer prints
-    ``<unavailable: EstimateNotSupportedError>`` and the command exits 0 —
-    the LLM-cost half of the report still computes via the
-    ``count_tokens`` calls. DEC-016: no traceback leaks.
+    A :class:`SnowflakeAdapter` wired to a fake connection returning a no-stat
+    EXPLAIN cell raises :class:`EstimateUnavailableError` (a ``WarehouseError``
+    subclass) — distinct from the retired ``EstimateNotSupportedError`` of
+    #123. The estimate engine's DEC-005 conservative-bias degrade captures that
+    into ``warehouse_unavailable_reason``; the renderer prints
+    ``<unavailable: EstimateUnavailableError>`` and the command exits 0 — the
+    LLM-cost half of the report still computes via the ``count_tokens`` calls.
+    DEC-016: no traceback leaks.
     """
     project_dir = make_fake_dbt_project(tmp_path)
     monkeypatch.chdir(project_dir)
-    fa, _fb = _install_estimate_patches(monkeypatch, adapter=SnowflakeAdapter())
+    fake_conn = FakeSnowflakeConnection()
+    fake_conn.expect_execute(
+        matching=r"^EXPLAIN USING JSON ",
+        returns=[(_load_snowflake_fixture("explain_using_json_no_stats.json"),)],
+    )
+    fa, _fb = _install_estimate_patches(monkeypatch, adapter=SnowflakeAdapter(connection=fake_conn))
     _queue_default_count_tokens(fa)
-    # No ``expect_dry_run`` queued — SnowflakeAdapter.estimate_query_bytes
-    # raises EstimateNotSupportedError before any client call.
 
     code = main(["generate", "--estimate", "model.shop.customers"])
     captured = capsys.readouterr()
 
     assert code == 0, f"stderr={captured.err}"
-    assert "<unavailable: EstimateNotSupportedError>" in captured.out
+    assert "<unavailable: EstimateUnavailableError>" in captured.out
     assert "Traceback" not in captured.err
     # Strictness: pin exact count_tokens consumption so a drift to fewer
     # calls (which would leave queued expectations unconsumed) fails loud.
+    fake_conn.assert_all_expectations_met()
     fa.assert_all_expectations_met()
 
 

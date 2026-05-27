@@ -16,22 +16,29 @@ pin the four issue ACs:
 ``column_stats`` still raises :class:`NotImplementedError` naming the epic
 (#118) — ``sample_rows`` (#122 US-003), ``materialise_sample`` / ``run_test_sql``
 (#122 US-004) are now implemented and exercised in the sampling / materialise
-suites. ``estimate_query_bytes`` inherits the ABC default (raising the typed
-:class:`EstimateNotSupportedError`) pending issue #123.
+suites. ``estimate_query_bytes`` is overridden by a real EXPLAIN-based
+implementation (#130 US-003): it runs ``EXPLAIN USING JSON <sql>`` and parses
+``GlobalStats.bytesAssigned``, returning a real ``int`` on the happy path and
+raising :class:`EstimateUnavailableError` when the plan carries no parseable
+byte stat. The pure parser is exercised in ``tests/warehouse/test_snowflake_estimate.py``.
 """
 
 from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
+from signalforge.warehouse import EstimateUnavailableError, SnowflakeAdapter
 from signalforge.warehouse.base import WarehouseAdapter
-from signalforge.warehouse.errors import EstimateNotSupportedError
 from signalforge.warehouse.models import SNOWFLAKE_DIALECT, Dialect, TableRef
 from signalforge.warehouse.profiles import DbtProfileTarget
+from tests.warehouse._fake_snowflake import FakeSnowflakeConnection
+
+_FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "warehouse" / "snowflake"
+_EXPECTED_BYTES = 104_857_600  # the sample fixture's bytesAssigned (100 MiB)
 
 # ---------------------------------------------------------------------------
 # Dialect contract (AC-2)
@@ -137,17 +144,49 @@ def test_column_stats_raises_not_implemented() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ABC-default graceful-degrade methods (NOT overridden)
+# estimate_query_bytes — real EXPLAIN-based implementation (#130 US-003)
 # ---------------------------------------------------------------------------
 
 
-def test_estimate_query_bytes_raises_not_supported() -> None:
-    """``estimate_query_bytes`` inherits the ABC default raising
-    :class:`EstimateNotSupportedError` (DEC-008)."""
-    adapter = SnowflakeAdapter()
+def _load(name: str) -> str:
+    return (_FIXTURES / name).read_text(encoding="utf-8")
 
-    with pytest.raises(EstimateNotSupportedError):
-        adapter.estimate_query_bytes("SELECT 1")
+
+def test_estimate_query_bytes_returns_explain_bytes() -> None:
+    """``estimate_query_bytes`` runs ``EXPLAIN USING JSON <sql>`` and parses
+    ``GlobalStats.bytesAssigned`` from the returned plan cell — a real ``int``,
+    NOT the ABC's ``EstimateNotSupportedError`` (the #123 behaviour the override
+    in #130 US-003 replaced). The injected fake returns the captured sample
+    EXPLAIN cell; the parsed int is pinned EQUAL to the fixture's bytesAssigned
+    so the test fails on a real regression, not whatever the parser returns."""
+    fake = FakeSnowflakeConnection()
+    fake.expect_execute(
+        matching=r"^EXPLAIN USING JSON ",
+        returns=[(_load("explain_using_json_sample.json"),)],
+    )
+    adapter = SnowflakeAdapter(connection=fake)
+
+    assert adapter.estimate_query_bytes("SELECT * FROM analytics.public.orders") == _EXPECTED_BYTES
+    fake.assert_all_expectations_met()
+
+
+def test_estimate_query_bytes_degrades_on_missing_stat() -> None:
+    """When the EXPLAIN plan carries no parseable ``GlobalStats.bytesAssigned``,
+    ``estimate_query_bytes`` raises :class:`EstimateUnavailableError` — the seam
+    ran (the adapter DOES support estimation), but produced nothing turnable into
+    a byte count. This is distinct from the retired ``EstimateNotSupportedError``
+    ("this adapter does no estimation at all", #123)."""
+    fake = FakeSnowflakeConnection()
+    fake.expect_execute(
+        matching=r"^EXPLAIN USING JSON ",
+        returns=[(_load("explain_using_json_no_stats.json"),)],
+    )
+    adapter = SnowflakeAdapter(connection=fake)
+
+    with pytest.raises(EstimateUnavailableError) as excinfo:
+        adapter.estimate_query_bytes("SELECT * FROM analytics.public.orders")
+    assert "GlobalStats" in excinfo.value.detail
+    fake.assert_all_expectations_met()
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +262,7 @@ profile = DbtProfileTarget.model_validate(
 )
 adapter = WarehouseAdapter.from_profile(profile)
 
-from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
+from signalforge.warehouse import SnowflakeAdapter
 
 assert isinstance(adapter, SnowflakeAdapter)
 assert "google.cloud.bigquery" not in sys.modules, (

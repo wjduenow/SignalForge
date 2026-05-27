@@ -157,6 +157,7 @@ from signalforge.warehouse import (
     BytesBilledExceededError,
     ColumnNotFoundError,
     EstimateNotSupportedError,
+    EstimateUnavailableError,
     IncompleteProfileError,
     InvalidIdentifierError,
     ManifestProjectNotFoundError,
@@ -406,6 +407,13 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # surfaces the typed exception with its locked remediation rather
     # than misclassifying it as input-shape.
     EstimateNotSupportedError: 3,
+    # Query-bytes estimation ran but produced nothing usable for THIS
+    # query (issue #130 / DEC-003): the adapter supports estimation (e.g.
+    # Snowflake EXPLAIN USING JSON) but the plan carried no parseable byte
+    # figure. External-dep tier so the ``--estimate`` engine degrades to a
+    # price-only preview and renders ``<unavailable: ...>`` rather than
+    # misclassifying it as input-shape.
+    EstimateUnavailableError: 3,
     # Audit-write durability across every fail-closed seam — when any of
     # these fire the disk hand-off didn't happen, which is an external-dep
     # state we couldn't recover.

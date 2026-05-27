@@ -20,7 +20,7 @@ from datetime import date, datetime
 
 import pytest
 
-from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
+from signalforge.warehouse import SnowflakeAdapter
 from signalforge.warehouse.errors import (
     QuerySyntaxError,
     SamplingRequiresPartitionFilterError,

@@ -44,9 +44,10 @@ Scope (deliberately minimal):
   :class:`TestResult`.
 * :meth:`column_stats` still raises :class:`NotImplementedError` naming the
   epic (#118) so the remaining v0.2 implementation work has a single grep
-  target (DEC-008). :meth:`estimate_query_bytes` is NOT overridden — the ABC
-  default (raising :class:`EstimateNotSupportedError`) is the correct v0.2
-  behaviour pending issue #123.
+  target (DEC-008).
+* :meth:`estimate_query_bytes` is implemented (#130) — it runs ``EXPLAIN USING
+  JSON <validated-sql>`` and parses ``GlobalStats.bytesAssigned`` via the pure
+  :func:`_parse_explain_json_bytes`, no longer inheriting the ABC degrade.
 * :meth:`WarehouseAdapter.from_profile` dispatches ``profile.type ==
   "snowflake"`` here so an operator with a Snowflake profile sees a
   ``NotImplementedError`` rather than the v0.1
@@ -56,8 +57,6 @@ Still pending (NOT implemented here):
 
 * :meth:`column_stats` — raises :class:`NotImplementedError` naming the epic
   (#118); the per-column profiling path lands in a later v0.2 issue.
-* :meth:`estimate_query_bytes` — NOT overridden; the ABC default
-  (:class:`EstimateNotSupportedError`) is the correct degrade pending #123.
 
 The ``snowflake.connector`` import stays confined to
 :mod:`signalforge.warehouse.adapters._snowflake_client` (the one-shim-per-vendor
@@ -77,6 +76,7 @@ from signalforge.warehouse._sample_id import _compute_run_id, _hash_session_id
 from signalforge.warehouse._sql_safety import validate_identifier, validate_test_sql
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
+    EstimateUnavailableError,
     MaterialisationFailedError,
     SamplingRequiresPartitionFilterError,
     UnknownTableSizeError,
@@ -118,6 +118,81 @@ _monotonic = time.monotonic
 _V02_REMEDIATION = "SnowflakeAdapter is a v0.2 skeleton (issue #118) — full implementation pending."
 
 
+def _parse_explain_json_bytes(cell: str | dict[str, Any]) -> int:
+    """Extract the planner's estimated-bytes figure from an ``EXPLAIN USING
+    JSON`` result cell (DEC-001 / DEC-002 / DEC-006 of issue #130).
+
+    ``EXPLAIN USING JSON <sql>`` returns a single row / single cell carrying a
+    JSON document with a top-level ``GlobalStats`` object
+    (``partitionsTotal`` / ``partitionsAssigned`` / ``bytesAssigned``).
+    ``GlobalStats.bytesAssigned`` is the estimated bytes scanned — the analogue
+    of BigQuery's ``total_bytes_processed`` (which is why it maps directly onto
+    the ``int``-bytes contract the ``--estimate`` engine consumes).
+
+    Pure: no connection, no warehouse call, no logging. The Snowflake connector
+    may hand the cell back as a JSON ``str`` OR an already-parsed ``dict``
+    depending on its configuration, so both shapes are accepted:
+
+    * ``str`` → ``json.loads`` it (malformed → :class:`EstimateUnavailableError`).
+    * ``dict`` → used directly.
+
+    Every failure to extract a usable byte count raises
+    :class:`EstimateUnavailableError` with an operator-useful ``detail`` (DEC-002).
+    An explicitly-present ``bytesAssigned`` of ``0`` IS a valid estimate and is
+    returned as ``0``; the "never ``0``" rule is narrower — it forbids
+    *fabricating* a ``0`` fallback when the stat is missing/unparseable. Without
+    that distinction a ``return 0`` fallback would conflate "metadata-only query
+    / plan-shape change" with "parser broke" and silently report a ``$0`` cost.
+    The ``--estimate`` engine catches this typed error at the supplementary-source
+    boundary and degrades to a price-only preview.
+
+    Defensive on the value itself: a ``bool`` is rejected (``bool`` is an
+    ``int`` subclass in Python, but ``True`` is not a byte count), as is a
+    negative value; anything not coercible to a non-negative ``int`` raises.
+
+    :param cell: the EXPLAIN result cell — JSON ``str`` or parsed ``dict``.
+    :returns: ``int(GlobalStats.bytesAssigned)`` — a non-negative byte count.
+    :raises EstimateUnavailableError: on unparseable JSON, a non-mapping
+        document, a missing/non-mapping ``GlobalStats``, a missing
+        ``bytesAssigned``, or a ``bytesAssigned`` that is not a non-negative
+        non-bool integer.
+    """
+    if isinstance(cell, str):
+        try:
+            document: Any = json.loads(cell)
+        except (ValueError, TypeError) as exc:
+            raise EstimateUnavailableError(
+                detail=f"EXPLAIN USING JSON cell was not valid JSON: {exc}"
+            ) from exc
+    else:
+        document = cell
+
+    if not isinstance(document, dict):
+        raise EstimateUnavailableError(
+            detail=f"EXPLAIN plan document was not a JSON object (got {type(document).__name__})"
+        )
+
+    global_stats = document.get("GlobalStats")
+    if not isinstance(global_stats, dict):
+        raise EstimateUnavailableError(detail="EXPLAIN plan carried no GlobalStats object")
+
+    if "bytesAssigned" not in global_stats:
+        raise EstimateUnavailableError(
+            detail="EXPLAIN plan GlobalStats carried no bytesAssigned field"
+        )
+
+    raw = global_stats["bytesAssigned"]
+    # ``bool`` is an ``int`` subclass, so reject it explicitly before the
+    # ``int`` check — a ``True`` byte count is meaningless.
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise EstimateUnavailableError(
+            detail=f"GlobalStats.bytesAssigned was not an integer (got {type(raw).__name__})"
+        )
+    if raw < 0:
+        raise EstimateUnavailableError(detail=f"GlobalStats.bytesAssigned was negative ({raw})")
+    return int(raw)
+
+
 class SnowflakeAdapter(WarehouseAdapter):
     """:class:`WarehouseAdapter` for Snowflake profiles (v0.2, in progress).
 
@@ -125,9 +200,9 @@ class SnowflakeAdapter(WarehouseAdapter):
     (deterministic hash-mod), :meth:`materialise_sample` (session-scoped
     ``TEMPORARY TABLE``), and :meth:`run_test_sql` (``COUNT(*)`` failing-rows
     wrap), all on a connection wired via :meth:`_get_connection` with a
-    fail-soft ``__exit__`` cleanup. :meth:`column_stats` still raises
-    :class:`NotImplementedError` (a later v0.2 issue); :meth:`estimate_query_bytes`
-    inherits the ABC degrade (pending #123).
+    fail-soft ``__exit__`` cleanup. :meth:`estimate_query_bytes` is implemented
+    (#130) via ``EXPLAIN USING JSON``. :meth:`column_stats` still raises
+    :class:`NotImplementedError` (a later v0.2 issue).
     """
 
     def __init__(
@@ -732,6 +807,82 @@ class SnowflakeAdapter(WarehouseAdapter):
             sample_failures=sample_failures,
             row_schema=None,
         )
+
+    # ------------------------------------------------------------------
+    # estimate_query_bytes — DEC-001 / DEC-004 / DEC-005 / DEC-008 of #130.
+    # ------------------------------------------------------------------
+
+    def _execute_scalar(self, sql: str) -> Any:
+        """Run ``sql`` and return the first row's first cell (DEC-008).
+
+        A no-:class:`TableRef`-in-scope sibling of :meth:`_execute` — the
+        ``--estimate`` path has only the caller-supplied SQL, no table context.
+        Keeps ONE cursor-handling path per operation while passing an empty
+        ``context`` to :func:`map_snowflake_exception` (DEC-005): a mapped typed
+        error is re-raised ``from`` the original; an unchanged passthrough
+        re-raises the original.
+
+        Returns ``None`` when the query produced no rows (the caller decides
+        whether that is a degrade — :meth:`estimate_query_bytes` treats an empty
+        result as an unparseable estimate).
+        """
+        from signalforge.warehouse.adapters._snowflake_client import map_snowflake_exception
+
+        cursor = self._get_connection().cursor()
+        try:
+            try:
+                cursor.execute(sql)
+                rows = list(cursor.fetchall())
+            except Exception as exc:
+                mapped = map_snowflake_exception(exc, context={})
+                if mapped is exc:
+                    raise
+                raise mapped from exc
+        finally:
+            # Bound cursor lifecycle — close on every path (success, mapped
+            # raise, passthrough raise) so a long-lived adapter does not leak
+            # server-side cursors across repeated estimate calls.
+            cursor.close()
+        if not rows:
+            return None
+        first = rows[0]
+        # Normalise a row to its first cell. A DictCursor-style connection hands
+        # back mapping rows (e.g. {"EXPLAIN": "<json>"}); returning the whole
+        # dict would feed the ROW (not the plan) to the parser and trip a false
+        # degrade, so extract the first value for mappings too.
+        if isinstance(first, dict):
+            return next(iter(first.values()), None)
+        return first[0] if isinstance(first, (list, tuple)) else first
+
+    def estimate_query_bytes(self, sql: str) -> int:
+        """Estimate bytes Snowflake would scan for ``sql`` via ``EXPLAIN USING
+        JSON`` (DEC-001 / DEC-004 / DEC-005 / DEC-008 of issue #130).
+
+        Mirrors :meth:`BigQueryAdapter.estimate_query_bytes`'s shape:
+
+        1. Validate the caller-supplied SQL via
+           :func:`signalforge.warehouse._sql_safety.validate_test_sql` FIRST
+           (no ``;``, no ``--`` comments, balanced parens). The ``EXPLAIN USING
+           JSON `` prefix is trusted constant text prepended AFTER validation
+           (DEC-004), so it never trips the user-SQL rejects.
+        2. Run ``EXPLAIN USING JSON <validated-sql>`` through the shared
+           cursor-handling helper (:meth:`_execute_scalar`); SDK failures route
+           through :func:`map_snowflake_exception` (DEC-005). The ``--estimate``
+           engine catches the mapped :class:`WarehouseError` as a supplementary
+           failure and degrades to a price-only preview.
+        3. Hand the single-row / single-cell result to the pure
+           :func:`_parse_explain_json_bytes` parser, which reads
+           ``GlobalStats.bytesAssigned`` (DEC-001).
+
+        An empty result (no rows) is an unparseable estimate →
+        :class:`EstimateUnavailableError` (NEVER a fabricated number / ``0``).
+        """
+        validate_test_sql(sql)
+
+        cell = self._execute_scalar(f"EXPLAIN USING JSON {sql}")
+        if cell is None:
+            raise EstimateUnavailableError(detail="EXPLAIN USING JSON returned no rows")
+        return _parse_explain_json_bytes(cell)
 
     def column_stats(self, table: TableRef, column: str) -> ColumnStats:
         raise NotImplementedError(f"column_stats: {_V02_REMEDIATION}")
