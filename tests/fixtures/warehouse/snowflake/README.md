@@ -2,9 +2,10 @@
 
 These fixtures are **hand-crafted**. Ralph workers and CI cannot reach a live
 Snowflake account, so the shape of an `EXPLAIN USING JSON <sql>` result cell is
-captured here by hand and the pure parser (`signalforge.warehouse.adapters.snowflake
-._parse_explain_json_bytes`) is pinned against it (engineered determinism — the
-parsed `int` equals the fixture's known `bytesAssigned`, never a live planner value).
+captured here by hand and the pure parser
+(`signalforge.warehouse.adapters.snowflake._parse_explain_json_bytes`) is pinned
+against it (engineered determinism — the parsed `int` equals the fixture's known
+`bytesAssigned`, never a live planner value).
 
 | File | Purpose |
 |---|---|

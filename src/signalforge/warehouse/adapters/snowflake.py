@@ -137,12 +137,14 @@ def _parse_explain_json_bytes(cell: str | dict[str, Any]) -> int:
     * ``dict`` → used directly.
 
     Every failure to extract a usable byte count raises
-    :class:`EstimateUnavailableError` with an operator-useful ``detail`` —
-    NEVER a fabricated number and NEVER ``0`` (DEC-002). A ``return 0`` would
-    conflate "metadata-only query / plan-shape change" with "parser broke" and
-    silently report a ``$0`` cost. The ``--estimate`` engine catches this typed
-    error at the supplementary-source boundary and degrades to a price-only
-    preview.
+    :class:`EstimateUnavailableError` with an operator-useful ``detail`` (DEC-002).
+    An explicitly-present ``bytesAssigned`` of ``0`` IS a valid estimate and is
+    returned as ``0``; the "never ``0``" rule is narrower — it forbids
+    *fabricating* a ``0`` fallback when the stat is missing/unparseable. Without
+    that distinction a ``return 0`` fallback would conflate "metadata-only query
+    / plan-shape change" with "parser broke" and silently report a ``$0`` cost.
+    The ``--estimate`` engine catches this typed error at the supplementary-source
+    boundary and degrades to a price-only preview.
 
     Defensive on the value itself: a ``bool`` is rejected (``bool`` is an
     ``int`` subclass in Python, but ``True`` is not a byte count), as is a
@@ -828,13 +830,19 @@ class SnowflakeAdapter(WarehouseAdapter):
 
         cursor = self._get_connection().cursor()
         try:
-            cursor.execute(sql)
-            rows = list(cursor.fetchall())
-        except Exception as exc:
-            mapped = map_snowflake_exception(exc, context={})
-            if mapped is exc:
-                raise
-            raise mapped from exc
+            try:
+                cursor.execute(sql)
+                rows = list(cursor.fetchall())
+            except Exception as exc:
+                mapped = map_snowflake_exception(exc, context={})
+                if mapped is exc:
+                    raise
+                raise mapped from exc
+        finally:
+            # Bound cursor lifecycle — close on every path (success, mapped
+            # raise, passthrough raise) so a long-lived adapter does not leak
+            # server-side cursors across repeated estimate calls.
+            cursor.close()
         if not rows:
             return None
         first = rows[0]

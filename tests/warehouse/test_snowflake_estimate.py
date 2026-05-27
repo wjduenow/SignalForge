@@ -140,7 +140,9 @@ def test_estimate_query_bytes_rejects_semicolon_before_any_cursor_call() -> None
     # No expectations queued: any execute would raise AssertionError("unexpected
     # query: ..."), so the assertion below proves validation runs first.
     adapter = SnowflakeAdapter(connection=fake)
-    with pytest.raises(Exception) as excinfo:
+    # validate_test_sql raises QuerySyntaxError for a multi-statement / `;` input;
+    # assert that specific type so the test can't pass on an unrelated exception.
+    with pytest.raises(QuerySyntaxError) as excinfo:
         adapter.estimate_query_bytes("SELECT 1; DROP TABLE x")
     # The failure is the SQL-safety reject, NOT a fake "unexpected query".
     assert "unexpected query" not in str(excinfo.value)
