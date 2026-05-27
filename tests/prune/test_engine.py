@@ -58,7 +58,13 @@ from signalforge.warehouse.errors import (
     TableNotFoundError,
     UnknownTableSizeError,
 )
-from signalforge.warehouse.models import PartitionFilter, TableRef
+from signalforge.warehouse.models import (
+    ColumnStats,
+    Dialect,
+    PartitionFilter,
+    TableRef,
+    TestResult,
+)
 from tests.warehouse._fake import FakeBigQueryClient, FakeTable
 
 # ---------------------------------------------------------------------------
@@ -1450,18 +1456,24 @@ class _RowCountOnlyAdapter(WarehouseAdapter):
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         return None
 
-    def dialect(self):  # type: ignore[no-untyped-def]
+    def dialect(self) -> Dialect:
         from signalforge.warehouse.models import SNOWFLAKE_DIALECT
 
         return SNOWFLAKE_DIALECT
 
-    def sample_rows(self, table, n, *, partition_filter=None):  # type: ignore[no-untyped-def]
+    def sample_rows(
+        self,
+        table: TableRef,
+        n: int,
+        *,
+        partition_filter: PartitionFilter | None = None,
+    ) -> list[dict[str, Any]]:
         raise NotImplementedError("not exercised")
 
-    def column_stats(self, table, column):  # type: ignore[no-untyped-def]
+    def column_stats(self, table: TableRef, column: str) -> ColumnStats:
         raise NotImplementedError("not exercised")
 
-    def run_test_sql(self, sql, *, capture_failures=0):  # type: ignore[no-untyped-def]
+    def run_test_sql(self, sql: str, *, capture_failures: int = 0) -> TestResult:
         raise NotImplementedError("not exercised")
 
     def get_row_count(self, table: TableRef) -> int | None:

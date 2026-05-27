@@ -635,9 +635,10 @@ def _resolve_sample_bucket(
     # homogeneous WarehouseError catch surface with their own remediation.
     num_rows = adapter.get_row_count(table_ref)
     if num_rows is None or num_rows == 0:
+        observed = "None" if num_rows is None else "0"
         raise PruneError(
             f"sample-mode prune requires Table.num_rows for "
-            f"{table_ref.qualified_name!r} but the warehouse returned None.",
+            f"{table_ref.qualified_name!r} but the warehouse returned {observed}.",
             remediation=(
                 "Verify the table is materialised and accessible. "
                 "If it is genuinely empty (or num_rows is unavailable on the "

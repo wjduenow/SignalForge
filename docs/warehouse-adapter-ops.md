@@ -616,8 +616,9 @@ materialised sampling against a read-only shared database (e.g.
 projection-subquery shape from #139 (`SELECT * EXCLUDE (_sf_sample_hash) FROM
 (SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash …)`), so `prune.scope: sample` +
 `prune.sample_strategy: materialised` works on live Snowflake (against a
-writable source). The `oneshot` strategy is still blocked at a separate engine
-seam — see "Known limitations" below.
+writable source). The `oneshot` strategy also works since #140 routed its
+sample row-count through the vendor-neutral `WarehouseAdapter.get_row_count`
+seam (no CTAS, so no writable source needed) — see "Known limitations" below.
 
 **Session cleanup is fail-soft with no manual command.** A Snowflake temp
 table is unreachable outside its owning session, so there is no
@@ -729,8 +730,8 @@ covers both the offline `fakesnow`/`sqlglot` suites (which run with no env
 vars) and the gated live tests (which self-skip without credentials):
 `tests/prune/test_compiler_fakesnow.py`,
 `tests/warehouse/test_snowflake_adapter_fakesnow.py` (offline);
-`tests/warehouse/test_snowflake_prune_live.py` (live, materialised, writable
-schema), `tests/warehouse/test_snowflake_estimate_live.py` (live EXPLAIN),
+`tests/warehouse/test_snowflake_prune_live.py` (live, materialised + oneshot,
+writable schema), `tests/warehouse/test_snowflake_estimate_live.py` (live EXPLAIN),
 `tests/cli/test_e2e_snowflake_smoke.py` (live full pipeline vs `TPCH_SF1`,
 `oneshot`).
 
