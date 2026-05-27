@@ -134,6 +134,15 @@ _CRITERION_TEXT_PREVIEW_LEN: int = 60
 :class:`CriterionEstimate` (for the renderer in US-004)."""
 
 
+_ESTIMATE_SOURCE_LABELS: dict[str, str] = {
+    "BigQueryAdapter": "BigQuery dryRun",
+    "SnowflakeAdapter": "Snowflake EXPLAIN",
+}
+"""Human label for the warehouse primitive behind ``estimate_query_bytes``,
+keyed by concrete adapter class name. Unknown adapters fall back to a generic
+``"warehouse estimate"`` so the renderer never mislabels the source (#130)."""
+
+
 # ---------------------------------------------------------------------------
 # Typed result shapes (DEC-010, DEC-022 of prune-engine.md mirror)
 # ---------------------------------------------------------------------------
@@ -201,6 +210,10 @@ class EstimateReport(BaseModel):
     warehouse_bytes_per_row: int | None
     warehouse_total_bytes: int | None
     warehouse_unavailable_reason: str | None = None
+    # Human label for the warehouse primitive that produced the estimate
+    # (e.g. "BigQuery dryRun", "Snowflake EXPLAIN"). Populated on the success
+    # path; ``None`` on the degrade path or for older callers.
+    warehouse_estimate_source: str | None = None
     tests_per_column_heuristic: float = _TESTS_PER_COLUMN_HEURISTIC
     sample_size: int
     price_table_version: str
@@ -520,6 +533,7 @@ def estimate(
     warehouse_total_bytes: int | None = None
     warehouse_unavailable_reason: str | None = None
     representative_sql = _build_representative_sql(model, adapter, sample_size)
+    warehouse_estimate_source: str | None = None
     try:
         dry_run_bytes = adapter.estimate_query_bytes(representative_sql)
     except WarehouseError as exc:
@@ -542,6 +556,9 @@ def estimate(
         # ``warehouse_bytes_per_row`` is a display-only divider.
         warehouse_total_bytes = dry_run_bytes * max(1, test_count_estimate)
         warehouse_bytes_per_row = max(1, dry_run_bytes // sample_size) if sample_size > 0 else None
+        warehouse_estimate_source = _ESTIMATE_SOURCE_LABELS.get(
+            type(adapter).__name__, "warehouse estimate"
+        )
 
     duration_seconds = time.perf_counter() - _start
 
@@ -560,6 +577,7 @@ def estimate(
         warehouse_bytes_per_row=warehouse_bytes_per_row,
         warehouse_total_bytes=warehouse_total_bytes,
         warehouse_unavailable_reason=warehouse_unavailable_reason,
+        warehouse_estimate_source=warehouse_estimate_source,
         tests_per_column_heuristic=_TESTS_PER_COLUMN_HEURISTIC,
         sample_size=sample_size,
         price_table_version=_pricing.PRICE_TABLE_VERSION,
@@ -726,7 +744,8 @@ def render(report: EstimateReport) -> str:
         assert bytes_per_row is not None  # noqa: S101 (engine invariant)
         assert total_bytes is not None  # noqa: S101 (engine invariant)
         test_count_est = int(report.tests_per_column_heuristic * _column_count_from_report(report))
-        lines.append(f"  bytes-per-row:    ~{bytes_per_row:,} (BigQuery dryRun)")
+        source_label = report.warehouse_estimate_source or "warehouse estimate"
+        lines.append(f"  bytes-per-row:    ~{bytes_per_row:,} ({source_label})")
         lines.append(
             f"  test count est:   {test_count_est} "
             f"({report.tests_per_column_heuristic} tests/col x "

@@ -81,7 +81,8 @@ _REQUIRED_CONN_VARS = (
 
 
 def _snowflake_runs_enabled() -> bool:
-    """``SF_RUN_SNOWFLAKE`` is set to a truthy value (mirrors ``SF_RUN_BQ``)."""
+    """``SF_RUN_SNOWFLAKE`` is set to a truthy value (the Snowflake analogue of
+    the ``SF_RUN_BQ`` opt-in; accepts ``1``/``true``/``yes``/``on``)."""
     return os.environ.get("SF_RUN_SNOWFLAKE", "").lower() in _TRUTHY
 
 

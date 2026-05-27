@@ -404,9 +404,15 @@ def test_estimate_reports_real_bytes_for_snowflake_explain(
     assert report.warehouse_total_bytes % _SNOWFLAKE_EXPLAIN_BYTES == 0
     assert report.total_llm_usd > 0
 
+    # #130: the source label is adapter-derived, not hardcoded — a Snowflake
+    # EXPLAIN estimate must not be mislabelled "BigQuery dryRun".
+    assert report.warehouse_estimate_source == "Snowflake EXPLAIN"
+
     rendered = render(report)
     assert "<unavailable:" not in rendered
     assert "Total estimated warehouse: <unknown>" not in rendered
+    assert "Snowflake EXPLAIN" in rendered
+    assert "BigQuery dryRun" not in rendered
 
     fake_conn.assert_all_expectations_met()
     fake_anthropic.assert_all_expectations_met()

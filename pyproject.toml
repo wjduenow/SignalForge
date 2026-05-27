@@ -111,5 +111,5 @@ markers = [
   "cli_subprocess: belt-and-braces subprocess-driven CLI smoke (skipped by default; run with -m cli_subprocess)",
   "e2e: end-to-end smoke test against real Anthropic + real BigQuery (gated by SF_RUN_BQ=1, ANTHROPIC_API_KEY, GOOGLE_CLOUD_PROJECT; skipped by default)",
   "wheel_smoke: maintainer-only; builds the wheel via `python -m build --wheel` and inspects the artifact for the demo file set (run with --no-cov)",
-  "snowflake: maintainer-only; runs compiled Snowflake SQL through fakesnow (run with --no-cov)",
+  "snowflake: maintainer-only; offline compiled-SQL validation via fakesnow AND the gated live EXPLAIN-estimate certification (run with --no-cov; live tests self-skip without SF_RUN_SNOWFLAKE + connection env vars)",
 ]
