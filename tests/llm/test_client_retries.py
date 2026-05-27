@@ -27,6 +27,7 @@ from signalforge.llm.errors import (
     LLMConnectionError,
     LLMHelperError,
     LLMRateLimitError,
+    LLMResponseFormatError,
     LLMServerError,
 )
 
@@ -407,3 +408,95 @@ def test_call_llm_per_class_budgets_do_not_cross_consume(
     # The error reports 429-class attempts (3), NOT the total (which
     # would include the conn retry).
     assert exc_info.value.attempts == 3
+
+
+# ---- count_tokens probe error mapping -------------------------------------
+# The pre-send count_tokens probe maps a raised SDK exception to a typed
+# LLMError via ``strategy.classify_exception`` and NEVER retries it (a probe
+# failure must not consume the messages.create budget). One assertion per
+# ExceptionCategory branch in ``call_llm`` (client.py count-gate block).
+
+
+def _call_llm_probe_failure(fake: FakeAnthropicClient) -> None:
+    """Invoke ``call_llm`` with a fake whose count_tokens is pre-queued to fail."""
+    call_llm(
+        system="sys",
+        cached_block="c",
+        dynamic_block="d",
+        model="claude-sonnet-4-6",
+        max_tokens=128,
+        prompt_version="v1",
+        client=fake,
+    )
+
+
+def test_count_tokens_auth_error_maps_to_auth_error_no_retry() -> None:
+    """count_tokens 401 → LLMAuthError, no messages.create issued."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_auth_error(401))
+
+    with pytest.raises(LLMAuthError) as exc_info:
+        _call_llm_probe_failure(fake)
+
+    assert isinstance(exc_info.value.cause, anthropic.AuthenticationError)
+    assert len(fake.create_calls) == 0
+
+
+def test_count_tokens_rate_limit_maps_to_rate_limit_error_attempts_zero() -> None:
+    """count_tokens 429 → LLMRateLimitError(attempts=0), not retried."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_rate_limit_error())
+
+    with pytest.raises(LLMRateLimitError) as exc_info:
+        _call_llm_probe_failure(fake)
+
+    assert exc_info.value.attempts == 0
+    assert isinstance(exc_info.value.cause, anthropic.RateLimitError)
+    assert len(fake.create_calls) == 0
+
+
+def test_count_tokens_connection_error_maps_to_connection_error_no_retry() -> None:
+    """count_tokens connection failure → LLMConnectionError, not retried."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_connection_error())
+
+    with pytest.raises(LLMConnectionError) as exc_info:
+        _call_llm_probe_failure(fake)
+
+    assert isinstance(exc_info.value.cause, anthropic.APIConnectionError)
+    assert len(fake.create_calls) == 0
+
+
+def test_count_tokens_5xx_maps_to_server_error_no_retry() -> None:
+    """count_tokens 503 → LLMServerError, not retried."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_status_error(503))
+
+    with pytest.raises(LLMServerError) as exc_info:
+        _call_llm_probe_failure(fake)
+
+    assert isinstance(exc_info.value.cause, anthropic.APIStatusError)
+    assert len(fake.create_calls) == 0
+
+
+def test_count_tokens_4xx_non_auth_maps_to_helper_error_no_retry() -> None:
+    """count_tokens non-5xx, non-auth (400) → LLMHelperError, not retried."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_status_error(400))
+
+    with pytest.raises(LLMHelperError) as exc_info:
+        _call_llm_probe_failure(fake)
+
+    assert isinstance(exc_info.value.cause, anthropic.APIStatusError)
+    assert len(fake.create_calls) == 0
+
+
+def test_count_tokens_missing_input_tokens_field_raises_response_format_error() -> None:
+    """A count_tokens response lacking ``input_tokens`` → LLMResponseFormatError."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=object())
+
+    with pytest.raises(LLMResponseFormatError):
+        _call_llm_probe_failure(fake)
+
+    assert len(fake.create_calls) == 0

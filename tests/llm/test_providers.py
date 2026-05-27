@@ -367,6 +367,14 @@ def test_extract_usage_missing_usage_raises() -> None:
             ),
             ExceptionCategory.NO_RETRY,
         ),
+        (
+            # APIStatusError that is neither 5xx nor 4xx-non-auth (a 3xx) hits
+            # the defensive fallthrough → NO_RETRY.
+            anthropic.APIStatusError(
+                message="3xx", response=httpx.Response(302, request=_REQ), body=None
+            ),
+            ExceptionCategory.NO_RETRY,
+        ),
         (anthropic.APIConnectionError(request=_REQ), ExceptionCategory.CONNECTION),
         (ValueError("unrecognised"), ExceptionCategory.NO_RETRY),
     ],
