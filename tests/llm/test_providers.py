@@ -1,12 +1,9 @@
-"""Unit tests for the provider-neutral LLM seam (US-001 of issue #135).
+"""Unit tests for the provider-neutral LLM seam (US-001 / US-002 of issue #135).
 
 Covers the foundation types: the :class:`ExceptionCategory` enum, the
-:class:`UsageMetrics` value object, the :class:`LLMProvider` ABC, and the
-process-level registry (:func:`register_provider` / :func:`provider_for`).
-
-No vendor behaviour is wired at this stage (US-002 registers
-``AnthropicProvider``), so ``provider_for("anthropic")`` raises
-:class:`UnknownProviderError` here — pinned below.
+:class:`UsageMetrics` value object, the :class:`LLMProvider` ABC, the
+process-level registry (:func:`register_provider` / :func:`provider_for`), and
+the :class:`AnthropicProvider` strategy registered by US-002.
 
 Every test is capable of failing: no ``assert True``-shaped placeholders
 (``testing-signal.md``).
@@ -16,16 +13,21 @@ from __future__ import annotations
 
 from typing import Any
 
+import anthropic
+import httpx
 import pytest
 
 from signalforge.llm.errors import UnknownProviderError
 from signalforge.llm.providers import (
+    AnthropicProvider,
     ExceptionCategory,
     LLMProvider,
     UsageMetrics,
     provider_for,
     register_provider,
 )
+
+from ._fake import FakeMessage, FakeTextBlock, FakeUsage
 
 
 class _DummyProvider(LLMProvider):
@@ -152,16 +154,11 @@ def test_registry_miss_raises_unknown_provider_error(_isolate_registry: None) ->
 
 @pytest.mark.unit
 @pytest.mark.llm
-def test_anthropic_not_registered_at_this_stage(_isolate_registry: None) -> None:
-    """US-001 wires NO provider; ``provider_for("anthropic")`` raises until
-    US-002 registers ``AnthropicProvider``."""
-    # Empty the registry to assert the start-empty contract regardless of what
-    # later stories register at import time.
-    from signalforge.llm import providers as providers_module
-
-    providers_module._REGISTRY.clear()
-    with pytest.raises(UnknownProviderError):
-        provider_for("anthropic")
+def test_anthropic_provider_is_registered() -> None:
+    """US-002 registers ``AnthropicProvider`` at import time, so
+    ``provider_for("anthropic")`` returns it (DEC-003)."""
+    provider = provider_for("anthropic")
+    assert isinstance(provider, AnthropicProvider)
 
 
 @pytest.mark.unit
@@ -182,3 +179,213 @@ def test_llm_provider_is_abstract() -> None:
     unimplemented abstract methods."""
     with pytest.raises(TypeError):
         LLMProvider()  # type: ignore[abstract]
+
+
+# ---------------------------------------------------------------------------
+# US-002 — AnthropicProvider strategy
+# ---------------------------------------------------------------------------
+
+
+_REQ = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_anthropic_provider_capability_flags() -> None:
+    """Anthropic supports both prompt caching and pre-send token counting, so
+    both capability flags are ``True`` (DEC-008) — keeping the orchestrator's
+    Anthropic control flow unchanged."""
+    provider = AnthropicProvider()
+    assert provider.name == "anthropic"
+    assert provider.supports_prompt_caching is True
+    assert provider.supports_token_count is True
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_build_create_kwargs_attaches_cache_marker_only_when_active() -> None:
+    """The ``cache_control`` ephemeral marker rides on block-1 ONLY when
+    ``cache_marker_active`` (mirrors the inline ``call_anthropic`` shape)."""
+    provider = AnthropicProvider()
+    with_marker = provider.build_create_kwargs(
+        system="sys",
+        cached_block="CACHED",
+        dynamic_block="DYN",
+        model="claude-sonnet-4",
+        max_tokens=1024,
+        cache_ttl="5m",
+        cache_marker_active=True,
+    )
+    blocks = with_marker["messages"][0]["content"]
+    assert blocks[0]["text"] == "CACHED"
+    assert blocks[0]["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
+    assert blocks[1] == {"type": "text", "text": "DYN"}
+    assert "cache_control" not in blocks[1]
+    assert with_marker["model"] == "claude-sonnet-4"
+    assert with_marker["max_tokens"] == 1024
+    assert with_marker["system"] == "sys"
+
+    without_marker = provider.build_create_kwargs(
+        system="sys",
+        cached_block="CACHED",
+        dynamic_block="DYN",
+        model="claude-sonnet-4",
+        max_tokens=1024,
+        cache_ttl="5m",
+        cache_marker_active=False,
+    )
+    assert "cache_control" not in without_marker["messages"][0]["content"][0]
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_build_create_kwargs_beta_header_only_at_1h() -> None:
+    """The ``extended-cache-ttl`` beta header is attached only when
+    ``cache_ttl == "1h"`` (sending it for 5m is at best ignored)."""
+    provider = AnthropicProvider()
+    one_h = provider.build_create_kwargs(
+        system="s",
+        cached_block="c",
+        dynamic_block="d",
+        model="claude-opus-4",
+        max_tokens=10,
+        cache_ttl="1h",
+        cache_marker_active=True,
+    )
+    assert one_h["extra_headers"] == {"anthropic-beta": "extended-cache-ttl-2025-04-11"}
+
+    five_m = provider.build_create_kwargs(
+        system="s",
+        cached_block="c",
+        dynamic_block="d",
+        model="claude-opus-4",
+        max_tokens=10,
+        cache_ttl="5m",
+        cache_marker_active=True,
+    )
+    assert five_m["extra_headers"] == {}
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_build_count_tokens_kwargs_sends_cached_block_only_no_marker() -> None:
+    """The pre-send count probe carries ``system`` + the cached block, with NO
+    ``cache_control`` marker (matches the inline ``call_anthropic`` probe)."""
+    provider = AnthropicProvider()
+    kwargs = provider.build_count_tokens_kwargs(
+        system="SYS",
+        cached_block="CACHED",
+        model="claude-sonnet-4",
+    )
+    assert kwargs["model"] == "claude-sonnet-4"
+    assert kwargs["system"] == "SYS"
+    block = kwargs["messages"][0]["content"][0]
+    assert block == {"type": "text", "text": "CACHED"}
+    assert "cache_control" not in block
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_extract_text_blocks_parity() -> None:
+    """``extract_text_blocks`` pulls every ``type == "text"`` block, matching
+    the inline ``_extract_text_blocks`` byte-for-byte."""
+    response = FakeMessage(
+        content=[FakeTextBlock(text="hello"), FakeTextBlock(text="world")],
+        usage=FakeUsage(input_tokens=1, output_tokens=1),
+    )
+    assert AnthropicProvider().extract_text_blocks(response) == ("hello", "world")
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_extract_usage_returns_usage_metrics() -> None:
+    """``extract_usage`` builds a :class:`UsageMetrics` from the response usage,
+    defaulting the cache fields to 0 when present-as-zero."""
+    response = FakeMessage(
+        content=[FakeTextBlock(text="x")],
+        usage=FakeUsage(
+            input_tokens=120,
+            output_tokens=45,
+            cache_creation_input_tokens=10,
+            cache_read_input_tokens=5,
+        ),
+    )
+    usage = AnthropicProvider().extract_usage(response)
+    assert isinstance(usage, UsageMetrics)
+    assert usage.input_tokens == 120
+    assert usage.output_tokens == 45
+    assert usage.cache_creation_input_tokens == 10
+    assert usage.cache_read_input_tokens == 5
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_extract_usage_missing_usage_raises() -> None:
+    """A response missing ``usage`` surfaces a typed format error (mirrors the
+    inline ``call_anthropic`` guard)."""
+    from signalforge.llm.errors import LLMResponseFormatError
+
+    class _NoUsage:
+        content: list[Any] = []
+
+    with pytest.raises(LLMResponseFormatError):
+        AnthropicProvider().extract_usage(_NoUsage())
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+@pytest.mark.parametrize(
+    ("exc", "expected"),
+    [
+        (
+            anthropic.AuthenticationError(
+                message="auth", response=httpx.Response(401, request=_REQ), body=None
+            ),
+            ExceptionCategory.AUTH,
+        ),
+        (
+            anthropic.PermissionDeniedError(
+                message="perm", response=httpx.Response(403, request=_REQ), body=None
+            ),
+            ExceptionCategory.AUTH,
+        ),
+        (
+            anthropic.RateLimitError(
+                message="rl", response=httpx.Response(429, request=_REQ), body=None
+            ),
+            ExceptionCategory.RATE_LIMIT,
+        ),
+        (
+            anthropic.APIStatusError(
+                message="5xx", response=httpx.Response(503, request=_REQ), body=None
+            ),
+            ExceptionCategory.SERVER_ERROR,
+        ),
+        (
+            anthropic.APIStatusError(
+                message="4xx", response=httpx.Response(422, request=_REQ), body=None
+            ),
+            ExceptionCategory.NO_RETRY,
+        ),
+        (anthropic.APIConnectionError(request=_REQ), ExceptionCategory.CONNECTION),
+        (ValueError("unrecognised"), ExceptionCategory.NO_RETRY),
+    ],
+)
+def test_classify_exception_maps_each_category(
+    exc: BaseException, expected: ExceptionCategory
+) -> None:
+    """Each Anthropic exception type maps to the correct neutral category,
+    and anything unrecognised maps to NO_RETRY (DEC-002)."""
+    assert AnthropicProvider().classify_exception(exc) is expected
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_anthropic_provider_make_client_uses_shim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``make_client`` delegates to the shim's ``_make_anthropic_client`` so the
+    DEC-012 SDK-construction confinement holds."""
+    import signalforge.llm._anthropic_client as shim
+
+    sentinel = object()
+    monkeypatch.setattr(shim, "_make_anthropic_client", lambda: sentinel)
+    assert AnthropicProvider().make_client() is sentinel

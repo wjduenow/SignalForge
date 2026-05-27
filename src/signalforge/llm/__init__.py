@@ -1,6 +1,6 @@
 """SignalForge LLM seam — centralized Anthropic SDK client + retry taxonomy."""
 
-from signalforge.llm._client import AnthropicClientProtocol
+from signalforge.llm._anthropic_client import AnthropicClientProtocol
 from signalforge.llm.client import call_anthropic
 from signalforge.llm.errors import (
     EstimateUnknownModelError,
@@ -22,6 +22,7 @@ from signalforge.llm.pricing import (
     lookup,
 )
 from signalforge.llm.providers import (
+    AnthropicProvider,
     ExceptionCategory,
     LLMProvider,
     UsageMetrics,
@@ -33,6 +34,7 @@ __all__ = (
     "PRICES",
     "PRICE_TABLE_VERSION",
     "AnthropicClientProtocol",
+    "AnthropicProvider",
     "EstimateUnknownModelError",
     "ExceptionCategory",
     "LLMAuthError",

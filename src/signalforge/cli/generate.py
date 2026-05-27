@@ -410,7 +410,7 @@ def _make_anthropic_client() -> AnthropicClientProtocol | None:
 
     Default implementation returns ``None`` so the underlying stage's
     own ``client = anthropic.Anthropic(...)`` lazy construction (gated
-    by the single SDK seam at :mod:`signalforge.llm._client`) runs.
+    by the single SDK seam at :mod:`signalforge.llm._anthropic_client`) runs.
     Tests patch this to return a :class:`tests.llm._fake.FakeAnthropicClient`.
     """
     return None
@@ -806,12 +806,14 @@ def _run_single_model(
             client = _make_anthropic_client()
             if client is None:
                 # The default factory returns None to let the underlying
-                # stages lazy-construct via signalforge.llm._client.
+                # stages lazy-construct via signalforge.llm._anthropic_client.
                 # The estimate engine needs a concrete client; build one
                 # here through the same single SDK seam so any
                 # LLMAuthError surfaces at the existing panic boundary
                 # → tier 3 via _EXCEPTION_TO_EXIT_CODE.
-                from signalforge.llm._client import _make_anthropic_client as _llm_make_client
+                from signalforge.llm._anthropic_client import (
+                    _make_anthropic_client as _llm_make_client,
+                )
 
                 client = _llm_make_client()
             report = estimate_module.estimate(

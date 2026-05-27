@@ -39,7 +39,7 @@ import random
 import time
 from typing import Any, Final, Literal
 
-from signalforge.llm._client import (
+from signalforge.llm._anthropic_client import (
     AnthropicClientProtocol,
     _load_anthropic_exception_classes,
 )
@@ -198,7 +198,7 @@ def call_anthropic(
         # Lazy-construct via the shim so test environments that inject a
         # fake never pay the SDK import cost. Production callers from
         # US-013 will pass a client explicitly.
-        from signalforge.llm._client import _make_anthropic_client
+        from signalforge.llm._anthropic_client import _make_anthropic_client
 
         client = _make_anthropic_client()
 
