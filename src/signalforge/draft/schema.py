@@ -61,7 +61,7 @@ from signalforge.draft.models import CandidateSchema
 from signalforge.draft.parser import _LLMResultMeta, parse_draft_response
 from signalforge.draft.prompts import render_prompt
 from signalforge.llm import AnthropicClientProtocol
-from signalforge.llm.client import call_anthropic
+from signalforge.llm.client import call_llm
 from signalforge.llm.models import LLMResult
 from signalforge.manifest.models import Manifest, Model
 from signalforge.safety.models import LLMRequest
@@ -183,7 +183,7 @@ def draft_from_request(
     )
 
     # 2. Issue the LLM call through the seam.
-    result = call_anthropic(
+    result = call_llm(
         system=system,
         cached_block=cached,
         dynamic_block=dynamic,
