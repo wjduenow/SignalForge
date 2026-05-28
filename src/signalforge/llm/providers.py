@@ -901,8 +901,14 @@ class GeminiProvider(LLMProvider):
 
         Reads ``response.usage_metadata.{prompt_token_count,
         candidates_token_count}``; cache fields default to 0 (no
-        Anthropic-style prompt caching per DEC-003).
+        Anthropic-style prompt caching per DEC-003). Per-field values
+        are pulled via the shared ``_extract_usage_field`` helper so a
+        missing or non-int field surfaces an
+        :class:`LLMResponseFormatError` rather than silently feeding
+        misleading 0/0 figures into the audit JSONL and ``--estimate``
+        cost projection.
         """
+        from signalforge.llm.client import _extract_usage_field
         from signalforge.llm.errors import LLMResponseFormatError
 
         usage = getattr(response, "usage_metadata", None)
@@ -910,8 +916,13 @@ class GeminiProvider(LLMProvider):
             raise LLMResponseFormatError(
                 "Gemini response is missing the `usage_metadata` attribute.",
             )
-        input_tokens = getattr(usage, "prompt_token_count", 0) or 0
-        output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+        # Fail loud on missing/non-int per-field values — mirrors the
+        # Anthropic precedent via _extract_usage_field. Silently
+        # defaulting to 0 would hide an SDK response-shape regression
+        # and feed misleading 0/0 token figures to the audit JSONL
+        # and the --estimate cost-projection math.
+        input_tokens = _extract_usage_field(usage, "prompt_token_count")
+        output_tokens = _extract_usage_field(usage, "candidates_token_count")
         return UsageMetrics(
             input_tokens=input_tokens,
             output_tokens=output_tokens,

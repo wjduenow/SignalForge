@@ -126,5 +126,5 @@ markers = [
   "wheel_smoke: maintainer-only; builds the wheel via `python -m build --wheel` and inspects the artifact for the demo file set (run with --no-cov)",
   "snowflake: maintainer-only; offline compiled-SQL validation via fakesnow AND the gated live EXPLAIN-estimate certification (run with --no-cov; live tests self-skip without SF_RUN_SNOWFLAKE + connection env vars)",
   "openai: real-API smoke test against OpenAI (requires SF_RUN_OPENAI=1 + OPENAI_API_KEY; excluded from default CI)",
-  "gemini: real-API smoke test (requires GOOGLE_API_KEY; excluded from default CI)",
+  "gemini: real-API smoke test against Gemini (requires SF_RUN_GEMINI=1 + GOOGLE_API_KEY; excluded from default CI)",
 ]

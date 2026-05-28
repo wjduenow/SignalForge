@@ -1057,6 +1057,37 @@ def test_geminiprovider_extract_usage_missing_metadata_raises() -> None:
 
 @pytest.mark.unit
 @pytest.mark.llm
+def test_geminiprovider_extract_usage_missing_inner_field_raises() -> None:
+    """A ``usage_metadata`` block missing one of the per-field counts
+    (or carrying a non-int value) surfaces :class:`LLMResponseFormatError`
+    instead of silently defaulting to 0. Mirrors the Anthropic precedent
+    via the shared ``_extract_usage_field`` helper — pinned in response
+    to PR #151 review feedback (Copilot, line 920 of providers.py).
+    """
+    from types import SimpleNamespace as N
+
+    from signalforge.llm.errors import LLMResponseFormatError
+    from signalforge.llm.providers import GeminiProvider
+
+    # Missing prompt_token_count: getattr would have returned 0 silently.
+    no_prompt = N(
+        candidates=[N(content=N(parts=[N(text="x")]), finish_reason=N(name="STOP"))],
+        usage_metadata=N(candidates_token_count=45),
+    )
+    with pytest.raises(LLMResponseFormatError, match="prompt_token_count"):
+        GeminiProvider().extract_usage(no_prompt)
+
+    # Non-int candidates_token_count: also fails loud.
+    bad_type = N(
+        candidates=[N(content=N(parts=[N(text="x")]), finish_reason=N(name="STOP"))],
+        usage_metadata=N(prompt_token_count=120, candidates_token_count="not-an-int"),
+    )
+    with pytest.raises(LLMResponseFormatError, match="candidates_token_count"):
+        GeminiProvider().extract_usage(bad_type)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
 def test_geminiprovider_classify_exception_each_category() -> None:
     """DEC-006: each ``google.genai.errors`` shape maps to its neutral
     :class:`ExceptionCategory`. SDK classes lazy-imported per-test (mirrors
