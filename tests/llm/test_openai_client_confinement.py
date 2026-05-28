@@ -67,3 +67,74 @@ def test_shim_actually_carries_openai_type_ignore() -> None:
         f"{_SHIM_FILENAME} should confine the openai SDK type-ignore; "
         "the confinement scan is only meaningful if the seam exists"
     )
+
+
+# ---------------------------------------------------------------------------
+# Coverage-closing tests for PR #152 codecov gaps on the shim internals.
+# Confinement-test file is the natural home — these tests pin the per-shim
+# behaviours that the production import surface depends on (the adapter
+# façade + the tiktoken fallback) but that no production caller currently
+# exercises in the default test set (the orchestrator drives via the
+# FakeOpenAIClient, never through _OpenAIClientAdapter; tiktoken's fallback
+# fires only on an unknown model id).
+# ---------------------------------------------------------------------------
+
+
+def test_openai_client_adapter_messages_create_delegates_to_chat_completions() -> None:
+    """``_OpenAIClientAdapter.messages.create(**kwargs)`` MUST delegate
+    verbatim to ``self._raw.chat.completions.create(**kwargs)``.
+
+    The orchestrator's ``call_llm`` hard-calls
+    ``llm_client.messages.create(...)``; the adapter is the only thing
+    that maps that into OpenAI's actual SDK call shape. A regression
+    that breaks the delegation (e.g. a refactor that swaps the SDK call
+    path) would surface here, not in the integration tests (those use
+    ``FakeOpenAIClient`` which has its own ``.messages.create`` and
+    never goes through the adapter).
+    """
+    from types import SimpleNamespace
+    from typing import Any
+
+    from signalforge.llm._openai_client import _OpenAIClientAdapter
+
+    captured: dict[str, Any] = {}
+    sentinel = object()
+
+    def _create(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return sentinel
+
+    raw = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
+    adapter = _OpenAIClientAdapter(raw)
+
+    result = adapter.messages.create(
+        model="gpt-4o",
+        max_tokens=128,
+        messages=[{"role": "user", "content": "hi"}],
+        response_format={"type": "json_object"},
+    )
+
+    assert result is sentinel
+    assert captured == {
+        "model": "gpt-4o",
+        "max_tokens": 128,
+        "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {"type": "json_object"},
+    }
+
+
+def test_count_openai_tokens_falls_back_to_cl100k_base_for_unknown_model() -> None:
+    """``_count_openai_tokens`` MUST NOT raise on an unknown model id —
+    DEC-012 of #136 documents the ``cl100k_base`` fallback so a
+    newer-than-tiktoken OpenAI SKU still produces a usable estimate
+    rather than crashing the ``--estimate`` flow. ``--estimate`` is a
+    calibration signal, not a billing guarantee (mirrors the
+    planner-estimate caveat in ``warehouse-adapters.md``).
+    """
+    from signalforge.llm._openai_client import _count_openai_tokens
+
+    # A model id ``tiktoken.encoding_for_model`` doesn't recognise.
+    # Must return a positive int via the cl100k_base fallback, NOT raise.
+    count = _count_openai_tokens("not-a-real-openai-model-xyz", "hello world")
+    assert isinstance(count, int)
+    assert count > 0

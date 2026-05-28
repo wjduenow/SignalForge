@@ -705,3 +705,95 @@ def test_unknown_provider_error_lists_both_anthropic_and_openai() -> None:
     rendered = str(err)
     assert "anthropic" in rendered
     assert "openai" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Coverage-closing tests for #136 US-008 QG / PR #152 codecov gaps
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_anthropic_provider_estimate_input_tokens_skips_system_kwarg_when_empty() -> None:
+    """``AnthropicProvider.estimate_input_tokens`` MUST omit the ``system=``
+    kwarg entirely when ``system`` is the empty default — otherwise the SDK
+    would carry a spurious ``system=""`` block in the count, inflating the
+    figure by Anthropic's empty-system envelope size.
+
+    Closes PR #152 codecov gap on the no-system branch
+    (``providers.py``: ``response = resolved.messages.count_tokens(...)``
+    inside the ``else:`` arm).
+    """
+    from tests.llm._fake import FakeAnthropicClient, FakeCountTokensResponse
+
+    fake = FakeAnthropicClient(project="fake")
+    captured: dict[str, Any] = {}
+
+    def _capture(kwargs: dict[str, Any]) -> bool:
+        captured.update(kwargs)
+        return True
+
+    fake.expect_count_tokens(matching=_capture, returns=FakeCountTokensResponse(input_tokens=42))
+
+    tokens = AnthropicProvider().estimate_input_tokens(
+        "claude-sonnet-4-6", "hello world", system="", client=fake
+    )
+
+    assert tokens == 42
+    assert "system" not in captured, (
+        f"empty system MUST be omitted from count_tokens kwargs; got {captured.keys()}"
+    )
+    fake.assert_all_expectations_met()
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_anthropic_provider_estimate_input_tokens_raises_on_missing_input_tokens() -> None:
+    """A count_tokens response with a missing/non-int ``input_tokens`` field
+    raises :class:`LLMResponseFormatError` (defensive guard against an SDK
+    response-shape regression).
+
+    Closes PR #152 codecov gap on the ``raise LLMResponseFormatError(...)``
+    arm of ``AnthropicProvider.estimate_input_tokens``.
+    """
+    from signalforge.llm.errors import LLMResponseFormatError
+    from tests.llm._fake import FakeAnthropicClient
+
+    fake = FakeAnthropicClient(project="fake")
+
+    # Queue a response object whose ``input_tokens`` attr is missing
+    # (a real SDK response always carries it as an int; a None return
+    # surfaces the guard).
+    class _NoInputTokens:
+        pass
+
+    fake.expect_count_tokens(matching=lambda kwargs: True, returns=_NoInputTokens())
+
+    with pytest.raises(LLMResponseFormatError, match="input_tokens"):
+        AnthropicProvider().estimate_input_tokens(
+            "claude-sonnet-4-6", "hello", system="sys", client=fake
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_extract_text_blocks_missing_message_attr_raises() -> None:
+    """A choice object missing the ``message`` attribute (or with
+    ``message=None``) raises :class:`LLMResponseFormatError`.
+
+    Distinct from the existing ``content=None`` / empty-choices cases
+    (those exercise different arms of ``extract_text_blocks``). Closes
+    PR #152 codecov gap on the ``raise LLMResponseFormatError(...)`` arm
+    that fires when ``getattr(first, "message", None) is None``.
+    """
+    from types import SimpleNamespace
+
+    from signalforge.llm.errors import LLMResponseFormatError
+
+    # A choice with message=None (real SDK never produces this, but the
+    # guard is the contract — surface a typed error rather than crash
+    # later on the content attribute access).
+    response = SimpleNamespace(choices=[SimpleNamespace(message=None)])
+
+    with pytest.raises(LLMResponseFormatError, match="message"):
+        OpenAIProvider().extract_text_blocks(response)

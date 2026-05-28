@@ -24,6 +24,7 @@ itself is NOT patched — that's the whole point of the AC-4 contract.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -507,3 +508,92 @@ def test_generate_estimate_divergent_providers_fails_fast(
     finally:
         providers_mod._REGISTRY.clear()
         providers_mod._REGISTRY.update(saved)
+
+
+def test_generate_estimate_openai_provider_passes_client_none_to_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When ``llm.provider == "openai"`` (and grade matches), the
+    ``--estimate`` short-circuit MUST take the non-Anthropic branch in
+    ``cmd_generate``: skip building an Anthropic SDK client and pass
+    ``client=None`` into ``estimate_module.estimate(...)``. OpenAI's
+    ``estimate_input_tokens`` counts locally via ``tiktoken`` and
+    needs no SDK client (DEC-012 of #136).
+
+    Closes PR #152 codecov gap on ``generate.py``'s
+    ``else: client = None`` arm — the existing
+    ``test_generate_estimate_*`` suite all uses the default Anthropic
+    provider, so the openai branch ships uncovered at the CLI level
+    until this test.
+
+    The ``@pytest.mark.openai`` live smoke at
+    ``tests/cli/test_e2e_estimate_openai.py`` exercises the same path
+    against the real API, but it's excluded from default CI; this is
+    the offline-driven coverage equivalent.
+    """
+    from signalforge.cli import generate as gen_mod
+    from signalforge.llm.providers import AnthropicProvider
+
+    project_dir = make_fake_dbt_project(tmp_path)
+    # Both stages on openai so the divergent-providers gate doesn't
+    # fire; cli/_estimate.py then dispatches token counting through
+    # OpenAIProvider, which delegates to tiktoken (no SDK call).
+    (project_dir / "signalforge.yml").write_text(
+        "llm:\n  provider: openai\n  model: gpt-4o\ngrade:\n  provider: openai\n  model: gpt-4o\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project_dir)
+
+    # Standard manifest + warehouse fakes from _install_estimate_patches,
+    # but the AnthropicProvider.make_client patch it installs MUST NOT
+    # be invoked on the openai path — pin that via a spy.
+    fa, fb = _install_estimate_patches(monkeypatch)
+    spy_calls: list[None] = []
+    real_anthropic_make = AnthropicProvider.make_client
+
+    def _spy(self: AnthropicProvider) -> object:
+        spy_calls.append(None)
+        return real_anthropic_make(self)
+
+    monkeypatch.setattr(AnthropicProvider, "make_client", _spy)
+
+    # Capture the kwargs handed to ``estimate(...)`` so we can pin that
+    # client=None (the load-bearing assertion for line 846).
+    captured: dict[str, object] = {}
+    real_estimate = gen_mod.estimate_module.estimate
+
+    def _capturing_estimate(*args: Any, **kwargs: Any) -> Any:
+        # ``estimate(...)`` is positional in cmd_generate: (model, manifest,
+        # draft_config, grade_config, prune_config, adapter, client, *,
+        # project_dir). The 7th positional is the client. Args/kwargs are
+        # typed ``Any`` so pyright sees the ``*args`` forward as
+        # type-compatible with the real ``estimate(...)`` signature; this
+        # is a test-side spy, not a re-exported function.
+        captured["client_arg"] = args[6] if len(args) > 6 else kwargs.get("client")
+        return real_estimate(*args, **kwargs)
+
+    monkeypatch.setattr(gen_mod.estimate_module, "estimate", _capturing_estimate)
+
+    # Warehouse dry-run still runs for the bytes leg; the LLM-side is
+    # tiktoken-local so no fake_anthropic expectations are queued.
+    fb.expect_dry_run(sql_matching=r"SELECT", returns_bytes=10_000)
+
+    code = main(["generate", "--estimate", "model.shop.customers"])
+    captured_out = capsys.readouterr()
+
+    assert code == 0, f"stderr={captured_out.err}"
+    assert "Traceback" not in captured_out.err
+    assert spy_calls == [], (
+        "AnthropicProvider.make_client MUST NOT be invoked on the openai "
+        f"path; got {len(spy_calls)} calls"
+    )
+    assert captured["client_arg"] is None, (
+        "cmd_generate MUST pass client=None to estimate(...) for non-"
+        f"Anthropic providers; got {captured['client_arg']!r}"
+    )
+    # FakeAnthropicClient was never touched (no count_tokens expectations
+    # were queued, and the OpenAI path doesn't go through it).
+    assert len(fa.count_calls) == 0
+    assert len(fa.create_calls) == 0
