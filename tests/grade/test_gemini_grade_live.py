@@ -139,7 +139,7 @@ def test_grade_artifacts_gemini_round_trips_against_real_api(tmp_path: Path) -> 
     config = GradeConfig(
         provider="gemini",
         model="gemini-2.5-flash",
-        max_output_tokens=512,
+        max_output_tokens=2048,
         max_retries_429=0,
         max_retries_5xx=0,
         max_retries_conn=0,

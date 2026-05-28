@@ -579,6 +579,21 @@ If `signalforge.yml` is missing entirely (or the `llm:` key is absent),
 `load_draft_config(project_dir)` returns the built-in defaults
 silently — same behaviour as `load_safety_config`.
 
+### Per-provider `max_output_tokens` recommended floors
+
+No per-provider override is enforced in code — `DraftConfig.max_output_tokens`
+is one knob across every provider. The floors below are observed-data
+recommendations from live drafting runs; operators can lower for cost-cutting
+but must validate quality afterward (truncated draft responses surface as
+`LLMOutputJSONError` or `LLMOutputAnchorContractError` and fail the run rather
+than ship a partial `schema.yml`).
+
+| Provider                 | Recommended floor | Rationale                                                                                  |
+|--------------------------|-------------------|--------------------------------------------------------------------------------------------|
+| Anthropic (Sonnet 4.6+)  | 1024              | Sufficient for full reasoning; tested in BQ smoke.                                         |
+| OpenAI (gpt-4o)          | 1024              | Same headroom; no observed truncation.                                                     |
+| Gemini (2.5-flash+)      | **2048**          | Verbose reasoning style; 512 / 1024 observed truncating mid-string (issue #155 DEC-008).   |
+
 ## OpenAI provider
 
 Issue #136 registered `OpenAIProvider` as the second
