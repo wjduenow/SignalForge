@@ -343,3 +343,96 @@ def test_fakenocache_provider_estimate_input_tokens_returns_word_count() -> None
     assert provider.estimate_input_tokens("any-model", "") == 0
     # The ``client`` kwarg is accepted but ignored.
     assert provider.estimate_input_tokens("any-model", "hello world", client=object()) == 2
+
+
+# ---------------------------------------------------------------------------
+# Gemini provider-aware estimate (#137 US-007 / DEC-016)
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_gemini_provider_produces_nonzero_tokens_and_usd() -> None:
+    """``--estimate`` with ``draft.provider: gemini`` + ``grade.provider:
+    gemini`` produces a report with non-zero token counts AND non-zero
+    USD figures.
+
+    Gemini counts via the native server-side ``models.count_tokens`` API
+    (US-007 / DEC-016 — first-party, no ``tiktoken`` equivalent). The
+    engine threads the injected :class:`FakeGeminiClient` into the
+    provider's ``estimate_input_tokens`` impl, which calls
+    ``client.models.count_tokens(...)``; each call consumes one queued
+    expectation.
+
+    Pricing math uses the ``gemini-2.5-flash`` row from
+    :data:`signalforge.llm.pricing.PRICES` (#137 US-006); even with
+    small token counts the per-MTok rates produce strictly positive
+    USD figures.
+    """
+    from tests.llm._fake_gemini import FakeGeminiClient, FakeGeminiCountTokensResponse
+
+    model = _make_model()
+    mf = _make_manifest(model)
+    draft_config = DraftConfig.model_validate(
+        {**DraftConfig().model_dump(), "provider": "gemini", "model": "gemini-2.5-flash"}
+    )
+    grade_config = GradeConfig.model_validate(
+        {**GradeConfig().model_dump(), "provider": "gemini", "model": "gemini-2.5-flash"}
+    )
+    prune_config = PruneConfig()
+    fc = FakeBigQueryClient(project="fake_project")
+    adapter = BigQueryAdapter(
+        project="fake_project",
+        location="US",
+        max_bytes_billed=100_000_000,
+        client=fc,
+    )
+    fc.expect_dry_run(sql_matching=r"SELECT", returns_bytes=10_000)
+
+    # Queue one count_tokens response for the drafter call + one per
+    # grade criterion. The provider routes every estimate through the
+    # native ``models.count_tokens`` endpoint.
+    fg = FakeGeminiClient()
+    fg.expect_count_tokens(
+        matching=lambda kw: True,
+        returns=FakeGeminiCountTokensResponse(total_tokens=1000),
+    )
+    for _ in range(len(DEFAULT_RUBRIC)):
+        fg.expect_count_tokens(
+            matching=lambda kw: True,
+            returns=FakeGeminiCountTokensResponse(total_tokens=500),
+        )
+
+    report = estimate(
+        model,
+        mf,
+        draft_config,
+        grade_config,
+        prune_config,
+        adapter,
+        fg,
+    )
+
+    # Engineered determinism: the canned counts are strictly positive,
+    # so every per-criterion + draft figure is positive.
+    assert report.draft_input_tokens == 1000
+    assert all(c.input_tokens_per_call == 500 for c in report.grade_per_criterion)
+
+    # USD math: ``gemini-2.5-flash`` carries strictly positive per-MTok
+    # input + output rates (#137 US-006), so any positive token count
+    # yields strictly positive USD figures.
+    assert report.draft_usd > 0
+    assert report.grade_usd > 0
+    assert report.total_llm_usd > 0
+
+    rendered = render(report)
+    assert "drafter: gemini-2.5-flash" in rendered
+    assert "grader:  gemini-2.5-flash" in rendered
+    assert "Total estimated LLM cost: $" in rendered
+    # No unavailable marker — the Gemini estimate path must complete cleanly.
+    assert "<unavailable" not in rendered
+    # The figure rounded to 4 decimals is non-zero.
+    assert "Total estimated LLM cost: $0.0000" not in rendered
+
+    # Every queued count_tokens expectation consumed; one per (drafter +
+    # criteria) call.
+    fg.assert_all_expectations_met()
+    assert len(fg.count_tokens_calls) == 1 + len(DEFAULT_RUBRIC)

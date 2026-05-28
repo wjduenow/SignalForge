@@ -130,6 +130,19 @@ class FakeGeminiResponse:
     usage_metadata: FakeGeminiUsageMetadata
 
 
+@dataclass
+class FakeGeminiCountTokensResponse:
+    """Stand-in for ``models.count_tokens`` response (US-007).
+
+    The real SDK's ``CountTokensResponse`` exposes ``total_tokens: int |
+    None``; :meth:`GeminiProvider.estimate_input_tokens` reads only that
+    field. Tests queue a fake returning the canned count via
+    :meth:`FakeGeminiClient.expect_count_tokens`.
+    """
+
+    total_tokens: int | None
+
+
 # ---- Expectation machinery -------------------------------------------------
 
 
@@ -205,6 +218,42 @@ class _FakeGeminiMessages:
         )
 
 
+@dataclass
+class _CountTokensExpectation:
+    matching: _Matcher
+    returns: object | BaseException
+
+
+@dataclass
+class _FakeGeminiModels:
+    """Implements the ``models`` namespace on the fake client (US-007).
+
+    Only ``count_tokens(**kwargs)`` is modelled — the production path's
+    ``models.generate_content`` is routed through ``.messages.create`` via
+    :class:`signalforge.llm.providers._GeminiMessagesAdapter` rather than
+    being called directly on the client. The US-007 estimate path bypasses
+    the messages façade and reaches ``client.models.count_tokens`` natively.
+    """
+
+    _count_queue: list[_CountTokensExpectation] = field(default_factory=list)
+    _count_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    def count_tokens(self, **kwargs: Any) -> Any:
+        self._count_calls.append(kwargs)
+        if not self._count_queue:
+            raise AssertionError(f"unexpected models.count_tokens call: {kwargs!r}")
+        expectation = self._count_queue[0]
+        if not _matches(expectation.matching, kwargs):
+            raise AssertionError(
+                f"unexpected models.count_tokens call: {kwargs!r} did not match expectation "
+                f"{expectation.matching!r}"
+            )
+        self._count_queue.pop(0)
+        if isinstance(expectation.returns, BaseException):
+            raise expectation.returns
+        return expectation.returns
+
+
 class FakeGeminiClient:
     """Explicit fake for the Gemini client surface; calls outside the queued
     expectations raise :class:`AssertionError`.
@@ -218,11 +267,18 @@ class FakeGeminiClient:
     :func:`signalforge.llm.client.call_llm` invokes. Inject via
     ``call_llm(..., client=<FakeGeminiClient>)`` to drive the Gemini path
     end-to-end without any real SDK on the path.
+
+    Also exposes ``.models.count_tokens(**kwargs)`` for the US-007 estimate
+    path — :meth:`GeminiProvider.estimate_input_tokens` calls the native
+    SDK ``models.count_tokens`` surface, not the orchestrator's
+    ``.messages.create`` façade.
     """
 
     def __init__(self) -> None:
         self._messages = _FakeGeminiMessages()
         self.messages = self._messages
+        self._models = _FakeGeminiModels()
+        self.models = self._models
 
     def expect_messages_create(
         self,
@@ -238,11 +294,31 @@ class FakeGeminiClient:
         """
         self._messages._create_queue.append(_CreateExpectation(matching=matching, returns=returns))
 
+    def expect_count_tokens(
+        self,
+        *,
+        matching: _Matcher,
+        returns: object | BaseException,
+    ) -> None:
+        """Queue one expectation for ``models.count_tokens`` (US-007).
+
+        ``matching`` is a dict (subset match against the kwargs) or a
+        predicate callable. ``returns`` is either a
+        :class:`FakeGeminiCountTokensResponse` (or any object with a
+        ``total_tokens`` attribute) to return, or a :class:`BaseException`
+        instance to raise.
+        """
+        self._models._count_queue.append(
+            _CountTokensExpectation(matching=matching, returns=returns)
+        )
+
     def assert_all_expectations_met(self) -> None:
         """Raise :class:`AssertionError` if any expectations remain unconsumed."""
         leftover: list[str] = []
         if self._messages._create_queue:
             leftover.append(f"{len(self._messages._create_queue)} messages.create expectation(s)")
+        if self._models._count_queue:
+            leftover.append(f"{len(self._models._count_queue)} models.count_tokens expectation(s)")
         if leftover:
             raise AssertionError("unconsumed expectations: " + ", ".join(leftover))
 
@@ -252,11 +328,18 @@ class FakeGeminiClient:
         passed to ``messages.create``."""
         return list(self._messages._create_calls)
 
+    @property
+    def count_tokens_calls(self) -> list[dict[str, Any]]:
+        """Inspector for tests that want to assert on the kwargs the
+        estimator passed to ``models.count_tokens``."""
+        return list(self._models._count_calls)
+
 
 __all__ = [
     "FakeGeminiCandidate",
     "FakeGeminiClient",
     "FakeGeminiContent",
+    "FakeGeminiCountTokensResponse",
     "FakeGeminiPart",
     "FakeGeminiResponse",
     "FakeGeminiUsageMetadata",
