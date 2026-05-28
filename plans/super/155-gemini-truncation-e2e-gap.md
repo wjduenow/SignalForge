@@ -5,7 +5,7 @@
 - **Issue:** [#155](https://github.com/wjduenow/SignalForge/issues/155)
 - **Branch:** `feature/155-gemini-truncation-e2e-gap`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/155-gemini-truncation-e2e-gap`
-- **Phase:** `detailing` (stories generated; awaiting publish-PR approval)
+- **Phase:** `devolved` (epic + 10 tasks live in bd; ready set: US-001, US-003, US-004)
 - **Parent epic:** [#134](https://github.com/wjduenow/SignalForge/issues/134) (pluggable LLM provider for grading)
 - **Sibling refs:** plans/super/{135,136,137}-*.md, plans/super/10-e2e-bigquery-smoke.md
 - **Sessions:** 2026-05-28 (first)
@@ -168,21 +168,26 @@ Ordering: refactor → tests → impl → docs (per `cli-layer.md` § 5-surface 
 
 ## Beads Manifest
 
-*(populated after `/super-plan` devolve step)*
+Created 2026-05-28. Epic + 10 tasks, 16 dependency links wired. Ready set on creation: US-001, US-003, US-004 (parallel-safe).
 
-| Bead ID | Story | Status |
-|---|---|---|
-| TBD | Epic | — |
-| TBD | US-001 | — |
-| TBD | US-002 | — |
-| TBD | US-003 | — |
-| TBD | US-004 | — |
-| TBD | US-005 | — |
-| TBD | US-006 | — |
-| TBD | US-007 | — |
-| TBD | US-008 | — |
-| TBD | US-009 | — |
-| TBD | US-010 | — |
+| Bead ID | Story | Status | Depends on |
+|---|---|---|---|
+| `bd_1-scaffolding-eu0` | Epic | open | — |
+| `bd_1-scaffolding-eu0.2` | US-001 ABC + concretes + wire-in | **ready** | — |
+| `bd_1-scaffolding-eu0.3` | US-002 unclean-path tests + rule edit | blocked | US-001 |
+| `bd_1-scaffolding-eu0.4` | US-003 bump fixture + docs floor table | **ready** | — |
+| `bd_1-scaffolding-eu0.5` | US-004 `apply_provider_override` helper | **ready** | — |
+| `bd_1-scaffolding-eu0.6` | US-005 `test_e2e_openai_smoke.py` | blocked | US-004 |
+| `bd_1-scaffolding-eu0.7` | US-006 `test_e2e_gemini_smoke.py` | blocked | US-004 |
+| `bd_1-scaffolding-eu0.8` | US-007 parametrize BQ smoke | blocked | US-004 |
+| `bd_1-scaffolding-eu0.9` | US-008 `CONTRIBUTING.md` cadence | blocked | US-005,6,7 |
+| `bd_1-scaffolding-eu0.10` | US-009 Quality Gate | blocked | US-001..008 |
+| `bd_1-scaffolding-eu0.11` | US-010 Patterns & Memory | blocked | US-009 |
+
+### Serialization callouts (per memory: `ralph-serialize-shared-registry-beads`)
+- **US-005 / US-006 / US-007 all touch `tests/cli/_e2e_helpers.py`** (the helper US-004 added) AND `tests/cli/test_e2e_bigquery_smoke.py` (US-007 parametrizes it; US-004 refactored it). Even though they're listed as "ready after US-004 completes," they should NOT be claimed concurrently — serialise them one-at-a-time to avoid merge conflicts on the shared file.
+- **US-002 edits `.claude/rules/llm-drafter.md`** — per memory `ralph-worker-claude-dir-perms`, this MUST be done by the orchestrator (me) directly, NOT a Ralph worker. The bead description flags this.
+- **US-010 also edits `.claude/rules/`** — same orchestrator-only constraint.
 
 ## References
 
