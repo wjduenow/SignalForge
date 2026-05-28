@@ -211,6 +211,31 @@ def test_call_llm_gemini_safety_blocked_raises_llmresponseformaterror() -> None:
     fake.assert_all_expectations_met()
 
 
+# ---------------------------------------------------------------------------
+# is_clean_completion — happy-path (#155 US-001)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_is_clean_completion_true_for_stop() -> None:
+    """``finish_reason.name == 'STOP'`` is the canonical Gemini clean
+    completion (#155 DEC-005/DEC-006).
+
+    The orchestrator's gate at ``call_llm`` (immediately before
+    :meth:`GeminiProvider.extract_text_blocks`) must let this response
+    through to the text-extraction path; this happy-path pin asserts the
+    gate evaluates to ``True``. Gemini's enum-typed ``finish_reason``
+    surface — read via ``.name`` to dodge the enum value/identity question
+    — is the load-bearing semantic that the #155 fix promotes from "only
+    raise on zero text parts" to "raise on any non-clean stop reason."
+    """
+    from signalforge.llm.providers import GeminiProvider
+
+    response = _ok_response(text='{"score": 1.0}')
+    assert GeminiProvider().is_clean_completion(response) is True
+
+
 @pytest.mark.unit
 @pytest.mark.llm
 def test_call_llm_gemini_retry_429_exhaustion_routes_to_llmratelimiterror(

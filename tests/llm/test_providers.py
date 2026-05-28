@@ -72,6 +72,12 @@ class _DummyProvider(LLMProvider):
     def classify_exception(self, exc: BaseException) -> ExceptionCategory:
         return ExceptionCategory.NO_RETRY
 
+    def is_clean_completion(self, response: object) -> bool:
+        # #155 US-001 — registry tests don't exercise the gate, only the
+        # ABC instantiation path; return True so a registry-exercise
+        # round-trip through ``call_llm`` wouldn't trip the gate.
+        return True
+
     def estimate_input_tokens(
         self,
         model: str,

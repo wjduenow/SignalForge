@@ -175,6 +175,56 @@ class LLMProvider(abc.ABC):
         """Map a raised vendor exception to a neutral :class:`ExceptionCategory`."""
 
     @abc.abstractmethod
+    def is_clean_completion(self, response: object) -> bool:
+        """Return ``True`` iff ``response`` finished generation cleanly
+        (#155 DEC-005).
+
+        Called by :func:`signalforge.llm.client.call_llm` **after**
+        ``messages.create`` returns and **before**
+        :meth:`extract_text_blocks`. When this returns ``False``, the
+        orchestrator raises :class:`signalforge.llm.errors.LLMResponseFormatError`
+        whose message comes from :meth:`unclean_finish_reason_message`,
+        surfacing a typed, non-retryable response-shape error rather than
+        letting a partial / truncated text part reach the downstream
+        JSON parser (where it would surface as the *wrong* typed degrade —
+        ``GradeOutputError`` instead of ``GradeLLMError``; #155 DEC-001).
+
+        Each concrete provider declares a ``_CLEAN_STOP_REASONS:
+        frozenset[str]`` and returns ``True`` only when the vendor-native
+        finish-reason field is in that set (#155 DEC-002). The predicate
+        is an **allowlist**, not a denylist: any unrecognised
+        finish-reason value (including ones a future SDK release adds)
+        is treated as UNCLEAN. This is intentional — the failure mode
+        the new gate prevents is a silent pass through of truncated
+        responses, so erring conservative is the right default.
+
+        Implementations MUST raise :class:`LLMResponseFormatError` when
+        the vendor-native finish-reason field is missing or ``None``
+        from the response (a missing field is a structural surprise we
+        cannot classify, and the conservative default is to fail loud).
+        """
+
+    def unclean_finish_reason_message(self, response: object) -> str:
+        """Return a human-readable diagnostic when
+        :meth:`is_clean_completion` returns ``False`` (#155 DEC-007).
+
+        The default surfaces a provider-agnostic message; each concrete
+        provider overrides to name its vendor-native finish-reason field
+        (``stop_reason`` for Anthropic, ``finish_reason`` for OpenAI /
+        Gemini) so the operator-facing diagnostic stays vendor-accurate.
+        Called only by :func:`signalforge.llm.client.call_llm` when
+        :meth:`is_clean_completion` has returned ``False`` — overrides
+        SHOULD assume the response did not finish cleanly and pull the
+        vendor-native finish-reason value into the message.
+        """
+        del response  # the default doesn't probe the vendor-shaped response
+        return (
+            f"{type(self).__name__}: response did not finish with a clean "
+            "stop reason (the model may have been truncated, safety-filtered, "
+            "or hit a tool-use / recitation path)."
+        )
+
+    @abc.abstractmethod
     def estimate_input_tokens(
         self,
         model: str,
@@ -279,11 +329,50 @@ class AnthropicProvider(LLMProvider):
     supports_prompt_caching = True
     supports_token_count = True
 
+    #: Stop-reason values that signal a fully-emitted, untruncated response
+    #: (#155 DEC-006). ``tool_use`` is deliberately UNCLEAN in v0.3 — the
+    #: codebase doesn't use tools today; a ``tool_use`` stop_reason would
+    #: signal system-prompt drift or unexpected behaviour. When tool-use
+    #: intentionally lands, the clean set expands deliberately.
+    _CLEAN_STOP_REASONS: frozenset[str] = frozenset({"end_turn", "stop_sequence"})
+
     def make_client(self) -> object:
         """Construct the real ``anthropic.Anthropic`` client via the shim."""
         from signalforge.llm._anthropic_client import _make_anthropic_client
 
         return _make_anthropic_client()
+
+    def is_clean_completion(self, response: object) -> bool:
+        """Return ``True`` iff ``response.stop_reason`` is in
+        :attr:`_CLEAN_STOP_REASONS` (#155 DEC-005/DEC-006).
+
+        Anthropic responses carry the finish-signal on ``stop_reason``
+        (``end_turn`` / ``stop_sequence`` / ``max_tokens`` / ``tool_use`` /
+        ``pause_turn`` / ``refusal``). Per DEC-006, only ``end_turn`` and
+        ``stop_sequence`` are clean in v0.3. Raises
+        :class:`LLMResponseFormatError` if the field is missing / ``None``
+        — a structural surprise we cannot classify, and the conservative
+        default is to fail loud rather than silently treat as clean.
+        """
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        stop_reason = getattr(response, "stop_reason", None)
+        if stop_reason is None:
+            raise LLMResponseFormatError(
+                "Anthropic response is missing the `stop_reason` field.",
+            )
+        return stop_reason in self._CLEAN_STOP_REASONS
+
+    def unclean_finish_reason_message(self, response: object) -> str:
+        """Render a diagnostic naming the Anthropic ``stop_reason`` field
+        (#155 DEC-007). Called only when :meth:`is_clean_completion`
+        returned ``False``, so ``stop_reason`` is present but unclean."""
+        stop_reason = getattr(response, "stop_reason", None)
+        return (
+            f"Anthropic response did not finish with a clean stop reason "
+            f"(stop_reason={stop_reason!r}). Response may be truncated, "
+            "tool-use-initiated, or otherwise structurally incomplete."
+        )
 
     def build_create_kwargs(
         self,
@@ -525,11 +614,57 @@ class OpenAIProvider(LLMProvider):
     supports_prompt_caching = False
     supports_token_count = False
 
+    #: OpenAI finish-reason values that signal a fully-emitted, untruncated
+    #: response (#155 DEC-005). ``length`` (max_tokens truncation),
+    #: ``content_filter``, ``tool_calls``, and ``function_call`` are all
+    #: UNCLEAN — a ``length``-truncated response is the latent #155-bug
+    #: equivalent of Gemini's ``MAX_TOKENS``.
+    _CLEAN_STOP_REASONS: frozenset[str] = frozenset({"stop"})
+
     def make_client(self) -> object:
         """Construct the real OpenAI client (wrapped in the shim adapter)."""
         from signalforge.llm._openai_client import _make_openai_client
 
         return _make_openai_client()
+
+    def is_clean_completion(self, response: object) -> bool:
+        """Return ``True`` iff ``response.choices[0].finish_reason`` is in
+        :attr:`_CLEAN_STOP_REASONS` (#155 DEC-005).
+
+        OpenAI Chat Completions responses carry the finish-signal on
+        ``choices[0].finish_reason``. Raises
+        :class:`LLMResponseFormatError` if ``choices`` is missing/empty
+        or ``finish_reason`` is missing — mirrors
+        :meth:`extract_text_blocks`'s defensive checks at the same
+        structural surface.
+        """
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        choices = getattr(response, "choices", None)
+        if not choices:
+            raise LLMResponseFormatError(
+                "OpenAI response is missing the `choices` attribute or it is empty.",
+            )
+        first = choices[0]
+        finish_reason = getattr(first, "finish_reason", None)
+        if finish_reason is None:
+            raise LLMResponseFormatError(
+                "OpenAI response choice is missing the `finish_reason` field.",
+            )
+        return finish_reason in self._CLEAN_STOP_REASONS
+
+    def unclean_finish_reason_message(self, response: object) -> str:
+        """Render a diagnostic naming the OpenAI ``finish_reason`` field
+        (#155 DEC-007). Called only when :meth:`is_clean_completion`
+        returned ``False`` (and therefore the structural checks above
+        already passed), so ``choices[0].finish_reason`` is present."""
+        choices = getattr(response, "choices", None) or ()
+        finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
+        return (
+            f"OpenAI response did not finish with a clean stop reason "
+            f"(finish_reason={finish_reason!r}). Response may be truncated "
+            "(`length`), content-filtered, or tool-call-initiated."
+        )
 
     def build_create_kwargs(
         self,
@@ -799,12 +934,77 @@ class GeminiProvider(LLMProvider):
     supports_prompt_caching = False
     supports_token_count = False
 
+    #: Gemini finish-reason values (read as ``finish_reason.name`` —
+    #: the SDK ships it as an enum) that signal a fully-emitted,
+    #: untruncated response (#155 DEC-005). ``MAX_TOKENS``, ``SAFETY``,
+    #: ``RECITATION``, ``OTHER``, ``BLOCKLIST``, ``PROHIBITED_CONTENT``,
+    #: ``SPII``, ``MALFORMED_FUNCTION_CALL``, ``IMAGE_SAFETY``, … are all
+    #: UNCLEAN. ``MAX_TOKENS`` is the original #155 bug case.
+    _CLEAN_STOP_REASONS: frozenset[str] = frozenset({"STOP"})
+
     def make_client(self) -> object:
         """Build the real ``google.genai.Client`` via the shim, wrapped in
         the ``.messages`` façade adapter (DEC-001/004)."""
         from signalforge.llm._gemini_client import _make_gemini_client
 
         return _GeminiClientAdapter(_make_gemini_client())
+
+    def is_clean_completion(self, response: object) -> bool:
+        """Return ``True`` iff ``response.candidates[0].finish_reason.name``
+        is in :attr:`_CLEAN_STOP_REASONS` (#155 DEC-005).
+
+        Gemini responses carry the finish-signal on
+        ``candidates[0].finish_reason``, an enum exposing ``.name``
+        (``STOP`` / ``MAX_TOKENS`` / ``SAFETY`` / …). Raises
+        :class:`LLMResponseFormatError` if ``candidates`` is missing/empty
+        or the candidate is missing the ``finish_reason`` enum.
+
+        This gate, called by ``call_llm`` BEFORE
+        :meth:`extract_text_blocks`, is the load-bearing #155 fix: a
+        ``MAX_TOKENS`` truncation that produces a partial JSON text part
+        previously slipped past the existing "no text parts" check inside
+        :meth:`extract_text_blocks` (which only fires on *zero* text
+        parts), reached :func:`signalforge.grade.parser.parse_grade_response`,
+        and surfaced as the wrong typed degrade (``GradeOutputError``
+        instead of ``GradeLLMError``).
+        """
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        candidates = getattr(response, "candidates", None)
+        if not candidates:
+            raise LLMResponseFormatError(
+                "Gemini response is missing the `candidates` attribute or it is empty.",
+            )
+        first = candidates[0]
+        finish_reason = getattr(first, "finish_reason", None)
+        if finish_reason is None:
+            raise LLMResponseFormatError(
+                "Gemini response candidate is missing the `finish_reason` field.",
+            )
+        # SDK ships finish_reason as an enum with .name; fall back to the
+        # raw value for fake-test ergonomics so a bare-string fake also
+        # satisfies the check (mirrors extract_text_blocks's getattr
+        # fallback at the same surface).
+        name = getattr(finish_reason, "name", finish_reason)
+        return name in self._CLEAN_STOP_REASONS
+
+    def unclean_finish_reason_message(self, response: object) -> str:
+        """Render a diagnostic naming the Gemini ``finish_reason`` field
+        (#155 DEC-007). Called only when :meth:`is_clean_completion`
+        returned ``False`` (and therefore the structural checks above
+        already passed), so ``candidates[0].finish_reason`` is present."""
+        candidates = getattr(response, "candidates", None) or ()
+        finish_reason: object = None
+        if candidates:
+            fr_attr = getattr(candidates[0], "finish_reason", None)
+            if fr_attr is not None:
+                finish_reason = getattr(fr_attr, "name", fr_attr)
+        return (
+            f"Gemini response did not finish with a clean stop reason "
+            f"(finish_reason={finish_reason!r}). Response may be truncated "
+            "(`MAX_TOKENS`), safety-filtered (`SAFETY`/`RECITATION`/"
+            "`PROHIBITED_CONTENT`), or otherwise structurally incomplete."
+        )
 
     def build_create_kwargs(
         self,

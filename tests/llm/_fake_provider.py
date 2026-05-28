@@ -199,6 +199,20 @@ class FakeNoCacheProvider(LLMProvider):
             cache_read_input_tokens=0,
         )
 
+    def is_clean_completion(self, response: object) -> bool:
+        """Return ``True`` unconditionally — the canned response is always
+        a fully-emitted body (#155 US-001).
+
+        The fake's :class:`FakeNoCacheResponse` has no concept of a
+        finish reason; the neutrality tests drive the happy path so the
+        gate must let every canned response through. A test wanting to
+        exercise the unclean-path contract uses one of the concrete
+        provider tests (which speak their vendor's response shape) or
+        a per-test subclass.
+        """
+        del response
+        return True
+
     def classify_exception(self, exc: BaseException) -> ExceptionCategory:
         """Minimal exception → category map satisfying the ABC.
 
