@@ -350,3 +350,78 @@ def test_min_cacheable_tokens_dict_is_sorted_alphabetically_for_review() -> None
     assert _MIN_CACHEABLE_TOKENS["claude-haiku"] == 2048
     assert _MIN_CACHEABLE_TOKENS["claude-sonnet"] == 1024
     assert _MIN_CACHEABLE_TOKENS["claude-opus"] == 1024
+
+
+# ---------------------------------------------------------------------------
+# is_clean_completion orchestrator-wiring integration (#155 US-002 / DEC-005)
+# ---------------------------------------------------------------------------
+
+
+def test_call_llm_raises_llmresponseformaterror_on_unclean_stop_reason() -> None:
+    """:func:`call_llm` raises :class:`LLMResponseFormatError` at the
+    :meth:`AnthropicProvider.is_clean_completion` gate when the response
+    carries an unclean ``stop_reason`` (#155 US-002, pins DEC-005 wiring).
+
+    This is the orchestrator-level pin for the per-provider unclean-path
+    contract. It proves three things in one assertion:
+
+    1. **The gate fires inside ``call_llm``, not at the call-site.** The
+       fake returns a real ``FakeMessage`` (not an exception); the raise
+       comes from the orchestrator's post-call check.
+
+    2. **The gate fires AFTER ``messages.create`` returns and BEFORE
+       :meth:`AnthropicProvider.extract_text_blocks`** — exactly one
+       create call is observed, and the partial text the response carried
+       never reaches the JSON parser downstream. This is the load-bearing
+       routing per DEC-005: a truncated/safety-blocked/tool-use response
+       routes to ``LLMResponseFormatError`` → (via grade-engine wrap)
+       ``GradeLLMError`` → conservative degrade, not to the wrong
+       typed degrade (``GradeOutputError`` from a partial-JSON parse).
+
+    3. **No retry is attempted.** ``LLMResponseFormatError`` is raised
+       outside the retry try/except (``client.py:476-488``) so it is
+       explicitly non-retryable — retrying a truncated generation gets
+       you the same truncation. Exactly one create call.
+
+    Companion sibling pin: ``tests/grade/test_gemini_neutrality.py:381``
+    asserts ``bad.reasoning == "call failed: GradeLLMError"`` for the
+    safety-blocked Gemini path, which now also covers MAX_TOKENS via the
+    same orchestrator routing. That pin MUST continue to pass unmodified
+    after this change lands.
+    """
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_ok_count_response())
+    # Truncated-at-max_tokens response with partial JSON in the content.
+    # Before #155, this would have slipped past ``extract_text_blocks``
+    # (which only raised on ZERO blocks), reached the JSON parser, and
+    # surfaced as ``GradeOutputError`` — the wrong typed degrade.
+    unclean = FakeMessage(
+        content=[FakeTextBlock(text='{"score": 0.9, "reasoning": "partial truncated')],
+        usage=FakeUsage(input_tokens=120, output_tokens=45),
+        stop_reason="max_tokens",
+    )
+    fake.expect_messages_create(matching={}, returns=unclean)
+
+    from signalforge.llm.errors import LLMResponseFormatError
+
+    with pytest.raises(LLMResponseFormatError) as excinfo:
+        call_llm(
+            system="sys",
+            cached_block="x" * _DEFAULT_CACHED_TOKENS,
+            dynamic_block="y" * 50,
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            prompt_version="v1",
+            client=fake,
+        )
+
+    # The error message is what
+    # :meth:`AnthropicProvider.unclean_finish_reason_message` returned:
+    # vendor-accurate field name + the offending value.
+    assert "stop_reason" in str(excinfo.value)
+    assert "'max_tokens'" in str(excinfo.value)
+
+    # Exactly one create call — no retry, no leak through to
+    # extract_text_blocks.
+    assert len(fake.create_calls) == 1
+    fake.assert_all_expectations_met()
