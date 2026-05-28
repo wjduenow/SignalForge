@@ -44,6 +44,17 @@ The `tests/llm/test_prompt_cache_stability.py` snapshot pins the cached-block by
 
 `signalforge.llm.client` emits `WARNING: cache marker no-op` only when **both** `cache_creation_input_tokens == 0` and `cache_read_input_tokens == 0` despite the cached block carrying a marker and passing pre-send size check. `cache_creation == 0` alone is the **normal healthy cache-hit case**. Any future "cache health" signal must apply the same dual-zero pattern.
 
+## Tolerant JSON extraction — prose-preamble guardrail (issue #144)
+
+`claude-sonnet-4-6` reproducibly narrates a reasoning preamble ("I need to analyze the business rules carefully...") **before** the JSON object on the business-rules drafting path, so `parse_draft_response`'s strict `CandidateSchema.model_validate_json` failed at line 1. **Assistant-turn prefill (the usual "JSON only" guardrail) is NOT available on this model** — the API rejects it with HTTP 400 `"This model does not support assistant message prefill. The conversation must end with a user message."` So the **parser is the only place a JSON-only guarantee can live**; the prompt is advisory.
+
+`parse_draft_response` routes `raw_text` through `signalforge._common.json_payload.extract_json_payload` before `model_validate_json`. The helper strips a leading prose preamble (and trailing content) around a cleanly-decodable JSON value. Two load-bearing rules:
+
+1. **Decode at the FIRST `{`/`[` only — never scan deeper.** A truncated outer object (whose first brace fails to decode) would otherwise match a complete *inner* fragment, silently turning a "not valid JSON" failure into a wrong-shape parse. On first-candidate failure the helper returns the input unchanged so the strict parser raises the normal `LLMOutputJSONError` with the correct excerpt/position — the truncated/garbage paths are unchanged.
+2. **Error envelopes keep the ORIGINAL `raw_text`** (preamble included) so incident reports show exactly what the model emitted; only the `model_validate_json` call sees the extracted payload. The response-audit `response_text_hash` is likewise unchanged (hashes the full API response).
+
+The grade parser shares the same helper (`grade-layer.md`). Prompt-level "JSON only" hardening (the issue's option 3) was deliberately NOT added: it would rotate the cached system-prompt golden for no load-bearing gain once the parser is the guarantee.
+
 ## Whole-draft fail-loud anchor contract (DEC-003, DEC-022)
 
 `signalforge.draft.parser._validate_anchor_contract` collects **every** violation — never short-circuits. Returns a tuple; non-empty raises `LLMOutputAnchorContractError(violations=...)` with the full list. Three independent checks per column:

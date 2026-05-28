@@ -50,6 +50,7 @@ See ``plans/super/6-prune-engine.md`` for the full design.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import blake2b
@@ -58,18 +59,41 @@ from typing import TYPE_CHECKING
 from signalforge.draft.models import (
     CandidateTest,
     CandidateTestAcceptedValues,
+    CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
     CandidateTestUnique,
 )
-from signalforge.warehouse._sql_safety import escape_bq_string_literal, validate_identifier
-from signalforge.warehouse.errors import InvalidIdentifierError
+from signalforge.manifest.errors import (
+    AmbiguousRefError,
+    RefNotFoundError,
+    SourceNotFoundError,
+    TemplateResolutionError,
+)
+from signalforge.manifest.template import resolve_template_refs
+from signalforge.warehouse._sample_sql import render_sample_select
+from signalforge.warehouse._sql_safety import (
+    escape_bq_string_literal,
+    validate_identifier,
+    validate_test_sql,
+)
+from signalforge.warehouse.errors import InvalidIdentifierError, QuerySyntaxError
 from signalforge.warehouse.models import PartitionFilter, TableRef
 
 if TYPE_CHECKING:
-    from signalforge.manifest.models import Manifest
+    from signalforge.manifest.models import Manifest, Model
     from signalforge.prune.models import Scope
     from signalforge.warehouse.models import Dialect
+
+
+# Word-boundary, case-insensitive ``JOIN`` detector used as the cheap
+# multi-table heuristic for ``custom_sql`` tests (DEC-006). A test whose
+# resolved SQL contains a ``JOIN`` references more than one table; sampling
+# only one side of a join produces false negatives (an orphan-detection
+# join against a sampled child would miss parents absent from the sample),
+# so multi-table tests run unsampled (full-scan) bounded by the adapter's
+# ``maximum_bytes_billed`` cap.
+_JOIN_RE = re.compile(r"\bjoin\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +132,26 @@ class _InvalidIdentifier:
     reason: str
 
 
-def _render_partition_filter(pf: PartitionFilter, quote_char: str) -> str:
+def _fold_identifier(identifier: str, dialect: Dialect) -> str:
+    """Case-fold ``identifier`` per :attr:`Dialect.identifier_case` (DEC-003).
+
+    ``"upper"`` → ``.upper()`` (Snowflake folds unquoted identifiers to
+    UPPERCASE, so a conventional ``CREATE TABLE(customer_id …)`` stores
+    ``CUSTOMER_ID``); ``"lower"`` → ``.lower()`` (Postgres); ``"preserve"``
+    → unchanged (BigQuery — keeps the 11 BigQuery snapshots byte-identical).
+
+    Folding runs BEFORE quoting so the always-quote injection-safe posture
+    is preserved while the quoted name still resolves against conventional
+    Snowflake/dbt tables.
+    """
+    if dialect.identifier_case == "upper":
+        return identifier.upper()
+    if dialect.identifier_case == "lower":
+        return identifier.lower()
+    return identifier
+
+
+def _render_partition_filter(pf: PartitionFilter, dialect: Dialect) -> str:
     """Render a :class:`PartitionFilter` to a SQL fragment for the WHERE clause.
 
     Mirrors :meth:`signalforge.warehouse.adapters.bigquery.BigQueryAdapter._render_partition_filter`
@@ -117,20 +160,22 @@ def _render_partition_filter(pf: PartitionFilter, quote_char: str) -> str:
     matches what the warehouse adapter would emit on its own
     ``sample_rows`` path.
 
-    ``datetime`` → ``TIMESTAMP('…')``; ``date`` → ``DATE('…')``;
-    ``str`` is escaped via :func:`escape_bq_string_literal` for safe
-    inclusion inside a single-quoted BigQuery string literal. The column
-    name is already DEC-013-validated by :class:`PartitionFilter`'s
-    ``__post_init__``.
+    ``datetime`` renders via :attr:`Dialect.timestamp_literal_template`
+    (BigQuery ``TIMESTAMP('…')`` / Snowflake ``'…'::TIMESTAMP``); ``date``
+    via :attr:`Dialect.date_literal_template`; ``str`` is escaped via
+    :func:`escape_bq_string_literal` for safe inclusion inside a
+    single-quoted string literal. The column name is already
+    DEC-013-validated by :class:`PartitionFilter`'s ``__post_init__`` and
+    is folded+quoted per the dialect (DEC-003).
     """
     # ``datetime`` is a subclass of ``date``, so check it first.
     if isinstance(pf.value, datetime):
-        rendered = f"TIMESTAMP('{pf.value.isoformat()}')"
+        rendered = dialect.timestamp_literal_template.format(value=pf.value.isoformat())
     elif isinstance(pf.value, date):
-        rendered = f"DATE('{pf.value.isoformat()}')"
+        rendered = dialect.date_literal_template.format(value=pf.value.isoformat())
     else:
         rendered = f"'{escape_bq_string_literal(str(pf.value))}'"
-    return f"{quote_char}{pf.column}{quote_char} {pf.op} {rendered}"
+    return f"{_quote(pf.column, dialect)} {pf.op} {rendered}"
 
 
 def _render_sample_cte(
@@ -139,7 +184,7 @@ def _render_sample_cte(
     sample_size: int,
     sample_bucket: int,
     partition_filter: PartitionFilter | None,
-    quote_char: str,
+    dialect: Dialect,
 ) -> str:
     """Render a deterministic-sample CTE matching the adapter's
     :meth:`signalforge.warehouse.adapters.bigquery.BigQueryAdapter.sample_rows`
@@ -149,28 +194,46 @@ def _render_sample_cte(
 
         WITH sample AS (
             SELECT * FROM <table> AS t
-            WHERE MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), <bucket>) < 1
+            WHERE MOD(<dialect.sample_row_hash_expr>, <bucket>) < 1
               [AND <partition_filter>]
             LIMIT <sample_size>
         )
         <test SQL targeting sample>
 
-    The hash-mod predicate is identical to the adapter's
-    ``sample_rows`` deterministic-sample shape (DEC-006 of issue #3) so
-    sampling decisions stay consistent between the adapter's internal
-    samples and the prune engine's wrapped tests.
+    The hash-mod predicate is rendered from
+    :attr:`Dialect.sample_row_hash_expr` (BigQuery
+    ``ABS(FARM_FINGERPRINT(TO_JSON_STRING(t)))`` / Snowflake
+    ``ABS(HASH(*))``) so sampling decisions stay consistent between the
+    adapter's internal samples and the prune engine's wrapped tests
+    (DEC-006 of issue #3; DEC-002 of issue #121).
+
+    The CTE body is built by the shared
+    :func:`signalforge.warehouse._sample_sql.render_sample_select` so the
+    compiler's sample CTE and the warehouse adapter's sample ``SELECT``
+    stay byte-consistent (issue #139, DEC-002). The compiler CTE carries
+    **no** ``ORDER BY`` (``order_by_hash=False``); the partition predicate
+    is rendered by the compiler's own dialect-correct
+    :func:`_render_partition_filter` and passed as ``extra_where``.
     """
-    where_clauses = [
-        f"MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), {sample_bucket}) < 1",
-    ]
-    if partition_filter is not None:
-        where_clauses.append(_render_partition_filter(partition_filter, quote_char))
-    where_sql = " AND ".join(where_clauses)
-    return f"WITH sample AS (SELECT * FROM {table} AS t WHERE {where_sql} LIMIT {sample_size})"
+    extra_where = (
+        _render_partition_filter(partition_filter, dialect)
+        if partition_filter is not None
+        else None
+    )
+    body = render_sample_select(
+        table,
+        dialect=dialect,
+        sample_bucket=sample_bucket,
+        sample_size=sample_size,
+        extra_where=extra_where,
+        order_by_hash=False,
+    )
+    return f"WITH {dialect.sample_cte_alias} AS ({body})"
 
 
-def _quote(identifier: str, quote_char: str) -> str:
-    """Wrap ``identifier`` in ``quote_char`` for SQL embedding.
+def _quote(identifier: str, dialect: Dialect) -> str:
+    """Fold (per :attr:`Dialect.identifier_case`) then wrap ``identifier`` in
+    :attr:`Dialect.quote_char` for SQL embedding (DEC-003).
 
     The compiler trusts adapter-validated identifiers on
     :class:`TableRef` — :func:`signalforge.warehouse._sql_safety.validate_identifier`
@@ -180,21 +243,39 @@ def _quote(identifier: str, quote_char: str) -> str:
     pass through the drafter's anchor-contract validator before reaching
     the compiler; the orchestrator's :class:`TableRef` construction is
     the gate, not this function.
+
+    Case folding runs on the already-validated token, so it cannot
+    introduce a quote-breaking character. BigQuery's ``"preserve"`` makes
+    folding a no-op — the existing snapshots stay byte-identical.
     """
-    return f"{quote_char}{identifier}{quote_char}"
+    folded = _fold_identifier(identifier, dialect)
+    return f"{dialect.quote_char}{folded}{dialect.quote_char}"
 
 
-def _qualified_table_name(table_ref: TableRef, quote_char: str) -> str:
+def _qualified_table_name(table_ref: TableRef, dialect: Dialect) -> str:
     """Render a fully-qualified ``project.dataset.name`` table identifier.
 
-    Matches the BigQuery convention ``\\`project.dataset.table\\``` (entire
-    qualified path inside one pair of backticks). Dialects with a different
-    quote_char get the same shape with their own quote character so v0.2
-    ports drop in without compiler changes (DEC-025).
+    Branches on :attr:`Dialect.quote_qualified_per_component` (DEC-002):
+
+    * ``False`` (BigQuery) — the entire dotted path is wrapped in one pair
+      of quote characters (``\\`project.dataset.table\\```). No case folding
+      (BigQuery's ``identifier_case="preserve"``) so the 11 BigQuery
+      snapshots stay byte-identical.
+    * ``True`` (Snowflake) — each component is folded+quoted separately and
+      joined with ``.`` (``"DB"."SCH"."T"``), because a single quoted string
+      spanning dots reads as one literal identifier named ``db.schema.table``.
     """
+    if dialect.quote_qualified_per_component:
+        components = (
+            [table_ref.dataset, table_ref.name]
+            if table_ref.project is None
+            else [table_ref.project, table_ref.dataset, table_ref.name]
+        )
+        return ".".join(_quote(component, dialect) for component in components)
+    qc = dialect.quote_char
     if table_ref.project is None:
-        return f"{quote_char}{table_ref.dataset}.{table_ref.name}{quote_char}"
-    return f"{quote_char}{table_ref.project}.{table_ref.dataset}.{table_ref.name}{quote_char}"
+        return f"{qc}{table_ref.dataset}.{table_ref.name}{qc}"
+    return f"{qc}{table_ref.project}.{table_ref.dataset}.{table_ref.name}{qc}"
 
 
 def _wrap_with_sample_or_partition(
@@ -206,7 +287,7 @@ def _wrap_with_sample_or_partition(
     sample_size: int | None,
     sample_bucket: int | None,
     partition_filter: PartitionFilter | None,
-    quote_char: str,
+    dialect: Dialect,
 ) -> str:
     """Apply scope/sample/partition_filter wrapping to a per-test SELECT.
 
@@ -250,12 +331,12 @@ def _wrap_with_sample_or_partition(
             sample_size=sample_size,
             sample_bucket=sample_bucket,
             partition_filter=partition_filter,
-            quote_char=quote_char,
+            dialect=dialect,
         )
         return f"{cte} {test_sql}"
     # scope == "full"
     if partition_filter is not None:
-        partition_sql = _render_partition_filter(partition_filter, quote_char)
+        partition_sql = _render_partition_filter(partition_filter, dialect)
         # Compose via derived table so per-test WHERE-clause shapes don't
         # have to be edited. Every per-test compiler emits exactly one
         # ``FROM <table_sql>`` fragment for the primary (child) table.
@@ -273,7 +354,7 @@ def _wrap_with_sample_or_partition(
 def _compile_not_null(
     test: CandidateTestNotNull,
     table_ref: TableRef,
-    quote_char: str,
+    dialect: Dialect,
     *,
     scope: Scope,
     sample_size: int | None,
@@ -289,9 +370,9 @@ def _compile_not_null(
                 f"candidate test references an invalid identifier shape: column={test.column!r}"
             )
         )
-    col = _quote(test.column, quote_char)
-    table = _qualified_table_name(table_ref, quote_char)
-    target = "sample" if scope == "sample" else table
+    col = _quote(test.column, dialect)
+    table = _qualified_table_name(table_ref, dialect)
+    target = dialect.sample_cte_alias if scope == "sample" else table
     test_sql = f"SELECT {col} FROM {target} WHERE {col} IS NULL"
     return _wrap_with_sample_or_partition(
         test_sql=test_sql,
@@ -301,14 +382,14 @@ def _compile_not_null(
         sample_size=sample_size,
         sample_bucket=sample_bucket,
         partition_filter=partition_filter,
-        quote_char=quote_char,
+        dialect=dialect,
     )
 
 
 def _compile_unique(
     test: CandidateTestUnique,
     table_ref: TableRef,
-    quote_char: str,
+    dialect: Dialect,
     *,
     scope: Scope,
     sample_size: int | None,
@@ -329,9 +410,9 @@ def _compile_unique(
                 f"candidate test references an invalid identifier shape: column={test.column!r}"
             )
         )
-    col = _quote(test.column, quote_char)
-    table = _qualified_table_name(table_ref, quote_char)
-    target = "sample" if scope == "sample" else table
+    col = _quote(test.column, dialect)
+    table = _qualified_table_name(table_ref, dialect)
+    target = dialect.sample_cte_alias if scope == "sample" else table
     test_sql = (
         f"SELECT {col} FROM {target} WHERE {col} IS NOT NULL GROUP BY {col} HAVING COUNT(*) > 1"
     )
@@ -343,14 +424,14 @@ def _compile_unique(
         sample_size=sample_size,
         sample_bucket=sample_bucket,
         partition_filter=partition_filter,
-        quote_char=quote_char,
+        dialect=dialect,
     )
 
 
 def _compile_accepted_values(
     test: CandidateTestAcceptedValues,
     table_ref: TableRef,
-    quote_char: str,
+    dialect: Dialect,
     *,
     scope: Scope,
     sample_size: int | None,
@@ -376,9 +457,9 @@ def _compile_accepted_values(
                 f"candidate test references an invalid identifier shape: column={test.column!r}"
             )
         )
-    col = _quote(test.column, quote_char)
-    table = _qualified_table_name(table_ref, quote_char)
-    target = "sample" if scope == "sample" else table
+    col = _quote(test.column, dialect)
+    table = _qualified_table_name(table_ref, dialect)
+    target = dialect.sample_cte_alias if scope == "sample" else table
     rendered_values = ", ".join(f"'{escape_bq_string_literal(v)}'" for v in test.values)
     test_sql = (
         f"SELECT {col} FROM {target} WHERE {col} IS NOT NULL AND {col} NOT IN ({rendered_values})"
@@ -391,7 +472,7 @@ def _compile_accepted_values(
         sample_size=sample_size,
         sample_bucket=sample_bucket,
         partition_filter=partition_filter,
-        quote_char=quote_char,
+        dialect=dialect,
     )
 
 
@@ -439,7 +520,7 @@ def _resolve_parent_table_ref(
 def _compile_relationships(
     test: CandidateTestRelationships,
     table_ref: TableRef,
-    quote_char: str,
+    dialect: Dialect,
     manifest: Manifest,
     *,
     scope: Scope,
@@ -483,11 +564,11 @@ def _compile_relationships(
     if isinstance(parent_table_ref, _RequiresFutureData):
         return parent_table_ref
 
-    child_col = _quote(test.column, quote_char)
-    parent_col = _quote(test.field, quote_char)
-    child_table = _qualified_table_name(table_ref, quote_char)
-    parent_table = _qualified_table_name(parent_table_ref, quote_char)
-    child_target = "sample" if scope == "sample" else child_table
+    child_col = _quote(test.column, dialect)
+    parent_col = _quote(test.field, dialect)
+    child_table = _qualified_table_name(table_ref, dialect)
+    parent_table = _qualified_table_name(parent_table_ref, dialect)
+    child_target = dialect.sample_cte_alias if scope == "sample" else child_table
     test_sql = (
         f"SELECT child.{child_col} "
         f"FROM {child_target} AS child "
@@ -503,8 +584,225 @@ def _compile_relationships(
         sample_size=sample_size,
         sample_bucket=sample_bucket,
         partition_filter=partition_filter,
-        quote_char=quote_char,
+        dialect=dialect,
     )
+
+
+def _is_multi_table(resolved_sql: str) -> bool:
+    """Cheap multi-table heuristic for a resolved ``custom_sql`` body (DEC-006).
+
+    Returns ``True`` when the resolved SQL contains a word-boundary
+    ``JOIN`` keyword (case-insensitive). String literals are stripped
+    first via :func:`signalforge.warehouse._sql_safety._strip_string_literals`
+    so a ``JOIN`` appearing inside a quoted value (``WHERE label = 'pre-join'``)
+    does not flip the heuristic to full-scan.
+
+    A multi-table test runs unsampled (full-scan) because sampling only
+    one table of a join is semantically wrong — an orphan-detection join
+    against a sampled child would report false orphans for parents that
+    are simply absent from the sample. Full-scan is bounded later by the
+    adapter's ``maximum_bytes_billed`` cap; over-cap is the engine's
+    concern (US-008), not the compiler's.
+    """
+    from signalforge.warehouse._sql_safety import _strip_string_literals
+
+    return _JOIN_RE.search(_strip_string_literals(resolved_sql)) is not None
+
+
+def _compile_custom_sql(
+    test: CandidateTestCustomSQL,
+    table_ref: TableRef,
+    dialect: Dialect,
+    manifest: Manifest,
+    model: Model | None,
+    *,
+    scope: Scope,
+    sample_size: int | None,
+    sample_bucket: int | None,
+    partition_filter: PartitionFilter | None,
+) -> str | _RequiresFutureData | _InvalidIdentifier:
+    """Compile a ``custom_sql`` singular test to a failing-rows SELECT.
+
+    Per dbt's singular-test contract (DEC-003), ``test.sql`` is itself a
+    full SELECT that returns the *failing* rows: zero rows means the test
+    passes. The compiler:
+
+    1. **Resolves dbt-Jinja refs** via
+       :func:`signalforge.manifest.template.resolve_template_refs` —
+       ``{{ this }}`` → the model's qualified name, ``{{ ref(...) }}`` /
+       ``{{ source(...) }}`` → the referenced table's qualified name.
+       Control-flow Jinja, ``var()`` / ``env_var()``, and macro calls are
+       unsupported and surface as :class:`TemplateResolutionError`
+       (DEC-004).
+    2. **Runs SQL-safety pre-flight** (:func:`validate_test_sql`) on the
+       *resolved* SQL (DEC-008). Stray ``;`` / ``--`` / ``/* */`` / unbalanced
+       parens are rejected.
+    3. **Returns the resolved failing-rows SELECT** for the adapter to wrap
+       with ``SELECT COUNT(*) AS failures FROM (<sql>) AS t`` — identical
+       to how the four built-in variants return their inner SELECT. The
+       compiler does NOT pre-wrap the ``count(*)`` itself: the adapter's
+       :meth:`run_test_sql` owns that envelope, and pre-wrapping here would
+       double-count.
+
+    Conservative-bias routing (DEC-006, DEC-008): Jinja-resolution failure
+    (:class:`TemplateResolutionError` / :class:`UnsupportedJinjaError`),
+    :class:`AmbiguousRefError`, and SQL-safety rejection return an
+    :class:`_InvalidIdentifier` sentinel rather than raising — the
+    orchestrator routes the sentinel to ``kept-without-evidence``
+    (decision="kept") so a test SignalForge cannot evaluate is shipped,
+    not silently dropped. An unresolvable ``{{ ref(...) }}`` /
+    ``{{ source(...) }}`` whose target is absent from the manifest
+    (:class:`RefNotFoundError` / :class:`SourceNotFoundError`) returns a
+    :class:`_RequiresFutureData` sentinel instead — the referenced
+    model/source isn't built yet, mirroring the ``relationships``
+    missing-target precedent (DEC-026), so it routes to
+    ``requires-future-data``. None of these errors ever propagate out of
+    the compiler. Compilation stays total (DEC-006): every candidate
+    yields compiled SQL or a structured sentinel.
+
+    Single-table vs. multi-table (DEC-006, DEC-009):
+
+    * **Single-table** (no ``JOIN`` after resolution) — the resolved SQL
+      references only the model's own table. In ``scope="sample"`` the
+      model's own qualified table name is substituted with the deterministic
+      ``sample`` CTE alias and the CTE is prepended (mirrors the built-ins).
+      In ``scope="full"`` with a ``partition_filter``, the model's table is
+      replaced with a partition-filtered derived table.
+    * **Multi-table** (a ``JOIN`` keyword survives literal-stripping) — runs
+      full-scan (unsampled). A partition filter is still applied to the
+      model's own table when one is available.
+
+    ``model`` carries the :class:`Model` under prune so the Jinja resolver
+    can map ``{{ this }}`` and so single-table substitution knows the
+    model's own qualified name. When ``model is None`` (no model threaded
+    through), the test cannot be resolved and routes to the sentinel.
+    """
+    if model is None:
+        # The orchestrator must thread ``model`` for custom_sql resolution.
+        # Absent it, conservatively route to kept-without-evidence rather
+        # than raising — the LLM proposed the test; absent a way to resolve
+        # its refs we ship it for the operator to decide.
+        return _InvalidIdentifier(
+            reason="custom_sql test cannot be resolved without the model under prune"
+        )
+
+    try:
+        resolved_sql = resolve_template_refs(test.sql, model, manifest)
+    except (RefNotFoundError, SourceNotFoundError) as exc:
+        # The ref()/source() target is not in the manifest yet — the
+        # referenced model/source simply isn't built. Mirror the
+        # relationships missing-target precedent (DEC-026): route to
+        # requires-future-data so the operator revisits when the
+        # dependency lands. NEVER raise — these are ManifestError
+        # siblings of TemplateResolutionError, not subclasses, so the
+        # broader handler below would not catch them.
+        return _RequiresFutureData(
+            reason=f"custom_sql references a manifest-absent target: {type(exc).__name__}"
+        )
+    except AmbiguousRefError as exc:
+        # Genuine user ambiguity (the ref() name matches multiple
+        # packages), not future data. Route to kept-without-evidence so a
+        # reviewer disambiguates with the two-arg ref('pkg','name') form.
+        return _InvalidIdentifier(reason=f"custom_sql ref() is ambiguous: {type(exc).__name__}")
+    except TemplateResolutionError as exc:
+        # Covers both UnsupportedJinjaError and the residual-{{ }} case.
+        return _InvalidIdentifier(
+            reason=f"custom_sql Jinja could not be resolved: {type(exc).__name__}"
+        )
+
+    try:
+        validate_test_sql(resolved_sql)
+    except QuerySyntaxError:
+        return _InvalidIdentifier(
+            reason="custom_sql rejected by SQL safety pre-flight on resolved SQL"
+        )
+
+    # The model's own qualified table name, as the Jinja resolver emits it
+    # (dialect-neutral ``[project.]dataset.name``) — this is the substring
+    # we look for when sampling / partition-filtering the single-table case.
+    own_qualified = model.resolve_this().qualified_name
+    own_table_quoted = _qualified_table_name(table_ref, dialect)
+
+    if _is_multi_table(resolved_sql):
+        # Multi-table: full-scan. Apply a partition filter to the model's
+        # own table when available; otherwise return the resolved SQL
+        # unchanged. Sampling a join is semantically wrong (DEC-006).
+        if partition_filter is not None:
+            partition_sql = _render_partition_filter(partition_filter, dialect)
+            replacement = f"(SELECT * FROM {own_qualified} WHERE {partition_sql})"
+            if own_qualified in resolved_sql:
+                return resolved_sql.replace(own_qualified, replacement, 1)
+        return resolved_sql
+
+    # Single-table.
+    if scope == "sample":
+        if sample_size is None or sample_bucket is None:
+            raise ValueError(
+                "scope='sample' requires both sample_size and sample_bucket; "
+                "the orchestrator should have computed these before calling _compile_test."
+            )
+        # Fail closed when the resolved SQL never references the model's own
+        # qualified name: there is nothing to substitute with the ``sample``
+        # CTE alias, so running the SQL as-is would read the full source
+        # table instead of the sample. Route to kept-without-evidence rather
+        # than silently sampling the wrong (unsampled) table.
+        if own_qualified not in resolved_sql:
+            return _InvalidIdentifier(
+                reason=(
+                    "custom_sql does not reference the model's own table "
+                    "({{ this }}); cannot bind the deterministic sample"
+                )
+            )
+        # Substitute the model's own table with the ``sample`` CTE alias,
+        # then prepend the deterministic-sample CTE bound to the real table.
+        # Replace ALL occurrences (P2 fix): a single-table custom_sql that
+        # references its own table more than once (correlated subquery /
+        # self-UNION without a JOIN) would otherwise leave later occurrences
+        # reading the full source table.
+        sampled_sql = resolved_sql.replace(own_qualified, dialect.sample_cte_alias)
+        cte = _render_sample_cte(
+            own_table_quoted,
+            sample_size=sample_size,
+            sample_bucket=sample_bucket,
+            partition_filter=partition_filter,
+            dialect=dialect,
+        )
+        return f"{cte} {sampled_sql}"
+
+    # scope == "full" single-table.
+    #
+    # P0 fix: when the orchestrator substituted a DIFFERENT physical table
+    # for ``table_ref`` than the model's own source (i.e. the materialised
+    # temp table under ``sample_strategy="materialised"`` + ``scope="sample"``,
+    # which the engine compiles as effective ``scope="full"`` against the
+    # temp table), rewrite ALL occurrences of the model's own qualified name
+    # to the quoted ``table_ref`` so the test reads the sample rather than
+    # full-scanning the production source. This mirrors the built-in
+    # compilers, which always FROM ``table_ref``.
+    if table_ref.qualified_name != own_qualified:
+        # The effective table is NOT the model's own source (materialised
+        # sample). Fail closed when the resolved SQL never names the model's
+        # own table: there is nothing to rewrite to the sample table, so
+        # running it as-is would read the wrong/source table rather than the
+        # materialised sample. Route to kept-without-evidence.
+        if own_qualified not in resolved_sql:
+            return _InvalidIdentifier(
+                reason=(
+                    "custom_sql does not reference the model's own table "
+                    "({{ this }}); cannot bind the materialised sample"
+                )
+            )
+        return resolved_sql.replace(own_qualified, own_table_quoted)
+
+    # No substitution (``table_ref`` IS the model's own table — the oneshot /
+    # full-strategy path): compose a partition filter via derived table when
+    # one is available (uniform with the built-ins).
+    if partition_filter is not None:
+        partition_sql = _render_partition_filter(partition_filter, dialect)
+        replacement = f"(SELECT * FROM {own_qualified} WHERE {partition_sql})"
+        if own_qualified in resolved_sql:
+            return resolved_sql.replace(own_qualified, replacement)
+    return resolved_sql
 
 
 def _compile_test(
@@ -513,6 +811,7 @@ def _compile_test(
     dialect: Dialect,
     manifest: Manifest,
     *,
+    model: Model | None = None,
     scope: Scope = "full",
     sample_size: int | None = None,
     sample_bucket: int | None = None,
@@ -536,6 +835,18 @@ def _compile_test(
     check returns :class:`_InvalidIdentifier`; the orchestrator
     distinguishes the three return shapes via :func:`isinstance`.
 
+    A ``custom_sql`` (singular) test resolves its dbt-Jinja refs
+    (``{{ this }}`` / ``{{ ref() }}`` / ``{{ source() }}``) via
+    :func:`signalforge.manifest.template.resolve_template_refs` then runs a
+    :func:`validate_test_sql` pre-flight on the resolved SQL; both
+    Jinja-resolution failure and SQL-safety rejection return an
+    :class:`_InvalidIdentifier` sentinel (DEC-006 / DEC-008). The
+    ``model`` keyword carries the :class:`Model` under prune for ``{{ this }}``
+    resolution and single-table substitution — the four built-in variants
+    ignore it. Single-table custom tests are sample-wrapped like the
+    built-ins; multi-table tests (a ``JOIN`` survives literal-stripping)
+    run full-scan (DEC-006 / DEC-009).
+
     Sampling and partition-filter wiring (post-PR-#20 review fix):
 
     * ``scope="sample"`` — wraps the test in a deterministic-sample CTE
@@ -553,12 +864,11 @@ def _compile_test(
       sample is not a false positive of the parent's missing-from-sample
       row. ``partition_filter`` likewise applies to the child only.
     """
-    quote_char = dialect.quote_char
     if isinstance(test, CandidateTestNotNull):
         return _compile_not_null(
             test,
             table_ref,
-            quote_char,
+            dialect,
             scope=scope,
             sample_size=sample_size,
             sample_bucket=sample_bucket,
@@ -568,7 +878,7 @@ def _compile_test(
         return _compile_unique(
             test,
             table_ref,
-            quote_char,
+            dialect,
             scope=scope,
             sample_size=sample_size,
             sample_bucket=sample_bucket,
@@ -578,22 +888,40 @@ def _compile_test(
         return _compile_accepted_values(
             test,
             table_ref,
-            quote_char,
+            dialect,
             scope=scope,
             sample_size=sample_size,
             sample_bucket=sample_bucket,
             partition_filter=partition_filter,
         )
-    # Only CandidateTestRelationships remains in the discriminated union.
-    return _compile_relationships(
-        test,
-        table_ref,
-        quote_char,
-        manifest,
-        scope=scope,
-        sample_size=sample_size,
-        sample_bucket=sample_bucket,
-        partition_filter=partition_filter,
+    if isinstance(test, CandidateTestRelationships):
+        return _compile_relationships(
+            test,
+            table_ref,
+            dialect,
+            manifest,
+            scope=scope,
+            sample_size=sample_size,
+            sample_bucket=sample_bucket,
+            partition_filter=partition_filter,
+        )
+    if isinstance(test, CandidateTestCustomSQL):
+        return _compile_custom_sql(
+            test,
+            table_ref,
+            dialect,
+            manifest,
+            model,
+            scope=scope,
+            sample_size=sample_size,
+            sample_bucket=sample_bucket,
+            partition_filter=partition_filter,
+        )
+    # The discriminated union is closed over the five variants above; an
+    # unreachable arm here means a sixth variant was added without a
+    # compiler branch.
+    raise NotImplementedError(  # pragma: no cover
+        f"no compiler branch for candidate test variant {type(test).__name__}"
     )
 
 

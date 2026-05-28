@@ -39,7 +39,8 @@ the layer stays SDK-agnostic and pyright-clean.
 | `DraftOutcome`          | model     | Frozen Pydantic value object: `(candidate, request, result)`. The thing every downstream stage receives.               |
 | `CandidateSchema`       | model     | The parsed schema the LLM produced: `(name, description, columns, tests, …)`. Frozen, `extra="ignore"` for read-back tolerance. |
 | `CandidateColumn`       | model     | One column on a `CandidateSchema`: `(name, description, rationale, tests, meta)`.                                      |
-| `CandidateTest`         | type      | Discriminated union over `not_null` / `unique` / `accepted_values` / `relationships` test variants. Discriminator: `type`. |
+| `CandidateTest`         | type      | Discriminated union over `not_null` / `unique` / `accepted_values` / `relationships` / `custom_sql` test variants. Discriminator: `type`. |
+| `CandidateTestCustomSQL`| model     | The fifth variant (issue #116): a custom singular SQL business-rule test. Carries `sql` (a failing-rows SELECT), optional `column`, optional `rationale`. See [§ Custom business-rule tests](#custom-business-rule-tests-custom_sql). |
 | `DraftConfig`           | model     | Config-shaped (`extra="forbid"`) Pydantic model mirroring the `llm:` block of `signalforge.yml`.                       |
 | `load_draft_config`     | function  | `load_draft_config(project_dir, path=None) -> DraftConfig`. Mirrors `load_safety_config`.                              |
 | `LLMResponseEvent`      | model     | One JSONL audit record per LLM response. Fields are documented in [§4](#response-audit).                                |
@@ -189,6 +190,152 @@ What it does **not** protect against:
 A v0.2 follow-up may add a manifest-content envelope with the same
 treatment; for v0.1 the practical mitigation is "review your manifest
 descriptions like you review your SQL."
+
+## Custom business-rule tests (`custom_sql`)
+
+The four schema-test types (`not_null`, `unique`, `accepted_values`,
+`relationships`) cover the structural invariants dbt's generic
+catalogue can express. They cannot express a *business rule* — "a
+refund's amount never exceeds the original order," "every shipped
+order has a ship date," "discount percent stays between 0 and 100."
+The fifth test variant, `custom_sql` (issue #116), is the escape hatch:
+a free-form **singular** SQL test the drafter authors per dbt's
+singular-test convention.
+
+### What a `custom_sql` test is
+
+`CandidateTestCustomSQL` carries:
+
+- **`sql`** — the complete failing-rows SELECT. Per dbt's singular-test
+  contract, the query returns the rows that **violate** the rule: a
+  non-empty result means the test failed. (Zero rows = pass.) This
+  mirrors how the four built-in variants compile to an inner
+  failing-rows SELECT — the prune adapter wraps every test in
+  `SELECT COUNT(*) AS failures FROM (<sql>) AS t`.
+- **`column`** — optional. A non-empty string scopes the rule to one
+  column (and the test renders as `test.column.<col>.custom_sql` in the
+  diff / grade artifact ids); `null` (the default) marks a model-level
+  business-rule assertion.
+- **`rationale`** — optional one-line "why," surfaced in the diff.
+
+Like the four built-ins, `custom_sql` **can** be excluded via
+`DraftConfig.exclude_tests` — it is a member of `VALID_TEST_TYPES`
+(US-021). When `"custom_sql"` is in `exclude_tests`,
+`_render_system_prompt` omits its JSON-shape illustration and drops it
+from the `### SCOPE` line, so a cooperative LLM never proposes one; if
+the LLM defies that, the parser's anchor-contract check rejects the
+`custom_sql` candidate (defence in depth — prompt + parser). Otherwise
+the system prompt appends the `custom_sql` JSON-shape illustration after
+the (possibly filtered) four standard entries.
+
+### Authoring rules via `meta.signalforge.business_rules`
+
+You steer the drafter toward specific rules by declaring them in your
+dbt model's `meta`. The drafter reads `meta.signalforge.business_rules`
+at **both** the column level (`columns[*].meta.signalforge`) and the
+model level (`config.meta.signalforge`). The value accepts two shapes:
+
+- **A single natural-language string:**
+
+  ```yaml
+  models:
+    - name: dim_customers
+      config:
+        meta:
+          signalforge:
+            business_rules: "lifetime_value must never be negative"
+      columns:
+        - name: discount_pct
+          meta:
+            signalforge:
+              business_rules: "discount_pct stays between 0 and 100 inclusive"
+  ```
+
+- **A list of rules:**
+
+  ```yaml
+  config:
+    meta:
+      signalforge:
+        business_rules:
+          - "total_amount equals the sum of line-item amounts"
+          - "every order with status='shipped' has a non-null ship_date"
+  ```
+
+When any rules are present, the drafter renders a `## BUSINESS RULES`
+section into the prompt's data block (model-level rules first, then
+per-column rules, columns sorted by name for byte-stable prompts;
+duplicate rule strings are de-duplicated) and instructs the LLM to
+draft **one `custom_sql` test per stated rule**, translating each
+natural-language rule into a failing-rows SELECT.
+
+Business-rule reading is **best-effort, never fail-loud.** A
+`business_rules` value that isn't a `str` or `list` (a number, a
+`dict`, `None`) yields no rules — the drafter still runs, and the
+inferred-fallback path below covers the gap. Whitespace-only strings
+collapse to nothing, so an empty `meta` value emits no section.
+
+### Inferred fallback
+
+You do **not** have to declare any rules. When no
+`meta.signalforge.business_rules` are present, the system prompt still
+permits the LLM to **infer** `custom_sql` tests from the model SQL and
+the column profile *where a clear, checkable invariant exists* — e.g.
+a `COALESCE`'d column that should never be null after the coalesce, or
+a derived `_pct` column that the SELECT computes as a bounded ratio.
+Declared rules are the high-precision path; inference is the
+zero-config path. Both produce the same `custom_sql` variant.
+
+### Jinja support inside `custom_sql.sql`
+
+The drafted SQL **may** reference the model under draft and its
+neighbours via the standard dbt-Jinja ref helpers:
+
+- `{{ this }}` — the model under draft (resolves to its qualified
+  warehouse table name at prune time).
+- `{{ ref('<model>') }}` — a neighbour model.
+- `{{ source('<src>', '<table>') }}` — a source table.
+
+These three are resolved by a **bounded** resolver at prune time
+(`signalforge.manifest.resolve_template_refs`) — there is no
+Jinja *engine*. **Control-flow Jinja is unsupported:** `{% if %}` /
+`{% for %}` blocks, `var()` / `env_var()` calls, and macro invocations
+cannot be resolved. A `custom_sql` test carrying unsupported Jinja is
+not dropped — the prune layer routes it to `kept-without-evidence` so a
+reviewer sees it (see [`docs/prune-ops.md`](prune-ops.md#custom_sql-evaluation)).
+
+### Worked example
+
+A `dim_customers` model declares one model-level rule:
+
+```yaml
+models:
+  - name: dim_customers
+    config:
+      meta:
+        signalforge:
+          business_rules: "total_amount must never be negative"
+```
+
+The drafter emits a `custom_sql` candidate roughly like:
+
+```json
+{
+  "type": "custom_sql",
+  "column": "total_amount",
+  "sql": "select * from {{ this }} where total_amount < 0",
+  "rationale": "total_amount is a non-negative monetary aggregate"
+}
+```
+
+This candidate flows into the prune layer, which resolves `{{ this }}`
+to the warehouse table, samples (single-table), and counts failing
+rows. If the warehouse has zero negative-total rows the test is dropped
+as `always-passes` (no signal); if it finds any, the test is `kept`
+and surfaces as a proposed standalone `tests/dim_customers__total_amount_custom_sql_<hash>.sql`
+file in the diff (see
+[`docs/diff-ops.md`](diff-ops.md#sidecar-json-schema) and
+[`docs/cli-ops.md`](cli-ops.md#signalforge-generate-model)).
 
 ## Cache behaviour
 
@@ -367,7 +514,7 @@ llm:
   max_retries_429: 3
   max_retries_5xx: 1
   max_retries_conn: 1
-  exclude_tests: []          # subset of [not_null, unique, accepted_values, relationships]
+  exclude_tests: []          # subset of [not_null, unique, accepted_values, relationships, custom_sql]
 ```
 
 Field-by-field:
@@ -385,17 +532,21 @@ Field-by-field:
 - **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — see
   [§7 Retry taxonomy](#retry-taxonomy).
 - **`exclude_tests`** — list of dbt test types the drafter must not
-  propose (issue #54). Each entry must be one of `not_null`,
-  `unique`, `accepted_values`, `relationships`; an unknown value
-  fails loud at config-load. Default `[]` (all four allowed). When
-  non-empty the system prompt's test catalogue + `### SCOPE` line
-  drop the excluded types AND the parser rejects any defiant LLM
-  output via `LLMOutputAnchorContractError`. Excluding all four is
+  propose (issue #54; extended to `custom_sql` in US-021 of #116).
+  Each entry must be one of the five `VALID_TEST_TYPES` — `not_null`,
+  `unique`, `accepted_values`, `relationships`, `custom_sql`; an
+  unknown value fails loud at config-load. Default `[]` (all five
+  allowed). When non-empty the system prompt's test catalogue +
+  `### SCOPE` line drop the excluded types (including `custom_sql`'s
+  JSON-shape illustration) AND the parser rejects any defiant LLM
+  output via `LLMOutputAnchorContractError`. Excluding every type is
   a config error (the drafter has nothing to propose). The prompt
   version hash rotates per exclusion set so Anthropic's prompt cache
   invalidates correctly. Useful for teams that find `accepted_values`
-  noisy on enum columns or want to defer `relationships` to a
-  manual review pass.
+  noisy on enum columns, want to defer `relationships` to a manual
+  review pass, or want to suppress `custom_sql` business-rule drafting
+  entirely (issue #116); see
+  [§ Custom business-rule tests](#custom-business-rule-tests-custom_sql).
 
 `DraftConfig` uses `extra="forbid"` (DEC-011, mirroring
 `safety-layer.md` DEC-015). Typos like `mdoel:` instead of `model:`

@@ -17,16 +17,18 @@ from pathlib import Path
 
 import pytest
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from signalforge.warehouse import profiles as profiles_module
 from signalforge.warehouse.errors import (
+    IncompleteProfileError,
+    InvalidIdentifierError,
     ProfileEnvVarUnsetError,
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
     UnsupportedAuthMethodError,
 )
-from signalforge.warehouse.profiles import load_profile
+from signalforge.warehouse.profiles import DbtProfileTarget, load_profile
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "profiles"
 
@@ -443,6 +445,178 @@ def test_load_profile_env_var_preserves_yaml_quoting(
 
 
 # ---------------------------------------------------------------------------
+# 6c. Snowflake profile parsing + cross-field validator (US-003, #120)
+# ---------------------------------------------------------------------------
+
+
+def _snowflake_target(**overrides: object) -> dict[str, object]:
+    """A representative valid ``type: snowflake`` target dict."""
+    base: dict[str, object] = {
+        "type": "snowflake",
+        "account": "xy12345.us-east-1",
+        "user": "svc_signalforge",
+        "role": "TRANSFORMER",
+        "warehouse": "ANALYTICS_WH",
+        "database": "ANALYTICS",
+        "schema": "public",
+        "threads": 4,
+        "password": "s3cr3t",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_snowflake_target_parses_full() -> None:
+    """A representative Snowflake target parses; every new field populates."""
+    target = DbtProfileTarget.model_validate(_snowflake_target())
+
+    assert target.type == "snowflake"
+    assert target.account == "xy12345.us-east-1"
+    assert target.user == "svc_signalforge"
+    assert target.role == "TRANSFORMER"
+    assert target.warehouse == "ANALYTICS_WH"
+    assert target.database == "ANALYTICS"
+    # Snowflake's `schema:` key continues to populate `dataset` (alias).
+    assert target.dataset == "public"
+    assert target.threads == 4
+    assert target.password == "s3cr3t"
+
+
+def test_snowflake_secrets_excluded_from_repr() -> None:
+    """`repr()` / `str()` must NOT leak credential material — `password`,
+    `private_key_passphrase`, `private_key_path` carry `repr=False` so a
+    debug print, log line, or exception context can't expose them."""
+    target = DbtProfileTarget.model_validate(
+        _snowflake_target(
+            password="hunter2-secret",
+            private_key_path="/keys/rsa_key.p8",
+            private_key_passphrase="topsecret-pp",
+            authenticator="snowflake",
+        )
+    )
+    rendered = repr(target)
+
+    assert "hunter2-secret" not in rendered
+    assert "topsecret-pp" not in rendered
+    assert "/keys/rsa_key.p8" not in rendered
+    # The values are still accessible via attribute — only the repr is redacted.
+    assert target.password == "hunter2-secret"
+    assert target.private_key_passphrase == "topsecret-pp"
+    # A non-secret identifying field still renders (sanity: repr isn't empty).
+    assert "xy12345.us-east-1" in rendered
+
+
+@pytest.mark.parametrize(
+    ("drop", "expected_missing"),
+    [
+        (["account"], "account"),
+        (["user"], "user"),
+        (["warehouse"], "warehouse"),
+        (["account", "user", "warehouse"], "warehouse"),
+    ],
+)
+def test_snowflake_missing_required_keys_raises(drop: list[str], expected_missing: str) -> None:
+    """Missing account / user / warehouse → IncompleteProfileError naming the key(s)."""
+    target = _snowflake_target()
+    for key in drop:
+        del target[key]
+
+    with pytest.raises(IncompleteProfileError) as excinfo:
+        DbtProfileTarget.model_validate(target)
+    assert expected_missing in str(excinfo.value)
+
+
+def test_snowflake_authenticator_externalbrowser_parses() -> None:
+    """`authenticator: externalbrowser` is an accepted SSO method."""
+    # password is optional once SSO is in play.
+    target_dict = _snowflake_target(authenticator="externalbrowser")
+    del target_dict["password"]
+    target = DbtProfileTarget.model_validate(target_dict)
+    assert target.authenticator == "externalbrowser"
+
+
+@pytest.mark.parametrize("authenticator", ["oauth", "username_password_mfa"])
+def test_snowflake_deferred_authenticator_raises(authenticator: str) -> None:
+    """Deferred auth methods → UnsupportedAuthMethodError (deferred-auth remediation)."""
+    with pytest.raises(UnsupportedAuthMethodError) as excinfo:
+        DbtProfileTarget.model_validate(_snowflake_target(authenticator=authenticator))
+    assert authenticator in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("warehouse", "wh;DROP"),
+        ("database", "db-with-dash"),
+        ("schema", "sch;ema"),
+        ("role", "r;DROP"),
+    ],
+)
+def test_snowflake_bad_identifier_raises(field: str, bad_value: str) -> None:
+    """Bad warehouse / database / schema / role identifiers → InvalidIdentifierError."""
+    with pytest.raises(InvalidIdentifierError) as excinfo:
+        DbtProfileTarget.model_validate(_snowflake_target(**{field: bad_value}))
+    assert bad_value in str(excinfo.value)
+
+
+def test_snowflake_bad_account_raises() -> None:
+    """A garbage account locator (embedded quote) → InvalidIdentifierError."""
+    with pytest.raises(InvalidIdentifierError) as excinfo:
+        DbtProfileTarget.model_validate(_snowflake_target(account="a'b"))
+    assert "a'b" in str(excinfo.value) or "account" in str(excinfo.value)
+
+
+def test_snowflake_good_account_parses() -> None:
+    """A region-suffixed legacy locator parses cleanly."""
+    target = DbtProfileTarget.model_validate(_snowflake_target(account="xy12345.us-east-1"))
+    assert target.account == "xy12345.us-east-1"
+
+
+def test_snowflake_foreign_bigquery_field_rejected() -> None:
+    """A BigQuery-only field (location) on a snowflake target → ValidationError."""
+    with pytest.raises(ValidationError) as excinfo:
+        DbtProfileTarget.model_validate(_snowflake_target(location="US"))
+    assert "location" in str(excinfo.value)
+
+
+def test_snowflake_foreign_max_bytes_billed_rejected() -> None:
+    """`maximum_bytes_billed` (BigQuery-only) on a snowflake target → ValidationError."""
+    with pytest.raises(ValidationError) as excinfo:
+        DbtProfileTarget.model_validate(_snowflake_target(maximum_bytes_billed=1_000_000))
+    assert "maximum_bytes_billed" in str(excinfo.value)
+
+
+def test_bigquery_foreign_snowflake_field_rejected() -> None:
+    """A Snowflake-only field (account) on a bigquery target → ValidationError."""
+    with pytest.raises(ValidationError) as excinfo:
+        DbtProfileTarget.model_validate(
+            {
+                "type": "bigquery",
+                "method": "oauth",
+                "project": "p",
+                "schema": "d",
+                "account": "xy12345",
+            }
+        )
+    assert "account" in str(excinfo.value)
+
+
+def test_bigquery_with_threads_parses() -> None:
+    """A BigQuery profile carrying `threads: 4` now parses (previously tripped forbid)."""
+    target = DbtProfileTarget.model_validate(
+        {
+            "type": "bigquery",
+            "method": "oauth",
+            "project": "p",
+            "schema": "d",
+            "threads": 4,
+        }
+    )
+    assert target.threads == 4
+    assert target.type == "bigquery"
+
+
+# ---------------------------------------------------------------------------
 # 7. Drift detector (DEC-017)
 # ---------------------------------------------------------------------------
 
@@ -494,6 +668,86 @@ def test_drift_detector_extra_forbid() -> None:
     assert model.type == "bigquery"
     assert model.method == "oauth"
     assert model.maximum_bytes_billed == 1000000000
+
+
+class StrictSnowflakeModel(BaseModel):
+    """Test-only mirror of dbt-snowflake's commonly-documented target fields.
+
+    ``extra="forbid"`` so adding a new field to the Snowflake drift fixture
+    without updating BOTH this model and (if SignalForge needs it) the
+    production :class:`DbtProfileTarget` trips the test loudly — the same
+    forward-compat compensation the BigQuery :class:`StrictModel` provides
+    (DEC-017).
+
+    The field list mirrors ``tests/fixtures/profiles/dbt_snowflake_drift_v1_x.yml``.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    type: str
+    account: str | None = None
+    user: str | None = None
+    role: str | None = None
+    database: str | None = None
+    warehouse: str | None = None
+    # `schema` shadows Pydantic's deprecated BaseModel.schema(); mirror the
+    # production model's approach and alias the dbt `schema:` key to a
+    # differently-named attribute (safety-layer.md § field-name shadow).
+    dataset: str | None = Field(default=None, alias="schema")
+    threads: int | None = None
+    password: str | None = None
+    private_key_path: str | None = None
+    private_key_passphrase: str | None = None
+    authenticator: str | None = None
+    client_session_keep_alive: bool | None = None
+    query_tag: str | None = None
+    connect_retries: int | None = None
+    connect_timeout: int | None = None
+    retry_on_database_errors: bool | None = None
+    retry_all: bool | None = None
+    reuse_connections: bool | None = None
+
+
+def test_drift_detector_snowflake_extra_forbid() -> None:
+    """The Snowflake drift fixture validates against StrictSnowflakeModel —
+    bumping fixture fields without updating StrictSnowflakeModel/DbtProfileTarget
+    fails this test loudly (DEC-017)."""
+    with (FIXTURES / "dbt_snowflake_drift_v1_x.yml").open("r", encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh)
+    target_dict = raw["signalforge_test"]["outputs"]["dev"]
+
+    model = StrictSnowflakeModel.model_validate(target_dict)
+
+    # Sanity-check a couple of fields so this catches at least one corruption
+    # mode (not just structural validation).
+    assert model.type == "snowflake"
+    assert model.account == "xy12345.us-east-1"
+    assert model.warehouse == "TRANSFORMING"
+
+
+def test_load_profile_parses_snowflake_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``load_profile`` parses a ``type: snowflake`` target end-to-end: the
+    Snowflake-shaped fields populate, and ``schema:`` hydrates ``dataset`` via
+    the alias (#120, US-005)."""
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake_home")
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _write_dbt_project(project_dir)
+    shutil.copy(FIXTURES / "snowflake_password.yml", project_dir / "profiles.yml")
+
+    target = load_profile(project_dir)
+
+    assert target.type == "snowflake"
+    assert target.account == "xy12345.us-east-1"
+    assert target.user == "svc_user"
+    assert target.warehouse == "TRANSFORMING"
+    assert target.database == "ANALYTICS"
+    # Snowflake's `schema:` key hydrates `dataset` via the alias.
+    assert target.dataset == "PUBLIC"
 
 
 def test_module_uses_warehouse_logger() -> None:

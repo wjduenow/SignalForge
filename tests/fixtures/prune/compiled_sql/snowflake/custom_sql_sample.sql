@@ -1,0 +1,1 @@
+WITH "sample" AS (SELECT * EXCLUDE (_sf_sample_hash) FROM (SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash FROM "FAKE_PROJECT"."DATASET"."ORDERS" AS t) WHERE MOD(_sf_sample_hash, 10) < 1 LIMIT 100000) select order_id from "sample" where total < 0

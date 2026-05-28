@@ -26,6 +26,7 @@ from signalforge.draft.errors import (
 from signalforge.draft.models import (
     CandidateColumn,
     CandidateSchema,
+    CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
     CandidateTestUnique,
@@ -72,6 +73,28 @@ def test_parse_draft_response_happy_path() -> None:
     assert isinstance(result, CandidateSchema)
     assert result.name == "fct_orders"
     assert {c.name for c in result.columns} == _FCT_ORDERS_COLUMNS
+
+
+def test_parse_draft_response_tolerates_prose_preamble() -> None:
+    """Issue #144: claude-sonnet-4-6 narrates before the `{` on the
+    business-rules path and the model rejects an assistant prefill, so the
+    parser must strip the preamble and still parse the embedded JSON."""
+    raw = (
+        "I need to analyze the business rules carefully. The first rule is a "
+        "tautology, so I'll only propose tests that add signal.\n\n"
+    ) + _read("llm_response_valid.json")
+    result = parse_draft_response(raw, _FCT_ORDERS_COLUMNS, llm_result_meta=_meta())
+    assert isinstance(result, CandidateSchema)
+    assert result.name == "fct_orders"
+    assert {c.name for c in result.columns} == _FCT_ORDERS_COLUMNS
+
+
+def test_parse_draft_response_pure_prose_still_raises_json_error() -> None:
+    """A response with no JSON object at all still fails loud (the preamble
+    tolerance must not mask a genuinely empty/garbage response)."""
+    raw = "I cannot help with that request."
+    with pytest.raises(LLMOutputJSONError):
+        parse_draft_response(raw, _FCT_ORDERS_COLUMNS, llm_result_meta=_meta())
 
 
 def test_parse_draft_response_truncated_raises_json_error() -> None:
@@ -281,6 +304,221 @@ def test_parse_draft_response_multiple_relationships_tests_on_same_column_allowe
     )
     raw = candidate.model_dump_json()
     parse_draft_response(raw, frozenset({"customer_id"}), llm_result_meta=_meta())
+
+
+# ---------------------------------------------------------------------------
+# custom_sql variant — anchor-contract handling (US-004, DEC-002)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_custom_sql_column_scoped_valid() -> None:
+    """A column-scoped custom_sql whose declared column exists passes."""
+    candidate = CandidateSchema(
+        name="fct_orders",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="amount",
+                description="order amount",
+                tests=(
+                    CandidateTestCustomSQL(
+                        sql="select * from {{ this }} where amount < 0",
+                        column="amount",
+                    ),
+                ),
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(raw, frozenset({"amount"}), llm_result_meta=_meta())
+    assert isinstance(result, CandidateSchema)
+
+
+def test_parse_custom_sql_model_level_column_none_valid() -> None:
+    """A model-level custom_sql (column=None) is a business-rule assertion
+    with no column checks — it passes."""
+    candidate = CandidateSchema(
+        name="fct_orders",
+        description="...",
+        columns=(CandidateColumn(name="order_id", description="pk", tests=()),),
+        tests=(
+            CandidateTestCustomSQL(
+                sql="select * from {{ this }} where amount > total",
+                column=None,
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(raw, frozenset({"order_id"}), llm_result_meta=_meta())
+    assert isinstance(result, CandidateSchema)
+
+
+def test_parse_custom_sql_references_other_columns_not_rejected() -> None:
+    """A column-scoped custom_sql is EXEMPT from the parent-column rule:
+    its SQL may reference columns other than the one it is filed under, and
+    its declared ``column`` only needs to be a real column (membership),
+    not equal to the SQL's referenced columns."""
+    candidate = CandidateSchema(
+        name="fct_orders",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="amount",
+                description="order amount",
+                tests=(
+                    # SQL references `discount` and `total`, but the test is
+                    # filed under `amount`. This must NOT be a violation.
+                    CandidateTestCustomSQL(
+                        sql="select * from {{ this }} where amount - discount > total",
+                        column="amount",
+                    ),
+                ),
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw, frozenset({"amount", "discount", "total"}), llm_result_meta=_meta()
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_parse_custom_sql_empty_sql_raises() -> None:
+    """A custom_sql whose SQL is whitespace-only (passes the model's
+    truthiness validator but is structurally empty) is a violation."""
+    candidate = CandidateSchema(
+        name="fct_orders",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="amount",
+                description="order amount",
+                tests=(CandidateTestCustomSQL(sql="   \n\t  ", column="amount"),),
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(raw, frozenset({"amount"}), llm_result_meta=_meta())
+    assert any("empty sql" in v for v in excinfo.value.violations)
+
+
+def test_parse_custom_sql_model_level_empty_sql_raises() -> None:
+    """A model-level custom_sql with whitespace-only SQL is a violation."""
+    candidate = CandidateSchema(
+        name="fct_orders",
+        description="...",
+        columns=(CandidateColumn(name="order_id", description="pk", tests=()),),
+        tests=(CandidateTestCustomSQL(sql="  ", column=None),),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(raw, frozenset({"order_id"}), llm_result_meta=_meta())
+    assert any("model-level custom_sql" in v and "empty sql" in v for v in excinfo.value.violations)
+
+
+def test_parse_custom_sql_unknown_declared_column_raises() -> None:
+    """A column-scoped custom_sql whose declared ``column`` is not a real
+    model column is a violation (membership check still applies)."""
+    candidate = CandidateSchema(
+        name="fct_orders",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="amount",
+                description="order amount",
+                tests=(
+                    CandidateTestCustomSQL(
+                        sql="select * from {{ this }} where x < 0",
+                        column="phantom_col",
+                    ),
+                ),
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(raw, frozenset({"amount"}), llm_result_meta=_meta())
+    assert any(
+        "custom_sql test references nonexistent column 'phantom_col'" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_parse_custom_sql_model_level_unknown_declared_column_raises() -> None:
+    """A model-level custom_sql with a non-None declared column that isn't on
+    the model is a violation."""
+    candidate = CandidateSchema(
+        name="fct_orders",
+        description="...",
+        columns=(CandidateColumn(name="order_id", description="pk", tests=()),),
+        tests=(
+            CandidateTestCustomSQL(
+                sql="select * from {{ this }} where x < 0",
+                column="phantom_col",
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(raw, frozenset({"order_id"}), llm_result_meta=_meta())
+    assert any(
+        "model-level custom_sql test references nonexistent column 'phantom_col'" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_parse_custom_sql_excluded_type_rejected() -> None:
+    """When ``custom_sql`` is in ``exclude_tests`` the parser rejects a
+    custom_sql candidate (defence-in-depth backstop)."""
+    candidate = CandidateSchema(
+        name="fct_orders",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="amount",
+                description="order amount",
+                tests=(
+                    CandidateTestCustomSQL(
+                        sql="select * from {{ this }} where amount < 0",
+                        column="amount",
+                    ),
+                ),
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"amount"}),
+            llm_result_meta=_meta(),
+            exclude_tests=frozenset({"custom_sql"}),
+        )
+    assert any("'custom_sql'" in v and "exclude_tests" in v for v in excinfo.value.violations)
+
+
+def test_parse_custom_sql_model_level_excluded_type_rejected() -> None:
+    """A model-level custom_sql is also rejected when ``custom_sql`` is
+    excluded."""
+    candidate = CandidateSchema(
+        name="fct_orders",
+        description="...",
+        columns=(CandidateColumn(name="order_id", description="pk", tests=()),),
+        tests=(CandidateTestCustomSQL(sql="select 1", column=None),),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"order_id"}),
+            llm_result_meta=_meta(),
+            exclude_tests=frozenset({"custom_sql"}),
+        )
+    assert any(
+        "model-level" in v and "'custom_sql'" in v and "exclude_tests" in v
+        for v in excinfo.value.violations
+    )
 
 
 def test_parse_draft_response_hallucinated_candidate_column_name_raises() -> None:

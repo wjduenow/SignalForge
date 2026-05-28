@@ -1,0 +1,26 @@
+{
+  "GlobalStats": {
+    "partitionsTotal": 1234,
+    "partitionsAssigned": 50,
+    "bytesAssigned": 104857600
+  },
+  "Operations": [
+    [
+      {
+        "id": 0,
+        "operation": "Result",
+        "expressions": ["CUSTOMER_ID", "ORDER_TOTAL"]
+      },
+      {
+        "id": 1,
+        "parent": 0,
+        "operation": "TableScan",
+        "objects": ["ANALYTICS.PUBLIC.ORDERS"],
+        "expressions": ["CUSTOMER_ID", "ORDER_TOTAL"],
+        "partitionsTotal": 1234,
+        "partitionsAssigned": 50,
+        "bytesAssigned": 104857600
+      }
+    ]
+  ]
+}

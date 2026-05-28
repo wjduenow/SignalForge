@@ -71,6 +71,8 @@ from signalforge.diff import (
     DiffPruneResultModelMismatchError,
     DiffSidecarRecordTooLargeError,
     DiffSidecarWriteError,
+    DiffTestFileRecordTooLargeError,
+    DiffTestFileWriteError,
 )
 from signalforge.draft import (
     DraftConfigInvalidError,
@@ -115,6 +117,7 @@ from signalforge.llm import (
     LLMServerError,
 )
 from signalforge.manifest import (
+    AmbiguousRefError,
     Manifest,
     ManifestError,
     ManifestNotFoundError,
@@ -123,7 +126,11 @@ from signalforge.manifest import (
     ModelMissingSqlError,
     ModelNotFoundError,
     ModelPathOutsideProjectError,
+    RefNotFoundError,
     SelectorParseError,
+    SourceNotFoundError,
+    TemplateResolutionError,
+    UnsupportedJinjaError,
     UnsupportedManifestVersionError,
 )
 from signalforge.prune import (
@@ -150,6 +157,8 @@ from signalforge.warehouse import (
     BytesBilledExceededError,
     ColumnNotFoundError,
     EstimateNotSupportedError,
+    EstimateUnavailableError,
+    IncompleteProfileError,
     InvalidIdentifierError,
     ManifestProjectNotFoundError,
     ManifestSchemaNotFoundError,
@@ -159,6 +168,7 @@ from signalforge.warehouse import (
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
     QuerySyntaxError,
+    RowCountNotSupportedError,
     SamplingError,
     SamplingRequiresPartitionFilterError,
     TableNotFoundError,
@@ -227,6 +237,10 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     ProfileTargetNotFoundError: 1,
     UnsupportedProfileTypeError: 1,
     UnsupportedAuthMethodError: 1,
+    # Profile parsed but missing required keys for its type (#120 US-002 /
+    # DEC-004). Tier 1 alongside UnsupportedAuthMethodError — both are
+    # profile-config-shape failures that fire before any warehouse work.
+    IncompleteProfileError: 1,
     ManifestProjectNotFoundError: 1,
     ManifestSchemaNotFoundError: 1,
     # Per-stage config-load errors.
@@ -280,6 +294,19 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # is disabled — caller's fault, not load).
     ModelNotFoundError: 2,
     ModelDisabledError: 2,
+    # Jinja-ref relation resolution (the SQL named a ref/source the manifest
+    # doesn't know, or an ambiguous ref — operator-supplied input that the
+    # warehouse can't act on; #116 DEC-005).
+    RefNotFoundError: 2,
+    AmbiguousRefError: 2,
+    SourceNotFoundError: 2,
+    # Bounded Jinja-ref resolution in singular-test SQL (the SQL used an
+    # unsupported Jinja form, or left a reference unresolved — operator-supplied
+    # input the bounded resolver can't act on; #116 US-002). ``UnsupportedJinjaError``
+    # subclasses ``TemplateResolutionError`` and inherits its tier via MRO, but is
+    # listed explicitly so the 7th AST scan finds a direct mapping for each.
+    TemplateResolutionError: 2,
+    UnsupportedJinjaError: 2,
     # Selector grammar (--select expression syntactically invalid; #37
     # DEC-007: tier 2 because the operator supplied a malformed input).
     SelectorParseError: 2,
@@ -381,6 +408,20 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # surfaces the typed exception with its locked remediation rather
     # than misclassifying it as input-shape.
     EstimateNotSupportedError: 3,
+    # Query-bytes estimation ran but produced nothing usable for THIS
+    # query (issue #130 / DEC-003): the adapter supports estimation (e.g.
+    # Snowflake EXPLAIN USING JSON) but the plan carried no parseable byte
+    # figure. External-dep tier so the ``--estimate`` engine degrades to a
+    # price-only preview and renders ``<unavailable: ...>`` rather than
+    # misclassifying it as input-shape.
+    EstimateUnavailableError: 3,
+    # Row-count seam (issue #140): the active adapter does not expose a
+    # ``get_row_count`` primitive (the Postgres stub, or any future
+    # adapter that has not grown one). Sample-scope prune routes the
+    # bucket-sizing lookup through this seam; the typed exception carries
+    # its own ``prune.scope: full`` remediation. External-dep tier, like
+    # the sibling ``*NotSupportedError`` adapter-capability signals.
+    RowCountNotSupportedError: 3,
     # Audit-write durability across every fail-closed seam — when any of
     # these fire the disk hand-off didn't happen, which is an external-dep
     # state we couldn't recover.
@@ -397,6 +438,12 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     LLMResponseAuditRecordTooLargeError: 3,
     DiffSidecarWriteError: 3,
     DiffSidecarRecordTooLargeError: 3,
+    # Generated singular-test ``.sql`` writer (US-011 of #116). Both are
+    # write-path durability errors raised inside the fail-closed writer
+    # (mirrors the diff sidecar precedent above): write-durability and the
+    # pre-open size cap are tier 3 (external-dep / fail-closed write).
+    DiffTestFileWriteError: 3,
+    DiffTestFileRecordTooLargeError: 3,
     # Grade base catches forward-compat subclasses to 3 (every grade-layer
     # leaf has been individually tier-mapped above).
     GradeError: 3,

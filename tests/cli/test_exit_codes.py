@@ -89,6 +89,8 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
         return cls("default", "dev")
     if name in {"UnsupportedProfileTypeError", "UnsupportedAuthMethodError"}:
         return cls("synthetic")
+    if name == "IncompleteProfileError":
+        return cls("snowflake", ["account", "warehouse"])
     if name in {"ManifestProjectNotFoundError", "ManifestSchemaNotFoundError"}:
         return cls("model.test.x")
 
@@ -115,6 +117,7 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
         "GradeAuditRecordTooLargeError",
         "LLMResponseAuditRecordTooLargeError",
         "DiffSidecarRecordTooLargeError",
+        "DiffTestFileRecordTooLargeError",
         "DiffInputTooLargeError",
         "IngestSchemaTooLargeError",
     }:
@@ -226,6 +229,7 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
         "LLMResponseAuditWriteError",
         "GradeLLMError",
         "DiffSidecarWriteError",
+        "DiffTestFileWriteError",
     }:
         return cls(_SENTINEL_MESSAGE, cause=_SENTINEL_CAUSE)
 
@@ -238,6 +242,11 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
         return cls(_SENTINEL_MESSAGE, cause=_SENTINEL_CAUSE)
     if name == "MaterialisationNotSupportedError":
         return cls("SyntheticAdapter")
+
+    # Query-bytes estimation produced no usable figure (issue #130 /
+    # DEC-003). Keyword-only ``detail`` (the diagnostic). Tier 3.
+    if name == "EstimateUnavailableError":
+        return cls(detail="EXPLAIN plan lacked GlobalStats")
 
     # Selector-failure CLI wrappers (issue #37 / DEC-007 — US-002).
     # ``CliSelectorParseError`` accepts an optional ``cause`` (the
@@ -565,3 +574,26 @@ def test_audit_completeness_scan_passes_for_new_errors() -> None:
     assert _EXCEPTION_TO_EXIT_CODE[MaterialisationNotSupportedError] == 3, (
         "MaterialisationNotSupportedError must map to tier 3 (external-dep) per DEC-008 of US-007."
     )
+
+
+def test_estimate_unavailable_error_maps_to_tier_3() -> None:
+    """``EstimateUnavailableError`` (issue #130 / DEC-003) is registered at
+    tier 3 (external-dep) — the estimation seam ran but produced no usable
+    figure, so it routes through ``--estimate``'s degrade path, not an
+    input-shape failure. The explicit table entry is required by the 7th AST
+    scan even though ``WarehouseError``'s fallback is also tier 3; this
+    per-class assertion names the offending class up front if the entry is
+    ever dropped. ``map_exception_to_exit_code`` resolves a constructed
+    instance via the MRO walk to confirm the table entry is live."""
+    from signalforge.cli._helpers import map_exception_to_exit_code
+    from signalforge.warehouse import EstimateUnavailableError
+
+    assert EstimateUnavailableError in _EXCEPTION_TO_EXIT_CODE, (
+        "EstimateUnavailableError missing from _EXCEPTION_TO_EXIT_CODE; the "
+        "7th AST scan would catch this, but the per-class assertion names "
+        "the offending class up front."
+    )
+    assert _EXCEPTION_TO_EXIT_CODE[EstimateUnavailableError] == 3, (
+        "EstimateUnavailableError must map to tier 3 (external-dep) per DEC-003 of #130."
+    )
+    assert map_exception_to_exit_code(EstimateUnavailableError(detail="no GlobalStats")) == 3

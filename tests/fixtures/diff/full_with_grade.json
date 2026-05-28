@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "audit_schema_version": 2,
+  "audit_schema_version": 3,
   "signalforge_version": "0.0.0-snapshot",
   "model_unique_id": "model.shop.dim_customers",
   "run_id": "0123456789abcdef0123456789abcdef",
@@ -55,6 +55,7 @@
       "passed": false
     }
   ],
+  "proposed_test_files": [],
   "kept_count": 2,
   "kept_uncertain_count": 1,
   "dropped_count": 1,

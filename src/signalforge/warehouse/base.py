@@ -171,6 +171,45 @@ class WarehouseAdapter(abc.ABC):
 
         raise EstimateNotSupportedError(adapter_name=type(self).__name__)
 
+    def get_row_count(self, table: TableRef) -> int | None:
+        """Return the row count of ``table``, or ``None`` when unknown
+        (issue #140).
+
+        The vendor-neutral seam the prune layer uses to size the
+        deterministic-sample bucket under ``prune.scope: sample`` — it
+        replaced :func:`signalforge.prune.engine._resolve_sample_bucket`'s
+        BigQuery-only ``getattr(adapter, "_get_client")`` crack, which made
+        sample-scope prune raise on any non-BigQuery adapter.
+
+        ``None`` is a first-class result, NOT an error: it means the
+        warehouse genuinely could not report a count (e.g. a view /
+        materialised view with no ``ROW_COUNT``, or stale metadata). The
+        prune layer decides what to do with an unknown count — the adapter
+        only reports what the warehouse knows.
+
+        Deliberately NOT decorated with ``@abstractmethod``: mirrors
+        :meth:`materialise_sample` (issue #22) and
+        :meth:`estimate_query_bytes` (issue #36). The default raise IS the
+        correct behaviour for an adapter that has not grown a row-count
+        primitive yet; :class:`RowCountNotSupportedError` is the typed
+        signal whose remediation tells the operator to fall back to
+        ``prune.scope: full``.
+
+        Args:
+            table: The table whose row count to look up.
+
+        Returns:
+            The row count as a non-negative ``int``, or ``None`` when the
+            warehouse cannot report it.
+
+        Raises:
+            RowCountNotSupportedError: Always, in the default impl.
+                Concrete adapters override.
+        """
+        from signalforge.warehouse.errors import RowCountNotSupportedError
+
+        raise RowCountNotSupportedError(adapter_name=type(self).__name__)
+
     @classmethod
     def from_profile(cls, profile: DbtProfileTarget) -> WarehouseAdapter:
         """Dispatch on ``profile.type`` and instantiate the matching adapter.
@@ -182,6 +221,11 @@ class WarehouseAdapter(abc.ABC):
         * ``"postgres"`` — returns the v0.2 stub
           :class:`signalforge.warehouse.adapters.postgres.PostgresAdapter`
           (issue #53); its warehouse-operation methods raise
+          :class:`NotImplementedError` until the full implementation
+          lands.
+        * ``"snowflake"`` — returns the v0.2 skeleton
+          :class:`signalforge.warehouse.adapters.snowflake.SnowflakeAdapter`
+          (issue #119; epic #118); its warehouse-operation methods raise
           :class:`NotImplementedError` until the full implementation
           lands.
 
@@ -226,6 +270,32 @@ class WarehouseAdapter(abc.ABC):
             return PostgresAdapter(
                 dbname=profile.project,
                 schema=profile.dataset,
+            )
+        if profile.type == "snowflake":
+            # v0.2 skeleton (issue #119; epic #118) — validates the
+            # warehouse-agnostic seam by routing a third profile.type through
+            # the factory. The adapter's warehouse-operation methods
+            # (sample_rows / column_stats / run_test_sql) raise
+            # NotImplementedError; operators see a clear "v0.2 pending" signal
+            # rather than the v0.1 UnsupportedProfileTypeError.
+            from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
+
+            # #120 grew DbtProfileTarget to parse a real Snowflake target
+            # (account / user / role / warehouse / database + the key-pair / SSO
+            # auth fields) and wires every parsed field through here. Snowflake's
+            # `schema:` key continues to hydrate `profile.dataset` via the
+            # existing alias, so the adapter's `schema` kwarg reads from there.
+            return SnowflakeAdapter(
+                account=profile.account,
+                user=profile.user,
+                password=profile.password,
+                role=profile.role,
+                warehouse=profile.warehouse,
+                database=profile.database,
+                schema=profile.dataset,
+                private_key_path=profile.private_key_path,
+                private_key_passphrase=profile.private_key_passphrase,
+                authenticator=profile.authenticator,
             )
         raise UnsupportedProfileTypeError(profile_type=profile.type)
 

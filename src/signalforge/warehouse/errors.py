@@ -19,6 +19,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import ClassVar
 
+# Reused by the profiles model validator (US-003) to remediate a Snowflake
+# profile that declares an auth method SignalForge's v0.2 adapter does not yet
+# support. Names the supported methods so the operator knows the working set;
+# names the deferred ones so the message isn't a dead end.
+_SNOWFLAKE_DEFERRED_AUTH_REMEDIATION = (
+    "v0.2 Snowflake auth supports: password (set `password:`), key-pair (set "
+    "`private_key_path:`), and SSO (set `authenticator: externalbrowser`). "
+    "oauth, inline `private_key:`, and MFA-token methods are deferred to a "
+    "later release."
+)
+
 
 def _format_value(v: object) -> str:
     """Quote a user-supplied value via ``repr()`` for safe inclusion in
@@ -464,6 +475,80 @@ class EstimateNotSupportedError(WarehouseError):
         super().__init__(message, remediation=remediation)
 
 
+class EstimateUnavailableError(WarehouseError):
+    """The active adapter *supports* query-bytes estimation but could not
+    extract the figure for THIS particular query (DEC-003 of issue #130).
+
+    Distinct from :class:`EstimateNotSupportedError` (which means "this
+    adapter does no estimation at all"). This one fires when, e.g., the
+    Snowflake adapter runs ``EXPLAIN USING JSON`` successfully but the
+    returned plan carries no parseable ``GlobalStats.bytesAssigned`` —
+    the seam ran, but produced nothing we can turn into a byte count.
+
+    The ``detail`` field carries the diagnostic (rendered via
+    :func:`_format_value`, i.e. ``repr()``, per DEC-022 so adversarial
+    planner output can't smuggle control characters into log viewers).
+    The ``--estimate`` engine catches this at the supplementary-source
+    boundary and renders ``<unavailable: EstimateUnavailableError>``,
+    falling back to a price-only preview rather than aborting the run.
+
+    Tier-3 in the CLI exit-code taxonomy (external-dep failure) via
+    inheritance from :class:`WarehouseError`.
+    """
+
+    # Locked verbatim per DEC-003 of plans/super/130-snowflake-estimate-explain.md;
+    # changing this text breaks a contract test pinning the byte-equal
+    # remediation string (test_estimateunavailableerror_remediation_locked_verbatim).
+    default_remediation: ClassVar[str] = (
+        "The query plan carried no parseable byte estimate; the run falls "
+        "back to a price-only cost preview. EXPLAIN figures are planner "
+        "estimates and may be absent for some query shapes — re-run "
+        "without --estimate to skip the preview entirely."
+    )
+
+    def __init__(self, *, detail: str, remediation: str | None = None) -> None:
+        self.detail = detail
+        message = f"Query-bytes estimate unavailable: {_format_value(detail)}"
+        super().__init__(message, remediation=remediation)
+
+
+class IncompleteProfileError(WarehouseError):
+    """A dbt profile parsed but is missing required keys for its ``type``.
+
+    Raised (US-003) when, e.g., a ``type: snowflake`` target omits
+    ``account`` / ``warehouse``. The constructor collects EVERY missing key
+    (collect-all, mirroring the anchor-contract validators elsewhere in the
+    codebase) so the operator can fix them in one pass rather than discovering
+    them one error at a time. The profile type and each missing key render via
+    :func:`_format_value` (i.e. ``repr()``) so adversarial values can't smuggle
+    control characters into log viewers (DEC-022).
+
+    Tier-1 in the CLI exit-code taxonomy (load/parse failure — a profile-config
+    problem, alongside :class:`UnsupportedAuthMethodError`).
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Add the missing key(s) to this target in profiles.yml, or pass an "
+        "explicit `target=` that is fully configured for its warehouse type."
+    )
+
+    def __init__(
+        self,
+        profile_type: str,
+        missing: list[str],
+        *,
+        remediation: str | None = None,
+    ) -> None:
+        self.profile_type = profile_type
+        self.missing = list(missing)
+        rendered_missing = ", ".join(_format_value(k) for k in self.missing)
+        message = (
+            f"Profile of type {_format_value(profile_type)} is missing required "
+            f"key(s): [{rendered_missing}]."
+        )
+        super().__init__(message, remediation=remediation)
+
+
 class MaterialisationNotSupportedError(WarehouseError):
     """The :class:`WarehouseAdapter` ABC default impl of
     ``materialise_sample`` raises this; concrete adapters override the
@@ -491,11 +576,47 @@ class MaterialisationNotSupportedError(WarehouseError):
         super().__init__(message, remediation=remediation)
 
 
+class RowCountNotSupportedError(WarehouseError):
+    """The :class:`WarehouseAdapter` ABC default impl of ``get_row_count``
+    raises this; concrete adapters override the method to provide a real
+    implementation (issue #140).
+
+    ``get_row_count`` is the vendor-neutral seam the prune layer uses to
+    size the deterministic-sample bucket under ``prune.scope: sample``
+    (it replaced the BigQuery-only ``getattr(adapter, "_get_client")``
+    crack). v0.2 ships the BigQuery and Snowflake overrides; the Postgres
+    stub (and any future adapter without a row-count primitive) inherits
+    the default raise.
+
+    Mirrors :class:`MaterialisationNotSupportedError` /
+    :class:`EstimateNotSupportedError`: the default raise IS the correct
+    behaviour for an adapter that has not grown the primitive yet — the
+    remediation tells the operator to fall back to ``prune.scope: full``,
+    which sizes nothing and so needs no row count.
+
+    Tier-3 in the CLI exit-code taxonomy via inheritance from
+    :class:`WarehouseError`.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Set 'prune.scope: full' in signalforge.yml to skip "
+        "deterministic-sample sizing, or wait for this adapter to grow a "
+        "get_row_count override."
+    )
+
+    def __init__(self, adapter_name: str, *, remediation: str | None = None) -> None:
+        self.adapter_name = adapter_name
+        message = f"Adapter {_format_value(adapter_name)} does not support row-count lookup."
+        super().__init__(message, remediation=remediation)
+
+
 # Sorted alphabetically (verified by tests/warehouse/test_errors.py).
 __all__ = [
     "BytesBilledExceededError",
     "ColumnNotFoundError",
     "EstimateNotSupportedError",
+    "EstimateUnavailableError",
+    "IncompleteProfileError",
     "InvalidIdentifierError",
     "ManifestProjectNotFoundError",
     "ManifestSchemaNotFoundError",
@@ -505,6 +626,7 @@ __all__ = [
     "ProfileNotFoundError",
     "ProfileTargetNotFoundError",
     "QuerySyntaxError",
+    "RowCountNotSupportedError",
     "SamplingError",
     "SamplingRequiresPartitionFilterError",
     "TableNotFoundError",

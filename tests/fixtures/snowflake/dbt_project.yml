@@ -1,0 +1,28 @@
+# Hand-crafted fixture project for the Snowflake live e2e (issue #124).
+# Targets dbt-snowflake 1.8.x over the SNOWFLAKE_SAMPLE_DATA.TPCH_SF1 dataset.
+# Profile `tpch` is defined in the sibling profiles.yml; the maintainer regen
+# note (README.md) sets DBT_PROFILES_DIR to this directory before invoking
+# `dbt parse`. The committed manifest.json under target/ is hand-crafted, NOT
+# generated, because Ralph workers / CI cannot reach live Snowflake.
+name: signalforge_test_tpch
+version: 1.0.0
+config-version: 2
+
+profile: tpch
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: target
+clean-targets:
+  - target
+  - dbt_packages
+
+models:
+  signalforge_test_tpch:
+    staging:
+      +materialized: view

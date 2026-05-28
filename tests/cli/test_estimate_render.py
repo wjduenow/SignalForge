@@ -85,6 +85,7 @@ def _make_happy_report() -> EstimateReport:
         warehouse_bytes_per_row=84,
         warehouse_total_bytes=35_300_000,
         warehouse_unavailable_reason=None,
+        warehouse_estimate_source="BigQuery dryRun",
         tests_per_column_heuristic=3.5,
         sample_size=10_000,
         price_table_version="2026-05-11",

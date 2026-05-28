@@ -110,6 +110,11 @@ from signalforge.cli.errors import (
     CliSelectorNoMatchError,
     CliSelectorParseError,
 )
+from signalforge.diff._test_file_writer import (
+    _GENERATED_MARKER_PREFIX,
+    write_test_file,
+)
+from signalforge.diff.models import DiffReport, ProposedTestFile
 from signalforge.grade.rubric import DEFAULT_RUBRIC
 from signalforge.llm import AnthropicClientProtocol
 from signalforge.manifest import select_models
@@ -139,6 +144,12 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
     ``--sample-strategy``; both override the same-named
     :class:`PruneConfig` fields via :meth:`model_validate` so validators
     re-run (DEC-012 of ``plans/super/22-temp-table-sample.md``).
+
+    US-012 of #116 adds ``--force`` (DEC-010/DEC-014): a modifier on
+    ``--write`` that governs whether an existing
+    ``-- signalforge:generated``-marked ``.sql`` test file is overwritten.
+    Hand-authored (unmarked) files are never overwritten, even with
+    ``--force``. No-op without ``--write``.
     """
     parser = subparsers.add_parser(
         "generate",
@@ -258,8 +269,28 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
         action="store_true",
         help=(
             "Write the proposed schema.yml to disk under "
-            "<project_dir>/<model_dir>/schema.yml. Sidecar JSON is "
-            "still written to <project_dir>/.signalforge/diff.json."
+            "<project_dir>/<model_dir>/schema.yml. ADDITIONALLY writes each "
+            "proposed singular .sql business-rule test to its tests/ path "
+            "(DEC-010/DEC-014 of #116). Sidecar JSON is still written to "
+            "<project_dir>/.signalforge/diff.json."
+        ),
+    )
+    # US-012 of #116 / DEC-010 — overwrite policy for proposed singular
+    # .sql test files written by --write. NOT mutually exclusive with the
+    # write/dry-run group (a bare modifier on --write); a no-op without
+    # --write. New files always write. An existing file carrying our
+    # ``-- signalforge:generated`` marker is overwritten ONLY with --force
+    # (skipped + WARNING otherwise). A file WITHOUT the marker
+    # (hand-authored) is NEVER overwritten, even with --force.
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "With --write, overwrite an existing proposed .sql test file "
+            "ONLY when it carries SignalForge's '-- signalforge:generated' "
+            "header marker. Hand-authored .sql files (no marker) are NEVER "
+            "overwritten, even with --force. No-op without --write "
+            "(DEC-010 of #116)."
         ),
     )
     write_group.add_argument(
@@ -393,6 +424,154 @@ def _make_warehouse_adapter(profile: warehouse_module.DbtProfileTarget) -> Wareh
     constructed with a :class:`tests.warehouse._fake.FakeBigQueryClient`).
     """
     return WarehouseAdapter.from_profile(profile)
+
+
+# ---------------------------------------------------------------------------
+# Proposed-test-file write path (US-012 of #116 — DEC-010 / DEC-014)
+# ---------------------------------------------------------------------------
+
+
+def _split_marked_sql(marked_sql: str) -> tuple[str, str]:
+    """Split a marker-prefixed ``ProposedTestFile.sql`` into ``(args_hash, body)``.
+
+    :class:`signalforge.diff.models.ProposedTestFile.sql` is emitted with the
+    ``-- signalforge:generated <hash>`` header marker already prepended (via
+    :func:`signalforge.diff._test_file_writer._with_marker`), so the sidecar
+    carries exactly the bytes the writer would persist. But
+    :func:`signalforge.diff._test_file_writer.write_test_file` re-prepends the
+    marker from the ``args_hash`` kwarg — passing the marked content verbatim
+    would double the marker. This helper recovers the bare body + the hash so
+    the writer reconstructs the identical marked output.
+
+    The marker line is ``"-- signalforge:generated <hash>"`` followed by a
+    single blank line then the body. A defensive fallback handles a payload
+    that (for any forward-compat reason) does NOT carry the marker: the whole
+    string is treated as the body and an empty hash is returned, so
+    ``write_test_file`` still produces valid (if hash-less) marked SQL rather
+    than crashing.
+    """
+    first_newline = marked_sql.find("\n")
+    first_line = marked_sql if first_newline == -1 else marked_sql[:first_newline]
+    if not first_line.startswith(_GENERATED_MARKER_PREFIX):
+        # No recognisable marker — treat the whole payload as the body.
+        return "", marked_sql
+    args_hash = first_line[len(_GENERATED_MARKER_PREFIX) :].strip()
+    # Drop the marker line. ``_with_marker`` writes "<marker>\n\n<body>" so a
+    # leading blank line follows the marker; strip exactly one to recover the
+    # bare body. ``write_test_file`` re-adds the "\n\n" separator.
+    remainder = marked_sql[first_newline + 1 :] if first_newline != -1 else ""
+    if remainder.startswith("\n"):
+        remainder = remainder[1:]
+    return args_hash, remainder
+
+
+def _existing_file_is_signalforge_generated(path: Path) -> bool:
+    """Return ``True`` iff the on-disk file at ``path`` carries our marker.
+
+    A file is "ours" when its content begins with the
+    ``-- signalforge:generated`` header marker (DEC-010). Hand-authored test
+    files do not carry it, so this is the gate that protects human-written
+    SQL from ever being clobbered (even with ``--force``). A read failure
+    (permissions, decode error) is treated conservatively as "not ours" so
+    the write path refuses to overwrite rather than risk clobbering content
+    it could not inspect.
+    """
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            head = handle.read(len(_GENERATED_MARKER_PREFIX))
+    except (OSError, UnicodeDecodeError):
+        return False
+    return head == _GENERATED_MARKER_PREFIX
+
+
+def _write_proposed_test_files(
+    report: DiffReport,
+    *,
+    project_dir: Path,
+    force: bool,
+) -> None:
+    """Materialise ``report.proposed_test_files`` to disk under ``--write``.
+
+    Implements the DEC-010 overwrite policy for the singular ``.sql``
+    business-rule tests proposed by the diff render. Called by
+    :func:`_run_single_model` ONLY on the ``--write`` path (NOT ``--dry-run``,
+    which writes nothing). For each :class:`ProposedTestFile`:
+
+    * the relative ``tests/<...>.sql`` ``path`` flows through
+      :func:`signalforge.cli._helpers.canonicalise_user_path` (symlink /
+      containment → :class:`CliPathError`) so a crafted proposal can never
+      escape the project tree;
+    * if the target does NOT exist → write it;
+    * if it EXISTS and carries our ``-- signalforge:generated`` marker:
+      overwrite when ``force`` is set; otherwise skip with a stderr WARNING
+      (refuse to clobber our own output without ``--force``);
+    * if it EXISTS WITHOUT the marker (hand-authored) → NEVER overwrite, even
+      with ``force``; skip with a clear stderr WARNING.
+
+    The actual byte-write delegates to
+    :func:`signalforge.diff._test_file_writer.write_test_file` (the project's
+    sixth fail-closed writer); the marker is reconstructed from the hash
+    recovered by :func:`_split_marked_sql` so the on-disk content matches the
+    sidecar's ``ProposedTestFile.sql`` byte-for-byte. The writer's own typed
+    errors (``DiffTestFileWriteError`` / ``DiffTestFileRecordTooLargeError``)
+    propagate to ``_run_single_model``'s single boundary catch, which maps
+    them via the exit-code table — no new error class needed.
+
+    Lazy-format JSON logging throughout (logger grep-gate at
+    ``tests/llm/test_logger_grep_gate.py``).
+    """
+    proposed: tuple[ProposedTestFile, ...] = report.proposed_test_files
+    if not proposed:
+        return
+    for entry in proposed:
+        # Canonicalise the proposed relative path against the project root.
+        # ``anchor_to_filename`` already slugged every component, but the
+        # symlink/containment gate is defence-in-depth (mirrors the writer's
+        # own second check). A failure re-raises as ``CliPathError`` from
+        # ``canonicalise_user_path``.
+        canonical = canonicalise_user_path(entry.path, project_dir)
+        # ``canonicalise_user_path`` returns ``None`` only for a ``None``
+        # input; ``entry.path`` is always a non-empty str, so ``canonical``
+        # is a ``Path`` here. The assert documents the invariant for pyright.
+        assert canonical is not None
+
+        if canonical.exists():
+            is_ours = _existing_file_is_signalforge_generated(canonical)
+            if not is_ours:
+                # Hand-authored — never clobber, even with --force.
+                print_stderr(
+                    f"WARNING: refusing to overwrite hand-authored {entry.path} "
+                    "(no '-- signalforge:generated' marker); skipping."
+                )
+                _LOGGER.warning(
+                    "skipping write of proposed .sql test (hand-authored, no marker): %s",
+                    json.dumps({"path": entry.path, "force": force}),
+                )
+                continue
+            if not force:
+                # Marked but no --force — refuse to clobber our own output.
+                print_stderr(
+                    f"WARNING: {entry.path} already exists; pass --force to "
+                    "overwrite SignalForge-generated tests. Skipping."
+                )
+                _LOGGER.warning(
+                    "skipping overwrite of marked proposed .sql test (--force not set): %s",
+                    json.dumps({"path": entry.path}),
+                )
+                continue
+            # Marked AND --force — fall through to overwrite.
+
+        args_hash, body = _split_marked_sql(entry.sql)
+        written = write_test_file(
+            body,
+            relative_path=entry.path,
+            args_hash=args_hash,
+            project_dir=project_dir,
+        )
+        _LOGGER.info(
+            "wrote proposed .sql test: %s",
+            json.dumps({"path": str(written)}),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -842,9 +1021,12 @@ def _run_single_model(
         # (neither flag): write sidecar to <project_dir>/.signalforge/diff.json,
         # do NOT write schema.yml. ``--write``: pass ``output_path``
         # pointing at <project_dir>/<model_dir>/schema.yml (next to the
-        # model's .sql file). ``--dry-run``: ``write_sidecar=False`` AND
-        # no ``output_path`` — pipeline runs, diff prints to stdout, but
-        # nothing lands on disk. The argparse mutex group already
+        # model's .sql file) AND materialise every proposed singular .sql
+        # business-rule test (US-012 of #116 — handled after render_diff
+        # returns, see ``_write_proposed_test_files``). ``--dry-run``:
+        # ``write_sidecar=False`` AND no ``output_path`` — pipeline runs,
+        # diff prints to stdout, but nothing lands on disk (no schema.yml,
+        # no sidecar, no .sql files). The argparse mutex group already
         # forbids ``--write --dry-run`` together.
         dry_run = getattr(args, "dry_run", False)
         write = getattr(args, "write", False)
@@ -871,6 +1053,19 @@ def _run_single_model(
         )
         if progress_on:
             emit_progress_done(5, "diff", time.monotonic() - _t0)
+
+        # US-012 of #116 / DEC-010 / DEC-014 — on ``--write`` (NOT
+        # ``--dry-run``), additionally materialise every proposed singular
+        # ``.sql`` business-rule test to its ``tests/`` path. The overwrite
+        # policy (new → write; marked + --force → overwrite; marked w/o
+        # --force → skip+WARNING; unmarked/hand-authored → never overwrite)
+        # lives in :func:`_write_proposed_test_files`. ``write_sidecar`` was
+        # already gated off for ``--dry-run`` above; ``write`` is the same
+        # boolean used to gate ``output_path``, so the ``.sql`` writes ride
+        # the identical ``--write`` gate.
+        if write:
+            force = getattr(args, "force", False)
+            _write_proposed_test_files(diff_report, project_dir=project_dir, force=force)
 
         # 6. Render to stdout via the in-process helper (DEC-015). The
         #    JSON sidecar (when not ``--dry-run``) was written by

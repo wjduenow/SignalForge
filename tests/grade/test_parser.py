@@ -63,6 +63,15 @@ def test_parse_grade_response_strips_unfenced_code_fence() -> None:
     assert result.criterion_id == _CRITERION.id
 
 
+def test_parse_grade_response_tolerates_prose_preamble() -> None:
+    """Issue #144: the judge can narrate before the `{` and the model
+    rejects an assistant prefill, so the parser strips the preamble."""
+    raw = "Let me think about this. The description is clear, so:\n\n" + json.dumps(_payload())
+    result = parse_grade_response(raw, artifact_id=_ARTIFACT_ID, criterion=_CRITERION)
+    assert result.criterion_id == _CRITERION.id
+    assert result.score == 0.8
+
+
 def test_parse_grade_response_strips_surrounding_whitespace() -> None:
     raw = "   \n\t" + json.dumps(_payload()) + "\n  "
     result = parse_grade_response(raw, artifact_id=_ARTIFACT_ID, criterion=_CRITERION)

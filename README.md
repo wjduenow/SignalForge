@@ -18,6 +18,7 @@ And you don't have to start from SignalForge's own drafts. Point it at a `schema
 
 - **Drafts `schema.yml`** from your model SQL using an LLM with project-aware context (manifest, sibling models, your team's terminology).
 - **Generates tests** — `not_null`, `unique`, `accepted_values`, `relationships`, plus dbt-expectations-style data tests where appropriate.
+- **Drafts custom business-rule tests.** Declare a rule in plain English (`meta.signalforge.business_rules: "total_amount must never be negative"`) and SignalForge writes a singular `tests/*.sql` test for it, prunes it against your warehouse, and ships only the rules your data can actually violate. No declared rules? It infers checkable invariants from your SQL.
 - **Prunes the noise.** Each candidate test runs against warehouse samples; tests that pass on every row of historical data add no signal and are dropped before they reach your repo.
 - **Generates documentation** — column-level descriptions and model-level overviews — graded by an LLM-as-judge against a configurable rubric.
 - **Reports what was kept and what was dropped**, with a one-line "why" per artifact. No black-box generation.
@@ -220,6 +221,54 @@ Two durable artefacts land under `/tmp/sf-austin/.signalforge/`:
 `grade.json` (per-criterion LLM-judge scores) and `diff.json` (the
 full rendered diff). The committed `.gitignore` covers `.signalforge/`.
 
+### Custom business-rule tests (worked example)
+
+The four generic test types catch *structural* invariants (nullability,
+uniqueness, referential integrity). They cannot catch a **business
+rule** — "a refund never exceeds its order," "discount percent stays in
+0–100." For those, declare the rule in plain English in your model's
+`meta`, and SignalForge drafts a singular SQL test for it.
+
+```yaml
+# models/marts/dim_customers.yml
+models:
+  - name: dim_customers
+    config:
+      meta:
+        signalforge:
+          business_rules: "total_amount must never be negative"
+```
+
+On the next `signalforge generate dim_customers`, the LLM translates the
+rule into a failing-rows SELECT — a `custom_sql` candidate test:
+
+```sql
+-- signalforge:generated a1b2c3d4
+select * from {{ this }} where total_amount < 0
+```
+
+That candidate runs through the **same prune step** as every other test.
+The decision is data-driven:
+
+- **Kept** if the warehouse has any negative-total rows — the rule
+  catches real bad data, so the test earns its place. With `--write` it
+  is materialised to `tests/dim_customers__total_amount_custom_sql_a1b2c3d4.sql`.
+- **Dropped (`always-passes`)** if no row ever violates it — the rule is
+  true but the data never tests it, so shipping it would be review-noise.
+
+You can also list multiple rules, scope a rule to a column, or skip the
+`meta` entirely and let SignalForge **infer** checkable invariants from
+your SQL. The drafted SQL may reference `{{ this }}`, `{{ ref('m') }}`,
+and `{{ source('s','t') }}` (control-flow Jinja is not supported). A
+multi-table rule (a `JOIN`) runs full-scan within the warehouse bytes
+cap rather than against a sample. See
+[`docs/draft-ops.md` § Custom business-rule tests](docs/draft-ops.md#custom-business-rule-tests-custom_sql)
+and [`docs/prune-ops.md` § `custom_sql` evaluation](docs/prune-ops.md#custom_sql-evaluation).
+
+Already have hand-authored singular `tests/*.sql` files? `prune-existing`
+ingests and prunes those too — see
+[Prune the tests you already have](#prune-the-tests-you-already-have).
+
 ### Troubleshooting
 
 | Symptom | Likely cause | Fix |
@@ -236,7 +285,10 @@ projects, see [Running across many
 models](docs/cli-ops.md#running-across-many-models) for the
 `--select` flag and shell-loop pattern. Maintainer-only walkthrough
 of the same flow as a gated test (`pytest -m e2e --no-cov`):
-[docs/e2e-smoke-test.md](docs/e2e-smoke-test.md).
+[docs/e2e-smoke-test.md](docs/e2e-smoke-test.md). To run the
+Snowflake-backed gated tests (`pytest -m snowflake --no-cov`),
+start from [docs/snowflake-e2e-setup.md](docs/snowflake-e2e-setup.md)
+(account setup, cost guardrails, and the `.env.example` template).
 
 ## Prune the tests you already have
 
@@ -262,6 +314,14 @@ showing exactly which tests to remove. Tests SignalForge doesn't yet
 evaluate — custom generics, `dbt_utils.*`, `dbt_expectations.*` — are
 summarised on stderr as skipped (run with `--verbose` for the per-test
 breakdown), never silently dropped.
+
+Your **singular `tests/*.sql` business-rule tests are pruned in the same
+run.** Each `.sql` whose `ref()` / `source()` / `{{ this }}` resolves to
+this model is read as a `custom_sql` candidate and pruned alongside the
+schema.yml tests, deduped against any matching schema.yml `custom_sql`.
+Override the directory with `--tests-dir`; files referencing other models
+are ignored, and a `.sql` carrying unsupported control-flow Jinja folds
+into the skipped report.
 
 It is **read-only by design**: there is no `--write` flag, so your
 hand-authored file is never overwritten. The rendered diff goes to

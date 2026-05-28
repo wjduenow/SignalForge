@@ -12,8 +12,9 @@ Stage-2 of the SignalForge pipeline. Public surface (DEC-017, mirroring
 - :class:`Dialect`, :class:`TableRef`, :class:`PartitionFilter`,
   :class:`ColumnStats`, :class:`TestResult`, :class:`DbtProfileTarget` —
   warehouse-agnostic value objects callers consume / construct.
-- :data:`BIGQUERY_DIALECT` — the canonical :class:`Dialect` instance for
-  BigQuery (DEC-003).
+- :data:`BIGQUERY_DIALECT`, :data:`POSTGRES_DIALECT`,
+  :data:`SNOWFLAKE_DIALECT` — the canonical :class:`Dialect` instances for
+  each supported warehouse flavour (DEC-003).
 - The full :class:`WarehouseError` hierarchy, so callers can catch typed
   failures without reaching into private modules.
 
@@ -24,11 +25,14 @@ package's top-level namespace.
 """
 
 from signalforge.warehouse.adapters.bigquery import BigQueryAdapter
+from signalforge.warehouse.adapters.snowflake import SnowflakeAdapter
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
     BytesBilledExceededError,
     ColumnNotFoundError,
     EstimateNotSupportedError,
+    EstimateUnavailableError,
+    IncompleteProfileError,
     InvalidIdentifierError,
     ManifestProjectNotFoundError,
     ManifestSchemaNotFoundError,
@@ -38,6 +42,7 @@ from signalforge.warehouse.errors import (
     ProfileNotFoundError,
     ProfileTargetNotFoundError,
     QuerySyntaxError,
+    RowCountNotSupportedError,
     SamplingError,
     SamplingRequiresPartitionFilterError,
     TableNotFoundError,
@@ -50,6 +55,7 @@ from signalforge.warehouse.errors import (
 from signalforge.warehouse.models import (
     BIGQUERY_DIALECT,
     POSTGRES_DIALECT,
+    SNOWFLAKE_DIALECT,
     ColumnStats,
     Dialect,
     PartitionFilter,
@@ -71,6 +77,8 @@ __all__ = [
     "DbtProfileTarget",
     "Dialect",
     "EstimateNotSupportedError",
+    "EstimateUnavailableError",
+    "IncompleteProfileError",
     "InvalidIdentifierError",
     "ManifestProjectNotFoundError",
     "ManifestSchemaNotFoundError",
@@ -82,8 +90,11 @@ __all__ = [
     "ProfileNotFoundError",
     "ProfileTargetNotFoundError",
     "QuerySyntaxError",
+    "RowCountNotSupportedError",
+    "SNOWFLAKE_DIALECT",
     "SamplingError",
     "SamplingRequiresPartitionFilterError",
+    "SnowflakeAdapter",
     "TableNotFoundError",
     "TableRef",
     "TestResult",

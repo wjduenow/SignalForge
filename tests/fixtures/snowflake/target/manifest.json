@@ -1,0 +1,313 @@
+{
+    "metadata": {
+        "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+        "dbt_version": "1.8.9",
+        "generated_at": null,
+        "invocation_id": null,
+        "env": {},
+        "project_name": "signalforge_test_tpch",
+        "project_id": "signalforgetpch00000000000000000",
+        "user_id": null,
+        "send_anonymous_usage_stats": null,
+        "adapter_type": null
+    },
+    "nodes": {
+        "model.signalforge_test_tpch.stg_tpch_customers": {
+            "database": "SNOWFLAKE_SAMPLE_DATA",
+            "schema": "TPCH_SF1",
+            "name": "stg_tpch_customers",
+            "resource_type": "model",
+            "package_name": "signalforge_test_tpch",
+            "path": "staging/stg_tpch_customers.sql",
+            "original_file_path": "models/staging/stg_tpch_customers.sql",
+            "unique_id": "model.signalforge_test_tpch.stg_tpch_customers",
+            "fqn": [
+                "signalforge_test_tpch",
+                "staging",
+                "stg_tpch_customers"
+            ],
+            "alias": "customer",
+            "checksum": {
+                "name": "sha256",
+                "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "config": {
+                "enabled": true,
+                "alias": null,
+                "schema": null,
+                "database": null,
+                "tags": [],
+                "meta": {},
+                "group": null,
+                "materialized": "view",
+                "incremental_strategy": null,
+                "persist_docs": {},
+                "post-hook": [],
+                "pre-hook": [],
+                "quoting": {},
+                "column_types": {},
+                "full_refresh": null,
+                "unique_key": null,
+                "on_schema_change": "ignore",
+                "on_configuration_change": "apply",
+                "grants": {},
+                "packages": [],
+                "docs": {
+                    "show": true,
+                    "node_color": null
+                },
+                "contract": {
+                    "enforced": false,
+                    "alias_types": true
+                },
+                "access": "protected"
+            },
+            "tags": [],
+            "description": "Source-as-model passthrough over the Snowflake sample dataset's `TPCH_SF1.CUSTOMER` table. Each row is one TPCH customer. Exposes a curated subset of REAL source columns so the SignalForge generate-pipeline live e2e (US-005) has a deterministic prune drop signal \u2014 a drafted `not_null` on the natural NOT NULL primary key `c_custkey` prunes as always-passes. The model's `alias` is overridden to `customer` so `relation_name` resolves directly to `SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER`, sidestepping a `dbt run` materialisation step.",
+            "columns": {
+                "c_custkey": {
+                    "name": "c_custkey",
+                    "description": "Unique customer key \u2014 the TPCH primary key. NATURAL NOT NULL: every source row has a value, so a drafted `not_null` on it returns zero failing rows and prunes as always-passes (the US-005 drop signal).",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_name": {
+                    "name": "c_name",
+                    "description": "Customer display name, e.g. `Customer#000000001`. Free-form STRING; non-null in the TPCH dataset.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_nationkey": {
+                    "name": "c_nationkey",
+                    "description": "Foreign key into the TPCH `NATION` table. Resolves the customer's nation; non-null.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_phone": {
+                    "name": "c_phone",
+                    "description": "Customer phone number. Fixed-width STRING; non-null.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_acctbal": {
+                    "name": "c_acctbal",
+                    "description": "Customer account balance. NUMBER; may be negative in the TPCH dataset but is non-null.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_mktsegment": {
+                    "name": "c_mktsegment",
+                    "description": "Market segment (e.g. `BUILDING`, `AUTOMOBILE`). STRING; non-null.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                }
+            },
+            "meta": {},
+            "group": null,
+            "docs": {
+                "show": true,
+                "node_color": null
+            },
+            "patch_path": null,
+            "build_path": null,
+            "unrendered_config": {
+                "materialized": "view"
+            },
+            "created_at": 0,
+            "relation_name": "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER",
+            "raw_code": "-- Hand-crafted TPCH seed model (issue #124, US-003). The model's `alias`\n-- is overridden to `customer` so its relation resolves directly to the\n-- read-only source SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER (SignalForge\n-- runs against the materialised relation; no `dbt run` needed). Declares\n-- only REAL TPCH source columns \u2014 the `always-passes` drop signal for the\n-- full-pipeline e2e (US-005) relies on a NATURAL NOT NULL column\n-- (`c_custkey`, the primary key) because under `oneshot` prune queries the\n-- source table directly (mirrors the Austin bikeshare natural-NOT-NULL\n-- pattern).\nSELECT\n    c_custkey,\n    c_name,\n    c_nationkey,\n    c_phone,\n    c_acctbal,\n    c_mktsegment\nFROM {{ source('tpch_sf1', 'customer') }}\n",
+            "language": "sql",
+            "refs": [],
+            "sources": [
+                [
+                    "tpch_sf1",
+                    "customer"
+                ]
+            ],
+            "metrics": [],
+            "depends_on": {
+                "macros": [],
+                "nodes": [
+                    "source.signalforge_test_tpch.tpch_sf1.customer"
+                ]
+            },
+            "compiled_path": null,
+            "contract": {
+                "enforced": false,
+                "alias_types": true,
+                "checksum": null
+            },
+            "access": "protected",
+            "constraints": [],
+            "version": null,
+            "latest_version": null,
+            "deprecation_date": null
+        }
+    },
+    "sources": {
+        "source.signalforge_test_tpch.tpch_sf1.customer": {
+            "database": "SNOWFLAKE_SAMPLE_DATA",
+            "schema": "TPCH_SF1",
+            "name": "customer",
+            "resource_type": "source",
+            "package_name": "signalforge_test_tpch",
+            "path": "models/staging/sources.yml",
+            "original_file_path": "models/staging/sources.yml",
+            "unique_id": "source.signalforge_test_tpch.tpch_sf1.customer",
+            "fqn": [
+                "signalforge_test_tpch",
+                "tpch_sf1",
+                "customer"
+            ],
+            "source_name": "tpch_sf1",
+            "source_description": "Snowflake sample TPCH_SF1 dataset.",
+            "loader": "",
+            "identifier": "CUSTOMER",
+            "quoting": {
+                "database": null,
+                "schema": null,
+                "identifier": null,
+                "column": null
+            },
+            "loaded_at_field": null,
+            "freshness": {
+                "warn_after": {
+                    "count": null,
+                    "period": null
+                },
+                "error_after": {
+                    "count": null,
+                    "period": null
+                },
+                "filter": null
+            },
+            "external": null,
+            "description": "One row per TPCH customer.",
+            "columns": {
+                "c_custkey": {
+                    "name": "c_custkey",
+                    "description": "Unique customer key.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_name": {
+                    "name": "c_name",
+                    "description": "Customer name.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_address": {
+                    "name": "c_address",
+                    "description": "Customer street address.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_nationkey": {
+                    "name": "c_nationkey",
+                    "description": "Foreign key into NATION.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_phone": {
+                    "name": "c_phone",
+                    "description": "Customer phone number.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_acctbal": {
+                    "name": "c_acctbal",
+                    "description": "Customer account balance.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_mktsegment": {
+                    "name": "c_mktsegment",
+                    "description": "Market segment.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "c_comment": {
+                    "name": "c_comment",
+                    "description": "Free-form comment.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                }
+            },
+            "meta": {},
+            "source_meta": {},
+            "tags": [],
+            "config": {
+                "enabled": true
+            },
+            "patch_path": null,
+            "unrendered_config": {},
+            "relation_name": "SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER",
+            "created_at": 0
+        }
+    },
+    "macros": {},
+    "docs": {},
+    "exposures": {},
+    "metrics": {},
+    "groups": {},
+    "selectors": {},
+    "disabled": {},
+    "parent_map": {
+        "model.signalforge_test_tpch.stg_tpch_customers": [
+            "source.signalforge_test_tpch.tpch_sf1.customer"
+        ],
+        "source.signalforge_test_tpch.tpch_sf1.customer": []
+    },
+    "child_map": {
+        "model.signalforge_test_tpch.stg_tpch_customers": [],
+        "source.signalforge_test_tpch.tpch_sf1.customer": [
+            "model.signalforge_test_tpch.stg_tpch_customers"
+        ]
+    },
+    "group_map": {},
+    "saved_queries": {},
+    "semantic_models": {},
+    "unit_tests": {}
+}

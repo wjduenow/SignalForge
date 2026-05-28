@@ -138,6 +138,46 @@ def test_dialect_returns_bigquery_constant(adapter: BigQueryAdapter) -> None:
 
 
 # ---------------------------------------------------------------------------
+# get_row_count — issue #140 (vendor-neutral row-count seam)
+# ---------------------------------------------------------------------------
+
+
+def test_get_row_count_returns_num_rows(
+    adapter: BigQueryAdapter,
+    fake_client: FakeBigQueryClient,
+    table_ref: TableRef,
+) -> None:
+    """The BigQuery override returns ``Table.num_rows`` via the cached
+    ``_get_table`` seam (issue #140) — this is what the prune engine's
+    ``_resolve_sample_bucket`` calls to size the deterministic-sample bucket."""
+    fake_client.expect_get_table(
+        ref=table_ref,
+        returns=FakeTable(num_rows=1_234_567, schema=[]),
+    )
+
+    assert adapter.get_row_count(table_ref) == 1_234_567
+    fake_client.assert_all_expectations_met()
+
+
+def test_get_row_count_returns_none_when_num_rows_unknown(
+    adapter: BigQueryAdapter,
+    fake_client: FakeBigQueryClient,
+    table_ref: TableRef,
+) -> None:
+    """``Table.num_rows is None`` (views / stale metadata) surfaces as
+    ``None`` — a first-class result, NOT an error. The prune layer decides
+    that an unknown count is a fail-loud condition; the adapter only reports
+    what the SDK returns (issue #140)."""
+    fake_client.expect_get_table(
+        ref=table_ref,
+        returns=FakeTable(num_rows=None, schema=[]),
+    )
+
+    assert adapter.get_row_count(table_ref) is None
+    fake_client.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
 # sample_rows — DEC-006 / DEC-024
 # ---------------------------------------------------------------------------
 

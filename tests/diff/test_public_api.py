@@ -39,8 +39,9 @@ _DOCUMENTED_PUBLIC = (
     # Result models + literal
     "DiffEntry",
     "DiffReport",
+    "ProposedTestFile",
     "Tier",
-    # Errors (7)
+    # Errors (9)
     "DiffError",
     "DiffCandidateModelMismatchError",
     "DiffPruneResultModelMismatchError",
@@ -48,6 +49,8 @@ _DOCUMENTED_PUBLIC = (
     "DiffInputTooLargeError",
     "DiffSidecarRecordTooLargeError",
     "DiffSidecarWriteError",
+    "DiffTestFileRecordTooLargeError",
+    "DiffTestFileWriteError",
 )
 
 
@@ -90,6 +93,9 @@ def test_each_public_name_is_importable_via_from_signalforge_diff() -> None:
         DiffReport,
         DiffSidecarRecordTooLargeError,
         DiffSidecarWriteError,
+        DiffTestFileRecordTooLargeError,
+        DiffTestFileWriteError,
+        ProposedTestFile,
         Tier,
         load_diff_config,
         render_diff,
@@ -106,6 +112,7 @@ def test_each_public_name_is_importable_via_from_signalforge_diff() -> None:
         "Renderer",
         "write_sidecar",
         "emit_proposed_yaml",
+        "emit_proposed_test_files",
         "artifact_id_for",
         "compute_args_hashes",
         "strip_ansi_escapes",
@@ -159,7 +166,7 @@ def test_private_sidecar_writer_reachable_via_dotted_import() -> None:
 
 
 def test_error_hierarchy_is_complete() -> None:
-    """All seven error classes inherit from ``DiffError``.
+    """All nine error classes inherit from ``DiffError``.
 
     A regression that landed a typed error without subclassing the
     base would surface as a missing-base-class error here. Mirrors
@@ -173,6 +180,8 @@ def test_error_hierarchy_is_complete() -> None:
         DiffPruneResultModelMismatchError,
         DiffSidecarRecordTooLargeError,
         DiffSidecarWriteError,
+        DiffTestFileRecordTooLargeError,
+        DiffTestFileWriteError,
     )
 
     for cls in (
@@ -182,5 +191,7 @@ def test_error_hierarchy_is_complete() -> None:
         DiffInputTooLargeError,
         DiffSidecarRecordTooLargeError,
         DiffSidecarWriteError,
+        DiffTestFileRecordTooLargeError,
+        DiffTestFileWriteError,
     ):
         assert issubclass(cls, DiffError), f"{cls.__name__} is not a DiffError subclass"

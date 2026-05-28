@@ -28,6 +28,16 @@ _PROJECT_RE = re.compile(
     r"^[A-Za-z][A-Za-z0-9-]{4,28}[A-Za-z0-9]$|^[A-Za-z_][A-Za-z0-9_]{4,28}[A-Za-z0-9_]$"
 )
 
+# Snowflake account identifiers are NEVER interpolated into SQL (they configure
+# the connection, not a query), so this regex is deliberately *permissive*: it
+# is log-injection hygiene + a fail-loud "obvious garbage" gate, NOT the strict
+# SQL-identifier rule. It must accept the dots and hyphens that real account
+# locators carry (org-account ``myorg-account1``, region-suffixed legacy locator
+# ``xy12345.us-east-1``, bare ``ab12345``) while rejecting whitespace, quoting,
+# SQL fragments, backticks, and empty/over-long input. Allowed alphabet:
+# alphanumerics, dot, underscore, hyphen; must start alphanumeric; length 2-254.
+_SF_ACCOUNT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,253}$")
+
 
 def validate_identifier(field: str, value: str) -> None:
     """Raise InvalidIdentifierError if value is not a valid SQL identifier.
@@ -62,6 +72,37 @@ def validate_project_id(field: str, value: str) -> None:
     from signalforge.warehouse.errors import InvalidIdentifierError
 
     if not _PROJECT_RE.fullmatch(value):
+        raise InvalidIdentifierError(field=field, value=value)
+
+
+def validate_snowflake_account(field: str, value: str) -> None:
+    """Raise InvalidIdentifierError if value is not a plausible Snowflake account.
+
+    DEC-006. Snowflake account identifiers are **never** interpolated into SQL —
+    they configure the connection, not a query — so this is deliberately a
+    permissive validator: log-injection hygiene plus a fail-loud "obvious
+    garbage" gate, NOT the strict SQL-identifier rule. Do NOT route account
+    identifiers through :func:`validate_identifier`; its regex rejects the dots
+    and hyphens that real account locators require.
+
+    Accepts the shapes Snowflake actually uses:
+
+    - org-account form: ``myorg-account1``
+    - region-suffixed legacy locator: ``xy12345.us-east-1``
+    - bare account locator: ``ab12345``
+    - mixed underscores/hyphens/dots: ``MY_ORG-acct.us_east_1``
+
+    Rejects empty input, whitespace, quoting (``'`` / ``"``), ``;``,
+    backticks, control characters, and over-long (> 254 char) values.
+
+    Note: a doubled hyphen (``--``) is **accepted** — hyphens are legal in
+    account locators and the value never reaches SQL, so ``--`` is not the
+    line-comment token here. The intent is to reject whitespace / quotes /
+    backticks / ``;`` / control chars, not every SQL metacharacter.
+    """
+    from signalforge.warehouse.errors import InvalidIdentifierError
+
+    if not _SF_ACCOUNT_RE.fullmatch(value):
         raise InvalidIdentifierError(field=field, value=value)
 
 
@@ -124,16 +165,22 @@ def validate_test_sql(sql: str) -> None:
 
 
 def _strip_string_literals(sql: str) -> str:
-    """Remove ``'...'`` and ``"..."`` string literals so token checks can ignore them.
+    """Remove ``'...'``, ``"..."`` and `` `...` `` quoted spans so token checks ignore them.
 
-    Naive — handles ``''`` and ``""`` as escapes. Sufficient for the
-    DEC-013 "cheap rejects, not full SQL parser" contract.
+    Naive — handles ``''`` / ``""`` / `` `` `` doubled-quote escapes. Backtick
+    spans are BigQuery quoted identifiers (e.g. `` `weird;name` ``); stripping
+    them is what makes a stray ``'`` / ``"`` / ``--`` / ``;`` hidden inside a
+    backtick-quoted identifier stop confusing the literal scanner — without it
+    a backtick identifier containing a lone quote (`` `O'Brien` ``) would open
+    a phantom single-quoted literal and swallow a real top-level ``;`` that
+    should have been rejected (DEC-008 of #116). Sufficient for the DEC-013
+    "cheap rejects, not full SQL parser" contract — NOT a SQL parser.
     """
     out: list[str] = []
     i = 0
     while i < len(sql):
         ch = sql[i]
-        if ch in ("'", '"'):
+        if ch in ("'", '"', "`"):
             quote = ch
             i += 1
             while i < len(sql):

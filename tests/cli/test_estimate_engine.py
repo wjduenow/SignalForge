@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
 import pytest
 
-from signalforge.cli._estimate import CriterionEstimate, EstimateReport, estimate
+from signalforge.cli._estimate import CriterionEstimate, EstimateReport, estimate, render
 from signalforge.draft.config import DraftConfig
 from signalforge.grade.config import GradeConfig
 from signalforge.grade.rubric import DEFAULT_RUBRIC
@@ -31,9 +32,20 @@ from signalforge.llm.pricing import PRICE_TABLE_VERSION
 from signalforge.llm.pricing import lookup as pricing_lookup
 from signalforge.manifest.models import Column, Manifest, Model
 from signalforge.prune.config import PruneConfig
-from signalforge.warehouse import BigQueryAdapter, WarehouseAuthError
+from signalforge.warehouse import BigQueryAdapter, SnowflakeAdapter, WarehouseAuthError
 from tests.llm._fake import FakeAnthropicClient, FakeCountTokensResponse
 from tests.warehouse._fake import FakeBigQueryClient
+from tests.warehouse._fake_snowflake import FakeSnowflakeConnection
+
+_SNOWFLAKE_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "warehouse" / "snowflake"
+# The sample EXPLAIN fixture encodes 100 MiB; pinned so the warehouse-bytes
+# assertion is mathematically guaranteed (engineered determinism).
+_SNOWFLAKE_EXPLAIN_BYTES = 104_857_600
+
+
+def _load_snowflake_fixture(name: str) -> str:
+    return (_SNOWFLAKE_FIXTURES / name).read_text(encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -344,6 +356,122 @@ def test_estimate_warehouse_unavailable_reason_carries_error_class_name(
     # Class name prefix is the load-bearing pin; the message body
     # may be truncated but the class-name boundary is exact.
     assert report.warehouse_unavailable_reason.startswith("WarehouseAuthError: ")
+
+
+def test_estimate_reports_real_bytes_for_snowflake_explain(
+    model: Model,
+    manifest: Manifest,
+    draft_config: DraftConfig,
+    grade_config: GradeConfig,
+    prune_config: PruneConfig,
+    fake_anthropic: FakeAnthropicClient,
+) -> None:
+    """#130 US-003: a real ``SnowflakeAdapter`` now runs ``EXPLAIN USING JSON``
+    and parses a real byte count — it no longer inherits the ABC default that
+    raised ``EstimateNotSupportedError`` (the #123 behaviour US-003 replaced).
+
+    Inject a :class:`FakeSnowflakeConnection` returning the captured sample
+    EXPLAIN cell; assert the engine reports a real ``estimated_bytes`` with NO
+    degrade (``warehouse_unavailable_reason is None``). The warehouse total is
+    the per-test EXPLAIN bytes multiplied by the test-count heuristic, so it is
+    a positive multiple of the fixture's bytesAssigned.
+    """
+    n_criteria = len(DEFAULT_RUBRIC)
+    _queue_count_tokens(fake_anthropic, draft=1000, per_criterion=500, n_criteria=n_criteria)
+    fake_conn = FakeSnowflakeConnection()
+    fake_conn.expect_execute(
+        matching=r"^EXPLAIN USING JSON ",
+        returns=[(_load_snowflake_fixture("explain_using_json_sample.json"),)],
+    )
+    adapter = SnowflakeAdapter(connection=fake_conn)
+
+    report = estimate(
+        model,
+        manifest,
+        draft_config,
+        grade_config,
+        prune_config,
+        adapter,
+        fake_anthropic,
+    )
+
+    assert report.warehouse_unavailable_reason is None
+    assert report.warehouse_total_bytes is not None
+    # The engine multiplies the per-test EXPLAIN bytes by the test-count
+    # heuristic, so the total is a positive multiple of the fixture's stat.
+    assert report.warehouse_total_bytes > 0
+    assert report.warehouse_total_bytes % _SNOWFLAKE_EXPLAIN_BYTES == 0
+    assert report.total_llm_usd > 0
+
+    # #130: the source label is adapter-derived, not hardcoded — a Snowflake
+    # EXPLAIN estimate must not be mislabelled "BigQuery dryRun".
+    assert report.warehouse_estimate_source == "Snowflake EXPLAIN"
+
+    rendered = render(report)
+    assert "<unavailable:" not in rendered
+    assert "Total estimated warehouse: <unknown>" not in rendered
+    assert "Snowflake EXPLAIN" in rendered
+    assert "BigQuery dryRun" not in rendered
+
+    fake_conn.assert_all_expectations_met()
+    fake_anthropic.assert_all_expectations_met()
+
+
+def test_estimate_degrades_on_snowflake_explain_missing_stat(
+    model: Model,
+    manifest: Manifest,
+    draft_config: DraftConfig,
+    grade_config: GradeConfig,
+    prune_config: PruneConfig,
+    fake_anthropic: FakeAnthropicClient,
+) -> None:
+    """DEC-005 + #130 DEC-007: when the Snowflake EXPLAIN plan carries no
+    parseable ``GlobalStats.bytesAssigned``, ``estimate_query_bytes`` raises
+    :class:`EstimateUnavailableError` (a ``WarehouseError`` subclass). The
+    engine catches it at the supplementary-source boundary, degrades the
+    warehouse-bytes section into ``warehouse_unavailable_reason``, and still
+    computes the LLM-cost half.
+
+    The assertion keys specifically on the ``EstimateUnavailableError`` class
+    name (NOT the ``WarehouseError`` parent) per the #123 rule note — so a
+    narrowing of the engine's ``except WarehouseError`` that excluded the
+    subclass would break this test.
+    """
+    n_criteria = len(DEFAULT_RUBRIC)
+    _queue_count_tokens(fake_anthropic, draft=1000, per_criterion=500, n_criteria=n_criteria)
+    fake_conn = FakeSnowflakeConnection()
+    fake_conn.expect_execute(
+        matching=r"^EXPLAIN USING JSON ",
+        returns=[(_load_snowflake_fixture("explain_using_json_no_stats.json"),)],
+    )
+    adapter = SnowflakeAdapter(connection=fake_conn)
+
+    report = estimate(
+        model,
+        manifest,
+        draft_config,
+        grade_config,
+        prune_config,
+        adapter,
+        fake_anthropic,
+    )
+
+    assert report.warehouse_unavailable_reason is not None
+    assert report.warehouse_unavailable_reason.startswith("EstimateUnavailableError:")
+    assert report.warehouse_total_bytes is None
+    assert report.warehouse_bytes_per_row is None
+    # The LLM-cost half of the report is unaffected by the warehouse degrade.
+    assert report.total_llm_usd > 0
+
+    rendered = render(report)
+    assert "<unavailable: EstimateUnavailableError>" in rendered
+    assert "Total estimated warehouse: <unknown>" in rendered
+
+    # Strictness: a drift to FEWER count_tokens calls would leave queued
+    # expectations unconsumed (extra calls already raise). Pin exact
+    # consumption so the LLM-cost half stays load-bearing under refactor.
+    fake_conn.assert_all_expectations_met()
+    fake_anthropic.assert_all_expectations_met()
 
 
 def test_estimate_emits_warning_on_warehouse_degrade(

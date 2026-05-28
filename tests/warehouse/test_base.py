@@ -27,6 +27,7 @@ from signalforge.warehouse.adapters.bigquery import BigQueryAdapter
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
     MaterialisationNotSupportedError,
+    RowCountNotSupportedError,
     UnsupportedProfileTypeError,
 )
 from signalforge.warehouse.models import (
@@ -100,18 +101,21 @@ def test_from_profile_dispatches_bigquery() -> None:
 
 
 def test_from_profile_raises_for_unknown_type() -> None:
-    """Anything other than 'bigquery' must raise UnsupportedProfileTypeError.
+    """A warehouse the factory does not dispatch must raise
+    UnsupportedProfileTypeError.
 
     DbtProfileTarget.type is typed ``str`` (no Literal narrowing) precisely
     so this dispatch path can reject unsupported warehouses with a typed
-    error rather than a Pydantic ValidationError.
+    error rather than a Pydantic ValidationError. ``"databricks"`` is used as
+    the unsupported example because ``"bigquery"`` / ``"postgres"`` (issue #53)
+    / ``"snowflake"`` (issue #119) all now dispatch to a concrete adapter.
     """
-    profile = DbtProfileTarget.model_validate({"type": "snowflake"})
+    profile = DbtProfileTarget.model_validate({"type": "databricks"})
 
     with pytest.raises(UnsupportedProfileTypeError) as exc_info:
         WarehouseAdapter.from_profile(profile)
 
-    assert exc_info.value.profile_type == "snowflake"
+    assert exc_info.value.profile_type == "databricks"
 
 
 def test_from_profile_uses_default_max_bytes_when_unset() -> None:
@@ -203,6 +207,34 @@ def test_materialise_sample_default_impl_raises_not_supported() -> None:
     assert "_StubAdapter" in rendered
     assert "↳ Remediation:" in rendered
     assert "prune.sample_strategy: oneshot" in rendered
+
+
+def test_get_row_count_default_impl_raises_not_supported() -> None:
+    """An adapter that does NOT override ``get_row_count`` inherits the ABC
+    default which raises :class:`RowCountNotSupportedError` (issue #140).
+
+    Pins the seam introduced to replace ``_resolve_sample_bucket``'s
+    BigQuery-only ``getattr(adapter, "_get_client")`` crack. The error must
+    be a typed ``WarehouseError`` subclass (not ``NotImplementedError``) so
+    the four-tier exit-code taxonomy maps it to CLI tier 3 and the operator
+    sees the ``prune.scope: full`` remediation.
+    """
+    adapter = _StubAdapter()
+    table = TableRef(project="my-project", dataset="ds", name="t")
+
+    with pytest.raises(RowCountNotSupportedError) as exc_info:
+        adapter.get_row_count(table)
+
+    err = exc_info.value
+    assert err.default_remediation == (
+        "Set 'prune.scope: full' in signalforge.yml to skip "
+        "deterministic-sample sizing, or wait for this adapter to grow a "
+        "get_row_count override."
+    )
+    rendered = str(err)
+    assert "_StubAdapter" in rendered
+    assert "↳ Remediation:" in rendered
+    assert "prune.scope: full" in rendered
 
 
 def test_materialise_sample_signature_matches_dec_004() -> None:

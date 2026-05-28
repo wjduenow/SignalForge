@@ -211,9 +211,9 @@ Every event and report model across the five stages uses Pydantic v2 `extra="ign
 - `PruneEvent.audit_schema_version: int = 2` (prune — bumped 1 → 2 in issue #55 when `config_hash` migrated to the `blake2b-8` recipe)
 - `GradeEvent.audit_schema_version: Literal[1] = 1` (grade per-call)
 - `GradingReport.grade_schema_version: Literal[1] = 1` (grade sidecar — separate field from the per-call event)
-- `DiffReport.schema_version: Literal[1] = 1` (diff sidecar overall) plus `DiffReport.audit_schema_version: Literal[2] = 2` (diff entries — bumped from 1 in issue #50 alongside the `kept-uncertain` tier literal)
+- `DiffReport.schema_version: Literal[1] = 1` (diff sidecar overall) plus `DiffReport.audit_schema_version: Literal[3] = 3` (bumped 1 → 2 in issue #50 alongside the `kept-uncertain` tier literal, 2 → 3 in issue #116 alongside the `proposed_test_files` array for standalone `custom_sql` `.sql` test files)
 
-Consumer policy: gate on `version >= N` (forward-compatible reads of newer minor versions), not `version == N` (strict equality, breaks on every additive bump). External CI parsers that key on the four-tier `DiffEntry.tier` taxonomy specifically should gate on `DiffReport.audit_schema_version >= 2`.
+Consumer policy: gate on `version >= N` (forward-compatible reads of newer minor versions), not `version == N` (strict equality, breaks on every additive bump). External CI parsers that key on the four-tier `DiffEntry.tier` taxonomy specifically should gate on `DiffReport.audit_schema_version >= 2`; consumers of the `proposed_test_files` array gate on `>= 3`.
 
 Drift-detector tests (`tests/{safety,draft,prune,grade,diff}/test_drift_detector.py`) pair every `extra="ignore"` production model with a one-off `Strict<X>(extra="forbid")` mirror validated against the committed fixture. Adding a field to production without also updating the strict mirror OR the fixture breaks the test loudly — the test is the safety net for accidental schema drift.
 

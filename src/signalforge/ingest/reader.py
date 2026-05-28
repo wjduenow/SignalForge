@@ -37,13 +37,19 @@ the consuming prune / grade stages.
 
 from __future__ import annotations
 
+from hashlib import blake2b
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from signalforge._common.path_safety import PathContainmentError, canonicalise_path
-from signalforge.draft.models import CandidateColumn, CandidateSchema, CandidateTest
+from signalforge.draft.models import (
+    CandidateColumn,
+    CandidateSchema,
+    CandidateTest,
+    CandidateTestCustomSQL,
+)
 from signalforge.ingest.anchor import validate_anchor_contract
 from signalforge.ingest.errors import (
     IngestModelNotFoundError,
@@ -52,8 +58,8 @@ from signalforge.ingest.errors import (
     IngestSchemaTooLargeError,
 )
 from signalforge.ingest.models import IngestResult, SkippedTest
-from signalforge.ingest.parser import parse_test_entry
-from signalforge.manifest import Model
+from signalforge.ingest.parser import classify_singular_test, parse_test_entry
+from signalforge.manifest import Manifest, Model
 
 # DEC-005: size cap on the raw byte length checked BEFORE ``yaml.safe_load``
 # so the parser never sees a billion-laughs / deeply-nested-anchor payload.
@@ -282,4 +288,161 @@ def _description_or_empty(block: dict[str, Any]) -> str:
     return raw if isinstance(raw, str) else ""
 
 
-__all__ = ("read_schema",)
+def _custom_sql_hash(sql: str) -> str:
+    """Stable 16-hex blake2b-8 fingerprint of a singular-test SQL body (DEC-013).
+
+    The dedupe key for a custom SQL test is ``(model, "custom_sql", sql_hash)``
+    — the model is fixed for a single ``read_test_files`` call, ``"custom_sql"``
+    is the test type, so ``sql_hash`` is the only varying component. blake2b-8
+    over the raw UTF-8 bytes mirrors the project's reproducibility-hash recipe
+    (issue #55 — one hash family across the corpus); two byte-identical SQL
+    bodies (whether from two ``.sql`` files or from a schema.yml ``custom_sql``)
+    collapse to a single :class:`CandidateTestCustomSQL`.
+    """
+    return blake2b(sql.encode("utf-8"), digest_size=8).hexdigest()
+
+
+def read_test_files(
+    tests_dir: Path,
+    model: Model,
+    manifest: Manifest,
+    *,
+    project_dir: Path | None = None,
+    existing: CandidateSchema | None = None,
+) -> IngestResult:
+    """Read an operator's singular dbt tests (``tests/*.sql``) for ``model`` (US-013).
+
+    Enumerates every ``*.sql`` file directly under ``tests_dir`` (sorted by
+    name for determinism), and for each one decides — via
+    :func:`signalforge.ingest.parser.classify_singular_test` — whether it is a
+    model-level :class:`~signalforge.draft.CandidateTestCustomSQL` for
+    ``model``:
+
+    * A ``.sql`` whose resolved ``ref()`` / ``source()`` / ``this`` references
+      ``model`` becomes a ``CandidateTestCustomSQL(column=None, sql=<body>)``.
+    * A ``.sql`` referencing some *other* model is simply not included (NOT
+      skip-recorded — it is not a defect of this model's ingest, DEC-013).
+    * A ``.sql`` carrying Jinja the bounded resolver cannot evaluate
+      (``{% ... %}``, ``{{ var() }}``, macros, or an unresolved ``{{ }}``)
+      becomes a :class:`SkippedTest` with ``reason="malformed-supported-test"``
+      (the closed 3-value :data:`~signalforge.ingest.models.SkipReason` is not
+      extended).
+
+    Each ``.sql`` is size-capped from ``stat().st_size`` BEFORE it is read into
+    memory (DEC-005, same cap as :func:`read_schema`), so an oversize file
+    raises :class:`IngestSchemaTooLargeError` without first being slurped.
+
+    Dedupe (DEC-013): associated tests dedupe by
+    ``(model, "custom_sql", sql_hash)``. Because ``model`` is fixed and the
+    type is constant, the effective key is the blake2b-8 of the SQL body
+    (:func:`_custom_sql_hash`). When ``existing`` (the schema.yml-sourced
+    candidate, supplied by the ``prune-existing`` merge in #105/US-014) is
+    given, any ``.sql`` whose SQL matches an ``existing`` custom_sql test is
+    dropped so the same test from both sources collapses to one.
+
+    The returned :class:`IngestResult` carries a model-level-only
+    ``CandidateSchema`` (no columns) holding just the associated custom SQL
+    tests; the caller (US-014) merges it with the schema.yml-sourced candidate.
+    No anchor-contract check runs here — singular tests are model-level and
+    carry no column reference (``column=None``).
+
+    Args:
+        tests_dir: The directory to enumerate ``*.sql`` files in (typically
+            ``<project_dir>/tests``). Canonicalised against ``project_dir``.
+        model: The manifest model the singular tests are associated to.
+        manifest: The manifest, used to resolve ``ref()`` / ``source()``.
+        project_dir: Optional project root used to symlink-harden ``tests_dir``.
+            Defaults to ``tests_dir`` itself.
+        existing: Optional schema.yml-sourced candidate to dedupe against by
+            ``(model, "custom_sql", sql_hash)``.
+
+    Returns:
+        An :class:`IngestResult` whose ``candidate`` holds the associated
+        custom SQL tests (model-level) and whose ``skipped`` records every
+        unsupported-Jinja file, in sorted-filename encounter order.
+
+    Raises:
+        IngestSchemaNotFoundError: ``tests_dir`` does not exist or is not a
+            directory.
+        IngestSchemaParseError: ``tests_dir`` failed canonicalisation, or a
+            ``.sql`` file could not be read / stat'd.
+        IngestSchemaTooLargeError: a ``.sql`` file exceeds
+            :data:`_INGEST_SCHEMA_SIZE_LIMIT_BYTES` (checked before read).
+    """
+    base = project_dir if project_dir is not None else tests_dir
+    try:
+        resolved_dir = canonicalise_path(tests_dir, base)
+    except PathContainmentError as exc:
+        raise IngestSchemaParseError(
+            f"tests directory path failed symlink-hardened canonicalisation: {exc}",
+            cause=exc,
+        ) from exc
+    if not resolved_dir.is_dir():
+        raise IngestSchemaNotFoundError(tests_dir)
+
+    seen_hashes: set[str] = set()
+    # Seed the dedupe set with the schema.yml-sourced custom_sql tests so a
+    # ``.sql`` duplicating one of them collapses (DEC-013).
+    if existing is not None:
+        for test in existing.tests:
+            if isinstance(test, CandidateTestCustomSQL):
+                seen_hashes.add(_custom_sql_hash(test.sql))
+
+    tests: list[CandidateTest] = []
+    skipped: list[SkippedTest] = []
+
+    for sql_path in sorted(resolved_dir.glob("*.sql"), key=lambda p: p.name):
+        if not sql_path.is_file():
+            continue
+        sql = _read_sql_file(sql_path)
+        outcome = classify_singular_test(
+            sql, file_name=sql_path.name, model=model, manifest=manifest
+        )
+        if outcome is None:
+            # Unrelated to this model — not included, not recorded.
+            continue
+        if isinstance(outcome, SkippedTest):
+            skipped.append(outcome)
+            continue
+        # Associated CandidateTestCustomSQL — dedupe by sql_hash.
+        sql_hash = _custom_sql_hash(outcome.sql)
+        if sql_hash in seen_hashes:
+            continue
+        seen_hashes.add(sql_hash)
+        tests.append(outcome)
+
+    candidate = CandidateSchema(
+        name=model.name,
+        description="",
+        columns=(),
+        tests=tuple(tests),
+    )
+    return IngestResult(candidate=candidate, skipped=tuple(skipped))
+
+
+def _read_sql_file(sql_path: Path) -> str:
+    """Read a single ``.sql`` file, size-capped from ``stat()`` before read.
+
+    Mirrors :func:`_resolve_input_bytes`'s Path branch: the cap is enforced
+    from ``stat().st_size`` BEFORE the file is read into memory (DEC-005), so
+    an oversize singular test never lands in memory.
+    """
+    try:
+        stat_size = sql_path.stat().st_size
+    except OSError as exc:
+        raise IngestSchemaParseError(
+            f"singular test file metadata could not be read: {exc}",
+            cause=exc,
+        ) from exc
+    if stat_size > _INGEST_SCHEMA_SIZE_LIMIT_BYTES:
+        raise IngestSchemaTooLargeError(stat_size, _INGEST_SCHEMA_SIZE_LIMIT_BYTES)
+    try:
+        return sql_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise IngestSchemaParseError(
+            f"singular test file could not be read: {exc}",
+            cause=exc,
+        ) from exc
+
+
+__all__ = ("read_schema", "read_test_files")
