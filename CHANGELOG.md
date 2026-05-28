@@ -4,9 +4,14 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 ## [Unreleased]
 
+_Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
+
+## [0.3.0] — 2026-05-27
+
 ### Added
 
 - **Snowflake warehouse adapter (epic #118 — #119–#124, #130).** The second concrete `WarehouseAdapter`, graduating the ABC + factory seam through a real vendor (Architectural Commitment #3 — warehouse-agnostic by design). `WarehouseAdapter.from_profile` dispatches `type: snowflake` dbt profiles via a unified `DbtProfileTarget` with a per-type cross-field validator and `validate_snowflake_account` (#120); the `snowflake-connector-python` shim is confined to `adapters/_snowflake_client.py` (one-shim-per-vendor, #119). The prune compiler emits valid Snowflake SQL purely from `SNOWFLAKE_DIALECT` — `quote_char='"'`, `identifier_case='upper'` (fold-then-quote so dbt-lowercased identifiers resolve against upper-folded objects), per-component qualified-name quoting, the quoted `"sample"` CTE alias, and `'…'::TIMESTAMP` partition literals — never branching on dialect name (#121). Deterministic `sample_rows` (HASH-mod) + `materialise_sample` (session-scoped `CREATE TEMPORARY TABLE`) with connection-bound session state and fail-soft `__exit__` cleanup (#122). `estimate_query_bytes` runs `EXPLAIN USING JSON` and parses `GlobalStats.bytesAssigned`, raising the new typed `EstimateUnavailableError` when the plan carries no figure (#123 degrade-first → #130 real estimate; planner-estimate accuracy caveat documented). Full `map_snowflake_exception` taxonomy (reusing existing typed errors), a fakesnow + sqlglot offline harness, two gated `@pytest.mark.snowflake` live e2e tests against `SNOWFLAKE_SAMPLE_DATA.TPCH_SF1`, and a consolidated `docs/warehouse-adapter-ops.md` § "Snowflake adapter (v0.2)" (#124).
+- **Custom business-rule tests (`custom_sql`) — the 5th dbt test type (#116).** A full singular-test `SELECT` (returns failing rows), drafted from `meta.signalforge.business_rules` (natural-language, column- or model-level) or LLM inference, then pruned and graded like the four built-ins — an always-pass business rule is dropped, not shipped. Bounded `{{ this }}` / `ref()` / `source()` Jinja resolution (no Jinja engine; control-flow rejected loudly), dialect-driven compilation, and emission as proposed `tests/*.sql` files via `generate --write [--force]` with a `-- signalforge:generated` ownership marker that never overwrites hand-authored files. `prune-existing --tests-dir` ingests and prunes existing singular tests alongside `schema.yml` tests.
 - **Snowflake e2e contributor docs (#138).** Setup guide for the gated Snowflake tests (`SF_RUN_SNOWFLAKE=1` + connection env vars, resource-monitor/XS-warehouse cost guidance), an `.env.example`, and a README pointer.
 
 ### Fixed
@@ -71,6 +76,7 @@ signalforge --version
 - OSS-first, Core-friendly — no dbt Cloud dependency; runs against any dbt-core project, locally or in CI.
 - Explainable diffs — every kept/dropped/flagged artifact ships with a one-line "why"; every run produces a sidecar JSON with reproducibility hashes.
 
-[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.3.0
 [0.2.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.2.0
 [0.1.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.1.0
