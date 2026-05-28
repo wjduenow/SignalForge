@@ -53,13 +53,13 @@ __all__ = [
 ]
 
 
-PRICE_TABLE_VERSION: str = "2026-05-11"
+PRICE_TABLE_VERSION: str = "2026-05-27"
 """Sourcing-date stamp for :data:`PRICES`. Bump alongside any numeric edit."""
 
 
 @dataclass(frozen=True, slots=True)
 class ModelPricing:
-    """Per-million-token USD prices for one Anthropic SKU.
+    """Per-million-token USD prices for one model SKU.
 
     ``frozen=True`` is the reproducibility invariant — once constructed,
     a :class:`ModelPricing` instance cannot mutate. ``slots=True`` keeps
@@ -69,6 +69,12 @@ class ModelPricing:
     All four fields are USD per million tokens. v0.1 supports only the
     5-minute cache tier; v0.2 may add a ``cache_write_1h_per_mtok`` field
     when the longer TTL becomes part of the SignalForge cache strategy.
+
+    Non-Anthropic SKUs without an Anthropic-equivalent prompt-cache
+    discount carry ``cache_write_5m_per_mtok = 0.0`` and
+    ``cache_read_per_mtok = 0.0`` (e.g. the three Gemini SKUs added in
+    #137 DEC-017). The ``--estimate`` engine multiplies these by token
+    counts; zero-valued cache fields contribute nothing to the USD math.
     """
 
     input_per_mtok: float
@@ -101,6 +107,33 @@ _PRICES_MUTABLE: dict[str, ModelPricing] = {
         output_per_mtok=4.00,
         cache_write_5m_per_mtok=1.00,
         cache_read_per_mtok=0.08,
+    ),
+    # Gemini SKUs (#137 DEC-017). USD per 1M tokens per Google's public
+    # Gemini API price page at PR-prep time. Cache fields = 0.0: v0.3
+    # ships Gemini without an Anthropic-equivalent prompt-cache discount
+    # (per DEC-003); the ``--estimate`` engine multiplies these by token
+    # counts so zero values contribute nothing to the USD math.
+    #
+    # gemini-2.5-pro: base-tier pricing (≤200K input tokens). Google
+    # publishes a separate higher tier for >200K context; v0.3 prices
+    # only the base tier (SignalForge's prompts stay well below 200K).
+    "gemini-2.5-pro": ModelPricing(
+        input_per_mtok=1.25,
+        output_per_mtok=10.00,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
+    "gemini-2.5-flash": ModelPricing(
+        input_per_mtok=0.30,
+        output_per_mtok=2.50,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
+    "gemini-2.0-flash": ModelPricing(
+        input_per_mtok=0.10,
+        output_per_mtok=0.40,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
     ),
 }
 

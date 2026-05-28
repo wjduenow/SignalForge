@@ -87,16 +87,79 @@ def test_pricing_module_exports() -> None:
     assert hasattr(llm_pkg, "EstimateUnknownModelError")
 
 
-def test_prices_contains_all_v01_skus() -> None:
-    """The v0.1 SKU set is locked: ``claude-sonnet-4-6``,
-    ``claude-opus-4-7``, ``claude-haiku-4-5``. Adding a fourth SKU is a
-    deliberate v0.2 expansion that should fail this test loudly until the
-    AC is updated."""
+def test_prices_contains_all_shipped_skus() -> None:
+    """The shipped SKU set is locked: three Anthropic SKUs plus, per
+    #137 DEC-017, three Gemini SKUs. Adding another SKU is a deliberate
+    expansion that should fail this test loudly until the AC is updated.
+    """
     assert set(PRICES.keys()) == {
         "claude-sonnet-4-6",
         "claude-opus-4-7",
         "claude-haiku-4-5",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
     }
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
+)
+def test_lookup_returns_modelpricing_for_gemini_skus(model: str) -> None:
+    """Each Gemini SKU (#137 DEC-017) resolves via ``lookup`` with
+    positive input/output rates and zero cache rates. v0.3 ships Gemini
+    without an Anthropic-equivalent prompt-cache discount, so the cache
+    fields are 0.0 — the ``--estimate`` engine multiplies these by token
+    counts and the zero values contribute nothing to the USD math.
+    """
+    pricing = lookup(model)
+    assert isinstance(pricing, ModelPricing)
+    assert pricing.input_per_mtok > 0.0
+    assert pricing.output_per_mtok > 0.0
+    assert pricing.cache_write_5m_per_mtok == 0.0
+    assert pricing.cache_read_per_mtok == 0.0
+
+
+def test_lookup_raises_estimateunknownmodelerror_for_unknown_gemini_model() -> None:
+    """An unknown Gemini-shaped SKU still routes through the standard
+    ``EstimateUnknownModelError`` path — the price table has no special
+    fallback for vendor-prefixed names.
+    """
+    with pytest.raises(EstimateUnknownModelError) as exc_info:
+        lookup("gemini-unknown")
+    assert exc_info.value.model == "gemini-unknown"
+
+
+def test_anthropic_skus_are_byte_identical_after_gemini_addition() -> None:
+    """#137 US-006 AC: the three Anthropic SKUs must be byte-identical
+    after the Gemini additions land — DEC-017 promises the change is
+    purely additive."""
+    sonnet = lookup("claude-sonnet-4-6")
+    assert sonnet.input_per_mtok == 3.00
+    assert sonnet.output_per_mtok == 15.00
+    assert sonnet.cache_write_5m_per_mtok == 3.75
+    assert sonnet.cache_read_per_mtok == 0.30
+
+    opus = lookup("claude-opus-4-7")
+    assert opus.input_per_mtok == 15.00
+    assert opus.output_per_mtok == 75.00
+    assert opus.cache_write_5m_per_mtok == 18.75
+    assert opus.cache_read_per_mtok == 1.50
+
+    haiku = lookup("claude-haiku-4-5")
+    assert haiku.input_per_mtok == 0.80
+    assert haiku.output_per_mtok == 4.00
+    assert haiku.cache_write_5m_per_mtok == 1.00
+    assert haiku.cache_read_per_mtok == 0.08
+
+
+def test_price_table_version_pins_137_ship_date() -> None:
+    """#137 US-006 AC: ``PRICE_TABLE_VERSION`` bumps to the ship date in
+    lockstep with the Gemini-SKU additions (DEC-017). Byte-equal string
+    match guards against accidental refresh-without-bump regressions.
+    """
+    assert PRICE_TABLE_VERSION == "2026-05-27"
 
 
 def test_estimateunknownmodelerror_is_in_exit_code_mapping_at_tier_2() -> None:
