@@ -129,3 +129,25 @@ SF_RUN_BQ)`.
 The tests query `bigquery-public-data.samples.shakespeare` (164K rows,
 free under the 1 TB/month BigQuery tier). They are maintainer-only for
 v0.1; no CI job runs them.
+
+## Gemini live smoke
+
+Three tests under `tests/llm/test_gemini_live.py`,
+`tests/draft/test_gemini_draft_live.py`, and
+`tests/grade/test_gemini_grade_live.py` exercise the Gemini provider
+end-to-end against the real Google Gen AI API (raw `call_llm`,
+`draft_schema`, and `grade_artifacts`). They are skipped by default —
+via `@pytest.mark.gemini` (filtered out by `addopts = -m 'not gemini'`,
+per DEC-012 of #137) and via a runtime env-var check on
+`SF_RUN_GEMINI=1` + `GOOGLE_API_KEY`.
+
+Maintainers should run them before declaring a `gemini`-touching PR
+ready (mirrors the `snowflake` / `anthropic` / `bigquery` precedents):
+
+```bash
+SF_RUN_GEMINI=1 GOOGLE_API_KEY=... uv run pytest -m gemini --no-cov
+```
+
+The tests use `gemini-2.5-flash` (cheapest SKU in the pricing table)
+with minimal token budgets — total cost per full run is well under a
+US cent. They are maintainer-only for v0.3; no CI job runs them.
