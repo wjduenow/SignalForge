@@ -4,7 +4,9 @@
 
 > LLM-drafted dbt schema.yml, tests, and docs — pruned against real warehouse data so only signal-bearing tests ship.
 
-**Supported warehouses:** **BigQuery** (since v0.1 — the original target adapter, exercised end-to-end by `signalforge init-demo` and the quick start below) and **Snowflake** (since v0.3 — full sampling, materialised-sample CTAS, `EXPLAIN`-based bytes estimation, and a typed-error taxonomy that reuses the existing `WarehouseError` hierarchy). One Snowflake combination is deferred: `safety: aggregate-only` (Snowflake `column_stats`) is not yet implemented — every other combination is functional (`safety: schema-only` / `safety: sample`, with `prune.scope: full` or `prune.scope: sample` under both `prune.sample_strategy: materialised` and `oneshot`). Postgres ships as a typed `NotImplementedError` stub today; Databricks and Redshift remain on the roadmap. The architecture is warehouse-agnostic — adapters plug in behind a thin sampling/profiling interface (`WarehouseAdapter.from_profile`), so new vendors slot in without touching the draft / prune / grade / diff stages.
+**Supported warehouses:** **BigQuery** (the original target adapter, exercised end-to-end by `signalforge init-demo` and the quick start below) and **Snowflake** (full sampling, materialised-sample CTAS, `EXPLAIN`-based bytes estimation, and a typed-error taxonomy that reuses the existing `WarehouseError` hierarchy). One Snowflake combination is deferred: `safety: aggregate-only` (Snowflake `column_stats`) is not yet implemented — every other combination is functional (`safety: schema-only` / `safety: sample`, with `prune.scope: full` or `prune.scope: sample` under both `prune.sample_strategy: materialised` and `oneshot`). Postgres ships as a typed `NotImplementedError` stub today; Databricks and Redshift remain on the roadmap. The architecture is warehouse-agnostic — adapters plug in behind a thin sampling/profiling interface (`WarehouseAdapter.from_profile`), so new vendors slot in without touching the draft / prune / grade / diff stages.
+
+**Custom business logic:** Beyond the four generic dbt test types (`not_null`, `unique`, `accepted_values`, `relationships`), SignalForge drafts and prunes **custom business-rule tests** (`custom_sql` — a full singular-test `SELECT` that returns failing rows). Declare a rule in plain English via `meta.signalforge.business_rules` (column- or model-level) — *"total_amount must never be negative"*, *"a refund never exceeds its order"* — or let SignalForge infer checkable invariants from your SQL. Each candidate compiles to a failing-rows query, runs through the same warehouse-backed prune step as the four built-ins, and ships as a singular `tests/*.sql` file with a `-- signalforge:generated` ownership marker that never overwrites hand-authored files. Always-pass business rules are dropped, not shipped — the same signal-over-volume contract applies. See [Custom business-rule tests (worked example)](#custom-business-rule-tests-worked-example).
 
 ## Why this exists
 
@@ -22,7 +24,7 @@ And you don't have to start from SignalForge's own drafts. Point it at a `schema
 - **Prunes the noise.** Each candidate test runs against warehouse samples; tests that pass on every row of historical data add no signal and are dropped before they reach your repo.
 - **Generates documentation** — column-level descriptions and model-level overviews — graded by an LLM-as-judge against a configurable rubric.
 - **Reports what was kept and what was dropped**, with a one-line "why" per artifact. No black-box generation.
-- **Prunes tests you already have** *(v0.2)*. Point it at an existing `schema.yml` — from dbt-codegen, dbt Copilot, DinoAI, datapilot, or hand-written — and the warehouse tells you which of *those* tests add no signal. Same prune step, no LLM call (`signalforge prune-existing`).
+- **Prunes tests you already have.** Point it at an existing `schema.yml` — from dbt-codegen, dbt Copilot, DinoAI, datapilot, or hand-written — and the warehouse tells you which of *those* tests add no signal. Same prune step, no LLM call (`signalforge prune-existing`).
 
 ## How it works
 
@@ -116,7 +118,7 @@ llm:
 safety:
   mode: aggregate-only   # schema-only is the default; aggregate-only sends column profiles, never row data
 prune:
-  sample_strategy: materialised   # v0.2 default; one temp-table CTAS feeds every per-test query
+  sample_strategy: materialised   # default; one temp-table CTAS feeds every per-test query
 grade:
   min_pass_rate: 0.95
   min_mean_score: 0.95
@@ -366,7 +368,7 @@ SignalForge reads your existing dbt `profiles.yml` and dispatches on
 same `sample_rows` / `materialise_sample` / `run_test_sql` /
 `estimate_query_bytes` surface to the rest of the pipeline.
 
-### BigQuery (v0.1)
+### BigQuery
 
 A standard `type: bigquery` dbt target works. Authenticate via
 Application Default Credentials and set the billing project:
@@ -383,7 +385,7 @@ Full reference — ADC setup, sampling strategy (and the TABLESAMPLE
 cost-asterisk), `PartitionFilter` use, and the typed-error reference —
 is in [docs/warehouse-adapter-ops.md](docs/warehouse-adapter-ops.md).
 
-### Snowflake (v0.3)
+### Snowflake
 
 A standard `type: snowflake` dbt target works — `account`, `user`,
 `warehouse`, plus either `password`, key-pair (`private_key_path` +
@@ -530,4 +532,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ## Contributing
 
-Pre-alpha — issues welcome to shape the design. Open one against the `dev` branch describing the use case you'd like SignalForge to handle. Code contributions will open with the v0.1 milestone.
+Issues welcome to shape the design. Open one against the `dev` branch describing the use case you'd like SignalForge to handle.
