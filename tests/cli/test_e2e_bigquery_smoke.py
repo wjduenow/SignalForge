@@ -63,6 +63,7 @@ import pytest
 from signalforge.cli import main
 from signalforge.grade import GradingReport
 from tests.cli._e2e_helpers import (
+    apply_provider_override,
     copy_fixture_to_tmp,
     read_diff_report,
     read_prune_decisions,
@@ -115,6 +116,15 @@ def test_e2e_signalforge_generate_against_austin_bikeshare(
     # safety.jsonl) and the diff sidecar land in the per-run temp dir,
     # not the committed fixture.
     project_dir = copy_fixture_to_tmp(_FIXTURE_DIR, tmp_path)
+
+    # Issue #155 / US-004 / DEC-012 — exercise the canonical per-test
+    # provider-overlay helper. This BQ smoke is the Anthropic baseline, so
+    # the call is a no-op proof-of-use: it stamps `grade.provider:
+    # anthropic` (the implicit default in the committed fixture's
+    # `signalforge.yml`) without changing any other knob. The OpenAI
+    # (US-005) and Gemini (US-006) sibling smokes will pass non-default
+    # `grade_provider=` values through the same seam.
+    apply_provider_override(project_dir, grade_provider="anthropic")
 
     # The committed `profiles.yml` pins ``project: bigquery-public-data``
     # so the regen script (`dbt parse`) can hit the public dataset; but at
