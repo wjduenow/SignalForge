@@ -190,13 +190,38 @@ class _AttributeCallFinder(ast.NodeVisitor):
         self._direct_aliases: set[str] = set()
         self.calls: list[tuple[int, int]] = []
 
+    def visit_Module(self, node: ast.Module) -> None:  # noqa: N802 — ast API
+        # Two-pass walk on the module root: collect every alias FIRST,
+        # then visit normally to find Call hits. Closes the
+        # "call-before-import" bypass where a function body references
+        # an alias defined by a later top-level import (PR #152
+        # CodeRabbit catch — mirrors the precedent in
+        # ``test_qualified_name_finder_catches_late_import_alias``).
+        # Without this, ``ast.NodeVisitor``'s depth-first walk visits
+        # the Call before the Import/ImportFrom and the alias map is
+        # empty when the Call is matched.
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Import):
+                for alias in sub.names:
+                    if alias.name == self._obj_name:
+                        self._obj_aliases.add(alias.asname or alias.name)
+            elif isinstance(sub, ast.ImportFrom) and sub.module == self._obj_name:
+                for alias in sub.names:
+                    if alias.name == self._attr_name:
+                        self._direct_aliases.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
     def visit_Import(self, node: ast.Import) -> None:  # noqa: N802 — ast API
+        # Idempotent re-add on the second pass (alias already collected
+        # by ``visit_Module``). Kept so callers feeding a sub-module
+        # subtree (not the Module root) still register aliases.
         for alias in node.names:
             if alias.name == self._obj_name:
                 self._obj_aliases.add(alias.asname or alias.name)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802 — ast API
+        # Same idempotent-on-second-pass note as ``visit_Import``.
         if node.module == self._obj_name:
             for alias in node.names:
                 if alias.name == self._attr_name:
@@ -1077,6 +1102,20 @@ def test_attribute_call_finder_catches_all_three_openai_bypass_patterns() -> Non
     assert len(attr.calls) == 1, (
         "Pattern 3 (module-attribute `import openai; openai.OpenAI(...)`) not detected — "
         "_AttributeCallFinder regressed."
+    )
+
+    # Pattern 4: late-import alias — call appears in source order BEFORE
+    # the import that defines its alias. Single-pass alias collection
+    # misses this; ``_AttributeCallFinder.visit_Module`` does a two-pass
+    # walk to close the bypass (PR #152 CodeRabbit catch; mirrors the
+    # ``_QualifiedNameCallFinder`` regression test below).
+    late_alias_src = "def make():\n    return O(api_key='x')\nfrom openai import OpenAI as O\n"
+    late = _AttributeCallFinder("openai", "OpenAI")
+    late.visit(ast.parse(late_alias_src))
+    assert len(late.calls) == 1, (
+        "Pattern 4 (late-import alias: call appears before its `from openai import OpenAI "
+        "as O` line) not detected — _AttributeCallFinder regressed; the two-pass "
+        "`visit_Module` alias collection is the gate that closes this bypass."
     )
 
 

@@ -230,7 +230,11 @@ class FakeNoCacheProvider(LLMProvider):
         method with a minimal honest value.
         """
         del model, client  # neither is consulted on the proxy path
-        return len((system + text).split())
+        # Join with a delimiter so the last word of ``system`` and the
+        # first word of ``text`` don't merge into a single token under
+        # ``.split()`` (boundary-word undercount; PR #152 CodeRabbit
+        # catch).
+        return len(f"{system} {text}".split())
 
 
 __all__ = [

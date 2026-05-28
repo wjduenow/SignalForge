@@ -57,10 +57,11 @@ uv run pytest
 #    --cov-append combines with run 1 so the term report shows the COMBINED total.
 #    --cov-fail-under=0 overrides the 80% gate inherited from addopts — gated
 #    markers alone never clear it, and this is a measurement, not a gate.
-#    (bigquery/anthropic/openai/e2e need creds; cli_subprocess/wheel_smoke do not.)
+#    (bigquery/anthropic/openai/snowflake/e2e need creds; cli_subprocess/wheel_smoke do not.)
 SF_RUN_BQ=1 ANTHROPIC_API_KEY=sk-... OPENAI_API_KEY=sk-... \
-  SF_RUN_OPENAI=1 GOOGLE_CLOUD_PROJECT=<billing-project> \
-  uv run pytest -m 'bigquery or anthropic or openai or e2e or cli_subprocess or wheel_smoke' \
+  SF_RUN_OPENAI=1 SF_RUN_SNOWFLAKE=1 GOOGLE_CLOUD_PROJECT=<billing-project> \
+  SNOWFLAKE_ACCOUNT=... SNOWFLAKE_USER=... SNOWFLAKE_PASSWORD=... SNOWFLAKE_WAREHOUSE=... \
+  uv run pytest -m 'bigquery or anthropic or openai or snowflake or e2e or cli_subprocess or wheel_smoke' \
   --cov=signalforge --cov-append --cov-fail-under=0 --cov-report=term
 ```
 

@@ -40,11 +40,16 @@ def test_openai_type_ignores_only_in_shim() -> None:
     ``_openai_client.py`` may carry an openai-mentioning type-ignore.
     """
     offenders: list[str] = []
-    for py in sorted(_LLM_DIR.glob("*.py")):
+    # ``rglob`` (not ``glob``) so nested modules under signalforge/llm/
+    # are also scanned — PR #152 CodeRabbit catch: top-level-only glob
+    # let openai-mentioning ignore directives in subpackages bypass the
+    # guard (the package is flat today but a future subpackage would
+    # silently un-confine the scan).
+    for py in sorted(_LLM_DIR.rglob("*.py")):
         if py.name == _SHIM_FILENAME:
             continue
         for lineno, text in _openai_type_ignore_lines(py):
-            offenders.append(f"{py.name}:{lineno}: {text}")
+            offenders.append(f"{py.relative_to(_LLM_DIR)}:{lineno}: {text}")
 
     assert not offenders, (
         "openai SDK type-ignore must live only in "
