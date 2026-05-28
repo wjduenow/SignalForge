@@ -17,17 +17,21 @@ original validation broke. Per DEC-009 the floor lives in the test
 overlay rather than as a bumped production default — avoids
 over-budgeting Anthropic/OpenAI calls.
 
-Gated by THREE env vars (mirrors BQ smoke's three-env-var skip gate):
+Gated by FIVE env vars (mirrors the parametrized BQ smoke and the
+OpenAI sibling — drafter stays Anthropic Sonnet per DEC-011, so the
+Anthropic auth + BigQuery opt-in are part of the contract even when
+the grader swap is Gemini):
 
 * ``SF_RUN_GEMINI=1`` — the project-wide opt-in for the Gemini live
   marker (mirrors :file:`tests/grade/test_gemini_grade_live.py`).
 * ``GOOGLE_API_KEY`` — without a key the grader cannot call Gemini.
+* ``SF_RUN_BQ=1`` — the project-wide opt-in for "this test costs real
+  money against BigQuery" (warehouse leg shared with the baseline).
+* ``ANTHROPIC_API_KEY`` — the DRAFTER stays Anthropic Sonnet per
+  DEC-011; without this the drafter fails on its first call.
 * ``GOOGLE_CLOUD_PROJECT`` — BigQuery is still the warehouse. The
   Austin source table lives in ``bigquery-public-data`` but the
   runner's own project is billed for the scanned bytes.
-
-Note: ``ANTHROPIC_API_KEY`` is also required because the drafter stays
-on Sonnet per DEC-011; check it here for clear skip ergonomics.
 
 The test is excluded from default ``pytest`` runs by ``addopts =
 "... -m 'not e2e and not gemini' ..."`` in ``pyproject.toml``. The

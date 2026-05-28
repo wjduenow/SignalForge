@@ -148,6 +148,8 @@ def test_unclean_finish_reason_message_names_finish_reason_field() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
+@pytest.mark.llm
 def test_call_llm_openai_length_with_partial_text_raises_at_is_clean_gate() -> None:
     """A ``finish_reason='length'`` response that CARRIES partial text must
     surface :class:`LLMResponseFormatError` from the
@@ -207,6 +209,8 @@ def test_call_llm_openai_length_with_partial_text_raises_at_is_clean_gate() -> N
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
+@pytest.mark.llm
 def test_is_clean_completion_raises_on_missing_or_empty_choices() -> None:
     """A response object lacking ``choices`` (or with an empty list)
     raises :class:`LLMResponseFormatError` naming the missing field.
@@ -228,6 +232,8 @@ def test_is_clean_completion_raises_on_missing_or_empty_choices() -> None:
         OpenAIProvider().is_clean_completion(empty)
 
 
+@pytest.mark.unit
+@pytest.mark.llm
 def test_is_clean_completion_raises_on_missing_finish_reason_on_first_choice() -> None:
     """A response with ``choices[0]`` present but missing ``finish_reason``
     raises :class:`LLMResponseFormatError` naming the missing field.

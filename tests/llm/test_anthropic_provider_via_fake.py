@@ -135,6 +135,8 @@ def test_unclean_finish_reason_message_names_stop_reason_field() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
+@pytest.mark.llm
 def test_is_clean_completion_raises_on_missing_stop_reason_attribute() -> None:
     """A response object lacking the ``stop_reason`` attribute entirely
     (or with ``stop_reason=None``) raises :class:`LLMResponseFormatError`

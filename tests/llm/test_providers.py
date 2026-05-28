@@ -1361,6 +1361,8 @@ def test_geminiprovider_estimate_input_tokens_builds_client_when_none(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
+@pytest.mark.llm
 def test_unclean_finish_reason_message_default_returns_generic_diagnostic() -> None:
     """The ABC's default :meth:`LLMProvider.unclean_finish_reason_message`
     returns a generic diagnostic naming the provider class (#155 DEC-007).

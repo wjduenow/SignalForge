@@ -211,6 +211,8 @@ def test_call_llm_gemini_safety_blocked_raises_llmresponseformaterror() -> None:
     fake.assert_all_expectations_met()
 
 
+@pytest.mark.unit
+@pytest.mark.llm
 def test_call_llm_gemini_max_tokens_with_partial_text_raises_at_is_clean_gate() -> None:
     """A ``finish_reason="MAX_TOKENS"`` response that CARRIES partial text
     must still surface :class:`LLMResponseFormatError` from the new
@@ -465,6 +467,8 @@ def test_call_llm_gemini_retry_429_exhaustion_routes_to_llmratelimiterror(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.unit
+@pytest.mark.llm
 def test_is_clean_completion_raises_on_missing_or_empty_candidates() -> None:
     """A response object lacking ``candidates`` (or with an empty list)
     raises :class:`LLMResponseFormatError` naming the missing field.
@@ -487,6 +491,8 @@ def test_is_clean_completion_raises_on_missing_or_empty_candidates() -> None:
         GeminiProvider().is_clean_completion(empty)
 
 
+@pytest.mark.unit
+@pytest.mark.llm
 def test_is_clean_completion_raises_on_missing_finish_reason_on_first_candidate() -> None:
     """A response with ``candidates[0]`` present but missing
     ``finish_reason`` raises :class:`LLMResponseFormatError` naming the
