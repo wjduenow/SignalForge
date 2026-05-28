@@ -100,7 +100,7 @@ testpaths = ["tests"]
 # `--import-mode=importlib` lets us share basenames across test dirs (e.g.
 # tests/manifest/test_errors.py and tests/warehouse/test_errors.py) without
 # adding tests/__init__.py — keeps `testing-signal.md`'s no-init rule intact.
-addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery and not anthropic and not cli_subprocess and not e2e and not wheel_smoke and not snowflake' --cov=signalforge --cov-report=xml --cov-report=term-missing --cov-fail-under=80"
+addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery and not anthropic and not cli_subprocess and not e2e and not wheel_smoke and not snowflake and not gemini' --cov=signalforge --cov-report=xml --cov-report=term-missing --cov-fail-under=80"
 minversion = "7.0"
 strict_markers = true
 markers = [
@@ -116,4 +116,5 @@ markers = [
   "e2e: end-to-end smoke test against real Anthropic + real BigQuery (gated by SF_RUN_BQ=1, ANTHROPIC_API_KEY, GOOGLE_CLOUD_PROJECT; skipped by default)",
   "wheel_smoke: maintainer-only; builds the wheel via `python -m build --wheel` and inspects the artifact for the demo file set (run with --no-cov)",
   "snowflake: maintainer-only; offline compiled-SQL validation via fakesnow AND the gated live EXPLAIN-estimate certification (run with --no-cov; live tests self-skip without SF_RUN_SNOWFLAKE + connection env vars)",
+  "gemini: real-API smoke test (requires GOOGLE_API_KEY; excluded from default CI)",
 ]
