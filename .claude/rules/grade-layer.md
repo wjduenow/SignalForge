@@ -10,7 +10,7 @@ The grade layer sits between the prune engine (#6) and the diff renderer (#8). I
 
 - **Scored:** `score: float ∈ [0.0, 1.0]` + `passed: bool`. The judge ran, the response parsed, the anchor contract held.
 - **Degraded:** `score: None, passed: False, evidence: "", reasoning: "<failure reason>"`. Three causes route here:
-  1. `LLMError` retries exhausted → `reasoning="call failed: GradeLLMError"`.
+  1. `LLMError` retries exhausted → `reasoning="call failed: GradeLLMError"`. **Also covers a provider-specific safety-filter / no-content response** (Gemini's `finish_reason ∈ {SAFETY, RECITATION, OTHER, ...}` with empty parts is the v0.3 example — `GeminiProvider.extract_text_blocks` raises a typed `LLMResponseFormatError` per DEC-005 of #137, which propagates as an `LLMError` and lands here). The contract is provider-neutral: a future vendor with a content-filter surface MUST route through `LLMResponseFormatError` so the conservative degrade fires uniformly — `grade-artifacts` does NOT switch on provider name.
   2. `GradeOutputError` (parser failure / anchor-contract failure) → `reasoning="call failed: GradeOutputError"`.
   3. `total_budget_seconds` exceeded → `reasoning="grade budget exceeded ..."`.
 
