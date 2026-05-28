@@ -350,7 +350,10 @@ beta header, and the pre-send `count_tokens` gate only when the
 selected `LLMProvider` reports `supports_prompt_caching` /
 `supports_token_count`. A provider that supports neither simply reports
 0 cache tokens and skips the marker. The default `anthropic` provider
-supports both, so the behaviour below is unchanged.
+supports both, so the behaviour below is unchanged. The `gemini`
+provider (v0.3) supports neither yet, so every draft call transmits
+the full prompt — see the `provider` field under [Configuration](#configuration)
+for the budgeting note; explicit Gemini context caching is a follow-up.
 
 Default `cache_ttl="5m"`; opt in to `"1h"` via `DraftConfig.cache_ttl`
 (DEC-005, DEC-009). The `extended-cache-ttl-2025-04-11` beta header
@@ -520,11 +523,13 @@ other stages and silently ignored by the draft loader.
 ```yaml
 # signalforge.yml
 llm:
-  provider: anthropic        # registry-validated; only "anthropic" registered today
+  provider: anthropic        # registry-validated; "anthropic" and "gemini" registered today
+  # provider: gemini         # alt: requires `pip install signalforge-dbt[gemini]` + GOOGLE_API_KEY
   model: claude-sonnet-4-6
+  # model: gemini-2.5-flash  # alt: recommended drafter SKU under provider: gemini
   cheap_model: claude-haiku-4-5-20251001
   max_output_tokens: 4096
-  cache_ttl: 5m              # one of "5m" | "1h"
+  cache_ttl: 5m              # one of "5m" | "1h" (inert under provider: gemini in v0.3)
   max_retries_429: 3
   max_retries_5xx: 1
   max_retries_conn: 1
@@ -539,8 +544,19 @@ Field-by-field:
   value fails loud at config-load, listing the registered provider
   names. Deliberately a registry-validated `str`, not a `Literal` — the
   provider registry is a forward-looking plugin point (#136 OpenAI /
-  #137 Gemini register more providers); today only `anthropic` is
-  registered.
+  #137 Gemini register more providers); today `anthropic` and `gemini`
+  are registered. Selecting `gemini` requires installing the optional
+  extra (`pip install signalforge-dbt[gemini]`) and setting
+  `GOOGLE_API_KEY`; recommended Gemini drafter SKU is
+  `gemini-2.5-flash`. **Gemini (v0.3) ships without prompt caching** —
+  every draft call transmits the full system + cached_block +
+  dynamic_block (the `LLMProvider` strategy reports
+  `supports_prompt_caching=False`, so `call_llm` skips the
+  `cache_control` marker, the `extended-cache-ttl` beta header, and the
+  pre-send `count_tokens` gate). Explicit Gemini context caching is
+  tracked as a follow-up; the drafter's per-model call volume is one
+  per `generate` invocation, so the budgeting impact is lighter than
+  the grader's per-criterion fan-out.
 - **`model`** — the model id used by every `call_llm` invocation.
   Default `claude-sonnet-4-6`. Any string the SDK accepts is allowed.
 - **`cheap_model`** — informational; not selected automatically.

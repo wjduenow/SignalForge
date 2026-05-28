@@ -115,8 +115,10 @@ loader cannot drift):
 ```yaml
 # signalforge.yml — grade stage configuration (v0.1)
 grade:
-  provider: anthropic             # registry-validated; only "anthropic" registered today
+  provider: anthropic             # registry-validated; "anthropic" and "gemini" registered today
+  # provider: gemini              # alt: requires `pip install signalforge-dbt[gemini]` + GOOGLE_API_KEY
   model: claude-sonnet-4-6        # model id (default)
+  # model: gemini-2.5-flash       # alt: recommended Gemini judge SKU under provider: gemini
   cache_ttl: 1h                   # Prompt-cache TTL ('5m' or '1h')
   max_output_tokens: 256          # Per-criterion JSON response cap
   max_retries_429: 3              # Rate-limit retry budget
@@ -157,7 +159,7 @@ grade:
 
 Field-by-field:
 
-- **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point (#136 OpenAI / #137 Gemini register more providers); today only `anthropic` is registered.
+- **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point (#136 OpenAI / #137 Gemini register more providers); today `anthropic` and `gemini` are registered. Selecting `gemini` requires installing the optional extra (`pip install signalforge-dbt[gemini]`) and setting `GOOGLE_API_KEY`; recommended Gemini judge SKU is `gemini-2.5-flash` (see [Cost guidance](#cost-guidance-dec-014) for the v0.3 no-caching note).
 - **`model`** — The model id used by every per-pair judge call. Default `claude-sonnet-4-6`. Mirrors `DraftConfig.model` default. Haiku 4.5 is documented as a v0.2 cost-conscious option but not exposed in v0.1.
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
 - **`max_output_tokens`** — Per-criterion judge response cap. Default `256`. The expected JSON response is ~150 tokens; 256 gives 2× safety. Independent of `DraftConfig.max_output_tokens`.
@@ -482,7 +484,9 @@ default fan-out is too expensive for their use case:
   reports `supports_prompt_caching` / `supports_token_count`. A provider
   that supports neither reports 0 cache tokens and skips the marker; the
   default `anthropic` provider supports both, so the economics below are
-  unchanged. The cached block (system prompt + rubric block) is constant
+  unchanged. The `gemini` provider (v0.3) supports neither yet — see the
+  "Gemini cost note (v0.3)" paragraph below for the budgeting impact.
+  The cached block (system prompt + rubric block) is constant
   across every call in one `grade_artifacts` invocation; a 60-call run
   reads the cache ~59 times after one write. Cache reads are 0.1× input pricing vs.
   1.25× for writes; the break-even is ~2 reads per write. Switching
@@ -491,6 +495,21 @@ default fan-out is too expensive for their use case:
   expire mid-iteration, which means the per-call reads stop landing,
   which the dual-zero cache-anomaly WARNING (DEC-014 of #5) surfaces
   loudly. Leave at `"1h"` unless you have a specific reason.
+
+**Gemini cost note (v0.3).** **Gemini (v0.3) ships without prompt
+caching.** Every grade call transmits the full system + rubric prompt;
+there is no Anthropic-style discount on the cached prefix. For a
+default 4-criterion rubric over a 12-column model (~48 sequential
+calls), budget the per-call cost accordingly — the `cache_ttl` knob
+is inert under `provider: gemini` (the `LLMProvider` strategy reports
+`supports_prompt_caching=False`, so `call_llm` skips the
+`cache_control` marker, the `extended-cache-ttl` beta header, and the
+pre-send `count_tokens` gate). Explicit Gemini context caching is
+tracked as a follow-up. Selecting `provider: gemini` requires
+`pip install signalforge-dbt[gemini]` and the `GOOGLE_API_KEY` env
+var; `gemini-2.5-flash` is the recommended middle-of-the-road judge
+SKU (the other registered SKUs are `gemini-2.5-pro` and
+`gemini-2.0-flash`).
 
 **v0.2 will offer batched-criteria as opt-in** for cost-conscious
 operators (DEC-014). The current architecture preserves the option:
