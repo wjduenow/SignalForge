@@ -6,8 +6,9 @@
 - **Parent epic:** #134 (pluggable LLM provider for grading — OpenAI/Gemini). Milestone v0.3.
 - **Depends on:** #135 (provider-neutral LLM seam) — **merged**, PR #148.
 - **Sibling:** #137 (Gemini grading; mirrors the same shape).
-- **Phase:** detailing (awaiting approval)
+- **Phase:** published (awaiting approval — PR #152)
 - **Branch:** `feature/136-openai-grading`
+- **PR:** https://github.com/wjduenow/SignalForge/pull/152
 
 ## What / Why
 
