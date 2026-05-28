@@ -1,6 +1,8 @@
-"""End-to-end smoke test against real Anthropic + real BigQuery.
+"""End-to-end smoke test against real BigQuery + parametrized grader provider.
 
-Issue #10 / US-005. Pins the v0.1 promise the rest of the suite cannot
+Issue #10 / US-005 (original Anthropic baseline) extended by issue #155 /
+US-007 to parametrize over ``grade.provider ∈ {"anthropic", "openai",
+"gemini"}``. Pins the v0.1 promise the rest of the suite cannot
 exercise: ``signalforge generate <model>`` against a real dbt project
 talking to a real warehouse and a real LLM produces a coherent
 ``diff.json`` whose kept / dropped / flagged tallies match the
@@ -9,16 +11,31 @@ fixture's expected shape (DEC-002, DEC-009, DEC-024, DEC-029 of
 to source-as-model so the always-passes drop comes from natural NOT
 NULL columns in bikeshare data rather than engineered literal columns).
 
-Gated by THREE env vars (DEC-002):
+Issue #155 motivation (DEC-003 / DEC-011 / DEC-012 of
+``plans/super/155-gemini-truncation-e2e-gap.md``): the in-isolation
+grade smokes (``tests/grade/test_*_grade_live.py``) never see the
+diff-sidecar ``evidence`` / ``reasoning`` rendering cascade with a
+non-Anthropic judge. Parametrizing this BQ smoke over ``grade.provider``
+covers the cross-provider diff-sidecar rendering contract. The drafter
+stays Anthropic Sonnet across all three variants per DEC-011
+(fixture stability — the LLM payload the drafter sees is unchanged so
+the always-passes column the LLM proposes is reproducibly the same).
+Per-variant failure ergonomics and cost transparency for the
+non-baseline variants also live in dedicated sibling files
+(``tests/cli/test_e2e_openai_smoke.py``, ``tests/cli/test_e2e_gemini_smoke.py``).
 
-* ``SF_RUN_BQ=1`` — the project-wide opt-in for "this test costs real
-  money / talks to a real warehouse" (mirrors
-  ``tests/warehouse/test_bigquery_integration.py``).
-* ``ANTHROPIC_API_KEY`` — without a key the drafter / grader cannot
-  call the LLM seam.
-* ``GOOGLE_CLOUD_PROJECT`` — the BigQuery billing project.
-  ``bigquery-public-data.austin_bikeshare`` is publicly readable but
-  the runner's own project is billed for the bytes scanned.
+Each variant carries the baseline three env-var gate (drafter is
+always Anthropic, warehouse is always BigQuery) plus per-variant
+grader env vars added on top:
+
+* ``anthropic`` — ``SF_RUN_BQ=1``, ``ANTHROPIC_API_KEY``,
+  ``GOOGLE_CLOUD_PROJECT`` (only the baseline; the grader reuses the
+  drafter's Anthropic key).
+* ``openai`` — baseline + ``SF_RUN_OPENAI=1`` + ``OPENAI_API_KEY``.
+* ``gemini`` — baseline + ``SF_RUN_GEMINI=1`` + ``GOOGLE_API_KEY``.
+
+``bigquery-public-data.austin_bikeshare`` is publicly readable but the
+runner's own project is billed for the bytes scanned.
 
 The test is excluded from default ``pytest`` runs by
 ``addopts = "... -m 'not e2e' ..."`` in ``pyproject.toml``. The
@@ -28,27 +45,37 @@ maintainer runs it once before declaring an e2e PR ready (mirrors
     gcloud auth application-default login
     export GOOGLE_CLOUD_PROJECT=<billing-project>
     export ANTHROPIC_API_KEY=sk-...
+    # Optional for the non-baseline variants:
+    export OPENAI_API_KEY=sk-... SF_RUN_OPENAI=1
+    export GOOGLE_API_KEY=... SF_RUN_GEMINI=1
     SF_RUN_BQ=1 pytest -m e2e --no-cov
 
 The ``--no-cov`` flag is required because ``--cov-fail-under`` in
 ``addopts`` would fail any marker-specific run that exercises only a
-fraction of the codebase.
+fraction of the codebase. Per-variant invocation: append
+``-k anthropic`` / ``-k openai`` / ``-k gemini`` to the above.
 
-Asserts the seven invariants from DEC-009:
+Asserts the seven invariants from DEC-009 across every parametrized
+variant:
 
 1. ``signalforge.cli.main(...)`` returns ``0``.
 2. ``<project_dir>/.signalforge/diff.json`` exists.
-3. ``DiffReport.kept_count >= 1`` (resolves SQ-01 — at least one
-   artifact survives prune + grade).
+3. ``DiffReport.kept_count + flagged_count + dropped_count >= 1``
+   (resolves SQ-01 — non-empty diff).
 4. A :class:`PruneDecision` with ``decision == "dropped"`` and
    ``reason == "always-passes"`` exists in the prune audit (resolves
    SQ-02 — the v0.1 differentiator: SignalForge dropped a noisy
    ``not_null`` test the LLM proposed on a natural NOT NULL column
-   like ``trip_id`` or ``start_time`` per DEC-024).
+   like ``trip_id`` or ``start_time`` per DEC-024). Warehouse-side,
+   independent of grader provider.
 5. ``DiffReport.flagged_count >= 1`` (forced by tight grade
-   thresholds in ``signalforge.yml``).
+   thresholds in ``signalforge.yml``). All three graders are held to
+   the same bar; see the inline comment on the assertion for the
+   per-variant relaxation risk.
 6. ``GradingReport.aggregate_complete is True`` (no degraded grade
-   calls — every ``(artifact, criterion)`` pair scored cleanly).
+   calls — every ``(artifact, criterion)`` pair scored cleanly). This
+   is the cross-provider contract pin the in-isolation smokes can't
+   provide.
 7. ``"Traceback" not in stderr`` (DEC-016 of
    ``cli-layer.md`` — no traceback ever leaks).
 """
@@ -78,37 +105,93 @@ def _bq_runs_enabled() -> bool:
     return os.environ.get("SF_RUN_BQ", "").lower() in _TRUTHY
 
 
-def _skip_reason() -> str | None:
+def _openai_runs_enabled() -> bool:
+    """``SF_RUN_OPENAI`` is set to a truthy value (mirrors ``SF_RUN_BQ``)."""
+    return os.environ.get("SF_RUN_OPENAI", "").lower() in _TRUTHY
+
+
+def _gemini_runs_enabled() -> bool:
+    """``SF_RUN_GEMINI`` is set to a truthy value (mirrors gemini live tests)."""
+    return os.environ.get("SF_RUN_GEMINI", "").lower() in _TRUTHY
+
+
+def _skip_reason(grade_provider: str) -> str | None:
     """Return a skip-reason string if any required env var is missing.
 
-    Returns ``None`` when all three gates are satisfied — the test
-    proceeds to make real Anthropic + real BigQuery calls. Mirrors the
-    skip-style used by ``tests/warehouse/test_bigquery_integration.py``
-    (DEC-002 / DEC-020).
+    Returns ``None`` when every gate required by ``grade_provider`` is
+    satisfied — the test then proceeds to make real BigQuery + real
+    Anthropic (drafter) + real ``<grade_provider>`` (grader) calls.
+
+    The baseline three-env-var gate (``SF_RUN_BQ`` + ``ANTHROPIC_API_KEY``
+    + ``GOOGLE_CLOUD_PROJECT``) applies to every variant because the
+    drafter stays Anthropic across all three per DEC-011 of
+    ``plans/super/155-gemini-truncation-e2e-gap.md``. The non-baseline
+    variants layer additional grader-specific env vars on top.
+
+    Each missing prerequisite yields its own distinct reason so a
+    maintainer running ``pytest -m e2e -k <variant>`` sees exactly what
+    to set. Treat an empty / whitespace-only key as "unset" (an empty
+    value would otherwise reach the client and produce a noisy auth
+    failure rather than a skip).
     """
+    # Baseline (always required — drafter is Anthropic, warehouse is BQ).
     if not _bq_runs_enabled():
         return "SF_RUN_BQ=1 required (e2e test costs real money against BigQuery)"
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        return "ANTHROPIC_API_KEY required (e2e test calls the real Anthropic API)"
-    if not os.environ.get("GOOGLE_CLOUD_PROJECT"):
+    if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return (
+            "ANTHROPIC_API_KEY required "
+            "(drafter stays on Anthropic Sonnet per #155 DEC-011 across every variant)"
+        )
+    if not os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip():
         return (
             "GOOGLE_CLOUD_PROJECT required "
             "(BigQuery billing project; bigquery-public-data is readable but billed to the runner)"
         )
+    # Per-variant grader env-var layer.
+    if grade_provider == "openai":
+        if not _openai_runs_enabled():
+            return (
+                "SF_RUN_OPENAI=1 required (openai variant costs real money against the OpenAI API)"
+            )
+        if not os.environ.get("OPENAI_API_KEY", "").strip():
+            return (
+                "OPENAI_API_KEY required (openai variant calls the real OpenAI API as the grader)"
+            )
+    elif grade_provider == "gemini":
+        if not _gemini_runs_enabled():
+            return (
+                "SF_RUN_GEMINI=1 required (gemini variant costs real money against the Gemini API)"
+            )
+        if not os.environ.get("GOOGLE_API_KEY", "").strip():
+            return (
+                "GOOGLE_API_KEY required (gemini variant calls the real Gemini API as the grader)"
+            )
     return None
 
 
 @pytest.mark.e2e
+@pytest.mark.parametrize("grade_provider", ["anthropic", "openai", "gemini"])
 def test_e2e_signalforge_generate_against_austin_bikeshare(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    grade_provider: str,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Run ``signalforge generate`` end-to-end and pin the seven invariants.
 
-    Skips cleanly under ``pytest -m e2e`` when any of the three env
-    vars is missing — the maintainer runs the gated invocation once
-    before merge and the default suite never reaches this test.
+    Parametrized over ``grade_provider`` per #155 DEC-003 — the
+    cross-provider diff-sidecar rendering contract the in-isolation
+    grade smokes (``tests/grade/test_*_grade_live.py``) cannot pin.
+    Drafter stays Anthropic Sonnet across all three variants per #155
+    DEC-011 (fixture stability: the LLM payload the drafter sees is
+    unchanged, so the always-passes column the LLM proposes is
+    reproducibly the same).
+
+    Skips cleanly under ``pytest -m e2e`` when any of the variant's
+    required env vars is missing — the maintainer runs the gated
+    invocation once before merge and the default suite never reaches
+    this test.
     """
-    if reason := _skip_reason():
+    if reason := _skip_reason(grade_provider):
         pytest.skip(reason)
 
     # DEC-008 — copy the read-only fixture to ``tmp_path`` so the audit
@@ -117,14 +200,43 @@ def test_e2e_signalforge_generate_against_austin_bikeshare(
     # not the committed fixture.
     project_dir = copy_fixture_to_tmp(_FIXTURE_DIR, tmp_path)
 
-    # Issue #155 / US-004 / DEC-012 — exercise the canonical per-test
-    # provider-overlay helper. This BQ smoke is the Anthropic baseline, so
-    # the call is a no-op proof-of-use: it stamps `grade.provider:
-    # anthropic` (the implicit default in the committed fixture's
-    # `signalforge.yml`) without changing any other knob. The OpenAI
-    # (US-005) and Gemini (US-006) sibling smokes will pass non-default
-    # `grade_provider=` values through the same seam.
-    apply_provider_override(project_dir, grade_provider="anthropic")
+    # Issue #155 / US-004 / US-007 / DEC-012 — overlay the grader's
+    # provider/model via the canonical per-test helper. The drafter
+    # stays Anthropic Sonnet across every variant per DEC-011 (no
+    # ``llm.provider`` override); only ``grade:`` block knobs change
+    # here. The fixture's grade thresholds (``min_pass_rate=0.95 /
+    # min_mean_score=0.95 / total_budget_seconds=600``) round-trip
+    # unchanged.
+    if grade_provider == "anthropic":
+        # No-op proof-of-use: stamps `grade.provider: anthropic` (the
+        # implicit default in the committed fixture's `signalforge.yml`)
+        # without changing any other knob.
+        apply_provider_override(project_dir, grade_provider="anthropic")
+    elif grade_provider == "openai":
+        apply_provider_override(
+            project_dir,
+            grade_provider="openai",
+            grade_model="gpt-4o",
+        )
+    elif grade_provider == "gemini":
+        # ``grade_max_output_tokens=2048`` is **load-bearing**, not
+        # cosmetic. Issue #155 Finding 2: Gemini 2.5-flash's verbose
+        # ``reasoning`` field routinely exceeds
+        # ``max_output_tokens=512``/``1024`` on this fixture's grading
+        # workload, hitting MAX_TOKENS and truncating mid-string. That
+        # truncation surfaces downstream as a degraded grade result
+        # (``aggregate_complete=False``) and would flake assertion #6
+        # below. The #155 live probe verified ``2048`` passes cleanly.
+        # Per DEC-009 the floor lives here in the test overlay rather
+        # than as a bumped ``GradeConfig`` production default.
+        apply_provider_override(
+            project_dir,
+            grade_provider="gemini",
+            grade_model="gemini-2.5-flash",
+            grade_max_output_tokens=2048,
+        )
+    else:  # pragma: no cover — parametrize guards the value space.
+        raise AssertionError(f"unhandled grade_provider: {grade_provider!r}")
 
     # The committed `profiles.yml` pins ``project: bigquery-public-data``
     # so the regen script (`dbt parse`) can hit the public dataset; but at
@@ -188,9 +300,23 @@ def test_e2e_signalforge_generate_against_austin_bikeshare(
         f"got kept={report.kept_count} flagged={report.flagged_count} "
         f"dropped={report.dropped_count}"
     )
+    # Per-variant relaxation risk: the fixture's tight thresholds were
+    # calibrated against the Anthropic grader's score distribution
+    # (US-005 / #10). OpenAI's ``gpt-4o`` and Gemini's
+    # ``gemini-2.5-flash`` may score the same artifacts differently —
+    # in principle a more lenient judge could land flagged_count=0 here
+    # while the run is otherwise healthy. The #155 live probe in DEC-009
+    # observed all three providers still force at least one flag on this
+    # fixture, but this is an unverified per-PR assumption (this worker
+    # cannot reach the live APIs). If a future maintainer's live run
+    # trips this assertion for the openai/gemini variant, relax to
+    # ``>= 0`` for that variant and capture the per-grader distribution
+    # in a follow-up bead — do NOT delete the assertion (the anthropic
+    # variant must still pin the threshold-honouring contract).
     assert report.flagged_count >= 1, (
-        f"expected flagged_count >= 1 (signalforge.yml pins min_pass_rate=0.95 / "
-        f"min_mean_score=0.95 to force at least one flag); got {report.flagged_count}"
+        f"expected flagged_count >= 1 for grader={grade_provider!r} "
+        f"(signalforge.yml pins min_pass_rate=0.95 / min_mean_score=0.95 to "
+        f"force at least one flag); got {report.flagged_count}"
     )
 
     # 4. At least one always-passes drop — the v0.1 differentiator.
@@ -211,14 +337,21 @@ def test_e2e_signalforge_generate_against_austin_bikeshare(
         "start_time, etc.) rather than engineered literals."
     )
 
-    # 6. Grade aggregate_complete — no degraded calls.
+    # 6. Grade aggregate_complete — no degraded calls. This is the
+    #    cross-provider contract pin the in-isolation smokes can't
+    #    provide: every (artifact, criterion) pair must score cleanly
+    #    through the full pipeline (manifest → safety → draft → prune →
+    #    grade → diff) under the parametrized grader provider, with no
+    #    truncation, safety-filter, or parse-failure degrades.
     grade_sidecar = project_dir / ".signalforge" / "grade.json"
     assert grade_sidecar.is_file(), f"grade sidecar missing at {grade_sidecar}"
     grading_report = GradingReport.model_validate_json(grade_sidecar.read_text())
     assert grading_report.aggregate_complete is True, (
-        "expected GradingReport.aggregate_complete=True (every (artifact, criterion) "
-        "pair scored cleanly); got False — increase grade.total_budget_seconds in "
-        "signalforge.yml or investigate the LLM seam."
+        f"expected GradingReport.aggregate_complete=True for grader={grade_provider!r} "
+        f"(every (artifact, criterion) pair scored cleanly); got False — increase "
+        f"grade.total_budget_seconds in signalforge.yml or investigate the "
+        f"{grade_provider} provider seam (capability flags, JSON-mode wiring, "
+        f"tolerant parser, max_output_tokens floor)."
     )
 
     # 7. No traceback in stderr (DEC-016 of cli-layer.md — the CLI's
