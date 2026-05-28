@@ -807,24 +807,22 @@ def _run_single_model(
             # DEC-006 of #135 — the four pipeline orchestrators now let
             # ``call_llm`` lazy-build the client via the configured provider,
             # so the CLI no longer constructs one for the real-run path. The
-            # ``--estimate`` engine, however, needs a concrete client up front
-            # (it issues ``count_tokens`` directly, an Anthropic-specific
-            # surface), so it builds one through the provider registry keyed on
-            # the drafter's configured provider. Any auth failure surfaces at
-            # the existing panic boundary → tier 3 via _EXCEPTION_TO_EXIT_CODE.
+            # ``--estimate`` engine takes the same shape: each stage's
+            # ``count`` call dispatches through
+            # ``provider_for(config.provider).estimate_input_tokens(...)``
+            # (#136 US-005 DEC-003), so a non-Anthropic provider's
+            # ``--estimate`` path now works too — OpenAI counts locally via
+            # ``tiktoken`` and ignores the threaded client.
             #
-            # ``make_client`` returns ``object`` (the provider-neutral seam
-            # type, #135 DEC-012); the ``--estimate`` engine's pre-flight cost
-            # preview is Anthropic-specific (it calls ``count_tokens`` on the
-            # ``AnthropicClientProtocol`` surface — #36), so cast to that
-            # protocol here. A non-Anthropic provider's ``--estimate`` path is
-            # out of scope until #136/#137 wire those vendors.
-            #
-            # The estimate engine takes BOTH configs but drives this single
-            # Anthropic-shaped client, so fail fast rather than silently
-            # project grade-stage cost through the drafter's client (if the
-            # two providers diverge) or blow up on a provider with no
-            # ``count_tokens`` surface.
+            # The engine still accepts a single optional client object so
+            # Anthropic's per-call SDK construction is avoidable when the
+            # CLI already has one in scope. For non-Anthropic providers we
+            # pass ``None`` and the provider handles it (no-op for OpenAI;
+            # error for any provider that genuinely needs an SDK client and
+            # was given none — only Anthropic does today). The single-client
+            # design still requires the two stages' providers to match so
+            # we don't silently project grade-stage cost through the
+            # drafter's vendor when they diverge.
             if draft_config.provider != grade_config.provider:
                 raise CliInputError(
                     "--estimate requires draft.provider and grade.provider to match "
@@ -834,19 +832,18 @@ def _run_single_model(
                         "--estimate until per-provider estimation support lands."
                     ),
                 )
-            if draft_config.provider != "anthropic":
-                raise CliInputError(
-                    "--estimate currently supports only provider='anthropic' "
-                    f"(got {draft_config.provider!r}).",
-                    remediation=(
-                        "Set draft.provider and grade.provider to 'anthropic', or "
-                        "run without --estimate."
-                    ),
+            # Build a concrete client only for providers that need one
+            # (Anthropic). Providers that count locally (OpenAI) ignore
+            # the kwarg; passing ``None`` keeps us from constructing an
+            # SDK client + requiring its API key purely for a local count.
+            client: object | None
+            if draft_config.provider == "anthropic":
+                client = cast(
+                    "AnthropicClientProtocol",
+                    provider_for(draft_config.provider).make_client(),
                 )
-            client = cast(
-                "AnthropicClientProtocol",
-                provider_for(draft_config.provider).make_client(),
-            )
+            else:
+                client = None
             report = estimate_module.estimate(
                 model,
                 manifest,

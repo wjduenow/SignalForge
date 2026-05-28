@@ -212,6 +212,25 @@ class FakeNoCacheProvider(LLMProvider):
             return ExceptionCategory.CONNECTION
         return ExceptionCategory.NO_RETRY
 
+    def estimate_input_tokens(
+        self,
+        model: str,
+        text: str,
+        *,
+        client: object | None = None,
+    ) -> int:
+        """Return a trivial word-count proxy for ``text`` (#136 US-005).
+
+        The neutrality test exercises orchestrator dispatch, not real
+        token counting; ``len(text.split())`` is a deterministic
+        non-zero positive answer that any rendered estimate will treat
+        as valid. Mirrors :class:`FakeNoCacheProvider`'s overall posture
+        of declaring the right capability flags and answering each ABC
+        method with a minimal honest value.
+        """
+        del model, client  # neither is consulted on the proxy path
+        return len(text.split())
+
 
 __all__ = [
     "FAKE_NOCACHE_PROVIDER_NAME",

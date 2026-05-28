@@ -174,6 +174,39 @@ class LLMProvider(abc.ABC):
     def classify_exception(self, exc: BaseException) -> ExceptionCategory:
         """Map a raised vendor exception to a neutral :class:`ExceptionCategory`."""
 
+    @abc.abstractmethod
+    def estimate_input_tokens(
+        self,
+        model: str,
+        text: str,
+        *,
+        client: object | None = None,
+    ) -> int:
+        """Return the input-token count ``text`` would consume on ``model``.
+
+        Used by the ``signalforge generate --estimate`` cost-preview path
+        (issue #36 / #136 US-005 — DEC-003). The Anthropic implementation
+        delegates to the SDK's ``messages.count_tokens`` (a server-side
+        count) so the figure matches what the runtime path would bill;
+        the OpenAI implementation delegates to ``tiktoken`` (a local BPE
+        count) because OpenAI has no equivalent pre-send count API.
+
+        Capability flags (DEC-008 of #135) do NOT gate this method —
+        every provider must answer "how many tokens is this text?" even
+        if it lacks Anthropic-style prompt caching. The runtime retry
+        loop's pre-send count gate (which IS gated by
+        :attr:`supports_token_count`) is a different surface; this is
+        the estimate path's calibration seam.
+
+        ``client`` is an optional pre-constructed SDK client (e.g. a
+        test fake satisfying the vendor's client protocol). Providers
+        that build a transient client per call (e.g. Anthropic) MAY
+        accept and reuse it to avoid the construction cost; providers
+        whose implementation is local (e.g. OpenAI's ``tiktoken``) MAY
+        ignore it. The orchestrator passes whatever client it already
+        has in scope (or ``None``); the provider decides.
+        """
+
 
 # Process-level provider registry, keyed by ``provider.name`` (DEC-003). Module
 # scope makes it a single registry per process; US-002 registers
@@ -354,6 +387,62 @@ class AnthropicProvider(LLMProvider):
                 return ExceptionCategory.NO_RETRY
             return ExceptionCategory.NO_RETRY
         return ExceptionCategory.NO_RETRY
+
+    def estimate_input_tokens(
+        self,
+        model: str,
+        text: str,
+        *,
+        client: object | None = None,
+    ) -> int:
+        """Count tokens via the Anthropic SDK's ``messages.count_tokens``.
+
+        Preserves byte-identity with the pre-#136-US-005 inline
+        ``client.messages.count_tokens(...)`` calls in
+        :mod:`signalforge.cli._estimate` (DEC-013 of #136): the count
+        is issued with a single user-message text block whose
+        ``content`` is ``text``. Tests inject a queued-response
+        ``FakeAnthropicClient`` via ``client``; production callers
+        either pass a pre-constructed client (from the
+        ``--estimate`` CLI prelude) or rely on the lazy fallback
+        below.
+
+        When ``client`` is ``None``, the provider builds a transient
+        SDK client via
+        :func:`signalforge.llm._anthropic_client._make_anthropic_client`.
+        This path is reachable only when a caller invokes the engine
+        without threading a client through (no v0.x caller does so on
+        the happy path); the cost of one SDK construction per call is
+        acceptable for that fallback case.
+        """
+        from typing import cast
+
+        from signalforge.llm._anthropic_client import (
+            AnthropicClientProtocol,
+            _make_anthropic_client,
+        )
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        # Cast the optional ``client`` to the public protocol so pyright
+        # sees the ``messages.count_tokens`` surface without a type-checker
+        # suppression here — the DEC-012 confinement rule keeps every
+        # SDK suppression inside ``_anthropic_client.py``. Both the real
+        # ``anthropic.Anthropic`` (via the shim's ``_make_anthropic_client``)
+        # and the ``FakeAnthropicClient`` test fake satisfy the protocol
+        # structurally.
+        resolved: AnthropicClientProtocol = (
+            _make_anthropic_client() if client is None else cast(AnthropicClientProtocol, client)
+        )
+        response = resolved.messages.count_tokens(
+            model=model,
+            messages=[{"role": "user", "content": text}],
+        )
+        input_tokens = getattr(response, "input_tokens", None)
+        if not isinstance(input_tokens, int):
+            raise LLMResponseFormatError(
+                "Anthropic count_tokens response is missing the `input_tokens` field.",
+            )
+        return input_tokens
 
 
 # Register the Anthropic strategy at import time so ``provider_for("anthropic")``
@@ -545,6 +634,34 @@ class OpenAIProvider(LLMProvider):
                 return ExceptionCategory.NO_RETRY
             return ExceptionCategory.NO_RETRY
         return ExceptionCategory.NO_RETRY
+
+    def estimate_input_tokens(
+        self,
+        model: str,
+        text: str,
+        *,
+        client: object | None = None,
+    ) -> int:
+        """Count tokens locally via ``tiktoken`` (DEC-003/DEC-012 of #136).
+
+        OpenAI has no server-side ``count_tokens`` API (and the provider
+        declares ``supports_token_count=False`` so the runtime retry loop
+        skips its pre-send count gate entirely — DEC-008 of #135). The
+        ``--estimate`` calibration path counts tokens locally instead by
+        delegating to
+        :func:`signalforge.llm._openai_client._count_openai_tokens`,
+        which uses ``tiktoken.encoding_for_model(model)`` with a
+        ``cl100k_base`` fallback for unknown model ids.
+
+        ``client`` is ignored — the count is a pure local BPE pass with
+        no SDK or network involvement. The kwarg is declared for
+        protocol parity with :meth:`AnthropicProvider.estimate_input_tokens`
+        so the orchestrator can call every provider the same way.
+        """
+        from signalforge.llm._openai_client import _count_openai_tokens
+
+        del client  # tiktoken needs no SDK client
+        return _count_openai_tokens(model, text)
 
 
 # Register the OpenAI strategy at import time so ``provider_for("openai")``

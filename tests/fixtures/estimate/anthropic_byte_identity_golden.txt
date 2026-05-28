@@ -1,0 +1,28 @@
+Estimate for model.shop.customers
+  drafter: claude-sonnet-4-6
+  grader:  claude-sonnet-4-6
+
+Estimated draft cost:
+  input tokens:   1,000
+  output tokens:  ~4,096 (estimated)
+  cost:           $0.0644
+
+Estimated grade cost:
+  artifacts: 13   criteria: 4   calls: 52
+  per criterion:
+    clarity          13 calls   6,500 tokens   $0.0292
+    consistency      13 calls   6,500 tokens   $0.0292
+    rationale        13 calls   6,500 tokens   $0.0292
+    no-redundant     13 calls   6,500 tokens   $0.0292
+  cost:           $0.1170
+
+Estimated warehouse cost:
+  bytes-per-row:    ~1 (BigQuery dryRun)
+  test count est:   7 (3.5 tests/col x 2 cols)
+  sample size:      100,000 rows
+  total bytes:      ~68.4 KB
+
+Total estimated LLM cost: $0.1814
+Total estimated warehouse: ~68.4 KB
+
+Price table: 2026-05-28  |  Heuristic: ~3.5 tests/column (canonical fixture average)

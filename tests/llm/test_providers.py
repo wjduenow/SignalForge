@@ -72,6 +72,17 @@ class _DummyProvider(LLMProvider):
     def classify_exception(self, exc: BaseException) -> ExceptionCategory:
         return ExceptionCategory.NO_RETRY
 
+    def estimate_input_tokens(
+        self,
+        model: str,
+        text: str,
+        *,
+        client: object | None = None,
+    ) -> int:
+        # Trivial deterministic stub (#136 US-005) — the registry tests
+        # don't exercise the count, only the ABC instantiation path.
+        return 0
+
 
 @pytest.fixture
 def _isolate_registry() -> Any:
