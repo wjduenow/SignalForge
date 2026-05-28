@@ -712,9 +712,334 @@ class OpenAIProvider(LLMProvider):
 register_provider(OpenAIProvider())
 
 
+class _GeminiMessagesAdapter:
+    """Façade exposing ``.create(**kwargs)`` over the SDK's native
+    ``client.models.generate_content(...)`` surface (#137 DEC-004/009).
+
+    The provider-neutral orchestrator in :mod:`signalforge.llm.client` always
+    calls ``client.messages.create(**kwargs)`` regardless of vendor. Google's
+    ``google-genai`` SDK has no native ``.messages`` namespace — generation
+    lives at ``client.models.generate_content(...)``. The kwargs dict produced
+    by :meth:`GeminiProvider.build_create_kwargs` matches that signature
+    exactly, so this adapter forwards ``**kwargs`` straight through.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    def create(self, **kwargs: Any) -> Any:
+        """Forward to the SDK's native ``models.generate_content``."""
+        return self._client.models.generate_content(**kwargs)
+
+    def count_tokens(self, **kwargs: Any) -> Any:
+        """Forward to the SDK's native ``models.count_tokens``.
+
+        Unused on the ``call_llm`` happy path — :class:`GeminiProvider`
+        declares ``supports_token_count = False`` (DEC-003) so the
+        orchestrator skips the pre-send count gate. Kept on the adapter for
+        the US-007 ``--estimate`` path and so the façade structurally
+        satisfies the neutral client protocol.
+        """
+        return self._client.models.count_tokens(**kwargs)
+
+
+class _GeminiClientAdapter:
+    """Wraps a real ``google.genai.Client`` so it satisfies the orchestrator's
+    neutral ``.messages.{create,count_tokens}`` surface (#137 DEC-009).
+
+    Constructed only inside :meth:`GeminiProvider.make_client` from the bare
+    client returned by :func:`signalforge.llm._gemini_client._make_gemini_client`.
+    Test environments inject :class:`tests.llm._fake_gemini.FakeGeminiClient`
+    (US-004) directly via the ``client=`` kwarg on ``call_llm`` and never see
+    this adapter — keeping the adapter logic narrowly on the production path.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self.messages = _GeminiMessagesAdapter(client)
+
+    @property
+    def models(self) -> Any:
+        """Expose the SDK's native ``.models`` namespace for any caller
+        (e.g. the US-007 token-estimator) that bypasses the ``.messages``
+        façade. The native surface is the only way to reach
+        ``client.models.count_tokens`` for an estimate."""
+        return self._client.models
+
+
+class GeminiProvider(LLMProvider):
+    """Google Gemini strategy behind the generic LLM orchestrator (#137).
+
+    Per DEC-003, both capability flags are ``False``: the v0.3 Gemini wiring
+    ships **without** Anthropic-style prompt caching and **without** a
+    pre-send token-count gate. The orchestrator therefore:
+
+    * builds no ``cache_control`` marker and no extended-cache beta header,
+    * skips the pre-send :class:`signalforge.llm.errors.LLMCacheTooLargeError`
+      gate (``messages.count_tokens`` is never called on the happy path),
+    * reports ``cache_creation_input_tokens`` / ``cache_read_input_tokens``
+      as 0, and suppresses the dual-zero cache-anomaly WARNING.
+
+    The Google ``google-genai`` SDK noise stays confined to
+    :mod:`signalforge.llm._gemini_client` (DEC-001). This class never imports
+    a ``google.genai`` symbol at module scope — every SDK touch is via the
+    shim's helpers (:func:`_make_gemini_client`,
+    :func:`_load_gemini_exception_classes`) so a base install without the
+    ``[gemini]`` extra still imports this module cleanly (DEC-015).
+
+    Server-side JSON enforcement (DEC-018). :meth:`build_create_kwargs`
+    sets ``response_mime_type="application/json"`` on the
+    ``GenerateContentConfig``. Belt-and-braces with the tolerant
+    :func:`signalforge.llm._json.extract_json_payload` (issue #144) — the
+    server-side flag eliminates the prose-preamble drift class; the
+    tolerant parser remains the fallback if a future model strips the flag.
+    """
+
+    name = "gemini"
+    supports_prompt_caching = False
+    supports_token_count = False
+
+    def make_client(self) -> object:
+        """Build the real ``google.genai.Client`` via the shim, wrapped in
+        the ``.messages`` façade adapter (DEC-001/004)."""
+        from signalforge.llm._gemini_client import _make_gemini_client
+
+        return _GeminiClientAdapter(_make_gemini_client())
+
+    def build_create_kwargs(
+        self,
+        *,
+        system: str,
+        cached_block: str,
+        dynamic_block: str,
+        model: str,
+        max_tokens: int,
+        cache_ttl: str,
+        cache_marker_active: bool,
+    ) -> dict[str, Any]:
+        """Build the kwargs for ``client.models.generate_content`` (DEC-004 + DEC-018).
+
+        ``system`` → ``GenerateContentConfig.system_instruction``;
+        ``cached_block + "\\n\\n" + dynamic_block`` concatenated into a single
+        user-role ``contents`` entry; ``response_mime_type="application/json"``
+        on the config (DEC-018). ``cache_marker_active`` is intentionally
+        ignored — both capability flags are ``False`` so no ``cache_control``
+        anywhere and no ``extra_headers`` key.
+
+        ``config`` is built as a plain ``dict`` (``GenerateContentConfigDict``
+        in the SDK's type union) so this module never imports
+        ``google.genai.types`` — keeping the line-based confinement test
+        green and a base install (no ``[gemini]`` extra) able to import
+        this module cleanly.
+        """
+        del cache_ttl, cache_marker_active  # no-cache provider
+        contents = [cached_block + "\n\n" + dynamic_block]
+        config: dict[str, Any] = {
+            "system_instruction": system,
+            "response_mime_type": "application/json",
+            "max_output_tokens": max_tokens,
+        }
+        return {
+            "model": model,
+            "contents": contents,
+            "config": config,
+        }
+
+    def build_count_tokens_kwargs(
+        self,
+        *,
+        system: str,
+        cached_block: str,
+        model: str,
+    ) -> dict[str, Any]:
+        """Never invoked — ``supports_token_count`` is ``False`` (DEC-003).
+
+        The orchestrator skips the pre-send count gate entirely for a
+        provider that cannot count tokens, so this method is unreachable
+        on the ``call_llm`` path. Mirrors the
+        :class:`tests.llm._fake_provider.FakeNoCacheProvider` precedent.
+        """
+        del system, cached_block, model
+        raise NotImplementedError(
+            "build_count_tokens_kwargs is unreachable when supports_token_count=False"
+        )
+
+    def extract_text_blocks(self, response: object) -> tuple[str, ...]:
+        """Pull text from each candidate's parts (DEC-005).
+
+        When no candidate yields any non-empty text part (safety-filtered,
+        recitation, prohibited content, no candidates at all), raises
+        :class:`signalforge.llm.errors.LLMResponseFormatError` whose
+        message names the first candidate's ``finish_reason``.
+        """
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        candidates = getattr(response, "candidates", None) or ()
+        blocks: list[str] = []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            if content is None:
+                continue
+            parts = getattr(content, "parts", None) or ()
+            for part in parts:
+                text = getattr(part, "text", None)
+                if isinstance(text, str) and text:
+                    blocks.append(text)
+        if blocks:
+            return tuple(blocks)
+        finish_reason: object = "unknown"
+        if candidates:
+            fr_attr = getattr(candidates[0], "finish_reason", None)
+            if fr_attr is not None:
+                finish_reason = getattr(fr_attr, "name", fr_attr)
+        raise LLMResponseFormatError(
+            f"Gemini response produced no text (finish_reason={finish_reason!r}).",
+        )
+
+    def extract_usage(self, response: object) -> UsageMetrics:
+        """Extract token economics from a Gemini response.
+
+        Reads ``response.usage_metadata.{prompt_token_count,
+        candidates_token_count}``; cache fields default to 0 (no
+        Anthropic-style prompt caching per DEC-003). Per-field values
+        are pulled via the shared ``_extract_usage_field`` helper so a
+        missing or non-int field surfaces an
+        :class:`LLMResponseFormatError` rather than silently feeding
+        misleading 0/0 figures into the audit JSONL and ``--estimate``
+        cost projection.
+        """
+        from signalforge.llm.client import _extract_usage_field
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        usage = getattr(response, "usage_metadata", None)
+        if usage is None:
+            raise LLMResponseFormatError(
+                "Gemini response is missing the `usage_metadata` attribute.",
+            )
+        # Fail loud on missing/non-int per-field values — mirrors the
+        # Anthropic precedent via _extract_usage_field. Silently
+        # defaulting to 0 would hide an SDK response-shape regression
+        # and feed misleading 0/0 token figures to the audit JSONL
+        # and the --estimate cost-projection math.
+        input_tokens = _extract_usage_field(usage, "prompt_token_count")
+        output_tokens = _extract_usage_field(usage, "candidates_token_count")
+        return UsageMetrics(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+
+    def classify_exception(self, exc: BaseException) -> ExceptionCategory:
+        """Map a raised ``google.genai.errors`` instance to a neutral category (DEC-006).
+
+        Dispatch: ``ServerError`` (5xx) → SERVER_ERROR (checked first since
+        both ``ServerError``/``ClientError`` derive from ``APIError``);
+        ``ClientError`` with ``code in (401, 403)`` → AUTH; ``ClientError``
+        with ``code == 429`` → RATE_LIMIT; ``httpx`` connection errors →
+        CONNECTION; everything else → NO_RETRY.
+
+        SDK class identities loaded via the shim's lazy helper; empty-tuple
+        fallback (DEC-015) maps everything to NO_RETRY cleanly when the
+        ``[gemini]`` extra isn't installed.
+        """
+        from signalforge.llm._gemini_client import _load_gemini_exception_classes
+
+        exc_classes = _load_gemini_exception_classes()
+        if exc_classes.api_status and isinstance(exc, exc_classes.api_status):
+            return ExceptionCategory.SERVER_ERROR
+        if exc_classes.rate_limit and isinstance(exc, exc_classes.rate_limit):
+            code = getattr(exc, "code", None)
+            if code in (401, 403):
+                return ExceptionCategory.AUTH
+            if code == 429:
+                return ExceptionCategory.RATE_LIMIT
+            return ExceptionCategory.NO_RETRY
+        try:
+            import httpx
+        except ImportError:  # pragma: no cover - httpx ships with google-genai
+            return ExceptionCategory.NO_RETRY
+        if isinstance(exc, (httpx.ConnectError, httpx.TimeoutException)):
+            return ExceptionCategory.CONNECTION
+        return ExceptionCategory.NO_RETRY
+
+    def estimate_input_tokens(
+        self,
+        model: str,
+        text: str,
+        *,
+        system: str = "",
+        client: object | None = None,
+    ) -> int:
+        """Token count via Gemini's native ``models.count_tokens`` (#137 US-007 / DEC-016).
+
+        First-party server-side count — no ``tiktoken`` equivalent. The
+        ``google-genai`` SDK exposes
+        ``client.models.count_tokens(model=..., contents=[...])`` returning
+        a ``CountTokensResponse`` whose ``total_tokens`` field carries the
+        count. One extra API round-trip per estimate call (comparable to
+        Anthropic's ``messages.count_tokens`` shape).
+
+        ``system`` is concatenated with ``text`` and sent as a single
+        ``contents`` entry. Gemini's count endpoint does not distinguish a
+        system envelope from regular tokens (unlike Anthropic's server-side
+        counter), so every token contributes to the same total — matching
+        what ``generate_content`` will bill at runtime under
+        ``provider: gemini``.
+
+        ``client`` may be a real :class:`_GeminiClientAdapter` (production),
+        a bare ``google.genai.Client`` (production fallback), or any test
+        object exposing ``.models.count_tokens(model=, contents=)``. When
+        ``None``, builds a fresh client via ``_make_gemini_client`` so the
+        estimate path works without the CLI pre-constructing one.
+
+        Capability flag note: :attr:`supports_token_count` is ``False``,
+        which gates the orchestrator's pre-send count gate on the
+        ``call_llm`` happy path — that capability is about Anthropic-style
+        prompt-cache validation, NOT about whether the provider can answer
+        ``estimate_input_tokens``. Gemini can answer this question via its
+        native endpoint; the estimate path uses it directly without going
+        through the cache-marker code path (#137 DEC-016).
+        """
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        if client is None:
+            from signalforge.llm._gemini_client import _make_gemini_client
+
+            client = _GeminiClientAdapter(_make_gemini_client())
+
+        # The orchestrator hands us either ``_GeminiClientAdapter`` (which
+        # exposes ``.models`` as a property over the raw SDK client) or
+        # any test object that exposes the same shape. Walk the attribute
+        # surface defensively rather than asserting a typed protocol — the
+        # confinement rule keeps every google-genai type-ignore inside the
+        # shim, so this seam intentionally uses ``getattr``.
+        models_ns = getattr(client, "models", None)
+        if models_ns is None or not hasattr(models_ns, "count_tokens"):
+            raise LLMResponseFormatError(
+                "Gemini client missing `.models.count_tokens` surface "
+                "(required for estimate_input_tokens).",
+            )
+
+        response = models_ns.count_tokens(model=model, contents=[system + text])
+        total = getattr(response, "total_tokens", None)
+        if not isinstance(total, int):
+            raise LLMResponseFormatError(
+                "Gemini count_tokens response is missing the `total_tokens` int field.",
+            )
+        return total
+
+
+# Register the Gemini strategy at import time so ``provider_for("gemini")``
+# resolves it. Mirrors the Anthropic + OpenAI registrations above; the
+# registry is a plugin point designed to grow (DEC-003).
+register_provider(GeminiProvider())
+
+
 __all__ = (
     "AnthropicProvider",
     "ExceptionCategory",
+    "GeminiProvider",
     "LLMProvider",
     "OpenAIProvider",
     "UsageMetrics",

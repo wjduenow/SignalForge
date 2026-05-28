@@ -108,13 +108,18 @@ export ANTHROPIC_API_KEY=sk-ant-...
 Use a fresh shell session (or `unset ANTHROPIC_API_KEY` after the
 run) so the key doesn't persist in your bash history.
 
-Anthropic is the default LLM provider. OpenAI is also supported —
-`pip install signalforge-dbt[openai]`, set `OPENAI_API_KEY`, and
-switch via `llm.provider: openai` / `grade.provider: openai` in
-`signalforge.yml`. See
-[docs/draft-ops.md § OpenAI provider](docs/draft-ops.md#openai-provider)
-and [docs/grade-ops.md § OpenAI provider](docs/grade-ops.md#openai-provider)
-for the per-stage config + cost notes.
+Anthropic is the default LLM provider. OpenAI and Google Gemini are
+also supported behind the same provider-neutral seam:
+
+- **OpenAI** — `pip install signalforge-dbt[openai]`, set `OPENAI_API_KEY`,
+  and switch via `llm.provider: openai` / `grade.provider: openai`. See
+  [docs/draft-ops.md § OpenAI provider](docs/draft-ops.md#openai-provider)
+  and [docs/grade-ops.md § OpenAI provider](docs/grade-ops.md#openai-provider).
+- **Google Gemini** — `pip install signalforge-dbt[gemini]`, set
+  `GOOGLE_API_KEY`, and switch via `llm.provider: gemini` /
+  `grade.provider: gemini`. Recommended SKU is `gemini-2.5-flash`. See
+  [docs/draft-ops.md § Gemini provider](docs/draft-ops.md#gemini-provider)
+  and [docs/grade-ops.md § Gemini provider](docs/grade-ops.md#gemini-provider).
 
 ### 3. Minimum `signalforge.yml`
 
@@ -503,12 +508,12 @@ Shipped:
 | v0.1    | 2026-05-20 | Single-model draft + warehouse prune + LLM-as-judge grade + diff renderer; BigQuery adapter; `signalforge` CLI (`generate`, `lint`, `version`)                  |
 | v0.2    | 2026-05-21 | Ingest externally-authored `schema.yml`; `signalforge prune-existing` (no-LLM prune path); `signalforge init-demo` first-run UX; uv tooling; Python 3.11–3.13   |
 | v0.3    | 2026-05-27 | Snowflake warehouse adapter (full sampling, materialised-sample CTAS, `EXPLAIN`-based bytes estimation); custom business-rule tests (`custom_sql`, the 5th test type) — drafted from `meta.signalforge.business_rules` or LLM inference, then pruned like any other test |
+| v0.4    | 2026-05-28 | **Multi-provider LLM support** — OpenAI (#136) and Google Gemini (#137) behind the provider-neutral seam established in #135 (Anthropic remains the default). `--estimate` is provider-aware: Anthropic uses `messages.count_tokens` (live SDK call), OpenAI uses local `tiktoken`, Gemini uses native `client.models.count_tokens` |
 
 Planned:
 
 | Version | Scope                                                                                                            |
 | ------- | ---------------------------------------------------------------------------------------------------------------- |
-| v0.4    | **Multi-provider LLM support** — Gemini and OpenAI behind the provider-neutral seam (Anthropic remains default) |
 | v0.5    | **Installable Claude Code skill** — `signalforge install-skill` ships a SKILL.md that teaches Claude to drive the CLI |
 | v0.6    | **Airflow operator** — drop SignalForge into a scheduled DAG for periodic schema drift / signal-rot detection    |
 | v0.7    | **GitHub Action** — PR-time invocation with inline comment integration (kept/dropped/flagged surfaced on the PR) |

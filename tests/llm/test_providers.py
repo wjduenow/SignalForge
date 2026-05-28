@@ -797,3 +797,554 @@ def test_openai_provider_extract_text_blocks_missing_message_attr_raises() -> No
 
     with pytest.raises(LLMResponseFormatError, match="message"):
         OpenAIProvider().extract_text_blocks(response)
+
+
+# ---------------------------------------------------------------------------
+# US-002 of #137 — GeminiProvider strategy
+# ---------------------------------------------------------------------------
+
+
+def _genai_errors() -> Any:
+    """Lazy-import ``google.genai.errors`` per-test (mirrors the Snowflake
+    ``_sfe()`` helper in ``warehouse-adapters.md``).
+
+    A module-level ``from google.genai import errors`` would go stale under
+    any test that mutates ``sys.modules`` for the SDK, and lazy-importing
+    keeps the assertions honest about which class identity the mapper sees.
+    """
+    from google.genai import errors as genai_errors  # noqa: PLC0415
+
+    return genai_errors
+
+
+def _make_requests_response(code: int, status_text: str, message: str) -> Any:
+    """Construct a real ``requests.Response`` carrying the JSON body the
+    ``google.genai.errors.APIError.__init__`` parses.
+
+    The SDK's ``APIError`` constructor takes a ``requests.Response``-like
+    object and pulls ``code`` / ``status`` / ``message`` out of its JSON
+    body; the bare integer ``code`` is stored on ``exc.code``, which is what
+    :meth:`GeminiProvider.classify_exception` reads.
+    """
+    import json
+
+    import requests
+
+    response = requests.Response()
+    response.status_code = code
+    response._content = json.dumps(  # type: ignore[attr-defined]
+        {"error": {"code": code, "status": status_text, "message": message}}
+    ).encode("utf-8")
+    return response
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_provider_for_gemini_returns_geminiprovider() -> None:
+    """US-002 registers ``GeminiProvider`` at module import time, so
+    ``provider_for("gemini")`` returns it. DEC-003: both capability flags
+    are ``False``."""
+    from signalforge.llm.providers import GeminiProvider
+
+    provider = provider_for("gemini")
+    assert isinstance(provider, GeminiProvider)
+    assert provider.name == "gemini"
+    assert provider.supports_prompt_caching is False
+    assert provider.supports_token_count is False
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_build_create_kwargs_no_cache_marker() -> None:
+    """DEC-003 / DEC-008 of #135: no ``cache_control`` block anywhere and
+    no ``extra_headers`` key — the capability flags are ``False`` so the
+    provider must emit a non-caching request shape.
+
+    Mirrors the AC #135 pinned for the no-cache fake. ``cache_marker_active``
+    is irrelevant: the provider must produce the same non-caching shape
+    whether the flag arrives ``True`` (defensive) or ``False`` (the
+    orchestrator's resolved value)."""
+    from signalforge.llm.providers import GeminiProvider
+
+    provider = GeminiProvider()
+    for marker_active in (True, False):
+        kwargs = provider.build_create_kwargs(
+            system="SYS",
+            cached_block="CACHED",
+            dynamic_block="DYN",
+            model="gemini-2.5-flash",
+            max_tokens=1024,
+            cache_ttl="5m",
+            cache_marker_active=marker_active,
+        )
+        assert "cache_control" not in repr(kwargs)
+        assert "extra_headers" not in kwargs
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_build_create_kwargs_sets_json_response_format() -> None:
+    """DEC-018: server-side JSON enforcement via
+    ``response_mime_type="application/json"`` on the ``GenerateContentConfig``.
+    Belt-and-braces with the tolerant parser (issue #144) — server-side
+    enforcement removes the prose-preamble drift class entirely."""
+    from signalforge.llm.providers import GeminiProvider
+
+    kwargs = GeminiProvider().build_create_kwargs(
+        system="SYS",
+        cached_block="C",
+        dynamic_block="D",
+        model="gemini-2.5-flash",
+        max_tokens=128,
+        cache_ttl="5m",
+        cache_marker_active=False,
+    )
+    config = kwargs["config"]
+    # The config can be a dict (GenerateContentConfigDict) or the typed
+    # GenerateContentConfig; cover both shapes.
+    if isinstance(config, dict):
+        assert config["response_mime_type"] == "application/json"
+    else:
+        assert config.response_mime_type == "application/json"
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_build_create_kwargs_system_and_contents() -> None:
+    """DEC-004: ``system`` → ``system_instruction``; ``cached_block`` +
+    ``dynamic_block`` concatenated into a single user-role ``contents``
+    entry. The provider has no caching so there is no value in keeping the
+    two blocks separate."""
+    from signalforge.llm.providers import GeminiProvider
+
+    kwargs = GeminiProvider().build_create_kwargs(
+        system="THE-SYSTEM",
+        cached_block="cached-text",
+        dynamic_block="dynamic-text",
+        model="gemini-2.5-flash",
+        max_tokens=42,
+        cache_ttl="5m",
+        cache_marker_active=False,
+    )
+    assert kwargs["model"] == "gemini-2.5-flash"
+    config = kwargs["config"]
+    system_instruction = (
+        config["system_instruction"] if isinstance(config, dict) else config.system_instruction
+    )
+    assert system_instruction == "THE-SYSTEM"
+    # Single user-role contents entry concatenating the two blocks.
+    contents = kwargs["contents"]
+    assert len(contents) == 1
+    assert "cached-text" in contents[0]
+    assert "dynamic-text" in contents[0]
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_build_count_tokens_kwargs_raises_notimplementederror() -> None:
+    """DEC-003: ``supports_token_count = False`` means the orchestrator
+    never calls this method — it raises ``NotImplementedError`` (mirrors
+    :class:`tests.llm._fake_provider.FakeNoCacheProvider`) so any accidental
+    call is loud."""
+    from signalforge.llm.providers import GeminiProvider
+
+    with pytest.raises(NotImplementedError) as excinfo:
+        GeminiProvider().build_count_tokens_kwargs(
+            system="s",
+            cached_block="c",
+            model="gemini-2.5-flash",
+        )
+    assert "supports_token_count=False" in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_extract_text_blocks_happy_path() -> None:
+    """DEC-005: ``extract_text_blocks`` walks ``response.candidates``, then
+    each candidate's ``content.parts``, collecting non-empty ``part.text``."""
+    from types import SimpleNamespace as N
+
+    from signalforge.llm.providers import GeminiProvider
+
+    response = N(
+        candidates=[
+            N(
+                content=N(parts=[N(text="hello"), N(text="world")]),
+                finish_reason=N(name="STOP"),
+            )
+        ],
+        usage_metadata=N(prompt_token_count=10, candidates_token_count=2),
+    )
+    assert GeminiProvider().extract_text_blocks(response) == ("hello", "world")
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_extract_text_blocks_safety_blocked_raises() -> None:
+    """DEC-005: a safety-blocked response (no candidate yields any text)
+    surfaces :class:`LLMResponseFormatError` whose message names the
+    finish_reason. The OpenAI parser-degrade path can't catch a *structural*
+    block (no candidate content at all), so this typed-error branch is
+    load-bearing for Gemini."""
+    from types import SimpleNamespace as N
+
+    from signalforge.llm.errors import LLMResponseFormatError
+    from signalforge.llm.providers import GeminiProvider
+
+    response = N(
+        candidates=[N(content=None, finish_reason=N(name="SAFETY"))],
+        usage_metadata=N(prompt_token_count=10, candidates_token_count=0),
+    )
+    with pytest.raises(LLMResponseFormatError) as excinfo:
+        GeminiProvider().extract_text_blocks(response)
+    assert "SAFETY" in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_extract_text_blocks_no_candidates_raises() -> None:
+    """No candidates at all (a defensively-shaped response) routes through
+    the same typed error with ``finish_reason='unknown'``."""
+    from types import SimpleNamespace as N
+
+    from signalforge.llm.errors import LLMResponseFormatError
+    from signalforge.llm.providers import GeminiProvider
+
+    response = N(candidates=[], usage_metadata=N(prompt_token_count=0, candidates_token_count=0))
+    with pytest.raises(LLMResponseFormatError) as excinfo:
+        GeminiProvider().extract_text_blocks(response)
+    assert "unknown" in str(excinfo.value)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_extract_usage_zero_cache_fields() -> None:
+    """DEC-003: the provider has no Anthropic-style prompt caching, so both
+    cache-token fields are reported as 0 regardless of the response shape.
+
+    Maps Gemini's ``prompt_token_count`` → ``input_tokens`` and
+    ``candidates_token_count`` → ``output_tokens``."""
+    from types import SimpleNamespace as N
+
+    from signalforge.llm.providers import GeminiProvider
+
+    response = N(
+        candidates=[N(content=N(parts=[N(text="x")]), finish_reason=N(name="STOP"))],
+        usage_metadata=N(prompt_token_count=120, candidates_token_count=45),
+    )
+    usage = GeminiProvider().extract_usage(response)
+    assert usage.input_tokens == 120
+    assert usage.output_tokens == 45
+    assert usage.cache_creation_input_tokens == 0
+    assert usage.cache_read_input_tokens == 0
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_extract_usage_missing_metadata_raises() -> None:
+    """A response missing ``usage_metadata`` entirely surfaces a typed
+    :class:`LLMResponseFormatError` — the seam never silently fabricates 0s
+    when the whole accounting block is gone."""
+    from types import SimpleNamespace as N
+
+    from signalforge.llm.errors import LLMResponseFormatError
+    from signalforge.llm.providers import GeminiProvider
+
+    response = N(candidates=[N(content=N(parts=[N(text="x")]), finish_reason=N(name="STOP"))])
+    with pytest.raises(LLMResponseFormatError):
+        GeminiProvider().extract_usage(response)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_extract_usage_missing_inner_field_raises() -> None:
+    """A ``usage_metadata`` block missing one of the per-field counts
+    (or carrying a non-int value) surfaces :class:`LLMResponseFormatError`
+    instead of silently defaulting to 0. Mirrors the Anthropic precedent
+    via the shared ``_extract_usage_field`` helper — pinned in response
+    to PR #151 review feedback (Copilot, line 920 of providers.py).
+    """
+    from types import SimpleNamespace as N
+
+    from signalforge.llm.errors import LLMResponseFormatError
+    from signalforge.llm.providers import GeminiProvider
+
+    # Missing prompt_token_count: getattr would have returned 0 silently.
+    no_prompt = N(
+        candidates=[N(content=N(parts=[N(text="x")]), finish_reason=N(name="STOP"))],
+        usage_metadata=N(candidates_token_count=45),
+    )
+    with pytest.raises(LLMResponseFormatError, match="prompt_token_count"):
+        GeminiProvider().extract_usage(no_prompt)
+
+    # Non-int candidates_token_count: also fails loud.
+    bad_type = N(
+        candidates=[N(content=N(parts=[N(text="x")]), finish_reason=N(name="STOP"))],
+        usage_metadata=N(prompt_token_count=120, candidates_token_count="not-an-int"),
+    )
+    with pytest.raises(LLMResponseFormatError, match="candidates_token_count"):
+        GeminiProvider().extract_usage(bad_type)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_classify_exception_each_category() -> None:
+    """DEC-006: each ``google.genai.errors`` shape maps to its neutral
+    :class:`ExceptionCategory`. SDK classes lazy-imported per-test (mirrors
+    Snowflake's ``_sfe()`` pattern)."""
+    from signalforge.llm.providers import GeminiProvider
+
+    genai_errors = _genai_errors()
+    provider = GeminiProvider()
+
+    # 401 / 403 → AUTH (ClientError carrying the HTTP code)
+    err_401 = genai_errors.ClientError(401, _make_requests_response(401, "UNAUTHENTICATED", "x"))
+    assert provider.classify_exception(err_401) is ExceptionCategory.AUTH
+    err_403 = genai_errors.ClientError(403, _make_requests_response(403, "PERMISSION_DENIED", "x"))
+    assert provider.classify_exception(err_403) is ExceptionCategory.AUTH
+
+    # 429 → RATE_LIMIT
+    err_429 = genai_errors.ClientError(429, _make_requests_response(429, "RESOURCE_EXHAUSTED", "x"))
+    assert provider.classify_exception(err_429) is ExceptionCategory.RATE_LIMIT
+
+    # 503 / 5xx → SERVER_ERROR
+    err_503 = genai_errors.ServerError(503, _make_requests_response(503, "UNAVAILABLE", "x"))
+    assert provider.classify_exception(err_503) is ExceptionCategory.SERVER_ERROR
+
+    # Other 4xx → NO_RETRY (e.g. 418 teapot)
+    err_other = genai_errors.ClientError(418, _make_requests_response(418, "TEAPOT", "x"))
+    assert provider.classify_exception(err_other) is ExceptionCategory.NO_RETRY
+
+    # CONNECTION — httpx.ConnectError leaks through on a hard network failure.
+    import httpx
+
+    assert provider.classify_exception(httpx.ConnectError("boom")) is ExceptionCategory.CONNECTION
+    assert provider.classify_exception(httpx.ConnectTimeout("slow")) is ExceptionCategory.CONNECTION
+
+    # Anything else → NO_RETRY (a plain ValueError as the unrecognised case).
+    assert provider.classify_exception(ValueError("unrecognised")) is ExceptionCategory.NO_RETRY
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_make_client_uses_shim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``make_client`` delegates to the shim's ``_make_gemini_client`` (DEC-001),
+    then wraps the bare client in the ``.messages`` façade adapter (DEC-004)
+    so the orchestrator's vendor-neutral ``client.messages.create(**kwargs)``
+    call shape works."""
+    import signalforge.llm._gemini_client as shim
+    from signalforge.llm.providers import GeminiProvider
+
+    class _SentinelRawClient:
+        class _Models:
+            def generate_content(self, **kwargs: Any) -> str:
+                return f"forwarded:{kwargs.get('model')}"
+
+            def count_tokens(self, **kwargs: Any) -> str:
+                return f"count:{kwargs.get('model')}"
+
+        models = _Models()
+
+    monkeypatch.setattr(shim, "_make_gemini_client", lambda: _SentinelRawClient())
+    client: Any = GeminiProvider().make_client()
+    # The adapter exposes the .messages façade...
+    assert hasattr(client, "messages")
+    assert client.messages.create(model="gemini-2.5-flash") == "forwarded:gemini-2.5-flash"
+    # ...and forwards count_tokens for the US-007 estimate path.
+    assert client.messages.count_tokens(model="gemini-2.5-flash") == "count:gemini-2.5-flash"
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_unknown_provider_lists_anthropic_and_gemini() -> None:
+    """``UnknownProviderError`` for an unregistered name lists every
+    currently registered provider — both ``anthropic`` (US-002 of #135) and
+    ``gemini`` (US-002 of #137)."""
+    with pytest.raises(UnknownProviderError) as excinfo:
+        provider_for("xyz-definitely-not-registered")
+    err = excinfo.value
+    assert err.name == "xyz-definitely-not-registered"
+    assert "anthropic" in err.available
+    assert "gemini" in err.available
+    rendered = str(err)
+    assert "anthropic" in rendered
+    assert "gemini" in rendered
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_in_signalforge_llm_public_surface() -> None:
+    """``GeminiProvider`` is re-exported from :mod:`signalforge.llm` so
+    downstream callers can ``from signalforge.llm import GeminiProvider``
+    without reaching into the private :mod:`signalforge.llm.providers`."""
+    import signalforge.llm as llm
+    from signalforge.llm.providers import GeminiProvider
+
+    assert llm.GeminiProvider is GeminiProvider
+    assert "GeminiProvider" in llm.__all__
+
+
+# ---------------------------------------------------------------------------
+# US-007 — GeminiProvider.estimate_input_tokens
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_estimate_input_tokens_via_injected_client() -> None:
+    """:meth:`GeminiProvider.estimate_input_tokens` delegates to the injected
+    client's ``models.count_tokens`` and returns ``response.total_tokens``.
+
+    Pins the load-bearing call shape: ``model=<arg>`` and
+    ``contents=[system + text]``. A regression that re-shaped the call
+    (e.g. splitting system and text into two ``contents`` entries) would
+    silently shift the count by Gemini's per-content envelope tokens.
+    """
+    from signalforge.llm.providers import GeminiProvider
+    from tests.llm._fake_gemini import FakeGeminiClient, FakeGeminiCountTokensResponse
+
+    fake = FakeGeminiClient()
+    captured: dict[str, Any] = {}
+
+    def _capture(kwargs: dict[str, Any]) -> bool:
+        captured.update(kwargs)
+        return True
+
+    fake.expect_count_tokens(
+        matching=_capture,
+        returns=FakeGeminiCountTokensResponse(total_tokens=42),
+    )
+
+    tokens = GeminiProvider().estimate_input_tokens(
+        "gemini-2.5-flash", "hello world", system="sys-prefix ", client=fake
+    )
+
+    assert tokens == 42
+    assert captured == {
+        "model": "gemini-2.5-flash",
+        "contents": ["sys-prefix hello world"],
+    }
+    fake.assert_all_expectations_met()
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_estimate_input_tokens_concatenates_system_and_text() -> None:
+    """The ``contents`` arg is exactly ``[system + text]`` — Gemini's
+    count_tokens endpoint does not distinguish a system envelope from
+    user content, so the provider concatenates them into one entry.
+
+    Asserting on the literal concatenated string (rather than only on
+    membership) catches a regression that flipped the order to
+    ``[text + system]`` or inserted a separator.
+    """
+    from signalforge.llm.providers import GeminiProvider
+    from tests.llm._fake_gemini import FakeGeminiClient, FakeGeminiCountTokensResponse
+
+    fake = FakeGeminiClient()
+    fake.expect_count_tokens(
+        matching=lambda kw: True,
+        returns=FakeGeminiCountTokensResponse(total_tokens=7),
+    )
+
+    tokens = GeminiProvider().estimate_input_tokens(
+        "gemini-2.5-flash", "BODY", system="SYSTEM ", client=fake
+    )
+
+    assert tokens == 7
+    assert fake.count_tokens_calls == [
+        {"model": "gemini-2.5-flash", "contents": ["SYSTEM BODY"]},
+    ]
+    fake.assert_all_expectations_met()
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_estimate_input_tokens_missing_total_tokens_raises() -> None:
+    """A count_tokens response with a missing/non-int ``total_tokens``
+    raises :class:`LLMResponseFormatError` (defensive guard against an
+    SDK response-shape regression).
+
+    Mirrors the Anthropic precedent
+    (``test_anthropic_provider_estimate_input_tokens_raises_on_missing_input_tokens``).
+    """
+    from signalforge.llm.errors import LLMResponseFormatError
+    from signalforge.llm.providers import GeminiProvider
+    from tests.llm._fake_gemini import FakeGeminiClient, FakeGeminiCountTokensResponse
+
+    fake = FakeGeminiClient()
+    # ``total_tokens=None`` is a possible SDK return shape (the field is
+    # ``int | None`` in the real CountTokensResponse); the guard surfaces
+    # it as a typed error rather than letting the orchestrator pretend
+    # the prompt costs zero tokens.
+    fake.expect_count_tokens(
+        matching=lambda kw: True,
+        returns=FakeGeminiCountTokensResponse(total_tokens=None),
+    )
+
+    with pytest.raises(LLMResponseFormatError, match="total_tokens"):
+        GeminiProvider().estimate_input_tokens("gemini-2.5-flash", "hello", system="", client=fake)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_estimate_input_tokens_missing_models_surface_raises() -> None:
+    """A client missing ``.models.count_tokens`` raises
+    :class:`LLMResponseFormatError` rather than ``AttributeError``.
+
+    The ``--estimate`` engine catches typed LLM errors as supplementary
+    failures (cli-layer.md DEC-005 of #36) and renders
+    ``<unavailable: <ErrorClass>>``; an untyped ``AttributeError`` would
+    propagate through the panic boundary as exit 1 instead.
+    """
+    from signalforge.llm.errors import LLMResponseFormatError
+    from signalforge.llm.providers import GeminiProvider
+
+    # A "client" object with no ``.models`` attribute at all.
+    class _BareClient:
+        pass
+
+    with pytest.raises(LLMResponseFormatError, match="models.count_tokens"):
+        GeminiProvider().estimate_input_tokens("gemini-2.5-flash", "hello", client=_BareClient())
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_estimate_input_tokens_builds_client_when_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``client=None``, the provider builds a fresh SDK client via
+    :func:`signalforge.llm._gemini_client._make_gemini_client` and wraps
+    it in :class:`_GeminiClientAdapter`.
+
+    Patches the shim factory to return a fake whose ``models.count_tokens``
+    is queryable; asserts the factory was called exactly once. Without
+    this lazy-build fallback, callers that don't thread a client through
+    (no v0.x CLI path does on the Gemini estimate happy path right now)
+    would get :class:`AttributeError` instead.
+    """
+    from signalforge.llm import _gemini_client as gemini_shim
+    from signalforge.llm.providers import GeminiProvider
+    from tests.llm._fake_gemini import FakeGeminiCountTokensResponse
+
+    call_counter = {"n": 0}
+
+    class _FakeRawClient:
+        class _Models:
+            def count_tokens(self, **kwargs: Any) -> Any:
+                assert kwargs.get("model") == "gemini-2.5-flash"
+                assert kwargs.get("contents") == ["sys + body"]
+                return FakeGeminiCountTokensResponse(total_tokens=99)
+
+        models = _Models()
+
+    def _factory() -> Any:
+        call_counter["n"] += 1
+        return _FakeRawClient()
+
+    monkeypatch.setattr(gemini_shim, "_make_gemini_client", _factory)
+
+    tokens = GeminiProvider().estimate_input_tokens("gemini-2.5-flash", "body", system="sys + ")
+
+    assert tokens == 99
+    assert call_counter["n"] == 1

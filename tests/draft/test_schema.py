@@ -492,6 +492,7 @@ def test_public_api_imports_match_dec_020() -> None:
         "AnthropicProvider",
         "EstimateUnknownModelError",
         "ExceptionCategory",
+        "GeminiProvider",
         "LLMAuthError",
         "LLMCacheTooLargeError",
         "LLMConnectionError",

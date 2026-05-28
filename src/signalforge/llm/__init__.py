@@ -27,6 +27,7 @@ from signalforge.llm.pricing import (
 from signalforge.llm.providers import (
     AnthropicProvider,
     ExceptionCategory,
+    GeminiProvider,
     LLMProvider,
     OpenAIProvider,
     UsageMetrics,
@@ -41,6 +42,7 @@ __all__ = (
     "AnthropicProvider",
     "EstimateUnknownModelError",
     "ExceptionCategory",
+    "GeminiProvider",
     "LLMAuthError",
     "LLMCacheTooLargeError",
     "LLMConnectionError",

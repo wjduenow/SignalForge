@@ -520,7 +520,7 @@ other stages and silently ignored by the draft loader.
 ```yaml
 # signalforge.yml
 llm:
-  provider: anthropic        # registry-validated; "anthropic" + "openai" are registered (see OpenAI provider below)
+  provider: anthropic        # registry-validated; "anthropic" + "openai" + "gemini" are registered (see provider sections below)
   model: claude-sonnet-4-6
   cheap_model: claude-haiku-4-5-20251001
   max_output_tokens: 4096
@@ -538,10 +538,9 @@ Field-by-field:
   into `call_llm` from `draft_schema`. Default `"anthropic"`. An unknown
   value fails loud at config-load, listing the registered provider
   names. Deliberately a registry-validated `str`, not a `Literal` — the
-  provider registry is a forward-looking plugin point (#136 OpenAI /
-  #137 Gemini register more providers). Today `anthropic` and `openai`
-  are registered; see [OpenAI provider](#openai-provider) below for the
-  `openai` option.
+  provider registry is a forward-looking plugin point. Today `anthropic`,
+  `openai`, and `gemini` are registered; see [OpenAI provider](#openai-provider)
+  and [Gemini provider](#gemini-provider) below for the non-default options.
 - **`model`** — the model id used by every `call_llm` invocation.
   Default `claude-sonnet-4-6`. Any string the SDK accepts is allowed.
 - **`cheap_model`** — informational; not selected automatically.
@@ -631,6 +630,49 @@ default CI run via `addopts -m 'not openai'`; both env vars are
 required (each missing var produces a clear skip reason). See
 [`docs/cost-estimate-ops.md`](cost-estimate-ops.md) for the
 maintainer's three-test smoke set (drafter + grader + `--estimate`).
+
+## Gemini provider
+
+Issue #137 registered `GeminiProvider` as the third LLM provider behind the
+provider-neutral seam (#135). Select it via `llm.provider: gemini` in
+`signalforge.yml`:
+
+```yaml
+llm:
+  provider: gemini
+  model: gemini-2.5-flash    # default mid-tier drafter; gemini-2.5-pro and gemini-2.0-flash are also registered
+  cache_ttl: 1h              # accepted but ignored — Gemini ships without caching in v0.3
+```
+
+- **Install extra:** `pip install signalforge-dbt[gemini]` (or `uv sync --dev` in a contributor checkout). Pulls `google-genai>=0.5,<1`.
+- **Env var:** `GOOGLE_API_KEY` (read by the SDK; SignalForge never logs it).
+- **Server-side JSON enforcement:** `GeminiProvider.build_create_kwargs` sets `response_mime_type="application/json"` on the `GenerateContentConfig` (DEC-018 of #137).
+
+**No prompt caching (cost note — DEC-013 of #137).** v0.3 Gemini ships
+**without** prompt caching. `GeminiProvider` reports
+`supports_prompt_caching=False` / `supports_token_count=False`, so
+`call_llm` skips the `cache_control` marker, the `extended-cache-ttl` beta
+header, and the pre-send `count_tokens` gate. Every drafter call
+transmits the full cached_block + dynamic_block; there is no
+Anthropic-style discount on the cached prefix. The drafter is one call
+per `signalforge generate` invocation, so the per-call overhead is
+modest compared to the grader's 4-criterion fan-out — but explicit
+Gemini context caching is still a tracked follow-up.
+
+**`--estimate` integration (active).** `signalforge generate --estimate`
+with `llm.provider: gemini` works end-to-end via Gemini's native
+`client.models.count_tokens` (US-007 of #137; DEC-016). One extra API
+round-trip per estimate call. The drafter-side USD figure uses the
+Gemini pricing SKUs registered in `signalforge.llm.pricing`. Network
+or auth failures surface as `<unavailable: <ErrorClass>>` via the
+conservative-bias supplementary-failure path.
+
+**Live smoke.** A `@pytest.mark.gemini` gated end-to-end test exercises
+drafting against `gemini-2.5-flash`. Run it with:
+
+```bash
+SF_RUN_GEMINI=1 GOOGLE_API_KEY=... uv run pytest -m gemini --no-cov
+```
 
 ## Error hierarchy
 

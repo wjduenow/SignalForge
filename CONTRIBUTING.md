@@ -35,8 +35,8 @@ uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run 
 
 The default `pytest` run — and therefore the coverage badge — measures only the
 default marker set. Tests gated behind `bigquery`, `anthropic`, `openai`,
-`cli_subprocess`, `e2e`, `snowflake`, and `wheel_smoke` are filtered out by
-`addopts` (see `.claude/rules/testing-signal.md` § "Known gap: excluded
+`gemini`, `cli_subprocess`, `e2e`, `snowflake`, and `wheel_smoke` are filtered
+out by `addopts` (see `.claude/rules/testing-signal.md` § "Known gap: excluded
 markers"), so the real-network and packaging paths are not instrumented in the
 badge number.
 
@@ -57,13 +57,34 @@ uv run pytest
 #    --cov-append combines with run 1 so the term report shows the COMBINED total.
 #    --cov-fail-under=0 overrides the 80% gate inherited from addopts — gated
 #    markers alone never clear it, and this is a measurement, not a gate.
-#    (bigquery/anthropic/openai/snowflake/e2e need creds; cli_subprocess/wheel_smoke do not.)
+#    (bigquery/anthropic/openai/gemini/snowflake/e2e need creds; cli_subprocess/wheel_smoke do not.)
 SF_RUN_BQ=1 ANTHROPIC_API_KEY=sk-... OPENAI_API_KEY=sk-... \
-  SF_RUN_OPENAI=1 SF_RUN_SNOWFLAKE=1 GOOGLE_CLOUD_PROJECT=<billing-project> \
+  SF_RUN_OPENAI=1 SF_RUN_SNOWFLAKE=1 SF_RUN_GEMINI=1 GOOGLE_API_KEY=... \
+  GOOGLE_CLOUD_PROJECT=<billing-project> \
   SNOWFLAKE_ACCOUNT=... SNOWFLAKE_USER=... SNOWFLAKE_PASSWORD=... SNOWFLAKE_WAREHOUSE=... \
-  uv run pytest -m 'bigquery or anthropic or openai or snowflake or e2e or cli_subprocess or wheel_smoke' \
+  uv run pytest -m 'bigquery or anthropic or openai or gemini or snowflake or e2e or cli_subprocess or wheel_smoke' \
   --cov=signalforge --cov-append --cov-fail-under=0 --cov-report=term
 ```
+
+## Gemini live smoke
+
+Three tests gated by `@pytest.mark.gemini` exercise the Gemini provider
+end-to-end against the real Google Gemini API:
+
+- `tests/llm/test_gemini_live.py` — raw `call_llm(provider="gemini", ...)` round-trip.
+- `tests/draft/test_gemini_draft_live.py` — `draft_schema` against a small in-test manifest fixture.
+- `tests/grade/test_gemini_grade_live.py` — `grade_artifacts` 1-criterion × 1-artifact.
+
+All three are deselected from default CI (`addopts -m 'not gemini'`) and
+additionally self-skip via a runtime gate if either env var is missing:
+
+```bash
+SF_RUN_GEMINI=1 GOOGLE_API_KEY=... uv run pytest -m gemini --no-cov
+```
+
+Recommended SKU is `gemini-2.5-flash` (cheapest of the three registered
+SKUs); per-call cost is dominated by the no-caching posture (DEC-013 of
+#137) so each rubric criterion ships the full system + rubric prompt.
 
 The combined total from step 2 minus the default badge number from step 1 is
 the coverage the gated paths add — typically 5–10%. Interpreting the delta: if

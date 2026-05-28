@@ -58,6 +58,8 @@ _DOCUMENTED_PUBLIC = (
     "AnthropicProvider",
     # OpenAI strategy (US-002 of #136) — registered at import time.
     "OpenAIProvider",
+    # Gemini strategy (US-002 of #137) — registered at import time.
+    "GeminiProvider",
 )
 
 
@@ -85,6 +87,7 @@ def test_each_public_name_is_importable_via_from_signalforge_llm() -> None:
         AnthropicProvider,
         EstimateUnknownModelError,
         ExceptionCategory,
+        GeminiProvider,
         LLMAuthError,
         LLMCacheTooLargeError,
         LLMConnectionError,

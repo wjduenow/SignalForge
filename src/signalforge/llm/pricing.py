@@ -143,6 +143,32 @@ _PRICES_MUTABLE: dict[str, ModelPricing] = {
         cache_write_5m_per_mtok=0.0,
         cache_read_per_mtok=0.0,
     ),
+    # -- Gemini SKUs (#137 US-006, DEC-017) ----------------------------
+    # `gemini-2.5-flash` is the documented mid-tier judge per DEC-004
+    # of #137; `gemini-2.5-pro` is the flagship; `gemini-2.0-flash` is
+    # the budget option. Cache fields are 0.0 — v0.3 Gemini ships
+    # without prompt caching (DEC-003). Per-Mtok USD figures from
+    # Google's public Gemini API pricing at PR-prep time
+    # (2026-05-27); `gemini-2.5-pro` figures are the base ≤200K
+    # context tier.
+    "gemini-2.5-pro": ModelPricing(
+        input_per_mtok=1.25,
+        output_per_mtok=10.00,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
+    "gemini-2.5-flash": ModelPricing(
+        input_per_mtok=0.30,
+        output_per_mtok=2.50,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
+    "gemini-2.0-flash": ModelPricing(
+        input_per_mtok=0.10,
+        output_per_mtok=0.40,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
 }
 
 PRICES: Mapping[str, ModelPricing] = MappingProxyType(_PRICES_MUTABLE)

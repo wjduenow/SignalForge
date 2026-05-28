@@ -223,6 +223,15 @@ def test_grade_config_provider_accepts_openai() -> None:
     assert cfg.model == "gpt-4o"
 
 
+def test_grade_config_provider_accepts_gemini() -> None:
+    """#137 US-002: ``GeminiProvider`` registers under ``"gemini"`` at import
+    time so ``GradeConfig(provider="gemini", model="gemini-2.5-flash")``
+    validates cleanly. The registry membership IS the validation surface."""
+    cfg = GradeConfig(provider="gemini", model="gemini-2.5-flash")
+    assert cfg.provider == "gemini"
+    assert cfg.model == "gemini-2.5-flash"
+
+
 def test_grade_config_provider_rejects_unknown_with_available_keys() -> None:
     """DEC-007: an unknown provider fails loud with a typed
     :class:`UnknownProviderError` naming the registered providers.
