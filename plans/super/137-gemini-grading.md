@@ -7,26 +7,26 @@
 - **Depends on:**
   - **#135** (provider-neutral LLM seam) — **merged** (`32b298f`, PR #148 → dev).
   - **#136** (OpenAI grading) — plan landed as PR #152, awaiting approval. #137 **sequences after #136**: #136 ships the `LLMProvider.estimate_input_tokens` ABC extension, the `pricing.py` per-provider SKU pattern, and the `--estimate` strategy refactor (with an Anthropic byte-identity snapshot as the floor). #137 piggybacks on that shape with a Gemini-native implementation (DEC-019).
-- **Phase:** detailing → publish
+- **Phase:** devolved (PR #151 → dev)
 - **Branch:** `feature/137-gemini-grading`
 - **Worktree:** `../worktrees/SignalForge/137-gemini-grading`
 
 ## Beads manifest
 
-- **Epic:** _(set on devolve)_
-- **Tasks** (linear chain except where noted parallel-safe):
-  - `.1` US-001 — `_gemini_client.py` shim + AST confinement scan extension
-  - `.2` US-002 — `GeminiProvider(LLMProvider)` + registration (incl. `response_mime_type="application/json"`)
-  - `.3` US-003 — `pyproject.toml` `[gemini]` extra + dev-group sync + `__init__` export
-  - `.4` US-004 — `FakeGeminiClient` + offline provider unit tests
-  - `.5` US-005 — Provider-neutrality end-to-end tests (draft + grade, fake-driven)
-  - `.6` US-006 — Gemini pricing SKUs in `pricing.py` (parallel-safe; no deps)
-  - `.7` US-007 — `GeminiProvider.estimate_input_tokens` + `--estimate` integration (depends on #136 ABC extension + US-002 + US-006)
-  - `.8` US-008 — Live tests (`@pytest.mark.gemini`, draft + grade + `--estimate`) + CONTRIBUTING update
-  - `.9` US-009 — Operator-facing docs + CHANGELOG (draft-ops / grade-ops / README / cost-estimate-ops / CHANGELOG)
-  - `.10` Quality Gate (includes `wheel_smoke` because `[gemini]` extra changes packaging)
-  - `.11` Patterns & Memory (orchestrator: `.claude/rules/llm-drafter.md` + `grade-layer.md`)
-- **Sessions:** 2 (2026-05-27 — initial plan; 2026-05-27 — extension after #136 plan comparison)
+- **Epic:** `bd_1-scaffolding-txe`
+- **Tasks** (linear chain except where noted parallel-safe; all P2):
+  - `.1` US-001 — `_gemini_client.py` shim + new AST confinement scan — **READY**
+  - `.2` US-002 — `GeminiProvider(LLMProvider)` + registration (incl. `response_mime_type="application/json"`) — blocked by `.1`
+  - `.3` US-003 — `pyproject.toml` `[gemini]` extra + dev-group sync — blocked by `.1`
+  - `.4` US-004 — `FakeGeminiClient` + offline provider unit tests — blocked by `.2`
+  - `.5` US-005 — Provider-neutrality end-to-end tests (draft + grade, fake-driven) — blocked by `.4`
+  - `.6` US-006 — Gemini pricing SKUs in `pricing.py` — **READY** (parallel-safe; no deps)
+  - `.7` US-007 — `GeminiProvider.estimate_input_tokens` + `--estimate` integration — blocked by `.2`, `.6`, **cross-epic on #136 landing first per DEC-019**
+  - `.8` US-008 — Live tests (`@pytest.mark.gemini`, raw + draft + grade) + CONTRIBUTING update — blocked by `.2`, `.5`
+  - `.9` US-009 — Operator-facing docs + CHANGELOG — blocked by `.2`
+  - `.10` Quality Gate (code-review ×4 + CodeRabbit + canonical validate + `wheel_smoke` + `anthropic` + `gemini` markers) — blocked by `.1`–`.9`
+  - `.11` Patterns & Memory **(orchestrator-only — edits `.claude/rules/`)** — blocked by `.10`
+- **Sessions:** 3 (2026-05-27 — initial plan; 2026-05-27 — extension after #136 plan comparison; 2026-05-28 — devolve)
 
 ## What / Why
 
