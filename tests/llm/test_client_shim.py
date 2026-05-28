@@ -35,8 +35,27 @@ _LLM_SRC_DIR = Path(__file__).resolve().parents[2] / "src" / "signalforge" / "ll
 
 
 def _llm_py_files_excluding_client() -> list[Path]:
-    """All ``.py`` under ``src/signalforge/llm/`` except ``_anthropic_client.py``."""
-    return [p for p in _LLM_SRC_DIR.rglob("*.py") if p.name != "_anthropic_client.py"]
+    """All ``.py`` under ``src/signalforge/llm/`` except the per-vendor
+    SDK shims (``_anthropic_client.py`` and ``_openai_client.py``).
+
+    Each vendor shim is the sole home for its own SDK's ``# pyright:
+    ignore`` / ``# type: ignore`` comments per the one-shim-per-vendor
+    convention (``.claude/rules/llm-drafter.md`` § "One SDK seam").
+    The per-vendor *confinement* of each shim's ignores is asserted by
+    the per-vendor cheap-floor tests:
+
+    * Anthropic: this module's :func:`test_no_pyright_ignores_outside_client_shim`
+      (but excluding the OpenAI shim — its docstring mentions the phrase
+      and its lazy ``import openai`` carries a legitimate ignore).
+    * OpenAI: ``tests/llm/test_openai_client_confinement.py``.
+
+    Excluding the OpenAI shim from the Anthropic regex floor mirrors how
+    Scan 9 in ``tests/test_audit_completeness.py`` excludes
+    ``_anthropic_client.py`` (and vice-versa for Scan 3) — each
+    per-vendor seam is invisible to the others' scans by construction.
+    """
+    excluded_names = {"_anthropic_client.py", "_openai_client.py"}
+    return [p for p in _LLM_SRC_DIR.rglob("*.py") if p.name not in excluded_names]
 
 
 def test_make_anthropic_client_returns_protocol_satisfying_object() -> None:
