@@ -248,16 +248,21 @@ No blockers. One concern (performance/cost) accepted with explicit docs; one con
   implementation). Explicit `api_key=` overrides. No SignalForge-specific env var. Tests
   that need a real key set `GOOGLE_API_KEY=...` and gate behind `SF_RUN_GEMINI=1`.
 
-- **DEC-009 — 9th AST confinement scan: `genai.Client(...)` only in `_gemini_client.py`.**
+- **DEC-009 — New AST confinement scan: `genai.Client(...)` only in `_gemini_client.py`.**
   Extend `tests/test_audit_completeness.py` with a `_QualifiedNameCallFinder` mirror
   matching `Call(func=Attribute(value=Name(id="genai"), attr="Client"))` (and the
   three bypass patterns from `testing-signal.md`: bare via `from google.genai import
   Client`, import-alias `from google.genai import Client as C`, attribute via
   `from google import genai; genai.Client(...)`). The 7th-AST-scan helper already
   generalises; reuse it. Sanity test asserts ≥1 construction in
-  `_gemini_client.py`. **Bumps the AST-scan count from 8 → 9** (the docstring "8 AST
-  scans" in `safety-layer.md` / scan-7 discovery counts are unaffected — those count
-  different things).
+  `_gemini_client.py`. **AST-scan tally is merge-order-dependent:** per DEC-019,
+  #137 ships **after** #136, so #136's `openai.OpenAI(...)` scan bumps 8 → 9 first
+  and #137's scan here bumps **9 → 10**. If the sequencing slips and #137 lands
+  first, it owns the 8 → 9 bump and #136 inherits 9 → 10 — update the docstring
+  count + the `_QualifiedNameCallFinder` test-discovery count to whichever number
+  is current at merge time. (The docstring "AST scans" tally in `safety-layer.md`
+  is the surface that needs updating; the scan-7 discovery count counts a different
+  thing — per-stage `errors.py` modules — and is unaffected.)
 
 - **DEC-010 — `pyproject.toml` `[gemini]` extra + dual dev-group listing.** `google-genai`
   appears in **three** places, in lockstep (Snowflake precedent):
@@ -730,6 +735,15 @@ pass after every round of fixes. **Additionally:**
 **Done when.** Both rule files updated, the lesson is durably captured for #136 (OpenAI)
 to copy this plan and substitute the vendor.
 
+## Worker-writability routing
+
+Per `~/.claude/projects/-home-wesd-Projects-SignalForge/memory/ralph-worker-claude-dir-perms.md`: **Ralph workers cannot Write under `.claude/` in worktrees** — only the orchestrator can. The story split honours this:
+
+- US-001 through US-008 + US-009 (docs + CHANGELOG) + Quality Gate touch only worker-writable paths (`src/`, `tests/`, `pyproject.toml`, `docs/`, `CHANGELOG.md`, `README.md`, `uv.lock`, `CONTRIBUTING.md`).
+- **Patterns & Memory is orchestrator-only** because it edits `.claude/rules/llm-drafter.md` and `.claude/rules/grade-layer.md`. The beads-manifest line already labels the task "(orchestrator: …)"; if a worker is dispatched against P&M the bead fails with a write-denied error — route it to the orchestrator at devolve time.
+
+The OpenAI plan (#136) codifies the same routing; mirroring it here so the rule lands durably for both #136 and #137. Future provider plans (#138+ if a fourth vendor ever ships) should copy this section verbatim.
+
 ## Open notes for implementation
 
 - **Verify the exact `google.genai.errors` exception class names + status-code attrs
@@ -737,6 +751,19 @@ to copy this plan and substitute the vendor.
   shape; the precise SDK-class names (`ClientError` vs `APIError`, status-code attr name
   `code` vs `status_code`) may need a tiny adjustment. The offline exception-mapper test
   drives this — write the test against the installed SDK, then implement to pass.
+- **`response_mime_type="application/json"` requires NO keyword in the prompt.** Unlike
+  OpenAI's `response_format={"type":"json_object"}` (which fails server-side unless
+  "json" appears in the prompt — see #136's Open notes), Gemini's structured-output
+  enforcement is purely a request flag. Don't add a defensive "JSON" sentence to the
+  grade or draft system prompts on Gemini's behalf — the existing prompts already name
+  JSON for the OpenAI path, and that's exclusively an OpenAI requirement. If a future
+  refactor splits the system prompts per-provider, this is the only Gemini-specific
+  prompt note to preserve.
+- **`pricing.lookup` returns zero cache fields for the three Gemini SKUs.** US-006:
+  assert this in `tests/llm/test_pricing.py`. `cli/_estimate.py` cache-cost math (the
+  `cache_write_5m_per_mtok` / `cache_read_per_mtok` multiplications) should produce 0.0
+  contributions without raising — verify the multiplication path doesn't break on a zero
+  `cache_write_5m_per_mtok`. Mirrors the symmetric verification item from #136.
 - **`messages.create` façade in `GeminiClientProtocol`.** The orchestrator calls
   `llm_client.messages.create(**kwargs)`. The shim adapts this to
   `client.models.generate_content(...)` internally — the protocol exposes
