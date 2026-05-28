@@ -115,10 +115,8 @@ loader cannot drift):
 ```yaml
 # signalforge.yml — grade stage configuration (v0.1)
 grade:
-  provider: anthropic             # registry-validated; "anthropic" and "gemini" registered today
-  # provider: gemini              # alt: requires `pip install signalforge-dbt[gemini]` + GOOGLE_API_KEY
+  provider: anthropic             # registry-validated; "anthropic" + "openai" + "gemini" are registered (see provider sections below)
   model: claude-sonnet-4-6        # model id (default)
-  # model: gemini-2.5-flash       # alt: recommended Gemini judge SKU under provider: gemini
   cache_ttl: 1h                   # Prompt-cache TTL ('5m' or '1h')
   max_output_tokens: 256          # Per-criterion JSON response cap
   max_retries_429: 3              # Rate-limit retry budget
@@ -159,7 +157,7 @@ grade:
 
 Field-by-field:
 
-- **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point (#136 OpenAI / #137 Gemini register more providers); today `anthropic` and `gemini` are registered. Selecting `gemini` requires installing the optional extra (`pip install signalforge-dbt[gemini]`) and setting `GOOGLE_API_KEY`; recommended Gemini judge SKU is `gemini-2.5-flash` (see [Cost guidance](#cost-guidance-dec-014) for the v0.3 no-caching note).
+- **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point. Today `anthropic`, `openai`, and `gemini` are registered; see [OpenAI provider](#openai-provider) and [Gemini provider](#gemini-provider) below for the non-default options.
 - **`model`** — The model id used by every per-pair judge call. Default `claude-sonnet-4-6`. Mirrors `DraftConfig.model` default. Haiku 4.5 is documented as a v0.2 cost-conscious option but not exposed in v0.1.
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
 - **`max_output_tokens`** — Per-criterion judge response cap. Default `256`. The expected JSON response is ~150 tokens; 256 gives 2× safety. Independent of `DraftConfig.max_output_tokens`.
@@ -484,9 +482,7 @@ default fan-out is too expensive for their use case:
   reports `supports_prompt_caching` / `supports_token_count`. A provider
   that supports neither reports 0 cache tokens and skips the marker; the
   default `anthropic` provider supports both, so the economics below are
-  unchanged. The `gemini` provider (v0.3) supports neither yet — see the
-  "Gemini cost note (v0.3)" paragraph below for the budgeting impact.
-  The cached block (system prompt + rubric block) is constant
+  unchanged. The cached block (system prompt + rubric block) is constant
   across every call in one `grade_artifacts` invocation; a 60-call run
   reads the cache ~59 times after one write. Cache reads are 0.1× input pricing vs.
   1.25× for writes; the break-even is ~2 reads per write. Switching
@@ -496,25 +492,110 @@ default fan-out is too expensive for their use case:
   which the dual-zero cache-anomaly WARNING (DEC-014 of #5) surfaces
   loudly. Leave at `"1h"` unless you have a specific reason.
 
-**Gemini cost note (v0.3).** **Gemini (v0.3) ships without prompt
-caching.** Every grade call transmits the full system + rubric prompt;
-there is no Anthropic-style discount on the cached prefix. For a
-default 4-criterion rubric over a 12-column model (~48 sequential
-calls), budget the per-call cost accordingly — the `cache_ttl` knob
-is inert under `provider: gemini` (the `LLMProvider` strategy reports
-`supports_prompt_caching=False`, so `call_llm` skips the
-`cache_control` marker, the `extended-cache-ttl` beta header, and the
-pre-send `count_tokens` gate). Explicit Gemini context caching is
-tracked as a follow-up. Selecting `provider: gemini` requires
-`pip install signalforge-dbt[gemini]` and the `GOOGLE_API_KEY` env
-var; `gemini-2.5-flash` is the recommended middle-of-the-road judge
-SKU (the other registered SKUs are `gemini-2.5-pro` and
-`gemini-2.0-flash`).
-
 **v0.2 will offer batched-criteria as opt-in** for cost-conscious
 operators (DEC-014). The current architecture preserves the option:
 each criterion has its own prompt seam already, so a `cost_mode:
 batched` flag is additive rather than a rewrite.
+
+## OpenAI provider
+
+Issue #136 registered `OpenAIProvider` as the second
+`signalforge.llm.providers.LLMProvider`. Select it by setting
+`grade.provider: openai` in `signalforge.yml`:
+
+```yaml
+grade:
+  provider: openai
+  model: gpt-4o            # default judge model for the OpenAI provider; any model id the SDK accepts is allowed
+  # cache_ttl, max_retries_*, total_budget_seconds, thresholds — same shape as the anthropic provider
+```
+
+Requirements:
+
+- **Install extra:** `pip install signalforge-dbt[openai]` (or `uv sync --dev` in a contributor checkout). Pulls `openai>=1.40` plus `tiktoken` for the `--estimate` cost-preview path.
+- **Env var:** `OPENAI_API_KEY` (mirrors `ANTHROPIC_API_KEY` for the default provider).
+- **Pricing SKUs registered:** `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4-turbo`. Other model ids raise `EstimateUnknownModelError` from the `--estimate` path (the live judge call still runs; `--estimate` is the only surface that requires a pricing row). See [`docs/cost-estimate-ops.md`](cost-estimate-ops.md).
+
+**No prompt caching (cost note).** OpenAI's Chat Completions surface
+does not expose Anthropic-style prompt caching. `OpenAIProvider`
+reports `supports_prompt_caching=False` and `supports_token_count=False`,
+which means the orchestrator (`signalforge.llm.call_llm`) skips both
+the `cache_control` marker and the pre-send `count_tokens` gate
+(issue #135 DEC-008). **Every grading call ships the full system +
+rubric block** — there is no cached read discount on subsequent
+criteria, so the per-`(artefact × criterion)` fan-out (see
+[Cost guidance](#cost-guidance-dec-014) above) costs a flat
+input-token bill on every call. Budget accordingly: a 4-criterion ×
+12-artefact run is 48 full system+rubric sends, not one write + 47
+reads. v0.3 ships without prompt caching; OpenAI's recent prompt-cache
+mechanism is a candidate for a follow-up.
+
+**Server-enforced JSON.** `OpenAIProvider.build_create_kwargs`
+attaches `response_format={"type": "json_object"}` so the judge model
+is forced to emit valid JSON server-side (DEC-006). The tolerant
+`extract_json_payload` parser (issue #144) remains as defence-in-depth
+for the same prose-preamble drift class the Anthropic path handles.
+
+**Live smoke gating.** A gated `@pytest.mark.openai` real-API
+end-to-end test exercises grading against `gpt-4o`. Run it with:
+
+```bash
+SF_RUN_OPENAI=1 OPENAI_API_KEY=sk-... uv run pytest -m openai --no-cov
+```
+
+Mirrors the `@pytest.mark.anthropic` precedent — excluded from the
+default CI run via `addopts -m 'not openai'`; both env vars are
+required (each missing var produces a clear skip reason). See
+[`docs/cost-estimate-ops.md`](cost-estimate-ops.md) for the
+maintainer's three-test smoke set (grader + drafter + `--estimate`).
+
+## Gemini provider
+
+Issue #137 registered `GeminiProvider` as the third LLM provider behind the
+provider-neutral seam (#135). Select it via `grade.provider: gemini` in
+`signalforge.yml`:
+
+```yaml
+grade:
+  provider: gemini
+  model: gemini-2.5-flash    # default mid-tier judge; gemini-2.5-pro and gemini-2.0-flash are also registered
+  cache_ttl: 1h              # accepted but ignored — Gemini ships without caching in v0.3
+```
+
+- **Install extra:** `pip install signalforge-dbt[gemini]` (or `uv sync --dev` in a contributor checkout). Pulls `google-genai>=0.5,<1`.
+- **Env var:** `GOOGLE_API_KEY` (read by the SDK; SignalForge never logs it).
+- **Server-side JSON enforcement:** `GeminiProvider.build_create_kwargs` sets `response_mime_type="application/json"` on the `GenerateContentConfig` (DEC-018 of #137). Belt-and-braces with the tolerant `extract_json_payload` parser.
+- **Safety-filter handling:** When Gemini blocks a response (`finish_reason` ∈ `{SAFETY, RECITATION, OTHER, ...}` with no text parts), `GeminiProvider.extract_text_blocks` raises `LLMResponseFormatError` naming the reason (DEC-005 of #137); the grade engine wraps it as `GradeLLMError` and degrades the affected pair via the conservative `score=None` / `reasoning="call failed: GradeLLMError"` taxonomy.
+
+**No prompt caching (cost note — DEC-013 of #137).** v0.3 Gemini ships
+**without** prompt caching. `GeminiProvider` reports
+`supports_prompt_caching=False` / `supports_token_count=False`, so
+`call_llm` skips the `cache_control` marker, the `extended-cache-ttl` beta
+header, the dual-zero cache-anomaly WARNING, AND the pre-send
+`count_tokens` gate. Every grade call transmits the full system + rubric
+prompt; there is no Anthropic-style discount on the cached prefix. For a
+default 4-criterion rubric over a 12-column model (~48 sequential calls),
+budget the per-call cost accordingly. Explicit Gemini context caching is
+tracked as a follow-up.
+
+**`--estimate` integration (deferred).** The `--estimate` cost-preview
+path's Gemini wiring is gated on US-007 of #137 (DEC-016 — native
+`client.models.count_tokens` integration). Until US-007 ships, an
+operator running `signalforge generate --estimate` with
+`grade.provider: gemini` will see the grader-side estimate surface as
+`<unavailable: NotImplementedError>` per the conservative-bias degrade
+(DEC-005 of #36). Anthropic and OpenAI `--estimate` paths are unaffected.
+
+**Live smoke.** A `@pytest.mark.gemini` gated end-to-end test exercises
+grading against `gemini-2.5-flash`. Run it with:
+
+```bash
+SF_RUN_GEMINI=1 GOOGLE_API_KEY=... uv run pytest -m gemini --no-cov
+```
+
+Mirrors the `@pytest.mark.anthropic` / `@pytest.mark.openai` precedent —
+excluded from the default CI run via `addopts -m 'not gemini'`; both env
+vars are required.
 
 ## Prompt-injection mitigation
 

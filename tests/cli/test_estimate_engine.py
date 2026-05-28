@@ -726,13 +726,16 @@ def test_estimate_uses_first_artifact_alphabetical_as_grade_rep(
     grade_calls = fake_anthropic.count_calls[1:]
     assert len(grade_calls) == n_criteria
     for call in grade_calls:
-        # The dynamic block carries ``artifact_id: column.aaa_first.description``
-        # in its body. Walk the messages content block to find it.
+        # #136 US-005: ``AnthropicProvider.estimate_input_tokens`` sends
+        # a single user-message with a string ``content`` payload (the
+        # concatenated ``system + cached + dynamic`` text); the previous
+        # two-block envelope is gone. The representative artifact_id
+        # still appears verbatim in the rendered dynamic block.
         messages = call["messages"]
         assert len(messages) == 1
-        blocks = messages[0]["content"]
-        dynamic_block_text = blocks[1]["text"]
-        assert "artifact_id: column.aaa_first.description" in dynamic_block_text
+        content = messages[0]["content"]
+        assert isinstance(content, str)
+        assert "artifact_id: column.aaa_first.description" in content
 
 
 def test_estimate_returns_frozen_estimate_report(

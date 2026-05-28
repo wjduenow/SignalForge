@@ -44,10 +44,14 @@ def test_lookup_raises_estimateunknownmodelerror_for_unknown_model() -> None:
         lookup("not-a-real-model-9999")
     rendered = str(exc_info.value)
     assert "not-a-real-model-9999" in rendered
-    # Locked remediation text — verbatim per US-001 AC.
+    # Locked remediation text — verbatim per US-001 AC, refreshed in
+    # #136 US-008 (QG) to enumerate the four OpenAI SKUs added by US-004,
+    # and again in #137 US-006 (DEC-017) for the three Gemini SKUs.
     assert (
         "Add the model to signalforge.llm.pricing.PRICES or use a supported "
-        "model: claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5."
+        "model: claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5, "
+        "gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4-turbo, "
+        "gemini-2.5-pro, gemini-2.5-flash, gemini-2.0-flash."
     ) in rendered
     # Carries the model id as a structured field for typed handling.
     assert exc_info.value.model == "not-a-real-model-9999"
@@ -64,12 +68,20 @@ def test_modelpricing_is_frozen() -> None:
 
 def test_price_table_version_is_a_nonempty_string() -> None:
     """``PRICE_TABLE_VERSION`` is a non-empty string. The literal value is
-    a sourcing-date stamp; v0.1 ships ``"2026-05-11"`` but the assertion
-    here is structural — that the constant exists and is non-empty —
-    so a price-table refresh doesn't churn the test for cosmetic reasons.
+    a sourcing-date stamp; the structural check here ensures the constant
+    exists and is non-empty, so a price-table refresh doesn't churn the
+    test for cosmetic reasons.
     """
     assert isinstance(PRICE_TABLE_VERSION, str)
     assert PRICE_TABLE_VERSION
+
+
+def test_price_table_version_pinned_to_us_004_ship_date() -> None:
+    """The ``#136 US-004`` ship-date stamp is pinned so a stealth bump
+    to the table version without a paired numeric edit / commit fails
+    loudly. Bump in lockstep with any future ``_PRICES_MUTABLE`` edit
+    (paired commit, per the module docstring)."""
+    assert PRICE_TABLE_VERSION == "2026-05-28"
 
 
 def test_pricing_module_exports() -> None:
@@ -88,14 +100,21 @@ def test_pricing_module_exports() -> None:
 
 
 def test_prices_contains_all_shipped_skus() -> None:
-    """The shipped SKU set is locked: three Anthropic SKUs plus, per
-    #137 DEC-017, three Gemini SKUs. Adding another SKU is a deliberate
+    """The shipped SKU set is locked: three Anthropic + four OpenAI as of
+    ``#136 US-004`` (DEC-007). Adding a future SKU is a deliberate
     expansion that should fail this test loudly until the AC is updated.
     """
     assert set(PRICES.keys()) == {
+        # Anthropic
         "claude-sonnet-4-6",
         "claude-opus-4-7",
         "claude-haiku-4-5",
+        # OpenAI (#136 US-004)
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4.1",
+        "gpt-4-turbo",
+        # Gemini (#137 US-006, DEC-017)
         "gemini-2.5-pro",
         "gemini-2.5-flash",
         "gemini-2.0-flash",
@@ -103,15 +122,46 @@ def test_prices_contains_all_shipped_skus() -> None:
 
 
 @pytest.mark.parametrize(
+    "sku",
+    [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "gpt-4.1",
+        "gpt-4-turbo",
+    ],
+)
+def test_lookup_returns_modelpricing_for_each_openai_sku(sku: str) -> None:
+    """Every OpenAI SKU added in #136 US-004 (DEC-007) ``lookup``s to a
+    ``ModelPricing`` with strictly positive input/output rates and
+    cache fields set to ``0.0`` — OpenAI has no Anthropic-equivalent
+    ``cache_control`` discount tier, so the cache columns are a
+    deliberate zero, not an unset placeholder.
+    """
+    pricing = lookup(sku)
+    assert isinstance(pricing, ModelPricing)
+    assert pricing.input_per_mtok > 0.0
+    assert pricing.output_per_mtok > 0.0
+    assert pricing.cache_write_5m_per_mtok == 0.0
+    assert pricing.cache_read_per_mtok == 0.0
+
+
+def test_lookup_raises_for_unknown_openai_flavoured_id() -> None:
+    """A plausible-looking but unsupported OpenAI id still raises
+    ``EstimateUnknownModelError`` — `lookup` does no provider sniffing
+    or fuzzy matching, just a strict dict lookup."""
+    with pytest.raises(EstimateUnknownModelError) as exc_info:
+        lookup("gpt-9-unicorn")
+    assert exc_info.value.model == "gpt-9-unicorn"
+
+
+@pytest.mark.parametrize(
     "model",
     ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
 )
 def test_lookup_returns_modelpricing_for_gemini_skus(model: str) -> None:
-    """Each Gemini SKU (#137 DEC-017) resolves via ``lookup`` with
-    positive input/output rates and zero cache rates. v0.3 ships Gemini
-    without an Anthropic-equivalent prompt-cache discount, so the cache
-    fields are 0.0 — the ``--estimate`` engine multiplies these by token
-    counts and the zero values contribute nothing to the USD math.
+    """Each Gemini SKU (#137 DEC-017) resolves via ``lookup`` with positive
+    input/output rates and zero cache rates — v0.3 Gemini ships without an
+    Anthropic-equivalent prompt-cache discount.
     """
     pricing = lookup(model)
     assert isinstance(pricing, ModelPricing)
@@ -122,19 +172,21 @@ def test_lookup_returns_modelpricing_for_gemini_skus(model: str) -> None:
 
 
 def test_lookup_raises_estimateunknownmodelerror_for_unknown_gemini_model() -> None:
-    """An unknown Gemini-shaped SKU still routes through the standard
-    ``EstimateUnknownModelError`` path — the price table has no special
-    fallback for vendor-prefixed names.
-    """
+    """An unknown Gemini-shaped SKU routes through the standard
+    ``EstimateUnknownModelError`` path (no vendor-prefix fallback)."""
     with pytest.raises(EstimateUnknownModelError) as exc_info:
         lookup("gemini-unknown")
     assert exc_info.value.model == "gemini-unknown"
 
 
-def test_anthropic_skus_are_byte_identical_after_gemini_addition() -> None:
-    """#137 US-006 AC: the three Anthropic SKUs must be byte-identical
-    after the Gemini additions land — DEC-017 promises the change is
-    purely additive."""
+def test_anthropic_skus_remain_byte_identical_after_us_004() -> None:
+    """Anthropic estimate byte-identity floor (DEC-013 of #135 / preserved
+    by #136): adding OpenAI SKUs must NOT perturb any field on the three
+    Anthropic ``ModelPricing`` rows. Pinning every field by value (rather
+    than asserting equality against a freshly-constructed dataclass) so a
+    silent rate drift fails loud here, not only at the cost-projection
+    seam.
+    """
     sonnet = lookup("claude-sonnet-4-6")
     assert sonnet.input_per_mtok == 3.00
     assert sonnet.output_per_mtok == 15.00
@@ -152,14 +204,6 @@ def test_anthropic_skus_are_byte_identical_after_gemini_addition() -> None:
     assert haiku.output_per_mtok == 4.00
     assert haiku.cache_write_5m_per_mtok == 1.00
     assert haiku.cache_read_per_mtok == 0.08
-
-
-def test_price_table_version_pins_137_ship_date() -> None:
-    """#137 US-006 AC: ``PRICE_TABLE_VERSION`` bumps to the ship date in
-    lockstep with the Gemini-SKU additions (DEC-017). Byte-equal string
-    match guards against accidental refresh-without-bump regressions.
-    """
-    assert PRICE_TABLE_VERSION == "2026-05-27"
 
 
 def test_estimateunknownmodelerror_is_in_exit_code_mapping_at_tier_2() -> None:

@@ -24,16 +24,20 @@ this module adds the remaining scans:
   whose body issues ``os.write`` / ``os.fsync``; every writer function
   must use a short-write loop. The propagation IS the defence
   (safety-layer.md DEC-011, repeated in prune/grade/diff rules).
-* **Scan 9** — ``genai.Client(...)`` outside
-  ``signalforge.llm._gemini_client`` (#137 US-001 / DEC-009). Mirrors
-  Scan 3 (Anthropic) for the Google Gemini SDK; uses
-  :class:`_AttributeCallFinder` with ``parent_module="google"`` so the
-  ``from google import genai; genai.Client(...)`` namespace-package
-  shape is caught alongside ``from google.genai import Client; Client(...)``
-  and its alias variant. The scan count is merge-order-dependent per
-  DEC-019 (if #136 lands its OpenAI scan first, that becomes Scan 9 and
-  Gemini renumbers to Scan 10) — the numbering is a docstring concern,
-  not a contract.
+* **Scan 9** — ``openai.OpenAI(...)`` outside
+  ``signalforge.llm._openai_client`` (#136 DEC-010). NEW — not an
+  extension of Scan 3 (which is Anthropic-specific). Mirrors Scan 3's
+  shape: reuses :class:`_AttributeCallFinder` to detect the SDK
+  construction call regardless of import-alias bypasses; the companion
+  per-file ``# type: ignore`` confinement test
+  (``tests/llm/test_openai_client_confinement.py``) mirrors the
+  Snowflake shim's line-based check.
+* **Scan 10** — ``genai.Client(...)`` outside
+  ``signalforge.llm._gemini_client`` (#137 DEC-009). Mirrors Scan 9 for
+  the Google Gemini SDK; uses :class:`_AttributeCallFinder` with
+  ``parent_module="google"`` so the ``from google import genai;
+  genai.Client(...)`` namespace-package shape is caught alongside
+  ``from google.genai import Client; Client(...)`` and its alias variant.
 
 Each scan is its own test with an explicit, justified exclusion list. The
 scans are deterministic and cheap: each ``.py`` is read once via
@@ -178,13 +182,6 @@ class _AttributeCallFinder(ast.NodeVisitor):
     Without alias-tracking the test could be bypassed by:
     ``import anthropic as a; a.Anthropic(...)`` or
     ``from anthropic import Anthropic; Anthropic(...)``.
-
-    The optional ``parent_module`` parameter lets the finder also catch
-    ``from <parent_module> import <obj> [as <alias>]; <obj_or_alias>.<attr>(...)``
-    — the namespace-package import shape used by Scan 9
-    (``from google import genai; genai.Client(...)``). Without it, a
-    ``from google import genai`` import would slip past ``visit_ImportFrom``
-    because ``node.module`` is ``"google"`` (the parent), not ``"genai"``.
     """
 
     def __init__(
@@ -196,6 +193,10 @@ class _AttributeCallFinder(ast.NodeVisitor):
     ) -> None:
         self._obj_name = obj_name
         self._attr_name = attr_name
+        # Namespace-package parent (e.g. ``"google"`` for ``from google import
+        # genai``). When set, the finder also catches the namespace-package
+        # import shape used by Scan 10 (Gemini). None for SDKs that ship as
+        # a top-level package (anthropic, openai).
         self._parent_module = parent_module
         # Names that bind to ``<obj>`` in this module's scope. Always
         # includes the canonical name so unaliased imports work.
@@ -205,24 +206,61 @@ class _AttributeCallFinder(ast.NodeVisitor):
         self._direct_aliases: set[str] = set()
         self.calls: list[tuple[int, int]] = []
 
+    def visit_Module(self, node: ast.Module) -> None:  # noqa: N802 — ast API
+        # Two-pass walk on the module root: collect every alias FIRST,
+        # then visit normally to find Call hits. Closes the
+        # "call-before-import" bypass where a function body references
+        # an alias defined by a later top-level import (PR #152
+        # CodeRabbit catch — mirrors the precedent in
+        # ``test_qualified_name_finder_catches_late_import_alias``).
+        # Without this, ``ast.NodeVisitor``'s depth-first walk visits
+        # the Call before the Import/ImportFrom and the alias map is
+        # empty when the Call is matched.
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Import):
+                for alias in sub.names:
+                    if alias.name == self._obj_name:
+                        self._obj_aliases.add(alias.asname or alias.name)
+                    # ``import <parent>.<obj>`` also binds the obj name
+                    # (Pattern for ``import google.genai``).
+                    elif self._parent_module is not None and alias.name == (
+                        f"{self._parent_module}.{self._obj_name}"
+                    ):
+                        self._obj_aliases.add(alias.asname or self._obj_name)
+            elif isinstance(sub, ast.ImportFrom):
+                dotted_form = (
+                    self._parent_module is not None
+                    and sub.module == f"{self._parent_module}.{self._obj_name}"
+                )
+                if sub.module == self._obj_name or dotted_form:
+                    for alias in sub.names:
+                        if alias.name == self._attr_name:
+                            self._direct_aliases.add(alias.asname or alias.name)
+                # Pattern B (namespace-package): ``from <parent> import <obj>``
+                # — binds <obj> as a local name (e.g. ``from google import
+                # genai``), identical to ``import <obj>`` for subsequent
+                # attribute-call resolution.
+                if self._parent_module is not None and sub.module == self._parent_module:
+                    for alias in sub.names:
+                        if alias.name == self._obj_name:
+                            self._obj_aliases.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
     def visit_Import(self, node: ast.Import) -> None:  # noqa: N802 — ast API
+        # Idempotent re-add on the second pass (alias already collected
+        # by ``visit_Module``). Kept so callers feeding a sub-module
+        # subtree (not the Module root) still register aliases.
         for alias in node.names:
             if alias.name == self._obj_name:
                 self._obj_aliases.add(alias.asname or alias.name)
-            # ``import <parent>.<obj>`` / ``import <parent>.<obj> as a``
-            # also binds the obj name in scope when ``parent_module`` is set.
-            if self._parent_module is not None and alias.name == (
+            elif self._parent_module is not None and alias.name == (
                 f"{self._parent_module}.{self._obj_name}"
             ):
                 self._obj_aliases.add(alias.asname or self._obj_name)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802 — ast API
-        # Pattern A: ``from <obj> import <attr>`` — binds <attr> directly.
-        # When ``parent_module`` is set, also catch the dotted form
-        # ``from <parent>.<obj> import <attr>`` (e.g.
-        # ``from google.genai import Client``), which carries
-        # ``node.module == "google.genai"``.
+        # Same idempotent-on-second-pass note as ``visit_Import``.
         dotted_form = (
             self._parent_module is not None
             and node.module == f"{self._parent_module}.{self._obj_name}"
@@ -231,9 +269,7 @@ class _AttributeCallFinder(ast.NodeVisitor):
             for alias in node.names:
                 if alias.name == self._attr_name:
                     self._direct_aliases.add(alias.asname or alias.name)
-        # Pattern B (namespace-package): ``from <parent> import <obj>`` —
-        # binds <obj> as a local name, identical to ``import <obj>`` for
-        # subsequent attribute-call resolution.
+        # Namespace-package: ``from <parent> import <obj>``.
         if self._parent_module is not None and node.module == self._parent_module:
             for alias in node.names:
                 if alias.name == self._obj_name:
@@ -269,12 +305,8 @@ def _scan_dir_for_attribute_calls(
     accounting for import aliasing — except in any file whose path
     relative to ``root`` (POSIX form) is in ``excluded_relpaths``.
 
-    The optional ``parent_module`` is forwarded to
-    :class:`_AttributeCallFinder` so namespace-package imports like
-    ``from google import genai`` are caught alongside the canonical
-    ``import genai`` shape. Scan 9 sets ``parent_module="google"`` for
-    the ``genai.Client`` confinement check; Scan 3 leaves it ``None``
-    (Anthropic is a top-level package).
+    ``parent_module`` enables Pattern B namespace-package detection
+    (Scan 10 — ``from google import genai; genai.Client(...)``).
     """
     hits: list[tuple[Path, int]] = []
     for path in root.rglob("*.py"):
@@ -937,22 +969,83 @@ def test_fail_closed_writers_use_short_write_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Scan 9 — genai.Client only in llm._gemini_client (#137 US-001 / DEC-009)
+# Scan 9 — openai.OpenAI only in llm._openai_client (#136 DEC-010)
 # ---------------------------------------------------------------------------
 
 
-# DEC-001 / DEC-009 of #137: every Google Gemini SDK ``# pyright: ignore`` and
-# the ``genai.Client(...)`` construction call itself live in
-# ``_gemini_client.py``. Mirrors Scan 3 (``anthropic.Anthropic`` confinement)
-# verbatim — one shim per vendor, no SDK ignores leaking into sibling modules.
-# The line-based ``# type: ignore`` confinement is the complementary gate in
-# ``tests/llm/test_gemini_client_confinement.py``.
-#
-# NOTE on count: per DEC-009 + DEC-019 the scan tally is merge-order-dependent.
-# #136 (OpenAI) was planned to land its own ``openai.OpenAI(...)`` confinement
-# scan as the 9th first; if #137 merges to ``dev`` before #136 this is Scan 9
-# and #136 becomes Scan 10. The number is a docstring concern, not a contract
-# — the scan body asserts the rule whichever numerical slot it ends up in.
+# DEC-010 of #136: every OpenAI SDK ``# pyright: ignore`` / ``# type: ignore``
+# and the SDK construction call itself live in ``_openai_client.py``. This is
+# a **new** scan, not an extension of Scan 3 — Scan 3 is Anthropic-specific
+# (``anthropic.Anthropic(...)``). Both scans mirror the same shape because
+# each vendor SDK gets its own shim per the one-shim-per-vendor convention
+# (``.claude/rules/llm-drafter.md`` § "One SDK seam"). When #137 ships the
+# Gemini equivalent, the tally bumps 9 → 10.
+_LLM_OPENAI_EXCLUSIONS: set[str] = {
+    # _openai_client.py is the sole SDK seam: it lazy-imports
+    # ``openai`` and constructs ``openai.OpenAI(api_key=...)``
+    # inside ``_make_openai_client``.
+    "_openai_client.py",
+}
+
+
+def test_openai_client_construction_only_in_llm_client_shim() -> None:
+    """DEC-010 of #136: ``openai.OpenAI(...)`` outside
+    ``signalforge.llm._openai_client`` violates the SDK-confinement
+    convention. The AST scan is stricter than the regex check in
+    ``tests/llm/test_openai_client_confinement.py`` (catches multi-line
+    / commented forms the regex would miss).
+
+    Mirrors :func:`test_anthropic_client_construction_only_in_llm_client_shim`
+    verbatim with ``openai`` / ``OpenAI`` substituted. The
+    :class:`_AttributeCallFinder` handles all three bypass patterns
+    (bare ``from openai import OpenAI``, alias ``import openai as o``,
+    attribute ``openai.OpenAI(...)``).
+    """
+    hits = _scan_dir_for_attribute_calls(
+        _LLM_DIR,
+        obj_name="openai",
+        attr_name="OpenAI",
+        excluded_relpaths=_LLM_OPENAI_EXCLUSIONS,
+    )
+    formatted = "\n".join(f"  {p}:{line}" for p, line in hits)
+    assert not hits, (
+        "openai.OpenAI(...) constructed outside "
+        "signalforge.llm._openai_client:\n"
+        f"{formatted}\n"
+        "Construct only via _make_openai_client — DEC-010 of #136 confines "
+        "OpenAI-SDK noise to the shim."
+    )
+
+
+def test_openai_client_construction_in_llm_client_shim_is_present() -> None:
+    """Sanity: at least one ``openai.OpenAI(...)`` in
+    ``_openai_client.py``. If this fails the scan above is no longer
+    load-bearing.
+    """
+    client_path = _LLM_DIR / "_openai_client.py"
+    tree = ast.parse(client_path.read_text(encoding="utf-8"))
+    finder = _AttributeCallFinder("openai", "OpenAI")
+    finder.visit(tree)
+    assert finder.calls, (
+        "Expected openai.OpenAI(...) call in "
+        "signalforge.llm._openai_client — the AST-scan above is no longer "
+        "load-bearing if the legitimate constructor disappears."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scan 10 — genai.Client only in llm._gemini_client (#137 DEC-009)
+# ---------------------------------------------------------------------------
+
+
+# DEC-009 of #137: every Google-Gemini SDK ``# pyright: ignore`` /
+# ``# type: ignore`` and the SDK construction call itself live in
+# ``_gemini_client.py``. Mirrors Scan 3 (Anthropic) and Scan 9 (OpenAI);
+# each vendor SDK gets its own shim per the one-shim-per-vendor convention
+# (``.claude/rules/llm-drafter.md`` § "One SDK seam"). The Gemini SDK ships
+# as a namespace-package (``from google import genai``) so the scan uses
+# ``parent_module="google"`` to catch that import shape alongside the bare
+# / dotted / alias forms.
 _LLM_GEMINI_EXCLUSIONS: set[str] = {
     # _gemini_client.py is the sole SDK seam: it lazy-imports
     # ``google.genai`` and constructs ``genai.Client(api_key=...)``
@@ -964,28 +1057,14 @@ _LLM_GEMINI_EXCLUSIONS: set[str] = {
 def test_gemini_client_construction_only_in_llm_client_shim() -> None:
     """DEC-009 of #137: ``genai.Client(...)`` outside
     ``signalforge.llm._gemini_client`` violates the SDK-confinement
-    convention (DEC-001).
+    convention. Stricter than the line-based regex check in
+    ``tests/llm/test_gemini_client_confinement.py`` because the AST
+    scan catches multi-line / commented forms the regex would miss.
 
-    Uses :class:`_AttributeCallFinder` with ``parent_module="google"`` so
-    all three bypass patterns from ``testing-signal.md`` § "AST single-
-    construction-seam scans must catch all three bypass patterns" are
-    covered:
-
-    * **Bare** — ``from google.genai import Client; Client(...)``
-      (``_direct_aliases`` via ``visit_ImportFrom`` with
-      ``node.module == "genai"``).
-    * **Import-alias** — ``from google.genai import Client as C; C(...)``
-      (``_direct_aliases`` carries the asname).
-    * **Module-attribute** — ``from google import genai; genai.Client(...)``
-      (``_obj_aliases`` populated by ``visit_ImportFrom`` with
-      ``node.module == "google"`` AND ``alias.name == "genai"`` — the
-      ``parent_module`` branch added for this scan).
-
-    The fourth shape ``import google.genai; google.genai.Client(...)`` is
-    rare and produces ``Attribute(value=Attribute(...))`` which the
-    visitor does NOT match — acceptable; the line-level
-    ``test_gemini_client_confinement`` gate catches the ``# type: ignore``
-    that would accompany any such SDK call in a non-shim module.
+    Reuses :class:`_AttributeCallFinder` with ``parent_module="google"``
+    so the namespace-package shape (``from google import genai;
+    genai.Client(...)``) is caught alongside the direct
+    ``from google.genai import Client; Client(...)`` and its alias.
     """
     hits = _scan_dir_for_attribute_calls(
         _LLM_DIR,
@@ -999,15 +1078,15 @@ def test_gemini_client_construction_only_in_llm_client_shim() -> None:
         "genai.Client(...) constructed outside "
         "signalforge.llm._gemini_client:\n"
         f"{formatted}\n"
-        "Construct only via _make_gemini_client — DEC-001 of #137 "
-        "confines Gemini-SDK noise to the shim."
+        "Construct only via _make_gemini_client — DEC-009 of #137 confines "
+        "Gemini-SDK noise to the shim."
     )
 
 
 def test_gemini_client_construction_in_llm_client_shim_is_present() -> None:
-    """Sanity: at least one ``genai.Client(...)`` in
-    ``_gemini_client.py``. If this fails the scan above is no longer
-    load-bearing.
+    """Sanity: at least one ``genai.Client(...)`` (in any of its import
+    forms) in ``_gemini_client.py``. If this fails the scan above is no
+    longer load-bearing.
     """
     client_path = _LLM_DIR / "_gemini_client.py"
     tree = ast.parse(client_path.read_text(encoding="utf-8"))
@@ -1105,6 +1184,59 @@ def test_qualified_name_finder_catches_all_three_bypass_patterns() -> None:
         )
 
 
+def test_attribute_call_finder_catches_all_three_openai_bypass_patterns() -> None:
+    """#136 DEC-010 planted-violation regression: Scan 9 must catch
+    each of the three bypass patterns for ``openai.OpenAI(...)``.
+
+    Mirrors :func:`test_qualified_name_finder_catches_all_three_bypass_patterns`
+    in spirit but uses :class:`_AttributeCallFinder` (Scan 9's helper)
+    against synthetic source for each pattern. Per
+    ``testing-signal.md`` § "AST single-construction-seam scans must
+    catch all three bypass patterns" — a bare-name-only visitor is
+    trivially bypassable and provides false confidence.
+    """
+    # Pattern 1: bare ``OpenAI(...)`` after ``from openai import OpenAI``.
+    bare_src = "from openai import OpenAI\ndef make():\n    return OpenAI(api_key='x')\n"
+    bare = _AttributeCallFinder("openai", "OpenAI")
+    bare.visit(ast.parse(bare_src))
+    assert len(bare.calls) == 1, (
+        "Pattern 1 (bare `from openai import OpenAI; OpenAI(...)`) not detected — "
+        "_AttributeCallFinder regressed."
+    )
+
+    # Pattern 2: import-alias ``from openai import OpenAI as O``.
+    alias_src = "from openai import OpenAI as O\ndef make():\n    return O(api_key='x')\n"
+    alias = _AttributeCallFinder("openai", "OpenAI")
+    alias.visit(ast.parse(alias_src))
+    assert len(alias.calls) == 1, (
+        "Pattern 2 (import-alias `from openai import OpenAI as O; O(...)`) not detected — "
+        "_AttributeCallFinder regressed."
+    )
+
+    # Pattern 3: module-attribute ``import openai; openai.OpenAI(...)``.
+    attr_src = "import openai\n\nx = openai.OpenAI(api_key='x')\n"
+    attr = _AttributeCallFinder("openai", "OpenAI")
+    attr.visit(ast.parse(attr_src))
+    assert len(attr.calls) == 1, (
+        "Pattern 3 (module-attribute `import openai; openai.OpenAI(...)`) not detected — "
+        "_AttributeCallFinder regressed."
+    )
+
+    # Pattern 4: late-import alias — call appears in source order BEFORE
+    # the import that defines its alias. Single-pass alias collection
+    # misses this; ``_AttributeCallFinder.visit_Module`` does a two-pass
+    # walk to close the bypass (PR #152 CodeRabbit catch; mirrors the
+    # ``_QualifiedNameCallFinder`` regression test below).
+    late_alias_src = "def make():\n    return O(api_key='x')\nfrom openai import OpenAI as O\n"
+    late = _AttributeCallFinder("openai", "OpenAI")
+    late.visit(ast.parse(late_alias_src))
+    assert len(late.calls) == 1, (
+        "Pattern 4 (late-import alias: call appears before its `from openai import OpenAI "
+        "as O` line) not detected — _AttributeCallFinder regressed; the two-pass "
+        "`visit_Module` alias collection is the gate that closes this bypass."
+    )
+
+
 def test_qualified_name_finder_catches_late_import_alias() -> None:
     """Regression for the late-import bypass CodeRabbit flagged on PR #69:
     a function body that references an alias defined by a later
@@ -1186,120 +1318,3 @@ def test_qualified_name_finder_ignores_unrelated_calls() -> None:
             assert node.handlers == [], "Self-check: canonical Try has only finally"
             good_count += 1
     assert good_count == 1, "Self-check: should find exactly one canonical Try"
-
-
-# ---------------------------------------------------------------------------
-# Issue #137 US-001: planted-violation regression tests for Scan 9's visitor
-# ---------------------------------------------------------------------------
-#
-# Scan 9 (Gemini ``genai.Client`` confinement) uses
-# :class:`_AttributeCallFinder` with ``parent_module="google"`` so the
-# namespace-package shape ``from google import genai; genai.Client(...)``
-# is caught alongside the canonical ``import genai`` form. The tests
-# below feed each of the three bypass patterns
-# (testing-signal.md § "AST single-construction-seam scans must catch
-# all three bypass patterns") through the visitor and assert the
-# construction call is detected. Without these tests, a refactor that
-# broke any pattern would silently disable the scan.
-
-
-def test_attribute_call_finder_catches_gemini_bare_import() -> None:
-    """Pattern 1 (bare): ``from google.genai import Client; Client(...)``
-    binds ``Client`` directly via ``visit_ImportFrom`` with
-    ``node.module == "genai"`` (the existing direct-symbol path).
-    """
-    src = "from google.genai import Client\ndef make():\n    return Client(api_key='x')\n"
-    finder = _AttributeCallFinder("genai", "Client", parent_module="google")
-    finder.visit(ast.parse(src))
-    assert len(finder.calls) == 1, (
-        "Gemini bare-import bypass not detected — "
-        "_AttributeCallFinder regressed on `from google.genai import Client; Client(...)`"
-    )
-
-
-def test_attribute_call_finder_catches_gemini_import_alias() -> None:
-    """Pattern 2 (import-alias):
-    ``from google.genai import Client as C; C(...)``
-    binds the asname into ``_direct_aliases`` so the bare-name call is
-    flagged.
-    """
-    src = "from google.genai import Client as _C\ndef make():\n    return _C(api_key='x')\n"
-    finder = _AttributeCallFinder("genai", "Client", parent_module="google")
-    finder.visit(ast.parse(src))
-    assert len(finder.calls) == 1, (
-        "Gemini import-alias bypass not detected — "
-        "_AttributeCallFinder regressed on "
-        "`from google.genai import Client as _C; _C(...)`"
-    )
-
-
-def test_attribute_call_finder_catches_gemini_namespace_package() -> None:
-    """Pattern 3 (namespace-package module-attribute):
-    ``from google import genai; genai.Client(...)`` binds ``genai`` as a
-    local obj-alias via the ``parent_module="google"`` branch of
-    ``visit_ImportFrom`` so the attribute-form call is flagged.
-
-    This is the bypass pattern the canonical ``_AttributeCallFinder``
-    (without ``parent_module``) cannot catch — Scan 3 doesn't need it
-    because ``anthropic`` is a top-level package, but Gemini imports
-    via the ``google`` namespace package and the visitor must handle
-    both shapes.
-    """
-    src = "from google import genai\ndef make():\n    return genai.Client(api_key='x')\n"
-    finder = _AttributeCallFinder("genai", "Client", parent_module="google")
-    finder.visit(ast.parse(src))
-    assert len(finder.calls) == 1, (
-        "Gemini namespace-package bypass not detected — "
-        "_AttributeCallFinder regressed on "
-        "`from google import genai; genai.Client(...)`"
-    )
-
-
-def test_attribute_call_finder_catches_gemini_namespace_package_with_alias() -> None:
-    """Pattern 3 variant: ``from google import genai as g; g.Client(...)``.
-
-    The asname is added to ``_obj_aliases`` via the ``parent_module``
-    branch, so the attribute-form call ``g.Client(...)`` is flagged.
-    """
-    src = "from google import genai as g\ndef make():\n    return g.Client(api_key='x')\n"
-    finder = _AttributeCallFinder("genai", "Client", parent_module="google")
-    finder.visit(ast.parse(src))
-    assert len(finder.calls) == 1, (
-        "Gemini namespace-package alias bypass not detected — "
-        "_AttributeCallFinder regressed on "
-        "`from google import genai as g; g.Client(...)`"
-    )
-
-
-def test_attribute_call_finder_ignores_unrelated_calls_with_parent_module() -> None:
-    """Negative case for the ``parent_module``-extended visitor: calls
-    to other names must not be flagged. Guards against an over-broad
-    visitor that flags every ``.Client(`` attribute access.
-    """
-    src = (
-        "from google import genai\n"
-        "def make():\n"
-        "    other.Client(api_key='x')\n"  # different obj — not caught
-        "    return genai.SomethingElse()\n"  # different attr — not caught
-    )
-    finder = _AttributeCallFinder("genai", "Client", parent_module="google")
-    finder.visit(ast.parse(src))
-    assert finder.calls == [], (
-        f"AttributeCallFinder (parent_module='google') produced false positives "
-        f"on unrelated calls; got: {finder.calls}"
-    )
-
-
-def test_attribute_call_finder_anthropic_path_unchanged_by_parent_module() -> None:
-    """The Anthropic scan (Scan 3) calls ``_AttributeCallFinder`` without
-    ``parent_module``; the new ``parent_module`` parameter must default
-    to ``None`` so the existing behaviour is byte-identical. A regression
-    here would silently break Scan 3.
-    """
-    src = "import anthropic\ndef make():\n    return anthropic.Anthropic(api_key='x')\n"
-    finder = _AttributeCallFinder("anthropic", "Anthropic")
-    finder.visit(ast.parse(src))
-    assert len(finder.calls) == 1, (
-        "Anthropic scan regressed — _AttributeCallFinder default behaviour "
-        "broke when parent_module was introduced"
-    )

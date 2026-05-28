@@ -22,6 +22,7 @@ from signalforge.llm.providers import (
     AnthropicProvider,
     ExceptionCategory,
     LLMProvider,
+    OpenAIProvider,
     UsageMetrics,
     provider_for,
     register_provider,
@@ -70,6 +71,18 @@ class _DummyProvider(LLMProvider):
 
     def classify_exception(self, exc: BaseException) -> ExceptionCategory:
         return ExceptionCategory.NO_RETRY
+
+    def estimate_input_tokens(
+        self,
+        model: str,
+        text: str,
+        *,
+        system: str = "",
+        client: object | None = None,
+    ) -> int:
+        # Trivial deterministic stub (#136 US-005) — the registry tests
+        # don't exercise the count, only the ABC instantiation path.
+        return 0
 
 
 @pytest.fixture
@@ -397,6 +410,393 @@ def test_anthropic_provider_make_client_uses_shim(monkeypatch: pytest.MonkeyPatc
     sentinel = object()
     monkeypatch.setattr(shim, "_make_anthropic_client", lambda: sentinel)
     assert AnthropicProvider().make_client() is sentinel
+
+
+# ---------------------------------------------------------------------------
+# US-002 of issue #136 — OpenAIProvider strategy
+# ---------------------------------------------------------------------------
+
+
+_OPENAI_REQ = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+
+
+class _FakeChoiceMessage:
+    """Minimal stand-in for the OpenAI SDK's ``ChatCompletionMessage``."""
+
+    def __init__(self, content: str | None) -> None:
+        self.content = content
+
+
+class _FakeChoice:
+    """Minimal stand-in for an OpenAI ``ChatCompletion.Choice``."""
+
+    def __init__(self, content: str | None) -> None:
+        self.message = _FakeChoiceMessage(content)
+
+
+class _FakeOpenAIUsage:
+    """OpenAI Chat Completions usage shape (``prompt_tokens`` /
+    ``completion_tokens``; no cache fields)."""
+
+    def __init__(self, prompt_tokens: int, completion_tokens: int) -> None:
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+
+
+class _FakeOpenAIResponse:
+    """Minimal stand-in for an OpenAI ``ChatCompletion`` response object."""
+
+    def __init__(
+        self,
+        *,
+        content: str | None = "ok",
+        prompt_tokens: int = 120,
+        completion_tokens: int = 45,
+        choices: object | None = None,
+    ) -> None:
+        if choices is None:
+            choices = [_FakeChoice(content)]
+        self.choices = choices
+        self.usage = _FakeOpenAIUsage(prompt_tokens, completion_tokens)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_is_registered() -> None:
+    """US-002 of #136 registers ``OpenAIProvider`` at import time, so
+    ``provider_for("openai")`` returns it (DEC-003 of #135)."""
+    provider = provider_for("openai")
+    assert isinstance(provider, OpenAIProvider)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_capability_flags() -> None:
+    """OpenAI has no prompt-caching primitive and no server-side
+    ``count_tokens`` API, so both capability flags are ``False``
+    (DEC-008 of #135)."""
+    provider = OpenAIProvider()
+    assert provider.name == "openai"
+    assert provider.supports_prompt_caching is False
+    assert provider.supports_token_count is False
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_build_create_kwargs_shape() -> None:
+    """``build_create_kwargs`` returns the OpenAI-native Chat Completions
+    kwargs shape: ``model``, ``max_tokens``, a system + user ``messages``
+    pair (user content = cached + dynamic), and ``response_format``
+    enforcing JSON server-side (DEC-006)."""
+    kwargs = OpenAIProvider().build_create_kwargs(
+        system="SYS",
+        cached_block="CACHED",
+        dynamic_block="DYN",
+        model="gpt-4o",
+        max_tokens=1024,
+        cache_ttl="5m",
+        cache_marker_active=False,
+    )
+    assert kwargs["model"] == "gpt-4o"
+    assert kwargs["max_tokens"] == 1024
+    assert kwargs["response_format"] == {"type": "json_object"}
+    messages = kwargs["messages"]
+    assert len(messages) == 2
+    assert messages[0] == {"role": "system", "content": "SYS"}
+    assert messages[1] == {"role": "user", "content": "CACHEDDYN"}
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_build_create_kwargs_never_emits_cache_marker_or_extra_headers() -> None:
+    """OpenAI has no caching primitive — there must be no ``cache_control``
+    marker anywhere in the kwargs and no ``extra_headers`` field, regardless
+    of ``cache_marker_active`` / ``cache_ttl`` (the orchestrator already
+    resolves the flag to ``False`` for a non-caching provider; this is
+    belt-and-braces)."""
+    for cache_marker_active in (True, False):
+        for cache_ttl in ("5m", "1h"):
+            kwargs = OpenAIProvider().build_create_kwargs(
+                system="s",
+                cached_block="c",
+                dynamic_block="d",
+                model="gpt-4o",
+                max_tokens=10,
+                cache_ttl=cache_ttl,
+                cache_marker_active=cache_marker_active,
+            )
+            assert "extra_headers" not in kwargs
+            # The kwargs dict carries no cache_control marker at any depth.
+            assert "cache_control" not in repr(kwargs)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_build_count_tokens_kwargs_raises() -> None:
+    """``build_count_tokens_kwargs`` raises ``NotImplementedError`` because
+    ``supports_token_count`` is ``False`` (DEC-011 of #136 — mirrors
+    ``FakeNoCacheProvider`` precedent)."""
+    with pytest.raises(NotImplementedError):
+        OpenAIProvider().build_count_tokens_kwargs(system="s", cached_block="c", model="gpt-4o")
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_extract_text_blocks_returns_single_element_tuple() -> None:
+    """``extract_text_blocks`` pulls ``choices[0].message.content`` as a
+    single string and wraps it in a one-element tuple so the orchestrator's
+    downstream ``"".join(blocks)`` is provider-agnostic."""
+    response = _FakeOpenAIResponse(content="hello world")
+    assert OpenAIProvider().extract_text_blocks(response) == ("hello world",)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+@pytest.mark.parametrize(
+    "response",
+    [
+        _FakeOpenAIResponse(choices=[]),  # empty choices
+        _FakeOpenAIResponse(content=None),  # message present but content None
+    ],
+)
+def test_openai_provider_extract_text_blocks_missing_structure_raises(
+    response: object,
+) -> None:
+    """A response missing the expected structure surfaces a typed format
+    error (mirrors the ``AnthropicProvider`` guard)."""
+    from signalforge.llm.errors import LLMResponseFormatError
+
+    with pytest.raises(LLMResponseFormatError):
+        OpenAIProvider().extract_text_blocks(response)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_extract_text_blocks_missing_choices_attr_raises() -> None:
+    """A response object missing the ``choices`` attribute entirely raises
+    :class:`LLMResponseFormatError`."""
+    from signalforge.llm.errors import LLMResponseFormatError
+
+    class _NoChoices:
+        usage = _FakeOpenAIUsage(1, 1)
+
+    with pytest.raises(LLMResponseFormatError):
+        OpenAIProvider().extract_text_blocks(_NoChoices())
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_extract_usage_returns_usage_metrics() -> None:
+    """``extract_usage`` maps ``usage.prompt_tokens`` /
+    ``usage.completion_tokens`` to :class:`UsageMetrics` with both cache
+    fields fixed at 0 (OpenAI has no cache discount —
+    ``supports_prompt_caching=False``)."""
+    response = _FakeOpenAIResponse(prompt_tokens=120, completion_tokens=45)
+    usage = OpenAIProvider().extract_usage(response)
+    assert isinstance(usage, UsageMetrics)
+    assert usage.input_tokens == 120
+    assert usage.output_tokens == 45
+    assert usage.cache_creation_input_tokens == 0
+    assert usage.cache_read_input_tokens == 0
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_extract_usage_missing_usage_raises() -> None:
+    """A response missing ``usage`` surfaces a typed format error."""
+    from signalforge.llm.errors import LLMResponseFormatError
+
+    class _NoUsage:
+        choices = [_FakeChoice("x")]
+
+    with pytest.raises(LLMResponseFormatError):
+        OpenAIProvider().extract_usage(_NoUsage())
+
+
+def _openai_api_status(message: str, status: int) -> BaseException:
+    """Construct an ``openai.APIStatusError`` with the given status code."""
+    import openai
+
+    return openai.APIStatusError(
+        message=message, response=httpx.Response(status, request=_OPENAI_REQ), body=None
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_classify_exception_maps_each_category() -> None:
+    """Each OpenAI SDK exception type maps to the correct neutral category
+    (DEC-009 of #136); unrecognised exceptions map to NO_RETRY."""
+    import openai
+
+    provider = OpenAIProvider()
+    assert (
+        provider.classify_exception(
+            openai.AuthenticationError(
+                message="auth",
+                response=httpx.Response(401, request=_OPENAI_REQ),
+                body=None,
+            )
+        )
+        is ExceptionCategory.AUTH
+    )
+    assert (
+        provider.classify_exception(
+            openai.PermissionDeniedError(
+                message="perm",
+                response=httpx.Response(403, request=_OPENAI_REQ),
+                body=None,
+            )
+        )
+        is ExceptionCategory.AUTH
+    )
+    assert (
+        provider.classify_exception(
+            openai.RateLimitError(
+                message="rl",
+                response=httpx.Response(429, request=_OPENAI_REQ),
+                body=None,
+            )
+        )
+        is ExceptionCategory.RATE_LIMIT
+    )
+    assert (
+        provider.classify_exception(openai.APIConnectionError(request=_OPENAI_REQ))
+        is ExceptionCategory.CONNECTION
+    )
+    # 5xx APIStatusError → SERVER_ERROR.
+    assert (
+        provider.classify_exception(_openai_api_status("5xx", 503))
+        is ExceptionCategory.SERVER_ERROR
+    )
+    # 4xx-non-auth APIStatusError → NO_RETRY.
+    assert provider.classify_exception(_openai_api_status("4xx", 422)) is ExceptionCategory.NO_RETRY
+    # APIStatusError that is neither 5xx nor 4xx-non-auth (a 3xx) hits the
+    # defensive fallthrough → NO_RETRY.
+    assert provider.classify_exception(_openai_api_status("3xx", 302)) is ExceptionCategory.NO_RETRY
+    # Anything unrecognised maps to NO_RETRY.
+    assert provider.classify_exception(ValueError("unrecognised")) is ExceptionCategory.NO_RETRY
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_make_client_uses_shim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``make_client`` delegates to the shim's ``_make_openai_client`` so the
+    DEC-010 SDK-construction confinement holds."""
+    import signalforge.llm._openai_client as shim
+
+    sentinel = object()
+    monkeypatch.setattr(shim, "_make_openai_client", lambda: sentinel)
+    assert OpenAIProvider().make_client() is sentinel
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_unknown_provider_error_lists_both_anthropic_and_openai() -> None:
+    """After US-002 registers ``OpenAIProvider``, an unknown name raises
+    :class:`UnknownProviderError` listing BOTH ``"anthropic"`` and
+    ``"openai"`` in its ``available`` tuple / message (DEC-003 of #135)."""
+    with pytest.raises(UnknownProviderError) as excinfo:
+        provider_for("xyz")
+    err = excinfo.value
+    assert err.name == "xyz"
+    assert "anthropic" in err.available
+    assert "openai" in err.available
+    rendered = str(err)
+    assert "anthropic" in rendered
+    assert "openai" in rendered
+
+
+# ---------------------------------------------------------------------------
+# Coverage-closing tests for #136 US-008 QG / PR #152 codecov gaps
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_anthropic_provider_estimate_input_tokens_skips_system_kwarg_when_empty() -> None:
+    """``AnthropicProvider.estimate_input_tokens`` MUST omit the ``system=``
+    kwarg entirely when ``system`` is the empty default — otherwise the SDK
+    would carry a spurious ``system=""`` block in the count, inflating the
+    figure by Anthropic's empty-system envelope size.
+
+    Closes PR #152 codecov gap on the no-system branch
+    (``providers.py``: ``response = resolved.messages.count_tokens(...)``
+    inside the ``else:`` arm).
+    """
+    from tests.llm._fake import FakeAnthropicClient, FakeCountTokensResponse
+
+    fake = FakeAnthropicClient(project="fake")
+    captured: dict[str, Any] = {}
+
+    def _capture(kwargs: dict[str, Any]) -> bool:
+        captured.update(kwargs)
+        return True
+
+    fake.expect_count_tokens(matching=_capture, returns=FakeCountTokensResponse(input_tokens=42))
+
+    tokens = AnthropicProvider().estimate_input_tokens(
+        "claude-sonnet-4-6", "hello world", system="", client=fake
+    )
+
+    assert tokens == 42
+    assert "system" not in captured, (
+        f"empty system MUST be omitted from count_tokens kwargs; got {captured.keys()}"
+    )
+    fake.assert_all_expectations_met()
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_anthropic_provider_estimate_input_tokens_raises_on_missing_input_tokens() -> None:
+    """A count_tokens response with a missing/non-int ``input_tokens`` field
+    raises :class:`LLMResponseFormatError` (defensive guard against an SDK
+    response-shape regression).
+
+    Closes PR #152 codecov gap on the ``raise LLMResponseFormatError(...)``
+    arm of ``AnthropicProvider.estimate_input_tokens``.
+    """
+    from signalforge.llm.errors import LLMResponseFormatError
+    from tests.llm._fake import FakeAnthropicClient
+
+    fake = FakeAnthropicClient(project="fake")
+
+    # Queue a response object whose ``input_tokens`` attr is missing
+    # (a real SDK response always carries it as an int; a None return
+    # surfaces the guard).
+    class _NoInputTokens:
+        pass
+
+    fake.expect_count_tokens(matching=lambda kwargs: True, returns=_NoInputTokens())
+
+    with pytest.raises(LLMResponseFormatError, match="input_tokens"):
+        AnthropicProvider().estimate_input_tokens(
+            "claude-sonnet-4-6", "hello", system="sys", client=fake
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_openai_provider_extract_text_blocks_missing_message_attr_raises() -> None:
+    """A choice object missing the ``message`` attribute (or with
+    ``message=None``) raises :class:`LLMResponseFormatError`.
+
+    Distinct from the existing ``content=None`` / empty-choices cases
+    (those exercise different arms of ``extract_text_blocks``). Closes
+    PR #152 codecov gap on the ``raise LLMResponseFormatError(...)`` arm
+    that fires when ``getattr(first, "message", None) is None``.
+    """
+    from types import SimpleNamespace
+
+    from signalforge.llm.errors import LLMResponseFormatError
+
+    # A choice with message=None (real SDK never produces this, but the
+    # guard is the contract — surface a typed error rather than crash
+    # later on the content attribute access).
+    response = SimpleNamespace(choices=[SimpleNamespace(message=None)])
+
+    with pytest.raises(LLMResponseFormatError, match="message"):
+        OpenAIProvider().extract_text_blocks(response)
 
 
 # ---------------------------------------------------------------------------

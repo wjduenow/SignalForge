@@ -174,6 +174,50 @@ class LLMProvider(abc.ABC):
     def classify_exception(self, exc: BaseException) -> ExceptionCategory:
         """Map a raised vendor exception to a neutral :class:`ExceptionCategory`."""
 
+    @abc.abstractmethod
+    def estimate_input_tokens(
+        self,
+        model: str,
+        text: str,
+        *,
+        system: str = "",
+        client: object | None = None,
+    ) -> int:
+        """Return the input-token count the prompt would consume on ``model``.
+
+        Used by the ``signalforge generate --estimate`` cost-preview path
+        (issue #36 / #136 US-005 — DEC-003). The Anthropic implementation
+        delegates to the SDK's ``messages.count_tokens`` (a server-side
+        count) so the figure matches what the runtime path would bill;
+        the OpenAI implementation delegates to ``tiktoken`` (a local BPE
+        count) because OpenAI has no equivalent pre-send count API.
+
+        Capability flags (DEC-008 of #135) do NOT gate this method —
+        every provider must answer "how many tokens is this text?" even
+        if it lacks Anthropic-style prompt caching. The runtime retry
+        loop's pre-send count gate (which IS gated by
+        :attr:`supports_token_count`) is a different surface; this is
+        the estimate path's calibration seam.
+
+        ``system`` is the system-prompt envelope, passed separately so
+        providers whose API counts the system block with its own envelope
+        tokens (Anthropic's ``messages.count_tokens(system=..., ...)``)
+        produce real-API-faithful counts (#136 US-005 / DEC-013 byte-
+        identity floor). Providers whose local tokenizer doesn't
+        distinguish (OpenAI's ``tiktoken``) MAY concatenate ``system +
+        text`` before counting; the total still includes every token.
+        Defaulting to an empty string preserves the call shape for
+        callers who don't separate the two surfaces yet.
+
+        ``client`` is an optional pre-constructed SDK client (e.g. a
+        test fake satisfying the vendor's client protocol). Providers
+        that build a transient client per call (e.g. Anthropic) MAY
+        accept and reuse it to avoid the construction cost; providers
+        whose implementation is local (e.g. OpenAI's ``tiktoken``) MAY
+        ignore it. The orchestrator passes whatever client it already
+        has in scope (or ``None``); the provider decides.
+        """
+
 
 # Process-level provider registry, keyed by ``provider.name`` (DEC-003). Module
 # scope makes it a single registry per process; US-002 registers
@@ -355,6 +399,85 @@ class AnthropicProvider(LLMProvider):
             return ExceptionCategory.NO_RETRY
         return ExceptionCategory.NO_RETRY
 
+    def estimate_input_tokens(
+        self,
+        model: str,
+        text: str,
+        *,
+        system: str = "",
+        client: object | None = None,
+    ) -> int:
+        """Count tokens via the Anthropic SDK's ``messages.count_tokens``.
+
+        Preserves real-API byte-identity with the pre-#136-US-005 inline
+        ``client.messages.count_tokens(...)`` calls in
+        :mod:`signalforge.cli._estimate` (DEC-013 of #136): the count is
+        issued with ``system`` threaded as its own kwarg (so Anthropic's
+        server-side tokenizer applies its system-block envelope tokens)
+        plus a single user-message text block whose ``content`` is
+        ``text`` (the concatenated cached + dynamic prompt body).
+        Anthropic's tokenizer collapses adjacent text blocks identically
+        to a single concatenated string for counting purposes, so the
+        post-refactor user-content shape matches the pre-refactor
+        ``[block_cached, block_dynamic]`` structured form at the count
+        level.
+
+        Tests inject a queued-response ``FakeAnthropicClient`` via
+        ``client``; production callers either pass a pre-constructed
+        client (from the ``--estimate`` CLI prelude) or rely on the
+        lazy fallback below.
+
+        When ``client`` is ``None``, the provider builds a transient
+        SDK client via
+        :func:`signalforge.llm._anthropic_client._make_anthropic_client`.
+        This path is reachable only when a caller invokes the engine
+        without threading a client through (no v0.x caller does so on
+        the happy path); the cost of one SDK construction per call is
+        acceptable for that fallback case.
+        """
+        from typing import cast
+
+        from signalforge.llm._anthropic_client import (
+            AnthropicClientProtocol,
+            _make_anthropic_client,
+        )
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        # Cast the optional ``client`` to the public protocol so pyright
+        # sees the ``messages.count_tokens`` surface without a type-checker
+        # suppression here — the DEC-012 confinement rule keeps every
+        # SDK suppression inside ``_anthropic_client.py``. Both the real
+        # ``anthropic.Anthropic`` (via the shim's ``_make_anthropic_client``)
+        # and the ``FakeAnthropicClient`` test fake satisfy the protocol
+        # structurally.
+        resolved: AnthropicClientProtocol = (
+            _make_anthropic_client() if client is None else cast(AnthropicClientProtocol, client)
+        )
+        # Pass ``system`` only when non-empty so a default ``""`` doesn't
+        # ship a bogus ``system=""`` kwarg the SDK would otherwise carry
+        # as an extra envelope block. Two explicit call shapes (instead
+        # of dict-unpack) keep the call site within the
+        # ``AnthropicClientProtocol`` typed surface — DEC-012 of #135
+        # confines every Anthropic SDK type-checker suppression to
+        # ``_anthropic_client.py``.
+        if system:
+            response = resolved.messages.count_tokens(
+                model=model,
+                system=system,
+                messages=[{"role": "user", "content": text}],
+            )
+        else:
+            response = resolved.messages.count_tokens(
+                model=model,
+                messages=[{"role": "user", "content": text}],
+            )
+        input_tokens = getattr(response, "input_tokens", None)
+        if not isinstance(input_tokens, int):
+            raise LLMResponseFormatError(
+                "Anthropic count_tokens response is missing the `input_tokens` field.",
+            )
+        return input_tokens
+
 
 # Register the Anthropic strategy at import time so ``provider_for("anthropic")``
 # resolves it. The registry is a plugin point designed to grow — #136/#137
@@ -362,22 +485,243 @@ class AnthropicProvider(LLMProvider):
 register_provider(AnthropicProvider())
 
 
+class OpenAIProvider(LLMProvider):
+    """OpenAI strategy behind the generic LLM orchestrator (#136 DEC-001/005/006/009/011).
+
+    OpenAI has no Anthropic-style prompt-caching primitive and no server-side
+    pre-send ``count_tokens`` API; both capability flags are therefore
+    ``False`` (DEC-008 of #135). The orchestrator consequently:
+
+    * emits no ``cache_control`` marker and no extended-cache beta header,
+    * reports ``cache_creation_input_tokens=0`` and ``cache_read_input_tokens=0``,
+    * skips the pre-send count-tokens gate entirely (the ``--estimate`` path
+      uses a local ``tiktoken`` count instead — US-005).
+
+    The OpenAI SDK exposes ``client.chat.completions.create(...)`` rather than
+    ``client.messages.create(...)``; the orchestrator hard-calls
+    ``client.messages.create(**kwargs)``. The shim's
+    :class:`signalforge.llm._openai_client._OpenAIClientAdapter` wraps the
+    real OpenAI client so ``.messages.create`` delegates to the underlying
+    ``chat.completions.create`` (DEC-009). Every OpenAI-SDK type-checker
+    suppression lives in :mod:`signalforge.llm._openai_client` (DEC-010);
+    this provider reaches the SDK only through that shim's typed surfaces.
+
+    ``build_create_kwargs`` attaches ``response_format={"type": "json_object"}``
+    to enforce JSON output server-side (DEC-006). This is belt-and-braces with
+    the existing tolerant :func:`signalforge.llm.json_payload.extract_json_payload`
+    parser; server-side enforcement eliminates the prose-preamble drift class
+    (mirrors issue #144's fix for ``claude-sonnet-4-6``). The grade and drafter
+    system prompts both already name "JSON" so OpenAI's prompt-requirement check
+    passes.
+
+    .. note::
+       :meth:`build_count_tokens_kwargs` raises :class:`NotImplementedError`
+       (DEC-011 of #136). The orchestrator gates the pre-send count call on
+       :attr:`supports_token_count` and so never invokes this method —
+       mirrors the ``FakeNoCacheProvider`` precedent.
+    """
+
+    name = "openai"
+    supports_prompt_caching = False
+    supports_token_count = False
+
+    def make_client(self) -> object:
+        """Construct the real OpenAI client (wrapped in the shim adapter)."""
+        from signalforge.llm._openai_client import _make_openai_client
+
+        return _make_openai_client()
+
+    def build_create_kwargs(
+        self,
+        *,
+        system: str,
+        cached_block: str,
+        dynamic_block: str,
+        model: str,
+        max_tokens: int,
+        cache_ttl: str,
+        cache_marker_active: bool,
+    ) -> dict[str, Any]:
+        """Build the kwargs for ``client.chat.completions.create``.
+
+        Returns the OpenAI-native Chat Completions kwargs shape: ``model``,
+        ``max_tokens``, a two-message ``messages`` list (system + user where the
+        user content is the cached block followed by the dynamic block), and
+        ``response_format={"type": "json_object"}`` for server-side JSON
+        enforcement (DEC-006).
+
+        ``cache_ttl`` and ``cache_marker_active`` are ignored: OpenAI has no
+        prompt-caching primitive, both capability flags are ``False`` (DEC-008
+        of #135), and the orchestrator already resolves ``cache_marker_active``
+        to ``False`` for a non-caching provider. There is no ``cache_control``
+        marker and no ``extra_headers`` attached.
+        """
+        return {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": cached_block + dynamic_block},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+
+    def build_count_tokens_kwargs(
+        self,
+        *,
+        system: str,
+        cached_block: str,
+        model: str,
+    ) -> dict[str, Any]:
+        """Never invoked — ``supports_token_count`` is ``False`` (DEC-011).
+
+        The orchestrator skips the pre-send count gate entirely for a provider
+        that cannot count tokens server-side; the ``--estimate`` path uses
+        :func:`signalforge.llm._openai_client._count_openai_tokens` (a local
+        ``tiktoken`` count) instead. Raising here makes a future regression in
+        the capability-flag gate loud rather than silent.
+        """
+        raise NotImplementedError(
+            "build_count_tokens_kwargs is unreachable when supports_token_count=False"
+        )
+
+    def extract_text_blocks(self, response: object) -> tuple[str, ...]:
+        """Extract the assistant text from an OpenAI Chat Completions response.
+
+        OpenAI returns ``response.choices[0].message.content`` as a single
+        string (no per-block typing — unlike Anthropic's typed-block array).
+        Returns a single-element tuple so the orchestrator's downstream
+        ``"".join(blocks)`` is the same shape across providers. Raises
+        :class:`signalforge.llm.errors.LLMResponseFormatError` if the
+        structure is missing or the content is ``None``.
+        """
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        choices = getattr(response, "choices", None)
+        if not choices:
+            raise LLMResponseFormatError(
+                "OpenAI response is missing the `choices` attribute or it is empty.",
+            )
+        first = choices[0]
+        message = getattr(first, "message", None)
+        if message is None:
+            raise LLMResponseFormatError(
+                "OpenAI response choice is missing the `message` attribute.",
+            )
+        content = getattr(message, "content", None)
+        if not isinstance(content, str):
+            raise LLMResponseFormatError(
+                "OpenAI response message `content` is missing or not a string.",
+            )
+        return (content,)
+
+    def extract_usage(self, response: object) -> UsageMetrics:
+        """Extract token economics from an OpenAI Chat Completions response.
+
+        OpenAI reports ``usage.prompt_tokens`` and ``usage.completion_tokens``
+        (no cache fields — OpenAI has no equivalent cache discount). Returns
+        :class:`UsageMetrics` with ``cache_creation_input_tokens=0`` and
+        ``cache_read_input_tokens=0``; matches ``supports_prompt_caching=False``.
+        """
+        from signalforge.llm.client import _extract_usage_field
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            raise LLMResponseFormatError(
+                "OpenAI response is missing the `usage` attribute.",
+            )
+        return UsageMetrics(
+            input_tokens=_extract_usage_field(usage, "prompt_tokens"),
+            output_tokens=_extract_usage_field(usage, "completion_tokens"),
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+
+    def classify_exception(self, exc: BaseException) -> ExceptionCategory:
+        """Map a raised OpenAI SDK exception to a neutral category (DEC-009 of #136).
+
+        Dispatch order mirrors :meth:`AnthropicProvider.classify_exception`:
+        auth (401 / 403) → rate-limit (429) → connection → API-status (5xx →
+        SERVER_ERROR; 4xx-non-auth → NO_RETRY; any other status → NO_RETRY).
+        Anything unrecognised maps to :attr:`ExceptionCategory.NO_RETRY` so the
+        orchestrator surfaces it without retrying.
+
+        Reads the SDK exception classes through the shim's
+        :func:`signalforge.llm._openai_client._load_openai_exception_classes`
+        so the DEC-010 SDK-ignore confinement holds.
+        """
+        from signalforge.llm._openai_client import _load_openai_exception_classes
+        from signalforge.llm.client import _is_4xx_non_auth, _is_5xx
+
+        exc_classes = _load_openai_exception_classes()
+        if isinstance(exc, exc_classes.auth):
+            return ExceptionCategory.AUTH
+        if isinstance(exc, exc_classes.rate_limit):
+            return ExceptionCategory.RATE_LIMIT
+        if isinstance(exc, exc_classes.connection):
+            return ExceptionCategory.CONNECTION
+        if isinstance(exc, exc_classes.api_status):
+            if _is_5xx(exc):
+                return ExceptionCategory.SERVER_ERROR
+            if _is_4xx_non_auth(exc):
+                return ExceptionCategory.NO_RETRY
+            return ExceptionCategory.NO_RETRY
+        return ExceptionCategory.NO_RETRY
+
+    def estimate_input_tokens(
+        self,
+        model: str,
+        text: str,
+        *,
+        system: str = "",
+        client: object | None = None,
+    ) -> int:
+        """Count tokens locally via ``tiktoken`` (DEC-003/DEC-012 of #136).
+
+        OpenAI has no server-side ``count_tokens`` API (and the provider
+        declares ``supports_token_count=False`` so the runtime retry loop
+        skips its pre-send count gate entirely — DEC-008 of #135). The
+        ``--estimate`` calibration path counts tokens locally instead by
+        delegating to
+        :func:`signalforge.llm._openai_client._count_openai_tokens`,
+        which uses ``tiktoken.encoding_for_model(model)`` with a
+        ``cl100k_base`` fallback for unknown model ids.
+
+        ``system`` is concatenated with ``text`` before counting —
+        ``tiktoken`` does not distinguish a "system" envelope from
+        regular tokens (unlike Anthropic's server-side counter), so
+        every token contributes to the same total. The combined count
+        matches what OpenAI's chat-completion endpoint will bill at
+        runtime (system prompt + user content).
+
+        ``client`` is ignored — the count is a pure local BPE pass with
+        no SDK or network involvement. The kwarg is declared for
+        protocol parity with :meth:`AnthropicProvider.estimate_input_tokens`
+        so the orchestrator can call every provider the same way.
+        """
+        from signalforge.llm._openai_client import _count_openai_tokens
+
+        del client  # tiktoken needs no SDK client
+        return _count_openai_tokens(model, system + text)
+
+
+# Register the OpenAI strategy at import time so ``provider_for("openai")``
+# resolves it and both ``GradeConfig`` / ``DraftConfig`` validators accept
+# ``provider="openai"`` (DEC-003 of #135; US-002 of #136).
+register_provider(OpenAIProvider())
+
+
 class _GeminiMessagesAdapter:
     """Façade exposing ``.create(**kwargs)`` over the SDK's native
-    ``client.models.generate_content(...)`` surface.
+    ``client.models.generate_content(...)`` surface (#137 DEC-004/009).
 
     The provider-neutral orchestrator in :mod:`signalforge.llm.client` always
     calls ``client.messages.create(**kwargs)`` regardless of vendor. Google's
     ``google-genai`` SDK has no native ``.messages`` namespace — generation
-    lives at ``client.models.generate_content(...)``. The shim in
-    :mod:`signalforge.llm._gemini_client` declares the
-    :class:`signalforge.llm._gemini_client.GeminiClientProtocol` façade but
-    leaves the adapter body to US-002 (this module) so the shim stays free of
-    behaviour, and every façade-to-SDK forwarding stays in one place.
-
-    The kwargs dict produced by :meth:`GeminiProvider.build_create_kwargs`
-    matches the native ``models.generate_content`` signature exactly, so this
-    adapter forwards ``**kwargs`` straight through.
+    lives at ``client.models.generate_content(...)``. The kwargs dict produced
+    by :meth:`GeminiProvider.build_create_kwargs` matches that signature
+    exactly, so this adapter forwards ``**kwargs`` straight through.
     """
 
     def __init__(self, client: Any) -> None:
@@ -401,12 +745,11 @@ class _GeminiMessagesAdapter:
 
 class _GeminiClientAdapter:
     """Wraps a real ``google.genai.Client`` so it satisfies the orchestrator's
-    neutral ``.messages.{create,count_tokens}`` surface.
+    neutral ``.messages.{create,count_tokens}`` surface (#137 DEC-009).
 
-    Constructed only inside :meth:`GeminiProvider.make_client` from the
-    bare client returned by
-    :func:`signalforge.llm._gemini_client._make_gemini_client`. Test
-    environments inject :class:`tests.llm._fake_gemini.FakeGeminiClient`
+    Constructed only inside :meth:`GeminiProvider.make_client` from the bare
+    client returned by :func:`signalforge.llm._gemini_client._make_gemini_client`.
+    Test environments inject :class:`tests.llm._fake_gemini.FakeGeminiClient`
     (US-004) directly via the ``client=`` kwarg on ``call_llm`` and never see
     this adapter — keeping the adapter logic narrowly on the production path.
     """
@@ -458,13 +801,7 @@ class GeminiProvider(LLMProvider):
 
     def make_client(self) -> object:
         """Build the real ``google.genai.Client`` via the shim, wrapped in
-        the ``.messages`` façade adapter.
-
-        The shim's :func:`signalforge.llm._gemini_client._make_gemini_client`
-        returns the bare SDK client (which has no native ``.messages``); the
-        adapter exposes ``.messages.create`` so the orchestrator calls a
-        single, vendor-neutral surface. DEC-001 / DEC-004.
-        """
+        the ``.messages`` façade adapter (DEC-001/004)."""
         from signalforge.llm._gemini_client import _make_gemini_client
 
         return _GeminiClientAdapter(_make_gemini_client())
@@ -480,36 +817,22 @@ class GeminiProvider(LLMProvider):
         cache_ttl: str,
         cache_marker_active: bool,
     ) -> dict[str, Any]:
-        """Build the kwargs for ``client.models.generate_content`` (DEC-004 +
-        DEC-018).
+        """Build the kwargs for ``client.models.generate_content`` (DEC-004 + DEC-018).
 
-        Three load-bearing shape choices:
-
-        * ``system`` → ``GenerateContentConfig.system_instruction``. Gemini
-          carries the system message on the request config, not as a
-          conversation turn.
-        * ``cached_block + "\\n\\n" + dynamic_block`` concatenated into a
-          single user-role ``contents`` entry. The provider has no caching
-          (DEC-003), so there is no value in keeping the two blocks separate.
-        * ``response_mime_type="application/json"`` on the config (DEC-018).
-          Server-side JSON enforcement removes the prose-preamble drift
-          class entirely; the tolerant parser in
-          :mod:`signalforge.llm._json` remains the fallback.
-
-        ``cache_marker_active`` is intentionally ignored — both capability
-        flags are ``False`` so the orchestrator already resolves it to
-        ``False``; passing it through would still be a no-op, but skipping
-        the read keeps the request shape obviously vendor-correct (no stray
-        ``cache_control`` field anywhere; no ``extra_headers`` key on the
-        returned dict).
+        ``system`` → ``GenerateContentConfig.system_instruction``;
+        ``cached_block + "\\n\\n" + dynamic_block`` concatenated into a single
+        user-role ``contents`` entry; ``response_mime_type="application/json"``
+        on the config (DEC-018). ``cache_marker_active`` is intentionally
+        ignored — both capability flags are ``False`` so no ``cache_control``
+        anywhere and no ``extra_headers`` key.
 
         ``config`` is built as a plain ``dict`` (``GenerateContentConfigDict``
         in the SDK's type union) so this module never imports
-        ``google.genai.types`` at any scope — keeping the
-        :mod:`tests.llm.test_gemini_client_confinement` line gate green and
-        a base install (no ``[gemini]`` extra) able to import this module
-        cleanly.
+        ``google.genai.types`` — keeping the line-based confinement test
+        green and a base install (no ``[gemini]`` extra) able to import
+        this module cleanly.
         """
+        del cache_ttl, cache_marker_active  # no-cache provider
         contents = [cached_block + "\n\n" + dynamic_block]
         config: dict[str, Any] = {
             "system_instruction": system,
@@ -532,12 +855,11 @@ class GeminiProvider(LLMProvider):
         """Never invoked — ``supports_token_count`` is ``False`` (DEC-003).
 
         The orchestrator skips the pre-send count gate entirely for a
-        provider that cannot count tokens, so this method is unreachable on
-        the :func:`signalforge.llm.client.call_llm` path. Mirrors the
-        :class:`tests.llm._fake_provider.FakeNoCacheProvider` precedent:
-        raise rather than return a placeholder dict, so any accidental call
-        is loud.
+        provider that cannot count tokens, so this method is unreachable
+        on the ``call_llm`` path. Mirrors the
+        :class:`tests.llm._fake_provider.FakeNoCacheProvider` precedent.
         """
+        del system, cached_block, model
         raise NotImplementedError(
             "build_count_tokens_kwargs is unreachable when supports_token_count=False"
         )
@@ -545,15 +867,10 @@ class GeminiProvider(LLMProvider):
     def extract_text_blocks(self, response: object) -> tuple[str, ...]:
         """Pull text from each candidate's parts (DEC-005).
 
-        Walks ``response.candidates``; for each candidate, walks
-        ``candidate.content.parts`` and collects ``part.text`` where present
-        and non-empty. When NO candidate yields any non-empty text part
-        (safety-filtered, recitation, prohibited content, no candidates at
-        all), raises
-        :class:`signalforge.llm.errors.LLMResponseFormatError` whose message
-        names the first candidate's ``finish_reason`` so the operator can
-        diagnose. ``finish_reason`` is rendered via ``repr`` so a hostile
-        value cannot inject control characters into logs.
+        When no candidate yields any non-empty text part (safety-filtered,
+        recitation, prohibited content, no candidates at all), raises
+        :class:`signalforge.llm.errors.LLMResponseFormatError` whose
+        message names the first candidate's ``finish_reason``.
         """
         from signalforge.llm.errors import LLMResponseFormatError
 
@@ -570,15 +887,10 @@ class GeminiProvider(LLMProvider):
                     blocks.append(text)
         if blocks:
             return tuple(blocks)
-        # No text — surface the first candidate's finish_reason so the
-        # operator knows whether the model was blocked, hit a length cap,
-        # produced an empty/None content, etc.
         finish_reason: object = "unknown"
         if candidates:
             fr_attr = getattr(candidates[0], "finish_reason", None)
             if fr_attr is not None:
-                # FinishReason is an enum; ``.name`` is the stable surface
-                # but fall back to its repr if a future SDK changes shape.
                 finish_reason = getattr(fr_attr, "name", fr_attr)
         raise LLMResponseFormatError(
             f"Gemini response produced no text (finish_reason={finish_reason!r}).",
@@ -588,11 +900,8 @@ class GeminiProvider(LLMProvider):
         """Extract token economics from a Gemini response.
 
         Reads ``response.usage_metadata.{prompt_token_count,
-        candidates_token_count}``; both cache fields default to 0 because
-        the provider has no Anthropic-style prompt caching (DEC-003).
-        Missing fields default to 0 via ``getattr``; the whole
-        ``usage_metadata`` being absent surfaces an
-        :class:`LLMResponseFormatError`.
+        candidates_token_count}``; cache fields default to 0 (no
+        Anthropic-style prompt caching per DEC-003).
         """
         from signalforge.llm.errors import LLMResponseFormatError
 
@@ -611,33 +920,21 @@ class GeminiProvider(LLMProvider):
         )
 
     def classify_exception(self, exc: BaseException) -> ExceptionCategory:
-        """Map a raised ``google.genai.errors`` instance to a neutral
-        category (DEC-006).
+        """Map a raised ``google.genai.errors`` instance to a neutral category (DEC-006).
 
-        Dispatch order:
+        Dispatch: ``ServerError`` (5xx) → SERVER_ERROR (checked first since
+        both ``ServerError``/``ClientError`` derive from ``APIError``);
+        ``ClientError`` with ``code in (401, 403)`` → AUTH; ``ClientError``
+        with ``code == 429`` → RATE_LIMIT; ``httpx`` connection errors →
+        CONNECTION; everything else → NO_RETRY.
 
-        * ``ServerError`` (5xx family) → :attr:`SERVER_ERROR`.
-        * ``ClientError`` with HTTP ``code in (401, 403)`` → :attr:`AUTH`.
-        * ``ClientError`` with HTTP ``code == 429`` → :attr:`RATE_LIMIT`.
-        * Connection-flavoured (``httpx.ConnectError`` /
-          ``httpx.TimeoutException``) → :attr:`CONNECTION`. Listed for
-          completeness; the SDK may wrap them. Anything else → NO_RETRY.
-
-        ``ServerError`` is checked **before** ``ClientError`` because both
-        derive from ``google.genai.errors.APIError``; ``ServerError`` is the
-        narrower bucket and routing it first avoids a false-match on a
-        future shared parent.
-
-        SDK class identities are loaded via the shim's
-        :func:`signalforge.llm._gemini_client._load_gemini_exception_classes`
-        so this module never imports ``google.genai`` directly (DEC-001).
-        A base install (no ``[gemini]`` extra) lands every exception on
-        :attr:`NO_RETRY` cleanly via the empty-tuple fallback (DEC-015).
+        SDK class identities loaded via the shim's lazy helper; empty-tuple
+        fallback (DEC-015) maps everything to NO_RETRY cleanly when the
+        ``[gemini]`` extra isn't installed.
         """
         from signalforge.llm._gemini_client import _load_gemini_exception_classes
 
         exc_classes = _load_gemini_exception_classes()
-        # Check ServerError before ClientError (both derive from APIError).
         if exc_classes.api_status and isinstance(exc, exc_classes.api_status):
             return ExceptionCategory.SERVER_ERROR
         if exc_classes.rate_limit and isinstance(exc, exc_classes.rate_limit):
@@ -647,9 +944,6 @@ class GeminiProvider(LLMProvider):
             if code == 429:
                 return ExceptionCategory.RATE_LIMIT
             return ExceptionCategory.NO_RETRY
-        # Connection-flavoured: httpx leaks through the SDK on a hard
-        # network failure. Imported lazily so the SDK transitive isn't
-        # required at module import. ImportError → fall through to NO_RETRY.
         try:
             import httpx
         except ImportError:  # pragma: no cover - httpx ships with google-genai
@@ -658,10 +952,39 @@ class GeminiProvider(LLMProvider):
             return ExceptionCategory.CONNECTION
         return ExceptionCategory.NO_RETRY
 
+    def estimate_input_tokens(
+        self,
+        model: str,
+        text: str,
+        *,
+        system: str = "",
+        client: object | None = None,
+    ) -> int:
+        """Token count via Gemini's native ``models.count_tokens`` (#137 US-007 / DEC-016).
+
+        **Currently a stub** — the real implementation lands with US-007
+        (``bd_1-scaffolding-txe.7``) which is gated on the sentinel bead
+        ``bd_1-scaffolding-41a`` closing. Once US-007 ships, this method
+        will delegate to ``client.models.count_tokens(model=..., contents=[
+        system + text])`` and return ``response.total_tokens`` (a first-party
+        count, no ``tiktoken`` equivalent needed).
+
+        Raising rather than returning ``0`` is deliberate: a silently-zero
+        estimate would mis-report a real run's expected cost. The orchestrator
+        catches ``NotImplementedError`` from ``--estimate`` engine paths as a
+        supplementary failure (DEC-005 of #36) and renders the report as
+        ``<unavailable: NotImplementedError>`` rather than aborting.
+        """
+        del model, text, system, client
+        raise NotImplementedError(
+            "GeminiProvider.estimate_input_tokens is gated on US-007 (#137 DEC-016); "
+            "close sentinel bd_1-scaffolding-41a then run /ralph-run to ship the real impl"
+        )
+
 
 # Register the Gemini strategy at import time so ``provider_for("gemini")``
-# resolves it. Mirrors the Anthropic registration above; the registry is a
-# plugin point designed to grow (DEC-003).
+# resolves it. Mirrors the Anthropic + OpenAI registrations above; the
+# registry is a plugin point designed to grow (DEC-003).
 register_provider(GeminiProvider())
 
 
@@ -670,6 +993,7 @@ __all__ = (
     "ExceptionCategory",
     "GeminiProvider",
     "LLMProvider",
+    "OpenAIProvider",
     "UsageMetrics",
     "provider_for",
     "register_provider",
