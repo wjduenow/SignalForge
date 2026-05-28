@@ -4,10 +4,6 @@
 
 > LLM-drafted dbt schema.yml, tests, and docs — pruned against real warehouse data so only signal-bearing tests ship.
 
-**Supported warehouses:** **BigQuery** (the original target adapter, exercised end-to-end by `signalforge init-demo` and the quick start below) and **Snowflake** (full sampling, materialised-sample CTAS, `EXPLAIN`-based bytes estimation, and a typed-error taxonomy that reuses the existing `WarehouseError` hierarchy). One Snowflake combination is deferred: `safety: aggregate-only` (Snowflake `column_stats`) is not yet implemented — every other combination is functional (`safety: schema-only` / `safety: sample`, with `prune.scope: full` or `prune.scope: sample` under both `prune.sample_strategy: materialised` and `oneshot`). Postgres ships as a typed `NotImplementedError` stub today; Databricks and Redshift remain on the roadmap. The architecture is warehouse-agnostic — adapters plug in behind a thin sampling/profiling interface (`WarehouseAdapter.from_profile`), so new vendors slot in without touching the draft / prune / grade / diff stages.
-
-**Custom business logic:** Beyond the four generic dbt test types (`not_null`, `unique`, `accepted_values`, `relationships`), SignalForge drafts and prunes **custom business-rule tests** (`custom_sql` — a full singular-test `SELECT` that returns failing rows). Declare a rule in plain English via `meta.signalforge.business_rules` (column- or model-level) — *"total_amount must never be negative"*, *"a refund never exceeds its order"* — or let SignalForge infer checkable invariants from your SQL. Each candidate compiles to a failing-rows query, runs through the same warehouse-backed prune step as the four built-ins, and ships as a singular `tests/*.sql` file with a `-- signalforge:generated` ownership marker that never overwrites hand-authored files. Always-pass business rules are dropped, not shipped — the same signal-over-volume contract applies. See [Custom business-rule tests (worked example)](#custom-business-rule-tests-worked-example).
-
 ## Why this exists
 
 Authoring `schema.yml`, tests, and documentation is the most-cited drudgery in the dbt ecosystem. AI tools that generate them already exist — dbt Copilot, dbt-codegen, Paradime DinoAI, Altimate datapilot — but their output is consistently described the same way: *noise*. Hundreds of `not_null` and `unique` tests that always pass. Generic docstrings that paraphrase the column name. Schemas that drift from the SELECT.
@@ -20,7 +16,7 @@ And you don't have to start from SignalForge's own drafts. Point it at a `schema
 
 - **Drafts `schema.yml`** from your model SQL using an LLM with project-aware context (manifest, sibling models, your team's terminology).
 - **Generates tests** — `not_null`, `unique`, `accepted_values`, `relationships`, plus dbt-expectations-style data tests where appropriate.
-- **Drafts custom business-rule tests.** Declare a rule in plain English (`meta.signalforge.business_rules: "total_amount must never be negative"`) and SignalForge writes a singular `tests/*.sql` test for it, prunes it against your warehouse, and ships only the rules your data can actually violate. No declared rules? It infers checkable invariants from your SQL.
+- **Drafts custom business-rule tests** — the fifth test type beyond `not_null` / `unique` / `accepted_values` / `relationships`. Declare a rule in plain English (`meta.signalforge.business_rules: "total_amount must never be negative"`) and SignalForge writes a singular `tests/*.sql` test for it, prunes it against your warehouse, and ships only the rules your data can actually violate. No declared rules? It infers checkable invariants from your SQL. Worked example: [Custom business-rule tests](#custom-business-rule-tests-worked-example).
 - **Prunes the noise.** Each candidate test runs against warehouse samples; tests that pass on every row of historical data add no signal and are dropped before they reach your repo.
 - **Generates documentation** — column-level descriptions and model-level overviews — graded by an LLM-as-judge against a configurable rubric.
 - **Reports what was kept and what was dropped**, with a one-line "why" per artifact. No black-box generation.
@@ -54,6 +50,12 @@ There's a second entry point that skips the LLM entirely. If you already have a 
 ```
 
 No draft, no grade, no LLM call — just "which of these tests earn their place?" Tests SignalForge can't evaluate (custom / dbt-expectations / namespaced generics) are reported as skipped, never silently dropped.
+
+## Supported warehouses
+
+SignalForge ships two production warehouse adapters today: **BigQuery** (the original target — exercised end-to-end by `signalforge init-demo` and the quick start below) and **Snowflake** (full sampling, materialised-sample CTAS, and `EXPLAIN`-based bytes estimation; one combination — `safety: aggregate-only` / Snowflake `column_stats` — is not yet implemented, every other mode/scope/strategy combination is functional). **Postgres** ships as a typed `NotImplementedError` stub; **Databricks** and **Redshift** remain on the roadmap.
+
+The architecture is warehouse-agnostic — adapters plug in behind a thin sampling/profiling interface (`WarehouseAdapter.from_profile`), so new vendors slot in without touching the draft / prune / grade / diff stages. Per-warehouse setup (auth, cost guardrails, profile-field requirements) lives in [Configuration](#configuration).
 
 > **Live on PyPI** — `pip install signalforge-dbt`. The quick start below runs against BigQuery (the bundled `init-demo` fixture targets the Austin bikeshare public dataset). Snowflake users wire their own dbt profile and project — see [Configuration](#configuration) and [docs/snowflake-e2e-setup.md](docs/snowflake-e2e-setup.md).
 
