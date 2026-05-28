@@ -339,5 +339,18 @@ Pragmatic verification items that depend on the installed SDK version at impleme
 
 ## Beads manifest
 
-*(to be filled at devolve time)*
+- **Epic:** `bd_1-scaffolding-4tw` — `#136 epic: OpenAI grading provider` (P2, external-ref `gh-136`)
+- **Tasks** (dep edges per plan's "Depends on:" lines; all P2):
+  - `.1` US-001 — `_openai_client.py` shim + `[openai]` extra + 9th AST scan — **READY** (no deps)
+  - `.2` US-002 — `OpenAIProvider` + registration + config-validator coverage — blocked by `.1`
+  - `.3` US-003 — `FakeOpenAIClient` + grade end-to-end provider-neutrality test — blocked by `.2`
+  - `.4` US-004 — Pricing entries (gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4-turbo) — **READY** (parallel-safe; no deps)
+  - `.5` US-005 — `--estimate` provider-aware token counting — blocked by `.2`, `.4`
+  - `.6` US-006 — Live gated smoke tests (grade + draft + `--estimate`) — blocked by `.2`, `.5`
+  - `.7` US-007 — Documentation surfaces — blocked by `.1`, `.2`, `.5`
+  - `.8` Quality Gate — code-review ×4 + CodeRabbit + full validation + `wheel_smoke` — blocked by `.1`–`.7`
+  - `.9` Patterns & Memory (orchestrator-only — edits `.claude/rules/`) — blocked by `.8`
+- **Cross-epic gate (downstream):** `bd_1-scaffolding-41a` (sentinel for #137 US-007) **`DEPENDS ON .9`**. When this epic completes, US-009 closes → sentinel becomes close-eligible → operator closes sentinel after PR #152 merges to `dev` → #137 US-007 unblocks. See #137 plan DEC-019.
+- **Parallel-safe entry points at devolve time:** `.1` (shim/extra/AST) and `.4` (pricing). They touch disjoint files — `.1` edits `_openai_client.py` / `pyproject.toml` / `test_audit_completeness.py`; `.4` edits `pricing.py` / `test_pricing.py` — so `ralph-serialize-shared-registry-beads` does NOT apply. Run them concurrently.
+- **Sessions:** 2 (initial plan; devolve + #137 cross-review revisions)
 
