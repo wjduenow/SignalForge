@@ -95,6 +95,15 @@ def test_draft_config_provider_accepts_registered_name() -> None:
     assert cfg.provider == "anthropic"
 
 
+def test_draft_config_provider_accepts_gemini() -> None:
+    """#137 US-002: ``GeminiProvider`` registers under ``"gemini"`` at
+    import time so ``DraftConfig(provider="gemini", model="gemini-2.5-flash")``
+    validates cleanly."""
+    cfg = DraftConfig(provider="gemini", model="gemini-2.5-flash")
+    assert cfg.provider == "gemini"
+    assert cfg.model == "gemini-2.5-flash"
+
+
 def test_draft_config_provider_rejects_unknown_with_available_keys() -> None:
     """DEC-007: an unknown provider fails loud with a typed
     :class:`UnknownProviderError` that names the registered providers.

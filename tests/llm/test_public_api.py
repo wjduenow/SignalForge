@@ -56,6 +56,8 @@ _DOCUMENTED_PUBLIC = (
     "provider_for",
     # Anthropic strategy (US-002 of #135) — registered at import time.
     "AnthropicProvider",
+    # Gemini strategy (US-002 of #137) — registered at import time.
+    "GeminiProvider",
 )
 
 
@@ -83,6 +85,7 @@ def test_each_public_name_is_importable_via_from_signalforge_llm() -> None:
         AnthropicProvider,
         EstimateUnknownModelError,
         ExceptionCategory,
+        GeminiProvider,
         LLMAuthError,
         LLMCacheTooLargeError,
         LLMConnectionError,
