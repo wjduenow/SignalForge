@@ -362,10 +362,202 @@ class AnthropicProvider(LLMProvider):
 register_provider(AnthropicProvider())
 
 
+class OpenAIProvider(LLMProvider):
+    """OpenAI strategy behind the generic LLM orchestrator (#136 DEC-001/005/006/009/011).
+
+    OpenAI has no Anthropic-style prompt-caching primitive and no server-side
+    pre-send ``count_tokens`` API; both capability flags are therefore
+    ``False`` (DEC-008 of #135). The orchestrator consequently:
+
+    * emits no ``cache_control`` marker and no extended-cache beta header,
+    * reports ``cache_creation_input_tokens=0`` and ``cache_read_input_tokens=0``,
+    * skips the pre-send count-tokens gate entirely (the ``--estimate`` path
+      uses a local ``tiktoken`` count instead — US-005).
+
+    The OpenAI SDK exposes ``client.chat.completions.create(...)`` rather than
+    ``client.messages.create(...)``; the orchestrator hard-calls
+    ``client.messages.create(**kwargs)``. The shim's
+    :class:`signalforge.llm._openai_client._OpenAIClientAdapter` wraps the
+    real OpenAI client so ``.messages.create`` delegates to the underlying
+    ``chat.completions.create`` (DEC-009). Every OpenAI-SDK type-checker
+    suppression lives in :mod:`signalforge.llm._openai_client` (DEC-010);
+    this provider reaches the SDK only through that shim's typed surfaces.
+
+    ``build_create_kwargs`` attaches ``response_format={"type": "json_object"}``
+    to enforce JSON output server-side (DEC-006). This is belt-and-braces with
+    the existing tolerant :func:`signalforge.llm.json_payload.extract_json_payload`
+    parser; server-side enforcement eliminates the prose-preamble drift class
+    (mirrors issue #144's fix for ``claude-sonnet-4-6``). The grade and drafter
+    system prompts both already name "JSON" so OpenAI's prompt-requirement check
+    passes.
+
+    .. note::
+       :meth:`build_count_tokens_kwargs` raises :class:`NotImplementedError`
+       (DEC-011 of #136). The orchestrator gates the pre-send count call on
+       :attr:`supports_token_count` and so never invokes this method —
+       mirrors the ``FakeNoCacheProvider`` precedent.
+    """
+
+    name = "openai"
+    supports_prompt_caching = False
+    supports_token_count = False
+
+    def make_client(self) -> object:
+        """Construct the real OpenAI client (wrapped in the shim adapter)."""
+        from signalforge.llm._openai_client import _make_openai_client
+
+        return _make_openai_client()
+
+    def build_create_kwargs(
+        self,
+        *,
+        system: str,
+        cached_block: str,
+        dynamic_block: str,
+        model: str,
+        max_tokens: int,
+        cache_ttl: str,
+        cache_marker_active: bool,
+    ) -> dict[str, Any]:
+        """Build the kwargs for ``client.chat.completions.create``.
+
+        Returns the OpenAI-native Chat Completions kwargs shape: ``model``,
+        ``max_tokens``, a two-message ``messages`` list (system + user where the
+        user content is the cached block followed by the dynamic block), and
+        ``response_format={"type": "json_object"}`` for server-side JSON
+        enforcement (DEC-006).
+
+        ``cache_ttl`` and ``cache_marker_active`` are ignored: OpenAI has no
+        prompt-caching primitive, both capability flags are ``False`` (DEC-008
+        of #135), and the orchestrator already resolves ``cache_marker_active``
+        to ``False`` for a non-caching provider. There is no ``cache_control``
+        marker and no ``extra_headers`` attached.
+        """
+        return {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": cached_block + dynamic_block},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+
+    def build_count_tokens_kwargs(
+        self,
+        *,
+        system: str,
+        cached_block: str,
+        model: str,
+    ) -> dict[str, Any]:
+        """Never invoked — ``supports_token_count`` is ``False`` (DEC-011).
+
+        The orchestrator skips the pre-send count gate entirely for a provider
+        that cannot count tokens server-side; the ``--estimate`` path uses
+        :func:`signalforge.llm._openai_client._count_openai_tokens` (a local
+        ``tiktoken`` count) instead. Raising here makes a future regression in
+        the capability-flag gate loud rather than silent.
+        """
+        raise NotImplementedError(
+            "build_count_tokens_kwargs is unreachable when supports_token_count=False"
+        )
+
+    def extract_text_blocks(self, response: object) -> tuple[str, ...]:
+        """Extract the assistant text from an OpenAI Chat Completions response.
+
+        OpenAI returns ``response.choices[0].message.content`` as a single
+        string (no per-block typing — unlike Anthropic's typed-block array).
+        Returns a single-element tuple so the orchestrator's downstream
+        ``"".join(blocks)`` is the same shape across providers. Raises
+        :class:`signalforge.llm.errors.LLMResponseFormatError` if the
+        structure is missing or the content is ``None``.
+        """
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        choices = getattr(response, "choices", None)
+        if not choices:
+            raise LLMResponseFormatError(
+                "OpenAI response is missing the `choices` attribute or it is empty.",
+            )
+        first = choices[0]
+        message = getattr(first, "message", None)
+        if message is None:
+            raise LLMResponseFormatError(
+                "OpenAI response choice is missing the `message` attribute.",
+            )
+        content = getattr(message, "content", None)
+        if not isinstance(content, str):
+            raise LLMResponseFormatError(
+                "OpenAI response message `content` is missing or not a string.",
+            )
+        return (content,)
+
+    def extract_usage(self, response: object) -> UsageMetrics:
+        """Extract token economics from an OpenAI Chat Completions response.
+
+        OpenAI reports ``usage.prompt_tokens`` and ``usage.completion_tokens``
+        (no cache fields — OpenAI has no equivalent cache discount). Returns
+        :class:`UsageMetrics` with ``cache_creation_input_tokens=0`` and
+        ``cache_read_input_tokens=0``; matches ``supports_prompt_caching=False``.
+        """
+        from signalforge.llm.client import _extract_usage_field
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        usage = getattr(response, "usage", None)
+        if usage is None:
+            raise LLMResponseFormatError(
+                "OpenAI response is missing the `usage` attribute.",
+            )
+        return UsageMetrics(
+            input_tokens=_extract_usage_field(usage, "prompt_tokens"),
+            output_tokens=_extract_usage_field(usage, "completion_tokens"),
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+
+    def classify_exception(self, exc: BaseException) -> ExceptionCategory:
+        """Map a raised OpenAI SDK exception to a neutral category (DEC-009 of #136).
+
+        Dispatch order mirrors :meth:`AnthropicProvider.classify_exception`:
+        auth (401 / 403) → rate-limit (429) → connection → API-status (5xx →
+        SERVER_ERROR; 4xx-non-auth → NO_RETRY; any other status → NO_RETRY).
+        Anything unrecognised maps to :attr:`ExceptionCategory.NO_RETRY` so the
+        orchestrator surfaces it without retrying.
+
+        Reads the SDK exception classes through the shim's
+        :func:`signalforge.llm._openai_client._load_openai_exception_classes`
+        so the DEC-010 SDK-ignore confinement holds.
+        """
+        from signalforge.llm._openai_client import _load_openai_exception_classes
+        from signalforge.llm.client import _is_4xx_non_auth, _is_5xx
+
+        exc_classes = _load_openai_exception_classes()
+        if isinstance(exc, exc_classes.auth):
+            return ExceptionCategory.AUTH
+        if isinstance(exc, exc_classes.rate_limit):
+            return ExceptionCategory.RATE_LIMIT
+        if isinstance(exc, exc_classes.connection):
+            return ExceptionCategory.CONNECTION
+        if isinstance(exc, exc_classes.api_status):
+            if _is_5xx(exc):
+                return ExceptionCategory.SERVER_ERROR
+            if _is_4xx_non_auth(exc):
+                return ExceptionCategory.NO_RETRY
+            return ExceptionCategory.NO_RETRY
+        return ExceptionCategory.NO_RETRY
+
+
+# Register the OpenAI strategy at import time so ``provider_for("openai")``
+# resolves it and both ``GradeConfig`` / ``DraftConfig`` validators accept
+# ``provider="openai"`` (DEC-003 of #135; US-002 of #136).
+register_provider(OpenAIProvider())
+
+
 __all__ = (
     "AnthropicProvider",
     "ExceptionCategory",
     "LLMProvider",
+    "OpenAIProvider",
     "UsageMetrics",
     "provider_for",
     "register_provider",
