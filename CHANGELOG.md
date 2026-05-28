@@ -4,7 +4,9 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 ## [Unreleased]
 
-_Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
+### Added
+
+- **OpenAI as a grading + drafting provider (#136).** Set `grade.provider: openai` or `llm.provider: openai` in `signalforge.yml`; requires the `[openai]` install extra and `OPENAI_API_KEY`. Ships four pricing SKUs (`gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4-turbo`); `--estimate` works via tiktoken (no extra API round-trip). Server-side JSON enforcement via `response_format={"type": "json_object"}`. v0.3 ships without prompt caching (no Anthropic-style cache discount); follow-up to evaluate OpenAI prompt caching.
 
 ## [0.3.0] — 2026-05-27
 

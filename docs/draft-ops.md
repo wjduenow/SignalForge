@@ -520,7 +520,7 @@ other stages and silently ignored by the draft loader.
 ```yaml
 # signalforge.yml
 llm:
-  provider: anthropic        # registry-validated; only "anthropic" registered today
+  provider: anthropic        # registry-validated; "anthropic" + "openai" are registered (see OpenAI provider below)
   model: claude-sonnet-4-6
   cheap_model: claude-haiku-4-5-20251001
   max_output_tokens: 4096
@@ -539,8 +539,9 @@ Field-by-field:
   value fails loud at config-load, listing the registered provider
   names. Deliberately a registry-validated `str`, not a `Literal` — the
   provider registry is a forward-looking plugin point (#136 OpenAI /
-  #137 Gemini register more providers); today only `anthropic` is
-  registered.
+  #137 Gemini register more providers). Today `anthropic` and `openai`
+  are registered; see [OpenAI provider](#openai-provider) below for the
+  `openai` option.
 - **`model`** — the model id used by every `call_llm` invocation.
   Default `claude-sonnet-4-6`. Any string the SDK accepts is allowed.
 - **`cheap_model`** — informational; not selected automatically.
@@ -578,6 +579,58 @@ trip the strict validator.
 If `signalforge.yml` is missing entirely (or the `llm:` key is absent),
 `load_draft_config(project_dir)` returns the built-in defaults
 silently — same behaviour as `load_safety_config`.
+
+## OpenAI provider
+
+Issue #136 registered `OpenAIProvider` as the second
+`signalforge.llm.providers.LLMProvider`. Select it by setting
+`llm.provider: openai` in `signalforge.yml`:
+
+```yaml
+llm:
+  provider: openai
+  model: gpt-4o            # default drafter model for the OpenAI provider; any model id the SDK accepts is allowed
+  max_output_tokens: 4096
+  # cache_ttl, max_retries_*, exclude_tests — same shape as the anthropic provider (cache_ttl is ignored, see below)
+```
+
+Requirements:
+
+- **Install extra:** `pip install signalforge-dbt[openai]` (or `uv sync --dev` in a contributor checkout). Pulls `openai>=1.40` plus `tiktoken` for the `--estimate` cost-preview path.
+- **Env var:** `OPENAI_API_KEY` (mirrors `ANTHROPIC_API_KEY` for the default provider).
+- **Pricing SKUs registered:** `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4-turbo`. Other model ids raise `EstimateUnknownModelError` from the `--estimate` path (the live draft call still runs; `--estimate` is the only surface that requires a pricing row). See [`docs/cost-estimate-ops.md`](cost-estimate-ops.md).
+
+**No prompt caching (cost note).** OpenAI's Chat Completions surface
+does not expose Anthropic-style prompt caching. `OpenAIProvider`
+reports `supports_prompt_caching=False` and `supports_token_count=False`,
+which means the orchestrator (`signalforge.llm.call_llm`) skips both
+the `cache_control` marker and the pre-send `count_tokens` gate
+(issue #135 DEC-008). **The `cache_ttl` config knob is silently
+ignored** for the OpenAI provider — every drafting call ships the full
+system + cached manifest summary on every invocation, with no read
+discount. For batch-CLI usage (`signalforge generate --select`) the
+absence of caching is the main cost delta vs. the Anthropic provider;
+budget input-token spend at full per-call rates. v0.3 ships without
+OpenAI prompt caching; their recent prompt-cache mechanism is a
+candidate for a follow-up.
+
+**Server-enforced JSON.** `OpenAIProvider.build_create_kwargs`
+attaches `response_format={"type": "json_object"}` so the drafter
+model is forced to emit valid JSON server-side (DEC-006). The tolerant
+`extract_json_payload` parser (issue #144) remains as defence-in-depth.
+
+**Live smoke gating.** A gated `@pytest.mark.openai` real-API
+end-to-end test exercises drafting against `gpt-4o`. Run it with:
+
+```bash
+SF_RUN_OPENAI=1 OPENAI_API_KEY=sk-... uv run pytest -m openai --no-cov
+```
+
+Mirrors the `@pytest.mark.anthropic` precedent — excluded from the
+default CI run via `addopts -m 'not openai'`; both env vars are
+required (each missing var produces a clear skip reason). See
+[`docs/cost-estimate-ops.md`](cost-estimate-ops.md) for the
+maintainer's three-test smoke set (drafter + grader + `--estimate`).
 
 ## Error hierarchy
 

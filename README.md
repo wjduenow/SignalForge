@@ -93,7 +93,7 @@ without adding it to a project environment.
 **Working from a clone (contributing)?** Install the dev toolchain with
 `uv sync --dev` — see [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
-### 2. Authenticate to BigQuery and Anthropic
+### 2. Authenticate to BigQuery and your LLM provider
 
 ```bash
 gcloud auth application-default login
@@ -103,6 +103,14 @@ export ANTHROPIC_API_KEY=sk-ant-...
 
 Use a fresh shell session (or `unset ANTHROPIC_API_KEY` after the
 run) so the key doesn't persist in your bash history.
+
+Anthropic is the default LLM provider. OpenAI is also supported —
+`pip install signalforge-dbt[openai]`, set `OPENAI_API_KEY`, and
+switch via `llm.provider: openai` / `grade.provider: openai` in
+`signalforge.yml`. See
+[docs/draft-ops.md § OpenAI provider](docs/draft-ops.md#openai-provider)
+and [docs/grade-ops.md § OpenAI provider](docs/grade-ops.md#openai-provider)
+for the per-stage config + cost notes.
 
 ### 3. Minimum `signalforge.yml`
 

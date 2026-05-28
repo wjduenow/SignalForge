@@ -157,7 +157,7 @@ grade:
 
 Field-by-field:
 
-- **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point (#136 OpenAI / #137 Gemini register more providers); today only `anthropic` is registered.
+- **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point (#136 OpenAI / #137 Gemini register more providers). Today `anthropic` and `openai` are registered; see [OpenAI provider](#openai-provider) below for the `openai` option.
 - **`model`** — The model id used by every per-pair judge call. Default `claude-sonnet-4-6`. Mirrors `DraftConfig.model` default. Haiku 4.5 is documented as a v0.2 cost-conscious option but not exposed in v0.1.
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
 - **`max_output_tokens`** — Per-criterion judge response cap. Default `256`. The expected JSON response is ~150 tokens; 256 gives 2× safety. Independent of `DraftConfig.max_output_tokens`.
@@ -496,6 +496,58 @@ default fan-out is too expensive for their use case:
 operators (DEC-014). The current architecture preserves the option:
 each criterion has its own prompt seam already, so a `cost_mode:
 batched` flag is additive rather than a rewrite.
+
+## OpenAI provider
+
+Issue #136 registered `OpenAIProvider` as the second
+`signalforge.llm.providers.LLMProvider`. Select it by setting
+`grade.provider: openai` in `signalforge.yml`:
+
+```yaml
+grade:
+  provider: openai
+  model: gpt-4o            # default judge model for the OpenAI provider; any model id the SDK accepts is allowed
+  # cache_ttl, max_retries_*, total_budget_seconds, thresholds — same shape as the anthropic provider
+```
+
+Requirements:
+
+- **Install extra:** `pip install signalforge-dbt[openai]` (or `uv sync --dev` in a contributor checkout). Pulls `openai>=1.40` plus `tiktoken` for the `--estimate` cost-preview path.
+- **Env var:** `OPENAI_API_KEY` (mirrors `ANTHROPIC_API_KEY` for the default provider).
+- **Pricing SKUs registered:** `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4-turbo`. Other model ids raise `EstimateUnknownModelError` from the `--estimate` path (the live judge call still runs; `--estimate` is the only surface that requires a pricing row). See [`docs/cost-estimate-ops.md`](cost-estimate-ops.md).
+
+**No prompt caching (cost note).** OpenAI's Chat Completions surface
+does not expose Anthropic-style prompt caching. `OpenAIProvider`
+reports `supports_prompt_caching=False` and `supports_token_count=False`,
+which means the orchestrator (`signalforge.llm.call_llm`) skips both
+the `cache_control` marker and the pre-send `count_tokens` gate
+(issue #135 DEC-008). **Every grading call ships the full system +
+rubric block** — there is no cached read discount on subsequent
+criteria, so the per-`(artefact × criterion)` fan-out (see
+[Cost guidance](#cost-guidance-dec-014) above) costs a flat
+input-token bill on every call. Budget accordingly: a 4-criterion ×
+12-artefact run is 48 full system+rubric sends, not one write + 47
+reads. v0.3 ships without prompt caching; OpenAI's recent prompt-cache
+mechanism is a candidate for a follow-up.
+
+**Server-enforced JSON.** `OpenAIProvider.build_create_kwargs`
+attaches `response_format={"type": "json_object"}` so the judge model
+is forced to emit valid JSON server-side (DEC-006). The tolerant
+`extract_json_payload` parser (issue #144) remains as defence-in-depth
+for the same prose-preamble drift class the Anthropic path handles.
+
+**Live smoke gating.** A gated `@pytest.mark.openai` real-API
+end-to-end test exercises grading against `gpt-4o`. Run it with:
+
+```bash
+SF_RUN_OPENAI=1 OPENAI_API_KEY=sk-... uv run pytest -m openai --no-cov
+```
+
+Mirrors the `@pytest.mark.anthropic` precedent — excluded from the
+default CI run via `addopts -m 'not openai'`; both env vars are
+required (each missing var produces a clear skip reason). See
+[`docs/cost-estimate-ops.md`](cost-estimate-ops.md) for the
+maintainer's three-test smoke set (grader + drafter + `--estimate`).
 
 ## Prompt-injection mitigation
 
