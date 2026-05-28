@@ -95,8 +95,11 @@ a typed `LLMError` (DEC-005 below).
 
 - `src/signalforge/llm/pricing.py` ships three Anthropic SKUs today
   (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-haiku-4-5`); `PRICE_TABLE_VERSION =
-  "2026-05-11"`. `lookup(model)` raises `EstimateUnknownModelError` for any non-Anthropic
-  id, so `--estimate` is silently un-usable for `grade.provider: gemini` until SKUs land.
+  "2026-05-11"` *at discovery time* (US-006 of this plan bumps it as it adds the three
+  Gemini SKUs; #136 lands four OpenAI SKUs in parallel and bumps it again — the current
+  on-disk value is whatever the most recent of those two landed). `lookup(model)` raises
+  `EstimateUnknownModelError` for any non-Anthropic id, so `--estimate` is silently
+  un-usable for `grade.provider: gemini` until SKUs land.
 - `src/signalforge/cli/_estimate.py` is **Anthropic-coupled**: it threads a single
   `anthropic_client: AnthropicClientProtocol` through `_count_draft_tokens` (line 309)
   and the grader-side equivalent (line 348), both hard-calling
@@ -759,22 +762,6 @@ Per `~/.claude/projects/-home-wesd-Projects-SignalForge/memory/ralph-worker-clau
 - **Patterns & Memory is orchestrator-only** because it edits `.claude/rules/llm-drafter.md` and `.claude/rules/grade-layer.md`. The beads-manifest line already labels the task "(orchestrator: …)"; if a worker is dispatched against P&M the bead fails with a write-denied error — route it to the orchestrator at devolve time.
 
 The OpenAI plan (#136) codifies the same routing; mirroring it here so the rule lands durably for both #136 and #137. Future provider plans (#138+ if a fourth vendor ever ships) should copy this section verbatim.
-
-## Worker-writability routing
-
-Per `~/.claude/projects/-home-wesd-Projects-SignalForge/memory/ralph-worker-claude-dir-perms.md`:
-**Ralph workers cannot Write under `.claude/` in worktrees** — only the orchestrator can.
-The story split honours this:
-
-- US-001 through US-009 + Quality Gate touch only worker-writable paths (`src/`, `tests/`,
-  `pyproject.toml`, `docs/`, `CHANGELOG.md`, `README.md`, `uv.lock`,
-  `CONTRIBUTING.md`).
-- **Patterns & Memory is orchestrator-only** because it edits
-  `.claude/rules/llm-drafter.md` (and `.claude/rules/grade-layer.md`). If a worker is
-  dispatched against the P&M bead, it fails with a write-denied error; route it to the
-  orchestrator.
-
-Mirrors #136's same routing convention — the rule lands durably for both #136 and #137.
 
 ## Open notes for implementation
 

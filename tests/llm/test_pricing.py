@@ -173,10 +173,25 @@ def test_lookup_returns_modelpricing_for_gemini_skus(model: str) -> None:
 
 def test_lookup_raises_estimateunknownmodelerror_for_unknown_gemini_model() -> None:
     """An unknown Gemini-shaped SKU routes through the standard
-    ``EstimateUnknownModelError`` path (no vendor-prefix fallback)."""
+    ``EstimateUnknownModelError`` path (no vendor-prefix fallback).
+
+    Also pins the operator-facing remediation text: with Gemini SKUs now
+    registered, stale Claude-only / OpenAI-only guidance would pass the
+    ``.model`` field check unnoticed and mislead operators. The pin is
+    structural ("the rendered exception names every shipped SKU
+    including the Gemini ones") rather than a verbatim string match, so
+    a future SKU addition only breaks this test if the remediation
+    isn't updated in lockstep.
+    """
     with pytest.raises(EstimateUnknownModelError) as exc_info:
         lookup("gemini-unknown")
     assert exc_info.value.model == "gemini-unknown"
+    rendered = str(exc_info.value)
+    for sku in ("gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"):
+        assert sku in rendered, (
+            f"Remediation text omits Gemini SKU {sku!r} — operator guidance "
+            "drifted from the pricing table."
+        )
 
 
 def test_anthropic_skus_remain_byte_identical_after_us_004() -> None:

@@ -90,14 +90,22 @@ class _GeminiModelsProtocol(Protocol):
 
 @runtime_checkable
 class GeminiClientProtocol(Protocol):
-    """Duck-typed surface common to a real ``genai.Client`` and the test fake.
+    """Duck-typed surface the orchestrator consumes — satisfied by the
+    **wrapped** Gemini client (``_GeminiClientAdapter`` in
+    :mod:`signalforge.llm.providers`) and by the test fake
+    (``tests/llm/_fake_gemini.py::FakeGeminiClient``, US-004) — **not**
+    by the bare SDK ``google.genai.Client``.
 
-    Both production (``google.genai.Client``) and test
-    (``tests/llm/_fake_gemini.py::FakeGeminiClient``, US-004) clients satisfy
-    this protocol, so :func:`signalforge.llm.client.call_llm` calls the same
-    method signatures regardless of which client was injected. The protocol
-    is intentionally narrow — only the surface :func:`call_llm` and the
-    ``--estimate`` token-counter (US-007) actually consume.
+    Unlike Anthropic (where ``anthropic.Anthropic`` natively exposes
+    ``.messages.create`` / ``.messages.count_tokens``), Google's
+    ``google-genai`` SDK ships generation as
+    ``client.models.generate_content`` and offers no ``.messages``
+    namespace. The provider's ``_GeminiClientAdapter`` wraps a bare SDK
+    client into an instance that exposes both ``.messages`` (the façade
+    the orchestrator calls) and ``.models`` (passthrough for the
+    ``--estimate`` token counter — US-007); only that wrapper satisfies
+    this protocol on the production path. Test fakes structurally expose
+    the same shape directly.
 
     Re-exported as :data:`signalforge.llm.GeminiClientProtocol` so the
     ``client`` kwarg on :func:`signalforge.draft.draft_schema` and
@@ -112,8 +120,8 @@ class GeminiClientProtocol(Protocol):
 
 def _make_gemini_client(
     api_key: str | None = None,
-) -> GeminiClientProtocol:  # pragma: no cover - exercised by live tests only
-    """Construct a real ``google.genai.Client``.
+) -> Any:  # pragma: no cover - exercised by live tests only
+    """Construct a bare ``google.genai.Client``.
 
     ``api_key=None`` lets the SDK consume the standard ``GOOGLE_API_KEY``
     (or ``GEMINI_API_KEY``, depending on SDK version) environment variable;
@@ -128,20 +136,19 @@ def _make_gemini_client(
     ``ImportError`` if invoked without the extra, which surfaces to the
     operator as a clear setup error.
 
-    The returned object satisfies :class:`GeminiClientProtocol` structurally;
-    the cast through ``Any`` is the one place ``google.genai``-typed values
-    enter the package, confined here per DEC-001.
-
-    NOTE: this returns the real SDK ``Client`` directly. The
-    ``.messages.create`` façade lives on the orchestrator path via the
-    provider's :meth:`build_create_kwargs` + the shim adapter that lands
-    with US-002 — the bare ``genai.Client`` does not expose ``.messages`` at
-    all. US-002 is responsible for wiring the façade (either via a thin
-    wrapper class here or via the provider's request-shape adaptation).
+    The return type is annotated :data:`typing.Any` because the **bare**
+    SDK client does NOT satisfy :class:`GeminiClientProtocol` — that
+    protocol requires a ``.messages`` namespace which the SDK does not
+    natively expose. The caller
+    (:meth:`signalforge.llm.providers.GeminiProvider.make_client`) wraps
+    the returned object in ``_GeminiClientAdapter`` to add the
+    ``.messages`` façade; only that wrapper satisfies the protocol. This
+    is the one place ``google.genai``-typed values enter the package, all
+    type-ignored per DEC-001.
     """
     from google import genai  # type: ignore[import-not-found]
 
-    return genai.Client(api_key=api_key)  # type: ignore[no-any-return]
+    return genai.Client(api_key=api_key)
 
 
 @dataclass(frozen=True)
