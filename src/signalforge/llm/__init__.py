@@ -1,4 +1,7 @@
-"""SignalForge LLM seam — centralized Anthropic SDK client + retry taxonomy."""
+"""SignalForge LLM seam — provider-neutral call_llm orchestrator + retry taxonomy.
+
+A provider registry (default ``anthropic``) plugs vendors in behind a thin
+``LLMProvider`` strategy; see :mod:`signalforge.llm.providers`."""
 
 from signalforge.llm._anthropic_client import AnthropicClientProtocol
 from signalforge.llm.client import call_llm

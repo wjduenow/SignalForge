@@ -210,7 +210,7 @@ class AnthropicProvider(LLMProvider):
 
     Moves the Anthropic-specific request-build, text/usage extraction, and
     exception classification — historically inline in
-    :func:`signalforge.llm.client.call_anthropic` — behind the
+    :func:`signalforge.llm.client.call_llm` — behind the
     :class:`LLMProvider` ABC. Anthropic supports both prompt caching and
     pre-send token counting, so both capability flags are ``True`` and the
     orchestrator's Anthropic control flow + emitted bytes are unchanged
@@ -225,9 +225,10 @@ class AnthropicProvider(LLMProvider):
     :mod:`signalforge.llm.client`.
 
     .. note::
-       This is a *preparatory* refactor (US-002). ``call_anthropic`` keeps its
-       inline helpers and stays byte-identical; US-003 rewires the orchestrator
-       to drive this strategy and collapses the duplication.
+       The generic orchestrator :func:`signalforge.llm.client.call_llm` drives
+       this strategy (US-003); the Anthropic path stays byte-identical to the
+       pre-#135 ``call_llm`` it replaced. A new vendor ships its own
+       :class:`LLMProvider` subclass + ``_<vendor>_client.py`` shim.
     """
 
     name = "anthropic"
@@ -254,7 +255,7 @@ class AnthropicProvider(LLMProvider):
         """Build the kwargs for ``client.messages.create``.
 
         Reproduces byte-for-byte the request shape historically built inline in
-        :func:`signalforge.llm.client.call_anthropic`: two user-message text
+        :func:`signalforge.llm.client.call_llm`: two user-message text
         blocks, with the ``cache_control`` ephemeral marker on block-1 ONLY when
         ``cache_marker_active``, and the extended-cache beta header on
         ``extra_headers`` only when ``cache_ttl == "1h"``.
@@ -304,7 +305,7 @@ class AnthropicProvider(LLMProvider):
     def extract_usage(self, response: object) -> UsageMetrics:
         """Extract token economics from an Anthropic response.
 
-        Mirrors the ``call_anthropic`` reads: ``input_tokens`` / ``output_tokens``
+        Mirrors the ``call_llm`` reads: ``input_tokens`` / ``output_tokens``
         are required; ``cache_creation_input_tokens`` / ``cache_read_input_tokens``
         default to 0 when absent.
         """
@@ -330,7 +331,7 @@ class AnthropicProvider(LLMProvider):
     def classify_exception(self, exc: BaseException) -> ExceptionCategory:
         """Map a raised Anthropic SDK exception to a neutral category.
 
-        Dispatch order mirrors the ``call_anthropic`` retry loop: auth →
+        Dispatch order mirrors the ``call_llm`` retry loop: auth →
         rate-limit → connection → API-status (5xx → SERVER_ERROR; 4xx-non-auth →
         NO_RETRY; any other status → NO_RETRY). Anything unrecognised maps to
         :attr:`ExceptionCategory.NO_RETRY` so the orchestrator surfaces it

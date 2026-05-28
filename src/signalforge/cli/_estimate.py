@@ -293,7 +293,7 @@ def _count_draft_tokens(
     """Issue exactly one ``count_tokens`` for the drafter prompt and
     return the integer ``input_tokens`` field.
 
-    Mirrors :func:`signalforge.llm.client.call_anthropic`'s pre-send
+    Mirrors :func:`signalforge.llm.client.call_llm`'s pre-send
     ``count_tokens`` envelope: system + the single cached user-content
     block. The dynamic block is included in the messages list so the
     count reflects the full prompt the drafter would send (the cache

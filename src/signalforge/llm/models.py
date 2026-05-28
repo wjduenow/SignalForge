@@ -1,7 +1,7 @@
 """Typed result shape for the LLM-drafting client (US-004).
 
 Defines :class:`LLMResult` — the stable, read-back-tolerant value object
-returned by :func:`signalforge.llm.client.call_anthropic` (lands in US-006)
+returned by :func:`signalforge.llm.client.call_llm` (lands in US-006)
 and consumed by the parser/integration layers (US-009 onwards).
 
 Design commitments operationalised here:
@@ -36,7 +36,7 @@ from pydantic import BaseModel, ConfigDict
 
 
 class LLMResult(BaseModel):
-    """Stable result shape returned by :func:`call_anthropic` (DEC-016).
+    """Stable result shape returned by :func:`call_llm` (DEC-016).
 
     Frozen + ``extra="ignore"`` mirrors :class:`signalforge.safety.LLMRequest`:
     once the client has produced an :class:`LLMResult`, downstream stages

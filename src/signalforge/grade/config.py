@@ -113,7 +113,7 @@ class GradeConfig(BaseModel):
 
     max_retries_429: int = 3
     """Mirrors :attr:`signalforge.draft.DraftConfig.max_retries_429`.
-    The grader reuses the centralised :func:`signalforge.llm.call_anthropic`
+    The grader reuses the centralised :func:`signalforge.llm.call_llm`
     seam (#5 DEC-012) so the retry taxonomy is the full clauditor
     surface; this knob dials down the per-call attempt count for 429
     responses without changing the global default."""

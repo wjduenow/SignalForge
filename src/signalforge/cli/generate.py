@@ -819,6 +819,30 @@ def _run_single_model(
             # ``AnthropicClientProtocol`` surface — #36), so cast to that
             # protocol here. A non-Anthropic provider's ``--estimate`` path is
             # out of scope until #136/#137 wire those vendors.
+            #
+            # The estimate engine takes BOTH configs but drives this single
+            # Anthropic-shaped client, so fail fast rather than silently
+            # project grade-stage cost through the drafter's client (if the
+            # two providers diverge) or blow up on a provider with no
+            # ``count_tokens`` surface.
+            if draft_config.provider != grade_config.provider:
+                raise CliInputError(
+                    "--estimate requires draft.provider and grade.provider to match "
+                    f"(got {draft_config.provider!r} and {grade_config.provider!r}).",
+                    remediation=(
+                        "Set the same provider for both stages, or run without "
+                        "--estimate until per-provider estimation support lands."
+                    ),
+                )
+            if draft_config.provider != "anthropic":
+                raise CliInputError(
+                    "--estimate currently supports only provider='anthropic' "
+                    f"(got {draft_config.provider!r}).",
+                    remediation=(
+                        "Set draft.provider and grade.provider to 'anthropic', or "
+                        "run without --estimate."
+                    ),
+                )
             client = cast(
                 "AnthropicClientProtocol",
                 provider_for(draft_config.provider).make_client(),

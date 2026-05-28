@@ -3,7 +3,7 @@
 :func:`grade_artifacts` is the public seam: given a model + drafted
 candidate + prune verdict + (optional) rubric + config, it iterates
 every ``(criterion, artifact)`` pair, issues one
-:func:`signalforge.llm.client.call_anthropic` call per pair, parses the
+:func:`signalforge.llm.client.call_llm` call per pair, parses the
 response, writes a fail-closed JSONL audit record, and at end-of-run
 writes a sidecar JSON :class:`GradingReport`.
 
@@ -517,7 +517,7 @@ def grade_artifacts(
             ``<project_dir>/.signalforge/grade.json`` (DEC-012).
         client: optional dependency-injection seam for tests. Production
             callers leave this ``None`` and let
-            :func:`signalforge.llm.client.call_anthropic` lazy-construct
+            :func:`signalforge.llm.client.call_llm` lazy-construct
             a real ``anthropic.Anthropic``.
         project_dir: optional project-root override used to resolve the
             default ``audit_path`` / ``sidecar_path``. ``None`` resolves

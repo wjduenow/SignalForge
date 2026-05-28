@@ -341,7 +341,7 @@ def call_llm(
                     cause=exc,
                 ) from exc
             raise LLMHelperError(
-                "LLM count_tokens returned a non-5xx error status.",
+                "LLM count_tokens failed with a non-retryable error.",
                 cause=exc,
             ) from exc
 
