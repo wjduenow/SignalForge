@@ -180,9 +180,10 @@ class LLMProvider(abc.ABC):
         model: str,
         text: str,
         *,
+        system: str = "",
         client: object | None = None,
     ) -> int:
-        """Return the input-token count ``text`` would consume on ``model``.
+        """Return the input-token count the prompt would consume on ``model``.
 
         Used by the ``signalforge generate --estimate`` cost-preview path
         (issue #36 / #136 US-005 — DEC-003). The Anthropic implementation
@@ -197,6 +198,16 @@ class LLMProvider(abc.ABC):
         loop's pre-send count gate (which IS gated by
         :attr:`supports_token_count`) is a different surface; this is
         the estimate path's calibration seam.
+
+        ``system`` is the system-prompt envelope, passed separately so
+        providers whose API counts the system block with its own envelope
+        tokens (Anthropic's ``messages.count_tokens(system=..., ...)``)
+        produce real-API-faithful counts (#136 US-005 / DEC-013 byte-
+        identity floor). Providers whose local tokenizer doesn't
+        distinguish (OpenAI's ``tiktoken``) MAY concatenate ``system +
+        text`` before counting; the total still includes every token.
+        Defaulting to an empty string preserves the call shape for
+        callers who don't separate the two surfaces yet.
 
         ``client`` is an optional pre-constructed SDK client (e.g. a
         test fake satisfying the vendor's client protocol). Providers
@@ -393,19 +404,28 @@ class AnthropicProvider(LLMProvider):
         model: str,
         text: str,
         *,
+        system: str = "",
         client: object | None = None,
     ) -> int:
         """Count tokens via the Anthropic SDK's ``messages.count_tokens``.
 
-        Preserves byte-identity with the pre-#136-US-005 inline
+        Preserves real-API byte-identity with the pre-#136-US-005 inline
         ``client.messages.count_tokens(...)`` calls in
-        :mod:`signalforge.cli._estimate` (DEC-013 of #136): the count
-        is issued with a single user-message text block whose
-        ``content`` is ``text``. Tests inject a queued-response
-        ``FakeAnthropicClient`` via ``client``; production callers
-        either pass a pre-constructed client (from the
-        ``--estimate`` CLI prelude) or rely on the lazy fallback
-        below.
+        :mod:`signalforge.cli._estimate` (DEC-013 of #136): the count is
+        issued with ``system`` threaded as its own kwarg (so Anthropic's
+        server-side tokenizer applies its system-block envelope tokens)
+        plus a single user-message text block whose ``content`` is
+        ``text`` (the concatenated cached + dynamic prompt body).
+        Anthropic's tokenizer collapses adjacent text blocks identically
+        to a single concatenated string for counting purposes, so the
+        post-refactor user-content shape matches the pre-refactor
+        ``[block_cached, block_dynamic]`` structured form at the count
+        level.
+
+        Tests inject a queued-response ``FakeAnthropicClient`` via
+        ``client``; production callers either pass a pre-constructed
+        client (from the ``--estimate`` CLI prelude) or rely on the
+        lazy fallback below.
 
         When ``client`` is ``None``, the provider builds a transient
         SDK client via
@@ -433,10 +453,24 @@ class AnthropicProvider(LLMProvider):
         resolved: AnthropicClientProtocol = (
             _make_anthropic_client() if client is None else cast(AnthropicClientProtocol, client)
         )
-        response = resolved.messages.count_tokens(
-            model=model,
-            messages=[{"role": "user", "content": text}],
-        )
+        # Pass ``system`` only when non-empty so a default ``""`` doesn't
+        # ship a bogus ``system=""`` kwarg the SDK would otherwise carry
+        # as an extra envelope block. Two explicit call shapes (instead
+        # of dict-unpack) keep the call site within the
+        # ``AnthropicClientProtocol`` typed surface — DEC-012 of #135
+        # confines every Anthropic SDK type-checker suppression to
+        # ``_anthropic_client.py``.
+        if system:
+            response = resolved.messages.count_tokens(
+                model=model,
+                system=system,
+                messages=[{"role": "user", "content": text}],
+            )
+        else:
+            response = resolved.messages.count_tokens(
+                model=model,
+                messages=[{"role": "user", "content": text}],
+            )
         input_tokens = getattr(response, "input_tokens", None)
         if not isinstance(input_tokens, int):
             raise LLMResponseFormatError(
@@ -640,6 +674,7 @@ class OpenAIProvider(LLMProvider):
         model: str,
         text: str,
         *,
+        system: str = "",
         client: object | None = None,
     ) -> int:
         """Count tokens locally via ``tiktoken`` (DEC-003/DEC-012 of #136).
@@ -653,6 +688,13 @@ class OpenAIProvider(LLMProvider):
         which uses ``tiktoken.encoding_for_model(model)`` with a
         ``cl100k_base`` fallback for unknown model ids.
 
+        ``system`` is concatenated with ``text`` before counting —
+        ``tiktoken`` does not distinguish a "system" envelope from
+        regular tokens (unlike Anthropic's server-side counter), so
+        every token contributes to the same total. The combined count
+        matches what OpenAI's chat-completion endpoint will bill at
+        runtime (system prompt + user content).
+
         ``client`` is ignored — the count is a pure local BPE pass with
         no SDK or network involvement. The kwarg is declared for
         protocol parity with :meth:`AnthropicProvider.estimate_input_tokens`
@@ -661,7 +703,7 @@ class OpenAIProvider(LLMProvider):
         from signalforge.llm._openai_client import _count_openai_tokens
 
         del client  # tiktoken needs no SDK client
-        return _count_openai_tokens(model, text)
+        return _count_openai_tokens(model, system + text)
 
 
 # Register the OpenAI strategy at import time so ``provider_for("openai")``

@@ -77,6 +77,7 @@ class _DummyProvider(LLMProvider):
         model: str,
         text: str,
         *,
+        system: str = "",
         client: object | None = None,
     ) -> int:
         # Trivial deterministic stub (#136 US-005) — the registry tests

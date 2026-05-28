@@ -301,15 +301,19 @@ def _count_draft_tokens(
     ``tests/cli/test_estimate.py::test_estimate_anthropic_byte_identity_golden``
     (DEC-013).
 
-    The full prompt the drafter would send is concatenated here
-    (``system + cached_block + dynamic_block``) and handed to the
-    strategy as one text payload. The cache boundary affects pricing,
-    not token count — pricing math runs further down using
-    ``draft_config.cache_ttl`` indirectly.
+    The ``system`` envelope is threaded as its own kwarg so providers
+    whose API counts the system block separately (Anthropic's
+    server-side ``messages.count_tokens(system=..., ...)``) produce
+    real-API-faithful counts (DEC-013 of #136). The ``cached_block`` +
+    ``dynamic_block`` are concatenated into the user-content text
+    payload because Anthropic's tokenizer collapses adjacent text blocks
+    identically to a single concatenated string for counting purposes.
+    The cache boundary affects pricing, not token count — pricing math
+    runs further down using ``draft_config.cache_ttl`` indirectly.
     """
-    text = system + cached_block + dynamic_block
+    text = cached_block + dynamic_block
     return provider_for(draft_config.provider).estimate_input_tokens(
-        draft_config.model, text, client=client
+        draft_config.model, text, system=system, client=client
     )
 
 
@@ -337,11 +341,21 @@ def _count_grade_criterion_tokens(
     across artifacts so per-criterion token counts scale linearly with
     artifact count, and counting one representative is a faithful
     proxy that keeps the LLM-call count bounded.
+
+    The pre-refactor Anthropic call passed ``system=system_and_rubric``
+    AND embedded ``system_and_rubric`` inside the cached user-content
+    block, so the rubric was counted twice. Preserving DEC-013
+    byte-identity requires reproducing that shape: ``system_and_rubric``
+    is threaded as ``system=`` (so the server-side counter applies its
+    system envelope) AND concatenated into the ``text`` payload (so it
+    appears in the user content too). This is a pre-existing oddity of
+    the grader estimate, not introduced by US-005; documenting here so
+    a future tidy-pass doesn't "fix" it and silently break the count.
     """
     dynamic_block = render_grade_dynamic_block(artifact_id, artifact_text, criterion)
     text = system_and_rubric + dynamic_block
     return provider_for(grade_config.provider).estimate_input_tokens(
-        grade_config.model, text, client=client
+        grade_config.model, text, system=system_and_rubric, client=client
     )
 
 

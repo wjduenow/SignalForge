@@ -217,9 +217,10 @@ class FakeNoCacheProvider(LLMProvider):
         model: str,
         text: str,
         *,
+        system: str = "",
         client: object | None = None,
     ) -> int:
-        """Return a trivial word-count proxy for ``text`` (#136 US-005).
+        """Return a trivial word-count proxy for ``system + text`` (#136 US-005).
 
         The neutrality test exercises orchestrator dispatch, not real
         token counting; ``len(text.split())`` is a deterministic
@@ -229,7 +230,7 @@ class FakeNoCacheProvider(LLMProvider):
         method with a minimal honest value.
         """
         del model, client  # neither is consulted on the proxy path
-        return len(text.split())
+        return len((system + text).split())
 
 
 __all__ = [

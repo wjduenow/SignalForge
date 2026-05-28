@@ -192,7 +192,7 @@ class EstimateUnknownModelError(LLMError):
     default_remediation: ClassVar[str] = (
         "Add the model to signalforge.llm.pricing.PRICES or use a "
         "supported model: claude-sonnet-4-6, claude-opus-4-7, "
-        "claude-haiku-4-5."
+        "claude-haiku-4-5, gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4-turbo."
     )
 
     def __init__(

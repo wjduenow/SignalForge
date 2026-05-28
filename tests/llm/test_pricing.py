@@ -44,10 +44,12 @@ def test_lookup_raises_estimateunknownmodelerror_for_unknown_model() -> None:
         lookup("not-a-real-model-9999")
     rendered = str(exc_info.value)
     assert "not-a-real-model-9999" in rendered
-    # Locked remediation text — verbatim per US-001 AC.
+    # Locked remediation text — verbatim per US-001 AC, refreshed in
+    # #136 US-008 (QG) to enumerate the four OpenAI SKUs added by US-004.
     assert (
         "Add the model to signalforge.llm.pricing.PRICES or use a supported "
-        "model: claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5."
+        "model: claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5, "
+        "gpt-4o, gpt-4o-mini, gpt-4.1, gpt-4-turbo."
     ) in rendered
     # Carries the model id as a structured field for typed handling.
     assert exc_info.value.model == "not-a-real-model-9999"

@@ -115,7 +115,7 @@ loader cannot drift):
 ```yaml
 # signalforge.yml — grade stage configuration (v0.1)
 grade:
-  provider: anthropic             # registry-validated; only "anthropic" registered today
+  provider: anthropic             # registry-validated; "anthropic" + "openai" are registered (see OpenAI provider below)
   model: claude-sonnet-4-6        # model id (default)
   cache_ttl: 1h                   # Prompt-cache TTL ('5m' or '1h')
   max_output_tokens: 256          # Per-criterion JSON response cap
