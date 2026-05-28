@@ -31,6 +31,7 @@ What this proves end-to-end on the Gemini path:
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -193,3 +194,14 @@ def test_grade_artifacts_gemini_round_trips_against_real_api(tmp_path: Path) -> 
     assert audit_path.exists()
     audit_lines = audit_path.read_text(encoding="utf-8").strip().splitlines()
     assert len(audit_lines) >= 1
+
+    # DEC-003 of #137: cache fields default to 0 on every event because
+    # GeminiProvider declares both capability flags False. A regression
+    # on the grade-path bookkeeping (e.g. populating cache_* from a
+    # spurious provider response field) would slip through the offline
+    # neutrality test if it stopped catching the live shape; pin every
+    # record here so a real-API regression fails loud.
+    for raw in audit_lines:
+        record = json.loads(raw)
+        assert record["cache_creation_input_tokens"] == 0
+        assert record["cache_read_input_tokens"] == 0

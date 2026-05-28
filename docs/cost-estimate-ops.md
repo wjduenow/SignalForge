@@ -58,6 +58,17 @@ Each registered provider supplies its own implementation:
   round-trip — DEC-012 of #136). Resolves the model id via
   `tiktoken.encoding_for_model(model)` with a graceful `cl100k_base`
   fallback for unknown ids.
+- **Google Gemini** — calls the SDK's native
+  `client.models.count_tokens(model=, contents=)` (issue #137 US-007;
+  DEC-016). First-party token counter, one extra API round-trip per
+  count (comparable in shape to the Anthropic path; distinct from
+  OpenAI's local `tiktoken` approach because Gemini has no equivalent
+  client-side BPE). `system` is concatenated with `text` into a single
+  `contents` entry — Gemini's count endpoint doesn't distinguish a
+  system envelope from regular tokens, so every token contributes to
+  the same total (matching what `generate_content` will bill at
+  runtime). `GOOGLE_API_KEY` is required because this is a live API
+  call.
 
 Anthropic stdout is byte-identical before and after the #136 refactor
 — pinned via a snapshot test in `tests/cli/test_estimate.py` per
@@ -117,6 +128,43 @@ pricing row). Common cases:
 Maps to CLI exit-code tier 2 (`INPUT`) — see
 [`docs/cli-ops.md`](cli-ops.md) for the full exit-code taxonomy.
 
+## Gemini provider — `[gemini]` install extra
+
+Selecting `grade.provider: gemini` and/or `llm.provider: gemini` in
+`signalforge.yml` requires the `gemini` install extra so the
+`google-genai` SDK is available:
+
+```bash
+pip install signalforge-dbt[gemini]
+# or, in a contributor checkout
+uv sync --dev   # the dev group already pulls google-genai
+```
+
+Unlike OpenAI's local `tiktoken` path, Gemini's count surface is a
+real API call (`client.models.count_tokens`); the SDK does not ship a
+client-side BPE tokeniser. The single extra round-trip per count is
+modest at the drafter level (one call per `signalforge generate`
+invocation) and grows linearly with the grader's per-criterion
+fan-out. Mirrors the Anthropic round-trip shape.
+
+### Registered Gemini pricing SKUs
+
+`signalforge.llm.pricing._PRICES_MUTABLE` ships three Gemini SKUs
+(issue #137 US-006; DEC-017):
+
+| Model id | Notes |
+|---|---|
+| `gemini-2.5-pro` | Flagship judge — strongest reasoning, highest cost (base ≤200K context tier). |
+| `gemini-2.5-flash` | Recommended default for the Gemini provider — middle-of-the-road cost/quality. |
+| `gemini-2.0-flash` | Budget tier — cheapest Gemini SKU registered. |
+
+Each SKU carries `input_per_mtok` and `output_per_mtok` rates; the
+cache fields are `0.0` because v0.3 Gemini ships without
+Anthropic-style prompt caching (DEC-003 of #137 — see
+[`docs/grade-ops.md` § Gemini provider](grade-ops.md#gemini-provider)
+and [`docs/draft-ops.md` § Gemini provider](draft-ops.md#gemini-provider)
+for the no-cache cost note).
+
 ## Maintainer-only live smoke tests
 
 Three `@pytest.mark.openai` gated tests exercise the OpenAI half of
@@ -134,6 +182,17 @@ var produces a clear skip reason naming the var). Mirrors the
 ```bash
 ANTHROPIC_API_KEY=sk-... uv run pytest -m anthropic --no-cov
 ```
+
+Three `@pytest.mark.gemini` gated tests cover the Gemini half (DEC-012
+of #137):
+
+```bash
+SF_RUN_GEMINI=1 GOOGLE_API_KEY=... uv run pytest -m gemini --no-cov
+```
+
+The `--estimate` Gemini path is exercised by the live `test_gemini_grade_live.py` /
+`test_gemini_draft_live.py` rounds via the same engine `estimate(...)` plus the
+offline-fake test at `tests/cli/test_estimate.py::test_estimate_gemini_provider_produces_nonzero_tokens_and_usd`.
 
 The Anthropic suite also includes the byte-identity snapshot for the
 estimate stdout that DEC-013 of #136 pins as the refactor floor.

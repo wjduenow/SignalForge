@@ -659,12 +659,13 @@ per `signalforge generate` invocation, so the per-call overhead is
 modest compared to the grader's 4-criterion fan-out — but explicit
 Gemini context caching is still a tracked follow-up.
 
-**`--estimate` integration (deferred).** Gated on US-007 of #137
-(DEC-016 — native `client.models.count_tokens` integration). Until
-US-007 ships, an operator running `signalforge generate --estimate`
-with `llm.provider: gemini` will see the drafter-side estimate surface
-as `<unavailable: NotImplementedError>` per the conservative-bias
-degrade.
+**`--estimate` integration (active).** `signalforge generate --estimate`
+with `llm.provider: gemini` works end-to-end via Gemini's native
+`client.models.count_tokens` (US-007 of #137; DEC-016). One extra API
+round-trip per estimate call. The drafter-side USD figure uses the
+Gemini pricing SKUs registered in `signalforge.llm.pricing`. Network
+or auth failures surface as `<unavailable: <ErrorClass>>` via the
+conservative-bias supplementary-failure path.
 
 **Live smoke.** A `@pytest.mark.gemini` gated end-to-end test exercises
 drafting against `gemini-2.5-flash`. Run it with:

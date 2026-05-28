@@ -578,13 +578,17 @@ default 4-criterion rubric over a 12-column model (~48 sequential calls),
 budget the per-call cost accordingly. Explicit Gemini context caching is
 tracked as a follow-up.
 
-**`--estimate` integration (deferred).** The `--estimate` cost-preview
-path's Gemini wiring is gated on US-007 of #137 (DEC-016 — native
-`client.models.count_tokens` integration). Until US-007 ships, an
-operator running `signalforge generate --estimate` with
-`grade.provider: gemini` will see the grader-side estimate surface as
-`<unavailable: NotImplementedError>` per the conservative-bias degrade
-(DEC-005 of #36). Anthropic and OpenAI `--estimate` paths are unaffected.
+**`--estimate` integration (active).** `signalforge generate --estimate`
+with `grade.provider: gemini` works end-to-end via Gemini's native
+`client.models.count_tokens` (US-007 of #137; DEC-016). One extra API
+round-trip per estimate call — comparable in shape to Anthropic's
+`messages.count_tokens` and distinct from OpenAI's local `tiktoken`
+path. The grader-side USD figure uses the Gemini pricing SKUs registered
+in `signalforge.llm.pricing` (`gemini-2.5-pro`, `gemini-2.5-flash`,
+`gemini-2.0-flash`). Network or auth failures surface as
+`<unavailable: <ErrorClass>>` via the conservative-bias supplementary-
+failure path (DEC-005 of #36); operators see a calibration signal, not
+an aborted run.
 
 **Live smoke.** A `@pytest.mark.gemini` gated end-to-end test exercises
 grading against `gemini-2.5-flash`. Run it with:

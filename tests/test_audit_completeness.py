@@ -1237,6 +1237,86 @@ def test_attribute_call_finder_catches_all_three_openai_bypass_patterns() -> Non
     )
 
 
+def test_attribute_call_finder_catches_all_namespace_package_bypass_patterns_for_gemini() -> None:
+    """#137 DEC-009 planted-violation regression: Scan 10 must catch each
+    of the namespace-package bypass patterns for ``genai.Client(...)``.
+
+    The Gemini SDK ships as a namespace-package (``from google import
+    genai``), so ``_AttributeCallFinder`` is instantiated with
+    ``parent_module="google"`` for Scan 10. That parameter adds three
+    detection branches on top of the four patterns the OpenAI Scan 9
+    test pins. Per ``testing-signal.md`` § "AST single-construction-seam
+    scans must catch all three bypass patterns" — without a planted-
+    violation regression test, a refactor of the ``parent_module``
+    branches could silently break the gate at the exact moment a real
+    Gemini-SDK construction was added outside ``_gemini_client.py``.
+
+    Patterns 1-4 (bare / import-alias / module-attribute / late-import)
+    are already covered by
+    :func:`test_attribute_call_finder_catches_all_three_openai_bypass_patterns`
+    on the no-parent_module shape. This test exercises Patterns 5-8 —
+    the namespace-package shapes that ``parent_module="google"``
+    activates.
+    """
+    # Pattern 5: namespace-package via ``from google import genai;
+    # genai.Client(...)``. The most common shape; documented in the
+    # google-genai README.
+    ns_src = "from google import genai\n\nx = genai.Client(api_key='x')\n"
+    ns = _AttributeCallFinder("genai", "Client", parent_module="google")
+    ns.visit(ast.parse(ns_src))
+    assert len(ns.calls) == 1, (
+        "Pattern 5 (`from google import genai; genai.Client(...)`) not detected — "
+        "_AttributeCallFinder.parent_module branch regressed."
+    )
+
+    # Pattern 6: namespace-package with alias —
+    # ``from google import genai as g; g.Client(...)``.
+    ns_alias_src = "from google import genai as g\n\nx = g.Client(api_key='x')\n"
+    ns_alias = _AttributeCallFinder("genai", "Client", parent_module="google")
+    ns_alias.visit(ast.parse(ns_alias_src))
+    assert len(ns_alias.calls) == 1, (
+        "Pattern 6 (`from google import genai as g; g.Client(...)`) not detected — "
+        "_AttributeCallFinder.parent_module alias branch regressed."
+    )
+
+    # Pattern 7: dotted-from form ``from google.genai import Client;
+    # Client(...)``. Falls under the "direct alias" set when
+    # parent_module is honoured.
+    dotted_src = "from google.genai import Client\n\nx = Client(api_key='x')\n"
+    dotted = _AttributeCallFinder("genai", "Client", parent_module="google")
+    dotted.visit(ast.parse(dotted_src))
+    assert len(dotted.calls) == 1, (
+        "Pattern 7 (`from google.genai import Client; Client(...)`) not detected — "
+        "_AttributeCallFinder dotted-from branch regressed."
+    )
+
+    # Pattern 8: dotted-import with alias —
+    # ``import google.genai as g; g.Client(...)``. Binds ``g`` to the
+    # submodule (Python name-resolution shape #4 from the SDK README).
+    dotted_alias_src = "import google.genai as g\n\nx = g.Client(api_key='x')\n"
+    dotted_alias = _AttributeCallFinder("genai", "Client", parent_module="google")
+    dotted_alias.visit(ast.parse(dotted_alias_src))
+    assert len(dotted_alias.calls) == 1, (
+        "Pattern 8 (`import google.genai as g; g.Client(...)`) not detected — "
+        "_AttributeCallFinder dotted-import branch regressed."
+    )
+
+    # Negative check: Pattern 7 (`from google.genai import Client;
+    # Client(...)``) requires ``parent_module="google"`` because the
+    # bare-name ``Client`` is added to ``_direct_aliases`` only via the
+    # dotted-from branch — without ``parent_module`` set, the finder
+    # never sees ``from google.genai import Client`` as a target import
+    # (it scans for ``from genai import Client``, not the dotted form).
+    sans_parent = _AttributeCallFinder("genai", "Client")
+    sans_parent.visit(ast.parse(dotted_src))
+    assert len(sans_parent.calls) == 0, (
+        "Negative check: Pattern 7 (dotted-from `from google.genai import Client; "
+        "Client(...)`) leaked into the no-parent_module path — parent_module gate "
+        "regressed; without the gate, the OpenAI Scan 9 would false-positive on a "
+        "`from google.genai import Client` line in any module."
+    )
+
+
 def test_qualified_name_finder_catches_late_import_alias() -> None:
     """Regression for the late-import bypass CodeRabbit flagged on PR #69:
     a function body that references an alias defined by a later
