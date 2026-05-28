@@ -4,7 +4,9 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 ## [Unreleased]
 
-_Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
+### Added
+
+- **Google Gemini as a grading + drafting provider (#137).** Set `grade.provider: gemini` or `llm.provider: gemini` in `signalforge.yml`; requires the `[gemini]` install extra (`pip install signalforge-dbt[gemini]`) and `GOOGLE_API_KEY`. Recommended SKU for both drafter and judge is `gemini-2.5-flash` (also registered: `gemini-2.5-pro`, `gemini-2.0-flash`). Ships **without prompt caching** in v0.3 — the `LLMProvider` strategy reports `supports_prompt_caching=False` / `supports_token_count=False`, so `call_llm` skips the `cache_control` marker, the `extended-cache-ttl` beta header, and the pre-send `count_tokens` gate; budget per-call cost accordingly under `provider: gemini` (especially for the grader's 4-criterion × ~12-artifact fan-out). Explicit Gemini context caching is tracked as a follow-up.
 
 ## [0.3.0] — 2026-05-27
 
