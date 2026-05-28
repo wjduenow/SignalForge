@@ -1354,3 +1354,29 @@ def test_geminiprovider_estimate_input_tokens_builds_client_when_none(
 
     assert tokens == 99
     assert call_counter["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# LLMProvider.unclean_finish_reason_message — ABC default body (#155 QG / codecov)
+# ---------------------------------------------------------------------------
+
+
+def test_unclean_finish_reason_message_default_returns_generic_diagnostic() -> None:
+    """The ABC's default :meth:`LLMProvider.unclean_finish_reason_message`
+    returns a generic diagnostic naming the provider class (#155 DEC-007).
+
+    Each concrete provider (Anthropic, OpenAI, Gemini) overrides this to
+    surface the vendor-native field name + the offending value (see the
+    `_provider_via_fake.py` tests). The default exists so a future
+    provider that hasn't yet wired its override still emits something
+    operator-readable rather than a placeholder.
+
+    :class:`_DummyProvider` (this file) inherits the default unchanged —
+    pin its output so a regression in the default body surfaces here.
+    """
+    message = _DummyProvider().unclean_finish_reason_message(object())
+    # Names the provider class so the operator can localise.
+    assert "_DummyProvider" in message
+    # Mentions the "stop reason" concept generically (the default doesn't
+    # know which vendor field to name — that's the override's job).
+    assert "stop reason" in message

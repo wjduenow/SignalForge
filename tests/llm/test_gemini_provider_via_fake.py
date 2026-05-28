@@ -458,3 +458,47 @@ def test_call_llm_gemini_retry_429_exhaustion_routes_to_llmratelimiterror(
     assert excinfo.value.attempts == 3
     assert isinstance(excinfo.value.cause, genai_errors.ClientError)
     fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# is_clean_completion — defensive raise on malformed SDK response (#155 QG / codecov)
+# ---------------------------------------------------------------------------
+
+
+def test_is_clean_completion_raises_on_missing_or_empty_candidates() -> None:
+    """A response object lacking ``candidates`` (or with an empty list)
+    raises :class:`LLMResponseFormatError` naming the missing field.
+
+    Guards against an SDK shape regression. Pinned at unit cost so a
+    regression doesn't have to wait for live e2e to surface.
+    """
+    from types import SimpleNamespace
+
+    from signalforge.llm.providers import GeminiProvider
+
+    # Missing attribute entirely.
+    no_attr = SimpleNamespace()
+    with pytest.raises(LLMResponseFormatError, match="candidates"):
+        GeminiProvider().is_clean_completion(no_attr)
+
+    # Present but empty list.
+    empty = SimpleNamespace(candidates=[])
+    with pytest.raises(LLMResponseFormatError, match="candidates"):
+        GeminiProvider().is_clean_completion(empty)
+
+
+def test_is_clean_completion_raises_on_missing_finish_reason_on_first_candidate() -> None:
+    """A response with ``candidates[0]`` present but missing
+    ``finish_reason`` raises :class:`LLMResponseFormatError` naming the
+    missing field.
+
+    Guards against an SDK shape regression where the candidate object
+    exists but the finish-reason field disappears. Pinned at unit cost.
+    """
+    from types import SimpleNamespace
+
+    from signalforge.llm.providers import GeminiProvider
+
+    response = SimpleNamespace(candidates=[SimpleNamespace()])  # no finish_reason
+    with pytest.raises(LLMResponseFormatError, match="finish_reason"):
+        GeminiProvider().is_clean_completion(response)

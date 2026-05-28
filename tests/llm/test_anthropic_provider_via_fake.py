@@ -128,3 +128,32 @@ def test_unclean_finish_reason_message_names_stop_reason_field() -> None:
     message = AnthropicProvider().unclean_finish_reason_message(response)
     assert "stop_reason" in message
     assert "'max_tokens'" in message
+
+
+# ---------------------------------------------------------------------------
+# is_clean_completion — defensive raise on malformed SDK response (#155 QG / codecov)
+# ---------------------------------------------------------------------------
+
+
+def test_is_clean_completion_raises_on_missing_stop_reason_attribute() -> None:
+    """A response object lacking the ``stop_reason`` attribute entirely
+    (or with ``stop_reason=None``) raises :class:`LLMResponseFormatError`
+    with a message naming the missing field.
+
+    This guards against an SDK shape regression — e.g. a future Anthropic
+    SDK rev renames ``stop_reason`` to ``terminated_for``, leaving every
+    response with no ``stop_reason`` attribute at all. Without this
+    defensive arm, the conservative-degrade path would silently swallow
+    the structural surprise rather than surfacing it loudly. Pinned at
+    unit cost so a regression here doesn't have to wait for live e2e.
+    """
+    from types import SimpleNamespace
+
+    from signalforge.llm.errors import LLMResponseFormatError
+    from signalforge.llm.providers import AnthropicProvider
+
+    # SimpleNamespace with no stop_reason attribute — getattr returns the
+    # default None, the provider's defensive arm raises.
+    response = SimpleNamespace()
+    with pytest.raises(LLMResponseFormatError, match="stop_reason"):
+        AnthropicProvider().is_clean_completion(response)

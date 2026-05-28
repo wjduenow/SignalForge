@@ -200,3 +200,44 @@ def test_call_llm_openai_length_with_partial_text_raises_at_is_clean_gate() -> N
     # Exactly one create call — no retry, no leak through to extract_text_blocks.
     assert len(fake.create_calls) == 1
     fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# is_clean_completion — defensive raise on malformed SDK response (#155 QG / codecov)
+# ---------------------------------------------------------------------------
+
+
+def test_is_clean_completion_raises_on_missing_or_empty_choices() -> None:
+    """A response object lacking ``choices`` (or with an empty list)
+    raises :class:`LLMResponseFormatError` naming the missing field.
+
+    Guards against an SDK shape regression. The conservative-degrade path
+    would otherwise silently swallow a structural surprise rather than
+    raising loudly. Pinned at unit cost.
+    """
+    from types import SimpleNamespace
+
+    # Missing attribute entirely.
+    no_attr = SimpleNamespace()
+    with pytest.raises(LLMResponseFormatError, match="choices"):
+        OpenAIProvider().is_clean_completion(no_attr)
+
+    # Present but empty list.
+    empty = SimpleNamespace(choices=[])
+    with pytest.raises(LLMResponseFormatError, match="choices"):
+        OpenAIProvider().is_clean_completion(empty)
+
+
+def test_is_clean_completion_raises_on_missing_finish_reason_on_first_choice() -> None:
+    """A response with ``choices[0]`` present but missing ``finish_reason``
+    raises :class:`LLMResponseFormatError` naming the missing field.
+
+    Guards against an SDK shape regression where the choice object exists
+    but the finish-reason field disappears (e.g. a vendor adds a new
+    response variant where the field is conditional). Pinned at unit cost.
+    """
+    from types import SimpleNamespace
+
+    response = SimpleNamespace(choices=[SimpleNamespace()])  # no finish_reason
+    with pytest.raises(LLMResponseFormatError, match="finish_reason"):
+        OpenAIProvider().is_clean_completion(response)
