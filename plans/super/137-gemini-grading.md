@@ -21,7 +21,7 @@
   - `.4` US-004 — `FakeGeminiClient` + offline provider unit tests — blocked by `.2`
   - `.5` US-005 — Provider-neutrality end-to-end tests (draft + grade, fake-driven) — blocked by `.4`
   - `.6` US-006 — Gemini pricing SKUs in `pricing.py` — **READY** (parallel-safe; no deps)
-  - `.7` US-007 — `GeminiProvider.estimate_input_tokens` + `--estimate` integration — blocked by `.2`, `.6`, **cross-epic on #136 landing first per DEC-019**
+  - `.7` US-007 — `GeminiProvider.estimate_input_tokens` + `--estimate` integration — blocked by `.2`, `.6`, **and `bd_1-scaffolding-41a` (sentinel: #136 PR #152 merged to dev — close on merge to unblock; mechanical encoding of DEC-019)**
   - `.8` US-008 — Live tests (`@pytest.mark.gemini`, raw + draft + grade) + CONTRIBUTING update — blocked by `.2`, `.5`
   - `.9` US-009 — Operator-facing docs + CHANGELOG — blocked by `.2`
   - `.10` Quality Gate (code-review ×4 + CodeRabbit + canonical validate + `wheel_smoke` + `anthropic` + `gemini` markers) — blocked by `.1`–`.9`
@@ -357,16 +357,21 @@ No blockers. One concern (performance/cost) accepted with explicit docs; one con
   `response_schema` for v0.3: the parser is the canonical structural gate, and a full
   Pydantic-derived schema adds surface for marginal benefit.
 
-- **DEC-019 — Sequence after #136 (implementation in progress).** **#136 is being
-  implemented first** — `feature/136-openai-grading` is the active epic; #137 merges
-  on top of it so the `LLMProvider.estimate_input_tokens` ABC extension, the
-  per-provider pricing pattern, the `--estimate` strategy refactor, AND the 9th AST
-  scan (`openai.OpenAI(...)`) are all in place when US-007 / US-001 land. Rebase #137
-  on `dev` (or directly on `feature/136-openai-grading` if needed) after #136 merges
-  rather than racing edits on `providers.py` / `pricing.py` / `cli/_estimate.py` /
-  `tests/test_audit_completeness.py`. The bead-level cross-epic blocker on US-007
-  (already annotated in the beads manifest) is the operational hook for this
-  sequencing.
+- **DEC-019 — Sequence after #136 (implementation in progress; gate is mechanical).**
+  **#136 is being implemented first** — `feature/136-openai-grading` is the active
+  epic; #137 merges on top of it so the `LLMProvider.estimate_input_tokens` ABC
+  extension, the per-provider pricing pattern, the `--estimate` strategy refactor,
+  AND the 9th AST scan (`openai.OpenAI(...)`) are all in place when US-007 lands.
+  Rebase #137 on `dev` (or directly on `feature/136-openai-grading` if needed) after
+  #136 merges rather than racing edits on `providers.py` / `pricing.py` /
+  `cli/_estimate.py` / `tests/test_audit_completeness.py`.
+
+  **Mechanical gate (sentinel bead).** The cross-epic blocker is encoded in bd as
+  `bd_1-scaffolding-41a` ("#136 OpenAI grading PR #152 merged to dev"). US-007
+  (`.7`) `DEPENDS ON` the sentinel; `bd ready` does NOT surface US-007 until the
+  sentinel is closed. **Close the sentinel the moment #136 merges to `dev`** and
+  US-007 unblocks automatically. This avoids the historical pattern of relying on a
+  human to read DEC-019 before picking up a `bd ready` bead.
 
 ## Story breakdown (Phase 4)
 
