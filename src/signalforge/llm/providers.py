@@ -962,24 +962,61 @@ class GeminiProvider(LLMProvider):
     ) -> int:
         """Token count via Gemini's native ``models.count_tokens`` (#137 US-007 / DEC-016).
 
-        **Currently a stub** — the real implementation lands with US-007
-        (``bd_1-scaffolding-txe.7``) which is gated on the sentinel bead
-        ``bd_1-scaffolding-41a`` closing. Once US-007 ships, this method
-        will delegate to ``client.models.count_tokens(model=..., contents=[
-        system + text])`` and return ``response.total_tokens`` (a first-party
-        count, no ``tiktoken`` equivalent needed).
+        First-party server-side count — no ``tiktoken`` equivalent. The
+        ``google-genai`` SDK exposes
+        ``client.models.count_tokens(model=..., contents=[...])`` returning
+        a ``CountTokensResponse`` whose ``total_tokens`` field carries the
+        count. One extra API round-trip per estimate call (comparable to
+        Anthropic's ``messages.count_tokens`` shape).
 
-        Raising rather than returning ``0`` is deliberate: a silently-zero
-        estimate would mis-report a real run's expected cost. The orchestrator
-        catches ``NotImplementedError`` from ``--estimate`` engine paths as a
-        supplementary failure (DEC-005 of #36) and renders the report as
-        ``<unavailable: NotImplementedError>`` rather than aborting.
+        ``system`` is concatenated with ``text`` and sent as a single
+        ``contents`` entry. Gemini's count endpoint does not distinguish a
+        system envelope from regular tokens (unlike Anthropic's server-side
+        counter), so every token contributes to the same total — matching
+        what ``generate_content`` will bill at runtime under
+        ``provider: gemini``.
+
+        ``client`` may be a real :class:`_GeminiClientAdapter` (production),
+        a bare ``google.genai.Client`` (production fallback), or any test
+        object exposing ``.models.count_tokens(model=, contents=)``. When
+        ``None``, builds a fresh client via ``_make_gemini_client`` so the
+        estimate path works without the CLI pre-constructing one.
+
+        Capability flag note: :attr:`supports_token_count` is ``False``,
+        which gates the orchestrator's pre-send count gate on the
+        ``call_llm`` happy path — that capability is about Anthropic-style
+        prompt-cache validation, NOT about whether the provider can answer
+        ``estimate_input_tokens``. Gemini can answer this question via its
+        native endpoint; the estimate path uses it directly without going
+        through the cache-marker code path (#137 DEC-016).
         """
-        del model, text, system, client
-        raise NotImplementedError(
-            "GeminiProvider.estimate_input_tokens is gated on US-007 (#137 DEC-016); "
-            "close sentinel bd_1-scaffolding-41a then run /ralph-run to ship the real impl"
-        )
+        from signalforge.llm.errors import LLMResponseFormatError
+
+        if client is None:
+            from signalforge.llm._gemini_client import _make_gemini_client
+
+            client = _GeminiClientAdapter(_make_gemini_client())
+
+        # The orchestrator hands us either ``_GeminiClientAdapter`` (which
+        # exposes ``.models`` as a property over the raw SDK client) or
+        # any test object that exposes the same shape. Walk the attribute
+        # surface defensively rather than asserting a typed protocol — the
+        # confinement rule keeps every google-genai type-ignore inside the
+        # shim, so this seam intentionally uses ``getattr``.
+        models_ns = getattr(client, "models", None)
+        if models_ns is None or not hasattr(models_ns, "count_tokens"):
+            raise LLMResponseFormatError(
+                "Gemini client missing `.models.count_tokens` surface "
+                "(required for estimate_input_tokens).",
+            )
+
+        response = models_ns.count_tokens(model=model, contents=[system + text])
+        total = getattr(response, "total_tokens", None)
+        if not isinstance(total, int):
+            raise LLMResponseFormatError(
+                "Gemini count_tokens response is missing the `total_tokens` int field.",
+            )
+        return total
 
 
 # Register the Gemini strategy at import time so ``provider_for("gemini")``

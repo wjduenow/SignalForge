@@ -1151,3 +1151,169 @@ def test_geminiprovider_in_signalforge_llm_public_surface() -> None:
 
     assert llm.GeminiProvider is GeminiProvider
     assert "GeminiProvider" in llm.__all__
+
+
+# ---------------------------------------------------------------------------
+# US-007 — GeminiProvider.estimate_input_tokens
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_estimate_input_tokens_via_injected_client() -> None:
+    """:meth:`GeminiProvider.estimate_input_tokens` delegates to the injected
+    client's ``models.count_tokens`` and returns ``response.total_tokens``.
+
+    Pins the load-bearing call shape: ``model=<arg>`` and
+    ``contents=[system + text]``. A regression that re-shaped the call
+    (e.g. splitting system and text into two ``contents`` entries) would
+    silently shift the count by Gemini's per-content envelope tokens.
+    """
+    from signalforge.llm.providers import GeminiProvider
+    from tests.llm._fake_gemini import FakeGeminiClient, FakeGeminiCountTokensResponse
+
+    fake = FakeGeminiClient()
+    captured: dict[str, Any] = {}
+
+    def _capture(kwargs: dict[str, Any]) -> bool:
+        captured.update(kwargs)
+        return True
+
+    fake.expect_count_tokens(
+        matching=_capture,
+        returns=FakeGeminiCountTokensResponse(total_tokens=42),
+    )
+
+    tokens = GeminiProvider().estimate_input_tokens(
+        "gemini-2.5-flash", "hello world", system="sys-prefix ", client=fake
+    )
+
+    assert tokens == 42
+    assert captured == {
+        "model": "gemini-2.5-flash",
+        "contents": ["sys-prefix hello world"],
+    }
+    fake.assert_all_expectations_met()
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_estimate_input_tokens_concatenates_system_and_text() -> None:
+    """The ``contents`` arg is exactly ``[system + text]`` — Gemini's
+    count_tokens endpoint does not distinguish a system envelope from
+    user content, so the provider concatenates them into one entry.
+
+    Asserting on the literal concatenated string (rather than only on
+    membership) catches a regression that flipped the order to
+    ``[text + system]`` or inserted a separator.
+    """
+    from signalforge.llm.providers import GeminiProvider
+    from tests.llm._fake_gemini import FakeGeminiClient, FakeGeminiCountTokensResponse
+
+    fake = FakeGeminiClient()
+    fake.expect_count_tokens(
+        matching=lambda kw: True,
+        returns=FakeGeminiCountTokensResponse(total_tokens=7),
+    )
+
+    tokens = GeminiProvider().estimate_input_tokens(
+        "gemini-2.5-flash", "BODY", system="SYSTEM ", client=fake
+    )
+
+    assert tokens == 7
+    assert fake.count_tokens_calls == [
+        {"model": "gemini-2.5-flash", "contents": ["SYSTEM BODY"]},
+    ]
+    fake.assert_all_expectations_met()
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_estimate_input_tokens_missing_total_tokens_raises() -> None:
+    """A count_tokens response with a missing/non-int ``total_tokens``
+    raises :class:`LLMResponseFormatError` (defensive guard against an
+    SDK response-shape regression).
+
+    Mirrors the Anthropic precedent
+    (``test_anthropic_provider_estimate_input_tokens_raises_on_missing_input_tokens``).
+    """
+    from signalforge.llm.errors import LLMResponseFormatError
+    from signalforge.llm.providers import GeminiProvider
+    from tests.llm._fake_gemini import FakeGeminiClient, FakeGeminiCountTokensResponse
+
+    fake = FakeGeminiClient()
+    # ``total_tokens=None`` is a possible SDK return shape (the field is
+    # ``int | None`` in the real CountTokensResponse); the guard surfaces
+    # it as a typed error rather than letting the orchestrator pretend
+    # the prompt costs zero tokens.
+    fake.expect_count_tokens(
+        matching=lambda kw: True,
+        returns=FakeGeminiCountTokensResponse(total_tokens=None),
+    )
+
+    with pytest.raises(LLMResponseFormatError, match="total_tokens"):
+        GeminiProvider().estimate_input_tokens("gemini-2.5-flash", "hello", system="", client=fake)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_estimate_input_tokens_missing_models_surface_raises() -> None:
+    """A client missing ``.models.count_tokens`` raises
+    :class:`LLMResponseFormatError` rather than ``AttributeError``.
+
+    The ``--estimate`` engine catches typed LLM errors as supplementary
+    failures (cli-layer.md DEC-005 of #36) and renders
+    ``<unavailable: <ErrorClass>>``; an untyped ``AttributeError`` would
+    propagate through the panic boundary as exit 1 instead.
+    """
+    from signalforge.llm.errors import LLMResponseFormatError
+    from signalforge.llm.providers import GeminiProvider
+
+    # A "client" object with no ``.models`` attribute at all.
+    class _BareClient:
+        pass
+
+    with pytest.raises(LLMResponseFormatError, match="models.count_tokens"):
+        GeminiProvider().estimate_input_tokens("gemini-2.5-flash", "hello", client=_BareClient())
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_geminiprovider_estimate_input_tokens_builds_client_when_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``client=None``, the provider builds a fresh SDK client via
+    :func:`signalforge.llm._gemini_client._make_gemini_client` and wraps
+    it in :class:`_GeminiClientAdapter`.
+
+    Patches the shim factory to return a fake whose ``models.count_tokens``
+    is queryable; asserts the factory was called exactly once. Without
+    this lazy-build fallback, callers that don't thread a client through
+    (no v0.x CLI path does on the Gemini estimate happy path right now)
+    would get :class:`AttributeError` instead.
+    """
+    from signalforge.llm import _gemini_client as gemini_shim
+    from signalforge.llm.providers import GeminiProvider
+    from tests.llm._fake_gemini import FakeGeminiCountTokensResponse
+
+    call_counter = {"n": 0}
+
+    class _FakeRawClient:
+        class _Models:
+            def count_tokens(self, **kwargs: Any) -> Any:
+                assert kwargs.get("model") == "gemini-2.5-flash"
+                assert kwargs.get("contents") == ["sys + body"]
+                return FakeGeminiCountTokensResponse(total_tokens=99)
+
+        models = _Models()
+
+    def _factory() -> Any:
+        call_counter["n"] += 1
+        return _FakeRawClient()
+
+    monkeypatch.setattr(gemini_shim, "_make_gemini_client", _factory)
+
+    tokens = GeminiProvider().estimate_input_tokens("gemini-2.5-flash", "body", system="sys + ")
+
+    assert tokens == 99
+    assert call_counter["n"] == 1
