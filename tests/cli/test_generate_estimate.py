@@ -469,9 +469,13 @@ def test_from_profile_dispatches_snowflake_to_snowflake_adapter() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Provider guard (#135 closeout) — --estimate is Anthropic-shaped (it casts to
-# AnthropicClientProtocol + calls count_tokens), so it fails fast rather than
-# project grade cost through a divergent / non-Anthropic provider's client.
+# Provider guard (#135 closeout, narrowed by #136 US-005) — --estimate
+# now dispatches its count_tokens calls through
+# LLMProvider.estimate_input_tokens, so a non-Anthropic provider's
+# --estimate path is supported (OpenAI counts locally via tiktoken). The
+# remaining guard is the divergent-providers check: the engine takes one
+# optional client object, so the two stages MUST use the same provider
+# or we'd silently project grade-stage cost through the drafter's vendor.
 # ---------------------------------------------------------------------------
 
 
@@ -499,37 +503,6 @@ def test_generate_estimate_divergent_providers_fails_fast(
 
         assert code == 2, f"stderr={captured.err}"
         assert "draft.provider and grade.provider to match" in captured.err
-        assert "Traceback" not in captured.err
-    finally:
-        providers_mod._REGISTRY.clear()
-        providers_mod._REGISTRY.update(saved)
-
-
-def test_generate_estimate_non_anthropic_provider_fails_fast(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """Both stages on a non-Anthropic provider → CliInputError (exit 2)."""
-    from signalforge.llm import providers as providers_mod
-    from tests.llm._fake_provider import FakeNoCacheProvider
-
-    saved = dict(providers_mod._REGISTRY)
-    providers_mod.register_provider(FakeNoCacheProvider())
-    try:
-        project_dir = make_fake_dbt_project(tmp_path)
-        (project_dir / "signalforge.yml").write_text(
-            "llm:\n  provider: fake-nocache\ngrade:\n  provider: fake-nocache\n",
-            encoding="utf-8",
-        )
-        monkeypatch.chdir(project_dir)
-        _install_estimate_patches(monkeypatch)
-
-        code = main(["generate", "--estimate", "model.shop.customers"])
-        captured = capsys.readouterr()
-
-        assert code == 2, f"stderr={captured.err}"
-        assert "only provider='anthropic'" in captured.err
         assert "Traceback" not in captured.err
     finally:
         providers_mod._REGISTRY.clear()
