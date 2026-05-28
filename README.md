@@ -4,7 +4,7 @@
 
 > LLM-drafted dbt schema.yml, tests, and docs — pruned against real warehouse data so only signal-bearing tests ship.
 
-**Status:** v0.1 alpha. Eleven issues shipped — single-model draft + warehouse prune, BigQuery adapter, `signalforge` CLI, `signalforge init-demo` for first-run UX. Designing in the open on the `dev` branch.
+**Supported warehouses:** **BigQuery** (since v0.1 — the original target adapter, exercised end-to-end by `signalforge init-demo` and the quick start below) and **Snowflake** (since v0.3 — full sampling, materialised-sample CTAS, `EXPLAIN`-based bytes estimation, and a typed-error taxonomy that reuses the existing `WarehouseError` hierarchy). One Snowflake combination is deferred: `safety: aggregate-only` (Snowflake `column_stats`) is not yet implemented — every other combination is functional (`safety: schema-only` / `safety: sample`, with `prune.scope: full` or `prune.scope: sample` under both `prune.sample_strategy: materialised` and `oneshot`). Postgres ships as a typed `NotImplementedError` stub today; Databricks and Redshift remain on the roadmap. The architecture is warehouse-agnostic — adapters plug in behind a thin sampling/profiling interface (`WarehouseAdapter.from_profile`), so new vendors slot in without touching the draft / prune / grade / diff stages.
 
 ## Why this exists
 
@@ -53,7 +53,7 @@ There's a second entry point that skips the LLM entirely. If you already have a 
 
 No draft, no grade, no LLM call — just "which of these tests earn their place?" Tests SignalForge can't evaluate (custom / dbt-expectations / namespaced generics) are reported as skipped, never silently dropped.
 
-> **Status (v0.1):** Live on PyPI — `pip install signalforge-dbt`. See [Quick start](#quick-start).
+> **Live on PyPI** — `pip install signalforge-dbt`. The quick start below runs against BigQuery (the bundled `init-demo` fixture targets the Austin bikeshare public dataset). Snowflake users wire their own dbt profile and project — see [Configuration](#configuration) and [docs/snowflake-e2e-setup.md](docs/snowflake-e2e-setup.md).
 
 ## Quick start
 
@@ -298,11 +298,6 @@ SignalForge to redraft it. Point `prune-existing` at it and the
 warehouse tells you which of those tests add signal. There's no LLM
 call, so the only requirement is warehouse access (a dbt profile).
 
-> **Availability:** `prune-existing` is a v0.2 feature, in development on
-> the `dev` branch — it is **not** in the current `pip install
-> signalforge-dbt` (v0.1) release. To use it now, install from source:
-> `pip install "signalforge-dbt @ git+https://github.com/wjduenow/SignalForge.git@dev"`.
-
 ```bash
 # From inside your dbt project (with target/manifest.json present):
 signalforge prune-existing customers --schema models/marts/schema.yml
@@ -334,13 +329,11 @@ which dbt test shapes are supported vs. skipped.
 
 ## CLI
 
-The CLI exposes five subcommands (the first four ship in the v0.1 PyPI
-release; `prune-existing` is on the in-development v0.2 line — see
-[Prune the tests you already have](#prune-the-tests-you-already-have)):
+The CLI exposes five subcommands, all shipped on PyPI:
 
 ```bash
 signalforge generate <model>                     # full draft -> prune -> grade -> diff pipeline for one model
-signalforge prune-existing <model> --schema <p>  # prune an existing schema.yml's tests (ingest -> prune -> diff, no LLM) [v0.2]
+signalforge prune-existing <model> --schema <p>  # prune an existing schema.yml's tests (ingest -> prune -> diff, no LLM)
 signalforge init-demo [<dest>]                   # copy the bundled Austin demo project into <dest>
 signalforge lint                                 # validate signalforge.yml config blocks (no LLM/warehouse calls)
 signalforge version                              # print the SignalForge version
@@ -367,13 +360,59 @@ reference, exit-code taxonomy, and environment variables.
 
 ## Configuration
 
-### Configuring the BigQuery adapter
+SignalForge reads your existing dbt `profiles.yml` and dispatches on
+`type:` — no second profile to maintain. The dispatch happens in
+`WarehouseAdapter.from_profile(profile)`; each adapter then exposes the
+same `sample_rows` / `materialise_sample` / `run_test_sql` /
+`estimate_query_bytes` surface to the rest of the pipeline.
 
-SignalForge reads your dbt profile and instantiates a `BigQueryAdapter`
-via `WarehouseAdapter.from_profile(profile)`. See
-[docs/warehouse-adapter-ops.md](docs/warehouse-adapter-ops.md) for ADC
-setup, cost defaults, sampling strategy (and the TABLESAMPLE
-cost-asterisk), `PartitionFilter` use, and the typed-error reference.
+### BigQuery (v0.1)
+
+A standard `type: bigquery` dbt target works. Authenticate via
+Application Default Credentials and set the billing project:
+
+```bash
+gcloud auth application-default login
+export GOOGLE_CLOUD_PROJECT=<your-billing-project>
+```
+
+Cost is bounded by `maximum_bytes_billed` (100 MB default; the bundled
+demo `profiles.yml` raises it to 1 GB so the materialised-sample scan
+clears the cap). `use_query_cache` is forced off for reproducibility.
+Full reference — ADC setup, sampling strategy (and the TABLESAMPLE
+cost-asterisk), `PartitionFilter` use, and the typed-error reference —
+is in [docs/warehouse-adapter-ops.md](docs/warehouse-adapter-ops.md).
+
+### Snowflake (v0.3)
+
+A standard `type: snowflake` dbt target works — `account`, `user`,
+`warehouse`, plus either `password`, key-pair (`private_key_path` +
+`private_key_passphrase`), or SSO (`authenticator: externalbrowser`).
+`database` / `schema` / `role` are optional at profile level; SignalForge
+will not override them at runtime.
+
+Recommended cost guardrails before pointing it at a real Snowflake
+account: create a **resource monitor** (e.g. 1-credit daily cap), use
+an **X-Small warehouse with aggressive auto-suspend**, and start with
+`prune.scope: sample` + `prune.sample_strategy: materialised`. Setup
+walkthrough (incl. an `.env.example`) is in
+[docs/snowflake-e2e-setup.md](docs/snowflake-e2e-setup.md); adapter
+reference (sampling, session cleanup, `EXPLAIN`-based bytes estimation,
+known limitations) is in
+[docs/warehouse-adapter-ops.md § Snowflake adapter](docs/warehouse-adapter-ops.md).
+
+> **Known limitation:** `safety: aggregate-only` (Snowflake `column_stats`)
+> is not yet implemented. Every other combination is functional.
+
+### Pipeline-stage configuration
+
+Cross-cutting behaviour (sampling mode, prune scope, grade thresholds,
+diff rendering) is configured per stage in `signalforge.yml` — see
+[docs/safety-ops.md](docs/safety-ops.md),
+[docs/prune-ops.md](docs/prune-ops.md),
+[docs/grade-ops.md](docs/grade-ops.md), and
+[docs/diff-ops.md](docs/diff-ops.md). `signalforge lint` validates the
+file with no LLM or warehouse calls.
 
 ## Data safety
 
@@ -445,19 +484,28 @@ reference.
 
 ## Roadmap
 
-| Version | Scope                                                                              |
-| ------- | ---------------------------------------------------------------------------------- |
-| v0.1    | Single-model draft + warehouse prune; first warehouse adapter (BigQuery); CLI only |
-| v0.2    | Prune externally-authored tests (`prune-existing`); additional warehouse adapters (Snowflake, Postgres); project-wide drift detection |
-| v0.3    | GitHub Action with PR comment integration                                          |
-| v0.4    | Rubric customization; organization-wide style profiles                             |
-| v1.0    | dbt Fusion engine compatibility; dbt MCP server consumption                        |
+Shipped:
 
-The architecture is warehouse-agnostic — adapters plug in behind a thin
-sampling/profiling interface. BigQuery is the v0.1 target because of its
-generous query-bytes pricing for sampled reads and its first-class
-`INFORMATION_SCHEMA.JOBS` history for downstream cost analysis. Snowflake,
-Databricks, Postgres, and Redshift are all on the roadmap; PRs welcome.
+| Version | Released   | Scope                                                                                                                                                          |
+| ------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| v0.1    | 2026-05-20 | Single-model draft + warehouse prune + LLM-as-judge grade + diff renderer; BigQuery adapter; `signalforge` CLI (`generate`, `lint`, `version`)                  |
+| v0.2    | 2026-05-21 | Ingest externally-authored `schema.yml`; `signalforge prune-existing` (no-LLM prune path); `signalforge init-demo` first-run UX; uv tooling; Python 3.11–3.13   |
+| v0.3    | 2026-05-27 | Snowflake warehouse adapter (full sampling, materialised-sample CTAS, `EXPLAIN`-based bytes estimation); custom business-rule tests (`custom_sql`, the 5th test type) — drafted from `meta.signalforge.business_rules` or LLM inference, then pruned like any other test |
+
+Planned:
+
+| Version | Scope                                                                                                            |
+| ------- | ---------------------------------------------------------------------------------------------------------------- |
+| v0.4    | **Multi-provider LLM support** — Gemini and OpenAI behind the provider-neutral seam (Anthropic remains default) |
+| v0.5    | **Installable Claude Code skill** — `signalforge install-skill` ships a SKILL.md that teaches Claude to drive the CLI |
+| v0.6    | **Airflow operator** — drop SignalForge into a scheduled DAG for periodic schema drift / signal-rot detection    |
+| v0.7    | **GitHub Action** — PR-time invocation with inline comment integration (kept/dropped/flagged surfaced on the PR) |
+| v0.8    | **Rubric customization** — project-specific grading criteria; organization-wide style profiles                   |
+| v1.0    | **dbt Fusion engine compatibility** — dbt MCP server consumption; first-class Fusion integration                 |
+
+Warehouse coverage beyond BigQuery + Snowflake — Postgres (stub today),
+Databricks, Redshift — slots in behind the existing `WarehouseAdapter`
+ABC and is roadmap-tracked but not version-pinned; PRs welcome.
 
 Detail is tracked in GitHub Issues against this repo.
 
