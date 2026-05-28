@@ -506,13 +506,27 @@ but must validate quality afterward. Truncated judge responses surface as
 `LLMResponseFormatError` (the provider-neutral `is_clean_completion` gate raises
 on any non-clean finish_reason — Anthropic `stop_reason="max_tokens"`, OpenAI
 `finish_reason="length"`, Gemini `finish_reason="MAX_TOKENS"`) and degrade
-the pair with `reasoning="call failed: GradeLLMError"` per #155 DEC-005.
+the pair with `reasoning="call failed: GradeLLMError: <inner finish_reason message>"`
+per #155 DEC-005 + #158 (the inner provider message — naming the actual
+`finish_reason` value — is surfaced into the audit JSONL so a residual
+degrade is self-diagnosing without re-reading stderr).
 
-| Provider                 | Recommended floor | Rationale                                                                                  |
-|--------------------------|-------------------|--------------------------------------------------------------------------------------------|
-| Anthropic (Sonnet 4.6+)  | 1024              | Sufficient for full reasoning; tested in BQ smoke.                                         |
-| OpenAI (gpt-4o)          | 1024              | Same headroom; no observed truncation.                                                     |
-| Gemini (2.5-flash+)      | **2048**          | Verbose reasoning style; 512 / 1024 observed truncating mid-string (issue #155 DEC-008).   |
+| Provider                 | Recommended floor | Rationale                                                                                                                                                                                                                                                  |
+|--------------------------|-------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Anthropic (Sonnet 4.6+)  | 1024              | Sufficient for full reasoning; tested in BQ smoke.                                                                                                                                                                                                         |
+| OpenAI (gpt-4o)          | 1024              | Same headroom; no observed truncation.                                                                                                                                                                                                                     |
+| Gemini (2.5-flash+)      | **4096**          | Verbose reasoning style; 512 / 1024 observed truncating mid-string (#155 DEC-008). 2048 verified safe at the 5-pair in-isolation smoke scale but **#158 found 5–6/108 pairs still degrade at 2048 on the full Austin fixture** — 4096 is the fixture-scale floor. |
+
+> **Fixture-scale caveat (issue #158):** these floors are *necessary
+> but not sufficient* — Gemini's per-pair `reasoning` length is
+> high-variance, so a fixture with substantially more artifacts than
+> the Austin bikeshare e2e (~27 artifacts × 4 criteria = ~108 pairs)
+> may still see residual `MAX_TOKENS` degrades at 4096. The honest
+> guidance is to treat the floor as fixture-scale-dependent: validate
+> with a full-fixture run, watch `GradingReport.aggregate_complete`,
+> and bump if any pair degrades with `reasoning` mentioning
+> `finish_reason='MAX_TOKENS'`. The diagnostic in the degrade reasoning
+> tells you exactly which `finish_reason` fired.
 
 ## OpenAI provider
 
@@ -582,7 +596,7 @@ grade:
 - **Install extra:** `pip install signalforge-dbt[gemini]` (or `uv sync --dev` in a contributor checkout). Pulls `google-genai>=0.5,<1`.
 - **Env var:** `GOOGLE_API_KEY` (read by the SDK; SignalForge never logs it).
 - **Server-side JSON enforcement:** `GeminiProvider.build_create_kwargs` sets `response_mime_type="application/json"` on the `GenerateContentConfig` (DEC-018 of #137). Belt-and-braces with the tolerant `extract_json_payload` parser.
-- **Safety-filter handling:** When Gemini blocks a response (`finish_reason` ∈ `{SAFETY, RECITATION, OTHER, ...}` with no text parts), `GeminiProvider.extract_text_blocks` raises `LLMResponseFormatError` naming the reason (DEC-005 of #137); the grade engine wraps it as `GradeLLMError` and degrades the affected pair via the conservative `score=None` / `reasoning="call failed: GradeLLMError"` taxonomy.
+- **Safety-filter handling:** When Gemini blocks a response (`finish_reason` ∈ `{SAFETY, RECITATION, OTHER, ...}` with no text parts), `GeminiProvider.extract_text_blocks` raises `LLMResponseFormatError` naming the reason (DEC-005 of #137); the grade engine wraps it as `GradeLLMError` and degrades the affected pair via the conservative `score=None` / `reasoning="call failed: GradeLLMError: <inner finish_reason message>"` taxonomy (#158 surfaces the inner provider message into the audit field so the actual `finish_reason` value — `SAFETY` vs `RECITATION` vs `MAX_TOKENS` — is recoverable from `.signalforge/grade.jsonl` alone).
 
 **No prompt caching (cost note — DEC-013 of #137).** v0.3 Gemini ships
 **without** prompt caching. `GeminiProvider` reports

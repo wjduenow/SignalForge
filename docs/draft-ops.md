@@ -588,11 +588,11 @@ but must validate quality afterward (truncated draft responses surface as
 `LLMOutputJSONError` or `LLMOutputAnchorContractError` and fail the run rather
 than ship a partial `schema.yml`).
 
-| Provider                 | Recommended floor | Rationale                                                                                  |
-|--------------------------|-------------------|--------------------------------------------------------------------------------------------|
-| Anthropic (Sonnet 4.6+)  | 1024              | Sufficient for full reasoning; tested in BQ smoke.                                         |
-| OpenAI (gpt-4o)          | 1024              | Same headroom; no observed truncation.                                                     |
-| Gemini (2.5-flash+)      | **2048**          | Verbose reasoning style; 512 / 1024 observed truncating mid-string (issue #155 DEC-008).   |
+| Provider                 | Recommended floor | Rationale                                                                                                                                                                                                                |
+|--------------------------|-------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Anthropic (Sonnet 4.6+)  | 1024              | Sufficient for full reasoning; tested in BQ smoke.                                                                                                                                                                       |
+| OpenAI (gpt-4o)          | 1024              | Same headroom; no observed truncation.                                                                                                                                                                                   |
+| Gemini (2.5-flash+)      | **4096**          | Verbose reasoning style; 512 / 1024 observed truncating mid-string (#155 DEC-008). Drafter floor mirrors the grader floor raised by #158 — Gemini's per-call output is high-variance enough that the grader's lesson applies. |
 
 ## OpenAI provider
 

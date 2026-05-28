@@ -219,21 +219,22 @@ def test_e2e_signalforge_generate_against_austin_bikeshare(
             grade_model="gpt-4o",
         )
     elif grade_provider == "gemini":
-        # ``grade_max_output_tokens=2048`` is **load-bearing**, not
-        # cosmetic. Issue #155 Finding 2: Gemini 2.5-flash's verbose
-        # ``reasoning`` field routinely exceeds
-        # ``max_output_tokens=512``/``1024`` on this fixture's grading
-        # workload, hitting MAX_TOKENS and truncating mid-string. That
-        # truncation surfaces downstream as a degraded grade result
-        # (``aggregate_complete=False``) and would flake assertion #6
-        # below. The #155 live probe verified ``2048`` passes cleanly.
-        # Per DEC-009 the floor lives here in the test overlay rather
+        # ``grade_max_output_tokens=4096`` is **load-bearing**, not
+        # cosmetic. Issue #155 Finding 2 + issue #158: Gemini 2.5-flash's
+        # verbose ``reasoning`` field truncates at low caps (512/1024)
+        # on every fixture; the #155 probe found 2048 sufficient for
+        # the 5-pair in-isolation smoke, but #158 caught that this
+        # full-pipeline fixture runs 108–116 (artifact × criterion)
+        # pairs and 5–6 of them still exceed 2048 (typed-degrading to
+        # ``GradeLLMError`` and flipping ``aggregate_complete=False``).
+        # 4096 is the #158 floor for the full-fixture workload. Per
+        # DEC-009 the floor still lives here in the test overlay rather
         # than as a bumped ``GradeConfig`` production default.
         apply_provider_override(
             project_dir,
             grade_provider="gemini",
             grade_model="gemini-2.5-flash",
-            grade_max_output_tokens=2048,
+            grade_max_output_tokens=4096,
         )
     else:  # pragma: no cover — parametrize guards the value space.
         raise AssertionError(f"unhandled grade_provider: {grade_provider!r}")

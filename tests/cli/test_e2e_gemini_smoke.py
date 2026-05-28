@@ -7,13 +7,18 @@ and ``grade.model`` to ``"gemini-2.5-flash"``. The drafter stays
 Anthropic Sonnet (per DEC-011 — fixture stability; only the grader is
 parametrised across providers).
 
-The ``grade_max_output_tokens=2048`` overlay is **load-bearing**, not
+The ``grade_max_output_tokens=4096`` overlay is **load-bearing**, not
 cosmetic. Issue #155 Finding 2: Gemini 2.5-flash's verbose
 ``reasoning`` field routinely exceeds ``max_output_tokens=512``/``1024``
-on this fixture's 5-pair grading workload, hitting ``MAX_TOKENS`` and
-truncating mid-string. The live probe in #155 verified ``2048`` passes
-cleanly. Without the cap, this test would flake the same way the
-original validation broke. Per DEC-009 the floor lives in the test
+on small fixtures, hitting ``MAX_TOKENS`` and truncating mid-string.
+The #155 live probe verified ``2048`` passes cleanly on the in-isolation
+5-pair smoke (:file:`tests/grade/test_gemini_grade_live.py`) — but
+**issue #158** caught the structural gap: this full-pipeline fixture
+runs 108–116 (artifact × criterion) pairs, and Gemini's per-pair
+``reasoning`` length is high-variance enough that 5–6 of them still
+exceed 2048 (typed-degrading as ``"call failed: GradeLLMError"`` and
+flipping ``aggregate_complete=False``). 4096 is the #158 floor for the
+full-fixture workload. Per DEC-009 the floor still lives in the test
 overlay rather than as a bumped production default — avoids
 over-budgeting Anthropic/OpenAI calls.
 
@@ -161,20 +166,22 @@ def test_e2e_signalforge_generate_against_austin_bikeshare_with_gemini_grader(
     # drafter stays Anthropic Sonnet per DEC-011 (no ``llm.provider``
     # override); only ``grade:`` block knobs change here.
     #
-    # ``grade_max_output_tokens=2048`` is **load-bearing**, not cosmetic.
-    # Issue #155 Finding 2: Gemini 2.5-flash's verbose ``reasoning``
-    # field routinely exceeds ``max_output_tokens=512``/``1024`` on this
-    # fixture's grading workload, hitting MAX_TOKENS and truncating
-    # mid-string. That truncation surfaces downstream as a degraded
-    # grade result (``aggregate_complete=False``) and would flake
-    # assertion #6 below. The #155 live probe verified ``2048`` passes
-    # cleanly. Per DEC-009 the floor lives here in the test overlay
-    # rather than as a bumped ``GradeConfig`` production default.
+    # ``grade_max_output_tokens=4096`` is **load-bearing**, not cosmetic.
+    # Issue #155 Finding 2 + issue #158: Gemini 2.5-flash's verbose
+    # ``reasoning`` field truncates at low caps (512/1024) on every
+    # fixture; the #155 probe found 2048 sufficient for the 5-pair
+    # in-isolation smoke, but #158 caught that this full-pipeline
+    # fixture runs 108–116 (artifact × criterion) pairs and 5–6 of them
+    # still exceed 2048 (typed-degrading to ``GradeLLMError`` and
+    # flipping ``aggregate_complete=False``). 4096 is the #158 floor for
+    # this fixture's grading workload. Per DEC-009 the floor still
+    # lives here in the test overlay rather than as a bumped
+    # ``GradeConfig`` production default.
     apply_provider_override(
         project_dir,
         grade_provider="gemini",
         grade_model="gemini-2.5-flash",
-        grade_max_output_tokens=2048,
+        grade_max_output_tokens=4096,
     )
 
     # The committed `profiles.yml` pins ``project: bigquery-public-data``
@@ -256,25 +263,29 @@ def test_e2e_signalforge_generate_against_austin_bikeshare_with_gemini_grader(
 
     # 6. Grade aggregate_complete — no degraded calls.
     #    This is the **load-bearing assertion** that proves the
-    #    ``max_output_tokens=2048`` overlay fixes the truncation bug.
-    #    Post-#155 US-001 the provider-neutral ``is_clean_completion``
-    #    gate raises ``LLMResponseFormatError`` on a MAX_TOKENS finish
-    #    even when partial text is present, which ``call_llm``
-    #    propagates as ``LLMError`` and ``grade_artifacts`` wraps as
+    #    ``max_output_tokens=4096`` overlay (#158) fixes the truncation
+    #    bug at this fixture's scale. Post-#155 US-001 the
+    #    provider-neutral ``is_clean_completion`` gate raises
+    #    ``LLMResponseFormatError`` on a MAX_TOKENS finish even when
+    #    partial text is present, which ``call_llm`` propagates as
+    #    ``LLMError`` and ``grade_artifacts`` wraps as
     #    ``GradeLLMError`` →
-    #    ``GradingResult(score=None, passed=False, reasoning="call failed: GradeLLMError")``
-    #    → ``aggregate_complete=False``. The cap MUST keep every
-    #    (artifact, criterion) pair scoring cleanly.
+    #    ``GradingResult(score=None, passed=False,
+    #    reasoning="call failed: GradeLLMError: <inner finish_reason message>")``
+    #    (#158 broadened the reasoning to surface the inner finish_reason
+    #    so a residual degrade is self-diagnosing) → ``aggregate_complete=False``.
+    #    The cap MUST keep every (artifact, criterion) pair scoring cleanly.
     grade_sidecar = project_dir / ".signalforge" / "grade.json"
     assert grade_sidecar.is_file(), f"grade sidecar missing at {grade_sidecar}"
     grading_report = GradingReport.model_validate_json(grade_sidecar.read_text())
     assert grading_report.aggregate_complete is True, (
         "expected GradingReport.aggregate_complete=True (every (artifact, criterion) "
-        "pair scored cleanly with Gemini at max_output_tokens=2048); got False — "
-        "either the 2048 cap is no longer sufficient (see #155 Finding 2; raise the "
-        "overlay), Gemini hit a safety-filter / RECITATION block, or "
+        "pair scored cleanly with Gemini at max_output_tokens=4096); got False — "
+        "either the 4096 cap is no longer sufficient (see #158; raise the overlay "
+        "and re-measure), Gemini hit a safety-filter / RECITATION block, or "
         "grade.total_budget_seconds tripped. Inspect "
-        ".signalforge/grade.jsonl for the per-pair degrade reasons."
+        ".signalforge/grade.jsonl for the per-pair degrade reasons — #158 now "
+        "carries the inner finish_reason into the reasoning string."
     )
 
     # 7. No traceback in stderr (DEC-016 of cli-layer.md — the CLI's

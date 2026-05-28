@@ -123,7 +123,7 @@ from signalforge.grade.rubric import (
 )
 from signalforge.llm import AnthropicClientProtocol
 from signalforge.llm.client import call_llm
-from signalforge.llm.errors import LLMError
+from signalforge.llm.errors import LLMError, LLMResponseFormatError
 from signalforge.manifest.models import Model
 from signalforge.prune.models import PruneResult
 
@@ -357,6 +357,30 @@ def _grade_one(
         cache_read_input_tokens=result.cache_read_input_tokens,
     )
     return grading_result, event
+
+
+def _format_degrade_reasoning(exc: BaseException) -> str:
+    """Render the ``GradingResult.reasoning`` string for a degraded pair.
+
+    Resolves issue #158: the bare ``f"call failed: {type(exc).__name__}"``
+    shape loses the vendor ``finish_reason`` value when a provider's
+    response-shape gate fires (Gemini ``MAX_TOKENS`` vs ``SAFETY`` vs
+    ``RECITATION`` all collapse to ``"call failed: GradeLLMError"``).
+    When the wrapped cause is :class:`LLMResponseFormatError`, surface its
+    bare ``message`` field (which names the vendor field + value per
+    :meth:`LLMProvider.unclean_finish_reason_message`) so operators can
+    diagnose from the audit JSONL / sidecar alone without re-reading
+    stderr.
+
+    For every other cause (auth, rate-limit, parser failure, budget
+    exhausted) the existing ``"call failed: <ClassName>"`` shape is
+    preserved verbatim — the audit corpus stays diff-clean for the 90%
+    case, and only the response-shape branch grows the diagnostic.
+    """
+    base = f"call failed: {type(exc).__name__}"
+    if isinstance(exc, GradeLLMError) and isinstance(exc.cause, LLMResponseFormatError):
+        return f"{base}: {exc.cause.message}"
+    return base
 
 
 def _build_degraded(
@@ -704,7 +728,7 @@ def grade_artifacts(
                 grading_result, event = _build_degraded(
                     artifact_id=artifact_id,
                     criterion=criterion,
-                    reasoning=f"call failed: {type(exc).__name__}",
+                    reasoning=_format_degrade_reasoning(exc),
                     config=resolved_config,
                     rubric_hash=rubric_hash,
                     template_hash=template_hash,
