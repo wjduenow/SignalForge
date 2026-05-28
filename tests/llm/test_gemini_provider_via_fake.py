@@ -213,6 +213,197 @@ def test_call_llm_gemini_safety_blocked_raises_llmresponseformaterror() -> None:
 
 @pytest.mark.unit
 @pytest.mark.llm
+def test_call_llm_gemini_max_tokens_with_partial_text_raises_at_is_clean_gate() -> None:
+    """A ``finish_reason="MAX_TOKENS"`` response that CARRIES partial text
+    must still surface :class:`LLMResponseFormatError` from the new
+    :meth:`GeminiProvider.is_clean_completion` gate — the load-bearing
+    Finding-1 orchestrator pin (#155 US-001/US-003).
+
+    The pre-existing safety-blocked test above exercises the SAFETY path
+    where no text is collected at all. THIS test exercises the
+    MAX_TOKENS-with-partial-text path: the response has a non-empty
+    ``parts[0].text`` (typical of mid-string truncation), and pre-fix
+    ``extract_text_blocks`` would return that partial JSON happily,
+    sending it downstream to ``parse_grade_response`` which would raise
+    ``GradeOutputError(violation_type="json_parse")``. The post-fix
+    orchestrator wire-in runs ``is_clean_completion`` AHEAD of
+    ``extract_text_blocks``, so MAX_TOKENS routes to ``LLMResponseFormatError``
+    here (and via the grade-engine wrap → ``GradeLLMError``).
+
+    A regression that re-ordered the gate after ``extract_text_blocks``
+    would silently let partial-text MAX_TOKENS responses slip back through
+    — this test catches that at unit-test cost rather than at live-e2e
+    cost (`test_e2e_gemini_smoke.py` would also fail invariant #6 in that
+    case, but at $0.02/run instead of zero).
+    """
+    fake = FakeGeminiClient()
+    truncated = FakeGeminiResponse(
+        candidates=[
+            FakeGeminiCandidate(
+                content=FakeGeminiContent(
+                    parts=[FakeGeminiPart(text='{"score": 0.9, "reasoning": "partial trunc')]
+                ),
+                finish_reason="MAX_TOKENS",
+            )
+        ],
+        usage_metadata=FakeGeminiUsageMetadata(prompt_token_count=120, candidates_token_count=512),
+    )
+    fake.expect_messages_create(matching={}, returns=truncated)
+
+    with pytest.raises(LLMResponseFormatError) as excinfo:
+        call_llm(
+            system="SYS",
+            cached_block="CACHED",
+            dynamic_block="DYN",
+            model="gemini-2.5-flash",
+            max_tokens=512,
+            prompt_version="v1",
+            provider="gemini",
+            client=fake,
+        )
+
+    assert "MAX_TOKENS" in str(excinfo.value)
+    # Exactly one create call — no retry, no leak through to extract_text_blocks.
+    assert len(fake.create_calls) == 1
+    fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# is_clean_completion — happy-path (#155 US-001)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_is_clean_completion_true_for_stop() -> None:
+    """``finish_reason.name == 'STOP'`` is the canonical Gemini clean
+    completion (#155 DEC-005/DEC-006).
+
+    The orchestrator's gate at ``call_llm`` (immediately before
+    :meth:`GeminiProvider.extract_text_blocks`) must let this response
+    through to the text-extraction path; this happy-path pin asserts the
+    gate evaluates to ``True``. Gemini's enum-typed ``finish_reason``
+    surface — read via ``.name`` to dodge the enum value/identity question
+    — is the load-bearing semantic that the #155 fix promotes from "only
+    raise on zero text parts" to "raise on any non-clean stop reason."
+    """
+    from signalforge.llm.providers import GeminiProvider
+
+    response = _ok_response(text='{"score": 1.0}')
+    assert GeminiProvider().is_clean_completion(response) is True
+
+
+# ---------------------------------------------------------------------------
+# is_clean_completion — unclean paths (#155 US-002)
+#
+# The MAX_TOKENS-with-partial-text test below is the LOAD-BEARING #155
+# Finding 1 regression. Before the fix, ``GeminiProvider.extract_text_blocks``
+# only raised ``LLMResponseFormatError`` when ZERO text parts were collected
+# (providers.py:867-897 pre-fix). A ``finish_reason='MAX_TOKENS'`` response
+# that produced a partial (truncated mid-string) text part silently returned,
+# the truncated JSON reached ``parse_grade_response``, and the grade engine
+# wrapped the resulting ``GradeOutputError(violation_type="json_parse")`` as
+# a degraded result with ``reasoning="call failed: GradeOutputError"`` —
+# masking the actionable typed degrade (``"call failed: GradeLLMError"``)
+# that llm-drafter.md § "Gemini provider shape" DEC-005 of #137 contracts.
+# The #155 fix promotes the gate to ``is_clean_completion`` which fires on
+# ANY non-clean ``finish_reason`` regardless of whether partial text was
+# emitted, routing every truncation/safety/recitation case uniformly through
+# the ``LLMResponseFormatError`` → ``GradeLLMError`` degrade path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_is_clean_completion_false_for_max_tokens_with_partial_text() -> None:
+    """``finish_reason.name == 'MAX_TOKENS'`` with a non-empty partial text
+    part is UNCLEAN — the LOAD-BEARING #155 Finding 1 regression pin.
+
+    See the section header above for the full bug history. The test
+    constructs a Gemini response that carries a real (mid-string) text
+    part AND ``finish_reason=MAX_TOKENS`` — exactly the shape that
+    silently slipped through pre-fix. The fix routes it through
+    :class:`LLMResponseFormatError`; this pin asserts the gate fires.
+    """
+    from signalforge.llm.providers import GeminiProvider
+
+    response = FakeGeminiResponse(
+        candidates=[
+            FakeGeminiCandidate(
+                content=FakeGeminiContent(
+                    parts=[
+                        FakeGeminiPart(
+                            text='{"score": 0.9, "reasoning": "partial truncated',
+                        )
+                    ]
+                ),
+                finish_reason="MAX_TOKENS",
+            )
+        ],
+        usage_metadata=FakeGeminiUsageMetadata(prompt_token_count=120, candidates_token_count=2048),
+    )
+    assert GeminiProvider().is_clean_completion(response) is False
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+@pytest.mark.parametrize("finish_reason", ["SAFETY", "RECITATION", "OTHER"])
+def test_is_clean_completion_false_for_non_stop_reasons(finish_reason: str) -> None:
+    """Non-``STOP`` finish reasons are UNCLEAN (#155 DEC-002).
+
+    The clean set is exactly ``{STOP}``. Gemini's documented non-clean
+    finish-reasons — ``SAFETY`` (content blocked by safety filter),
+    ``RECITATION`` (model produced verbatim training-data snippet), and
+    ``OTHER`` (catch-all bucket the SDK uses for filter mechanisms not
+    enumerated above) — all route through the typed degrade. The
+    ``MAX_TOKENS`` case has its own dedicated test above because it is
+    the load-bearing #155 Finding 1 regression.
+    """
+    from signalforge.llm.providers import GeminiProvider
+
+    # Build a response with the partial-text shape — proves the gate
+    # raises regardless of whether content was emitted.
+    response = FakeGeminiResponse(
+        candidates=[
+            FakeGeminiCandidate(
+                content=FakeGeminiContent(parts=[FakeGeminiPart(text="partial")]),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage_metadata=FakeGeminiUsageMetadata(prompt_token_count=120, candidates_token_count=10),
+    )
+    assert GeminiProvider().is_clean_completion(response) is False
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_unclean_finish_reason_message_names_finish_reason_field() -> None:
+    """:meth:`unclean_finish_reason_message` renders an operator-facing
+    diagnostic that names the vendor-native ``finish_reason`` field and
+    quotes the actual unclean value (#155 DEC-007).
+
+    Vendor-accurate naming (``finish_reason`` for Gemini vs
+    ``stop_reason`` for Anthropic) is why DEC-007 made this a
+    provider-override rather than a shared default.
+    """
+    from signalforge.llm.providers import GeminiProvider
+
+    response = FakeGeminiResponse(
+        candidates=[
+            FakeGeminiCandidate(
+                content=FakeGeminiContent(parts=[FakeGeminiPart(text="partial")]),
+                finish_reason="MAX_TOKENS",
+            )
+        ],
+        usage_metadata=FakeGeminiUsageMetadata(prompt_token_count=120, candidates_token_count=10),
+    )
+    message = GeminiProvider().unclean_finish_reason_message(response)
+    assert "finish_reason" in message
+    assert "'MAX_TOKENS'" in message
+
+
+@pytest.mark.unit
+@pytest.mark.llm
 def test_call_llm_gemini_retry_429_exhaustion_routes_to_llmratelimiterror(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -269,3 +460,51 @@ def test_call_llm_gemini_retry_429_exhaustion_routes_to_llmratelimiterror(
     assert excinfo.value.attempts == 3
     assert isinstance(excinfo.value.cause, genai_errors.ClientError)
     fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# is_clean_completion — defensive raise on malformed SDK response (#155 QG / codecov)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_is_clean_completion_raises_on_missing_or_empty_candidates() -> None:
+    """A response object lacking ``candidates`` (or with an empty list)
+    raises :class:`LLMResponseFormatError` naming the missing field.
+
+    Guards against an SDK shape regression. Pinned at unit cost so a
+    regression doesn't have to wait for live e2e to surface.
+    """
+    from types import SimpleNamespace
+
+    from signalforge.llm.providers import GeminiProvider
+
+    # Missing attribute entirely.
+    no_attr = SimpleNamespace()
+    with pytest.raises(LLMResponseFormatError, match="candidates"):
+        GeminiProvider().is_clean_completion(no_attr)
+
+    # Present but empty list.
+    empty = SimpleNamespace(candidates=[])
+    with pytest.raises(LLMResponseFormatError, match="candidates"):
+        GeminiProvider().is_clean_completion(empty)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_is_clean_completion_raises_on_missing_finish_reason_on_first_candidate() -> None:
+    """A response with ``candidates[0]`` present but missing
+    ``finish_reason`` raises :class:`LLMResponseFormatError` naming the
+    missing field.
+
+    Guards against an SDK shape regression where the candidate object
+    exists but the finish-reason field disappears. Pinned at unit cost.
+    """
+    from types import SimpleNamespace
+
+    from signalforge.llm.providers import GeminiProvider
+
+    response = SimpleNamespace(candidates=[SimpleNamespace()])  # no finish_reason
+    with pytest.raises(LLMResponseFormatError, match="finish_reason"):
+        GeminiProvider().is_clean_completion(response)

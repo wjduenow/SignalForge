@@ -373,7 +373,12 @@ def test_grade_artifacts_safety_blocked_response_degrades_pair(
     assert len(degraded) == 1
     assert len(scored) == expected_calls - 1
 
-    # The degraded pair carries the GradeLLMError shape (DEC-005).
+    # The degraded pair carries the GradeLLMError shape (DEC-005 of #137,
+    # generalised provider-neutral by DEC-001/DEC-005 of #155 — the
+    # is_clean_completion ABC now routes BOTH the safety-blocked path
+    # exercised here AND the MAX_TOKENS-with-partial-text path through
+    # the same orchestrator gate, so this assertion is the shared
+    # contract pin for both regressions).
     bad = degraded[0]
     assert bad.score is None
     assert bad.passed is False

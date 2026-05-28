@@ -162,6 +162,14 @@ A user-facing CLI flag's value can drift across surfaces (README, test argv, pla
 
 Issue #10's gotcha: `signalforge generate stg_bikeshare_trips` (bare name) failed with `ModelNotFoundError`; only the file path or unique_id forms work. Caught only by Pass 4 of Quality Gate review — no unit test exercises the CLI's full model-arg path against the real `Manifest.get_model`. Mitigation: pre-merge review explicitly verifies CLI examples by running them locally.
 
+### Per-test provider overlay via `apply_provider_override` (#155 US-004 / DEC-012)
+
+When an e2e test needs to swap the LLM provider config (e.g. `tests/cli/test_e2e_openai_smoke.py` runs `signalforge generate` against the same Austin bikeshare fixture as the baseline BQ smoke, but with `grade.provider: openai` instead of the Anthropic default), the canonical helper is `tests.cli._e2e_helpers.apply_provider_override(project_dir, *, grade_provider=None, grade_model=None, grade_max_output_tokens=None) -> None`. Reads `<project_dir>/signalforge.yml`, overlays the `grade:` block deltas, writes back. Non-destructive: unset knobs left alone. Raises `FileNotFoundError` if the fixture's `signalforge.yml` is missing. This is the seam #155 US-005/US-006/US-007 (the three e2e provider variants) all flow through.
+
+Two load-bearing rules: (1) **per-test overlay, not a `GradeConfig` default bump.** Lowering `GradeConfig.max_output_tokens` default would over-budget Anthropic/OpenAI calls; the per-test overlay scopes the Gemini-specific 2048 floor to the test that needs it (DEC-009 of #155). (2) **Drafter stays Anthropic Sonnet across all three e2e providers per DEC-011** — fixture stability requires only the grader varies. Tests that overlay `grade_provider` MUST still gate on `ANTHROPIC_API_KEY` (drafter) AND the provider-specific key (grader); a 3-env-var skip gate is insufficient when the drafter remains Anthropic — five is the contract (drafter API key + grader API key + their respective `SF_RUN_*` opt-ins + `GOOGLE_CLOUD_PROJECT` for the BigQuery leg). #155 QG Pass 4 caught the openai-smoke 3-vs-5 drift exactly because the docstring contract said "three" while the BQ smoke + Gemini sibling already used the five-var pattern.
+
+The same belt-and-suspenders gating still applies: marker + runtime `_skip_reason()` + `tmp_path` isolation. The overlay is applied AFTER `copy_fixture_to_tmp` so the committed fixture is never modified.
+
 ## Reference
 
 `plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `plans/super/27-codecov-coverage.md` — DEC-001, DEC-004, DEC-009. `plans/super/10-e2e-bigquery-smoke.md` — DEC-001, DEC-002, DEC-004, DEC-008, DEC-010, DEC-022. `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh`, `tests/cli/_e2e_helpers.py`, `tests/cli/test_e2e_bigquery_smoke.py`.
