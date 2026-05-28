@@ -4,8 +4,9 @@
 
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/137
 - **Parent epic:** #134 (pluggable LLM provider for grading — OpenAI/Gemini). Milestone v0.3.
-- **Depends on:** #135 (provider-neutral LLM seam) — **merged** (`32b298f`, PR #148 → dev).
-- **Sibling:** #136 (OpenAI grading) — open, no plan yet; this plan establishes the per-vendor pattern #136 will mirror.
+- **Depends on:**
+  - **#135** (provider-neutral LLM seam) — **merged** (`32b298f`, PR #148 → dev).
+  - **#136** (OpenAI grading) — plan landed as PR #152, awaiting approval. #137 **sequences after #136**: #136 ships the `LLMProvider.estimate_input_tokens` ABC extension, the `pricing.py` per-provider SKU pattern, and the `--estimate` strategy refactor (with an Anthropic byte-identity snapshot as the floor). #137 piggybacks on that shape with a Gemini-native implementation (DEC-019).
 - **Phase:** detailing → publish
 - **Branch:** `feature/137-gemini-grading`
 - **Worktree:** `../worktrees/SignalForge/137-gemini-grading`
@@ -13,17 +14,19 @@
 ## Beads manifest
 
 - **Epic:** _(set on devolve)_
-- **Tasks** (linear chain; each blocks the next):
+- **Tasks** (linear chain except where noted parallel-safe):
   - `.1` US-001 — `_gemini_client.py` shim + AST confinement scan extension
-  - `.2` US-002 — `GeminiProvider(LLMProvider)` + registration
+  - `.2` US-002 — `GeminiProvider(LLMProvider)` + registration (incl. `response_mime_type="application/json"`)
   - `.3` US-003 — `pyproject.toml` `[gemini]` extra + dev-group sync + `__init__` export
   - `.4` US-004 — `FakeGeminiClient` + offline provider unit tests
   - `.5` US-005 — Provider-neutrality end-to-end tests (draft + grade, fake-driven)
-  - `.6` US-006 — Live tests (`@pytest.mark.gemini`, draft + grade) + CONTRIBUTING update
-  - `.7` US-007 — Operator-facing docs (draft-ops / grade-ops / README)
-  - `.8` Quality Gate
-  - `.9` Patterns & Memory (orchestrator: `.claude/rules/llm-drafter.md` + `grade-layer.md`)
-- **Sessions:** 1 (2026-05-27)
+  - `.6` US-006 — Gemini pricing SKUs in `pricing.py` (parallel-safe; no deps)
+  - `.7` US-007 — `GeminiProvider.estimate_input_tokens` + `--estimate` integration (depends on #136 ABC extension + US-002 + US-006)
+  - `.8` US-008 — Live tests (`@pytest.mark.gemini`, draft + grade + `--estimate`) + CONTRIBUTING update
+  - `.9` US-009 — Operator-facing docs + CHANGELOG (draft-ops / grade-ops / README / cost-estimate-ops / CHANGELOG)
+  - `.10` Quality Gate (includes `wheel_smoke` because `[gemini]` extra changes packaging)
+  - `.11` Patterns & Memory (orchestrator: `.claude/rules/llm-drafter.md` + `grade-layer.md`)
+- **Sessions:** 2 (2026-05-27 — initial plan; 2026-05-27 — extension after #136 plan comparison)
 
 ## What / Why
 
@@ -88,6 +91,26 @@ Safety-filter responses surface as a candidate with `finish_reason` ∈ {`SAFETY
 `RECITATION`, `OTHER`, …} and no `text` parts — the shim must detect this and route to
 a typed `LLMError` (DEC-005 below).
 
+### `pricing.py` + `cli/_estimate.py` — the seam #136 generalises, #137 piggybacks on
+
+- `src/signalforge/llm/pricing.py` ships three Anthropic SKUs today
+  (`claude-sonnet-4-6`, `claude-opus-4-7`, `claude-haiku-4-5`); `PRICE_TABLE_VERSION =
+  "2026-05-11"`. `lookup(model)` raises `EstimateUnknownModelError` for any non-Anthropic
+  id, so `--estimate` is silently un-usable for `grade.provider: gemini` until SKUs land.
+- `src/signalforge/cli/_estimate.py` is **Anthropic-coupled**: it threads a single
+  `anthropic_client: AnthropicClientProtocol` through `_count_draft_tokens` (line 309)
+  and the grader-side equivalent (line 348), both hard-calling
+  `anthropic_client.messages.count_tokens(...)`.
+- **#136 (DEC-003, DEC-013, US-005) generalises this** by adding
+  `LLMProvider.estimate_input_tokens(model, text) -> int` to the ABC, threading the
+  resolved provider strategy through `cli/_estimate.py`, and pinning an Anthropic
+  byte-identity snapshot as the floor. OpenAI implements via `tiktoken` (local BPE).
+- **#137 piggybacks** on that ABC extension with a Gemini-native implementation via
+  `client.models.count_tokens(model=, contents=)` — the google-genai SDK exposes a real
+  count_tokens method, so no `tiktoken`-equivalent local-tokeniser dep is needed (the
+  shim wraps the SDK call; cost is one extra API round-trip per estimate call, identical
+  in shape to the Anthropic path). See DEC-016 + US-007.
+
 ### Snowflake `[snowflake]` extra — the pattern to mirror (`pyproject.toml`)
 
 `snowflake-connector-python>=3,<4` appears in **both** `[project.optional-dependencies].snowflake`
@@ -144,8 +167,12 @@ inside each test).
 | **Reproducibility hashes** | pass | `rubric_hash`, `prompt_version_template`, `criterion_prompt_hash`, `response_text_hash`, `args_hash` are provider-neutral. Cache-token fields default 0 — already round-tripped by drift detectors. |
 | **Testing strategy** | pass | Hand-rolled `FakeGeminiClient` + `expect_*` for offline behaviour; offline exception-map tests use genuine `google.genai.errors.*` instances (SDK is a dev dep); `@pytest.mark.gemini` for live (gated by `SF_RUN_GEMINI=1` + `GOOGLE_API_KEY`). Live tests run `--no-cov`. |
 | **Observability** | pass | No new logging beyond what `call_llm` already emits (and most of that is gated off by capability flags). Cleanup-boundary fail-soft N/A — no session state. |
-| **Docs / 5-surface parity** | concern → addressed | Provider list mention in `docs/{draft,grade}-ops.md` ("today only `anthropic` is registered" → "`anthropic` and `gemini`"); cost-guidance bullet about no-caching; CONTRIBUTING line for `uv run pytest -m gemini --no-cov`; README provider list. `.claude/rules/llm-drafter.md` + `grade-layer.md` updates handled by orchestrator-only Patterns & Memory story (Ralph workers can't write `.claude/`, per memory). |
-| **Worker-writability** | pass | All shipped code + tests + `docs/` + `README` + `pyproject.toml` are worker-writable. The two `.claude/rules/` updates land in the orchestrator-handled P&M story. |
+| **`--estimate` integration** | concern → addressed | The ABC extension (`estimate_input_tokens`) ships in #136; #137 implements it via Gemini's native `client.models.count_tokens` and adds 3 Gemini SKUs to `pricing.py`. Documented as DEC-016/017 + US-006/007. **Sequencing: merge after #136** so the ABC + estimate refactor are in place (DEC-019). |
+| **Server-side JSON enforcement** | concern → addressed | `extract_json_payload` (issue #144) already tolerates a prose preamble, but server-side enforcement eliminates the drift class entirely. `GeminiProvider.build_create_kwargs` sets `GenerateContentConfig(response_mime_type="application/json")`. Mirrors #136 DEC-006 (`response_format={"type":"json_object"}`). DEC-018. |
+| **Pricing-table churn** | pass | `_PRICES_MUTABLE` gains 3 Gemini SKUs (`gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.0-flash`) with cache fields = 0.0; `PRICE_TABLE_VERSION` bumps. Additive; no Anthropic SKU moves. DEC-017. |
+| **Wheel-build smoke** | pass | New `[gemini]` extra changes packaging metadata. QG runs `uv run pytest -m wheel_smoke --no-cov` per the maintainer marker convention (`python-build.md` § "wheel_smoke maintainer-gate"). |
+| **Docs / 5-surface parity** | concern → addressed | Provider list mention in `docs/{draft,grade}-ops.md` ("today only `anthropic` is registered" → "`anthropic`, `openai`, `gemini`" once #136 lands first); cost-guidance bullet about no-caching; `docs/cost-estimate-ops.md` mention of the Gemini estimate path; CONTRIBUTING line for `uv run pytest -m gemini --no-cov`; README provider list; **CHANGELOG entry under `[Unreleased]`**. `.claude/rules/llm-drafter.md` + `grade-layer.md` updates handled by orchestrator-only Patterns & Memory story (Ralph workers can't write `.claude/`, per memory). |
+| **Worker-writability** | pass | All shipped code + tests + `docs/` + `README` + `pyproject.toml` + `CHANGELOG.md` are worker-writable. The two `.claude/rules/` updates land in the orchestrator-handled P&M story. |
 
 No blockers. One concern (performance/cost) accepted with explicit docs; one concern (5-surface parity) addressed by the story split.
 
@@ -288,6 +315,45 @@ No blockers. One concern (performance/cost) accepted with explicit docs; one con
   without the `[gemini]` extra — the operator just never gets `provider: gemini` to
   resolve a real call, but import-time behaviour is graceful.
 
+- **DEC-016 — `GeminiProvider.estimate_input_tokens` via native `count_tokens`.**
+  google-genai exposes `client.models.count_tokens(model=, contents=)` as a real,
+  server-side token counter — no `tiktoken`-equivalent local-tokeniser dependency
+  needed (cleaner than #136's OpenAI path, which leans on `tiktoken` because OpenAI
+  has no first-party count endpoint on Chat Completions). The shim wraps the call;
+  `GeminiProvider.estimate_input_tokens(model, text)` delegates via the shim. Cost:
+  one extra API round-trip per `--estimate` call (identical in shape to Anthropic).
+  **Depends on the ABC method shipping with #136** (DEC-019).
+
+- **DEC-017 — 3 Gemini pricing SKUs + `PRICE_TABLE_VERSION` bump.** Add
+  `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.0-flash` to `_PRICES_MUTABLE` in
+  `src/signalforge/llm/pricing.py`. Each carries `input_per_mtok` + `output_per_mtok`
+  per Google's public price page at PR-prep time; cache fields = 0.0 (no Anthropic-
+  equivalent discount). Bump `PRICE_TABLE_VERSION` to the ship date. Mirrors #136
+  DEC-007 (which adds 4 OpenAI SKUs in the same dict). Additive — no Anthropic SKU
+  moves; Anthropic-config `--estimate` byte-identity unaffected.
+
+- **DEC-018 — Server-side JSON enforcement via `response_mime_type="application/json"`.**
+  `GeminiProvider.build_create_kwargs` constructs a `GenerateContentConfig` with
+  `response_mime_type="application/json"` (and `system_instruction=system`). Belt-and-
+  braces with the existing tolerant `extract_json_payload` parser (issue #144):
+  server-side enforcement eliminates the prose-preamble drift class, the parser
+  remains the fallback if a future model strips the flag. The grade system prompt
+  already names "JSON" so any prompt-requirement check passes. Mirrors #136 DEC-006
+  exactly — same defence, different vendor flag. Deliberately NOT setting
+  `response_schema` for v0.3: the parser is the canonical structural gate, and a full
+  Pydantic-derived schema adds surface for marginal benefit.
+
+- **DEC-019 — Sequence after #136.** #137 merges **after** #136 so the
+  `LLMProvider.estimate_input_tokens` ABC extension, the per-provider pricing pattern,
+  and the `--estimate` strategy refactor are in place. The contingency is small:
+  if #137 ships first, an extra story is needed to add the ABC extension + the
+  Anthropic byte-identity snapshot + the OpenAI-less estimate refactor — work that
+  fundamentally belongs to #136. Avoid by gating PR-merge order; document the
+  dependency on the PR body and in the bead description.
+  **If the sequencing slips:** raise a coordination bead in the parent epic (#134) to
+  re-base #137 on top of merged-#136 rather than racing the rebases on `providers.py`
+  / `pricing.py` / `cli/_estimate.py`.
+
 ## Story breakdown (Phase 4)
 
 Each story includes its trace to DECs, acceptance criteria, "Done when," files, and TDD
@@ -335,7 +401,7 @@ confinement test passes, no `google.genai` symbol appears in `git grep` outside
 ### US-002 — `GeminiProvider(LLMProvider)` + registration
 
 **Traces to:** DEC-001, DEC-003, DEC-004, DEC-005, DEC-006, DEC-013 (capability flags
-drive docs wording).
+drive docs wording), DEC-018 (server-side JSON enforcement).
 
 **Description.** Implement the `LLMProvider` subclass and register it at module import.
 
@@ -343,7 +409,10 @@ drive docs wording).
 - `src/signalforge/llm/providers.py` (edit): add `GeminiProvider` after
   `AnthropicProvider`; call `register_provider(GeminiProvider())` at module scope
   (line below the existing Anthropic registration). Implement all six abstract methods
-  + the two capability-flag class attrs.
+  + the two capability-flag class attrs. `build_create_kwargs` constructs the call
+  with `GenerateContentConfig(system_instruction=system, response_mime_type="application/json")`
+  per DEC-004 + DEC-018; cached_block + dynamic_block concatenated into one
+  user-role contents entry. No `cache_control` anywhere.
 - `src/signalforge/llm/__init__.py` (edit): re-export `GeminiProvider` alongside
   `AnthropicProvider`.
 
@@ -359,10 +428,12 @@ safety-filter branch, `extract_usage`, `classify_exception`) get unit tests in U
   unreachable-when-supports_token_count=False message (matches `FakeNoCacheProvider`).
 - `provider.build_create_kwargs(...)` returns a dict with no `cache_control` block
   anywhere and no `extra_headers` key (capability-gated, DEC-008 of #135 / DEC-003 here).
+- The kwargs dict carries the JSON-mime config (asserted by inspecting the dict
+  string-representation OR the `config` arg's `response_mime_type` field; DEC-018).
 - Canonical validation command passes.
 
 **Done when.** Provider registered, all abstract methods implemented, capability flags
-both `False`, `__init__` exports updated, US-004 tests green.
+both `False`, JSON-mime enforcement wired, `__init__` exports updated, US-004 tests green.
 
 ### US-003 — `pyproject.toml` `[gemini]` extra + dev-group sync
 
@@ -462,12 +533,93 @@ passes.
 **Done when.** Both test files exist; each test asserts the listed invariants; runs
 green in `uv run pytest`.
 
-### US-006 — Live tests + CONTRIBUTING update
+### US-006 — Gemini pricing SKUs in `pricing.py`
 
-**Traces to:** DEC-012.
+**Traces to:** DEC-017.
+
+**Description.** Add three Gemini SKUs to `_PRICES_MUTABLE` in `pricing.py`; bump
+`PRICE_TABLE_VERSION`. Mirrors #136 US-004's OpenAI-SKU additions; parallel-safe.
+
+**Files.**
+- `src/signalforge/llm/pricing.py` (edit): extend `_PRICES_MUTABLE` with `gemini-2.5-pro`,
+  `gemini-2.5-flash`, `gemini-2.0-flash`. Each carries `input_per_mtok` +
+  `output_per_mtok` (USD per 1M tokens) from Google's public price page at PR-prep
+  time; `cache_write_5m_per_mtok = 0.0`; `cache_read_per_mtok = 0.0`. Bump
+  `PRICE_TABLE_VERSION` to the ship date (e.g. `"2026-05-27"`).
+- `tests/llm/test_pricing.py` (edit): assert `lookup("gemini-2.5-pro")`,
+  `lookup("gemini-2.5-flash")`, `lookup("gemini-2.0-flash")` each return a non-zero
+  `input_per_mtok` + `output_per_mtok` and zero cache fields. Assert
+  `lookup("gemini-9-unicorn")` still raises `EstimateUnknownModelError`. Assert the
+  three existing Anthropic SKUs round-trip unchanged.
+
+**TDD.** Pricing-lookup tests first (red); add SKU entries (green); pin the version bump.
+
+**Acceptance criteria.**
+- All three Gemini SKUs resolve via `lookup()` with non-zero input/output rates and
+  zero cache rates.
+- `PRICE_TABLE_VERSION` bumped (asserted via byte-equal string match against the new
+  ship date).
+- Unknown Gemini model still raises `EstimateUnknownModelError`.
+- The three Anthropic SKUs are byte-identical (their `ModelPricing` instances unchanged).
+
+**Done when.** Pricing extended, tests green, validation passes.
+
+**Depends on:** none (parallel-safe with US-001 … US-005).
+
+### US-007 — `GeminiProvider.estimate_input_tokens` + `--estimate` integration
+
+**Traces to:** DEC-016, DEC-017, DEC-019.
+
+**Description.** Implement Gemini's side of the `LLMProvider.estimate_input_tokens`
+ABC method shipped by #136. Uses google-genai's native `client.models.count_tokens`
+(no `tiktoken`-equivalent local dep) — cleaner story than OpenAI's path because
+Gemini has a first-party count endpoint. Pin a fake-driven `--estimate` test that
+drives the path end-to-end.
+
+**Files.**
+- `src/signalforge/llm/_gemini_client.py` (edit): add a thin wrapper around
+  `client.models.count_tokens(model=, contents=)` (e.g. `_count_gemini_tokens(client,
+  model, text) -> int`) — confined to the shim per DEC-001.
+- `src/signalforge/llm/providers.py` (edit): implement
+  `GeminiProvider.estimate_input_tokens(model, text) -> int` delegating to the shim
+  helper. The orchestrator-side strategy threading lives in #136's US-005.
+- `tests/llm/test_gemini_provider.py` (edit): add a test driving
+  `GeminiProvider.estimate_input_tokens` against `FakeGeminiClient` queued with a
+  `count_tokens` response (extend `FakeGeminiClient` from US-004 with
+  `expect_count_tokens(matching, returns)` if not already covered).
+- `tests/cli/test_estimate.py` (edit): add a fake-driven test running
+  `signalforge generate --estimate` with `grade.provider: gemini` + `grade.model:
+  gemini-2.5-flash` (and the drafter-side equivalent), asserting the report renders
+  with non-zero token counts + non-zero USD figures. Mirrors #136 US-005's OpenAI
+  fake-driven estimate test.
+
+**TDD.** Provider unit test first (`GeminiProvider.estimate_input_tokens` returns
+the count_tokens response's `total_tokens` field). Then the CLI integration test
+driving `--estimate` end-to-end. Anthropic byte-identity is #136's gate (this story
+inherits the snapshot test landed there).
+
+**Acceptance criteria.**
+- `GeminiProvider.estimate_input_tokens("gemini-2.5-flash", "hello world")` returns
+  a positive int (against a `FakeGeminiClient` queued with the expected response).
+- `signalforge generate --estimate` with `grade.provider: gemini` produces an
+  `EstimateReport` with non-zero grader token counts and non-zero USD figures.
+- Anthropic byte-identity snapshot (from #136) remains green — no estimate-path
+  regression from the Gemini wiring.
+
+**Done when.** Above ACs pass; validation green; no `--cov-fail-under` regression.
+
+**Depends on:** US-002 (provider class exists), US-006 (pricing SKUs exist), and
+**#136 merged** (provides the ABC extension + the cli/_estimate.py strategy
+refactor). If #136 is not yet merged at devolve time, this story is blocked.
+
+### US-008 — Live tests + CONTRIBUTING update
+
+**Traces to:** DEC-012, DEC-016.
 
 **Description.** Maintainer-gated live tests against the real Gemini API. Registers
-`gemini` marker; threads `_skip_reason()` env-var gate.
+`gemini` marker; threads `_skip_reason()` env-var gate. Covers `call_llm`, `draft_schema`,
+`grade_artifacts`, AND `--estimate` (the last one is the live counterpart to US-007's
+fake-driven CLI test).
 
 **Files.**
 - `pyproject.toml` (edit): register `gemini` marker; add `and not gemini` to default
@@ -481,9 +633,13 @@ green in `uv run pytest`.
 - `tests/grade/test_gemini_grade_live.py` (new): `@pytest.mark.gemini` `grade_artifacts`
   against a 1-criterion rubric over a 1-artifact candidate; asserts one
   `GradingResult` with `score is not None` and `aggregate_complete is True`.
+- `tests/cli/test_e2e_estimate_gemini.py` (new): `@pytest.mark.gemini`
+  `signalforge generate --estimate ...` with `grade.provider: gemini` + `grade.model:
+  gemini-2.5-flash`; asserts the rendered report includes non-zero grader USD
+  estimate, exit code 0, no traceback. Mirrors #136 US-006's OpenAI live-estimate test.
 - `CONTRIBUTING.md` (edit): add `uv run pytest -m gemini --no-cov` to the maintainer
-  marker-run list, alongside the existing `snowflake` line. Note required env vars:
-  `SF_RUN_GEMINI=1 GOOGLE_API_KEY=...`.
+  marker-run list, alongside the existing `snowflake` / `anthropic` / `openai` lines.
+  Note required env vars: `SF_RUN_GEMINI=1 GOOGLE_API_KEY=...`.
 
 **TDD.** Live tests are integration smokes; structure assertions are deliberately
 modest (no LLM-output-byte assertions; engineered determinism via 1-criterion rubric +
@@ -492,17 +648,17 @@ documents is not needed here — we're proving the wire, not the output quality)
 
 **Acceptance criteria.**
 - Default `pytest` does NOT collect `@pytest.mark.gemini` tests.
-- `pytest -m gemini --no-cov` with no env vars surfaces three clear `pytest.skip(reason)`
+- `pytest -m gemini --no-cov` with no env vars surfaces four clear `pytest.skip(reason)`
   outputs (one per test) naming the missing var.
 - Each live test, with env vars set, exits 0 against the real API.
 
-**Done when.** Marker registered + excluded; three live tests exist with the env-gate;
+**Done when.** Marker registered + excluded; four live tests exist with the env-gate;
 CONTRIBUTING line landed.
 
-### US-007 — Operator-facing docs
+### US-009 — Operator-facing docs + CHANGELOG
 
 **Traces to:** DEC-007 (recommended model id), DEC-010 (`[gemini]` install), DEC-013
-(cost guidance + provider list).
+(cost guidance + provider list), DEC-016/017 (estimate path + pricing).
 
 **Description.** Worker-writable docs only. `.claude/rules/*` updates live in P&M
 (orchestrator-only, per `skill-parity.md` + memory). Update the operator surface:
@@ -510,30 +666,49 @@ CONTRIBUTING line landed.
 **Files.**
 - `docs/grade-ops.md` (edit):
   - In `signalforge.yml` `grade:` block example, add a comment showing `provider: gemini`
-    + recommended model id alternative.
-  - Update the "today only `anthropic` is registered" text → "today `anthropic` and
-    `gemini` are registered."
+    + recommended model id alternative (`gemini-2.5-flash` for judge work).
+  - Update the registered-providers wording to enumerate `anthropic`, `openai` (from
+    #136), and `gemini`.
   - Add a "Gemini cost note (v0.3)" paragraph to § Cost guidance with the DEC-013 text.
   - Note the `[gemini]` install (`pip install signalforge-dbt[gemini]`).
 - `docs/draft-ops.md` (edit): equivalent updates for the drafter `llm:` block (provider
   list, install hint, cost note).
-- `README.md` (edit): if the README lists supported providers, add Gemini. (Verify
-  during implementation; otherwise skip.)
+- `docs/cost-estimate-ops.md` (edit, or create if absent following #136 US-007): name
+  Gemini's `client.models.count_tokens` as the estimate-path source — no
+  `tiktoken`-equivalent local dep, one extra round-trip per estimate call. Reference
+  the three Gemini SKUs in the pricing table.
+- `README.md` (edit): if the README lists supported providers, add Gemini.
+- `CHANGELOG.md` (edit): under `[Unreleased]` "Added": `Gemini as a grading + drafting
+  provider (#137). Set grade.provider: gemini or llm.provider: gemini in
+  signalforge.yml; requires the [gemini] install extra and GOOGLE_API_KEY. v0.3 ships
+  without prompt caching; explicit Gemini context caching is a follow-up.`
 
 **TDD.** N/A (docs).
 
 **Acceptance criteria.** Each ops doc names `gemini` as a registered provider AND ships
 a cost-guidance paragraph naming the no-caching deferral. The install hint appears in
-both ops docs. Canonical validation command passes (the docs gate runs `mkdocs build`
-on PR via the `docs-build` job per `docs-publishing.md`).
+both ops docs. CHANGELOG carries the new entry under `[Unreleased]`. Canonical
+validation command passes (the docs gate runs `mkdocs build` on PR via the `docs-build`
+job per `docs-publishing.md`).
 
-**Done when.** Docs edits land, mkdocs build is clean.
+**Done when.** Docs edits land, CHANGELOG entry landed, mkdocs build is clean.
 
 ### Quality Gate
 
 Run `/code-review` (or equivalent) **4 times** across the full changeset, fixing every
 real bug found each pass. Run CodeRabbit on the PR. Canonical validation command must
-pass after every round of fixes. **Depends on US-001 … US-007.**
+pass after every round of fixes. **Additionally:**
+
+- `uv run pytest -m anthropic --no-cov` passes (proves Anthropic byte-identity in the
+  `--estimate` strategy refactor end-to-end — inherits #136's snapshot).
+- `uv run pytest -m gemini --no-cov` passes locally with credentials (live smoke).
+- `uv run pytest -m wheel_smoke --no-cov` passes (new `[gemini]` extra doesn't break
+  wheel build — per `python-build.md` § "wheel_smoke maintainer-gate"; the test asserts
+  the canonical demo file set still appears under the expected wheel path with the new
+  optional-dep declaration).
+- Coverage stays at or above the current threshold.
+
+**Depends on:** US-001 … US-009.
 
 ### Patterns & Memory (orchestrator-only)
 
