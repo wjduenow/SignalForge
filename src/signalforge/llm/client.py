@@ -473,6 +473,20 @@ def call_llm(
                 cause=exc,
             ) from exc
 
+    # Gate on the response's finish/stop reason BEFORE extracting text
+    # (#155 US-001). The provider's allowlist of clean stop reasons
+    # catches truncation / safety-filter / tool-use / recitation paths
+    # uniformly across vendors and routes them through the typed
+    # ``LLMResponseFormatError`` → ``GradeLLMError`` degrade rather than
+    # leaking partial text into the downstream JSON parser (where it
+    # would surface as the *wrong* typed degrade per #155 DEC-001).
+    # Raised here, post-call and outside the retry try/except, so it is
+    # explicitly non-retryable (response-shape errors are not in the
+    # retry taxonomy — retrying a truncated generation gets you the same
+    # truncation).
+    if not strategy.is_clean_completion(response):
+        raise LLMResponseFormatError(strategy.unclean_finish_reason_message(response))
+
     # Build the typed result from the response via the strategy.
     text_blocks = strategy.extract_text_blocks(response)
     usage = strategy.extract_usage(response)
