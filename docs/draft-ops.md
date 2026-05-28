@@ -15,10 +15,15 @@ call. It sits **after** the safety layer (which produces the
 `LLMRequest`) and **before** prune / grade / diff render
 (#6 / #7 / #8). Two subpackages share the work (DEC-001):
 
-- `signalforge.llm` — the centralized SDK seam. One function,
-  `call_anthropic`, owns retry policy, prompt-cache pre-send checks,
-  exception translation, and the `LLMResult` value object. No other
-  module imports the `anthropic` SDK.
+- `signalforge.llm` — the centralized, provider-neutral LLM seam. One
+  function, `call_llm`, owns the retry loop, backoff math, prompt-cache
+  pre-send checks, and the `LLMResult` value object; a pluggable
+  `LLMProvider` strategy (resolved from a process-level registry) owns
+  the vendor-specific request build, response extraction, and
+  exception classification (issue #135). The default provider is
+  `anthropic`; its SDK noise (type-stub gaps, lazy exception-class
+  import) stays confined to `signalforge.llm._anthropic_client`. No
+  other module imports the `anthropic` SDK.
 - `signalforge.draft` — the orchestration layer on top of that seam.
   Owns the prompt builder, the JSON + anchor-contract parser, the
   fail-closed response-audit JSONL writer, and the `draft_schema` /
@@ -51,7 +56,7 @@ the layer stays SDK-agnostic and pyright-clean.
 
 | Name                     | Kind      | Description                                                                                                          |
 | ------------------------ | --------- | -------------------------------------------------------------------------------------------------------------------- |
-| `call_anthropic`         | function  | The single Anthropic `messages.create` seam. Owns retry policy + cache pre-send check. Returns `LLMResult`.          |
+| `call_llm`               | function  | The single provider-neutral LLM seam. Owns retry policy + cache pre-send check; selects an `LLMProvider` strategy by name (default `"anthropic"`). Returns `LLMResult`. |
 | `LLMResult`              | model     | Frozen result shape: `text_blocks`, `response_text`, token counts (input/output/cache_creation/cache_read), `model`, `prompt_version`, `raw_message`. |
 | `LLMError`               | exception | Base class for everything in `signalforge.llm.errors`.                                                               |
 | `LLMHelperError`         | exception | Umbrella for SDK-call failures. Subclasses cover the retry-taxonomy branches.                                        |
@@ -339,6 +344,14 @@ file in the diff (see
 
 ## Cache behaviour
 
+Prompt caching is a **provider capability** (issue #135): the seam
+emits a `cache_control` marker, the `extended-cache-ttl-2025-04-11`
+beta header, and the pre-send `count_tokens` gate only when the
+selected `LLMProvider` reports `supports_prompt_caching` /
+`supports_token_count`. A provider that supports neither simply reports
+0 cache tokens and skips the marker. The default `anthropic` provider
+supports both, so the behaviour below is unchanged.
+
 Default `cache_ttl="5m"`; opt in to `"1h"` via `DraftConfig.cache_ttl`
 (DEC-005, DEC-009). The `extended-cache-ttl-2025-04-11` beta header
 is auto-set when `cache_ttl="1h"`; sending it for `"5m"` is at best
@@ -507,6 +520,7 @@ other stages and silently ignored by the draft loader.
 ```yaml
 # signalforge.yml
 llm:
+  provider: anthropic        # registry-validated; only "anthropic" registered today
   model: claude-sonnet-4-6
   cheap_model: claude-haiku-4-5-20251001
   max_output_tokens: 4096
@@ -519,9 +533,16 @@ llm:
 
 Field-by-field:
 
-- **`model`** — the Anthropic model id used by every `call_anthropic`
-  invocation. Default `claude-sonnet-4-6`. Any string the SDK accepts
-  is allowed.
+- **`provider`** — the LLM provider strategy name (issue #135 DEC-007),
+  resolved against the `signalforge.llm.providers` registry and threaded
+  into `call_llm` from `draft_schema`. Default `"anthropic"`. An unknown
+  value fails loud at config-load, listing the registered provider
+  names. Deliberately a registry-validated `str`, not a `Literal` — the
+  provider registry is a forward-looking plugin point (#136 OpenAI /
+  #137 Gemini register more providers); today only `anthropic` is
+  registered.
+- **`model`** — the model id used by every `call_llm` invocation.
+  Default `claude-sonnet-4-6`. Any string the SDK accepts is allowed.
 - **`cheap_model`** — informational; not selected automatically.
   The CLI (#9) flips on `--cheap` to swap `model` for this value.
   Default `claude-haiku-4-5-20251001`.

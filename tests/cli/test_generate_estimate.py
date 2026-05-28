@@ -16,7 +16,7 @@ The tests use a real :class:`FakeAnthropicClient` and a real
 :class:`BigQueryAdapter`-with-:class:`FakeBigQueryClient` so the engine
 runs end-to-end. The CLI's stage entry points
 (``manifest.load`` / ``warehouse.load_profile`` /
-``_make_warehouse_adapter`` / ``_make_anthropic_client``) are patched
+``_make_warehouse_adapter`` / ``AnthropicProvider.make_client``) are patched
 so no real disk / network is touched, but ``signalforge.cli._estimate``
 itself is NOT patched — that's the whole point of the AC-4 contract.
 """
@@ -64,7 +64,8 @@ def _install_estimate_patches(
 ) -> tuple[FakeAnthropicClient, FakeBigQueryClient]:
     """Patch the four CLI seams that the ``--estimate`` short-circuit
     consumes (manifest load, warehouse profile load, warehouse adapter
-    factory, anthropic client factory) with explicit fakes.
+    factory, and the provider's ``make_client`` — the LLM-client seam after
+    issue #135 DEC-006) with explicit fakes.
 
     Returns the ``(fake_anthropic, fake_bq)`` pair so the caller can
     queue ``expect_count_tokens`` / ``expect_dry_run`` expectations.
@@ -103,7 +104,13 @@ def _install_estimate_patches(
     monkeypatch.setattr(
         gen_mod, "_make_warehouse_adapter", MagicMock(return_value=resolved_adapter)
     )
-    monkeypatch.setattr(gen_mod, "_make_anthropic_client", MagicMock(return_value=fa))
+    # DEC-006 of #135 — the ``--estimate`` short-circuit builds its concrete
+    # client via ``provider_for(draft_config.provider).make_client()`` (default
+    # provider "anthropic"), so patch the AnthropicProvider's ``make_client`` to
+    # hand back the FakeAnthropicClient rather than a CLI helper.
+    from signalforge.llm.providers import AnthropicProvider
+
+    monkeypatch.setattr(AnthropicProvider, "make_client", lambda self: fa)
 
     return fa, fb
 
@@ -459,3 +466,71 @@ def test_from_profile_dispatches_snowflake_to_snowflake_adapter() -> None:
     adapter = WarehouseAdapter.from_profile(profile)
 
     assert isinstance(adapter, SnowflakeAdapter)
+
+
+# ---------------------------------------------------------------------------
+# Provider guard (#135 closeout) — --estimate is Anthropic-shaped (it casts to
+# AnthropicClientProtocol + calls count_tokens), so it fails fast rather than
+# project grade cost through a divergent / non-Anthropic provider's client.
+# ---------------------------------------------------------------------------
+
+
+def test_generate_estimate_divergent_providers_fails_fast(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """draft.provider != grade.provider → CliInputError (tier 2, exit 2)."""
+    from signalforge.llm import providers as providers_mod
+    from tests.llm._fake_provider import FakeNoCacheProvider
+
+    saved = dict(providers_mod._REGISTRY)
+    providers_mod.register_provider(FakeNoCacheProvider())
+    try:
+        project_dir = make_fake_dbt_project(tmp_path)
+        (project_dir / "signalforge.yml").write_text(
+            "grade:\n  provider: fake-nocache\n", encoding="utf-8"
+        )
+        monkeypatch.chdir(project_dir)
+        _install_estimate_patches(monkeypatch)
+
+        code = main(["generate", "--estimate", "model.shop.customers"])
+        captured = capsys.readouterr()
+
+        assert code == 2, f"stderr={captured.err}"
+        assert "draft.provider and grade.provider to match" in captured.err
+        assert "Traceback" not in captured.err
+    finally:
+        providers_mod._REGISTRY.clear()
+        providers_mod._REGISTRY.update(saved)
+
+
+def test_generate_estimate_non_anthropic_provider_fails_fast(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both stages on a non-Anthropic provider → CliInputError (exit 2)."""
+    from signalforge.llm import providers as providers_mod
+    from tests.llm._fake_provider import FakeNoCacheProvider
+
+    saved = dict(providers_mod._REGISTRY)
+    providers_mod.register_provider(FakeNoCacheProvider())
+    try:
+        project_dir = make_fake_dbt_project(tmp_path)
+        (project_dir / "signalforge.yml").write_text(
+            "llm:\n  provider: fake-nocache\ngrade:\n  provider: fake-nocache\n",
+            encoding="utf-8",
+        )
+        monkeypatch.chdir(project_dir)
+        _install_estimate_patches(monkeypatch)
+
+        code = main(["generate", "--estimate", "model.shop.customers"])
+        captured = capsys.readouterr()
+
+        assert code == 2, f"stderr={captured.err}"
+        assert "only provider='anthropic'" in captured.err
+        assert "Traceback" not in captured.err
+    finally:
+        providers_mod._REGISTRY.clear()
+        providers_mod._REGISTRY.update(saved)

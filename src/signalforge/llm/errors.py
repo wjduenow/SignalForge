@@ -210,6 +210,44 @@ class EstimateUnknownModelError(LLMError):
         super().__init__(message, remediation=remediation)
 
 
+class UnknownProviderError(LLMError):
+    """The caller requested an LLM provider that is not in the registry.
+
+    Raised by :func:`signalforge.llm.providers.provider_for` (and the
+    registry-validated ``provider`` config fields that land in US-004) when a
+    name does not match any registered provider. The message lists every
+    currently-registered provider name so the operator can spot a typo or a
+    not-yet-registered provider at a glance.
+
+    Direct ``LLMError`` subclass (NOT an :class:`LLMHelperError`) because the
+    failure is a registry lookup, not an SDK call — it fires before any vendor
+    client is constructed.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Set the provider to one of the registered names, or register the "
+        "provider before selecting it. The default provider is 'anthropic'."
+    )
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        available: tuple[str, ...] = (),
+        remediation: str | None = None,
+    ) -> None:
+        self.name = name
+        self.available = available
+        # ``_format_value`` quotes via ``repr()`` so an adversarial provider
+        # name (control chars, ANSI escapes, embedded newlines) cannot pollute
+        # log viewers / stack traces — same pattern as EstimateUnknownModelError.
+        available_str = ", ".join(_format_value(p) for p in available) if available else "(none)"
+        message = (
+            f"unknown LLM provider: {_format_value(name)}; available providers: {available_str}"
+        )
+        super().__init__(message, remediation=remediation)
+
+
 class LLMCacheTooLargeError(LLMError):
     """Pre-send token-count check (DEC-024) reported the cached block is
     above the SignalForge cap (DEC-009 — 8000 input tokens).
@@ -255,4 +293,5 @@ __all__ = [
     "LLMRateLimitError",
     "LLMResponseFormatError",
     "LLMServerError",
+    "UnknownProviderError",
 ]

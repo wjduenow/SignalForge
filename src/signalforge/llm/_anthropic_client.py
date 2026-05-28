@@ -9,15 +9,15 @@ Mirrors the precedent established by
 :mod:`signalforge.warehouse.adapters._client` for the BigQuery SDK (see
 ``.claude/rules/warehouse-adapters.md`` — "_client.py contains every #
 pyright: ignore"). When a future v0.2 LLM provider is added, it should get its
-own ``_client.py`` shim under ``signalforge.llm`` for the same reason; do not
-pool SDK ignores into a generic util module.
+own ``_<vendor>_client.py`` shim under ``signalforge.llm`` for the same reason;
+do not pool SDK ignores into a generic util module.
 
 Two responsibilities:
 
 * :class:`AnthropicClientProtocol` — duck-typed surface common to
   ``anthropic.Anthropic`` and ``tests/llm/_fake.py::FakeAnthropicClient``
   (lands in US-006). Narrow on purpose — only the methods
-  :func:`signalforge.llm.client.call_anthropic` actually consumes.
+  :func:`signalforge.llm.client.call_llm` actually consumes.
   Re-exported as ``signalforge.llm.AnthropicClientProtocol`` so the
   ``client`` kwarg on ``draft_schema`` / ``grade_artifacts`` and
   downstream library callers can type-annotate against the public name
@@ -49,7 +49,7 @@ class _AnthropicMessagesProtocol(Protocol):
     directly on ``client.messages`` (verified against the installed SDK at
     US-005 time). The signatures are intentionally permissive — the real SDK
     accepts a large kwargs surface and the fake (US-006) only cares about
-    the subset :func:`signalforge.llm.client.call_anthropic` passes.
+    the subset :func:`signalforge.llm.client.call_llm` passes.
     """
 
     def create(self, **kwargs: Any) -> Any: ...
@@ -63,10 +63,10 @@ class AnthropicClientProtocol(Protocol):
 
     Both production (``anthropic.Anthropic``) and test
     (``tests/llm/_fake.py::FakeAnthropicClient``, US-006) clients satisfy
-    this protocol, so :func:`signalforge.llm.client.call_anthropic` calls the
+    this protocol, so :func:`signalforge.llm.client.call_llm` calls the
     same method signatures regardless of which client was injected. The
     protocol is intentionally narrow — only the surface
-    :func:`call_anthropic` actually consumes (``messages.create``,
+    :func:`call_llm` actually consumes (``messages.create``,
     ``messages.count_tokens``).
 
     Re-exported as ``signalforge.llm.AnthropicClientProtocol`` (issue #44)
@@ -98,7 +98,7 @@ def _make_anthropic_client(
 @dataclass(frozen=True)
 class _AnthropicExceptionClasses:
     """Bundle of SDK exception classes used by the retry loop in
-    :func:`signalforge.llm.client.call_anthropic`.
+    :func:`signalforge.llm.client.call_llm`.
 
     Each tuple is the ``except`` clause's catch surface for one branch
     of the retry taxonomy (DEC-004). Wrapping them in a frozen dataclass

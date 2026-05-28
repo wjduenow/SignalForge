@@ -25,14 +25,14 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from signalforge.llm._client import _AnthropicMessagesProtocol
+from signalforge.llm._anthropic_client import _AnthropicMessagesProtocol
 
 
 @dataclass
 class FakeUsage:
     """Stand-in for ``anthropic.types.Usage``.
 
-    Only the fields :func:`signalforge.llm.client.call_anthropic` reads
+    Only the fields :func:`signalforge.llm.client.call_llm` reads
     are exposed. ``cache_creation_input_tokens`` / ``cache_read_input_tokens``
     default to 0 so tests that don't care about cache accounting don't
     have to set them; the seam treats them as optional and defaults to 0

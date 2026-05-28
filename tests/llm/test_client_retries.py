@@ -1,4 +1,4 @@
-"""Retry-branch coverage for :func:`signalforge.llm.client.call_anthropic`
+"""Retry-branch coverage for :func:`signalforge.llm.client.call_llm`
 (US-006, DEC-004).
 
 Reassigns the module-level ``_sleep`` and ``_rand_uniform`` aliases to
@@ -21,12 +21,13 @@ import httpx
 import pytest
 
 from signalforge.llm import client as client_module
-from signalforge.llm.client import call_anthropic
+from signalforge.llm.client import call_llm
 from signalforge.llm.errors import (
     LLMAuthError,
     LLMConnectionError,
     LLMHelperError,
     LLMRateLimitError,
+    LLMResponseFormatError,
     LLMServerError,
 )
 
@@ -110,7 +111,7 @@ def _deterministic_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---- 429 ------------------------------------------------------------------
 
 
-def test_call_anthropic_429_retries_three_times_then_raises_rate_limit_error(
+def test_call_llm_429_retries_three_times_then_raises_rate_limit_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Default ``max_retries_429=3``: four total attempts → exhausted."""
@@ -124,7 +125,7 @@ def test_call_anthropic_429_retries_three_times_then_raises_rate_limit_error(
         caplog.at_level(logging.WARNING, logger="signalforge.llm.client"),
         pytest.raises(LLMRateLimitError) as exc_info,
     ):
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -145,7 +146,7 @@ def test_call_anthropic_429_retries_three_times_then_raises_rate_limit_error(
 # ---- 5xx ------------------------------------------------------------------
 
 
-def test_call_anthropic_5xx_retries_once_then_raises_server_error() -> None:
+def test_call_llm_5xx_retries_once_then_raises_server_error() -> None:
     """Default ``max_retries_5xx=1``: two total attempts → exhausted."""
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=_ok_count())
@@ -153,7 +154,7 @@ def test_call_anthropic_5xx_retries_once_then_raises_server_error() -> None:
     fake.expect_messages_create(matching={}, returns=_status_error(503))
 
     with pytest.raises(LLMServerError) as exc_info:
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -166,14 +167,14 @@ def test_call_anthropic_5xx_retries_once_then_raises_server_error() -> None:
     fake.assert_all_expectations_met()
 
 
-def test_call_anthropic_5xx_recovers_on_retry() -> None:
+def test_call_llm_5xx_recovers_on_retry() -> None:
     """A 5xx then a 200 returns normally."""
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=_ok_count())
     fake.expect_messages_create(matching={}, returns=_status_error(503))
     fake.expect_messages_create(matching={}, returns=_ok_message())
 
-    result = call_anthropic(
+    result = call_llm(
         system="sys",
         cached_block="c",
         dynamic_block="d",
@@ -189,14 +190,14 @@ def test_call_anthropic_5xx_recovers_on_retry() -> None:
 # ---- 4xx (non-auth) -------------------------------------------------------
 
 
-def test_call_anthropic_4xx_no_retry_raises_immediately() -> None:
+def test_call_llm_4xx_no_retry_raises_immediately() -> None:
     """4xx (non-401/403/429) does not retry."""
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=_ok_count())
     fake.expect_messages_create(matching={}, returns=_status_error(422))
 
     with pytest.raises(LLMHelperError) as exc_info:
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -214,14 +215,14 @@ def test_call_anthropic_4xx_no_retry_raises_immediately() -> None:
 # ---- 401 / 403 ------------------------------------------------------------
 
 
-def test_call_anthropic_401_raises_auth_error_with_api_key_hint() -> None:
+def test_call_llm_401_raises_auth_error_with_api_key_hint() -> None:
     """401 → :class:`LLMAuthError`, no retry, remediation mentions API key."""
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=_ok_count())
     fake.expect_messages_create(matching={}, returns=_auth_error(401))
 
     with pytest.raises(LLMAuthError) as exc_info:
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -234,14 +235,14 @@ def test_call_anthropic_401_raises_auth_error_with_api_key_hint() -> None:
     assert isinstance(exc_info.value.cause, anthropic.AuthenticationError)
 
 
-def test_call_anthropic_403_raises_auth_error() -> None:
+def test_call_llm_403_raises_auth_error() -> None:
     """403 → :class:`LLMAuthError`, no retry."""
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=_ok_count())
     fake.expect_messages_create(matching={}, returns=_auth_error(403))
 
     with pytest.raises(LLMAuthError) as exc_info:
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -256,7 +257,7 @@ def test_call_anthropic_403_raises_auth_error() -> None:
 # ---- Connection -----------------------------------------------------------
 
 
-def test_call_anthropic_connection_error_retries_once() -> None:
+def test_call_llm_connection_error_retries_once() -> None:
     """Default ``max_retries_conn=1``: two total attempts → exhausted."""
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=_ok_count())
@@ -264,7 +265,7 @@ def test_call_anthropic_connection_error_retries_once() -> None:
     fake.expect_messages_create(matching={}, returns=_connection_error())
 
     with pytest.raises(LLMConnectionError) as exc_info:
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -280,7 +281,7 @@ def test_call_anthropic_connection_error_retries_once() -> None:
 # ---- WARNING shape --------------------------------------------------------
 
 
-def test_call_anthropic_each_retry_emits_warning(
+def test_call_llm_each_retry_emits_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Each retry emits a WARNING with attempt/delay/error_class/model."""
@@ -290,7 +291,7 @@ def test_call_anthropic_each_retry_emits_warning(
     fake.expect_messages_create(matching={}, returns=_ok_message())
 
     with caplog.at_level(logging.WARNING, logger="signalforge.llm.client"):
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -323,7 +324,7 @@ def test_call_anthropic_each_retry_emits_warning(
 # ---- Jitter ---------------------------------------------------------------
 
 
-def test_call_anthropic_jitter_bounded_by_rand_uniform_aliases(
+def test_call_llm_jitter_bounded_by_rand_uniform_aliases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reassigning ``_rand_uniform`` deterministically controls ``_sleep``
@@ -346,7 +347,7 @@ def test_call_anthropic_jitter_bounded_by_rand_uniform_aliases(
     fake.expect_messages_create(matching={}, returns=_rate_limit_error())
     fake.expect_messages_create(matching={}, returns=_ok_message())
 
-    call_anthropic(
+    call_llm(
         system="sys",
         cached_block="c",
         dynamic_block="d",
@@ -362,7 +363,7 @@ def test_call_anthropic_jitter_bounded_by_rand_uniform_aliases(
     ]
 
 
-def test_call_anthropic_per_class_budgets_do_not_cross_consume(
+def test_call_llm_per_class_budgets_do_not_cross_consume(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Quality-Gate fix (CodeRabbit on PR #19): one failure class must
@@ -390,7 +391,7 @@ def test_call_anthropic_per_class_budgets_do_not_cross_consume(
     fake.expect_messages_create(matching={}, returns=_rate_limit_error())
 
     with pytest.raises(LLMRateLimitError) as exc_info:
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -407,3 +408,95 @@ def test_call_anthropic_per_class_budgets_do_not_cross_consume(
     # The error reports 429-class attempts (3), NOT the total (which
     # would include the conn retry).
     assert exc_info.value.attempts == 3
+
+
+# ---- count_tokens probe error mapping -------------------------------------
+# The pre-send count_tokens probe maps a raised SDK exception to a typed
+# LLMError via ``strategy.classify_exception`` and NEVER retries it (a probe
+# failure must not consume the messages.create budget). One assertion per
+# ExceptionCategory branch in ``call_llm`` (client.py count-gate block).
+
+
+def _call_llm_probe_failure(fake: FakeAnthropicClient) -> None:
+    """Invoke ``call_llm`` with a fake whose count_tokens is pre-queued to fail."""
+    call_llm(
+        system="sys",
+        cached_block="c",
+        dynamic_block="d",
+        model="claude-sonnet-4-6",
+        max_tokens=128,
+        prompt_version="v1",
+        client=fake,
+    )
+
+
+def test_count_tokens_auth_error_maps_to_auth_error_no_retry() -> None:
+    """count_tokens 401 → LLMAuthError, no messages.create issued."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_auth_error(401))
+
+    with pytest.raises(LLMAuthError) as exc_info:
+        _call_llm_probe_failure(fake)
+
+    assert isinstance(exc_info.value.cause, anthropic.AuthenticationError)
+    assert len(fake.create_calls) == 0
+
+
+def test_count_tokens_rate_limit_maps_to_rate_limit_error_attempts_zero() -> None:
+    """count_tokens 429 → LLMRateLimitError(attempts=0), not retried."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_rate_limit_error())
+
+    with pytest.raises(LLMRateLimitError) as exc_info:
+        _call_llm_probe_failure(fake)
+
+    assert exc_info.value.attempts == 0
+    assert isinstance(exc_info.value.cause, anthropic.RateLimitError)
+    assert len(fake.create_calls) == 0
+
+
+def test_count_tokens_connection_error_maps_to_connection_error_no_retry() -> None:
+    """count_tokens connection failure → LLMConnectionError, not retried."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_connection_error())
+
+    with pytest.raises(LLMConnectionError) as exc_info:
+        _call_llm_probe_failure(fake)
+
+    assert isinstance(exc_info.value.cause, anthropic.APIConnectionError)
+    assert len(fake.create_calls) == 0
+
+
+def test_count_tokens_5xx_maps_to_server_error_no_retry() -> None:
+    """count_tokens 503 → LLMServerError, not retried."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_status_error(503))
+
+    with pytest.raises(LLMServerError) as exc_info:
+        _call_llm_probe_failure(fake)
+
+    assert isinstance(exc_info.value.cause, anthropic.APIStatusError)
+    assert len(fake.create_calls) == 0
+
+
+def test_count_tokens_4xx_non_auth_maps_to_helper_error_no_retry() -> None:
+    """count_tokens non-5xx, non-auth (400) → LLMHelperError, not retried."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_status_error(400))
+
+    with pytest.raises(LLMHelperError) as exc_info:
+        _call_llm_probe_failure(fake)
+
+    assert isinstance(exc_info.value.cause, anthropic.APIStatusError)
+    assert len(fake.create_calls) == 0
+
+
+def test_count_tokens_missing_input_tokens_field_raises_response_format_error() -> None:
+    """A count_tokens response lacking ``input_tokens`` → LLMResponseFormatError."""
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=object())
+
+    with pytest.raises(LLMResponseFormatError):
+        _call_llm_probe_failure(fake)
+
+    assert len(fake.create_calls) == 0

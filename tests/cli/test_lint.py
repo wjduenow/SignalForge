@@ -629,11 +629,11 @@ def test_lint_makes_no_llm_or_warehouse_call(
     # Any attempt to construct an Anthropic client would call this
     # factory; raising here proves no LLM seam was reached. The grep
     # for ``_make_anthropic_client`` mirrors the SDK confinement in
-    # ``signalforge.llm._client``.
+    # ``signalforge.llm._anthropic_client``.
     def _explode(*args: object, **kwargs: object) -> object:
         raise AssertionError("lint must not invoke the LLM seam")
 
-    import signalforge.llm._client as _llm_client
+    import signalforge.llm._anthropic_client as _llm_client
 
     monkeypatch.setattr(_llm_client, "_make_anthropic_client", _explode)
 

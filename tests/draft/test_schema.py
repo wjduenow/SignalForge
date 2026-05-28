@@ -87,7 +87,7 @@ def _set_up_fake_anthropic(
     input_tokens: int = 1700,
     output_tokens: int = 800,
 ) -> None:
-    """Queue the two SDK calls `call_anthropic` makes: count_tokens then create."""
+    """Queue the two SDK calls `call_llm` makes: count_tokens then create."""
     fake.expect_count_tokens(
         matching=lambda kw: True,
         returns=FakeCountTokensResponse(input_tokens=cached_tokens),
@@ -489,17 +489,24 @@ def test_public_api_imports_match_dec_020() -> None:
         "PRICES",
         "PRICE_TABLE_VERSION",
         "AnthropicClientProtocol",
+        "AnthropicProvider",
         "EstimateUnknownModelError",
+        "ExceptionCategory",
         "LLMAuthError",
         "LLMCacheTooLargeError",
         "LLMConnectionError",
         "LLMError",
         "LLMHelperError",
+        "LLMProvider",
         "LLMRateLimitError",
         "LLMResponseFormatError",
         "LLMResult",
         "LLMServerError",
         "ModelPricing",
-        "call_anthropic",
+        "UnknownProviderError",
+        "UsageMetrics",
+        "call_llm",
         "lookup",
+        "provider_for",
+        "register_provider",
     )

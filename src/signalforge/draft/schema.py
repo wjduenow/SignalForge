@@ -61,7 +61,7 @@ from signalforge.draft.models import CandidateSchema
 from signalforge.draft.parser import _LLMResultMeta, parse_draft_response
 from signalforge.draft.prompts import render_prompt
 from signalforge.llm import AnthropicClientProtocol
-from signalforge.llm.client import call_anthropic
+from signalforge.llm.client import call_llm
 from signalforge.llm.models import LLMResult
 from signalforge.manifest.models import Manifest, Model
 from signalforge.safety.models import LLMRequest
@@ -123,7 +123,7 @@ def draft_from_request(
     Steps (each owned by a separate US):
 
     1. Render the four-part prompt (US-010 / :func:`render_prompt`).
-    2. Issue the LLM call via the seam (US-006 / :func:`call_anthropic`).
+    2. Issue the LLM call via the seam (US-006 / :func:`call_llm`).
     3. Parse + anchor-validate the response (US-011 /
        :func:`parse_draft_response`). Parse errors propagate as
        :class:`LLMOutputJSONError` /
@@ -155,7 +155,7 @@ def draft_from_request(
             JSONL sits next to it.
         _client: optional dependency-injection seam for tests. Production
             callers leave this ``None`` and let
-            :func:`signalforge.llm.client.call_anthropic` lazy-construct
+            :func:`signalforge.llm.client.call_llm` lazy-construct
             a real ``anthropic.Anthropic``.
 
     Returns:
@@ -183,7 +183,7 @@ def draft_from_request(
     )
 
     # 2. Issue the LLM call through the seam.
-    result = call_anthropic(
+    result = call_llm(
         system=system,
         cached_block=cached,
         dynamic_block=dynamic,
@@ -194,6 +194,7 @@ def draft_from_request(
         max_retries_429=config.max_retries_429,
         max_retries_5xx=config.max_retries_5xx,
         max_retries_conn=config.max_retries_conn,
+        provider=config.provider,
         client=_client,
     )
 

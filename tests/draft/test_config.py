@@ -84,6 +84,35 @@ def test_draft_config_cache_ttl_rejects_unknown() -> None:
         DraftConfig(cache_ttl="30m")  # type: ignore[arg-type]
 
 
+def test_draft_config_provider_defaults_to_anthropic() -> None:
+    """DEC-007 of #135: ``provider`` defaults to the registered ``"anthropic"``."""
+    assert DraftConfig().provider == "anthropic"
+
+
+def test_draft_config_provider_accepts_registered_name() -> None:
+    """DEC-007: a registered provider name is accepted by the validator."""
+    cfg = DraftConfig(provider="anthropic")
+    assert cfg.provider == "anthropic"
+
+
+def test_draft_config_provider_rejects_unknown_with_available_keys() -> None:
+    """DEC-007: an unknown provider fails loud with a typed
+    :class:`UnknownProviderError` that names the registered providers.
+
+    The validator delegates to
+    :func:`signalforge.llm.providers.provider_for`, which raises the typed
+    error directly — Pydantic does NOT wrap it into a ``ValidationError``
+    (it isn't a ``ValueError`` / ``TypeError`` / ``AssertionError``)."""
+    from signalforge.llm.errors import UnknownProviderError
+
+    with pytest.raises(UnknownProviderError) as excinfo:
+        DraftConfig(provider="bogus")
+    assert excinfo.value.name == "bogus"
+    # Available-keys remediation: the registered providers are listed.
+    assert "anthropic" in str(excinfo.value)
+    assert "bogus" in str(excinfo.value)
+
+
 # ---------------------------------------------------------------------------
 # load_draft_config — resolution / defaults
 # ---------------------------------------------------------------------------
@@ -141,6 +170,28 @@ def test_load_draft_config_missing_llm_key_returns_defaults(tmp_path: Path) -> N
     ``llm:`` block is simply absent."""
     (tmp_path / "signalforge.yml").write_text("safety: {}\n", encoding="utf-8")
     assert load_draft_config(tmp_path) == DraftConfig()
+
+
+def test_load_draft_config_provider_round_trips_from_yaml(tmp_path: Path) -> None:
+    """DEC-007: the ``provider`` knob round-trips from the ``llm:`` block."""
+    (tmp_path / "signalforge.yml").write_text("llm:\n  provider: anthropic\n", encoding="utf-8")
+    cfg = load_draft_config(tmp_path)
+    assert cfg.provider == "anthropic"
+
+
+def test_load_draft_config_unknown_provider_fails_loud(tmp_path: Path) -> None:
+    """DEC-007: an unknown ``provider`` in ``signalforge.yml`` fails loud with
+    the typed :class:`UnknownProviderError` naming the registered providers.
+
+    The validator's :class:`UnknownProviderError` is NOT a Pydantic
+    ``ValidationError``, so it propagates raw through ``load_draft_config``
+    rather than being re-wrapped as ``DraftConfigInvalidError``."""
+    from signalforge.llm.errors import UnknownProviderError
+
+    (tmp_path / "signalforge.yml").write_text("llm:\n  provider: bogus\n", encoding="utf-8")
+    with pytest.raises(UnknownProviderError) as excinfo:
+        load_draft_config(tmp_path)
+    assert "anthropic" in str(excinfo.value)
 
 
 def test_load_draft_config_explicit_path_miss_raises(tmp_path: Path) -> None:

@@ -150,7 +150,7 @@ class GradeRubricError(GradeError):
 class GradeLLMError(GradeError):
     """One-level adapter wrapping :class:`signalforge.llm.LLMError`.
 
-    The grader reuses the centralised :func:`signalforge.llm.call_anthropic`
+    The grader reuses the centralised :func:`signalforge.llm.call_llm`
     seam (#5 DEC-012) for its judge calls. When that seam raises an
     :class:`signalforge.llm.LLMError` subclass, the grader's exception
     ladder wraps it once into :class:`GradeLLMError` so callers that

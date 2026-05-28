@@ -3,7 +3,7 @@
 :func:`grade_artifacts` is the public seam: given a model + drafted
 candidate + prune verdict + (optional) rubric + config, it iterates
 every ``(criterion, artifact)`` pair, issues one
-:func:`signalforge.llm.client.call_anthropic` call per pair, parses the
+:func:`signalforge.llm.client.call_llm` call per pair, parses the
 response, writes a fail-closed JSONL audit record, and at end-of-run
 writes a sidecar JSON :class:`GradingReport`.
 
@@ -122,7 +122,7 @@ from signalforge.grade.rubric import (
     validate_rubric,
 )
 from signalforge.llm import AnthropicClientProtocol
-from signalforge.llm.client import call_anthropic
+from signalforge.llm.client import call_llm
 from signalforge.llm.errors import LLMError
 from signalforge.manifest.models import Model
 from signalforge.prune.models import PruneResult
@@ -303,7 +303,7 @@ def _grade_one(
     # 2. Issue the LLM call. Wrap LLMError -> GradeLLMError once at
     #    the seam (DEC-015 of #5 mirror: one-level adapter).
     try:
-        result = call_anthropic(
+        result = call_llm(
             system=_SYSTEM_PROMPT,
             cached_block=rubric_block,
             dynamic_block=dynamic_block,
@@ -314,6 +314,7 @@ def _grade_one(
             max_retries_429=config.max_retries_429,
             max_retries_5xx=config.max_retries_5xx,
             max_retries_conn=config.max_retries_conn,
+            provider=config.provider,
             client=client,
         )
     except LLMError as exc:
@@ -516,7 +517,7 @@ def grade_artifacts(
             ``<project_dir>/.signalforge/grade.json`` (DEC-012).
         client: optional dependency-injection seam for tests. Production
             callers leave this ``None`` and let
-            :func:`signalforge.llm.client.call_anthropic` lazy-construct
+            :func:`signalforge.llm.client.call_llm` lazy-construct
             a real ``anthropic.Anthropic``.
         project_dir: optional project-root override used to resolve the
             default ``audit_path`` / ``sidecar_path``. ``None`` resolves
