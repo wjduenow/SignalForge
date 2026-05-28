@@ -211,6 +211,61 @@ def test_call_llm_gemini_safety_blocked_raises_llmresponseformaterror() -> None:
     fake.assert_all_expectations_met()
 
 
+def test_call_llm_gemini_max_tokens_with_partial_text_raises_at_is_clean_gate() -> None:
+    """A ``finish_reason="MAX_TOKENS"`` response that CARRIES partial text
+    must still surface :class:`LLMResponseFormatError` from the new
+    :meth:`GeminiProvider.is_clean_completion` gate — the load-bearing
+    Finding-1 orchestrator pin (#155 US-001/US-003).
+
+    The pre-existing safety-blocked test above exercises the SAFETY path
+    where no text is collected at all. THIS test exercises the
+    MAX_TOKENS-with-partial-text path: the response has a non-empty
+    ``parts[0].text`` (typical of mid-string truncation), and pre-fix
+    ``extract_text_blocks`` would return that partial JSON happily,
+    sending it downstream to ``parse_grade_response`` which would raise
+    ``GradeOutputError(violation_type="json_parse")``. The post-fix
+    orchestrator wire-in runs ``is_clean_completion`` AHEAD of
+    ``extract_text_blocks``, so MAX_TOKENS routes to ``LLMResponseFormatError``
+    here (and via the grade-engine wrap → ``GradeLLMError``).
+
+    A regression that re-ordered the gate after ``extract_text_blocks``
+    would silently let partial-text MAX_TOKENS responses slip back through
+    — this test catches that at unit-test cost rather than at live-e2e
+    cost (`test_e2e_gemini_smoke.py` would also fail invariant #6 in that
+    case, but at $0.02/run instead of zero).
+    """
+    fake = FakeGeminiClient()
+    truncated = FakeGeminiResponse(
+        candidates=[
+            FakeGeminiCandidate(
+                content=FakeGeminiContent(
+                    parts=[FakeGeminiPart(text='{"score": 0.9, "reasoning": "partial trunc')]
+                ),
+                finish_reason="MAX_TOKENS",
+            )
+        ],
+        usage_metadata=FakeGeminiUsageMetadata(prompt_token_count=120, candidates_token_count=512),
+    )
+    fake.expect_messages_create(matching={}, returns=truncated)
+
+    with pytest.raises(LLMResponseFormatError) as excinfo:
+        call_llm(
+            system="SYS",
+            cached_block="CACHED",
+            dynamic_block="DYN",
+            model="gemini-2.5-flash",
+            max_tokens=512,
+            prompt_version="v1",
+            provider="gemini",
+            client=fake,
+        )
+
+    assert "MAX_TOKENS" in str(excinfo.value)
+    # Exactly one create call — no retry, no leak through to extract_text_blocks.
+    assert len(fake.create_calls) == 1
+    fake.assert_all_expectations_met()
+
+
 # ---------------------------------------------------------------------------
 # is_clean_completion — happy-path (#155 US-001)
 # ---------------------------------------------------------------------------

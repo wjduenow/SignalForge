@@ -127,9 +127,11 @@ warehouses and real graders:
    always runs when the BQ + Anthropic gate is satisfied.
 2. **`tests/cli/test_e2e_openai_smoke.py`** — `@pytest.mark.e2e` +
    `@pytest.mark.openai`. Anthropic drafter, OpenAI `gpt-4o` grader.
-   Three-env-var gate: `SF_RUN_OPENAI=1` + `OPENAI_API_KEY` +
-   `GOOGLE_CLOUD_PROJECT` (Anthropic key is consumed implicitly by the
-   drafter; reuse the same one set for the BQ baseline).
+   Five-env-var gate (mirrors the Gemini sibling and the parametrized
+   BQ smoke — drafter stays Anthropic Sonnet per DEC-011, so the
+   Anthropic auth + BigQuery opt-in are part of the contract): `SF_RUN_OPENAI=1`
+   + `OPENAI_API_KEY` + `SF_RUN_BQ=1` + `ANTHROPIC_API_KEY` +
+   `GOOGLE_CLOUD_PROJECT`.
 3. **`tests/cli/test_e2e_gemini_smoke.py`** — `@pytest.mark.e2e` +
    `@pytest.mark.gemini`. Anthropic drafter, Gemini
    `gemini-2.5-flash` grader with `grade.max_output_tokens=2048` (the

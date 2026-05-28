@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import pytest
 
+from signalforge.llm import call_llm
+from signalforge.llm.errors import LLMResponseFormatError
 from signalforge.llm.providers import OpenAIProvider
 from tests.llm._fake_openai import (
     FakeOpenAIChoice,
+    FakeOpenAIClient,
     FakeOpenAICompletion,
     FakeOpenAIMessage,
     FakeOpenAIUsage,
@@ -138,3 +141,62 @@ def test_unclean_finish_reason_message_names_finish_reason_field() -> None:
     message = OpenAIProvider().unclean_finish_reason_message(response)
     assert "finish_reason" in message
     assert "'length'" in message
+
+
+# ---------------------------------------------------------------------------
+# is_clean_completion — orchestrator wire-in (#155 US-001 / DEC-005)
+# ---------------------------------------------------------------------------
+
+
+def test_call_llm_openai_length_with_partial_text_raises_at_is_clean_gate() -> None:
+    """A ``finish_reason='length'`` response that CARRIES partial text must
+    surface :class:`LLMResponseFormatError` from the
+    :meth:`OpenAIProvider.is_clean_completion` gate inside ``call_llm``
+    (orchestrator wire-in pin for OpenAI — analogous to the Gemini
+    MAX_TOKENS pin in ``test_gemini_provider_via_fake.py``).
+
+    Pre-#155 there was no per-provider check beyond ``extract_text_blocks``,
+    which happily returns partial truncated text for OpenAI ``length`` (the
+    ``message.content`` is just a non-empty string). Post-fix the wire-in
+    runs ``is_clean_completion`` AHEAD of ``extract_text_blocks``, so
+    ``length`` routes to ``LLMResponseFormatError`` here (and via the
+    grade-engine wrap → ``GradeLLMError``).
+
+    Companion pin: the equivalent regression for Anthropic (``stop_reason
+    = "max_tokens"``) is at
+    ``tests/llm/test_client.py::test_call_llm_raises_llmresponseformaterror_on_unclean_stop_reason``;
+    for Gemini at
+    ``tests/llm/test_gemini_provider_via_fake.py::test_call_llm_gemini_max_tokens_with_partial_text_raises_at_is_clean_gate``.
+    A regression that re-ordered the gate after ``extract_text_blocks``
+    would let truncated OpenAI responses slip through — this test catches
+    that at unit cost rather than at live e2e cost.
+    """
+    fake = FakeOpenAIClient()
+    truncated = FakeOpenAICompletion(
+        choices=[
+            FakeOpenAIChoice(
+                message=FakeOpenAIMessage(content='{"score": 0.9, "reasoning": "partial trunc'),
+                finish_reason="length",
+            )
+        ],
+        usage=FakeOpenAIUsage(prompt_tokens=120, completion_tokens=512),
+    )
+    fake.expect_messages_create(matching={}, returns=truncated)
+
+    with pytest.raises(LLMResponseFormatError) as excinfo:
+        call_llm(
+            system="SYS",
+            cached_block="CACHED",
+            dynamic_block="DYN",
+            model="gpt-4o",
+            max_tokens=512,
+            prompt_version="v1",
+            provider="openai",
+            client=fake,
+        )
+
+    assert "finish_reason" in str(excinfo.value)
+    assert "'length'" in str(excinfo.value)
+    # Exactly one create call — no retry, no leak through to extract_text_blocks.
+    assert len(fake.create_calls) == 1
+    fake.assert_all_expectations_met()

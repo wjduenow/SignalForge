@@ -502,9 +502,11 @@ batched` flag is additive rather than a rewrite.
 No per-provider override is enforced in code — `GradeConfig.max_output_tokens`
 is one knob across every provider. The floors below are observed-data
 recommendations from live grading runs; operators can lower for cost-cutting
-but must validate quality afterward (truncated judge responses surface as
-`GradeOutputError(violation_type="json_parse")` and route to the conservative
-degrade path, masking signal).
+but must validate quality afterward. Truncated judge responses surface as
+`LLMResponseFormatError` (the provider-neutral `is_clean_completion` gate raises
+on any non-clean finish_reason — Anthropic `stop_reason="max_tokens"`, OpenAI
+`finish_reason="length"`, Gemini `finish_reason="MAX_TOKENS"`) and degrade
+the pair with `reasoning="call failed: GradeLLMError"` per #155 DEC-005.
 
 | Provider                 | Recommended floor | Rationale                                                                                  |
 |--------------------------|-------------------|--------------------------------------------------------------------------------------------|

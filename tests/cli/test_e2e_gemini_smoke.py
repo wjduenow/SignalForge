@@ -59,10 +59,13 @@ Asserts the same seven invariants as :file:`test_e2e_bigquery_smoke.py`:
 6. ``GradingReport.aggregate_complete is True`` — **the load-bearing
    assertion that proves the 2048 cap fixes the truncation bug.**
    If ``max_output_tokens`` were too low, Gemini's verbose
-   ``reasoning`` would truncate mid-string, raising
-   ``GradeOutputError`` and degrading the result (per
-   ``grade-layer.md`` § "Conservative score-and-degrade taxonomy"),
-   which would flip ``aggregate_complete`` to ``False``.
+   ``reasoning`` would truncate mid-string. Post-#155 US-001 the
+   provider-neutral ``is_clean_completion`` gate raises
+   ``LLMResponseFormatError`` on ``finish_reason="MAX_TOKENS"``, which
+   ``call_llm`` propagates as ``LLMError`` and ``grade_artifacts``
+   wraps as ``GradeLLMError`` (per ``grade-layer.md`` § "Conservative
+   score-and-degrade taxonomy"), flipping ``aggregate_complete`` to
+   ``False``.
 7. ``"Traceback" not in stderr`` (DEC-016 of ``cli-layer.md`` — no
    traceback ever leaks).
 """
@@ -250,9 +253,12 @@ def test_e2e_signalforge_generate_against_austin_bikeshare_with_gemini_grader(
     # 6. Grade aggregate_complete — no degraded calls.
     #    This is the **load-bearing assertion** that proves the
     #    ``max_output_tokens=2048`` overlay fixes the truncation bug.
-    #    A MAX_TOKENS-mid-string truncation in any Gemini judge call
-    #    would surface as ``GradeOutputError(violation_type="json_parse")``
-    #    → ``GradingResult(score=None, passed=False, reasoning="call failed: GradeOutputError")``
+    #    Post-#155 US-001 the provider-neutral ``is_clean_completion``
+    #    gate raises ``LLMResponseFormatError`` on a MAX_TOKENS finish
+    #    even when partial text is present, which ``call_llm``
+    #    propagates as ``LLMError`` and ``grade_artifacts`` wraps as
+    #    ``GradeLLMError`` →
+    #    ``GradingResult(score=None, passed=False, reasoning="call failed: GradeLLMError")``
     #    → ``aggregate_complete=False``. The cap MUST keep every
     #    (artifact, criterion) pair scoring cleanly.
     grade_sidecar = project_dir / ".signalforge" / "grade.json"

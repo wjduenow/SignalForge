@@ -16,15 +16,23 @@ keeps the three as separate files rather than one parametrized test so
 each provider's failure ergonomics, cost transparency, and marker gating
 stay independent.
 
-Gated by THREE env vars (mirrors the BQ smoke):
+Gated by FIVE env vars (mirrors the BQ smoke + the Gemini sibling — the
+drafter stays Anthropic Sonnet per DEC-011, so the Anthropic auth +
+BigQuery opt-in are part of the contract even though the grader swap is
+OpenAI):
 
 * ``SF_RUN_OPENAI=1`` — the project-wide opt-in for "this test costs
   real money against the OpenAI API" (mirrors ``SF_RUN_BQ`` /
   ``SF_RUN_SNOWFLAKE``).
 * ``OPENAI_API_KEY`` — without a key the OpenAI grader cannot call the
   LLM seam.
-* ``GOOGLE_CLOUD_PROJECT`` — the BigQuery billing project (the
-  warehouse leg is unchanged from the Anthropic baseline).
+* ``SF_RUN_BQ=1`` — the project-wide opt-in for "this test costs real
+  money against BigQuery" (the warehouse leg is unchanged from the
+  Anthropic baseline; same gate as ``tests/cli/test_e2e_bigquery_smoke.py``).
+* ``ANTHROPIC_API_KEY`` — the DRAFTER is Anthropic Sonnet per DEC-011
+  (drafter stays Sonnet across all three e2e providers for fixture
+  stability); only the grader swaps to gpt-4o.
+* ``GOOGLE_CLOUD_PROJECT`` — the BigQuery billing project.
 
 The test is excluded from default ``pytest`` runs by ``addopts = "...
 -m 'not e2e and not openai' ..."`` in ``pyproject.toml``. The
@@ -32,8 +40,9 @@ maintainer runs it once before declaring an e2e PR ready::
 
     gcloud auth application-default login
     export GOOGLE_CLOUD_PROJECT=<billing-project>
+    export ANTHROPIC_API_KEY=sk-ant-...
     export OPENAI_API_KEY=sk-...
-    SF_RUN_OPENAI=1 pytest -m openai --no-cov
+    SF_RUN_BQ=1 SF_RUN_OPENAI=1 pytest -m openai --no-cov
 
 The ``--no-cov`` flag is required because ``--cov-fail-under`` in
 ``addopts`` would fail any marker-specific run that exercises only a
@@ -87,21 +96,47 @@ def _openai_runs_enabled() -> bool:
     return os.environ.get("SF_RUN_OPENAI", "").lower() in _TRUTHY
 
 
+def _bq_runs_enabled() -> bool:
+    """``SF_RUN_BQ`` is set to a truthy value (warehouse opt-in cost gate).
+
+    Mirrors :func:`tests.cli.test_e2e_bigquery_smoke._bq_runs_enabled`. The
+    drafter-stays-Anthropic-Sonnet posture from DEC-011 means the
+    OpenAI sibling still runs against the same BigQuery warehouse as the
+    baseline, so the SF_RUN_BQ opt-in is part of this test's contract too.
+    """
+    return os.environ.get("SF_RUN_BQ", "").lower() in _TRUTHY
+
+
 def _skip_reason() -> str | None:
     """Return a skip-reason string if any required env var is missing.
 
-    Returns ``None`` only when all three gates are satisfied — the test
-    then proceeds to make real OpenAI + real BigQuery calls. Each missing
-    prerequisite yields its own distinct reason so a maintainer running
-    ``pytest -m openai`` sees exactly what to set. Treat an
-    empty / whitespace-only ``OPENAI_API_KEY`` as "unset" (an empty value
+    Returns ``None`` only when all FIVE gates are satisfied — the test
+    then proceeds to make real OpenAI + real Anthropic + real BigQuery
+    calls. Each missing prerequisite yields its own distinct reason so a
+    maintainer running ``pytest -m openai`` sees exactly what to set.
+    Treat an empty / whitespace-only API key as "unset" (an empty value
     would otherwise reach the client and produce a noisy auth failure
-    rather than a skip).
+    rather than a clean named skip).
+
+    The Anthropic + SF_RUN_BQ checks are required because the drafter
+    stays Anthropic Sonnet across all three e2e providers per DEC-011
+    (only the grader swaps) — without them the test fails on the FIRST
+    drafter call, not at the OpenAI grader, which is confusing.
     """
     if not _openai_runs_enabled():
         return "SF_RUN_OPENAI=1 required (e2e test costs real money against the OpenAI API)"
     if not os.environ.get("OPENAI_API_KEY", "").strip():
         return "OPENAI_API_KEY required (e2e test calls the real OpenAI API as the grader)"
+    if not _bq_runs_enabled():
+        return (
+            "SF_RUN_BQ=1 required "
+            "(e2e test costs real money against BigQuery — warehouse leg shared with the baseline)"
+        )
+    if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return (
+            "ANTHROPIC_API_KEY required "
+            "(drafter stays Anthropic Sonnet per DEC-011; only the grader swaps to gpt-4o)"
+        )
     if not os.environ.get("GOOGLE_CLOUD_PROJECT", "").strip():
         return (
             "GOOGLE_CLOUD_PROJECT required "
@@ -115,7 +150,7 @@ def test_e2e_signalforge_generate_against_austin_bikeshare_openai_grader(
 ) -> None:
     """Run ``signalforge generate`` end-to-end with OpenAI as the grader.
 
-    Skips cleanly under ``pytest -m openai`` when any of the three env
+    Skips cleanly under ``pytest -m openai`` when any of the five env
     vars is missing — the maintainer runs the gated invocation once
     before merge and the default suite never reaches this test.
     """
