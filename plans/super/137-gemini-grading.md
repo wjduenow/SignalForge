@@ -6,7 +6,7 @@
 - **Parent epic:** #134 (pluggable LLM provider for grading — OpenAI/Gemini). Milestone v0.3.
 - **Depends on:**
   - **#135** (provider-neutral LLM seam) — **merged** (`32b298f`, PR #148 → dev).
-  - **#136** (OpenAI grading) — plan landed as PR #152, awaiting approval. #137 **sequences after #136**: #136 ships the `LLMProvider.estimate_input_tokens` ABC extension, the `pricing.py` per-provider SKU pattern, and the `--estimate` strategy refactor (with an Anthropic byte-identity snapshot as the floor). #137 piggybacks on that shape with a Gemini-native implementation (DEC-019).
+  - **#136** (OpenAI grading) — **plan approved and now in implementation**; #136 lands on `dev` first. #137 **sequences after #136 merged**: #136 ships the `LLMProvider.estimate_input_tokens` ABC extension, the `pricing.py` per-provider SKU pattern, the `--estimate` strategy refactor (with an Anthropic byte-identity snapshot as the floor), AND the 9th AST scan (`openai.OpenAI(...)` confinement). #137 piggybacks on that shape with a Gemini-native implementation and adds the **10th** AST scan (DEC-019).
 - **Phase:** devolved (PR #151 → dev)
 - **Branch:** `feature/137-gemini-grading`
 - **Worktree:** `../worktrees/SignalForge/137-gemini-grading`
@@ -132,7 +132,8 @@ inside each test).
 - `tests/llm/test_prompt_cache_stability.py` — pins the Anthropic cached-block bytes;
   unaffected (Gemini takes a different code path through `call_llm`).
 - `tests/test_audit_completeness.py` scans 1–7 — unchanged. Scan **8** (fail-closed
-  writers) and the Anthropic-construction scan stay. We add a **9th** scan for
+  writers) and the Anthropic-construction scan stay. **#136 lands the 9th** scan
+  (`openai.OpenAI(...)` confinement) first; #137 adds the **10th** scan for
   `genai.Client(...)` confinement to `_gemini_client.py`.
 
 ## Scoping decisions (Phase 1 — answered)
@@ -223,6 +224,17 @@ No blockers. One concern (performance/cost) accepted with explicit docs; one con
   `reasoning="call failed: GradeLLMError"`. The drafter path surfaces it directly to the
   CLI's exit-code tier 2.
 
+  **Refusal / content-filter symmetry with OpenAI (cross-ref #136 DEC-014).** OpenAI
+  surfaces refusals as **model-generated text** (e.g. "I cannot help with that") which
+  the tolerant JSON parser routes through `GradeOutputError(violation_type="json_parse")`
+  → standard degrade — so #136 deliberately ships **no** safety-filter typed-degrade DEC.
+  Gemini is the opposite: structural blocks produce **no candidate / no text at all**, so
+  the same parser-degrade path can't catch them; the typed-error branch is load-bearing
+  here. The two providers' divergent refusal surfaces are why #136 doesn't need this DEC
+  and #137 does. If a future Gemini SDK release starts returning refusal-as-text in some
+  cases, the OpenAI parser-degrade path catches it automatically — keep the typed branch
+  for the structural case it uniquely handles.
+
 - **DEC-006 — Exception → `ExceptionCategory` taxonomy.** Loaded lazily in the shim:
   - `google.genai.errors.ClientError` with `code == 401` or `403` → `AUTH`
   - `google.genai.errors.ClientError` with `code == 429` → `RATE_LIMIT`
@@ -255,14 +267,11 @@ No blockers. One concern (performance/cost) accepted with explicit docs; one con
   Client`, import-alias `from google.genai import Client as C`, attribute via
   `from google import genai; genai.Client(...)`). The 7th-AST-scan helper already
   generalises; reuse it. Sanity test asserts ≥1 construction in
-  `_gemini_client.py`. **AST-scan tally is merge-order-dependent:** per DEC-019,
-  #137 ships **after** #136, so #136's `openai.OpenAI(...)` scan bumps 8 → 9 first
-  and #137's scan here bumps **9 → 10**. If the sequencing slips and #137 lands
-  first, it owns the 8 → 9 bump and #136 inherits 9 → 10 — update the docstring
-  count + the `_QualifiedNameCallFinder` test-discovery count to whichever number
-  is current at merge time. (The docstring "AST scans" tally in `safety-layer.md`
-  is the surface that needs updating; the scan-7 discovery count counts a different
-  thing — per-stage `errors.py` modules — and is unaffected.)
+  `_gemini_client.py`. **Tally: #137 bumps 9 → 10** (#136 lands the 9th scan for
+  `openai.OpenAI(...)` first per DEC-019). The docstring "AST scans" tally in
+  `safety-layer.md` is the surface that needs updating to **10**; the scan-7
+  discovery count counts a different thing — per-stage `errors.py` modules — and is
+  unaffected.
 
 - **DEC-010 — `pyproject.toml` `[gemini]` extra + dual dev-group listing.** `google-genai`
   appears in **three** places, in lockstep (Snowflake precedent):
@@ -348,16 +357,16 @@ No blockers. One concern (performance/cost) accepted with explicit docs; one con
   `response_schema` for v0.3: the parser is the canonical structural gate, and a full
   Pydantic-derived schema adds surface for marginal benefit.
 
-- **DEC-019 — Sequence after #136.** #137 merges **after** #136 so the
-  `LLMProvider.estimate_input_tokens` ABC extension, the per-provider pricing pattern,
-  and the `--estimate` strategy refactor are in place. The contingency is small:
-  if #137 ships first, an extra story is needed to add the ABC extension + the
-  Anthropic byte-identity snapshot + the OpenAI-less estimate refactor — work that
-  fundamentally belongs to #136. Avoid by gating PR-merge order; document the
-  dependency on the PR body and in the bead description.
-  **If the sequencing slips:** raise a coordination bead in the parent epic (#134) to
-  re-base #137 on top of merged-#136 rather than racing the rebases on `providers.py`
-  / `pricing.py` / `cli/_estimate.py`.
+- **DEC-019 — Sequence after #136 (implementation in progress).** **#136 is being
+  implemented first** — `feature/136-openai-grading` is the active epic; #137 merges
+  on top of it so the `LLMProvider.estimate_input_tokens` ABC extension, the
+  per-provider pricing pattern, the `--estimate` strategy refactor, AND the 9th AST
+  scan (`openai.OpenAI(...)`) are all in place when US-007 / US-001 land. Rebase #137
+  on `dev` (or directly on `feature/136-openai-grading` if needed) after #136 merges
+  rather than racing edits on `providers.py` / `pricing.py` / `cli/_estimate.py` /
+  `tests/test_audit_completeness.py`. The bead-level cross-epic blocker on US-007
+  (already annotated in the beads manifest) is the operational hook for this
+  sequencing.
 
 ## Story breakdown (Phase 4)
 
@@ -372,8 +381,8 @@ part of the validation gate.
 **Traces to:** DEC-001, DEC-008, DEC-009, DEC-015.
 
 **Description.** Create the per-vendor shim that confines every `google.genai` import +
-SDK ignore. Add the 9th AST audit-completeness scan asserting `genai.Client(...)`
-construction only happens here.
+SDK ignore. Add the **10th** AST audit-completeness scan asserting `genai.Client(...)`
+construction only happens here (#136 lands the 9th scan for OpenAI first, per DEC-019).
 
 **Files.**
 - `src/signalforge/llm/_gemini_client.py` (new): `GeminiClientProtocol` (with nested
@@ -381,9 +390,10 @@ construction only happens here.
   façade), `_make_gemini_client(api_key=None) -> GeminiClientProtocol`,
   `_load_gemini_exception_classes() -> _GeminiExceptionClasses`,
   `_GeminiExceptionClasses` frozen dataclass.
-- `tests/test_audit_completeness.py` (edit): add 9th scan + the planted-violation
+- `tests/test_audit_completeness.py` (edit): add the 10th scan + the planted-violation
   regression test covering bare / import-alias / module-attribute bypass patterns
-  (`testing-signal.md` § "AST single-construction-seam scans").
+  (`testing-signal.md` § "AST single-construction-seam scans"). Bump the module
+  docstring's "AST scans" tally from 9 → 10.
 - `tests/llm/test_gemini_client_confinement.py` (new): asserts every
   `google.genai`-typed import and `# pyright: ignore` for the SDK lives only in
   `_gemini_client.py` (mirrors `tests/warehouse/test_snowflake_client_confinement.py`).
@@ -394,7 +404,7 @@ the shim; assert it passes the confinement test.
 **Acceptance criteria.**
 - `from signalforge.llm._gemini_client import GeminiClientProtocol, _make_gemini_client`
   works in a fresh `uv sync --dev` env (SDK installed via `dev` group).
-- `tests/test_audit_completeness.py` 9th scan rejects a planted
+- `tests/test_audit_completeness.py` 10th scan rejects a planted
   `genai.Client(...)` in any module other than `_gemini_client.py`.
 - `tests/llm/test_gemini_client_confinement.py` passes.
 - Canonical validation command passes.
@@ -720,9 +730,10 @@ pass after every round of fixes. **Additionally:**
 **Files.**
 - `.claude/rules/llm-drafter.md` (edit):
   - Update "Provider-neutral seam — generic orchestrator + per-provider strategy (#135)"
-    section to note the second concrete provider (Gemini) shipped under #137 and the
-    `_gemini_client.py` confinement; bump "AST audit-completeness scans" from four to
-    five (the 9th scan).
+    section to note Gemini as the **third** concrete provider (OpenAI #136 + Gemini #137)
+    and the `_gemini_client.py` confinement; bump "AST audit-completeness scans" from
+    five to six (#136 adds the 9th scan; #137 adds the 10th — both surface as new
+    AST-scan items in the rule file's tally).
   - Add a paragraph: **"v0.3 Gemini ships no-cache."** Both capability flags `False`;
     request shape collapses `system + cached_block + dynamic_block` into
     `system_instruction + single user turn`; safety-filter no-content responses surface
@@ -743,6 +754,22 @@ Per `~/.claude/projects/-home-wesd-Projects-SignalForge/memory/ralph-worker-clau
 - **Patterns & Memory is orchestrator-only** because it edits `.claude/rules/llm-drafter.md` and `.claude/rules/grade-layer.md`. The beads-manifest line already labels the task "(orchestrator: …)"; if a worker is dispatched against P&M the bead fails with a write-denied error — route it to the orchestrator at devolve time.
 
 The OpenAI plan (#136) codifies the same routing; mirroring it here so the rule lands durably for both #136 and #137. Future provider plans (#138+ if a fourth vendor ever ships) should copy this section verbatim.
+
+## Worker-writability routing
+
+Per `~/.claude/projects/-home-wesd-Projects-SignalForge/memory/ralph-worker-claude-dir-perms.md`:
+**Ralph workers cannot Write under `.claude/` in worktrees** — only the orchestrator can.
+The story split honours this:
+
+- US-001 through US-009 + Quality Gate touch only worker-writable paths (`src/`, `tests/`,
+  `pyproject.toml`, `docs/`, `CHANGELOG.md`, `README.md`, `uv.lock`,
+  `CONTRIBUTING.md`).
+- **Patterns & Memory is orchestrator-only** because it edits
+  `.claude/rules/llm-drafter.md` (and `.claude/rules/grade-layer.md`). If a worker is
+  dispatched against the P&M bead, it fails with a write-denied error; route it to the
+  orchestrator.
+
+Mirrors #136's same routing convention — the rule lands durably for both #136 and #137.
 
 ## Open notes for implementation
 
@@ -780,6 +807,19 @@ The OpenAI plan (#136) codifies the same routing; mirroring it here so the rule 
   `LLMHelperError` / `LLMAuthError` / etc. The taxonomy is provider-neutral by design.
   No new entries in the `_EXCEPTION_TO_EXIT_CODE` table (per `cli-layer.md` § 7th AST
   scan).
-- **The 9th AST scan re-uses `_QualifiedNameCallFinder`.** Don't roll a new visitor;
+- **The 10th AST scan re-uses `_QualifiedNameCallFinder`.** Don't roll a new visitor;
   the existing helper handles all three bypass patterns (`testing-signal.md` § "AST
-  single-construction-seam scans must catch all three bypass patterns").
+  single-construction-seam scans must catch all three bypass patterns"). #136's 9th
+  scan (`openai.OpenAI(...)`) is the precedent — copy its shape.
+- **`count_tokens` response field name — verify against installed `google-genai` SDK.**
+  DEC-016: `GeminiProvider.estimate_input_tokens` reads the count from the
+  `models.count_tokens(...)` response. The field is `.total_tokens` on current SDK
+  versions; pin a unit test under US-007 that drives `FakeGeminiClient` with a queued
+  count_tokens response and asserts the extraction works. If the SDK renames the field
+  (e.g. `.total_token_count`), the test fails loud at implementation time — adjust
+  the shim, not the plan. Parallel to #136's tiktoken-fallback note.
+- **Anthropic byte-identity snapshot is owned by #136.** US-007 inherits the snapshot
+  test at `tests/cli/test_estimate.py` that #136 lands. Do NOT re-capture or move the
+  snapshot during #137 implementation — if it changes when wiring Gemini's
+  `estimate_input_tokens`, the wiring is wrong (a Gemini estimate path must not move
+  Anthropic estimate bytes).
