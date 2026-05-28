@@ -72,7 +72,7 @@ import logging
 import time
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
@@ -85,6 +85,7 @@ from signalforge.grade.prompts import (
 )
 from signalforge.grade.rubric import DEFAULT_RUBRIC
 from signalforge.llm import pricing as _pricing
+from signalforge.llm.providers import provider_for
 from signalforge.safety.models import LLMRequest, SamplingMode
 from signalforge.warehouse._sql_safety import validate_identifier
 from signalforge.warehouse.errors import WarehouseError
@@ -94,7 +95,6 @@ if TYPE_CHECKING:
     from signalforge.draft.config import DraftConfig
     from signalforge.grade.config import GradeConfig
     from signalforge.grade.rubric import Criterion
-    from signalforge.llm import AnthropicClientProtocol
     from signalforge.manifest.models import Manifest, Model
     from signalforge.prune.config import PruneConfig
     from signalforge.warehouse.base import WarehouseAdapter
@@ -284,51 +284,55 @@ def _truncate_criterion_text(text: str) -> str:
 
 def _count_draft_tokens(
     *,
-    client: AnthropicClientProtocol,
+    client: object | None,
     draft_config: DraftConfig,
     system: str,
     cached_block: str,
     dynamic_block: str,
 ) -> int:
-    """Issue exactly one ``count_tokens`` for the drafter prompt and
-    return the integer ``input_tokens`` field.
+    """Return the input-token count for the drafter prompt.
 
-    Mirrors :func:`signalforge.llm.client.call_llm`'s pre-send
-    ``count_tokens`` envelope: system + the single cached user-content
-    block. The dynamic block is included in the messages list so the
-    count reflects the full prompt the drafter would send (the cache
-    boundary affects pricing, not token count — pricing math runs
-    further down using ``draft_config.cache_ttl`` indirectly).
+    Refactored in #136 US-005 (DEC-003) to dispatch through
+    :meth:`signalforge.llm.providers.LLMProvider.estimate_input_tokens`
+    so the engine works against any registered provider — Anthropic
+    delegates to the SDK's server-side ``messages.count_tokens``;
+    OpenAI counts locally via ``tiktoken``. Byte-identity with the
+    pre-refactor Anthropic path is pinned by
+    ``tests/cli/test_estimate.py::test_estimate_anthropic_byte_identity_golden``
+    (DEC-013).
+
+    The ``system`` envelope is threaded as its own kwarg so providers
+    whose API counts the system block separately (Anthropic's
+    server-side ``messages.count_tokens(system=..., ...)``) produce
+    real-API-faithful counts (DEC-013 of #136). The ``cached_block`` +
+    ``dynamic_block`` are concatenated into the user-content text
+    payload because Anthropic's tokenizer collapses adjacent text blocks
+    identically to a single concatenated string for counting purposes.
+    The cache boundary affects pricing, not token count — pricing math
+    runs further down using ``draft_config.cache_ttl`` indirectly.
     """
-    block_cached: dict[str, Any] = {
-        "type": "text",
-        "text": cached_block,
-        "cache_control": {"type": "ephemeral", "ttl": draft_config.cache_ttl},
-    }
-    block_dynamic: dict[str, Any] = {"type": "text", "text": dynamic_block}
-    response = client.messages.count_tokens(
-        model=draft_config.model,
-        system=system,
-        messages=[{"role": "user", "content": [block_cached, block_dynamic]}],
+    text = cached_block + dynamic_block
+    return provider_for(draft_config.provider).estimate_input_tokens(
+        draft_config.model, text, system=system, client=client
     )
-    input_tokens = getattr(response, "input_tokens", None)
-    if not isinstance(input_tokens, int):
-        msg = "count_tokens response is missing the `input_tokens` field."
-        raise RuntimeError(msg)
-    return input_tokens
 
 
 def _count_grade_criterion_tokens(
     *,
-    client: AnthropicClientProtocol,
+    client: object | None,
     grade_config: GradeConfig,
     system_and_rubric: str,
     artifact_id: str,
     artifact_text: str,
     criterion: Criterion,
 ) -> int:
-    """Issue one ``count_tokens`` for the representative ``(artifact,
-    criterion)`` prompt and return ``input_tokens``.
+    """Return the input-token count for the representative
+    ``(artifact, criterion)`` grade prompt.
+
+    Refactored in #136 US-005 (DEC-003) to dispatch through
+    :meth:`signalforge.llm.providers.LLMProvider.estimate_input_tokens`
+    so the engine works against any registered provider — see
+    :func:`_count_draft_tokens` for the byte-identity contract.
 
     Per ``grade-layer.md`` DEC-004 the real grader issues one
     ``messages.create`` per ``(artifact × criterion)`` pair. The
@@ -337,24 +341,28 @@ def _count_grade_criterion_tokens(
     across artifacts so per-criterion token counts scale linearly with
     artifact count, and counting one representative is a faithful
     proxy that keeps the LLM-call count bounded.
+
+    **Pre-existing double-count corrected in #136 US-008 QG.** The
+    pre-US-005 inline Anthropic call passed ``system=system_and_rubric``
+    AND embedded ``system_and_rubric`` inside the cached user-content
+    block, counting the rubric twice on every per-criterion estimate.
+    The first QG fix mistakenly preserved that double-count in the
+    name of byte-identity, which then *triple*-counted for OpenAI
+    (system kwarg → OpenAI's ``system + text`` concat → rubric prefix
+    in text). The correct behaviour matches the runtime grader call:
+    rubric in ``system=`` once, the artifact envelope in user content,
+    no overlap. Anthropic call shape is now system-envelope(rubric) +
+    dynamic_block (drops one rubric copy from the pre-refactor bytes);
+    OpenAI counts system_and_rubric + dynamic_block once. Fake-driven
+    byte-identity golden still passes (canned token counts unchanged
+    by call-shape), so the rendered USD floor for the golden fixture
+    holds; real-API ``--estimate`` figures shift down by ~one rubric
+    per criterion. See CHANGELOG.
     """
     dynamic_block = render_grade_dynamic_block(artifact_id, artifact_text, criterion)
-    block_cached: dict[str, Any] = {
-        "type": "text",
-        "text": system_and_rubric,
-        "cache_control": {"type": "ephemeral", "ttl": grade_config.cache_ttl},
-    }
-    block_dynamic: dict[str, Any] = {"type": "text", "text": dynamic_block}
-    response = client.messages.count_tokens(
-        model=grade_config.model,
-        system=system_and_rubric,
-        messages=[{"role": "user", "content": [block_cached, block_dynamic]}],
+    return provider_for(grade_config.provider).estimate_input_tokens(
+        grade_config.model, dynamic_block, system=system_and_rubric, client=client
     )
-    input_tokens = getattr(response, "input_tokens", None)
-    if not isinstance(input_tokens, int):
-        msg = "count_tokens response is missing the `input_tokens` field."
-        raise RuntimeError(msg)
-    return input_tokens
 
 
 def _build_representative_sql(model: Model, adapter: WarehouseAdapter, sample_size: int) -> str:
@@ -416,7 +424,7 @@ def estimate(
     grade_config: GradeConfig,
     prune_config: PruneConfig,
     adapter: WarehouseAdapter,
-    anthropic_client: AnthropicClientProtocol,
+    client: object | None,
     *,
     project_dir: Path | None = None,  # noqa: ARG001 (reserved for v0.2)
 ) -> EstimateReport:
@@ -443,8 +451,18 @@ def estimate(
         prune_config: Loaded :class:`PruneConfig` (carries
             ``sample_size`` for the representative dry-run SQL).
         adapter: Constructed :class:`WarehouseAdapter`.
-        anthropic_client: Constructed Anthropic client (or test fake
-            satisfying the protocol).
+        client: Optional pre-constructed provider-shaped client (or
+            test fake satisfying the active provider's protocol).
+            Renamed from ``anthropic_client`` in #136 US-008 QG —
+            after US-005 the slot was already typed ``object | None``
+            and forwarded verbatim to whichever provider strategy is
+            active; the old name implied Anthropic-only and would
+            mislead a future #137 Gemini wiring. The CLI in
+            ``generate.py`` builds an Anthropic SDK client only when
+            ``provider == "anthropic"`` and passes ``None`` otherwise;
+            providers whose count is local (OpenAI's ``tiktoken``,
+            #137 Gemini's planned native ``count_tokens``) ignore the
+            kwarg either way.
         project_dir: Reserved for v0.2 (caching, sidecar paths).
 
     Returns:
@@ -458,7 +476,7 @@ def estimate(
     request = _build_schema_only_request(model)
     system, cached_block, dynamic_block, _prompt_version = render_prompt(model, request, manifest)
     draft_input_tokens = _count_draft_tokens(
-        client=anthropic_client,
+        client=client,
         draft_config=draft_config,
         system=system,
         cached_block=cached_block,
@@ -499,7 +517,7 @@ def estimate(
     grade_usd = 0.0
     for criterion in rubric:
         input_tokens_per_call = _count_grade_criterion_tokens(
-            client=anthropic_client,
+            client=client,
             grade_config=grade_config,
             system_and_rubric=system_and_rubric,
             artifact_id=rep_artifact_id,

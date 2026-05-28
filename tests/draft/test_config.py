@@ -95,6 +95,15 @@ def test_draft_config_provider_accepts_registered_name() -> None:
     assert cfg.provider == "anthropic"
 
 
+def test_draft_config_provider_accepts_openai() -> None:
+    """US-002 of #136: after ``OpenAIProvider`` is registered at import time,
+    ``DraftConfig(provider="openai", model="gpt-4o")`` validates without
+    error (DEC-005 of #136 — both stages accept ``provider: openai``)."""
+    cfg = DraftConfig(provider="openai", model="gpt-4o")
+    assert cfg.provider == "openai"
+    assert cfg.model == "gpt-4o"
+
+
 def test_draft_config_provider_rejects_unknown_with_available_keys() -> None:
     """DEC-007: an unknown provider fails loud with a typed
     :class:`UnknownProviderError` that names the registered providers.

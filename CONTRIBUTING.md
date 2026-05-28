@@ -34,10 +34,11 @@ uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run 
 ## Pre-release coverage audit
 
 The default `pytest` run — and therefore the coverage badge — measures only the
-default marker set. Tests gated behind `bigquery`, `anthropic`, `cli_subprocess`,
-`e2e`, and `wheel_smoke` are filtered out by `addopts` (see
-`.claude/rules/testing-signal.md` § "Known gap: excluded markers"), so the
-real-network and packaging paths are not instrumented in the badge number.
+default marker set. Tests gated behind `bigquery`, `anthropic`, `openai`,
+`cli_subprocess`, `e2e`, `snowflake`, and `wheel_smoke` are filtered out by
+`addopts` (see `.claude/rules/testing-signal.md` § "Known gap: excluded
+markers"), so the real-network and packaging paths are not instrumented in the
+badge number.
 
 Run this audit against the **matrix ceiling** (currently Python 3.13 — the
 highest version CI exercises) by prefixing `uv run --python 3.13`, so the
@@ -56,9 +57,11 @@ uv run pytest
 #    --cov-append combines with run 1 so the term report shows the COMBINED total.
 #    --cov-fail-under=0 overrides the 80% gate inherited from addopts — gated
 #    markers alone never clear it, and this is a measurement, not a gate.
-#    (bigquery/anthropic/e2e need creds; cli_subprocess/wheel_smoke do not.)
-SF_RUN_BQ=1 ANTHROPIC_API_KEY=sk-... GOOGLE_CLOUD_PROJECT=<billing-project> \
-  uv run pytest -m 'bigquery or anthropic or e2e or cli_subprocess or wheel_smoke' \
+#    (bigquery/anthropic/openai/snowflake/e2e need creds; cli_subprocess/wheel_smoke do not.)
+SF_RUN_BQ=1 ANTHROPIC_API_KEY=sk-... OPENAI_API_KEY=sk-... \
+  SF_RUN_OPENAI=1 SF_RUN_SNOWFLAKE=1 GOOGLE_CLOUD_PROJECT=<billing-project> \
+  SNOWFLAKE_ACCOUNT=... SNOWFLAKE_USER=... SNOWFLAKE_PASSWORD=... SNOWFLAKE_WAREHOUSE=... \
+  uv run pytest -m 'bigquery or anthropic or openai or snowflake or e2e or cli_subprocess or wheel_smoke' \
   --cov=signalforge --cov-append --cov-fail-under=0 --cov-report=term
 ```
 
@@ -129,3 +132,34 @@ SF_RUN_BQ)`.
 The tests query `bigquery-public-data.samples.shakespeare` (164K rows,
 free under the 1 TB/month BigQuery tier). They are maintainer-only for
 v0.1; no CI job runs them.
+
+## OpenAI live-API smoke tests
+
+Three tests gated by `@pytest.mark.openai` exercise the OpenAI provider
+end-to-end (issue #136):
+
+- `tests/grade/test_smoke_real_api_openai.py` — `grade_artifacts` against
+  a tiny in-test fixture, single criterion.
+- `tests/draft/test_smoke_real_api_openai.py` — `draft_schema` against a
+  small in-test manifest; honours DEC-005's "scope both stages" commitment.
+- `tests/cli/test_e2e_estimate_openai.py` — `signalforge generate
+  --estimate` with `llm.provider: openai` + `grade.provider: openai`.
+
+All three are skipped by default (filtered out by `addopts = -m 'not
+openai'`) and additionally self-skip via a runtime gate if either env var
+is missing — the belt-and-suspenders pattern from
+`.claude/rules/testing-signal.md` § "End-to-end gated tests".
+
+Run with credentials:
+
+```bash
+SF_RUN_OPENAI=1 OPENAI_API_KEY=sk-... uv run pytest -m openai --no-cov
+```
+
+The `--estimate` test additionally honours `GOOGLE_CLOUD_PROJECT` when
+present (lets the warehouse-bytes leg compute instead of degrading to
+`<unavailable: ...>`); absent, the warehouse half degrades cleanly per
+DEC-005 of #36 and the test still passes. They are maintainer-only; no
+CI job runs them. Each run hits the real OpenAI API and incurs a small
+cost (the grade smoke is 5 `gpt-4o` calls at ~$0.005 each; the draft
+smoke is 1 call; `--estimate` is local tiktoken only, no API call).

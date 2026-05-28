@@ -24,6 +24,15 @@ this module adds the remaining scans:
   whose body issues ``os.write`` / ``os.fsync``; every writer function
   must use a short-write loop. The propagation IS the defence
   (safety-layer.md DEC-011, repeated in prune/grade/diff rules).
+* **Scan 9** — ``openai.OpenAI(...)`` outside
+  ``signalforge.llm._openai_client`` (#136 DEC-010). NEW — not an
+  extension of Scan 3 (which is Anthropic-specific). Mirrors Scan 3's
+  shape: reuses :class:`_AttributeCallFinder` to detect the SDK
+  construction call regardless of import-alias bypasses; the companion
+  per-file ``# type: ignore`` confinement test
+  (``tests/llm/test_openai_client_confinement.py``) mirrors the
+  Snowflake shim's line-based check. Once #137 lands its Gemini
+  equivalent, the tally moves to 10.
 
 Each scan is its own test with an explicit, justified exclusion list. The
 scans are deterministic and cheap: each ``.py`` is read once via
@@ -181,13 +190,38 @@ class _AttributeCallFinder(ast.NodeVisitor):
         self._direct_aliases: set[str] = set()
         self.calls: list[tuple[int, int]] = []
 
+    def visit_Module(self, node: ast.Module) -> None:  # noqa: N802 — ast API
+        # Two-pass walk on the module root: collect every alias FIRST,
+        # then visit normally to find Call hits. Closes the
+        # "call-before-import" bypass where a function body references
+        # an alias defined by a later top-level import (PR #152
+        # CodeRabbit catch — mirrors the precedent in
+        # ``test_qualified_name_finder_catches_late_import_alias``).
+        # Without this, ``ast.NodeVisitor``'s depth-first walk visits
+        # the Call before the Import/ImportFrom and the alias map is
+        # empty when the Call is matched.
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Import):
+                for alias in sub.names:
+                    if alias.name == self._obj_name:
+                        self._obj_aliases.add(alias.asname or alias.name)
+            elif isinstance(sub, ast.ImportFrom) and sub.module == self._obj_name:
+                for alias in sub.names:
+                    if alias.name == self._attr_name:
+                        self._direct_aliases.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
     def visit_Import(self, node: ast.Import) -> None:  # noqa: N802 — ast API
+        # Idempotent re-add on the second pass (alias already collected
+        # by ``visit_Module``). Kept so callers feeding a sub-module
+        # subtree (not the Module root) still register aliases.
         for alias in node.names:
             if alias.name == self._obj_name:
                 self._obj_aliases.add(alias.asname or alias.name)
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802 — ast API
+        # Same idempotent-on-second-pass note as ``visit_Import``.
         if node.module == self._obj_name:
             for alias in node.names:
                 if alias.name == self._attr_name:
@@ -883,6 +917,71 @@ def test_fail_closed_writers_use_short_write_loop() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Scan 9 — openai.OpenAI only in llm._openai_client (#136 DEC-010)
+# ---------------------------------------------------------------------------
+
+
+# DEC-010 of #136: every OpenAI SDK ``# pyright: ignore`` / ``# type: ignore``
+# and the SDK construction call itself live in ``_openai_client.py``. This is
+# a **new** scan, not an extension of Scan 3 — Scan 3 is Anthropic-specific
+# (``anthropic.Anthropic(...)``). Both scans mirror the same shape because
+# each vendor SDK gets its own shim per the one-shim-per-vendor convention
+# (``.claude/rules/llm-drafter.md`` § "One SDK seam"). When #137 ships the
+# Gemini equivalent, the tally bumps 9 → 10.
+_LLM_OPENAI_EXCLUSIONS: set[str] = {
+    # _openai_client.py is the sole SDK seam: it lazy-imports
+    # ``openai`` and constructs ``openai.OpenAI(api_key=...)``
+    # inside ``_make_openai_client``.
+    "_openai_client.py",
+}
+
+
+def test_openai_client_construction_only_in_llm_client_shim() -> None:
+    """DEC-010 of #136: ``openai.OpenAI(...)`` outside
+    ``signalforge.llm._openai_client`` violates the SDK-confinement
+    convention. The AST scan is stricter than the regex check in
+    ``tests/llm/test_openai_client_confinement.py`` (catches multi-line
+    / commented forms the regex would miss).
+
+    Mirrors :func:`test_anthropic_client_construction_only_in_llm_client_shim`
+    verbatim with ``openai`` / ``OpenAI`` substituted. The
+    :class:`_AttributeCallFinder` handles all three bypass patterns
+    (bare ``from openai import OpenAI``, alias ``import openai as o``,
+    attribute ``openai.OpenAI(...)``).
+    """
+    hits = _scan_dir_for_attribute_calls(
+        _LLM_DIR,
+        obj_name="openai",
+        attr_name="OpenAI",
+        excluded_relpaths=_LLM_OPENAI_EXCLUSIONS,
+    )
+    formatted = "\n".join(f"  {p}:{line}" for p, line in hits)
+    assert not hits, (
+        "openai.OpenAI(...) constructed outside "
+        "signalforge.llm._openai_client:\n"
+        f"{formatted}\n"
+        "Construct only via _make_openai_client — DEC-010 of #136 confines "
+        "OpenAI-SDK noise to the shim."
+    )
+
+
+def test_openai_client_construction_in_llm_client_shim_is_present() -> None:
+    """Sanity: at least one ``openai.OpenAI(...)`` in
+    ``_openai_client.py``. If this fails the scan above is no longer
+    load-bearing.
+    """
+    client_path = _LLM_DIR / "_openai_client.py"
+    tree = ast.parse(client_path.read_text(encoding="utf-8"))
+    finder = _AttributeCallFinder("openai", "OpenAI")
+    finder.visit(tree)
+    assert finder.calls, (
+        "Expected openai.OpenAI(...) call in "
+        "signalforge.llm._openai_client — the AST-scan above is no longer "
+        "load-bearing if the legitimate constructor disappears."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Negative tests: confirm the AST visitors detect planted violations
 # ---------------------------------------------------------------------------
 
@@ -965,6 +1064,59 @@ def test_qualified_name_finder_catches_all_three_bypass_patterns() -> None:
             f"_QualifiedNameCallFinder regressed on Pattern 3 "
             f"(`module.{target}(...)`)"
         )
+
+
+def test_attribute_call_finder_catches_all_three_openai_bypass_patterns() -> None:
+    """#136 DEC-010 planted-violation regression: Scan 9 must catch
+    each of the three bypass patterns for ``openai.OpenAI(...)``.
+
+    Mirrors :func:`test_qualified_name_finder_catches_all_three_bypass_patterns`
+    in spirit but uses :class:`_AttributeCallFinder` (Scan 9's helper)
+    against synthetic source for each pattern. Per
+    ``testing-signal.md`` § "AST single-construction-seam scans must
+    catch all three bypass patterns" — a bare-name-only visitor is
+    trivially bypassable and provides false confidence.
+    """
+    # Pattern 1: bare ``OpenAI(...)`` after ``from openai import OpenAI``.
+    bare_src = "from openai import OpenAI\ndef make():\n    return OpenAI(api_key='x')\n"
+    bare = _AttributeCallFinder("openai", "OpenAI")
+    bare.visit(ast.parse(bare_src))
+    assert len(bare.calls) == 1, (
+        "Pattern 1 (bare `from openai import OpenAI; OpenAI(...)`) not detected — "
+        "_AttributeCallFinder regressed."
+    )
+
+    # Pattern 2: import-alias ``from openai import OpenAI as O``.
+    alias_src = "from openai import OpenAI as O\ndef make():\n    return O(api_key='x')\n"
+    alias = _AttributeCallFinder("openai", "OpenAI")
+    alias.visit(ast.parse(alias_src))
+    assert len(alias.calls) == 1, (
+        "Pattern 2 (import-alias `from openai import OpenAI as O; O(...)`) not detected — "
+        "_AttributeCallFinder regressed."
+    )
+
+    # Pattern 3: module-attribute ``import openai; openai.OpenAI(...)``.
+    attr_src = "import openai\n\nx = openai.OpenAI(api_key='x')\n"
+    attr = _AttributeCallFinder("openai", "OpenAI")
+    attr.visit(ast.parse(attr_src))
+    assert len(attr.calls) == 1, (
+        "Pattern 3 (module-attribute `import openai; openai.OpenAI(...)`) not detected — "
+        "_AttributeCallFinder regressed."
+    )
+
+    # Pattern 4: late-import alias — call appears in source order BEFORE
+    # the import that defines its alias. Single-pass alias collection
+    # misses this; ``_AttributeCallFinder.visit_Module`` does a two-pass
+    # walk to close the bypass (PR #152 CodeRabbit catch; mirrors the
+    # ``_QualifiedNameCallFinder`` regression test below).
+    late_alias_src = "def make():\n    return O(api_key='x')\nfrom openai import OpenAI as O\n"
+    late = _AttributeCallFinder("openai", "OpenAI")
+    late.visit(ast.parse(late_alias_src))
+    assert len(late.calls) == 1, (
+        "Pattern 4 (late-import alias: call appears before its `from openai import OpenAI "
+        "as O` line) not detected — _AttributeCallFinder regressed; the two-pass "
+        "`visit_Module` alias collection is the gate that closes this bypass."
+    )
 
 
 def test_qualified_name_finder_catches_late_import_alias() -> None:
