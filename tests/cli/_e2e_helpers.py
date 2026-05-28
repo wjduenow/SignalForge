@@ -20,6 +20,12 @@ Public surface:
   verbatim without coupling the e2e fixture to the ``init-demo`` parity
   tree (``tests/test_demo_fixture_parity.py``) — the rules are injected
   into the per-run ``tmp_path`` copy, never the committed fixture.
+* :func:`apply_provider_override` — overlays per-test ``grade:`` block
+  knobs (``provider`` / ``model`` / ``max_output_tokens``) onto a copied
+  fixture's ``signalforge.yml`` (issue #155 / US-004 / DEC-012). The
+  canonical seam the multi-provider e2e smokes (BigQuery+Anthropic /
+  +OpenAI / +Gemini) use to swap the grader without maintaining N
+  near-duplicate fixtures.
 
 Used only by the gated e2e smokes (``tests/cli/test_e2e_*.py``) plus the
 helper's own unit tests under ``tests/cli/test_e2e_helpers.py``. Not
@@ -32,6 +38,8 @@ import json
 import shutil
 from collections.abc import Sequence
 from pathlib import Path
+
+import yaml
 
 from signalforge.diff import DiffReport
 from signalforge.prune import PruneDecision, PruneEvent
@@ -178,3 +186,55 @@ def inject_model_business_rules(
     node_meta.setdefault("signalforge", {})["business_rules"] = rules_list
 
     manifest_path.write_text(json.dumps(manifest))
+
+
+def apply_provider_override(
+    project_dir: Path,
+    *,
+    grade_provider: str | None = None,
+    grade_model: str | None = None,
+    grade_max_output_tokens: int | None = None,
+) -> None:
+    """Overlay ``grade:`` block provider config onto an existing ``signalforge.yml``.
+
+    Issue #155 / US-004 / DEC-012. The multi-provider e2e smokes
+    (BigQuery+Anthropic baseline, +OpenAI, +Gemini) share the committed
+    Austin fixture and swap only the grader's provider/model. This helper
+    is the canonical seam: read the per-run ``signalforge.yml``, set the
+    three ``grade:`` knobs whose argument is non-``None``, write back.
+
+    Non-destructive — unset knobs (default ``None``) are left untouched, so
+    existing thresholds (``min_pass_rate``, ``min_mean_score``,
+    ``total_budget_seconds``, ``fail_on_below_threshold``) and sibling
+    top-level blocks (``llm:``, ``safety:``, ``prune:``) round-trip
+    unchanged. If the file has no ``grade:`` block, one is created with
+    only the supplied keys.
+
+    Args:
+        project_dir: a copied project root (use
+            :func:`copy_fixture_to_tmp` first — NEVER call against a
+            committed fixture; mutates ``project_dir/signalforge.yml``
+            in place).
+        grade_provider: optional override for ``grade.provider`` (e.g.
+            ``"anthropic"``, ``"openai"``, ``"gemini"``).
+        grade_model: optional override for ``grade.model`` (e.g.
+            ``"gpt-4o"``, ``"gemini-2.5-flash"``).
+        grade_max_output_tokens: optional override for
+            ``grade.max_output_tokens`` (e.g. ``2048`` for Gemini to
+            avoid mid-response truncation per #155).
+
+    Raises:
+        FileNotFoundError: if ``<project_dir>/signalforge.yml`` is
+            missing (the helper assumes a real fixture has been copied
+            in; silently creating one would mask misconfigured tests).
+    """
+    config_path = project_dir / "signalforge.yml"
+    data = yaml.safe_load(config_path.read_text()) or {}
+    grade_block = data.setdefault("grade", {})
+    if grade_provider is not None:
+        grade_block["provider"] = grade_provider
+    if grade_model is not None:
+        grade_block["model"] = grade_model
+    if grade_max_output_tokens is not None:
+        grade_block["max_output_tokens"] = grade_max_output_tokens
+    config_path.write_text(yaml.safe_dump(data, sort_keys=False))
