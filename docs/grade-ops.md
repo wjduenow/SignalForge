@@ -497,6 +497,21 @@ operators (DEC-014). The current architecture preserves the option:
 each criterion has its own prompt seam already, so a `cost_mode:
 batched` flag is additive rather than a rewrite.
 
+### Per-provider `max_output_tokens` recommended floors
+
+No per-provider override is enforced in code — `GradeConfig.max_output_tokens`
+is one knob across every provider. The floors below are observed-data
+recommendations from live grading runs; operators can lower for cost-cutting
+but must validate quality afterward (truncated judge responses surface as
+`GradeOutputError(violation_type="json_parse")` and route to the conservative
+degrade path, masking signal).
+
+| Provider                 | Recommended floor | Rationale                                                                                  |
+|--------------------------|-------------------|--------------------------------------------------------------------------------------------|
+| Anthropic (Sonnet 4.6+)  | 1024              | Sufficient for full reasoning; tested in BQ smoke.                                         |
+| OpenAI (gpt-4o)          | 1024              | Same headroom; no observed truncation.                                                     |
+| Gemini (2.5-flash+)      | **2048**          | Verbose reasoning style; 512 / 1024 observed truncating mid-string (issue #155 DEC-008).   |
+
 ## OpenAI provider
 
 Issue #136 registered `OpenAIProvider` as the second
