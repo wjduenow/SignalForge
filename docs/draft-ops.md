@@ -483,8 +483,7 @@ candidates that slip past — a dual-defence pattern mirroring
 ### What it catches
 
 The check walks binary comparison nodes (`<>`, `=`, `<`, `>`, `<=`,
-`>=`, plus `IN`-list comparisons) in the drafted SQL and flags
-violations where:
+`>=`) in the drafted SQL and flags violations where:
 
 - Both operands are bare column references (NOT `CAST`, `SAFE_CAST`,
   `COALESCE`, `IFNULL`, function calls, subqueries, literals, `NULL`,
