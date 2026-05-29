@@ -592,7 +592,7 @@ than ship a partial `schema.yml`).
 |--------------------------|-------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Anthropic (Sonnet 4.6+)  | 1024              | Sufficient for full reasoning; tested in BQ smoke.                                                                                                                                                                       |
 | OpenAI (gpt-4o)          | 1024              | Same headroom; no observed truncation.                                                                                                                                                                                   |
-| Gemini (2.5-flash+)      | **4096**          | Verbose reasoning style; 512 / 1024 observed truncating mid-string (#155 DEC-008). Drafter floor mirrors the grader floor raised by #158 — Gemini's per-call output is high-variance enough that the grader's lesson applies. |
+| Gemini (2.5-flash+)      | **4096**          | Verbose reasoning style; 512 / 1024 observed truncating mid-string (#155 DEC-008). The 4096 figure is a **conservative mirror of the #158 Gemini-grader floor** (Gemini's per-pair output is high-variance enough that the grader's 5–6/108 degrades-at-2048 finding applies to any verbose response). The drafter currently runs Anthropic in every shipped e2e, so this row is **pending Gemini-drafter live validation** — when that lands, update with measured evidence. |
 
 ## OpenAI provider
 

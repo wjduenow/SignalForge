@@ -66,7 +66,8 @@ Asserts the same seven invariants as :file:`test_e2e_bigquery_smoke.py`:
    Gemini's grading distribution should still produce at least one
    flag against thresholds this strict).
 6. ``GradingReport.aggregate_complete is True`` — **the load-bearing
-   assertion that proves the 2048 cap fixes the truncation bug.**
+   assertion that proves the 4096 cap (#158) fixes the full-fixture
+   truncation bug.**
    If ``max_output_tokens`` were too low, Gemini's verbose
    ``reasoning`` would truncate mid-string. Post-#155 US-001 the
    provider-neutral ``is_clean_completion`` gate raises
