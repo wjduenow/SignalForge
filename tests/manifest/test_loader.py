@@ -609,8 +609,15 @@ def test_load_catalog_malformed_json_is_silent(tmp_path: Path) -> None:
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
-@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file-mode perms")
+@pytest.mark.skipif(
+    # Single combined predicate — pytest evaluates ALL skipif decorators at
+    # collection time, so a chain `skipif(sys.platform == "win32")` +
+    # `skipif(os.geteuid() == 0)` would still call os.geteuid() on Windows
+    # (it doesn't exist there → AttributeError at collection) (Copilot
+    # finding on PR #161). hasattr guards before the geteuid call.
+    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="POSIX-only test (mode 0o000 read); root bypasses file-mode perms",
+)
 def test_load_catalog_oserror_is_silent(tmp_path: Path) -> None:
     """A catalog.json that raises ``OSError`` on read (mode 0o000) is silently
     skipped; the manifest still loads."""

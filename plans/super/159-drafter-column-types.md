@@ -231,13 +231,15 @@ Robustness:
 - `test_e2e_bigquery_smoke` (the sibling smoke that shares the fixture) still passes — populating types does not perturb the always-passes column path.
 - Canonical validation green; default (non-e2e) pytest run unchanged.
 
-**Done when:** Fixture committed; default `uv run pytest` green; `git diff` shows ONLY the two fixture file changes.
+**Done when:** Fixture committed; default `uv run pytest` green; this story's own commit changes ONLY fixture/demo data files (`tests/fixtures/dbt_project_austin/target/{manifest,catalog}.json` plus their `src/signalforge/_demo/target/` mirrors per the `tests/test_demo_fixture_parity.py` gate — no source code). The cumulative diff against the base branch will of course include the upstream US-001 + US-002 changes via the dependency chain — that is expected and is NOT what this criterion scopes.
 
 **Files:**
 - `tests/fixtures/dbt_project_austin/target/manifest.json` — edit
 - `tests/fixtures/dbt_project_austin/target/catalog.json` — new
+- `src/signalforge/_demo/target/manifest.json` — edit (DEC-008 of #47 demo-fixture parity gate; mirror of the test fixture)
+- `src/signalforge/_demo/target/catalog.json` — new (same)
 
-**Depends on:** US-001, US-002
+**Depends on:** US-001 (loader must already read catalog.json for the new fixture to exercise it end-to-end), US-002 (parser defence must coexist with type-populated drafts so the gated e2e behaviour is well-defined).
 
 ---
 

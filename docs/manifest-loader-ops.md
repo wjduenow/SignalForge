@@ -79,7 +79,7 @@ incidence of type-incoherent `custom_sql` business-rule tests (e.g. an
 [`docs/draft-ops.md` § Type-coherence defence](draft-ops.md#type-coherence-defence-issue-159)
 for the parser-side belt-and-braces check.
 
-### Failure modes (all silent — never block load)
+### Failure modes (all silent except the path-safety gate)
 
 - `catalog.json` absent → no merge; `data_type` fields stay `None`.
 - `catalog.json` unreadable (permission denied) or malformed JSON → no
@@ -94,6 +94,14 @@ for the parser-side belt-and-braces check.
   uppercases identifiers; BigQuery preserves case; Postgres lowercases)
   → case-insensitive match via `lower(col_name)`; the merge works
   across all three warehouses without configuration.
+
+**The one exception — path-containment violation.** If the resolved
+`catalog.json` path escapes the project tree (e.g. a symlink that
+resolves to `/etc/passwd`), the loader raises `PathContainmentError`
+from `signalforge._common.path_safety` — same symlink-hardened gate as
+`manifest.json` itself. This is a security boundary, not a stale-input
+condition, so it deliberately fails loud rather than silently skipping.
+A legitimate `catalog.json` will never trip this.
 
 ### Refreshing catalog.json
 
