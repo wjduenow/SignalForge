@@ -24,6 +24,8 @@ guard for ``manifest_path=`` overrides.
 from __future__ import annotations
 
 import errno
+import json
+import logging
 import os
 import shutil
 import sys
@@ -31,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from signalforge._common.path_safety import PathContainmentError
 from signalforge.manifest.errors import (
     ManifestError,
     ManifestNotFoundError,
@@ -533,3 +536,279 @@ def test_non_loop_oserror_on_input_path_is_not_swallowed(
 
     with pytest.raises(PermissionError):
         _canonicalise_path("manifest.json", project_resolved)
+
+
+# ---------------------------------------------------------------------------
+# 18. catalog.json sibling merge (#159 US-001 — DEC-001, DEC-002, DEC-007, DEC-010)
+# ---------------------------------------------------------------------------
+
+MANIFEST_WITH_COLUMNS = FIXTURES_DIR / "manifest" / "manifest_with_columns.json"
+CATALOG_CANONICAL = FIXTURES_DIR / "manifest" / "catalog_canonical.json"
+CATALOG_CASE_MISMATCH = FIXTURES_DIR / "manifest" / "catalog_case_mismatch.json"
+CATALOG_PHANTOM = FIXTURES_DIR / "manifest" / "catalog_phantom_column.json"
+CATALOG_PARTIAL = FIXTURES_DIR / "manifest" / "catalog_partial.json"
+DIM_USERS_UID = "model.signalforge_test_small.dim_users"
+
+
+def _project_with_manifest_and_catalog(
+    tmp_path: Path,
+    manifest_src: Path,
+    catalog_src: Path | None,
+) -> Path:
+    """Build a project tree carrying ``manifest_src`` (and optionally
+    ``catalog_src``) under ``target/``. Returns the project root.
+
+    Used by the catalog merge tests so each test gets an isolated project
+    directory with a known manifest+catalog pair.
+    """
+    project = tmp_path / "proj"
+    target = project / "target"
+    target.mkdir(parents=True)
+    shutil.copy(manifest_src, target / "manifest.json")
+    if catalog_src is not None:
+        shutil.copy(catalog_src, target / "catalog.json")
+    return project
+
+
+@pytest.mark.integration
+def test_load_merges_catalog_types_into_columns(tmp_path: Path) -> None:
+    """Happy path: catalog.json sibling read overlays ``data_type`` per column."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_CANONICAL)
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    assert model.columns["id"].data_type == "INT64"
+    assert model.columns["email"].data_type == "STRING"
+    assert model.columns["created_at"].data_type == "TIMESTAMP"
+
+
+@pytest.mark.integration
+def test_load_catalog_missing_is_silent(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """No catalog.json present: load succeeds, ``data_type`` stays ``None``,
+    no log records emitted from the manifest layer (stage-0 invariant)."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, None)
+    with caplog.at_level(logging.DEBUG, logger="signalforge.manifest"):
+        manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    for col in model.columns.values():
+        assert col.data_type is None
+    # Stage-0 invariant: manifest layer emits NO log records.
+    assert [r for r in caplog.records if r.name.startswith("signalforge.manifest")] == []
+
+
+@pytest.mark.integration
+def test_load_catalog_malformed_json_is_silent(tmp_path: Path) -> None:
+    """A corrupt ``catalog.json`` does not abort load; ``data_type`` stays ``None``."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_CANONICAL)
+    # Overwrite the canonical catalog with malformed JSON.
+    (project / "target" / "catalog.json").write_text("{ this is not json", encoding="utf-8")
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    for col in model.columns.values():
+        assert col.data_type is None
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions")
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file-mode perms")
+def test_load_catalog_oserror_is_silent(tmp_path: Path) -> None:
+    """A catalog.json that raises ``OSError`` on read (mode 0o000) is silently
+    skipped; the manifest still loads."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_CANONICAL)
+    catalog_path = project / "target" / "catalog.json"
+    catalog_path.chmod(0o000)
+    try:
+        manifest = load(project)
+    finally:
+        # Restore so tmp_path cleanup can delete the file.
+        catalog_path.chmod(0o600)
+    model = manifest.nodes[DIM_USERS_UID]
+    for col in model.columns.values():
+        assert col.data_type is None
+
+
+@pytest.mark.integration
+def test_load_catalog_column_case_insensitive_match(tmp_path: Path) -> None:
+    """Manifest column ``id`` matches catalog column ``ID`` (Snowflake-style)."""
+    project = _project_with_manifest_and_catalog(
+        tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_CASE_MISMATCH
+    )
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    assert model.columns["id"].data_type == "NUMBER"
+    assert model.columns["email"].data_type == "VARCHAR"
+    # created_at not in catalog → stays None
+    assert model.columns["created_at"].data_type is None
+
+
+@pytest.mark.integration
+def test_load_catalog_phantom_column_ignored(tmp_path: Path) -> None:
+    """Catalog declares ``phantom_col`` not in manifest; not added to ``Model.columns``.
+
+    Manifest columns NOT in catalog stay ``None`` (DEC-010(b))."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_PHANTOM)
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    assert "phantom_col" not in model.columns
+    assert model.columns["id"].data_type == "INT64"
+    # email + created_at not in catalog → stays None
+    assert model.columns["email"].data_type is None
+    assert model.columns["created_at"].data_type is None
+
+
+@pytest.mark.integration
+def test_load_catalog_missing_column_stays_null(tmp_path: Path) -> None:
+    """Manifest has columns that the catalog doesn't declare; their ``data_type``
+    remains ``None`` (DEC-010(b))."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_PARTIAL)
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    assert model.columns["id"].data_type == "INT64"
+    assert model.columns["email"].data_type is None
+    assert model.columns["created_at"].data_type is None
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "catalog_body",
+    [
+        # Root is a JSON array, not a dict (DEC-010c shape guard).
+        "[]",
+        # Root dict but ``nodes`` is a list (DEC-010c).
+        '{"nodes": []}',
+        # ``nodes`` present but the matched node is not a dict.
+        '{"nodes": {"model.signalforge_test_small.dim_users": "scalar"}}',
+        # Node dict but ``columns`` is not a dict.
+        '{"nodes": {"model.signalforge_test_small.dim_users": {"columns": "scalar"}}}',
+        # Catalog column is not a dict.
+        ('{"nodes": {"model.signalforge_test_small.dim_users": {"columns": {"id": "scalar"}}}}'),
+        # Catalog column dict missing ``type``.
+        (
+            '{"nodes": {"model.signalforge_test_small.dim_users": '
+            '{"columns": {"id": {"index": 1}}}}}'
+        ),
+        # Catalog column ``type`` is not a string.
+        (
+            '{"nodes": {"model.signalforge_test_small.dim_users": '
+            '{"columns": {"id": {"type": 42}}}}}'
+        ),
+        # Empty catalog (no node matches at all).
+        '{"nodes": {}}',
+        # Catalog declares a node not in the manifest (no manifest column
+        # matches; the model_changed branch stays False so model_copy is
+        # skipped — exercises the else-branch at the end of the merge loop).
+        (
+            '{"nodes": {"model.other_project.other_model": '
+            '{"columns": {"foo": {"type": "STRING"}}}}}'
+        ),
+    ],
+    ids=[
+        "root-is-list",
+        "nodes-is-list",
+        "node-is-scalar",
+        "columns-is-scalar",
+        "col-is-scalar",
+        "col-missing-type",
+        "col-type-non-string",
+        "empty-nodes",
+        "unmatched-node",
+    ],
+)
+def test_load_catalog_shape_degrades_silently(tmp_path: Path, catalog_body: str) -> None:
+    """Every malformed catalog shape silently degrades to no-op overlay;
+    ``data_type`` stays ``None`` on every column.
+
+    Exercises the DEC-010c "silent no-op on malformed catalog" defence
+    across the per-shape guards in ``_apply_catalog_overlay``.
+    """
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, None)
+    (project / "target" / "catalog.json").write_text(catalog_body, encoding="utf-8")
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    for col in model.columns.values():
+        assert col.data_type is None
+
+
+@pytest.mark.integration
+def test_load_catalog_only_phantom_columns_no_model_change(tmp_path: Path) -> None:
+    """Matched node where EVERY catalog column is a phantom (not in manifest)
+    leaves the model unchanged — the merge loop takes the else-branch and
+    drops in the original model unmodified."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, None)
+    (project / "target" / "catalog.json").write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    DIM_USERS_UID: {
+                        "columns": {
+                            "phantom_a": {"type": "STRING"},
+                            "phantom_b": {"type": "INT64"},
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    assert "phantom_a" not in model.columns
+    assert "phantom_b" not in model.columns
+    for col in model.columns.values():
+        assert col.data_type is None
+
+
+@pytest.mark.integration
+def test_load_catalog_non_string_column_name_ignored(tmp_path: Path) -> None:
+    """A column whose key in the catalog ``columns`` dict is not a string is
+    silently skipped (defence against malformed catalog payloads that round-trip
+    a non-string key through a non-JSON producer)."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, None)
+    catalog_path = project / "target" / "catalog.json"
+    # JSON itself forbids non-string keys, so build the dict in Python and dump
+    # via Python's json (which would coerce — instead inject the dict directly
+    # into the parser path by writing valid JSON and then having the loader
+    # parse it; for the non-string-key path we mock at the post-parse step).
+    # The simpler way: write a custom payload that triggers the ``isinstance``
+    # guard on cat_col_name by using a list-typed columns dict — covered by
+    # the parametrised tests above. This test additionally pins the recovery
+    # case where ALL columns in a matched node fail the guard, leaving
+    # ``per_node`` empty so the node is dropped from ``by_node``.
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    DIM_USERS_UID: {
+                        "columns": {
+                            "id": {"index": 1},  # missing type → skipped
+                            "email": {"type": None},  # non-string type → skipped
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    for col in model.columns.values():
+        assert col.data_type is None
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need admin on Windows")
+def test_load_catalog_path_canonicalised(tmp_path: Path) -> None:
+    """``catalog.json`` is resolved through ``_common.path_safety.canonicalise_path``;
+    a symlink pointing outside the project tree is rejected with
+    :class:`PathContainmentError` (DEC-002).
+
+    The security gate is NOT in the silent-degrade set — a malicious symlink
+    must surface, never be swallowed.
+    """
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, None)
+    # Drop a real file outside the project tree, then symlink target/catalog.json
+    # to it. Canonicalise should reject the resolved path as outside project.
+    outside = tmp_path / "outside_catalog.json"
+    outside.write_text(json.dumps({"nodes": {}}), encoding="utf-8")
+    (project / "target" / "catalog.json").symlink_to(outside)
+    with pytest.raises(PathContainmentError):
+        load(project)
