@@ -545,3 +545,401 @@ def test_parse_draft_response_hallucinated_candidate_column_name_raises() -> Non
         "CandidateColumn references nonexistent column 'hallucinated_col'" in v
         for v in excinfo.value.violations
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #159 — sqlglot type-coherence defence for custom_sql (DEC-003)
+# ---------------------------------------------------------------------------
+
+
+def _types_map(**kwargs: str | None) -> dict[str, str | None]:
+    """Build a column-name → BigQuery data_type map for the type defence."""
+    return dict(kwargs)
+
+
+def _custom_sql_candidate(
+    *,
+    column_names: tuple[str, ...],
+    sql: str,
+    test_column: str | None = None,
+    model_level: bool = False,
+) -> CandidateSchema:
+    """Build a synthetic CandidateSchema carrying one custom_sql test."""
+    custom = CandidateTestCustomSQL(sql=sql, column=test_column)
+    if model_level:
+        return CandidateSchema(
+            name="fct_test",
+            description="...",
+            columns=tuple(
+                CandidateColumn(name=n, description="...", tests=()) for n in column_names
+            ),
+            tests=(custom,),
+        )
+    # Column-scoped: file under first declared column (arbitrary parent).
+    parent = test_column or column_names[0]
+    return CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=tuple(
+            CandidateColumn(
+                name=n,
+                description="...",
+                tests=(custom,) if n == parent else (),
+            )
+            for n in column_names
+        ),
+    )
+
+
+# --- planted positives (MUST add a violation) ---
+
+
+def test_custom_sql_int64_vs_string_comparison_is_rejected() -> None:
+    """A direct INT64 <> STRING comparison is the canonical mismatch the
+    parser defence exists to catch (#159 / DEC-003)."""
+    candidate = _custom_sql_candidate(
+        column_names=("int_col", "str_col"),
+        sql="select * from {{ this }} where int_col <> str_col",
+        test_column="int_col",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(int_col="INT64", str_col="STRING")
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"int_col", "str_col"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=types,
+        )
+    assert any(
+        "int_col" in v and "str_col" in v and "incompatible" in v for v in excinfo.value.violations
+    )
+
+
+def test_custom_sql_int64_vs_string_equality_is_rejected() -> None:
+    """An equality comparison across incompatible types is rejected just
+    like the inequality form."""
+    candidate = _custom_sql_candidate(
+        column_names=("int_col", "str_col"),
+        sql="select * from {{ this }} where int_col = str_col",
+        test_column="int_col",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(int_col="INT64", str_col="STRING")
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"int_col", "str_col"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=types,
+        )
+    assert any(
+        "int_col" in v and "str_col" in v and "incompatible" in v for v in excinfo.value.violations
+    )
+
+
+def test_custom_sql_int64_vs_date_comparison_is_rejected() -> None:
+    """INT64 vs DATE is incompatible; the comparison is flagged."""
+    candidate = _custom_sql_candidate(
+        column_names=("i", "d"),
+        sql="select * from {{ this }} where i > d",
+        test_column="i",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(i="INT64", d="DATE")
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"i", "d"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=types,
+        )
+    assert any("'i'" in v and "'d'" in v and "incompatible" in v for v in excinfo.value.violations)
+
+
+# --- planted negatives (MUST NOT add a violation) ---
+
+
+def test_custom_sql_int64_vs_float64_accepted_numeric_coercion() -> None:
+    """BigQuery accepts implicit INT64 ↔ FLOAT64 coercion; do NOT flag it."""
+    candidate = _custom_sql_candidate(
+        column_names=("i", "f"),
+        sql="select * from {{ this }} where i <> f",
+        test_column="i",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(i="INT64", f="FLOAT64")
+    # No raise — accepted numeric coercion.
+    result = parse_draft_response(
+        raw,
+        frozenset({"i", "f"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_custom_sql_numeric_vs_bignumeric_accepted() -> None:
+    """NUMERIC ↔ BIGNUMERIC is a legitimate same-family coercion."""
+    candidate = _custom_sql_candidate(
+        column_names=("n", "bn"),
+        sql="select * from {{ this }} where n <> bn",
+        test_column="n",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(n="NUMERIC", bn="BIGNUMERIC")
+    result = parse_draft_response(
+        raw,
+        frozenset({"n", "bn"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_custom_sql_cast_around_string_skipped() -> None:
+    """A CAST coerces explicitly; the parser defence does NOT second-guess
+    an explicit cast (DEC-006 skip-when-uncertain)."""
+    candidate = _custom_sql_candidate(
+        column_names=("int_col", "str_col"),
+        sql="select * from {{ this }} where CAST(int_col AS STRING) <> str_col",
+        test_column="int_col",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(int_col="INT64", str_col="STRING")
+    result = parse_draft_response(
+        raw,
+        frozenset({"int_col", "str_col"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_custom_sql_coalesce_skipped() -> None:
+    """A COALESCE wraps the column in a function call; skip per DEC-006."""
+    candidate = _custom_sql_candidate(
+        column_names=("int_col", "str_col"),
+        sql="select * from {{ this }} where COALESCE(int_col, 0) <> str_col",
+        test_column="int_col",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(int_col="INT64", str_col="STRING")
+    result = parse_draft_response(
+        raw,
+        frozenset({"int_col", "str_col"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_custom_sql_safe_cast_skipped() -> None:
+    """BigQuery SAFE_CAST is an explicit coercion shape; skip per DEC-006."""
+    candidate = _custom_sql_candidate(
+        column_names=("int_col", "str_col"),
+        sql="select * from {{ this }} where SAFE_CAST(int_col AS STRING) <> str_col",
+        test_column="int_col",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(int_col="INT64", str_col="STRING")
+    result = parse_draft_response(
+        raw,
+        frozenset({"int_col", "str_col"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_custom_sql_null_comparison_skipped() -> None:
+    """``IS NOT NULL`` is not a binary Column<op>Column comparison; skip."""
+    candidate = _custom_sql_candidate(
+        column_names=("int_col",),
+        sql="select * from {{ this }} where int_col IS NOT NULL",
+        test_column="int_col",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(int_col="INT64")
+    result = parse_draft_response(
+        raw,
+        frozenset({"int_col"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_custom_sql_literal_compare_skipped() -> None:
+    """A column-vs-literal comparison has a non-Column right side; skip."""
+    candidate = _custom_sql_candidate(
+        column_names=("int_col",),
+        sql="select * from {{ this }} where int_col <> 0",
+        test_column="int_col",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(int_col="INT64")
+    result = parse_draft_response(
+        raw,
+        frozenset({"int_col"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_custom_sql_function_call_skipped() -> None:
+    """LENGTH(str_col) yields a non-Column left side; skip per DEC-006."""
+    candidate = _custom_sql_candidate(
+        column_names=("str_col",),
+        sql="select * from {{ this }} where LENGTH(str_col) > 0",
+        test_column="str_col",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(str_col="STRING")
+    result = parse_draft_response(
+        raw,
+        frozenset({"str_col"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_custom_sql_subquery_skipped() -> None:
+    """A subquery on the right side is not a bare Column; skip."""
+    candidate = _custom_sql_candidate(
+        column_names=("col",),
+        sql="select * from {{ this }} where col IN (select id from other)",
+        test_column="col",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(col="INT64")
+    result = parse_draft_response(
+        raw,
+        frozenset({"col"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+# --- robustness ---
+
+
+def test_custom_sql_unparseable_sql_is_silent() -> None:
+    """sqlglot ParseError must NOT raise out of the defence; the existing
+    structural checks still run (and pass for this candidate)."""
+    candidate = _custom_sql_candidate(
+        column_names=("int_col",),
+        sql="this is @@@ not {{{{ valid sql }}}}",
+        test_column="int_col",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(int_col="INT64")
+    # The SQL body is non-empty; structural checks pass; type defence skips.
+    result = parse_draft_response(
+        raw,
+        frozenset({"int_col"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_custom_sql_unknown_column_type_skipped() -> None:
+    """Both columns have data_type=None → the type-coherence arm is a
+    whole-map no-op (the catalog merge in US-001 hasn't filled types)."""
+    candidate = _custom_sql_candidate(
+        column_names=("a", "b"),
+        sql="select * from {{ this }} where a <> b",
+        test_column="a",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(a=None, b=None)
+    result = parse_draft_response(
+        raw,
+        frozenset({"a", "b"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_custom_sql_partial_unknown_skipped() -> None:
+    """Only one column has a known type — per-pair skip preserves
+    conservative-bias (we can't reject what we can't compare)."""
+    candidate = _custom_sql_candidate(
+        column_names=("a", "b"),
+        sql="select * from {{ this }} where a <> b",
+        test_column="a",
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(a="INT64", b=None)
+    result = parse_draft_response(
+        raw,
+        frozenset({"a", "b"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=types,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_custom_sql_model_columns_by_type_none_skips_arm_entirely() -> None:
+    """Passing model_columns_by_type=None skips the type-coherence arm
+    while leaving structural anchor checks running."""
+    candidate = _custom_sql_candidate(
+        column_names=("int_col", "str_col"),
+        sql="select * from {{ this }} where int_col <> str_col",
+        test_column="int_col",
+    )
+    raw = candidate.model_dump_json()
+    # No types passed — type defence is a no-op even though this SQL is
+    # type-incoherent. The structural checks pass.
+    result = parse_draft_response(
+        raw,
+        frozenset({"int_col", "str_col"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=None,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_validate_anchor_contract_collects_type_and_structural_violations() -> None:
+    """Whole-draft collect-all invariant: a candidate carrying BOTH a
+    structural violation (hallucinated column) AND a type-coherence
+    violation produces BOTH in one ``LLMOutputAnchorContractError``.
+    """
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="int_col",
+                description="...",
+                tests=(
+                    CandidateTestCustomSQL(
+                        sql="select * from {{ this }} where int_col <> str_col",
+                        column="int_col",
+                    ),
+                ),
+            ),
+            CandidateColumn(name="str_col", description="...", tests=()),
+            # Structural violation: hallucinated CandidateColumn name.
+            CandidateColumn(name="phantom_col", description="...", tests=()),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    types = _types_map(int_col="INT64", str_col="STRING")
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"int_col", "str_col"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=types,
+        )
+    # Both surfaces present.
+    assert any("phantom_col" in v for v in excinfo.value.violations)
+    assert any(
+        "int_col" in v and "str_col" in v and "incompatible" in v for v in excinfo.value.violations
+    )

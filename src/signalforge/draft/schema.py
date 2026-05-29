@@ -208,11 +208,19 @@ def draft_from_request(
         output_tokens=result.output_tokens,
     )
     model_columns: frozenset[str] = frozenset(c.name for c in model.columns_list)
+    # Issue #159 — build column-name → data_type map for the parser's
+    # type-coherence defence. v0.1 hard-codes BigQuery; v0.2 multi-warehouse
+    # threads the dialect through the safety policy (DEC-013).
+    # TODO: source dialect_name from safety_policy.warehouse_dialect_name
+    # when v0.2 multi-warehouse lands.
+    model_columns_by_type: dict[str, str | None] = {c.name: c.data_type for c in model.columns_list}
     candidate = parse_draft_response(
         result.response_text,
         model_columns,
         llm_result_meta=meta,
         exclude_tests=frozenset(config.exclude_tests),
+        model_columns_by_type=model_columns_by_type,
+        dialect_name="bigquery",
     )
 
     # 4. Write the response-audit record. Fail-closed (DEC-011):
