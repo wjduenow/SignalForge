@@ -379,11 +379,20 @@ def test_grade_artifacts_safety_blocked_response_degrades_pair(
     # exercised here AND the MAX_TOKENS-with-partial-text path through
     # the same orchestrator gate, so this assertion is the shared
     # contract pin for both regressions).
+    #
+    # Issue #158 broadened the reasoning string so the inner
+    # ``LLMResponseFormatError`` message (which names the vendor's
+    # ``finish_reason`` value) survives into the audit JSONL / sidecar
+    # — operators can now distinguish ``SAFETY`` vs ``MAX_TOKENS`` vs
+    # ``RECITATION`` degrades without re-reading stderr. The bare
+    # ``"call failed: GradeLLMError"`` shape is preserved verbatim for
+    # every other cause (auth / rate-limit / parser failure).
     bad = degraded[0]
     assert bad.score is None
     assert bad.passed is False
     assert bad.evidence == ""
-    assert bad.reasoning == "call failed: GradeLLMError"
+    assert bad.reasoning.startswith("call failed: GradeLLMError: ")
+    assert "finish_reason='SAFETY'" in bad.reasoning
 
     # The other pairs were scored normally.
     for good in scored:
