@@ -201,6 +201,44 @@ def test_measure_e2e_cost_main_exits_2_on_unknown_model(
     assert "Traceback" not in captured.err
 
 
+def test_measure_e2e_cost_main_exits_1_on_unexpected_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unexpected (non-``CostError``) exception routes to exit 1 + no traceback.
+
+    Pass-2 F2 — closes the panic-path coverage gap. The script's boundary
+    ``try / except Exception`` (cli-layer.md DEC-016) catches ANY exception
+    that escapes ``rollup_audit_dir`` and renders it to stderr as
+    ``ERROR: <ClassName>: <msg>``. Without this test, a contributor who
+    deleted the bare ``Exception`` arm would still pass the 0/2 exit-code
+    tests while letting a ``Traceback`` leak through on any unexpected
+    error path.
+    """
+    project = tmp_path / "panic_project"
+    project.mkdir()
+    audit = project / ".signalforge"
+    audit.mkdir()
+    # Empty audit dir alone would surface as exit 2 (CostRollupAuditMissingError);
+    # populate it with a valid record so rollup_audit_dir would normally succeed,
+    # then monkeypatch to inject a synthetic non-CostError.
+    _write_jsonl(audit / "llm_responses.jsonl", [_draft_record()])
+
+    def _raise_unexpected(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("synthetic panic-path probe")
+
+    monkeypatch.setattr(_SCRIPT, "rollup_audit_dir", _raise_unexpected)
+
+    exit_code = _SCRIPT.main(["--project-dir", str(project)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "ERROR: ValueError" in captured.err
+    assert "synthetic panic-path probe" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_measure_e2e_cost_format_json_emits_valid_json(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -225,6 +263,10 @@ def test_measure_e2e_cost_format_json_emits_valid_json(
     assert "openai" in payload["per_provider"]
     assert "claude-sonnet-4-6" in payload["per_provider"]["anthropic"]["per_model"]
     assert "gpt-4o-mini" in payload["per_provider"]["openai"]["per_model"]
+    # Pass-3 F7: pin the audit_files_consumed list ordering so a future
+    # rotation in the rollup's append order (drafter-then-grader) breaks
+    # loud in the JSON output, not just silently in the structural shape.
+    assert payload["audit_files_consumed"] == ["llm_responses.jsonl", "grade.jsonl"]
 
 
 def test_measure_e2e_cost_format_text_emits_grand_total_line(
@@ -243,6 +285,40 @@ def test_measure_e2e_cost_format_text_emits_grand_total_line(
     assert "pricing table" in captured.out
     assert "llm_responses.jsonl" in captured.out
     assert "grade.jsonl" in captured.out
+
+
+def test_measure_e2e_cost_format_text_no_priced_records_still_prints_total(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Empty-providers ``_print_text`` branch (Pass-3 F5).
+
+    Both audit JSONLs exist but contain only blank/whitespace lines
+    (zero priced records). The rollup helper would have raised
+    ``CostRollupAuditMissingError`` if BOTH files were absent, so this
+    path is reachable only via "files present, no records." The script
+    must still emit the canonical ``TOTAL: $0.0000`` footer for
+    downstream tooling, plus the ``(no priced records found…)``
+    diagnostic.
+
+    Without this test, a regression that flipped the empty-providers
+    guard could silently drop one of the two outputs.
+    """
+    project = tmp_path / "empty_records_project"
+    project.mkdir()
+    audit = project / ".signalforge"
+    audit.mkdir()
+    # Both files present, but content is whitespace-only -> rollup skips
+    # every line in _ingest_jsonl, leaving per_provider empty.
+    (audit / "llm_responses.jsonl").write_text("\n\n", encoding="utf-8")
+    (audit / "grade.jsonl").write_text("\n", encoding="utf-8")
+
+    exit_code = _SCRIPT.main(["--project-dir", str(project)])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert "(no priced records" in captured.out
+    assert "TOTAL: $0.0000" in captured.out
+    assert "Traceback" not in captured.err
 
 
 # ---------------------------------------------------------------------------

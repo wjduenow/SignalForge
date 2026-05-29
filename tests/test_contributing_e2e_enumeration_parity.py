@@ -79,10 +79,22 @@ _PAID_E2E_FILES = (
 # The recommended parallel invocation. Documented verbatim in CONTRIBUTING's
 # "Parallel execution (recommended)" subsection (issue #157 US-004).
 _PARALLEL_INVOCATION = "pytest -m e2e -n 3 --no-cov"
+# CONTRIBUTING contains the invocation in TWO distinct spots: the canonical
+# recommendation block + the rate-limit-monitoring example. Pinning the count
+# (not just presence) catches a partial rotation where one site is updated
+# and the other isn't (Pass-4 F1). Bump in lockstep when adding/removing a
+# legitimate occurrence in CONTRIBUTING.md.
+_PARALLEL_INVOCATION_EXPECTED_COUNT = 2
 
-# Anchor phrases for the Anthropic rate-limit caveat. Both must co-occur in
-# CONTRIBUTING — the caveat is load-bearing for operators running with -n 3.
-_RATE_LIMIT_ANCHORS = ("Anthropic", "rate limit")
+# Anchor phrase for the Anthropic rate-limit caveat. Pinned VERBATIM
+# because the caveat is load-bearing for operators running with -n 3
+# (Pass-2 F4): "Anthropic" and "rate limit" each appear 20+ times across
+# unrelated paragraphs in CONTRIBUTING, so co-occurrence is not enough —
+# a future edit could leave both anchors intact while silently deleting
+# the specific 50-RPM caveat block. The compound phrase below appears
+# exactly once (the caveat heading) and rotates with any edit that
+# weakens the warning.
+_RATE_LIMIT_ANCHORS = ("Anthropic 50 RPM rate-limit caveat",)
 
 # Pointer to the US-003 cost-rollup helper.
 _COST_HELPER_POINTER = "scripts/measure_e2e_cost.py"
@@ -115,12 +127,24 @@ def test_contributing_documents_parallel_invocation() -> None:
     Pins the recommended invocation surface from issue #157 US-004
     (DEC-001 + DEC-003). A future doc edit that drops or rewords the
     `-n 3` recommendation fails loud here.
+
+    Pass-4 F1: the invocation appears in two distinct spots in
+    CONTRIBUTING (the canonical recommendation block AND the monitoring
+    example). A simple substring match would silently pass if a
+    maintainer rotated only one site to a different concurrency. Pin
+    the EXPECTED COUNT so a partial rotation flags loud — the count
+    must stay at exactly ``_PARALLEL_INVOCATION_EXPECTED_COUNT``.
     """
     content = _read_contributing()
-    assert _PARALLEL_INVOCATION in content, (
-        f"CONTRIBUTING.md is missing the recommended parallel invocation "
-        f"'{_PARALLEL_INVOCATION}'. Document it under '### Parallel execution "
-        f"(recommended)' per #157 US-004."
+    occurrences = content.count(_PARALLEL_INVOCATION)
+    assert occurrences == _PARALLEL_INVOCATION_EXPECTED_COUNT, (
+        f"CONTRIBUTING.md must contain '{_PARALLEL_INVOCATION}' exactly "
+        f"{_PARALLEL_INVOCATION_EXPECTED_COUNT} time(s) (canonical "
+        f"recommendation block + monitoring example, per #157 US-004). "
+        f"Found {occurrences}. A partial rotation (e.g. canonical block "
+        f"updated to `-n 4` but monitoring example left at `-n 3`) leaves "
+        f"the docs internally inconsistent — both sites must drift in lockstep "
+        f"OR the expected count must be updated here in lockstep with the doc."
     )
 
 

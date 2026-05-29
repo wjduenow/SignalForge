@@ -163,7 +163,10 @@ def test_rollup_empty_project_raises_missing_audit_error(tmp_path: Path) -> None
 def test_rollup_only_llm_responses_returns_degraded_report(tmp_path: Path) -> None:
     """Only drafter JSONL present → degraded report (AC5).
 
-    ``audit_files_consumed`` reports only the file that existed.
+    ``audit_files_consumed`` reports only the file that existed. USD
+    is still computed from the present file (Pass-2 F5 — defends the
+    only-drafter code path against a regression that routed records
+    to a zero-cost branch).
     """
     project = _make_project(tmp_path)
     _write_jsonl(
@@ -182,10 +185,18 @@ def test_rollup_only_llm_responses_returns_degraded_report(tmp_path: Path) -> No
     assert isinstance(report, CostReport)
     assert report.audit_files_consumed == ("llm_responses.jsonl",)
     assert "anthropic" in report.per_provider
+    # Hand-computed: (1000 × $3.00 + 500 × $15.00) / 1e6 = $0.0105.
+    model = report.per_provider["anthropic"].per_model["claude-sonnet-4-6"]
+    assert model.total_usd == pytest.approx(0.0105)
+    assert report.total_usd == pytest.approx(0.0105)
 
 
 def test_rollup_only_grade_returns_degraded_report(tmp_path: Path) -> None:
-    """Only grader JSONL present → degraded report (AC5)."""
+    """Only grader JSONL present → degraded report (AC5).
+
+    Pass-2 F5: also pin USD so the only-grader code path can't
+    regress to a zero-cost branch.
+    """
     project = _make_project(tmp_path)
     _write_jsonl(
         _audit_dir(project) / "grade.jsonl",
@@ -203,6 +214,10 @@ def test_rollup_only_grade_returns_degraded_report(tmp_path: Path) -> None:
     assert isinstance(report, CostReport)
     assert report.audit_files_consumed == ("grade.jsonl",)
     assert "anthropic" in report.per_provider
+    # Hand-computed: (1000 × $3.00 + 500 × $15.00) / 1e6 = $0.0105.
+    model = report.per_provider["anthropic"].per_model["claude-sonnet-4-6"]
+    assert model.total_usd == pytest.approx(0.0105)
+    assert report.total_usd == pytest.approx(0.0105)
 
 
 def test_rollup_both_jsonls_returns_full_report(tmp_path: Path) -> None:
@@ -235,7 +250,10 @@ def test_rollup_both_jsonls_returns_full_report(tmp_path: Path) -> None:
 
     report = rollup_audit_dir(project)
 
-    assert set(report.audit_files_consumed) == {"llm_responses.jsonl", "grade.jsonl"}
+    # Tuple, not set — drafter-then-grader ordering is part of the contract
+    # (Pass-2 F3). Downstream consumers can rely on this ordering for stable
+    # rendering / serialization across runs.
+    assert report.audit_files_consumed == ("llm_responses.jsonl", "grade.jsonl")
     anth = report.per_provider["anthropic"]
     model = anth.per_model["claude-sonnet-4-6"]
     assert model.input_tokens == 1500  # 1000 + 500
@@ -385,7 +403,12 @@ def test_rollup_malformed_jsonl_line_raises_typed_error(tmp_path: Path) -> None:
 
 
 def test_rollup_unknown_model_raises_typed_error(tmp_path: Path) -> None:
-    """Audit record references absent SKU → ``CostRollupUnknownModelError`` (AC7)."""
+    """Audit record references absent SKU → ``CostRollupUnknownModelError`` (AC7).
+
+    Variant: the model id matches a KNOWN provider prefix (``claude-``)
+    but isn't in ``PRICES`` — exercises the ``_compute_record_usd`` →
+    ``lookup`` → ``EstimateUnknownModelError`` → wrap branch.
+    """
     project = _make_project(tmp_path)
     _write_jsonl(
         _audit_dir(project) / "llm_responses.jsonl",
@@ -402,6 +425,98 @@ def test_rollup_unknown_model_raises_typed_error(tmp_path: Path) -> None:
         rollup_audit_dir(project)
 
     assert exc_info.value.model_id == "claude-future-9-9"
+
+
+def test_rollup_unknown_provider_prefix_raises_typed_error(tmp_path: Path) -> None:
+    """Model id matches NO known provider prefix → typed error (Pass-3 F1).
+
+    Future vendor (e.g. ``databricks-llama-3-70b``, ``mistral-large``)
+    whose model id doesn't start with one of ``_PROVIDER_PREFIXES``
+    must route through the no-prefix branch of ``_ingest_jsonl`` and
+    raise ``CostRollupUnknownModelError`` with the cost-rollup-specific
+    remediation. Without this test the no-prefix branch is dead code;
+    deleting it would silently fall through to the lookup branch and
+    surface the wrong error class.
+    """
+    project = _make_project(tmp_path)
+    _write_jsonl(
+        _audit_dir(project) / "llm_responses.jsonl",
+        [
+            _draft_record(
+                model="databricks-llama-3-70b",
+                input_tokens=100,
+                output_tokens=100,
+            )
+        ],
+    )
+
+    with pytest.raises(CostRollupUnknownModelError) as exc_info:
+        rollup_audit_dir(project)
+
+    assert exc_info.value.model_id == "databricks-llama-3-70b"
+    # Remediation must direct the operator at the right fix (PRICES table).
+    assert "PRICES" in str(exc_info.value) or "pricing" in str(exc_info.value).lower()
+
+
+def test_rollup_anthropic_opus_uses_opus_pricing_not_sonnet(tmp_path: Path) -> None:
+    """Per-SKU pricing wired correctly across the Anthropic tier (Pass-3 F4).
+
+    Existing happy-path tests exercise only ``claude-sonnet-4-6``. A
+    bug that hard-coded ``lookup("claude-sonnet-4-6")`` regardless of
+    the actual model id would produce a 5× cost under-report when the
+    real model is opus. Pin opus pricing at the wire so the wrong-tier
+    bug fails loud.
+
+    Hand-computed against PRICES (2026-05-28):
+      claude-opus-4-7: input $15.00/Mtok, output $75.00/Mtok
+      (1e6 × $15.00 + 0.5e6 × $75.00) / 1e6 = $15.00 + $37.50 = $52.50
+    """
+    project = _make_project(tmp_path)
+    _write_jsonl(
+        _audit_dir(project) / "llm_responses.jsonl",
+        [
+            _draft_record(
+                model="claude-opus-4-7",
+                input_tokens=1_000_000,
+                output_tokens=500_000,
+            )
+        ],
+    )
+
+    report = rollup_audit_dir(project)
+
+    opus = report.per_provider["anthropic"].per_model["claude-opus-4-7"]
+    assert opus.total_usd == pytest.approx(52.50)
+    # Distinct from sonnet's $10.50 for the same token shape — a wrong-tier
+    # lookup would land at sonnet pricing and fail this assertion.
+    assert opus.total_usd != pytest.approx(10.50)
+
+
+def test_rollup_line_num_reflects_literal_file_position_with_blank_lines(
+    tmp_path: Path,
+) -> None:
+    """``line_num`` tracks the LITERAL file line (Pass-3 F3).
+
+    ``_ingest_jsonl`` skips blank lines but ``enumerate(fh, start=1)``
+    increments unconditionally — so a malformed line on file line 4
+    surfaces as ``line_num=4`` even when intervening blanks were
+    skipped. This contract makes the error's diagnostic compatible
+    with ``sed -n '4p' <file>``. Pin it so a future "optimisation"
+    that filters blank lines BEFORE enumeration breaks loud.
+    """
+    project = _make_project(tmp_path)
+    audit_file = _audit_dir(project) / "llm_responses.jsonl"
+    # Layout: valid record on line 1, blank lines 2 & 3, malformed on line 4.
+    valid = json.dumps(_draft_record(model="claude-sonnet-4-6", input_tokens=100, output_tokens=50))
+    audit_file.write_text(f"{valid}\n\n\n{{bad json on line 4\n", encoding="utf-8")
+
+    with pytest.raises(CostRollupMalformedRecordError) as exc_info:
+        rollup_audit_dir(project)
+
+    assert exc_info.value.line_num == 4, (
+        f"expected literal-line-num invariant (sed -n '4p' compatibility); "
+        f"got line_num={exc_info.value.line_num}"
+    )
 
 
 def test_rollup_pins_pricing_table_version(tmp_path: Path) -> None:
@@ -471,7 +586,15 @@ def test_rollup_rejects_symlink_loop_in_project_dir(tmp_path: Path) -> None:
 
 
 def test_rollup_grand_total_equals_sum_of_provider_subtotals(tmp_path: Path) -> None:
-    """``CostReport.total_usd == sum(subtotal_usd for p in per_provider)``."""
+    """``CostReport.total_usd`` matches a hand-computed mixed-provider sum.
+
+    Pass-2 F1: previously this test re-derived the sum the same way the
+    engine does (``sum(p.subtotal_usd ...)``), which made the assertion
+    tautological — any sign-flip in the engine would still produce a
+    self-consistent report. Hand-compute the expected grand total
+    against the locked ``PRICES`` table (PRICE_TABLE_VERSION
+    "2026-05-28") so the wire formula is pinned independently.
+    """
     project = _make_project(tmp_path)
     _write_jsonl(
         _audit_dir(project) / "llm_responses.jsonl",
@@ -501,9 +624,19 @@ def test_rollup_grand_total_equals_sum_of_provider_subtotals(tmp_path: Path) -> 
 
     report = rollup_audit_dir(project)
 
+    # Hand-computed against PRICES (2026-05-28):
+    #   anthropic claude-sonnet-4-6: (1e6 × $3.00 + 0.5e6 × $15.00) / 1e6 = $10.50
+    #   openai    gpt-4o:            (2e6 × $2.50 + 1e6   × $10.00) / 1e6 = $15.00
+    #   gemini    gemini-2.5-flash:  (0.5e6 × $0.30 + 0.3e6 × $2.50) / 1e6 = $0.90
+    #   grand total                                                       = $26.40
+    assert report.per_provider["anthropic"].subtotal_usd == pytest.approx(10.50)
+    assert report.per_provider["openai"].subtotal_usd == pytest.approx(15.00)
+    assert report.per_provider["gemini"].subtotal_usd == pytest.approx(0.90)
+    assert report.total_usd == pytest.approx(26.40)
+    # Belt-and-braces structural invariants (kept for the regression they
+    # close — but no longer the only signal in this test).
     summed = sum(p.subtotal_usd for p in report.per_provider.values())
     assert report.total_usd == pytest.approx(summed)
-    # ModelRollup sanity: per-provider subtotal = sum of model totals.
     for provider in report.per_provider.values():
         model_sum = sum(m.total_usd for m in provider.per_model.values())
         assert provider.subtotal_usd == pytest.approx(model_sum)
