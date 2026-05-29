@@ -1,0 +1,70 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/catalog/v1.json",
+    "dbt_version": "1.8.9",
+    "generated_at": null,
+    "invocation_id": null,
+    "env": {}
+  },
+  "nodes": {
+    "model.signalforge_test_austin.stg_bikeshare_trips": {
+      "metadata": {
+        "type": "BASE TABLE",
+        "schema": "austin_bikeshare",
+        "name": "bikeshare_trips",
+        "database": "bigquery-public-data",
+        "comment": null,
+        "owner": null
+      },
+      "columns": {
+        "trip_id": {
+          "type": "STRING",
+          "index": 1,
+          "name": "trip_id",
+          "comment": null
+        },
+        "subscriber_type": {
+          "type": "STRING",
+          "index": 2,
+          "name": "subscriber_type",
+          "comment": null
+        },
+        "bike_id": {
+          "type": "STRING",
+          "index": 3,
+          "name": "bike_id",
+          "comment": null
+        },
+        "start_time": {
+          "type": "TIMESTAMP",
+          "index": 4,
+          "name": "start_time",
+          "comment": null
+        },
+        "start_station_id": {
+          "type": "INT64",
+          "index": 5,
+          "name": "start_station_id",
+          "comment": null
+        },
+        "end_station_id": {
+          "type": "STRING",
+          "index": 6,
+          "name": "end_station_id",
+          "comment": null
+        },
+        "duration_minutes": {
+          "type": "INT64",
+          "index": 7,
+          "name": "duration_minutes",
+          "comment": null
+        }
+      },
+      "stats": {},
+      "unique_id": "model.signalforge_test_austin.stg_bikeshare_trips"
+    }
+  },
+  "sources": {},
+  "errors": null,
+  "info": null
+}

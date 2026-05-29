@@ -69,7 +69,7 @@
           "name": "trip_id",
           "description": "Unique identifier assigned to each bikeshare trip by the city's bikeshare system. Acts as the natural primary key for this table; no two rows in the source share a `trip_id`. Stored as a STRING because the underlying identifier is alphanumeric in some city installations even though it looks numeric in this dataset.",
           "meta": {},
-          "data_type": null,
+          "data_type": "STRING",
           "constraints": [],
           "quote": null,
           "tags": []
@@ -78,7 +78,7 @@
           "name": "subscriber_type",
           "description": "Membership classification of the rider who took the trip — typical values include `local monthly`, `walk-up`, `single trip`, `student membership`, `weekender`, etc. Useful for segmenting demand by user category. Free-form STRING (not enumerated in the source schema), so downstream consumers should expect long-tail values.",
           "meta": {},
-          "data_type": null,
+          "data_type": "STRING",
           "constraints": [],
           "quote": null,
           "tags": []
@@ -87,7 +87,7 @@
           "name": "bike_id",
           "description": "Identifier of the physical bike used for this trip. Maps a single bike across many trips so utilisation per bike can be computed. Note the underscore in `bike_id` (the source column is `bike_id`, NOT `bikeid`); the underscore matters for joins and for any downstream model that references this column by name.",
           "meta": {},
-          "data_type": null,
+          "data_type": "STRING",
           "constraints": [],
           "quote": null,
           "tags": []
@@ -96,7 +96,7 @@
           "name": "start_time",
           "description": "Timestamp marking when the trip began (the rider docked-out the bike). Stored as TIMESTAMP in UTC. This is the primary time dimension for the model and is reliably non-null in the source data — every trip has a recorded start time even when other fields are sparse.",
           "meta": {},
-          "data_type": null,
+          "data_type": "TIMESTAMP",
           "constraints": [],
           "quote": null,
           "tags": []
@@ -105,7 +105,7 @@
           "name": "start_station_id",
           "description": "Numeric identifier of the bikeshare station where the trip began. Joins to `austin_bikeshare.bikeshare_stations.station_id` to resolve station name, latitude, longitude, council district. Some legacy trips have NULL here when the station was deleted from the registry but the trip record was preserved.",
           "meta": {},
-          "data_type": null,
+          "data_type": "INT64",
           "constraints": [],
           "quote": null,
           "tags": []
@@ -114,7 +114,7 @@
           "name": "end_station_id",
           "description": "Numeric identifier of the station where the trip ended (rider docked-in the bike). Same join semantics as `start_station_id`. NULL is possible for trips that ended outside the station network or whose end-station record was later deleted from the registry.",
           "meta": {},
-          "data_type": null,
+          "data_type": "STRING",
           "constraints": [],
           "quote": null,
           "tags": []
@@ -123,7 +123,7 @@
           "name": "duration_minutes",
           "description": "Trip length in whole minutes, computed by the source system as `end_time - start_time`. INTEGER. Most trips fall under 60 minutes; the long tail above 1440 (24 hours) typically indicates abandoned bikes or system glitches rather than real ridership. Downstream analytics often filter to `duration_minutes BETWEEN 1 AND 240` to focus on legitimate trips.",
           "meta": {},
-          "data_type": null,
+          "data_type": "INT64",
           "constraints": [],
           "quote": null,
           "tags": []
