@@ -170,6 +170,33 @@ Two load-bearing rules: (1) **per-test overlay, not a `GradeConfig` default bump
 
 The same belt-and-suspenders gating still applies: marker + runtime `_skip_reason()` + `tmp_path` isolation. The overlay is applied AFTER `copy_fixture_to_tmp` so the committed fixture is never modified.
 
+### Parallel-safe e2e via per-test isolation (issue #157)
+
+The live e2e suite is **parallel-safe at the pytest-node level** under `pytest-xdist`. The granularity is deliberate: parallelism is *across* tests, NOT *inside* a test — the grade engine stays sequential per `grade-layer.md` § "One LLM call per (artifact × criterion); sequential (DEC-004, DEC-027)". A single test still issues its grade calls one at a time; what `-n 3` does is run three *tests* in parallel pytest-xdist workers.
+
+**The contract — every e2e test is self-isolating; no shared mutable state.** Three primitives in `tests/cli/_e2e_helpers.py` make this work, and every e2e test reaches for them in the same order:
+
+1. **`copy_fixture_to_tmp(fixture_dir, tmp_path)`** — every test gets a private fixture copy under `tmp_path`. The committed fixtures (`tests/fixtures/dbt_project_austin`, `tests/fixtures/snowflake/...`) are read-only.
+2. **`apply_provider_override(project_dir, *, grade_provider=None, grade_model=None, grade_max_output_tokens=None)`** — per-test config overlay on the copy's `signalforge.yml` (NOT on the committed file). Per-test scope per #155 US-004 / DEC-012.
+3. **`inject_model_business_rules(project_dir, *, model_unique_id, column_rules=..., model_rules=...)`** — per-test mutations of `meta.signalforge.business_rules` on the **copied** `manifest.json`, leaving the committed seed untouched (issue #116 e2e shape).
+
+All writes (audit JSONLs, sidecars, `signalforge.yml` overlays, manifest mutations) land under `tmp_path`. **No env mutation between tests.** The helpers route per-test config through file edits on the temp copy, never through `os.environ` — so a parallel test cannot leak state into a sibling xdist worker.
+
+**The invocation.** `uv run pytest -m e2e -n 3 --no-cov` is the maintainer-recommended path (documented in `CONTRIBUTING.md` § "Live e2e suite (pre-release only)"). `pytest-xdist` is a dev-group dep (added by #157 US-004) — `uv sync --dev` pulls it automatically; default `addopts` stays sequential, so parallelism is **opt-in only**, never CI-default. `-n 3` is a deliberate choice, NOT `-n auto`: it bounds the Anthropic-singleton fan-out.
+
+**The Anthropic 50-RPM caveat (load-bearing).** The drafter is Anthropic on every variant, and the `[anthropic]` BQ-smoke parametrize + the business-rules test ALSO use Anthropic as the grader. With `-n 3`, three parallel tests can collectively issue ~50 calls in a tight window and trigger the `WARNING: rate limit` retry path (`llm-drafter.md` § "Module-level `_sleep` / `_rand_uniform` aliases" — retries are bounded by `DraftConfig.max_retries_429` / `GradeConfig.max_retries_429`). The 2026-05-29 baseline measured against the Austin bikeshare fixture observed **zero rate-limit retries** at `-n 3`; richer fixtures or a tighter Anthropic tier may need `-n 2` or `-n 1`. Verify with:
+
+```bash
+uv run pytest -m e2e -n 3 --no-cov 2>&1 | tee pytest-stderr.log
+grep -c "rate limit" pytest-stderr.log
+```
+
+(or `--capture=no` for live visibility). A burst of retries is the canonical "downgrade to `-n 2`" signal.
+
+**Cost-rollup helper (`signalforge.llm.cost.rollup_audit_dir`).** After a run, `signalforge.llm.cost.rollup_audit_dir(project_dir) -> CostReport` walks `<project_dir>/.signalforge/{llm_responses,grade}.jsonl` and computes per-provider per-model USD against the frozen `signalforge.llm.pricing.PRICES` table. The CLI wrapper at `scripts/measure_e2e_cost.py` (added by #157 US-003) is the maintainer-facing surface; the public Python entry point is the same helper. Read-only — `project_dir` is canonicalised at entry; no audit writer, no on-disk artefact. The pricing-table version stamp (`2026-05-28` as of the 2026-05-29 baseline measurement) appears across three surfaces — `CONTRIBUTING.md` § "Live e2e suite", `docs/grade-ops.md`, `plans/super/155-gemini-truncation-e2e-gap.md` DEC-010 — and is pinned by the parity gate at `tests/test_contributing_e2e_enumeration_parity.py`. When pricing rotates, bump the stamp in all three doc surfaces in lockstep; the parity gate fails loud otherwise.
+
+**Markers that STAY serial — do NOT pass `-n` to these.** `cli_subprocess` and `wheel_smoke` invocations shell out to a single installed console-script / build a single wheel into shared `dist/`, so parallel workers would collide on the artefact. Run them as documented in `python-build.md` / `cli-layer.md`: `uv run pytest -m cli_subprocess --no-cov` and `uv run pytest -m wheel_smoke --no-cov`, sequential, no `-n`.
+
 ## Reference
 
-`plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `plans/super/27-codecov-coverage.md` — DEC-001, DEC-004, DEC-009. `plans/super/10-e2e-bigquery-smoke.md` — DEC-001, DEC-002, DEC-004, DEC-008, DEC-010, DEC-022. `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh`, `tests/cli/_e2e_helpers.py`, `tests/cli/test_e2e_bigquery_smoke.py`.
+`plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `plans/super/27-codecov-coverage.md` — DEC-001, DEC-004, DEC-009. `plans/super/10-e2e-bigquery-smoke.md` — DEC-001, DEC-002, DEC-004, DEC-008, DEC-010, DEC-022. `plans/super/157-e2e-cost-and-parallel.md` — DEC-001 … DEC-010 (parallel-safe e2e, `signalforge.llm.cost.rollup_audit_dir`, pricing-table-version parity gate). `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh`, `tests/cli/_e2e_helpers.py`, `tests/cli/test_e2e_bigquery_smoke.py`, `tests/test_contributing_e2e_enumeration_parity.py`, `src/signalforge/llm/cost/`.
