@@ -5,7 +5,7 @@
 - **Ticket:** [#157](https://github.com/wjduenow/SignalForge/issues/157)
 - **Branch:** `feature/157-e2e-cost-parallel`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/157-e2e-cost-parallel`
-- **Phase:** discovery
+- **Phase:** devolved (beads created 2026-05-29; ready for `/ralph-run`)
 - **Created:** 2026-05-29
 - **Sessions:** 1
 
@@ -418,4 +418,24 @@ All Ralph-eligible stories fit in one context window. US-005 is the explicit mai
 
 ## Beads Manifest (Phase 7)
 
-(pending — populated on devolve)
+Created 2026-05-29 via `bd create` from the worktree at
+`/home/wesd/Projects/worktrees/SignalForge/157-e2e-cost-parallel`.
+
+- **Epic:** `bd_1-scaffolding-e1a` — 157: E2E cost docs + parallelization
+- **Children (8):**
+  - `bd_1-scaffolding-e1a.1` — US-001: subpackage skeleton + errors *(ready — no deps)*
+  - `bd_1-scaffolding-e1a.2` — US-002: rollup engine (TDD) *(blocked by .1)*
+  - `bd_1-scaffolding-e1a.3` — US-003: scripts/measure_e2e_cost.py *(blocked by .2)*
+  - `bd_1-scaffolding-e1a.4` — US-004: pytest-xdist + CONTRIBUTING *(blocked by .3)*
+  - `bd_1-scaffolding-e1a.5` — US-005: **maintainer live re-run** *(blocked by .3, .4; assignee: wjduenow)*
+  - `bd_1-scaffolding-e1a.6` — US-006: lift measured baseline into 3 docs *(blocked by .5)*
+  - `bd_1-scaffolding-e1a.7` — Quality Gate *(blocked by .1–.6)*
+  - `bd_1-scaffolding-e1a.8` — Patterns & Memory *(blocked by .7)*
+
+`bd ready` immediately after devolve: only US-001 (.1) is unblocked, as expected from the dependency graph.
+
+**Next steps:**
+1. Run Ralph: `/ralph-run` (will pick up `bd_1-scaffolding-e1a.1` first).
+2. Ralph will stop at US-005 (maintainer-only); maintainer runs the live suite manually, pastes measured baseline into this plan's refinement log, then closes `.5`.
+3. Ralph resumes US-006 → Quality Gate → Patterns & Memory.
+4. When done: `/closeout`.
