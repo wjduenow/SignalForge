@@ -144,6 +144,29 @@ def test_wheel_includes_all_demo_files(_built_wheel_members: set[str]) -> None:
 
 
 @pytest.mark.wheel_smoke
+def test_wheel_excludes_scripts_directory(_built_wheel_members: set[str]) -> None:
+    """The repo-root ``scripts/`` dir MUST NOT ship in the built wheel.
+
+    Established by US-003 of ``plans/super/157-e2e-cost-and-parallel.md``:
+    ``scripts/measure_e2e_cost.py`` is a maintainer-only audit helper that
+    runs from the repo checkout and is never invoked from an installed
+    wheel. The ``[tool.hatch.build.targets.wheel]`` table in
+    ``pyproject.toml`` deliberately omits ``scripts/`` from both
+    ``packages`` and ``include`` — this test gates that omission so a
+    future contributor adding ``scripts/`` to either list (or Hatchling
+    silently picking it up) fails loud at packaging time rather than
+    silently bloating the wheel.
+    """
+    scripts_members = [name for name in _built_wheel_members if name.startswith("scripts/")]
+    assert not scripts_members, (
+        "wheel unexpectedly ships entries under `scripts/`: "
+        f"{scripts_members}. Check `[tool.hatch.build.targets.wheel]` in "
+        "pyproject.toml — `scripts/` is maintainer-only and must stay out "
+        "of the wheel (US-003 of plans/super/157-e2e-cost-and-parallel.md)."
+    )
+
+
+@pytest.mark.wheel_smoke
 def test_wheel_includes_demo_gitignore_dotfile(_built_wheel_members: set[str]) -> None:
     """``signalforge/_demo/.gitignore`` ships in the wheel (DEC-006).
 
