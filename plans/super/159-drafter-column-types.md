@@ -4,7 +4,8 @@
 
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/159
 - **Title:** test_e2e_business_rules flake: drafter emits custom_sql with column-type mismatch
-- **Phase:** detailing
+- **Phase:** devolved
+- **PR:** https://github.com/wjduenow/SignalForge/pull/161
 - **Branch:** `feature/159-drafter-column-types`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/159-drafter-column-types`
 - **Started:** 2026-05-28
@@ -296,14 +297,19 @@ Robustness:
 
 ---
 
-## Beads manifest (Phase 7 — pending)
+## Beads manifest (Phase 7)
 
-(epic + task IDs after devolve)
+- **Epic:** `bd_1-scaffolding-crh` — #159: drafter column-type awareness
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/159-drafter-column-types`
+- **Branch:** `feature/159-drafter-column-types`
 
-## Detailed breakdown (Phase 4 — pending)
+| Story | Bead ID | Depends on |
+|---|---|---|
+| US-001 — manifest catalog.json sibling reader | `bd_1-scaffolding-crh.1` | — |
+| US-002 — drafter parser sqlglot defence | `bd_1-scaffolding-crh.2` | — |
+| US-003 — Austin fixture: data_type + catalog.json | `bd_1-scaffolding-crh.3` | .1, .2 |
+| US-004 — 5-surface rules + docs | `bd_1-scaffolding-crh.4` | .1, .2, .3 |
+| US-005 — Quality Gate | `bd_1-scaffolding-crh.5` | .4 |
+| US-006 — Patterns & Memory | `bd_1-scaffolding-crh.6` | .5 |
 
-(stories captured here)
-
-## Beads manifest (Phase 7 — pending)
-
-(epic + task IDs after devolve)
+US-001 and US-002 start in parallel; the rest serialize.

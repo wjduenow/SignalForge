@@ -470,6 +470,104 @@ except LLMOutputAnchorContractError as exc:
     raise
 ```
 
+## Type-coherence defence (issue #159)
+
+`_validate_anchor_contract` extends the structural anchor-contract
+checks with a sqlglot-based type-coherence pass for `custom_sql`
+business-rule tests. Cooperative LLMs see real warehouse column types
+in the cached manifest summary and emit type-coherent SQL on their
+own; this parser-side check is the belt-and-braces defence for
+candidates that slip past — a dual-defence pattern mirroring
+`exclude_tests` (prompt filter + parser rejection).
+
+### What it catches
+
+The check walks binary comparison nodes (`<>`, `=`, `<`, `>`, `<=`,
+`>=`, plus `IN`-list comparisons) in the drafted SQL and flags
+violations where:
+
+- Both operands are bare column references (NOT `CAST`, `SAFE_CAST`,
+  `COALESCE`, `IFNULL`, function calls, subqueries, literals, `NULL`,
+  or window functions).
+- Both columns have known types in the manifest's `Column.data_type`
+  field.
+- The two types are incompatible per sqlglot's BigQuery
+  `TypeAnnotator.COERCES_TO` table (bidirectional check —
+  `INT64 ↔ STRING` is flagged; `INT64 ↔ FLOAT64` and
+  `NUMERIC ↔ BIGNUMERIC` are accepted as legal cross-numeric coercions
+  per BigQuery's conversion rules).
+
+Violations append to the same `LLMOutputAnchorContractError.violations`
+tuple as the structural checks — no new error class. A candidate with
+BOTH a hallucinated column AND a type mismatch surfaces BOTH
+violations in one error (collect-all invariant preserved).
+
+### What it deliberately skips
+
+Zero false-positives on legitimate SQL is the design contract; missing
+some real bugs is the acceptable tradeoff. The check skips silently
+when:
+
+- Either operand is wrapped in `CAST` / `SAFE_CAST` / `COALESCE` /
+  `IFNULL` / a function call / a subquery — the operator's intent is
+  ambiguous from a type perspective; defer to the warehouse.
+- Either side is a literal, `NULL`, or a window-function expression.
+- Either column's `data_type` is `None` (unknown — the drafter prompt
+  rendered "UNKNOWN" for the same column; the check can't be more
+  certain than the prompt).
+- The SQL fails to parse (`sqlglot.errors.ParseError`); the warehouse
+  adapter will catch it downstream and route through
+  `kept-without-evidence`.
+- The drafted SQL references `{{ this }}` or other Jinja templates —
+  these are substituted to a placeholder before parsing so the
+  WHERE-clause comparison nodes remain analysable.
+
+When the check skips, the prune engine remains the safety net:
+type-incoherent SQL that reaches the warehouse compiles to a
+`QuerySyntaxError`, which routes through `_InvalidIdentifier` →
+`kept-without-evidence` per `prune-engine.md` § "Conservative-bias
+routing template."
+
+### Threading column types into the parser
+
+`parse_draft_response` accepts two new keyword-only parameters:
+
+```python
+parse_draft_response(
+    raw_text,
+    model_columns,
+    *,
+    model_columns_by_type: Mapping[str, str | None] | None = None,
+    dialect_name: str = "bigquery",
+    exclude_tests: frozenset[str] = frozenset(),
+)
+```
+
+`draft_from_request` builds `model_columns_by_type` from
+`model.columns_list` and threads through. When
+`model_columns_by_type=None` or every column's `data_type` is `None`,
+the type-coherence arm is a no-op (structural anchor-contract checks
+still run as before). For populating `data_type` from your dbt
+project, see
+[`docs/manifest-loader-ops.md` § Column types from catalog.json](manifest-loader-ops.md#column-types-from-catalogjson-issue-159).
+
+### Dialect support
+
+v0.3 hardcodes `dialect_name="bigquery"` at the orchestrator (a TODO
+in `draft.schema` marks the v0.2-of-multi-warehouse handoff). sqlglot
+also supports Snowflake and Postgres dialects; when the warehouse
+layer surfaces those as first-class adapters, the orchestrator will
+source `dialect_name` from the safety policy or adapter. No prompt or
+config change planned.
+
+### Dependency
+
+sqlglot is pinned at `sqlglot>=30,<31` in
+`[project].dependencies`. It was a dev-only transitive (via
+`fakesnow`) before #159; promoting to runtime is a deliberate
+~15MB add for `signalforge-dbt` PyPI users in exchange for the
+type-coherence defence.
+
 ## `prompt_version` cross-reference
 
 `prompt_version` is a deterministic 16-hex-char blake2b digest of the
