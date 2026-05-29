@@ -103,13 +103,20 @@ marker out of default runs automatically; this section just documents how
 a maintainer invokes the full suite when cutting a release (per DEC-010
 of [`plans/super/155-gemini-truncation-e2e-gap.md`](plans/super/155-gemini-truncation-e2e-gap.md)).
 
-**Cost ceiling:** ≈ **$0.30 per full-suite run** *(stale figure — predates
-`test_e2e_business_rules.py`; US-006 of #157 will lift the measured baseline
-after the next live re-run)* across the five paid e2e tests below (plus a
-handful of cents for the grade-only live-API companions). At ~2–3 pre-release
-audits per month for a one-maintainer project, that lands at roughly
-$0.60–$1.00/month — small enough that a shell wrapper around the invocation
-would add surface area without changing the contract.
+**Cost ceiling:** ≈ **$1.38 per full-suite run** (measured 2026-05-29
+against the Austin bikeshare fixture at pricing-table version `2026-05-28`;
+~108 grade calls/test × 6 paid e2e tests ≈ 660 LLM calls/run across the
+three providers). This is a **calibration signal, not a billing guarantee** —
+vendor pricing rotates and the per-test artifact count is workload-specific.
+See [`plans/super/157-e2e-cost-and-parallel.md`](plans/super/157-e2e-cost-and-parallel.md)
+§ "Measured baseline (2026-05-29)" for the per-provider breakdown (Anthropic
+~$0.87, OpenAI gpt-4o ~$0.42, Gemini 2.5-flash ~$0.087) and the per-test
+wall-clock table.
+
+At ~2–3 pre-release audits per month for a one-maintainer project, that
+lands at roughly **$2.80–$4.20/month** — still small enough that a shell
+wrapper around the invocation would add surface area without changing the
+contract.
 
 ### Tests in the live e2e suite
 
@@ -191,6 +198,12 @@ sequential — parallelism is opt-in only (per DEC-001 / DEC-003 of
 [`plans/super/157-e2e-cost-and-parallel.md`](plans/super/157-e2e-cost-and-parallel.md)).
 The `cli_subprocess` and `wheel_smoke` markers stay serial — do NOT add
 `-n` to those invocations.
+
+**Measured wall-clock (2026-05-29 baseline):** ~15 min at `-n 3`
+(893s end-to-end) vs ~40 min serial (`-n 1`) → ~2.6× speedup against the
+Austin bikeshare fixture. **Zero Anthropic rate-limit retries observed at
+`-n 3`** in this baseline; the rate-limit caveat below is still load-bearing
+guidance for larger fixtures or if the Anthropic 50-RPM tier changes.
 
 **Anthropic 50 RPM rate-limit caveat.** Every paid e2e test uses Anthropic
 as the drafter (the `[anthropic]` parametrize variant of the BQ smoke and
