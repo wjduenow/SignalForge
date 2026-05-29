@@ -26,8 +26,6 @@ Pins five load-bearing properties:
 
 from __future__ import annotations
 
-import pytest
-
 from signalforge.cli._helpers import _EXCEPTION_TO_EXIT_CODE
 from signalforge.llm.cost import (
     CostError,
@@ -193,9 +191,7 @@ def test_cost_error_excluded_from_scan_7_required_mapping() -> None:
     )
 
 
-def test_rollup_audit_dir_stub_raises_not_implemented() -> None:
-    """US-001 ships the signature only; the body raises
-    ``NotImplementedError`` until US-002 lands the implementation.
-    """
-    with pytest.raises(NotImplementedError):
-        rollup_audit_dir(".")
+# NOTE: The US-001 stub test
+# ``test_rollup_audit_dir_stub_raises_not_implemented`` was removed when
+# US-002 (bead ``bd_1-scaffolding-e1a.2``) landed the real implementation
+# — see ``tests/llm/cost/test_rollup.py`` for the behaviour pin.
