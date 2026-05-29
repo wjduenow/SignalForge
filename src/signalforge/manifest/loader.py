@@ -53,6 +53,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from signalforge._common.path_safety import canonicalise_path
 from signalforge.manifest.errors import (
     AmbiguousRefError,
     ManifestError,
@@ -65,7 +66,7 @@ from signalforge.manifest.errors import (
     SourceNotFoundError,
     UnsupportedManifestVersionError,
 )
-from signalforge.manifest.models import Manifest, Model
+from signalforge.manifest.models import Column, Manifest, Model
 
 if TYPE_CHECKING:
     from signalforge.warehouse.models import TableRef
@@ -336,7 +337,135 @@ def load(
     # canonicalise inputs. Frozen-model escape hatch (Pydantic v2 idiom).
     object.__setattr__(manifest, _PROJECT_DIR_ATTR, project_resolved)
 
+    # Overlay column ``data_type`` values from a sibling ``catalog.json``
+    # when present (issue #159 — DEC-001, DEC-002, DEC-007, DEC-010).
+    manifest = _apply_catalog_overlay(manifest, resolved_manifest, project_resolved)
+
     return manifest
+
+
+# ---------------------------------------------------------------------------
+# catalog.json sibling merge (issue #159 — DEC-001, DEC-002, DEC-007, DEC-010)
+# ---------------------------------------------------------------------------
+
+
+def _apply_catalog_overlay(
+    manifest: Manifest,
+    resolved_manifest: Path,
+    project_resolved: Path,
+) -> Manifest:
+    """Merge column ``data_type`` values from a sibling ``catalog.json``.
+
+    Issue #159 — DEC-001/002/007/010. The catalog file is looked up at
+    ``<resolved_manifest>.parent / "catalog.json"`` (sibling to the manifest;
+    mirrors how dbt itself locates the file). When present, its per-node
+    ``columns[*].type`` entries are merged into the in-memory
+    :class:`Column.data_type` fields using case-insensitive column-name
+    matching (Snowflake catalog.json uppercases identifiers; BigQuery
+    preserves case — DEC-007).
+
+    Silent degradation (DEC-010):
+
+    * Catalog file absent → no-op (most common case for projects not running
+      ``dbt docs generate``).
+    * Catalog JSON malformed / file unreadable → silent skip.
+    * Catalog node not in manifest → silently ignored.
+    * Catalog column not in the matching manifest model → silently dropped
+      (never adds a phantom column to ``Model.columns``).
+    * Manifest column not in catalog → keeps ``data_type = None``.
+
+    Path canonicalisation **does** apply: a ``catalog.json`` symlink that
+    escapes the project tree raises :class:`PathContainmentError` from the
+    common path-safety helper. The silent-degrade set covers I/O / parse
+    failures, NOT a malicious path manipulation.
+
+    No logging is emitted (stage-0 invariant per
+    ``.claude/rules/manifest-readers.md``).
+
+    Returns either the original ``manifest`` (when nothing to merge) or a
+    new :class:`Manifest` whose ``nodes`` dict carries the overlaid
+    :class:`Column` / :class:`Model` instances built via
+    :meth:`pydantic.BaseModel.model_copy` (the frozen-model pattern).
+    """
+    catalog_path = resolved_manifest.parent / "catalog.json"
+    # Canonicalise the catalog path — security gate; a symlink escape raises
+    # PathContainmentError, which we deliberately do NOT swallow.
+    resolved_catalog = canonicalise_path(catalog_path, project_resolved)
+
+    if not resolved_catalog.exists() or not resolved_catalog.is_file():
+        return manifest
+
+    # Read + parse. Any I/O or JSON failure → silent no-op (DEC-010c).
+    try:
+        with resolved_catalog.open("r", encoding="utf-8") as fh:
+            catalog_loaded: Any = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return manifest
+
+    if not isinstance(catalog_loaded, dict):
+        return manifest
+
+    catalog_nodes = catalog_loaded.get("nodes")
+    if not isinstance(catalog_nodes, dict):
+        return manifest
+
+    # Build {unique_id -> {lower(col_name) -> type}} once.
+    by_node: dict[str, dict[str, str]] = {}
+    for unique_id, node in catalog_nodes.items():
+        if not isinstance(node, dict):
+            continue
+        cat_cols = node.get("columns")
+        if not isinstance(cat_cols, dict):
+            continue
+        per_node: dict[str, str] = {}
+        for cat_col_name, cat_col in cat_cols.items():
+            # ``cat_col_name`` is a JSON object key, so always ``str`` — no
+            # explicit type guard needed here (the JSON parser enforces it).
+            if not isinstance(cat_col, dict):
+                continue
+            cat_type = cat_col.get("type")
+            if not isinstance(cat_type, str):
+                continue
+            per_node[cat_col_name.lower()] = cat_type
+        if per_node:
+            by_node[unique_id] = per_node
+
+    if not by_node:
+        return manifest
+
+    new_nodes: dict[str, Model] = {}
+    changed = False
+    for unique_id, model in manifest.nodes.items():
+        types_for_node = by_node.get(unique_id)
+        if types_for_node is None:
+            new_nodes[unique_id] = model
+            continue
+        new_columns: dict[str, Column] = {}
+        model_changed = False
+        for col_name, column in model.columns.items():
+            cat_type = types_for_node.get(col_name.lower())
+            if cat_type is None:
+                new_columns[col_name] = column
+                continue
+            # Frozen-model overlay per manifest-readers.md.
+            new_columns[col_name] = column.model_copy(update={"data_type": cat_type})
+            model_changed = True
+        if model_changed:
+            new_nodes[unique_id] = model.model_copy(update={"columns": new_columns})
+            changed = True
+        else:
+            new_nodes[unique_id] = model
+
+    if not changed:
+        return manifest
+
+    new_manifest = manifest.model_copy(update={"nodes": new_nodes})
+    # Re-stash the resolved project_dir + drop any stale resolver-index cache —
+    # model_copy creates a fresh instance; the indexes attached via
+    # object.__setattr__ on the old instance are lost intentionally and will
+    # be rebuilt lazily on first get_model() lookup against new_nodes.
+    object.__setattr__(new_manifest, _PROJECT_DIR_ATTR, project_resolved)
+    return new_manifest
 
 
 # ---------------------------------------------------------------------------
