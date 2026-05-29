@@ -5,7 +5,7 @@
 - **Ticket:** [#157](https://github.com/wjduenow/SignalForge/issues/157)
 - **Branch:** `feature/157-e2e-cost-parallel`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/157-e2e-cost-parallel`
-- **Phase:** devolved (beads created 2026-05-29; ready for `/ralph-run`)
+- **Phase:** in-flight (US-001..US-005 closed; US-006..US-008 pending)
 - **Created:** 2026-05-29
 - **Sessions:** 1
 
@@ -116,6 +116,41 @@ No blockers; three concerns to resolve in refinement. Reviewed the proposed shap
 - **DEC-008 — Maintainer live re-run is its own story.** Bead is marked maintainer-only at devolve; closes when measured baseline lands in this plan's refinement log.
 
 - **DEC-009 — Durable convention captured in `testing-signal.md` § "End-to-end gated tests"** — the "parallel-safe via per-test tmp_path + apply_provider_override" rule plus the rate-limit-caveat invocation pattern. Patterns & Memory story owns this.
+
+### Measured baseline (2026-05-29)
+
+Live `uv run pytest -m e2e -n 3 --no-cov --capture=no -v` against the maintainer's billing project (`duenow-nest`). Rollup computed by `scripts/measure_e2e_cost.py` over each test's preserved `tmp_path/.signalforge/` JSONLs at `/tmp/pytest-of-wesd/pytest-629/`. **`PRICE_TABLE_VERSION = "2026-05-28"`** (from `signalforge.llm.pricing`).
+
+**Wall-clock:** `14:53` (893.35s) at `-n 3` vs the ticket-cited `39:23` serial baseline → **~2.6× speedup**. Test scheduling: 3 xdist workers, each running 2 tests sequentially. Per-test wall-clock is not cleanly extractable from xdist parallel output; the leader (gemini_smoke on gw2) completed in ~9 min, and each worker finished both tests within 14:53.
+
+**Rate-limit retries:** **zero** observed in stderr. Grep for `rate limit` / `429` / `retry` over the full log returned no matches. The Anthropic-50-RPM concern documented in CONTRIBUTING did not materialise at `-n 3` against the Austin fixture — the per-test grade-call cadence is more spread out than worst-case calculation suggested. **Concurrency: `-n 3` was safe; no downgrade needed.**
+
+**Per-test USD (locked by JSONL token rollup × `PRICES` table):**
+
+| Test (pytest tmp basename) | Drafter | Grader | Calls | USD |
+|---|---|---|---|---|
+| BQ smoke `[anthropic]` (gw0 #0) | Anthropic | Anthropic | 105 | **$0.3822** |
+| BQ smoke `[openai]` *or* `openai_smoke` (gw0 #1) | Anthropic | OpenAI gpt-4o | 1 + 108 | **$0.2550** |
+| `business_rules` (gw1 #0) ⚠ | Anthropic | Anthropic | 89 | **$0.3218** |
+| BQ smoke `[gemini]` *or* `gemini_smoke` (gw1 #1) | Anthropic | Gemini 2.5-flash | 1 + 108 | **$0.0881** |
+| Sibling smoke (gemini grader, gw2 #0) | Anthropic | Gemini 2.5-flash | 1 + 104 | **$0.0843** |
+| Sibling smoke (openai grader, gw2 #1) | Anthropic | OpenAI gpt-4o | 1 + 108 | **$0.2476** |
+
+Within each `(openai|gemini)` row pair, identifying which is the BQ parametrize variant vs the standalone sibling is not load-bearing for cost (both ran the full pipeline; both produced kept/dropped diffs). Their costs differ by `±$0.01` driven by Anthropic-side prompt-cache hit/miss state across the run.
+
+**Per-provider aggregate:**
+
+| Provider | Calls | Input tokens | Output tokens | Cache-write tokens | Cache-read tokens | Subtotal USD |
+|---|---|---|---|---|---|---|
+| **Anthropic** (drafter on all 6; grader on 2) | 198 | 85,460 | 38,387 | 9,412 | 3,866 | **$0.8686** |
+| **OpenAI** (gpt-4o grader on 2) | 216 | 85,686 | 20,891 | 0 | 0 | **$0.4231** |
+| **Gemini** (2.5-flash grader on 2) | 212 | 84,248 | 24,734 | 0 | 0 | **$0.0871** |
+
+**Grand total: `$1.3789 per full-suite run`** at pricing-table `2026-05-28`. This is **~4.6× the stale `$0.30/full-suite` figure** that lived in CONTRIBUTING / `plans/super/155-…md` DEC-010 / `docs/grade-ops.md`. The drift was driven by a larger-than-estimated artifact count on the Austin fixture (~108 grade calls/test, not the ~48 the original plan estimated — already noted in the ticket text).
+
+**Pre-existing flake observed (NOT a US-005 blocker):** `test_e2e_business_rules.py::test_e2e_business_rules_drafts_prunes_custom_sql` FAILED with an `AssertionError` at line 207 — the test expects at least one `custom_sql` PruneDecision to be `kept` with `reason="kept"` (the "same start/end station" business rule should be violated by real A→B bikeshare trips), but the drafter produced a tautological SQL that pruned to `('dropped', 'always-passes')`. This is LLM-determinism on the drafter side, not a bug in US-001…US-004 or in `-n 3` parallelization. The test still ran to completion and emitted all four `.signalforge/` JSONLs; cost rollup is unaffected. Tracked: file a separate flake-investigation ticket if reproducibility is high.
+
+**Framing for US-006 (cited verbatim in the doc updates):** "calibration signal, not a billing guarantee" per `warehouse-adapters.md` precedent — the figures above are a single 2026-05-29 measurement at `PRICE_TABLE_VERSION=2026-05-28`; vendor pricing rotates and the Austin-fixture artifact count is workload-specific.
 
 ### Session notes
 
