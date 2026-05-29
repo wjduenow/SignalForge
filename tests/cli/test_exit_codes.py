@@ -277,6 +277,21 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
 
         return cls(var_name="SYNTHETIC_VAR", profiles_path=Path("/tmp/synthetic/profiles.yml"))
 
+    # LLM cost-rollup errors (issue #157 / US-001). Each concrete carries
+    # positional args specific to the rollup failure mode (missing JSONLs,
+    # malformed JSONL line, unknown model id); the catch-all message shape
+    # doesn't fit.
+    if name == "CostRollupAuditMissingError":
+        return cls(project_dir="/tmp/synthetic", audit_dir=".signalforge")
+    if name == "CostRollupMalformedRecordError":
+        return cls(
+            path="/tmp/synthetic/.signalforge/llm_responses.jsonl",
+            line_num=1,
+            reason="synthetic JSONDecodeError",
+        )
+    if name == "CostRollupUnknownModelError":
+        return cls(model_id="synthetic-model-id")
+
     # Catch-all: layer-base default ``Cls(message, *, remediation=None)``.
     try:
         return cls(_SENTINEL_MESSAGE)

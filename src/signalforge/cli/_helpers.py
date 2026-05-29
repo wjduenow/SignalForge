@@ -117,6 +117,12 @@ from signalforge.llm import (
     LLMServerError,
     UnknownProviderError,
 )
+from signalforge.llm.cost import (
+    CostError,
+    CostRollupAuditMissingError,
+    CostRollupMalformedRecordError,
+    CostRollupUnknownModelError,
+)
 from signalforge.manifest import (
     AmbiguousRefError,
     Manifest,
@@ -378,6 +384,20 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # failure — the YAML is stale or wrong vs. the manifest).
     IngestModelNotFoundError: 2,
     IngestAnchorContractError: 2,
+    # LLM cost-rollup layer (issue #157 / DEC-002 of US-001). The rollup
+    # walks per-run audit JSONLs and turns token counts into USD via the
+    # pricing table; all three concretes are input-shape failures (the
+    # operator pointed the rollup at a directory missing the JSONLs, or
+    # at a project whose JSONLs contain a malformed record / unknown
+    # model id). ``CostError`` base is dual-registered at tier 2 below
+    # as a single-tier safety net per cli-layer.md § "7th AST scan" —
+    # mirrors the nine other single-tier base entries.
+    CostRollupAuditMissingError: 2,
+    CostRollupMalformedRecordError: 2,
+    CostRollupUnknownModelError: 2,
+    # ``CostError`` base dual-registration (safety net for forward-compat
+    # subclasses) — every concrete is individually mapped above.
+    CostError: 2,
     # ---- Tier 3: API / external dep ---------------------------------------
     # LLM connectivity / quota / SDK issues.
     LLMError: 3,
