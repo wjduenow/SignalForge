@@ -113,6 +113,10 @@ without adding it to a project environment.
 **Working from a clone (contributing)?** Install the dev toolchain with
 `uv sync --dev` — see [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
+Run `signalforge install-skill` to drop the [Claude Code skill](docs/skills.md)
+into your project's `.claude/skills/signalforge/` and let Claude drive
+SignalForge end-to-end.
+
 ### 2. Authenticate to BigQuery and your LLM provider
 
 ```bash
