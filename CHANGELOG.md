@@ -6,6 +6,19 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 _Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
 
+## [0.5.0] — 2026-05-30
+
+### Added
+
+- **SignalForge skill for Claude Code + `install-skill` subcommand (#141).** Ships a bundled Claude Code skill at `src/signalforge/skills/signalforge/SKILL.md` that teaches Claude to drive the SignalForge CLI against a user's dbt project — pointing at a project, running the zero-cred demo, drafting + pruning real models, reading diffs, and the gated live e2e flow. New `signalforge install-skill [<dest>]` subcommand copies the bundled skill out of the wheel into `<dest>/.claude/skills/signalforge/`; library seam at `signalforge.skill.install_skill(...)` with a three-class typed-error hierarchy (`SkillDestPathError` tier 1, `SkillDestUnsafeError` tier 2, `SkillPackageDataMissingError` tier 1) mirroring `signalforge.demo.copy_demo` verbatim for symlink-cycle defence. Symlink protection covers every bundled path (SKILL.md AND every `assets/` file), not just the top-level destination — a symlinked ancestor directory or sibling asset cannot smuggle writes through copytree.
+- **SKILL ↔ CLI parity gate (`tests/cli/test_skill_cli_parity.py`).** The bundled skill is the project's **6th parity surface** (`.claude/rules/skill-parity.md`). The gate parses the live argparse subparser registry, four canonical demo command lines, and `signalforge <subcommand> --<flag>` patterns from the SKILL body, then asserts every token appears verbatim in `SKILL.md`. Runs inside the canonical `uv run pytest` so a CLI change that drifts from the skill fails validation until the skill is updated in the same commit — gate-over-prompt, not a reviewer-discretion item. Planted-violation self-check per `.claude/rules/testing-signal.md` § AST source-scan gates.
+- **`docs/skills.md` documentation + README skill pointer.** New MkDocs page documenting the bundled skill, the `install-skill` subcommand, the two demo paths (zero-cred default + opt-in live e2e), the parity gate, and the maintainer-only-skill wheel exclusion. README Quick-start gains a one-sentence pointer.
+
+### Fixed
+
+- **`install-skill` symlink defence extended to every bundled path (#141 CodeRabbit/Copilot).** The pre-review version protected only `<dest>/.claude/skills/signalforge/SKILL.md`; a symlinked `assets/SKILL.eval.json` (or symlinked `assets/` directory) would have smuggled writes through copytree. The seam now enumerates every relative path under the bundled source tree via `rglob` and refuses to overwrite any of them through a symlink, with `mkdir(parents=True)` wrapped to raise `SkillDestUnsafeError` (not raw `OSError`) when a non-directory component sits along the install chain (e.g. `<dest>/.claude` is a regular file).
+- **`install-skill` `existed_before` probe now catches broken symlinks (#141 CodeRabbit).** The DEC-017 stdout contract is "True for files and symlinks (both shapes are replaced from the operator's POV)." `.exists()` alone follows symlinks AND returns False for broken symlinks; probe now ORs `.is_symlink()` so a broken-symlink destination is honestly reported as "replaced" (even though the lib seam then refuses to write through it).
+
 ## [0.4.0] — 2026-05-30
 
 ### Added
@@ -90,7 +103,8 @@ signalforge --version
 - OSS-first, Core-friendly — no dbt Cloud dependency; runs against any dbt-core project, locally or in CI.
 - Explainable diffs — every kept/dropped/flagged artifact ships with a one-line "why"; every run produces a sidecar JSON with reproducibility hashes.
 
-[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.5.0
 [0.4.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.4.0
 [0.3.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.3.0
 [0.2.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.2.0

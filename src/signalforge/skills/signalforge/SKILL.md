@@ -3,7 +3,7 @@ name: signalforge
 description: Use when the user wants to draft, prune, or grade dbt tests / docs with an LLM, has a dbt project (manifest.json + sql models), or asks about SignalForge. Drives the `signalforge` CLI end-to-end: drafts candidate tests, runs them against warehouse samples, drops the noise, and explains every kept/dropped artifact.
 compatibility: "Requires: signalforge installed (pip install signalforge-dbt) + ANTHROPIC_API_KEY (the drafter always calls Anthropic). The `signalforge lint` and `signalforge install-skill` paths are fully offline. The bundled demo (`init-demo` + `generate`) reads a public BigQuery dataset, so it needs ADC (`gcloud auth application-default login`) + `GOOGLE_CLOUD_PROJECT` for billing — no proprietary warehouse setup of your own, but not credential-free. For real dbt projects: dbt-core + a populated manifest.json + your warehouse profile. For live e2e: BigQuery v0.1."
 metadata:
-  signalforge-version: "0.5.0.dev0"
+  signalforge-version: "0.5.0"
 allowed-tools: Bash(signalforge *), Bash(uv run signalforge *), Bash(uv run pytest -m e2e*), Bash(cat *), Bash(ls *), Bash(grep *), Bash(head *), Bash(tail *), Read, Write, Edit
 ---
 
