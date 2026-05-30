@@ -5,11 +5,32 @@
 - **Ticket:** [GH #141](https://github.com/wjduenow/SignalForge/issues/141)
 - **Branch:** `feature/141-claude-skill-install`
 - **Worktree:** `../worktrees/SignalForge/141-claude-skill-install`
-- **Phase:** published
+- **Phase:** devolved
 - **PR:** [#166](https://github.com/wjduenow/SignalForge/pull/166)
-- **Epic:** TBD
+- **Epic:** `bd_1-scaffolding-ezn`
 - **Sessions:**
-  - 2026-05-29 — Phase 1 discovery kickoff (parallel research)
+  - 2026-05-29 — Phase 1 discovery (parallel research, 4 scoping decisions locked)
+  - 2026-05-29 — Phase 2 architecture review (no blockers, 2 concerns surfaced)
+  - 2026-05-29 — Phase 3 refinement (24 DECs locked), Phase 4 detailing (11 stories), Phase 5 published as draft PR #166
+  - 2026-05-30 — Phase 6 approved, Phase 7 devolved to beads (epic `bd_1-scaffolding-ezn`, 11 tasks)
+
+## Beads manifest
+
+- **Epic:** `bd_1-scaffolding-ezn` — "141: SignalForge skill + install-skill"
+- **Tasks:**
+  - `bd_1-scaffolding-ezn.1` — US-001 — Bootstrap skills tree + wheel packaging (no deps; READY)
+  - `bd_1-scaffolding-ezn.2` — US-002 — Public `signalforge.skill` lib + errors (deps: .1)
+  - `bd_1-scaffolding-ezn.3` — US-003 — CLI `install-skill` subcommand (deps: .2)
+  - `bd_1-scaffolding-ezn.4` — US-004 — SKILL ↔ CLI parity gate (deps: .1, .3, .7)
+  - `bd_1-scaffolding-ezn.5` — US-005 — 5-surface parity for install-skill (deps: .3, .6)
+  - `bd_1-scaffolding-ezn.6` — US-006 — Docs (skills.md + nav + cli-ops + README) (deps: .3)
+  - `bd_1-scaffolding-ezn.7` — US-007 — Author SKILL.md prose (deps: .1, .3)
+  - `bd_1-scaffolding-ezn.8` — US-008 — Clauditor self-grade + README badge (deps: .7)
+  - `bd_1-scaffolding-ezn.9` — US-009 — skill-parity.md + cli-layer.md update [ORCHESTRATOR-ONLY] (deps: .3, .4)
+  - `bd_1-scaffolding-ezn.10` — Quality Gate — code-review ×4 + CodeRabbit (deps: .1…9)
+  - `bd_1-scaffolding-ezn.11` — Patterns & Memory (deps: .10)
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/141-claude-skill-install`
+- **Branch:** `feature/141-claude-skill-install`
 
 ## Ticket summary
 
