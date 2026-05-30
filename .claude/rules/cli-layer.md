@@ -124,6 +124,8 @@ A behaviour change in the CLI touches **five surfaces**, all updated in the same
 
 When introducing a new flag, write surfaces 1–3 first, then the test against those, then back-fill the DEC.
 
+**The bundled Claude Code skill is a sixth parity surface** (#141, see `skill-parity.md`). `src/signalforge/skills/signalforge/SKILL.md` teaches the CLI surface to operators driving Claude Code; a subcommand / flag / demo-command change updates the skill body in the same commit. Enforcement is a gate, not a prompt: `tests/cli/test_skill_cli_parity.py` parses the live argparse subparser registry plus the locked demo-command list and asserts every token appears in `SKILL.md`. The gate runs inside the canonical `VALIDATE_CMD` (`uv run pytest`), so a `/ralph-run` bead that drifts the CLI from the skill fails validation until the skill is fixed. The gate is mechanical (subcommand / flag / demo-command presence); semantic freshness is the clauditor self-grade plus reviewer attention.
+
 ## API alignment with adjacent stages
 
 `add_parser(subparsers) -> None` and `cmd_<name>(args) -> int` for every subcommand; `main(argv: list[str] | None = None) -> int` at the top. No top-level `try/except` in `main()` — typed errors flow up; `cmd_<name>` does the explicit catch and returns the right exit code. **One layer's exception → one CLI handler → one exit code.**

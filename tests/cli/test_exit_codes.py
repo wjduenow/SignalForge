@@ -269,6 +269,14 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
     if name == "CliInitDemoCopyError":
         return cls(dest="/tmp/synthetic", cause=_SENTINEL_CAUSE)
 
+    # install-skill CLI wrappers (issue #141 / DEC-008 — US-003). Path
+    # and dest-unsafe variants take ``dest=`` + optional ``cause=`` kwargs;
+    # the package-data-missing wrapper takes ``cause=`` only.
+    if name in {"CliInstallSkillPathError", "CliInstallSkillDestUnsafeError"}:
+        return cls(dest="/tmp/synthetic", cause=_SENTINEL_CAUSE)
+    if name == "CliInstallSkillPackageDataMissingError":
+        return cls(cause=_SENTINEL_CAUSE)
+
     # Warehouse profile env_var failure (issue #47 — supports init-demo's
     # bundled `{{ env_var('GOOGLE_CLOUD_PROJECT') }}` profile). Requires
     # (var_name, profiles_path) as positional args.

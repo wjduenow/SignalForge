@@ -46,6 +46,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - CLI Reference: cli-ops.md
+  - Claude Code Skill: skills.md
   - Pipeline Stages:
       - Manifest Loader: manifest-loader-ops.md
       - Warehouse Adapter: warehouse-adapter-ops.md

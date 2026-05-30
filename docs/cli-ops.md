@@ -57,10 +57,10 @@ After install, the `signalforge` console script is registered via
 
 ## Subcommands
 
-The CLI exposes five subcommands: `generate`, `init-demo`, `lint`,
-`prune-existing`, `version`. `signalforge --help` prints the
-top-level help; each subcommand has its own `--help` page (e.g.
-`signalforge generate --help`).
+The CLI exposes six subcommands: `generate`, `init-demo`,
+`install-skill`, `lint`, `prune-existing`, `version`. `signalforge
+--help` prints the top-level help; each subcommand has its own
+`--help` page (e.g. `signalforge generate --help`).
 
 ### `signalforge generate <model>`
 
@@ -333,6 +333,99 @@ export GOOGLE_CLOUD_PROJECT=<your-billing-project>
 export ANTHROPIC_API_KEY=sk-ant-...
 signalforge lint
 signalforge generate models/staging/stg_bikeshare_trips.sql --dry-run
+```
+
+### `signalforge install-skill [<dest>]`
+
+Copy the bundled SignalForge Claude Code skill into
+`<dest>/.claude/skills/signalforge/`. With the skill installed, a
+Claude Code session in `<dest>` recognises requests like "draft tests
+for `dim_customers`" or "prune my existing `schema.yml`," picks the
+right `signalforge` subcommand and flags, and explains the resulting
+kept / dropped / flagged diff back to the user. See
+[docs/skills.md](skills.md) for the skill catalog entry and the body
+sections it covers (DEC-021 of
+[`plans/super/141-claude-skill-install.md`](../plans/super/141-claude-skill-install.md)).
+
+Wraps the public library entry point
+`signalforge.skill.install_skill(dest) -> Path`; the CLI re-raises
+the lower-level `SkillError` subclasses as `CliInstallSkill*Error`
+wrappers at the handler boundary so the four-tier exit-code taxonomy
+stays homogeneous (DEC-008).
+
+Positional argument:
+
+- `<dest>` — Destination directory. Optional; default `.` (the
+  current working directory), so the common invocation from a dbt
+  project root is just `signalforge install-skill`. Relative paths
+  resolve against the current working directory; `~` expands.
+  Symlink-cycle defence applies (resolves via `.resolve(strict=True)`,
+  falling back to `.resolve(strict=False)` on
+  `FileNotFoundError` / `NotADirectoryError`) and raises
+  `CliInstallSkillPathError` on a cycle on every supported Python
+  version (gh-108958). **No `--project-dir` containment gate applies**
+  — `install-skill` is the second subcommand that *creates* a project
+  context rather than operating *inside* one (the first is
+  `init-demo`), so the `canonicalise_user_path(...)` containment
+  helper used by every other CLI flag is deliberately bypassed
+  (DEC-006).
+
+Flags: none. There is **no `--force` flag** (DEC-003): the library
+seam always overwrites every file SignalForge ships and preserves
+every other file in the destination tree, so the
+`--force`-against-symlink-dest hazard `init-demo --force` defends
+against does not apply here.
+
+Install path: `<dest>/.claude/skills/signalforge/SKILL.md`. The
+companion `assets/` subtree (also part of the bundled skill) lands
+alongside it.
+
+Exit codes (four-tier taxonomy; see § Four-tier exit-code taxonomy
+for the full table):
+
+- `0` — install succeeded; INFO line printed to stdout.
+- `1` — `CliInstallSkillPathError` (symlink cycle on `<dest>`) or
+  `CliInstallSkillPackageDataMissingError` (broken wheel install:
+  the bundled skill tree could not be located via
+  `importlib.resources` — practically unreachable on a clean
+  `pip install signalforge-dbt` run).
+- `2` — `CliInstallSkillDestUnsafeError`: `<dest>` exists as a
+  regular file (not a directory), OR the existing `SKILL.md` is a
+  symlink (writing would follow the link and clobber an arbitrary
+  destination).
+- `3` — n/a. `install-skill` makes no network, warehouse, or LLM
+  call.
+
+Stdout shapes:
+
+- New install (no existing `SKILL.md` at the target):
+  ```text
+  Installed SignalForge skill to <abs path>
+  ```
+- Upgrade-in-place (existing `SKILL.md` was overwritten — detected
+  via `Path.exists()` BEFORE the copy, DEC-017):
+  ```text
+  Installed SignalForge skill to <abs path> (replaced existing SKILL.md)
+  ```
+
+  The `(replaced existing SKILL.md)` suffix surfaces the lib seam's
+  upgrade-in-place overwrite policy so operators know their
+  hand-edited `SKILL.md` was replaced. The operator can `git diff` if
+  they had the file under version control.
+
+Stderr shapes: standard `ERROR: <message>` + optional
+`↳ Remediation: <text>` per tier (see § Stderr message shape per
+tier); no multi-violation header / bullet form fires from this
+subcommand.
+
+Example:
+
+```bash
+cd /repo/dbt/analytics
+signalforge install-skill
+# stdout: Installed SignalForge skill to /repo/dbt/analytics/.claude/skills/signalforge/SKILL.md
+echo $?
+# 0
 ```
 
 ### `signalforge lint`

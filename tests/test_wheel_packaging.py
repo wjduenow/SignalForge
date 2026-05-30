@@ -59,6 +59,19 @@ _EXPECTED_DEMO_FILES: tuple[str, ...] = (
     "signalforge/_demo/target/manifest.json",
 )
 
+# Canonical bundled-skill file set under ``signalforge/skills/`` inside the
+# built wheel. Established by US-001 of ``plans/super/141-claude-skill-install.md``
+# (DEC-001 — the shipped SignalForge skill lives in ``src/signalforge/skills/``
+# so Ralph workers can update it from worktrees; DEC-010 — wheel packaging via
+# ``[tool.hatch.build.targets.wheel].include``; DEC-011 — wheel_smoke gates the
+# file set so a drop fails loud at packaging time; DEC-022 — maintainer-only
+# skills under repo-root ``.claude/skills/`` MUST stay excluded). The placeholder
+# eval-sidecar lives under ``assets/`` to mirror the SKILL Spec convention.
+_EXPECTED_SKILL_FILES: tuple[str, ...] = (
+    "signalforge/skills/signalforge/SKILL.md",
+    "signalforge/skills/signalforge/assets/SKILL.eval.json",
+)
+
 
 def _build_command(outdir: Path) -> list[str]:
     """Pick the wheel-build invocation available in the current environment.
@@ -163,6 +176,51 @@ def test_wheel_excludes_scripts_directory(_built_wheel_members: set[str]) -> Non
         f"{scripts_members}. Check `[tool.hatch.build.targets.wheel]` in "
         "pyproject.toml — `scripts/` is maintainer-only and must stay out "
         "of the wheel (US-003 of plans/super/157-e2e-cost-and-parallel.md)."
+    )
+
+
+@pytest.mark.wheel_smoke
+def test_wheel_includes_all_bundled_skill_files(_built_wheel_members: set[str]) -> None:
+    """Every file in ``src/signalforge/skills/`` ships in the built wheel.
+
+    Gates DEC-010 (``include = [..., "src/signalforge/skills"]``) at
+    packaging time. The bundled SignalForge skill (US-007) plus its
+    placeholder eval sidecar (US-001) must reach an installed wheel so
+    the ``install-skill`` CLI (US-002) can copy them into
+    ``~/.claude/skills/signalforge/``. Without the directive Hatchling's
+    default ``packages`` glob is not guaranteed to pick up non-``.py``
+    skill data (mirrors the demo-tree precedent, ``DEC-002`` of
+    ``plans/super/47-init-demo.md``).
+    """
+    missing = [name for name in _EXPECTED_SKILL_FILES if name not in _built_wheel_members]
+    assert not missing, (
+        f"wheel is missing bundled skill files: {missing}. "
+        f"Check `[tool.hatch.build.targets.wheel] include` in pyproject.toml."
+    )
+
+
+@pytest.mark.wheel_smoke
+def test_wheel_excludes_maintainer_only_claude_skills(_built_wheel_members: set[str]) -> None:
+    """No ``.claude/skills/*`` entry may ship in the built wheel.
+
+    DEC-022 of ``plans/super/141-claude-skill-install.md`` — maintainer-only
+    skills (``release-manager``, ``review-agentskills-spec``) live at
+    repo-root ``.claude/skills/`` and MUST stay out of the distributed
+    wheel. They are orchestrator-only conventions and a Ralph worker
+    cannot edit them from a worktree (see the ``ralph-worker-claude-dir-perms``
+    memory), so accidentally bundling them would both bloat the wheel and
+    surface internal tooling to end-users. The shipped, user-facing skill
+    lives under ``src/signalforge/skills/`` (see the positive assertion
+    above); this negative gate catches a future contributor who mirrors
+    the repo-root ``.claude/skills/`` tree into the wheel by mistake.
+    """
+    leaked = sorted(name for name in _built_wheel_members if ".claude/skills/" in name)
+    assert not leaked, (
+        "wheel unexpectedly ships entries under `.claude/skills/`: "
+        f"{leaked}. Maintainer-only skills (release-manager, "
+        "review-agentskills-spec) must stay at repo-root `.claude/skills/` "
+        "and out of the wheel (DEC-022 of plans/super/141-claude-skill-install.md). "
+        "The shipped user-facing skill lives under `src/signalforge/skills/`."
     )
 
 
