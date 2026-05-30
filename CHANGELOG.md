@@ -4,6 +4,10 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 ## [Unreleased]
 
+_Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
+
+## [0.4.0] — 2026-05-30
+
 ### Added
 
 - **Column-type awareness for the drafter (#159).** `signalforge.manifest.load(project_dir)` now auto-merges column types from a sibling `target/catalog.json` (produced by `dbt docs generate`) into `Column.data_type` on the in-memory `Manifest`. The drafter's prompt — cached manifest summary AND dynamic data-section schema — both already rendered `data_type` when present; populating it from catalog.json closes the dbt-parse-only gap so cooperative LLMs see real warehouse types (`INT64`, `STRING`, `TIMESTAMP`, …) instead of `UNKNOWN`. No CLI flag, no config knob — pure sibling auto-discovery; missing or malformed catalog degrades silently. Case-insensitive column matching (`lower(col_name)`) handles Snowflake's uppercase / BigQuery's preserve / Postgres's lowercase identifier conventions without configuration.
@@ -86,7 +90,8 @@ signalforge --version
 - OSS-first, Core-friendly — no dbt Cloud dependency; runs against any dbt-core project, locally or in CI.
 - Explainable diffs — every kept/dropped/flagged artifact ships with a one-line "why"; every run produces a sidecar JSON with reproducibility hashes.
 
-[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.4.0
 [0.3.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.3.0
 [0.2.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.2.0
 [0.1.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.1.0
