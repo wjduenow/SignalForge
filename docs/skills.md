@@ -71,8 +71,8 @@ SignalForge surface (DEC-021 of
    and a pointer to [docs/cli-ops.md](cli-ops.md).
 
 The skill always activates against the live `signalforge` CLI on the user's
-PATH — `signalforge --version` is the first thing it runs to confirm the
-install resolved.
+PATH — `signalforge version` (the subcommand) is the first thing it runs to
+confirm the install resolved.
 
 ## Two demo paths
 
@@ -110,9 +110,10 @@ walkthrough of the same flow.
 A pytest gate at `tests/cli/test_skill_cli_parity.py` parses the live CLI
 (every registered subcommand from the `argparse` subparser registry) and
 asserts that each subcommand AND the four canonical demo commands
-(`signalforge init-demo`, `signalforge generate ... --write`,
-`signalforge prune-existing ... --schema`, `signalforge --version`) appear
-in `SKILL.md`. The gate runs inside the canonical `VALIDATE_CMD`
+(`signalforge init-demo`, `signalforge generate <model> --write`,
+`signalforge prune-existing <model> --schema <path>`,
+`signalforge install-skill`) appear in `SKILL.md`. The gate runs inside the
+canonical `VALIDATE_CMD`
 (`uv run pytest`), so a CLI change that drifts the surface from the skill
 fails validation until `SKILL.md` is updated in the same change.
 

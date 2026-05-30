@@ -167,13 +167,27 @@ def install_skill(dest: Path | str) -> Path:
             f"destination {str(resolved_dest)!r} exists but is not a directory"
         )
 
-    # Symlinked-SKILL.md defence (DEC-005). ``copytree`` with
-    # ``dirs_exist_ok=True`` will faithfully overwrite a regular file at
-    # the same path, but on a symlink it would follow the link and write
-    # into the link target — a destination the operator did not consent
-    # to. Refuse loudly before any source materialisation.
+    # Symlinked-SKILL.md / symlinked-ancestor defence (DEC-005). ``copytree``
+    # with ``dirs_exist_ok=True`` will faithfully overwrite a regular file at
+    # the same path, but on a symlink it would follow the link and write into
+    # the link target — a destination the operator did not consent to. The
+    # check covers both SKILL.md itself AND every install-tree ancestor under
+    # ``<resolved_dest>`` back to ``.claude/`` so a symlinked ancestor (e.g.
+    # ``.claude/skills/signalforge/`` repointed elsewhere) cannot smuggle
+    # writes through. Refuse loudly before any source materialisation.
     target_skill_dir = resolved_dest / _CLAUDE_DIR / _SKILLS_DIR / _SKILL_NAME
     target_skill_md = target_skill_dir / _SKILL_MD
+    for ancestor in (
+        resolved_dest / _CLAUDE_DIR,
+        resolved_dest / _CLAUDE_DIR / _SKILLS_DIR,
+        target_skill_dir,
+    ):
+        if ancestor.is_symlink():
+            raise SkillDestUnsafeError(
+                f"refusing to install through symlinked ancestor {str(ancestor)!r}: "
+                "would follow the link and write into the resolved target. Remove the "
+                "symlink first or pick a different destination."
+            )
     if target_skill_md.is_symlink():
         raise SkillDestUnsafeError(
             f"refusing to overwrite symlinked SKILL.md at {str(target_skill_md)!r}: "

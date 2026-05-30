@@ -55,6 +55,7 @@ so the gate and the gated artefact both live in worker-writable trees.
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import pytest
@@ -234,4 +235,85 @@ def test_parity_gate_catches_missing_subcommand_planted_violation(
     assert omitted in str(exc_info.value), (
         f"AssertionError message did not name the missing subcommand "
         f"{omitted!r}; got: {exc_info.value!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Category 4 (QG extension): flags the skill claims must exist on the live CLI
+# ---------------------------------------------------------------------------
+
+
+# Match ``signalforge <subcommand> --<flag>`` occurrences inside SKILL.md so a
+# typo / stale-rebase that teaches a non-existent flag (the US-008-era
+# ``signalforge install-skill --force`` finding) trips the gate. Captures the
+# subcommand AND the flag separately so we can dispatch the validity check to
+# the right subparser. Plain ASCII flag chars only — the regex deliberately
+# does NOT match exotic shells (`/`, `=`, etc.) because skill prose only ever
+# teaches the conventional long-flag form.
+_SKILL_FLAG_USAGE_RE = re.compile(r"signalforge ([a-z][a-z0-9-]*)\s+(--[a-z][a-z0-9-]*)")
+
+
+def _subparser_flags(subcommand: str) -> frozenset[str]:
+    """Return every long-form flag (``--foo``) registered on ``subcommand``.
+
+    Walks the live argparse subparser for the named subcommand and harvests
+    every ``option_string`` that starts with ``--`` from every action.
+    Returns an empty frozenset if the subcommand isn't registered (caller
+    is responsible for distinguishing that case).
+    """
+    parser = _build_parser()
+    subparser_actions = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+    assert len(subparser_actions) == 1
+    choices = subparser_actions[0].choices
+    if subcommand not in choices:
+        return frozenset()
+    sub = choices[subcommand]
+    flags: set[str] = set()
+    for action in sub._actions:
+        for opt in action.option_strings:
+            if opt.startswith("--"):
+                flags.add(opt)
+    return frozenset(flags)
+
+
+def test_skill_md_only_teaches_flags_that_exist_on_the_live_cli() -> None:
+    """Every ``signalforge <subcommand> --<flag>`` occurrence in SKILL.md
+    names a flag that actually exists on the live subparser (QG-extended
+    category 4 of 3, added after the US-008 review found SKILL.md teaching
+    ``signalforge install-skill --force`` — a flag DEC-003 explicitly
+    forbids).
+
+    The substring match in category 1/2 catches missing subcommands and
+    drifted demo commands but NOT a typo flag the skill claims to exist.
+    This test closes that gap by scanning SKILL.md for any
+    ``signalforge X --flag`` pattern and asserting ``--flag`` is in the
+    live subparser's option strings.
+
+    The skill-parity rule explicitly acknowledges the gate is "necessary
+    not sufficient" (per ``.claude/rules/skill-parity.md``) — semantic
+    prose freshness still rides reviewer attention + the clauditor self-
+    grade. This category 4 narrows that gap by promoting one specific
+    "prose lies about the CLI surface" failure mode into a mechanical
+    gate.
+    """
+    assert _SKILL_MD.exists(), f"SKILL.md not found at {_SKILL_MD}"
+    body = _SKILL_MD.read_text(encoding="utf-8")
+
+    bogus: list[tuple[str, str]] = []
+    for match in _SKILL_FLAG_USAGE_RE.finditer(body):
+        subcommand, flag = match.group(1), match.group(2)
+        registered = _subparser_flags(subcommand)
+        if not registered:
+            # Subcommand itself doesn't exist on the live CLI — caught by
+            # category 1's gate, not this one. Skip to avoid double-counting.
+            continue
+        if flag not in registered:
+            bogus.append((subcommand, flag))
+
+    assert not bogus, (
+        f"SKILL.md teaches flag(s) that do not exist on the live CLI: "
+        f"{bogus!r}. Either the flag was renamed / removed (update SKILL.md) "
+        "or the skill prose is wrong (e.g. teaching ``signalforge install-skill "
+        "--force`` when DEC-003 explicitly forbids ``--force``). Run "
+        "``signalforge <subcommand> --help`` to see the real flag set."
     )

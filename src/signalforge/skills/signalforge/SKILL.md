@@ -1,9 +1,9 @@
 ---
 name: signalforge
 description: Use when the user wants to draft, prune, or grade dbt tests / docs with an LLM, has a dbt project (manifest.json + sql models), or asks about SignalForge. Drives the `signalforge` CLI end-to-end: drafts candidate tests, runs them against warehouse samples, drops the noise, and explains every kept/dropped artifact.
-compatibility: "Requires: signalforge installed (pip install signalforge-dbt). For the zero-credential demo: no warehouse needed. For real dbt projects: dbt-core + a populated manifest.json. For live e2e: a configured warehouse profile (BigQuery v0.1) + ANTHROPIC_API_KEY."
+compatibility: "Requires: signalforge installed (pip install signalforge-dbt) + ANTHROPIC_API_KEY (the drafter always calls Anthropic). For the zero-credential demo: no warehouse profile needed (samples a public BigQuery dataset under ADC). For real dbt projects: dbt-core + a populated manifest.json. For live e2e: a configured warehouse profile (BigQuery v0.1)."
 metadata:
-  signalforge-version: "0.X.Y"
+  signalforge-version: "0.5.0.dev0"
 allowed-tools: Bash(signalforge *), Bash(uv run signalforge *), Bash(uv run pytest -m e2e*), Bash(cat *), Bash(ls *), Bash(grep *), Bash(head *), Bash(tail *), Read, Write, Edit
 ---
 
@@ -33,7 +33,7 @@ pip install signalforge-dbt
 signalforge install-skill
 ```
 
-That drops `SKILL.md` into `<project>/.claude/skills/signalforge/`. A fresh Claude Code session activates the skill on the next relevant prompt. Use `signalforge install-skill --force` to overwrite an existing copy.
+That drops `SKILL.md` into `<project>/.claude/skills/signalforge/`. A fresh Claude Code session activates the skill on the next relevant prompt. Re-running `signalforge install-skill` overwrites `SKILL.md` (and any other files SignalForge ships) while preserving everything else under that directory — stdout reports `(replaced existing SKILL.md)` so you know when the swap fired. There is no `--force` flag.
 
 `signalforge version` confirms the install resolved.
 
@@ -71,7 +71,7 @@ signalforge lint --model stg_orders
 
 ## 2. Zero-credential demo
 
-The fastest way to see the full pipeline is the bundled Austin bikeshare demo. It needs **no warehouse, no API keys, no dbt profile** — it ships a frozen `manifest.json` and a public-data sampling mode that runs against fixture data.
+The fastest way to see the full pipeline is the bundled Austin bikeshare demo. It needs **no dbt profile of your own and no warehouse credentials** — the demo ships a frozen `manifest.json` and points at a public BigQuery dataset that resolves under Google Application Default Credentials (`gcloud auth application-default login`). The drafter still calls Anthropic, so `ANTHROPIC_API_KEY` must be set; Anthropic's free tier covers the demo.
 
 ```bash
 signalforge init-demo
@@ -182,7 +182,7 @@ Common errors and their one-line fixes:
 
 - **`ModelNotFoundError`** — the model arg did not resolve. Verify with `signalforge lint --model <name>` (accepts bare names + disambiguates collisions across packages). For `generate` / `prune-existing`, use the file path (`models/staging/stg_orders.sql`) or unique_id (`model.<pkg>.<name>`) form. Tier-2 exit code.
 - **`WarehouseAuthError`** — adapter could not authenticate. Check `~/.dbt/profiles.yml` is configured for the target profile + that ambient credentials (gcloud ADC, service-account JSON) are valid. Tier-3 exit code (external dependency).
-- **`LLMCacheTooLargeError`** — the cached prompt block (model under draft + its direct refs / depends_on neighbours) exceeded 8000 input tokens. Narrow the surface: either trim the model's manifest scope (smaller graph) or split the model into smaller models. Tier-3 exit code.
+- **`LLMCacheTooLargeError`** — the cached prompt block (model under draft + its direct refs / depends_on neighbours) exceeded 8000 input tokens. Narrow the surface: either trim the model's manifest scope (smaller graph) or split the model into smaller models. Tier-2 exit code (input validation — pre-LLM-call payload-size check).
 - **`PromptEnvelopeBreachError`** — drafted SQL or `meta.signalforge.business_rules` content contains the literal closing-tag fence (`</MODEL_SQL>` or `</BUSINESS_RULE>`). Remove or rephrase the offending content. Tier-2 exit code.
 - **`SamplingRequiresPartitionFilterError`** — model is large (>= 100M rows) and no partition filter was supplied. Either configure `prune.partition_filter` in `signalforge.yml`, or scope to a smaller model.
 

@@ -100,6 +100,39 @@ def test_install_skill_refuses_when_skill_md_is_symlink(tmp_path: Path) -> None:
     assert elsewhere.read_text(encoding="utf-8") == "not ours"
 
 
+def test_install_skill_refuses_when_install_dir_ancestor_is_symlink(
+    tmp_path: Path,
+) -> None:
+    """DEC-005 (QG-extended): if ANY ancestor under <dest> back to
+    ``.claude/`` is a symlinked directory, the install refuses — writing
+    through a symlinked ancestor would land in the resolved target
+    (e.g. ``.claude/skills/signalforge/`` repointed to /tmp/attacker)
+    without operator consent.
+
+    Without this gate, the SKILL.md-only ``is_symlink()`` check would
+    pass (SKILL.md inside the linked dir is not itself a symlink) and
+    ``shutil.copytree`` would write straight through. Pinned per the
+    QG review finding.
+    """
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "preexisting.txt").write_text("attacker's data", encoding="utf-8")
+
+    skills_parent = tmp_path / ".claude" / "skills"
+    skills_parent.mkdir(parents=True)
+    # ``.claude/skills/signalforge/`` -> /tmp/.../elsewhere/  (symlinked ancestor)
+    (skills_parent / "signalforge").symlink_to(elsewhere, target_is_directory=True)
+
+    with pytest.raises(SkillDestUnsafeError):
+        install_skill(tmp_path)
+
+    # Defence: the link target's preexisting file is untouched.
+    assert (elsewhere / "preexisting.txt").read_text(encoding="utf-8") == "attacker's data"
+    # No SKILL.md materialised under the symlinked path.
+    assert not (elsewhere / "SKILL.md").exists()
+
+
 # ---------------------------------------------------------------------------
 # Symlink-cycle dest → SkillDestPathError (DEC-005, mirrors copy_demo)
 # ---------------------------------------------------------------------------
