@@ -149,11 +149,13 @@ warehouses and real graders:
    `GOOGLE_CLOUD_PROJECT`.
 4. **`tests/cli/test_e2e_gemini_smoke.py`** — `@pytest.mark.e2e` +
    `@pytest.mark.gemini`. Anthropic drafter, Gemini
-   `gemini-2.5-flash` grader with `grade.max_output_tokens=2048` (the
-   floor from DEC-008 of #155 — Gemini's verbose `reasoning` needs at
-   least 1024 tokens to land a clean `STOP` finish_reason; 2048 is the
-   verified-safe floor). Gate: `SF_RUN_GEMINI=1` + `GOOGLE_API_KEY` +
-   `SF_RUN_BQ=1` + `ANTHROPIC_API_KEY` + `GOOGLE_CLOUD_PROJECT`.
+   `gemini-2.5-flash` grader with `grade.max_output_tokens=4096` (the
+   floor was originally 2048 per DEC-008 of #155 / verified-safe at
+   the 5-pair in-isolation smoke scale; #158 raised it to 4096 after
+   the full-Austin-fixture e2e run found 5-6/108 pairs still
+   degrading at 2048 — 4096 is the current fixture-scale floor). Gate:
+   `SF_RUN_GEMINI=1` + `GOOGLE_API_KEY` + `SF_RUN_BQ=1` +
+   `ANTHROPIC_API_KEY` + `GOOGLE_CLOUD_PROJECT`.
 5. **`tests/cli/test_e2e_snowflake_smoke.py`** — `@pytest.mark.snowflake`
    (NOT `@pytest.mark.e2e` — reached via the `snowflake` marker, see the
    `-m` note below). The other-warehouse path: Anthropic drafter,
@@ -249,7 +251,7 @@ GOOGLE_API_KEY=... \
 GOOGLE_CLOUD_PROJECT=<billing-project> \
 SNOWFLAKE_ACCOUNT=... SNOWFLAKE_USER=... SNOWFLAKE_PASSWORD=... \
 SNOWFLAKE_WAREHOUSE=... SNOWFLAKE_DATABASE=... SNOWFLAKE_SCHEMA=... \
-  uv run pytest -m 'e2e or anthropic or openai or gemini' --no-cov
+  uv run pytest -m 'e2e or anthropic or openai or gemini or snowflake' --no-cov
 ```
 
 `--no-cov` is required per `.claude/rules/python-build.md` § "Python
@@ -259,14 +261,16 @@ marker-specific run that exercises only a fraction of the codebase
 (mirrors `uv run pytest -m bigquery --no-cov` and
 `uv run pytest -m cli_subprocess --no-cov`).
 
-The `snowflake` marker is deliberately **omitted** from the `-m`
-expression above: that marker also covers the offline `fakesnow` +
-`sqlglot` validation suite (no env vars required), which the default
-post-PR validation already runs ad-hoc. The live Snowflake e2e is
-reached via the `e2e` marker on `test_e2e_snowflake_smoke.py` instead;
-if a maintainer wants to add the gated live `snowflake` tests
-(`test_snowflake_estimate_live.py`, `test_snowflake_prune_live.py`),
-append ` or snowflake` to the `-m` expression.
+The `snowflake` marker spans two tiers: an **offline** `fakesnow` +
+`sqlglot` validation suite (no env vars required — runs whenever the
+marker is invoked) AND the **live** Snowflake-warehouse tests
+(`test_e2e_snowflake_smoke.py`, `test_snowflake_estimate_live.py`,
+`test_snowflake_prune_live.py`) gated by `SF_RUN_SNOWFLAKE=1` and the
+six `SNOWFLAKE_*` connection env vars. The `-m` expression above
+includes `snowflake` so the full pre-release sweep covers the live
+Snowflake path; if you want to skip the live tier (e.g. no Snowflake
+credentials handy), unset `SF_RUN_SNOWFLAKE` and the live tests skip
+with their `_skip_reason()` while the offline tier still runs.
 
 If you need to skip a specific provider for a given release (e.g. an
 OpenAI quota hold), simply omit its `SF_RUN_<X>=1` env var — that

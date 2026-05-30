@@ -115,11 +115,18 @@ def _build_model_to_provider() -> Mapping[str, str]:
 
 
 _MODEL_TO_PROVIDER: Mapping[str, str] = _build_model_to_provider()
-assert len(_MODEL_TO_PROVIDER) == len(PRICES), (
-    "every model id in signalforge.llm.pricing.PRICES must match a "
-    "_PROVIDER_PREFIXES entry; a new SKU was added without updating the "
-    "provider-prefix table"
-)
+# Explicit raise (not `assert`) so the import-time sanity check still runs
+# under `python -O`, which strips assertions (PR #162 review). The check
+# is load-bearing for provider-dispatch correctness — a missing prefix
+# would silently route the SKU to CostRollupUnknownModelError at rollup
+# time instead of failing loud at `import signalforge.llm.cost`.
+if len(_MODEL_TO_PROVIDER) != len(PRICES):
+    _missing_models = sorted(set(PRICES) - set(_MODEL_TO_PROVIDER))
+    raise RuntimeError(
+        "every model id in signalforge.llm.pricing.PRICES must match a "
+        "_PROVIDER_PREFIXES entry; a new SKU was added without updating "
+        f"the provider-prefix table: missing {_missing_models!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

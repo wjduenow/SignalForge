@@ -70,9 +70,12 @@ class CostRollupAuditMissingError(CostError):
     ) -> None:
         self.project_dir = project_dir
         self.audit_dir = audit_dir
+        # Format the combined audit-root path as ONE repr-safe string so the
+        # operator sees a single quoted, copy-pasteable path rather than two
+        # separately-quoted reprs joined by a literal slash (PR #162 review).
+        audit_root = f"{project_dir.rstrip('/')}/{audit_dir.lstrip('/')}"
         message = (
-            f"no audit JSONLs found under "
-            f"{_format_value(project_dir)}/{_format_value(audit_dir)}; "
+            f"no audit JSONLs found under {_format_value(audit_root)}; "
             f"expected at least one of llm_responses.jsonl or grade.jsonl"
         )
         super().__init__(message, remediation=remediation)
