@@ -280,6 +280,80 @@ Business-rule reading is **best-effort, never fail-loud.** A
 inferred-fallback path below covers the gap. Whitespace-only strings
 collapse to nothing, so an empty `meta` value emits no section.
 
+### Numbered envelope shape (`<BUSINESS_RULE id="N">…</BUSINESS_RULE>`)
+
+As of #163, each rule renders inside a numbered envelope rather than a
+bare bullet:
+
+```text
+## BUSINESS RULES
+
+Operator-supplied business rules for this model. Draft one custom_sql
+test per rule below, using the rule ID as a reference:
+
+<BUSINESS_RULE id="1">
+  (model) total_amount must never be negative
+</BUSINESS_RULE>
+<BUSINESS_RULE id="2">
+  (column discount_pct) discount_pct stays between 0 and 100 inclusive
+</BUSINESS_RULE>
+```
+
+IDs start at 1; bodies are indented 2 spaces and carry the existing
+`(model) ` / `(column X) ` scope prefix. The envelope gives the LLM
+unambiguous reference targets and parallels the existing `<MODEL_SQL>`
+fence around the model's raw SQL.
+
+**Envelope-breach guard.** A rule body containing the literal
+`</BUSINESS_RULE>` substring would terminate the fence early and let
+downstream content escape the data block. Before rendering, the
+drafter scans every rule for that exact substring (boring substring
+match — no whitespace / case normalisation, mirrors the `</MODEL_SQL>`
+precedent) and raises `PromptEnvelopeBreachError(envelope="BUSINESS_RULE",
+rule_index=N)` if found. **The opening tag `<BUSINESS_RULE>` alone
+is fine** (only the closing tag breaks the fence), as is any truncated
+fragment like `</BUSINESS_RUL`. The error class is the same one used
+for `</MODEL_SQL>` — extended in #163 with `envelope=` / `rule_index=`
+kwargs rather than subclassed. Future envelopes follow the same shape.
+
+### Cardinality contract (at-least-one-per-rule)
+
+The drafter's anchor-contract validator enforces a hard contract on
+the LLM's output: when `meta.signalforge.business_rules` declares N
+rules AND `custom_sql` is NOT excluded via `DraftConfig.exclude_tests`,
+the response MUST carry **at least N `custom_sql` tests** (counted
+across both model-level `tests:` and per-column `columns[*].tests`).
+Fewer is rejected loudly via `LLMOutputAnchorContractError` with a
+violation message that lists every declared rule verbatim:
+
+```text
+Expected ≥2 custom_sql test(s) (one per declared business rule), got 1.
+Declared rules: '(model) total_amount must never be negative',
+'(column discount_pct) discount_pct stays between 0 and 100 inclusive'.
+```
+
+The gate is **at-least, not exact-equality** — the LLM may legitimately
+decompose a complex rule into two SELECTs, and the excess is allowed.
+The collect-all invariant is preserved: a candidate with both a
+hallucinated column AND a cardinality miss surfaces both violations in
+one error. The gate is a no-op when no rules are declared (the
+inferred-fallback path stays open) and a no-op when `custom_sql` is in
+`DraftConfig.exclude_tests` (see below).
+
+### `exclude_tests` short-circuit
+
+When `draft.exclude_tests` in `signalforge.yml` contains `"custom_sql"`,
+both surfaces no-op:
+
+- `_render_business_rules_section` returns `""` — the drafter does not
+  send rules to the LLM (no point asking for tests the operator forbade).
+- The parser's cardinality gate is skipped — no violation fires even
+  when rules are declared.
+
+The per-test `exclude_tests` filter at the parser still catches any
+`custom_sql` an LLM defies-the-prompt to emit. The two layers are
+orthogonal — together they preserve the operator's choice.
+
 ### Inferred fallback
 
 You do **not** have to declare any rules. When no

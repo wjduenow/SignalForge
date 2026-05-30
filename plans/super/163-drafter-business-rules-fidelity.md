@@ -5,7 +5,7 @@
 - **Ticket:** [#163](https://github.com/wjduenow/SignalForge/issues/163) — `test_e2e_business_rules: drafter ignores meta.signalforge.business_rules and hallucinates an unrelated rule`
 - **Branch:** `feature/163-drafter-business-rules`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/163-drafter-business-rules`
-- **Phase:** `devolved` (PR [#164](https://github.com/wjduenow/SignalForge/pull/164); beads epic `bd_1-scaffolding-74b`)
+- **Phase:** `complete` (PR [#164](https://github.com/wjduenow/SignalForge/pull/164); beads epic `bd_1-scaffolding-74b` — all stories closed)
 - **Sessions:** 1 (2026-05-29)
 
 ## Symptom
@@ -227,11 +227,11 @@ Each story is right-sized for one Ralph context window. Acceptance criteria trac
 - **Branch:** `feature/163-drafter-business-rules`
 - **External ref:** `gh-163`
 
-| Story | Bead ID | Depends on | Status |
-|---|---|---|---|
-| US-001 — Dynamic-block envelope hardening + parameterised breach guard | `bd_1-scaffolding-74b.1` | — (ready) | open |
-| US-002 — Parser cardinality gate + business_rules threading | `bd_1-scaffolding-74b.2` | US-001 | open (blocked) |
-| US-003 — Quality Gate (code-review x4 + CodeRabbit) | `bd_1-scaffolding-74b.3` | US-001, US-002 | open (blocked) |
-| US-004 — Patterns & Memory (rule files + ops docs) | `bd_1-scaffolding-74b.4` | US-003 | open (blocked) |
+| Story | Bead ID | Depends on | Status | Commit |
+|---|---|---|---|---|
+| US-001 — Dynamic-block envelope hardening + parameterised breach guard | `bd_1-scaffolding-74b.1` | — | ✅ closed | `cfd3510` (merged via `0d32311`) |
+| US-002 — Parser cardinality gate + business_rules threading | `bd_1-scaffolding-74b.2` | US-001 | ✅ closed | `2bbe092` (merged via `9731a1f`) |
+| US-003 — Quality Gate (code-review x4 + 5 invariant tests landed) | `bd_1-scaffolding-74b.3` | US-001, US-002 | ✅ closed | `213e777` (inline) |
+| US-004 — Patterns & Memory (rule files + ops docs) | `bd_1-scaffolding-74b.4` | US-003 | ✅ closed | this commit |
 
-**Ready next:** `bd_1-scaffolding-74b.1` (US-001). Run `/ralph-run` from this worktree to execute the chain.
+**Run summary:** Ralph autonomous run on 2026-05-30. 2 worker beads + 2 inline beads. Final validation: 2662 tests passed, 97.72% coverage. `_PROMPT_VERSION` unchanged at `c9e7ee1f6f465933` (load-bearing cache-stability gate held throughout).

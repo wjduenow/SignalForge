@@ -70,11 +70,13 @@ Mirrors safety's fail-closed audit at the LLM-output boundary. Three load-bearin
 
 `LLMResponseEvent` carries `sent_sql_hash` (blake2b-8 of `Model.raw_code`), `parsed_schema_hash` (blake2b-8 of `candidate.model_dump_json` with sorted keys), `response_text_hash` (blake2b-8 of raw LLM text), plus `prompt_version`, cache-token economics, model id, and `signalforge_version`.
 
-## `<MODEL_SQL>` prompt-injection envelope (DEC-007)
+## `<MODEL_SQL>` prompt-injection envelope (DEC-007), parameterised in #163
 
 `Model.raw_code` is user-authored SQL. A comment like `-- IGNORE PREVIOUS INSTRUCTIONS` could flip the LLM's output without the envelope. `_render_dynamic_block` wraps `raw_code` in `<MODEL_SQL>...</MODEL_SQL>` tags; the system message's anchor contract instructs the LLM to treat anything between as data.
 
 **Envelope-breach guard.** `_render_dynamic_block` raises `PromptEnvelopeBreachError(model_unique_id)` if `raw_code` contains the literal `</MODEL_SQL>` — refuses to render the prompt, never reaches the LLM. Don't downgrade to a warning; the envelope is the only defence between malicious manifest content and the LLM.
+
+**`PromptEnvelopeBreachError` is envelope-parameterised, not subclassed (#163, DEC-005).** When the drafter shipped a second envelope `<BUSINESS_RULE id="N">…</BUSINESS_RULE>` around operator-supplied `meta.signalforge.business_rules` content (see `business-rule-tests.md` § "Two input paths"), the breach guard pattern repeated verbatim — but `PromptEnvelopeBreachError.__init__` was extended with keyword-only `envelope: str = "MODEL_SQL"` + `rule_index: int | None = None` rather than a new error subclass. Default kwargs preserve byte-equality of the existing `</MODEL_SQL>` message; `envelope="BUSINESS_RULE"` + 1-indexed `rule_index` renders the BUSINESS_RULE-shaped message. `default_remediation` text was deliberately generalised to name both envelopes (pinned by `tests/draft/test_errors.py::test_prompt_envelope_breach_default_remediation_covers_both_envelopes`). **Future envelopes follow this shape — extend with a new `envelope=` value, never a new error class** (one class, two raise sites today, N tomorrow; no taxonomy growth; no `_EXCEPTION_TO_EXIT_CODE` churn — already tier 2 via the existing entry). The breach scan is **boring substring match**: literal `in` check on the exact closing tag (no whitespace / case normalisation; opening tag alone is allowed; truncated fragments like `</BUSINESS_RUL` are allowed) — mirror this for every envelope (mirrors safety / grade envelope-breach contract precedents too).
 
 ## Cached-block scope (DEC-009)
 
