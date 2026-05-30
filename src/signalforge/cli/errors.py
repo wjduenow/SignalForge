@@ -348,3 +348,142 @@ class CliInitDemoCopyError(CliError):
         )
         self.dest = dest
         self.cause = cause
+
+
+# ---------------------------------------------------------------------------
+# install-skill wrappers (issue #141 — US-003, DEC-008 / DEC-009)
+# ---------------------------------------------------------------------------
+#
+# The CLI subcommand ``signalforge install-skill`` calls into the public
+# :func:`signalforge.skill.install_skill` helper. The helper raises three typed
+# :class:`signalforge.skill.SkillError` subclasses; the CLI handler wraps each
+# at the boundary into one of the three ``CliInstallSkill*Error`` classes below
+# so the four-tier exit-code taxonomy stays homogeneous (DEC-008). DEC-008 also
+# locks the tier assignment: path-resolution (symlink cycle) and broken-install
+# (bundled tree missing) land at tier 1 (load); dest-unsafe (regular file or
+# symlinked SKILL.md) lands at tier 2 (input-validation — the operator chose a
+# destination state we refuse to write under).
+#
+# Each class carries a ``default_remediation`` so the layer-base ``__str__``
+# renders the canonical ``ERROR: <message>\n  ↳ Remediation: <text>`` shape
+# without subclasses having to redefine rendering.
+
+
+_CLI_INSTALL_SKILL_PATH_DEFAULT_REMEDIATION: str = (
+    "Remove the symlink cycle at the destination or pick a different path."
+)
+
+_CLI_INSTALL_SKILL_DEST_UNSAFE_DEFAULT_REMEDIATION: str = (
+    "Pick an existing directory as the destination, or remove the symlinked SKILL.md first."
+)
+
+_CLI_INSTALL_SKILL_PACKAGE_DATA_MISSING_DEFAULT_REMEDIATION: str = (
+    "Reinstall signalforge-dbt — the bundled Claude Code skill tree is missing from your install."
+)
+
+
+class CliInstallSkillPathError(CliError):
+    """Raised by ``cmd_install_skill`` when the destination path cannot
+    be canonicalised (symlink cycle).
+
+    Wraps :class:`signalforge.skill.SkillDestPathError`. Tier 1 (load —
+    the filesystem state cannot be resolved into a coherent shape
+    before work begins). Mirrors the precedent set by
+    :class:`CliPathError` (every CLI-originated path-resolution failure
+    is tier 1).
+    """
+
+    def __init__(
+        self,
+        *,
+        dest: str,
+        cause: Exception | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        if cause is None:
+            message = f"failed to resolve install destination {dest!r}"
+        else:
+            message = f"failed to resolve install destination {dest!r}: {cause}"
+        super().__init__(
+            message,
+            remediation=(
+                remediation
+                if remediation is not None
+                else _CLI_INSTALL_SKILL_PATH_DEFAULT_REMEDIATION
+            ),
+        )
+        self.dest = dest
+        self.cause = cause
+
+
+class CliInstallSkillDestUnsafeError(CliInputError):
+    """Raised by ``cmd_install_skill`` when ``<dest>`` is in a shape the
+    install seam refuses to write under.
+
+    Wraps :class:`signalforge.skill.SkillDestUnsafeError`. Two surfaces
+    fire this: ``<dest>`` exists as a regular file (not a directory),
+    OR the existing ``SKILL.md`` is a symlink (writing would follow the
+    link and clobber an arbitrary destination). Tier 2 (input
+    validation — the operator chose a destination state we cannot
+    safely write into).
+    """
+
+    def __init__(
+        self,
+        *,
+        dest: str,
+        cause: Exception | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        if cause is None:
+            message = f"refusing to install skill to unsafe destination {dest!r}"
+        else:
+            message = f"refusing to install skill to unsafe destination {dest!r}: {cause}"
+        super().__init__(
+            message,
+            remediation=(
+                remediation
+                if remediation is not None
+                else _CLI_INSTALL_SKILL_DEST_UNSAFE_DEFAULT_REMEDIATION
+            ),
+        )
+        self.dest = dest
+        self.cause = cause
+
+
+class CliInstallSkillPackageDataMissingError(CliError):
+    """Raised by ``cmd_install_skill`` when the bundled
+    ``signalforge/skills/signalforge/`` tree cannot be located via
+    :mod:`importlib.resources`.
+
+    Wraps :class:`signalforge.skill.SkillPackageDataMissingError`. Tier
+    1 (load — the wheel install is broken and there is no work that
+    can proceed). The wheel-packaging convention in
+    ``.claude/rules/python-build.md`` makes this practically
+    unreachable on a clean ``pip install signalforge-dbt`` run, but a
+    corrupted install (partial wheel extract, hand-edited
+    site-packages) would surface here.
+    """
+
+    def __init__(
+        self,
+        *,
+        cause: Exception | None = None,
+        remediation: str | None = None,
+    ) -> None:
+        if cause is None:
+            message = "bundled SignalForge skill tree is missing from the signalforge-dbt install"
+        else:
+            message = (
+                "bundled SignalForge skill tree is missing from the "
+                f"signalforge-dbt install: {cause}"
+            )
+        super().__init__(
+            message,
+            remediation=(
+                remediation
+                if remediation is not None
+                else _CLI_INSTALL_SKILL_PACKAGE_DATA_MISSING_DEFAULT_REMEDIATION
+            ),
+        )
+        self.cause = cause
