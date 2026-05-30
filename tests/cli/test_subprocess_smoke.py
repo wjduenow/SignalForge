@@ -166,6 +166,38 @@ def test_signalforge_init_demo_help_via_subprocess() -> None:
 
 
 @pytest.mark.cli_subprocess
+def test_signalforge_install_skill_help_via_subprocess() -> None:
+    """``signalforge install-skill --help`` exits 0 with the subcommand's help.
+
+    US-003 of ``plans/super/141-claude-skill-install.md`` (#141 / DEC-009
+    / DEC-024) — extends the subprocess-gated smoke to the new
+    ``install-skill`` subcommand so a ``[project.scripts]`` regression
+    specific to its argparse wiring (subparser deletion, ``add_parser``
+    typo, console-script wrapper losing the dispatch entry) is caught by
+    ``pytest -m cli_subprocess``. The in-process ``main(argv)`` smoke
+    tests in ``tests/cli/`` cannot catch this class of regression — they
+    bypass the ``[project.scripts]`` table entirely.
+    """
+    result = subprocess.run(
+        ["signalforge", "install-skill", "--help"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0
+    # The presence of the subcommand name plus the ``DEST`` positional
+    # metavar jointly guarantees argparse is rendering the new
+    # subcommand's help, not the top-level usage. (``install-skill`` has
+    # no flags of its own in v0.1 per DEC-003, so the subcommand name +
+    # the rendered positional are the unique discriminators here.)
+    assert "install-skill" in result.stdout
+    assert "DEST" in result.stdout
+    # No-traceback floor — see the ``--version`` test above.
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.cli_subprocess
 def test_signalforge_prune_existing_help_via_subprocess() -> None:
     """``signalforge prune-existing --help`` exits 0 with the subcommand's help.
 
