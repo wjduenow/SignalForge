@@ -47,6 +47,9 @@ from signalforge.cli.errors import (
     CliInitDemoDestUnsafeError,
     CliInitDemoFixtureMissingError,
     CliInputError,
+    CliInstallSkillDestUnsafeError,
+    CliInstallSkillPackageDataMissingError,
+    CliInstallSkillPathError,
     CliPathError,
     CliSelectorNoMatchError,
     CliSelectorParseError,
@@ -299,6 +302,13 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # it lives only in ``_EXCEPTION_MAPPING_EXCLUDED_BASES``.
     SkillDestPathError: 1,
     SkillPackageDataMissingError: 1,
+    # CLI wrappers for the skill-install handler boundary (issue #141 /
+    # US-003 / DEC-008). Tier 1 for the two load-time failures: a
+    # symlink-cycle resolve failure on ``<dest>`` and a broken-install
+    # case where the bundled skill tree is missing. Mirrors the tiering
+    # of the underlying ``Skill*Error`` lib concretes above.
+    CliInstallSkillPathError: 1,
+    CliInstallSkillPackageDataMissingError: 1,
     # Ingest layer (issue #104 / DEC-001 / US-001). The reader parses an
     # external dbt schema.yml into a CandidateSchema. These three are
     # load-tier: the schema file is missing, unparseable, or exceeds the
@@ -398,6 +408,11 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # that conflict with the install contract; mirrors
     # ``DemoDestUnsafeError``'s tier.
     SkillDestUnsafeError: 2,
+    # CLI wrapper for the skill-install dest-unsafe boundary (issue #141
+    # / US-003 / DEC-008). Tier 2 (input-validation — the operator
+    # supplied a destination state we refuse to write under); mirrors
+    # ``CliInitDemoDestUnsafeError``'s tier.
+    CliInstallSkillDestUnsafeError: 2,
     # Ingest layer (issue #104 / DEC-002 of US-001). Both fire on
     # operator-supplied input that conflicts with the manifest/schema:
     # the named model is absent from the schema.yml (mirrors

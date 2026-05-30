@@ -20,6 +20,7 @@ import sys
 import signalforge
 from signalforge.cli import generate as generate_cmd
 from signalforge.cli import init_demo as init_demo_cmd
+from signalforge.cli import install_skill as install_skill_cmd
 from signalforge.cli import lint as lint_cmd
 from signalforge.cli import prune_existing as prune_existing_cmd
 from signalforge.cli import version as version_cmd
@@ -82,6 +83,7 @@ def _build_parser() -> argparse.ArgumentParser:
     lint_cmd.add_parser(subparsers)
     generate_cmd.add_parser(subparsers)
     init_demo_cmd.add_parser(subparsers)
+    install_skill_cmd.add_parser(subparsers)
     prune_existing_cmd.add_parser(subparsers)
     return parser
 
