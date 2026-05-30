@@ -2219,6 +2219,7 @@ dependencies = [
     { name = "google-cloud-bigquery" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "sqlglot" },
 ]
 
 [package.optional-dependencies]
@@ -2233,6 +2234,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "ruff" },
     { name = "snowflake-connector-python" },
+    { name = "sqlglot" },
     { name = "tiktoken" },
     { name = "types-pyyaml" },
 ]
@@ -2262,6 +2264,7 @@ dev = [
     { name = "pytest-xdist" },
     { name = "ruff" },
     { name = "snowflake-connector-python" },
+    { name = "sqlglot" },
     { name = "tiktoken" },
     { name = "types-pyyaml" },
 ]
@@ -2289,6 +2292,8 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "snowflake-connector-python", marker = "extra == 'dev'", specifier = ">=3,<4" },
     { name = "snowflake-connector-python", marker = "extra == 'snowflake'", specifier = ">=3,<4" },
+    { name = "sqlglot", specifier = ">=30,<31" },
+    { name = "sqlglot", marker = "extra == 'dev'", specifier = ">=30,<31" },
     { name = "tiktoken", marker = "extra == 'dev'", specifier = ">=0.7,<1.0" },
     { name = "tiktoken", marker = "extra == 'openai'", specifier = ">=0.7,<1.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6,<7" },
@@ -2310,6 +2315,7 @@ dev = [
     { name = "pytest-xdist", specifier = ">=3.6,<4" },
     { name = "ruff" },
     { name = "snowflake-connector-python", specifier = ">=3,<4" },
+    { name = "sqlglot", specifier = ">=30,<31" },
     { name = "tiktoken", specifier = ">=0.7,<1.0" },
     { name = "types-pyyaml", specifier = ">=6,<7" },
 ]
