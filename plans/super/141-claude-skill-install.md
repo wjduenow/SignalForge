@@ -5,7 +5,7 @@
 - **Ticket:** [GH #141](https://github.com/wjduenow/SignalForge/issues/141)
 - **Branch:** `feature/141-claude-skill-install`
 - **Worktree:** `../worktrees/SignalForge/141-claude-skill-install`
-- **Phase:** devolved
+- **Phase:** implemented
 - **PR:** [#166](https://github.com/wjduenow/SignalForge/pull/166)
 - **Epic:** `bd_1-scaffolding-ezn`
 - **Sessions:**
@@ -13,6 +13,7 @@
   - 2026-05-29 — Phase 2 architecture review (no blockers, 2 concerns surfaced)
   - 2026-05-29 — Phase 3 refinement (24 DECs locked), Phase 4 detailing (11 stories), Phase 5 published as draft PR #166
   - 2026-05-30 — Phase 6 approved, Phase 7 devolved to beads (epic `bd_1-scaffolding-ezn`, 11 tasks)
+  - 2026-05-30 — Ralph run end-to-end: all 11 stories landed (US-001 → US-011); QG (US-010) fixed 8 review findings including a stale-rebase __version__ downgrade, a SKILL.md `--force` line that didn't exist on the CLI (caught by Reviews 3+4 independently), and a symlinked-ancestor-dir bypass; gate extended with a flag-validity scan; PR #166 marked ready for review
 
 ## Beads manifest
 
