@@ -398,3 +398,41 @@ def test_install_skill_with_symlinked_skill_md_returns_two(
     # Victim file untouched.
     assert real_target.read_text() == "victim file"
     assert "Traceback" not in err
+
+
+def test_install_skill_handles_oserror_in_existed_before_probe(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pre-install probe for ``existed_before`` swallows ``OSError``
+    silently — a permission-denied or stat-failure on the dest tree
+    must NOT abort the install (the lib seam's own failure surfaces
+    through the typed except ladder below the probe instead).
+
+    Pinned per the QG coverage gap: the ``except OSError`` branch around
+    the probe was patch-coverage-dead even though it exists for a real
+    reason (an unreadable parent dir during pre-probe should not punish
+    the operator before the lib gets a chance to raise its own typed
+    error).
+    """
+    import pathlib
+
+    real_exists = pathlib.Path.exists
+
+    def _exists_raises(self: pathlib.Path) -> bool:
+        # Raise OSError only when the probe is inspecting SKILL.md.
+        # Real-existence checks on tmp_path / other paths still work.
+        if self.name == "SKILL.md":
+            raise OSError(errno.EACCES, "Permission denied")
+        return real_exists(self)
+
+    monkeypatch.setattr(pathlib.Path, "exists", _exists_raises)
+
+    ret = main(["install-skill", str(tmp_path)])
+    out, err = _capture(capsys)
+    # Probe-OSError silently downgrades → install proceeds → exit 0.
+    assert ret == 0, f"expected install to proceed; got {ret}\nstdout: {out}\nstderr: {err}"
+    # Probe failed → existed_before stays False → no `(replaced existing SKILL.md)` suffix.
+    assert "(replaced existing SKILL.md)" not in out
+    assert "Traceback" not in err

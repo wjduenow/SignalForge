@@ -240,3 +240,70 @@ def test_skill_error_str_renders_remediation_footer() -> None:
     rendered = str(err)
     assert "destination 'x' is not a directory" in rendered
     assert "↳ Remediation:" in rendered
+
+
+def test_skill_error_str_omits_footer_when_remediation_is_none() -> None:
+    """``__str__`` returns just ``message`` (no footer) when neither an
+    explicit ``remediation`` kwarg NOR a class-level ``default_remediation``
+    is set.
+
+    The :class:`SkillError` base declares ``default_remediation: str | None
+    = None`` so constructing it directly hits the no-footer branch. Without
+    this test the line is patch-coverage-dead — codecov flags it on the PR
+    even though the branch is a real fallback contract (forward-compat
+    subclasses without their own default_remediation render plainly).
+    """
+    err = SkillError("bare message, no remediation")
+    assert str(err) == "bare message, no remediation"
+    assert "↳" not in str(err)
+
+
+def test_install_skill_propagates_non_eloop_oserror_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ``OSError`` whose ``errno`` is NOT ``ELOOP`` propagates raw
+    out of :func:`install_skill` — it is NOT wrapped as
+    :class:`SkillDestPathError`.
+
+    The narrow ELOOP-only routing is load-bearing: a ``PermissionError``
+    (an OSError subclass) on the canonicalise path is a different class
+    of failure that the CLI's panic catch surfaces as tier 1 with a
+    generic message. Conflating the two would mis-attribute permission
+    errors as symlink-cycle errors and waste the operator's time.
+    """
+    import errno
+    import pathlib
+
+    eacces_err = OSError(errno.EACCES, "Permission denied")
+
+    def _raise_eacces(self: pathlib.Path, *, strict: bool = False) -> pathlib.Path:
+        raise eacces_err
+
+    monkeypatch.setattr(pathlib.Path, "resolve", _raise_eacces)
+
+    with pytest.raises(OSError) as excinfo:
+        install_skill(tmp_path)
+    # Raw OSError — NOT SkillDestPathError.
+    assert not isinstance(excinfo.value, SkillError)
+    assert excinfo.value.errno == errno.EACCES
+
+
+def test_install_skill_resolves_nonexistent_dest_via_strict_false_fallback(
+    tmp_path: Path,
+) -> None:
+    """A ``dest`` that does not exist yet falls through ``resolve(strict=
+    True)`` (raises ``FileNotFoundError``) to the ``resolve(strict=False)``
+    fallback. Covers the common case where the operator runs
+    ``signalforge install-skill /tmp/new-project`` against a path that
+    only exists after the install creates it.
+
+    Without this test the ``strict=False`` fallback line is patch-
+    coverage-dead even though every fresh-project install hits it.
+    """
+    new_dest = tmp_path / "fresh-project-that-does-not-exist-yet"
+    assert not new_dest.exists()
+
+    installed = install_skill(new_dest)
+    # Install proceeded — the fallback resolved the path successfully.
+    assert installed.exists()
+    assert installed.is_relative_to(new_dest.resolve())
