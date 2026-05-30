@@ -245,6 +245,134 @@ grade:
   · [`docs/cost-estimate-ops.md`](cost-estimate-ops.md) for Gemini's
   `count_tokens` integration.
 
+## Prompt caching — what it is and why providers differ
+
+The capability matrix marks Anthropic with a ✅ for prompt caching
+and OpenAI / Gemini with a ❌. That's the most consequential row in
+the table for anyone budgeting a real workload, so it earns its own
+section.
+
+### What prompt caching is (business framing)
+
+Every LLM call bills you for **every input token, every time** —
+even if 90% of the prompt is boilerplate you sent five seconds ago
+on the previous call. Prompt caching is the provider's offer: tell
+me which chunk of the prompt is the *stable prefix*, I'll fingerprint
+it on my side, and on subsequent calls within a TTL window I'll
+charge you a steep discount on those tokens instead of the full
+input rate.
+
+Anthropic's published rates for `claude-sonnet-4-6` (SignalForge's
+default; the figures live in
+[`signalforge/llm/pricing.py`](https://github.com/wjduenow/SignalForge/blob/dev/src/signalforge/llm/pricing.py)):
+
+| Token class | Rate (USD / Mtok) | vs. full input |
+|---|---|---|
+| Full input | $3.00 | baseline |
+| Cache **write** (first call seeds the cache) | $3.75 | 25% premium |
+| Cache **read** (later calls within TTL hit the cache) | $0.30 | 90% discount |
+
+You pay a small premium once to seed the cache, then 10¢ on the
+dollar for every read. Break-even is roughly one follow-up call;
+from the 2nd call onward you're saving money.
+
+### Where this matters in SignalForge
+
+- **Drafter** — one LLM call per `signalforge generate` invocation.
+  The cached prefix is the system prompt + the manifest summary.
+  Inside a single `--select` batch of 20 models, calls 2–20 hit the
+  cache. Modest but real savings.
+- **Grader** — ~48 LLM calls on a typical model (~12 artifacts × 4
+  rubric criteria; see
+  [`grade-ops.md` § One LLM call per artifact × criterion](grade-ops.md)).
+  The cached prefix is the rubric criterion list. Once per run the
+  rubric is "written" to the cache; the other ~47 calls "read" it
+  at 90% off. This is where prompt caching pays for itself
+  loudest.
+
+### Why OpenAI isn't supported
+
+OpenAI's Chat Completions API has an automatic prompt-caching
+feature, but it's deliberately opaque:
+
+1. **No marker, no control surface.** Anthropic exposes an inline
+   `cache_control` marker on the block you want cached; OpenAI's
+   backend pattern-matches recent prompts and applies discounts
+   silently. SignalForge cannot *steer* the cache toward the
+   system + cached-block prefix that matters.
+2. **No public per-MTok rate.** Anthropic publishes a cache-write
+   premium and a cache-read discount, so
+   `signalforge.llm.pricing.PRICES` can model both. OpenAI's
+   discount tier isn't published in the same shape, so
+   `--estimate` cannot project caching savings honestly.
+3. **No `cache_creation_input_tokens` / `cache_read_input_tokens`
+   in the usage response.** Anthropic returns both fields per call,
+   which feeds the dual-zero cache-anomaly WARNING and the audit
+   JSONL's reproducibility hashes. OpenAI's usage shape carries no
+   equivalent — even *measuring* whether a cache hit fired after
+   the fact is awkward.
+
+So `OpenAIProvider.supports_prompt_caching = False` is the honest
+posture: we can't steer the cache, we can't price the cache, and we
+can't audit the cache. Whatever automatic discount OpenAI applies
+on their side, the operator gets — SignalForge just doesn't model
+it. `cache_ttl` in `signalforge.yml` is accepted and silently
+ignored for OpenAI.
+
+### Why Gemini isn't supported (yet)
+
+Gemini ships **context caching** — a real, usable feature — but its
+shape is fundamentally different from Anthropic's inline marker:
+
+1. **Separate API call.** You call `CachedContent.create(...)`
+   before the generation call to upload the chunk to a named cache
+   resource, get back a handle, and reference the handle on every
+   subsequent `generate_content(...)`. Anthropic's `cache_control`
+   marker is a single field inside the existing
+   `messages.create(...)` call.
+2. **Separate pricing dimension.** Gemini bills cache **storage**
+   per hour while the cached resource lives, plus a per-token
+   discount on cached reads. The cost model is "rent the cache
+   slot, get cheaper reads" — fundamentally different from
+   Anthropic's "pay a write premium once, get cheap reads."
+3. **Minimum payload + lifecycle.** Gemini's cached content has a
+   minimum size and an explicit TTL the operator manages; an
+   abandoned cache keeps billing storage until it expires.
+
+Wiring Gemini context caching correctly into SignalForge means a
+separate "warm the cache" code path, a TTL strategy, an
+`LLMResult.usage` shape that includes Gemini's distinct cache
+fields, and a `pricing.py` schema extension carrying the storage
+rate alongside the existing per-MTok rates. None of that was in
+scope for issue
+[#137](https://github.com/wjduenow/SignalForge/issues/137) (which
+landed Gemini as a third provider proving the seam holds). It's a
+tracked follow-up — `GeminiProvider.supports_prompt_caching = False`
+today; `cache_ttl` is accepted and silently ignored.
+
+The asymmetry isn't "Gemini is worse than Anthropic"; it's
+"Anthropic's caching maps onto the existing seam in one config line
+(`cache_ttl: 5m | 1h`), and Gemini's caching needs a code path we
+haven't built yet."
+
+### The practical bottom line
+
+On the grader (the high-call-count surface where caching matters
+most), the math typically nets out:
+
+- **Anthropic** — 1 cache-write rubric + ~47 cache-read rubrics at
+  10¢-on-the-dollar input tokens.
+- **Gemini `gemini-2.5-flash`** — 48 full-input rubrics, but each
+  input token costs ~10× less than `claude-sonnet-4-6`.
+- **OpenAI `gpt-4o-mini`** — 48 full-input rubrics, input tokens
+  ~20× cheaper than `claude-sonnet-4-6`.
+
+Cheaper-per-token providers usually still come out ahead on
+absolute dollars even without caching — they're just leaving
+optimization on the table that Anthropic doesn't. If Gemini
+context caching lands as a follow-up, Gemini becomes substantially
+cheaper still.
+
 ## Choosing a provider
 
 Three dimensions to weigh:
