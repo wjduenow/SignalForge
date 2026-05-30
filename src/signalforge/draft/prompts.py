@@ -554,17 +554,47 @@ def _read_business_rules(model: Model) -> list[str]:
     return collected
 
 
-def _render_business_rules_section(model: Model) -> str:
+def _render_business_rules_section(
+    model: Model,
+    *,
+    exclude_tests: tuple[str, ...] = (),
+) -> str:
     """Render the operator-supplied business rules as a fenced section.
 
-    Returns the empty string when no rules are present so the dynamic
-    block stays byte-identical to the pre-#116 render for the no-rules
-    case (the inferred-fallback path needs no section — the system prompt
-    already permits inferred ``custom_sql`` tests).
+    Each rule is wrapped in a numbered ``<BUSINESS_RULE id="N">…</BUSINESS_RULE>``
+    envelope (#163 US-001, DEC-009) — N starts at 1; rule body is indented
+    exactly 2 spaces. The numbered envelopes give the LLM unambiguous per-rule
+    anchors so it can produce one ``custom_sql`` test per rule.
+
+    Returns the empty string when:
+
+    * No rules are present (the dynamic block stays byte-identical to the
+      pre-#116 render for the no-rules case — the inferred-fallback path
+      needs no section; the system prompt already permits inferred
+      ``custom_sql`` tests).
+    * ``"custom_sql"`` is in ``exclude_tests`` (#163 DEC-008) — the operator
+      forbids ``custom_sql`` entirely, so telling the LLM to draft rules it
+      can't emit would be misleading.
+
+    Refuses to render if any rule body contains the literal
+    ``</BUSINESS_RULE>`` substring — that would terminate the envelope
+    early and let downstream rule text escape the data fence. Boring
+    substring match per the ``</MODEL_SQL>`` precedent (DEC-007 of #5; no
+    whitespace/case normalisation, which would create false-positive
+    risk). Raises :class:`PromptEnvelopeBreachError` with
+    ``envelope="BUSINESS_RULE"`` and the 1-indexed ``rule_index``.
     """
+    from signalforge.draft.errors import PromptEnvelopeBreachError
+
+    if "custom_sql" in exclude_tests:
+        return ""
     rules = _read_business_rules(model)
     if not rules:
         return ""
+    # Pre-render breach scan (boring substring match, 1-indexed).
+    for i, rule in enumerate(rules, start=1):
+        if "</BUSINESS_RULE>" in rule:
+            raise PromptEnvelopeBreachError(model.unique_id, envelope="BUSINESS_RULE", rule_index=i)
     lines = [
         "## BUSINESS RULES",
         "",
@@ -575,11 +605,19 @@ def _render_business_rules_section(model: Model) -> str:
         ),
         "",
     ]
-    lines.extend(f"- {rule}" for rule in rules)
+    for i, rule in enumerate(rules, start=1):
+        lines.append(f'<BUSINESS_RULE id="{i}">')
+        lines.append(f"  {rule}")
+        lines.append("</BUSINESS_RULE>")
     return "\n".join(lines)
 
 
-def _render_dynamic_block(model: Model, request: LLMRequest) -> str:
+def _render_dynamic_block(
+    model: Model,
+    request: LLMRequest,
+    *,
+    exclude_tests: tuple[str, ...] = (),
+) -> str:
     """Render the dynamic block: ``<MODEL_SQL>`` envelope + data section.
 
     Wraps :attr:`Model.raw_code` in ``<MODEL_SQL>``/``</MODEL_SQL>`` tags
@@ -590,6 +628,10 @@ def _render_dynamic_block(model: Model, request: LLMRequest) -> str:
     closing tag — that would terminate the prompt-injection envelope early
     and let downstream content escape the data fence. Raises
     :class:`PromptEnvelopeBreachError`; the caller handles the typed error.
+
+    ``exclude_tests`` is threaded through to
+    :func:`_render_business_rules_section` so the section short-circuits
+    when ``"custom_sql"`` is excluded (#163 US-001, DEC-008).
     """
     from signalforge.draft.errors import PromptEnvelopeBreachError
 
@@ -597,7 +639,7 @@ def _render_dynamic_block(model: Model, request: LLMRequest) -> str:
     if "</MODEL_SQL>" in raw_code:
         raise PromptEnvelopeBreachError(model.unique_id)
     data_section = _render_data_section(request)
-    business_rules = _render_business_rules_section(model)
+    business_rules = _render_business_rules_section(model, exclude_tests=exclude_tests)
     block = f"<MODEL_SQL>\n{raw_code}\n</MODEL_SQL>\n\n{data_section}"
     if business_rules:
         block = f"{block}\n\n{business_rules}"
@@ -639,7 +681,7 @@ def render_prompt(
     """
     system = _render_system_prompt(exclude_tests)
     cached = _render_manifest_summary(model, manifest)
-    dynamic = _render_dynamic_block(model, request)
+    dynamic = _render_dynamic_block(model, request, exclude_tests=exclude_tests)
     return system, cached, dynamic, _prompt_version_for(exclude_tests)
 
 

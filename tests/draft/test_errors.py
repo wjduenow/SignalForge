@@ -25,6 +25,7 @@ from signalforge.draft.errors import (
     LLMOutputJSONError,
     LLMOutputValidationError,
     LLMResponseAuditWriteError,
+    PromptEnvelopeBreachError,
     _format_value,
 )
 
@@ -338,3 +339,44 @@ def test_default_remediations_are_set() -> None:
         assert isinstance(rem, str) and rem, (
             f"{name}.default_remediation must be a non-empty string; got {rem!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# PromptEnvelopeBreachError parameterised envelope (#163 US-001, DEC-005)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.draft
+def test_prompt_envelope_breach_default_envelope_message_byte_equal_to_current() -> None:
+    """The default ``envelope="MODEL_SQL"`` rendering is byte-equal to the
+    pre-#163 message — the existing call site in ``prompts.py`` MUST keep
+    working unchanged (DEC-005)."""
+    err = PromptEnvelopeBreachError("model.sf.foo")
+    expected_message = (
+        "Model 'model.sf.foo' contains the literal '</MODEL_SQL>' "
+        "in raw_code — refusing to render the prompt."
+    )
+    assert err.message == expected_message
+    assert err.model_unique_id == "model.sf.foo"
+
+
+@pytest.mark.unit
+@pytest.mark.draft
+def test_prompt_envelope_breach_business_rule_envelope_message_mentions_rule_index() -> None:
+    """When ``envelope="BUSINESS_RULE"`` and ``rule_index`` is set, the
+    message names the 1-indexed offending rule and the closing tag (DEC-005)."""
+    err = PromptEnvelopeBreachError("model.sf.foo", envelope="BUSINESS_RULE", rule_index=2)
+    assert "Rule #2" in err.message
+    assert "</BUSINESS_RULE>" in err.message
+    assert "model.sf.foo" in err.message
+
+
+@pytest.mark.unit
+@pytest.mark.draft
+def test_prompt_envelope_breach_business_rule_envelope_carries_rule_index_attr() -> None:
+    """The ``rule_index`` is preserved on the attribute so callers / tests
+    can pattern-match on it."""
+    err = PromptEnvelopeBreachError("model.sf.foo", envelope="BUSINESS_RULE", rule_index=3)
+    assert err.rule_index == 3
+    assert err.envelope == "BUSINESS_RULE"
