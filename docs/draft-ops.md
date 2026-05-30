@@ -300,7 +300,7 @@ test per rule below, using the rule ID as a reference:
 ```
 
 IDs start at 1; bodies are indented 2 spaces and carry the existing
-`(model) ` / `(column X) ` scope prefix. The envelope gives the LLM
+`(model)` / `(column X)` scope prefix. The envelope gives the LLM
 unambiguous reference targets and parallels the existing `<MODEL_SQL>`
 fence around the model's raw SQL.
 

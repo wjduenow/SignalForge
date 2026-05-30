@@ -27,7 +27,7 @@ Pipeline completed cleanly (exit 0, audits intact, cost rollup unaffected). The 
 ### Current rendering shape (verified in code)
 
 - `src/signalforge/draft/prompts.py:557-579` — `_render_business_rules_section(model)` renders rules as a plain bulleted list under `## BUSINESS RULES` in the **dynamic block**:
-  ```
+  ```text
   ## BUSINESS RULES
 
   Operator-supplied business rules for this model. Draft one custom_sql test per rule, translating each into a failing-rows SELECT (a non-empty result means the rule was violated):
@@ -119,7 +119,7 @@ Each story is right-sized for one Ralph context window. Acceptance criteria trac
 **Acceptance criteria:**
 
 1. `_render_business_rules_section(model)` emits `<BUSINESS_RULE id="N">\n  <rule text>\n</BUSINESS_RULE>` per rule (N starts at 1, body indented 2 spaces). Section header `## BUSINESS RULES` and lead-in prose unchanged.
-2. The rule body still carries the existing scope prefix (`(model) ` / `(column X) `) verbatim.
+2. The rule body still carries the existing scope prefix (`(model)` / `(column X)`) verbatim.
 3. `_render_business_rules_section` short-circuits to `""` when `custom_sql` is in `DraftConfig.exclude_tests` (passed in from the renderer via the existing thread).
 4. `PromptEnvelopeBreachError.__init__` accepts new keyword-only args: `envelope: str = "MODEL_SQL"`, `rule_index: int | None = None`. Existing single call site in `prompts.py` keeps working unchanged.
 5. Rendered message: when `envelope="MODEL_SQL"`, byte-equal to the current `</MODEL_SQL>` message; when `envelope="BUSINESS_RULE"`, mentions the rule index (`"… in rule #2 of model.x.y …"`).
