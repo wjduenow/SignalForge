@@ -5,7 +5,7 @@
 - **Ticket:** [#163](https://github.com/wjduenow/SignalForge/issues/163) — `test_e2e_business_rules: drafter ignores meta.signalforge.business_rules and hallucinates an unrelated rule`
 - **Branch:** `feature/163-drafter-business-rules`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/163-drafter-business-rules`
-- **Phase:** `detailing` (in progress)
+- **Phase:** `devolved` (PR [#164](https://github.com/wjduenow/SignalForge/pull/164); beads epic `bd_1-scaffolding-74b`)
 - **Sessions:** 1 (2026-05-29)
 
 ## Symptom
@@ -222,4 +222,16 @@ Each story is right-sized for one Ralph context window. Acceptance criteria trac
 
 ## Beads manifest
 
-*(pending Phase 7)*
+- **Epic:** `bd_1-scaffolding-74b` — #163: drafter business-rules fidelity
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/163-drafter-business-rules`
+- **Branch:** `feature/163-drafter-business-rules`
+- **External ref:** `gh-163`
+
+| Story | Bead ID | Depends on | Status |
+|---|---|---|---|
+| US-001 — Dynamic-block envelope hardening + parameterised breach guard | `bd_1-scaffolding-74b.1` | — (ready) | open |
+| US-002 — Parser cardinality gate + business_rules threading | `bd_1-scaffolding-74b.2` | US-001 | open (blocked) |
+| US-003 — Quality Gate (code-review x4 + CodeRabbit) | `bd_1-scaffolding-74b.3` | US-001, US-002 | open (blocked) |
+| US-004 — Patterns & Memory (rule files + ops docs) | `bd_1-scaffolding-74b.4` | US-003 | open (blocked) |
+
+**Ready next:** `bd_1-scaffolding-74b.1` (US-001). Run `/ralph-run` from this worktree to execute the chain.
