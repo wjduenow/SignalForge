@@ -700,6 +700,18 @@ _EXCEPTION_MAPPING_EXCLUDED_BASES: frozenset[str] = frozenset(
         # require it to be mapped (the table entry is the safety net, not
         # the contract).
         "CostError",
+        # ``SkillError`` (issue #141 / DEC-008, DEC-009) — abstract base
+        # of the ``signalforge.skill`` typed-error hierarchy (the 13th
+        # per-stage ``errors.py``). Its three concrete subclasses are
+        # individually mapped in ``_EXCEPTION_TO_EXIT_CODE``
+        # (``SkillDestPathError`` / ``SkillPackageDataMissingError`` →
+        # tier 1; ``SkillDestUnsafeError`` → tier 2). Like ``DemoError``
+        # and ``IngestError``, the concretes span tiers 1 and 2, so the
+        # base gets NO single fallback-tier entry — it lives only here
+        # in the excluded set; a forgotten concrete falls through to
+        # tier 1 and the AST scan catches the missing per-class entry
+        # at test time.
+        "SkillError",
     }
 )
 
@@ -825,13 +837,14 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
     """Sanity: ``_enumerate_error_module_paths`` finds every per-stage
     ``errors.py`` in the project. If a future stage forgets to ship
     ``errors.py`` the scan would still pass (because there'd be nothing
-    to walk for that stage); this test pins the expected set of twelve
-    modules.
+    to walk for that stage); this test pins the expected set of
+    thirteen modules.
 
     Issue #157 / DEC-002 of US-001 added the first sub-stage
     ``errors.py`` (``llm/cost/errors.py`` — the cost-rollup layer); the
     glob was extended to depth-2 in lockstep so the expected count
-    bumped 11 → 12.
+    bumped 11 → 12. Issue #141 / US-002 / DEC-009 added the
+    ``signalforge.skill`` package and bumped 12 → 13.
     """
     paths = _enumerate_error_module_paths()
     rel_names = sorted(p.relative_to(_SIGNALFORGE_DIR).as_posix() for p in paths)
@@ -847,12 +860,13 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
         "manifest/errors.py",
         "prune/errors.py",
         "safety/errors.py",
+        "skill/errors.py",
         "warehouse/errors.py",
     ], (
-        "Expected exactly twelve per-stage errors.py modules (one per "
+        "Expected exactly thirteen per-stage errors.py modules (one per "
         "stage; demo added in #47, ingest in #104, llm/cost added in "
-        f"#157); got: {rel_names}. If this changes, update Scan 7's "
-        "expected set."
+        f"#157, skill added in #141); got: {rel_names}. If this "
+        "changes, update Scan 7's expected set."
     )
 
 
