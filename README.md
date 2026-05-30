@@ -59,6 +59,22 @@ The architecture is warehouse-agnostic — adapters plug in behind a thin sampli
 
 > **Live on PyPI** — `pip install signalforge-dbt`. The quick start below runs against BigQuery (the bundled `init-demo` fixture targets the Austin bikeshare public dataset). Snowflake users wire their own dbt profile and project — see [Configuration](#configuration) and [docs/snowflake-e2e-setup.md](docs/snowflake-e2e-setup.md).
 
+## Supported LLM providers
+
+SignalForge calls an LLM at exactly two stages: the **drafter** (one call per `generate` run, produces the candidate `schema.yml` + tests + docs) and the **grader** (one call per `(artifact × rubric criterion)` pair, scores the kept artifacts against a rubric). The other five stages — manifest, safety, prune, ingest, diff — are LLM-free. `signalforge prune-existing` and `signalforge lint` issue zero LLM calls.
+
+Three providers are supported behind a single provider-neutral seam:
+
+| Provider | Install | Env var | Prompt caching | Server-side JSON |
+|---|---|---|---|---|
+| **Anthropic** (default) | base `pip install signalforge-dbt` | `ANTHROPIC_API_KEY` | ✅ `cache_control` (5m / 1h) | parser-side |
+| **OpenAI** | `pip install signalforge-dbt[openai]` | `OPENAI_API_KEY` | ❌ | ✅ `response_format` |
+| **Google Gemini** | `pip install signalforge-dbt[gemini]` | `GOOGLE_API_KEY` | ❌ (deferred) | ✅ `response_mime_type` |
+
+The drafter and grader resolve their providers independently — a common pattern is Anthropic drafter (benefits from prompt caching across `--select` siblings) + Gemini grader (cheaper per-token rates on the multi-call fan-out). All three providers integrate with `signalforge generate --estimate` for pre-flight cost preview.
+
+Full reference, capability matrix, cost / caching tradeoffs, and the "adding a fourth provider" recipe live in [docs/llm-providers-ops.md](docs/llm-providers-ops.md).
+
 ## Quick start
 
 The wheel ships a minimal dbt demo project (Austin bikeshare staging
@@ -108,18 +124,14 @@ export ANTHROPIC_API_KEY=sk-ant-...
 Use a fresh shell session (or `unset ANTHROPIC_API_KEY` after the
 run) so the key doesn't persist in your bash history.
 
-Anthropic is the default LLM provider. OpenAI and Google Gemini are
-also supported behind the same provider-neutral seam:
-
-- **OpenAI** — `pip install signalforge-dbt[openai]`, set `OPENAI_API_KEY`,
-  and switch via `llm.provider: openai` / `grade.provider: openai`. See
-  [docs/draft-ops.md § OpenAI provider](docs/draft-ops.md#openai-provider)
-  and [docs/grade-ops.md § OpenAI provider](docs/grade-ops.md#openai-provider).
-- **Google Gemini** — `pip install signalforge-dbt[gemini]`, set
-  `GOOGLE_API_KEY`, and switch via `llm.provider: gemini` /
-  `grade.provider: gemini`. Recommended SKU is `gemini-2.5-flash`. See
-  [docs/draft-ops.md § Gemini provider](docs/draft-ops.md#gemini-provider)
-  and [docs/grade-ops.md § Gemini provider](docs/grade-ops.md#gemini-provider).
+Anthropic is the default LLM provider; OpenAI and Google Gemini ship
+behind the same provider-neutral seam. To switch providers, install
+the matching extra (`signalforge-dbt[openai]` / `signalforge-dbt[gemini]`),
+set the matching env var (`OPENAI_API_KEY` / `GOOGLE_API_KEY`), and
+add `llm.provider:` / `grade.provider:` to `signalforge.yml`. The
+drafter and grader knobs are independent — a mixed-provider run
+(e.g. Anthropic drafter + Gemini grader) is supported. Capability
+matrix and cost tradeoffs: [docs/llm-providers-ops.md](docs/llm-providers-ops.md).
 
 ### 3. Minimum `signalforge.yml`
 
@@ -475,11 +487,19 @@ response audit are all owned by the layer.
 ```text
 Manifest + Model + LLMRequest (from safety layer)
   -> render_prompt  (system + cached manifest summary + dynamic per-model SQL)
-  -> call_anthropic (1 SDK seam, full retry taxonomy, prompt caching)
+  -> call_llm       (provider-neutral seam, full retry taxonomy, prompt caching)
   -> parse_draft_response (JSON + anchor-contract validator)
   -> write_response_event (fail-closed JSONL audit)
   -> DraftOutcome(candidate, request, result)
 ```
+
+`call_llm` dispatches the vendor-specific request shape / response
+parse / exception classification to the registered `LLMProvider`
+strategy (Anthropic / OpenAI / Gemini). See
+[docs/llm-providers-ops.md](docs/llm-providers-ops.md) for the
+capability matrix, the per-provider gotchas (Gemini truncation, the
+`finish_reason` degrade path, server-side JSON modes), and the
+recipe for adding a fourth provider.
 
 ### Auditability
 
