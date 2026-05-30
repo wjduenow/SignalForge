@@ -47,6 +47,9 @@ from signalforge.cli.errors import (
     CliInitDemoDestUnsafeError,
     CliInitDemoFixtureMissingError,
     CliInputError,
+    CliInstallSkillDestUnsafeError,
+    CliInstallSkillPackageDataMissingError,
+    CliInstallSkillPathError,
     CliPathError,
     CliSelectorNoMatchError,
     CliSelectorParseError,
@@ -159,6 +162,11 @@ from signalforge.safety import (
     PolicyValidationError,
     SafetyError,
     UnknownConfigKeyError,
+)
+from signalforge.skill import (
+    SkillDestPathError,
+    SkillDestUnsafeError,
+    SkillPackageDataMissingError,
 )
 from signalforge.warehouse import (
     BytesBilledExceededError,
@@ -283,6 +291,24 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # walk in :func:`map_exception_to_exit_code`.
     DemoPathError: 1,
     DemoFixtureMissingError: 1,
+    # signalforge.skill typed errors (issue #141 / DEC-008). The CLI
+    # wrappers will land in US-003 and re-raise these into
+    # ``CliInstallSkill*Error`` at the handler boundary; the lib
+    # concretes still appear here as defence-in-depth so the 7th AST
+    # scan finds them and so an escaping raise gets a sensible exit code
+    # via the MRO walk in :func:`map_exception_to_exit_code`. Like
+    # ``DemoError`` and ``IngestError``, the concretes span tiers 1 and
+    # 2, so ``SkillError`` itself has no single-tier fallback entry —
+    # it lives only in ``_EXCEPTION_MAPPING_EXCLUDED_BASES``.
+    SkillDestPathError: 1,
+    SkillPackageDataMissingError: 1,
+    # CLI wrappers for the skill-install handler boundary (issue #141 /
+    # US-003 / DEC-008). Tier 1 for the two load-time failures: a
+    # symlink-cycle resolve failure on ``<dest>`` and a broken-install
+    # case where the bundled skill tree is missing. Mirrors the tiering
+    # of the underlying ``Skill*Error`` lib concretes above.
+    CliInstallSkillPathError: 1,
+    CliInstallSkillPackageDataMissingError: 1,
     # Ingest layer (issue #104 / DEC-001 / US-001). The reader parses an
     # external dbt schema.yml into a CandidateSchema. These three are
     # load-tier: the schema file is missing, unparseable, or exceeds the
@@ -376,6 +402,17 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # above for the defence-in-depth rationale.
     DemoDestExistsError: 2,
     DemoDestUnsafeError: 2,
+    # signalforge.skill input-validation concrete (issue #141 / DEC-008).
+    # Fires when ``dest`` is a regular file or when the existing
+    # ``SKILL.md`` is a symlink — both operator-supplied input states
+    # that conflict with the install contract; mirrors
+    # ``DemoDestUnsafeError``'s tier.
+    SkillDestUnsafeError: 2,
+    # CLI wrapper for the skill-install dest-unsafe boundary (issue #141
+    # / US-003 / DEC-008). Tier 2 (input-validation — the operator
+    # supplied a destination state we refuse to write under); mirrors
+    # ``CliInitDemoDestUnsafeError``'s tier.
+    CliInstallSkillDestUnsafeError: 2,
     # Ingest layer (issue #104 / DEC-002 of US-001). Both fire on
     # operator-supplied input that conflicts with the manifest/schema:
     # the named model is absent from the schema.yml (mirrors

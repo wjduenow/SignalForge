@@ -72,6 +72,14 @@ dev = [
   "tiktoken>=0.7,<1.0",
   "google-genai>=0.5,<1",
   "sqlglot>=30,<31",
+  # clauditor-eval powers the pre-release SKILL.md self-grade run per
+  # DEC-014 of plans/super/141-claude-skill-install.md. PyPI dist name is
+  # `clauditor-eval`; it provides the `clauditor` CLI entry point. The
+  # maintainer runs `uv run clauditor grade
+  # src/signalforge/skills/signalforge/SKILL.md` and pins the score in
+  # `src/signalforge/skills/signalforge/assets/SKILL.eval.json`. No CI
+  # integration — manual pre-release only.
+  "clauditor-eval>=0.1,<1",
   {include-group = "docs"},
 ]
 
@@ -87,13 +95,21 @@ path = "src/signalforge/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/signalforge"]
-# `include` is defence-in-depth for the demo tree under `src/signalforge/_demo/`
+# `include` is defence-in-depth for non-`.py` data trees under `src/signalforge/`
 # — Hatchling's default `packages` glob picks `.py` reliably but its behaviour
 # on non-`.py` data files (and dotfiles like `.gitignore` per DEC-006 of
 # `plans/super/47-init-demo.md`) is not contractually guaranteed across releases.
-# The wheel_smoke marker (`tests/test_wheel_packaging.py`) gates the demo file
-# set in the built artifact; this directive is the production-side guarantee.
-include = ["src/signalforge/_demo"]
+# The wheel_smoke marker (`tests/test_wheel_packaging.py`) gates the on-disk
+# file set in the built artifact for both trees; this directive is the
+# production-side guarantee.
+#   - `_demo/`   — bundled demo project (DEC-002 of plans/super/47-init-demo.md).
+#   - `skills/`  — bundled SignalForge Claude Code skill that the `install-skill`
+#                  CLI copies into `~/.claude/skills/` (DEC-010 of
+#                  plans/super/141-claude-skill-install.md). Maintainer-only
+#                  skills under repo-root `.claude/skills/` (release-manager,
+#                  review-agentskills-spec) are deliberately NOT listed here —
+#                  see DEC-022 + the negative-assertion test in test_wheel_packaging.py.
+include = ["src/signalforge/_demo", "src/signalforge/skills"]
 
 [tool.ruff]
 line-length = 100
