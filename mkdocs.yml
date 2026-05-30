@@ -55,6 +55,8 @@ nav:
       - Prune Engine: prune-ops.md
       - Quality Grader: grade-ops.md
       - Diff Renderer: diff-ops.md
+  - LLM Providers: llm-providers-ops.md
+  - Cost Estimate: cost-estimate-ops.md
   - Audits & Sidecars: audits.md
   - End-to-End Smoke Test: e2e-smoke-test.md
   - Snowflake E2E Setup: snowflake-e2e-setup.md

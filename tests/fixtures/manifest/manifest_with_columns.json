@@ -1,0 +1,220 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+    "dbt_version": "1.8.9",
+    "generated_at": null,
+    "invocation_id": null,
+    "env": {},
+    "project_name": "signalforge_test_small",
+    "project_id": "eea3cbfe787d985d15b0bb2b7cad23ab",
+    "user_id": null,
+    "send_anonymous_usage_stats": null,
+    "adapter_type": null
+  },
+  "nodes": {
+    "model.signalforge_test_small.dim_users": {
+      "database": "dev",
+      "schema": "main",
+      "name": "dim_users",
+      "resource_type": "model",
+      "package_name": "signalforge_test_small",
+      "path": "marts/dim_users.sql",
+      "original_file_path": "models/marts/dim_users.sql",
+      "unique_id": "model.signalforge_test_small.dim_users",
+      "fqn": [
+        "signalforge_test_small",
+        "marts",
+        "dim_users"
+      ],
+      "alias": "dim_users",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "f781f1cde05a299eae4eda887d3a16ac1dd4b72969bbaa49019d99d2fe395103"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "tags": [],
+        "meta": {},
+        "group": null,
+        "materialized": "table",
+        "incremental_strategy": null,
+        "persist_docs": {},
+        "post-hook": [],
+        "pre-hook": [],
+        "quoting": {},
+        "column_types": {},
+        "full_refresh": null,
+        "unique_key": null,
+        "on_schema_change": "ignore",
+        "on_configuration_change": "apply",
+        "grants": {},
+        "packages": [],
+        "docs": {
+          "show": true,
+          "node_color": null
+        },
+        "contract": {
+          "enforced": false,
+          "alias_types": true
+        },
+        "access": "protected"
+      },
+      "tags": [],
+      "description": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "email": {
+          "name": "email",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "created_at": {
+          "name": "created_at",
+          "description": "",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "meta": {},
+      "group": null,
+      "docs": {
+        "show": true,
+        "node_color": null
+      },
+      "patch_path": null,
+      "build_path": null,
+      "unrendered_config": {
+        "materialized": "table"
+      },
+      "created_at": 1777342194.3481634,
+      "relation_name": "\"dev\".\"main\".\"dim_users\"",
+      "raw_code": "-- Mart: refs the staging user model (proves ref(...) edge in the manifest).\nselect\n    user_id,\n    email,\n    created_at\nfrom {{ ref('stg_users') }}",
+      "language": "sql",
+      "refs": [
+        {
+          "name": "stg_users",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "metrics": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.signalforge_test_small.stg_users"
+        ]
+      },
+      "compiled_path": null,
+      "contract": {
+        "enforced": false,
+        "alias_types": true,
+        "checksum": null
+      },
+      "access": "protected",
+      "constraints": [],
+      "version": null,
+      "latest_version": null,
+      "deprecation_date": null
+    }
+  },
+  "disabled": {},
+  "sources": {
+    "source.signalforge_test_small.raw.users": {
+      "database": "dev",
+      "schema": "raw",
+      "name": "users",
+      "resource_type": "source",
+      "package_name": "signalforge_test_small",
+      "path": "models/_sources.yml",
+      "original_file_path": "models/_sources.yml",
+      "unique_id": "source.signalforge_test_small.raw.users",
+      "fqn": [
+        "signalforge_test_small",
+        "raw",
+        "users"
+      ],
+      "source_name": "raw",
+      "source_description": "Raw landing zone (synthetic \u2014 fixture only).",
+      "loader": "",
+      "identifier": "users",
+      "quoting": {
+        "database": null,
+        "schema": null,
+        "identifier": null,
+        "column": null
+      },
+      "loaded_at_field": null,
+      "freshness": {
+        "warn_after": {
+          "count": null,
+          "period": null
+        },
+        "error_after": {
+          "count": null,
+          "period": null
+        },
+        "filter": null
+      },
+      "external": null,
+      "description": "Raw user rows from the synthetic source system.",
+      "columns": {
+        "id": {
+          "name": "id",
+          "description": "Synthetic primary key.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "email": {
+          "name": "email",
+          "description": "User email.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "created_at": {
+          "name": "created_at",
+          "description": "Row creation timestamp.",
+          "meta": {},
+          "data_type": null,
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "meta": {},
+      "source_meta": {},
+      "tags": [],
+      "config": {
+        "enabled": true
+      },
+      "patch_path": null,
+      "unrendered_config": {},
+      "relation_name": "\"dev\".\"raw\".\"users\"",
+      "created_at": 1777342194.450339
+    }
+  }
+}

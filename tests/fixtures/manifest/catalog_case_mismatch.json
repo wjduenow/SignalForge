@@ -1,0 +1,40 @@
+{
+  "metadata": {
+    "dbt_schema_version": "https://schemas.getdbt.com/dbt/catalog/v1.json",
+    "dbt_version": "1.8.9",
+    "generated_at": null,
+    "invocation_id": null,
+    "env": {}
+  },
+  "nodes": {
+    "model.signalforge_test_small.dim_users": {
+      "metadata": {
+        "type": "BASE TABLE",
+        "schema": "main",
+        "name": "dim_users",
+        "database": "dev",
+        "comment": null,
+        "owner": null
+      },
+      "columns": {
+        "ID": {
+          "type": "NUMBER",
+          "index": 1,
+          "name": "ID",
+          "comment": null
+        },
+        "EMAIL": {
+          "type": "VARCHAR",
+          "index": 2,
+          "name": "EMAIL",
+          "comment": null
+        }
+      },
+      "stats": {},
+      "unique_id": "model.signalforge_test_small.dim_users"
+    }
+  },
+  "sources": {},
+  "errors": null,
+  "info": null
+}

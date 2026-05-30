@@ -24,6 +24,8 @@ guard for ``manifest_path=`` overrides.
 from __future__ import annotations
 
 import errno
+import json
+import logging
 import os
 import shutil
 import sys
@@ -31,6 +33,7 @@ from pathlib import Path
 
 import pytest
 
+from signalforge._common.path_safety import PathContainmentError
 from signalforge.manifest.errors import (
     ManifestError,
     ManifestNotFoundError,
@@ -45,6 +48,7 @@ from signalforge.manifest.loader import (
     _canonicalise_path,
     _detect_version,
     load,
+    schema_version,
 )
 from signalforge.manifest.models import Manifest
 
@@ -533,3 +537,463 @@ def test_non_loop_oserror_on_input_path_is_not_swallowed(
 
     with pytest.raises(PermissionError):
         _canonicalise_path("manifest.json", project_resolved)
+
+
+# ---------------------------------------------------------------------------
+# 18. catalog.json sibling merge (#159 US-001 — DEC-001, DEC-002, DEC-007, DEC-010)
+# ---------------------------------------------------------------------------
+
+MANIFEST_WITH_COLUMNS = FIXTURES_DIR / "manifest" / "manifest_with_columns.json"
+CATALOG_CANONICAL = FIXTURES_DIR / "manifest" / "catalog_canonical.json"
+CATALOG_CASE_MISMATCH = FIXTURES_DIR / "manifest" / "catalog_case_mismatch.json"
+CATALOG_PHANTOM = FIXTURES_DIR / "manifest" / "catalog_phantom_column.json"
+CATALOG_PARTIAL = FIXTURES_DIR / "manifest" / "catalog_partial.json"
+DIM_USERS_UID = "model.signalforge_test_small.dim_users"
+
+
+def _project_with_manifest_and_catalog(
+    tmp_path: Path,
+    manifest_src: Path,
+    catalog_src: Path | None,
+) -> Path:
+    """Build a project tree carrying ``manifest_src`` (and optionally
+    ``catalog_src``) under ``target/``. Returns the project root.
+
+    Used by the catalog merge tests so each test gets an isolated project
+    directory with a known manifest+catalog pair.
+    """
+    project = tmp_path / "proj"
+    target = project / "target"
+    target.mkdir(parents=True)
+    shutil.copy(manifest_src, target / "manifest.json")
+    if catalog_src is not None:
+        shutil.copy(catalog_src, target / "catalog.json")
+    return project
+
+
+@pytest.mark.integration
+def test_load_merges_catalog_types_into_columns(tmp_path: Path) -> None:
+    """Happy path: catalog.json sibling read overlays ``data_type`` per column."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_CANONICAL)
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    assert model.columns["id"].data_type == "INT64"
+    assert model.columns["email"].data_type == "STRING"
+    assert model.columns["created_at"].data_type == "TIMESTAMP"
+
+
+@pytest.mark.integration
+def test_load_catalog_missing_is_silent(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """No catalog.json present: load succeeds, ``data_type`` stays ``None``,
+    no log records emitted from the manifest layer (stage-0 invariant)."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, None)
+    with caplog.at_level(logging.DEBUG, logger="signalforge.manifest"):
+        manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    for col in model.columns.values():
+        assert col.data_type is None
+    # Stage-0 invariant: manifest layer emits NO log records.
+    assert [r for r in caplog.records if r.name.startswith("signalforge.manifest")] == []
+
+
+@pytest.mark.integration
+def test_load_catalog_malformed_json_is_silent(tmp_path: Path) -> None:
+    """A corrupt ``catalog.json`` does not abort load; ``data_type`` stays ``None``."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_CANONICAL)
+    # Overwrite the canonical catalog with malformed JSON.
+    (project / "target" / "catalog.json").write_text("{ this is not json", encoding="utf-8")
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    for col in model.columns.values():
+        assert col.data_type is None
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    # Single combined predicate — pytest evaluates ALL skipif decorators at
+    # collection time, so a chain `skipif(sys.platform == "win32")` +
+    # `skipif(os.geteuid() == 0)` would still call os.geteuid() on Windows
+    # (it doesn't exist there → AttributeError at collection) (Copilot
+    # finding on PR #161). hasattr guards before the geteuid call.
+    sys.platform == "win32" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="POSIX-only test (mode 0o000 read); root bypasses file-mode perms",
+)
+def test_load_catalog_oserror_is_silent(tmp_path: Path) -> None:
+    """A catalog.json that raises ``OSError`` on read (mode 0o000) is silently
+    skipped; the manifest still loads."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_CANONICAL)
+    catalog_path = project / "target" / "catalog.json"
+    catalog_path.chmod(0o000)
+    try:
+        manifest = load(project)
+    finally:
+        # Restore so tmp_path cleanup can delete the file.
+        catalog_path.chmod(0o600)
+    model = manifest.nodes[DIM_USERS_UID]
+    for col in model.columns.values():
+        assert col.data_type is None
+
+
+@pytest.mark.integration
+def test_load_catalog_column_case_insensitive_match(tmp_path: Path) -> None:
+    """Manifest column ``id`` matches catalog column ``ID`` (Snowflake-style)."""
+    project = _project_with_manifest_and_catalog(
+        tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_CASE_MISMATCH
+    )
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    assert model.columns["id"].data_type == "NUMBER"
+    assert model.columns["email"].data_type == "VARCHAR"
+    # created_at not in catalog → stays None
+    assert model.columns["created_at"].data_type is None
+
+
+@pytest.mark.integration
+def test_load_catalog_phantom_column_ignored(tmp_path: Path) -> None:
+    """Catalog declares ``phantom_col`` not in manifest; not added to ``Model.columns``.
+
+    Manifest columns NOT in catalog stay ``None`` (DEC-010(b))."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_PHANTOM)
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    assert "phantom_col" not in model.columns
+    assert model.columns["id"].data_type == "INT64"
+    # email + created_at not in catalog → stays None
+    assert model.columns["email"].data_type is None
+    assert model.columns["created_at"].data_type is None
+
+
+@pytest.mark.integration
+def test_load_catalog_missing_column_stays_null(tmp_path: Path) -> None:
+    """Manifest has columns that the catalog doesn't declare; their ``data_type``
+    remains ``None`` (DEC-010(b))."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, CATALOG_PARTIAL)
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    assert model.columns["id"].data_type == "INT64"
+    assert model.columns["email"].data_type is None
+    assert model.columns["created_at"].data_type is None
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    "catalog_body",
+    [
+        # Root is a JSON array, not a dict (DEC-010c shape guard).
+        "[]",
+        # Root dict but ``nodes`` is a list (DEC-010c).
+        '{"nodes": []}',
+        # ``nodes`` present but the matched node is not a dict.
+        '{"nodes": {"model.signalforge_test_small.dim_users": "scalar"}}',
+        # Node dict but ``columns`` is not a dict.
+        '{"nodes": {"model.signalforge_test_small.dim_users": {"columns": "scalar"}}}',
+        # Catalog column is not a dict.
+        ('{"nodes": {"model.signalforge_test_small.dim_users": {"columns": {"id": "scalar"}}}}'),
+        # Catalog column dict missing ``type``.
+        (
+            '{"nodes": {"model.signalforge_test_small.dim_users": '
+            '{"columns": {"id": {"index": 1}}}}}'
+        ),
+        # Catalog column ``type`` is not a string.
+        (
+            '{"nodes": {"model.signalforge_test_small.dim_users": '
+            '{"columns": {"id": {"type": 42}}}}}'
+        ),
+        # Empty catalog (no node matches at all).
+        '{"nodes": {}}',
+        # Catalog declares a node not in the manifest (no manifest column
+        # matches; the model_changed branch stays False so model_copy is
+        # skipped — exercises the else-branch at the end of the merge loop).
+        (
+            '{"nodes": {"model.other_project.other_model": '
+            '{"columns": {"foo": {"type": "STRING"}}}}}'
+        ),
+    ],
+    ids=[
+        "root-is-list",
+        "nodes-is-list",
+        "node-is-scalar",
+        "columns-is-scalar",
+        "col-is-scalar",
+        "col-missing-type",
+        "col-type-non-string",
+        "empty-nodes",
+        "unmatched-node",
+    ],
+)
+def test_load_catalog_shape_degrades_silently(tmp_path: Path, catalog_body: str) -> None:
+    """Every malformed catalog shape silently degrades to no-op overlay;
+    ``data_type`` stays ``None`` on every column.
+
+    Exercises the DEC-010c "silent no-op on malformed catalog" defence
+    across the per-shape guards in ``_apply_catalog_overlay``.
+    """
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, None)
+    (project / "target" / "catalog.json").write_text(catalog_body, encoding="utf-8")
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    for col in model.columns.values():
+        assert col.data_type is None
+
+
+@pytest.mark.integration
+def test_load_catalog_only_phantom_columns_no_model_change(tmp_path: Path) -> None:
+    """Matched node where EVERY catalog column is a phantom (not in manifest)
+    leaves the model unchanged — the merge loop takes the else-branch and
+    drops in the original model unmodified."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, None)
+    (project / "target" / "catalog.json").write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    DIM_USERS_UID: {
+                        "columns": {
+                            "phantom_a": {"type": "STRING"},
+                            "phantom_b": {"type": "INT64"},
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    assert "phantom_a" not in model.columns
+    assert "phantom_b" not in model.columns
+    for col in model.columns.values():
+        assert col.data_type is None
+
+
+@pytest.mark.integration
+def test_load_catalog_non_string_column_name_ignored(tmp_path: Path) -> None:
+    """A column whose key in the catalog ``columns`` dict is not a string is
+    silently skipped (defence against malformed catalog payloads that round-trip
+    a non-string key through a non-JSON producer)."""
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, None)
+    catalog_path = project / "target" / "catalog.json"
+    # JSON itself forbids non-string keys, so build the dict in Python and dump
+    # via Python's json (which would coerce — instead inject the dict directly
+    # into the parser path by writing valid JSON and then having the loader
+    # parse it; for the non-string-key path we mock at the post-parse step).
+    # The simpler way: write a custom payload that triggers the ``isinstance``
+    # guard on cat_col_name by using a list-typed columns dict — covered by
+    # the parametrised tests above. This test additionally pins the recovery
+    # case where ALL columns in a matched node fail the guard, leaving
+    # ``per_node`` empty so the node is dropped from ``by_node``.
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "nodes": {
+                    DIM_USERS_UID: {
+                        "columns": {
+                            "id": {"index": 1},  # missing type → skipped
+                            "email": {"type": None},  # non-string type → skipped
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = load(project)
+    model = manifest.nodes[DIM_USERS_UID]
+    for col in model.columns.values():
+        assert col.data_type is None
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(sys.platform == "win32", reason="symlinks need admin on Windows")
+def test_load_catalog_path_canonicalised(tmp_path: Path) -> None:
+    """``catalog.json`` is resolved through ``_common.path_safety.canonicalise_path``;
+    a symlink pointing outside the project tree is rejected with
+    :class:`PathContainmentError` (DEC-002).
+
+    The security gate is NOT in the silent-degrade set — a malicious symlink
+    must surface, never be swallowed.
+    """
+    project = _project_with_manifest_and_catalog(tmp_path, MANIFEST_WITH_COLUMNS, None)
+    # Drop a real file outside the project tree, then symlink target/catalog.json
+    # to it. Canonicalise should reject the resolved path as outside project.
+    outside = tmp_path / "outside_catalog.json"
+    outside.write_text(json.dumps({"nodes": {}}), encoding="utf-8")
+    (project / "target" / "catalog.json").symlink_to(outside)
+    with pytest.raises(PathContainmentError):
+        load(project)
+
+
+# ---------------------------------------------------------------------------
+# Pre-existing-line coverage gates (#159 US-005 codecov follow-up).
+#
+# These tests pin defensive branches in `signalforge.manifest.loader` that
+# existed before #159 but lacked coverage. Codecov flags any uncovered line
+# in a file modified by the PR even when the line itself is untouched, so
+# closing the gap on the file the catalog overlay landed in is the cleanest
+# way to satisfy the project-coverage gate alongside the new patch tests.
+# ---------------------------------------------------------------------------
+
+
+def test_load_project_dir_is_a_file_raises_manifest_not_found(tmp_path: Path) -> None:
+    """When ``project_dir`` resolves to a regular file (not a directory),
+    the loader raises ``ManifestNotFoundError`` at loader.py:231 BEFORE
+    any manifest read. Distinct from ``FileNotFoundError`` (caught one
+    branch up) — the path exists, it just isn't a directory."""
+    not_a_dir = tmp_path / "not_a_dir.txt"
+    not_a_dir.write_text("regular file, not a directory\n")
+    with pytest.raises(ManifestNotFoundError, match="is not a directory"):
+        load(not_a_dir)
+
+
+def test_load_non_dict_metadata_raises_manifest_error(tmp_path: Path) -> None:
+    """An otherwise-valid manifest whose ``metadata`` key is not a JSON
+    object hits the explicit ``isinstance(metadata, dict)`` gate at
+    loader.py:283 and raises ``ManifestError`` — never proceeds past it
+    to feature-sniff a version off a non-object payload."""
+    project = tmp_path / "proj"
+    (project / "target").mkdir(parents=True)
+    (project / "target" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "metadata": ["not", "a", "dict"],
+                "nodes": {},
+                "disabled": {},
+                "sources": {},
+                "macros": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ManifestError, match="metadata is not an object"):
+        load(project)
+
+
+def test_load_disabled_with_non_list_value_continues(tmp_path: Path) -> None:
+    """A ``disabled[<unique_id>]`` entry whose value is not a list (dbt
+    always writes lists, but the loader is defensive against schema drift)
+    routes through the ``continue`` at loader.py:308 — silently dropped
+    from the disabled map without failing the whole load."""
+    project = tmp_path / "proj"
+    (project / "target").mkdir(parents=True)
+    (project / "target" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json"
+                },
+                "nodes": {},
+                "disabled": {
+                    "model.pkg.something": "this should be a list but isn't",
+                },
+                "sources": {},
+                "macros": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Loads cleanly; the malformed disabled entry is silently skipped.
+    manifest = load(project)
+    assert manifest.disabled == {}
+
+
+def test_schema_version_non_string_returns_empty_string(tmp_path: Path) -> None:
+    """When ``manifest.metadata['dbt_schema_version']`` exists but is not
+    a string (e.g. shape drift in a future fusion schema), the
+    ``schema_version()`` helper returns an empty string at loader.py:485
+    rather than propagating the wrong type."""
+    project = tmp_path / "proj"
+    (project / "target").mkdir(parents=True)
+    (project / "target" / "manifest.json").write_text(
+        json.dumps(
+            {
+                # Use a real URL so the LOADER accepts it; we'll mutate the
+                # value on the constructed Manifest after load to exercise
+                # the schema_version() helper specifically.
+                "metadata": {
+                    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json"
+                },
+                "nodes": {},
+                "disabled": {},
+                "sources": {},
+                "macros": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = load(project)
+    # Mutate via model_copy to get a non-string version field. Manifest is
+    # frozen; we construct a fresh one for the test rather than mutating.
+    bad_metadata = dict(manifest.metadata)
+    bad_metadata["dbt_schema_version"] = 12  # int, not str
+    bad_manifest = manifest.model_copy(update={"metadata": bad_metadata})
+    assert schema_version(bad_manifest) == ""
+
+
+def test_get_model_resolver_index_cache_hit_returns_cached(
+    v12_manifest: Manifest,
+) -> None:
+    """A second ``get_model`` call against the same Manifest instance
+    must reuse the in-memory resolver-index cache populated on the first
+    call — hits ``return cached`` at loader.py:598. Without the cache,
+    every CLI lookup would re-scan the entire nodes dict."""
+    # stg_users.sql is an ENABLED model in the v12 fixture (stg_orders is
+    # disabled, which would route through a different branch). The cache
+    # hit at loader.py:598 applies regardless — we want the second call
+    # to bypass _build_indexes via the _INDEX_ATTR cache.
+    first_lookup = v12_manifest.get_model("models/staging/stg_users.sql")
+    second_lookup = v12_manifest.get_model("models/staging/stg_users.sql")
+    # Same Model instance returned both times; the second call rode the
+    # cached index built during the first call.
+    assert first_lookup is second_lookup
+
+
+def test_get_model_by_file_path_for_disabled_model_raises_disabled(
+    tmp_path: Path,
+) -> None:
+    """Resolving a model by its ``original_file_path`` for a node that
+    lives under ``disabled`` raises ``ModelDisabledError`` at
+    loader.py:679 — the path-lookup branch needs the same disabled-state
+    detection the unique_id lookup branch already has, so the operator
+    sees the same typed error regardless of how they identified the
+    model."""
+    project = tmp_path / "proj"
+    (project / "target").mkdir(parents=True)
+    (project / "models" / "staging").mkdir(parents=True)
+    # Create the .sql so _check_raw_code wouldn't trip — but it never runs
+    # because the disabled branch raises first.
+    (project / "models" / "staging" / "stg_disabled.sql").write_text(
+        "select 1 as foo\n", encoding="utf-8"
+    )
+    (project / "target" / "manifest.json").write_text(
+        json.dumps(
+            {
+                "metadata": {
+                    "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json"
+                },
+                "nodes": {},
+                "disabled": {
+                    "model.pkg.stg_disabled": [
+                        {
+                            "unique_id": "model.pkg.stg_disabled",
+                            "name": "stg_disabled",
+                            "resource_type": "model",
+                            "package_name": "pkg",
+                            "path": "staging/stg_disabled.sql",
+                            "original_file_path": "models/staging/stg_disabled.sql",
+                            "raw_code": "select 1 as foo",
+                            "columns": {},
+                            "config": {"enabled": False},
+                            "refs": [],
+                            "depends_on": {"nodes": []},
+                            "sources": [],
+                        }
+                    ]
+                },
+                "sources": {},
+                "macros": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = load(project)
+    with pytest.raises(ModelDisabledError, match="is disabled in dbt config"):
+        manifest.get_model("models/staging/stg_disabled.sql")

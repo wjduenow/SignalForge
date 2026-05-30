@@ -1,4 +1,4 @@
-"""Happy-path tests for :func:`signalforge.llm.client.call_anthropic`
+"""Happy-path tests for :func:`signalforge.llm.client.call_llm`
 (US-006).
 
 Covers:
@@ -30,7 +30,7 @@ from signalforge.llm.client import (
     _CACHED_BLOCK_CAP_TOKENS,
     _MIN_CACHEABLE_TOKENS,
     _min_cacheable_tokens,
-    call_anthropic,
+    call_llm,
 )
 from signalforge.llm.errors import (
     LLMCacheTooLargeError,
@@ -69,7 +69,7 @@ def _ok_message_response(*, cache_creation: int = 1234, cache_read: int = 0) -> 
     )
 
 
-def test_call_anthropic_happy_path_returns_llm_result_with_usage() -> None:
+def test_call_llm_happy_path_returns_llm_result_with_usage() -> None:
     """A normal call returns an :class:`LLMResult` with usage + content."""
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={"model": "claude-sonnet-4-6"}, returns=_ok_count_response())
@@ -78,7 +78,7 @@ def test_call_anthropic_happy_path_returns_llm_result_with_usage() -> None:
         returns=_ok_message_response(),
     )
 
-    result = call_anthropic(
+    result = call_llm(
         system="sys",
         cached_block="x" * 100,
         dynamic_block="y" * 50,
@@ -100,13 +100,13 @@ def test_call_anthropic_happy_path_returns_llm_result_with_usage() -> None:
     fake.assert_all_expectations_met()
 
 
-def test_call_anthropic_sets_cache_control_marker_with_5m_default() -> None:
+def test_call_llm_sets_cache_control_marker_with_5m_default() -> None:
     """The first user block carries `cache_control` with the default 5m TTL."""
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=_ok_count_response())
     fake.expect_messages_create(matching={}, returns=_ok_message_response())
 
-    call_anthropic(
+    call_llm(
         system="sys",
         cached_block="cached",
         dynamic_block="dyn",
@@ -126,13 +126,13 @@ def test_call_anthropic_sets_cache_control_marker_with_5m_default() -> None:
     assert "cache_control" not in blocks[1]
 
 
-def test_call_anthropic_sets_beta_header_only_when_1h_ttl() -> None:
+def test_call_llm_sets_beta_header_only_when_1h_ttl() -> None:
     """The 1h-TTL beta header is set only when ``cache_ttl == "1h"``."""
     # 5m: header absent
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=_ok_count_response())
     fake.expect_messages_create(matching={}, returns=_ok_message_response())
-    call_anthropic(
+    call_llm(
         system="sys",
         cached_block="c",
         dynamic_block="d",
@@ -148,7 +148,7 @@ def test_call_anthropic_sets_beta_header_only_when_1h_ttl() -> None:
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=_ok_count_response())
     fake.expect_messages_create(matching={}, returns=_ok_message_response())
-    call_anthropic(
+    call_llm(
         system="sys",
         cached_block="c",
         dynamic_block="d",
@@ -163,7 +163,7 @@ def test_call_anthropic_sets_beta_header_only_when_1h_ttl() -> None:
     }
 
 
-def test_call_anthropic_pre_send_count_below_min_drops_cache_marker() -> None:
+def test_call_llm_pre_send_count_below_min_drops_cache_marker() -> None:
     """Below-minimum cached block drops the ``cache_control`` marker and
     proceeds to the normal call.
 
@@ -178,7 +178,7 @@ def test_call_anthropic_pre_send_count_below_min_drops_cache_marker() -> None:
     fake.expect_count_tokens(matching={}, returns=FakeCountTokensResponse(input_tokens=128))
     fake.expect_messages_create(matching={}, returns=_ok_message_response())
 
-    result = call_anthropic(
+    result = call_llm(
         system="sys",
         cached_block="c",
         dynamic_block="d",
@@ -198,7 +198,7 @@ def test_call_anthropic_pre_send_count_below_min_drops_cache_marker() -> None:
     assert "cache_control" not in blocks[0]
 
 
-def test_call_anthropic_pre_send_count_above_cap_raises_cache_too_large() -> None:
+def test_call_llm_pre_send_count_above_cap_raises_cache_too_large() -> None:
     """Above-cap cached block raises :class:`LLMCacheTooLargeError`."""
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(
@@ -207,7 +207,7 @@ def test_call_anthropic_pre_send_count_above_cap_raises_cache_too_large() -> Non
     )
 
     with pytest.raises(LLMCacheTooLargeError) as exc_info:
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -229,14 +229,12 @@ def test_call_anthropic_pre_send_count_above_cap_raises_cache_too_large() -> Non
         ("totally-unknown-model", 1024),
     ],
 )
-def test_call_anthropic_min_cacheable_tokens_keyed_by_model_prefix(
-    model: str, expected_min: int
-) -> None:
+def test_call_llm_min_cacheable_tokens_keyed_by_model_prefix(model: str, expected_min: int) -> None:
     """``_min_cacheable_tokens`` picks by longest-prefix-match w/ a default."""
     assert _min_cacheable_tokens(model) == expected_min
 
 
-def test_call_anthropic_cache_no_op_emits_warning(
+def test_call_llm_cache_no_op_emits_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """When usage reports cache_creation_input_tokens == 0 despite the
@@ -249,7 +247,7 @@ def test_call_anthropic_cache_no_op_emits_warning(
     )
 
     with caplog.at_level(logging.WARNING, logger="signalforge.llm.client"):
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -269,7 +267,7 @@ def test_call_anthropic_cache_no_op_emits_warning(
     }
 
 
-def test_call_anthropic_cache_hit_does_not_emit_no_op_warning(
+def test_call_llm_cache_hit_does_not_emit_no_op_warning(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Quality-Gate fix (Issue 4): on a cache HIT (cache_creation == 0
@@ -285,7 +283,7 @@ def test_call_anthropic_cache_hit_does_not_emit_no_op_warning(
     )
 
     with caplog.at_level(logging.WARNING, logger="signalforge.llm.client"):
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -299,7 +297,7 @@ def test_call_anthropic_cache_hit_does_not_emit_no_op_warning(
     assert len(no_op_records) == 0
 
 
-def test_call_anthropic_does_not_log_api_key(
+def test_call_llm_does_not_log_api_key(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Sanity check: no log record carries an api-key-shaped string."""
@@ -308,7 +306,7 @@ def test_call_anthropic_does_not_log_api_key(
     fake.expect_messages_create(matching={}, returns=_ok_message_response())
 
     with caplog.at_level(logging.DEBUG, logger="signalforge.llm.client"):
-        call_anthropic(
+        call_llm(
             system="sys",
             cached_block="c",
             dynamic_block="d",
@@ -352,3 +350,78 @@ def test_min_cacheable_tokens_dict_is_sorted_alphabetically_for_review() -> None
     assert _MIN_CACHEABLE_TOKENS["claude-haiku"] == 2048
     assert _MIN_CACHEABLE_TOKENS["claude-sonnet"] == 1024
     assert _MIN_CACHEABLE_TOKENS["claude-opus"] == 1024
+
+
+# ---------------------------------------------------------------------------
+# is_clean_completion orchestrator-wiring integration (#155 US-002 / DEC-005)
+# ---------------------------------------------------------------------------
+
+
+def test_call_llm_raises_llmresponseformaterror_on_unclean_stop_reason() -> None:
+    """:func:`call_llm` raises :class:`LLMResponseFormatError` at the
+    :meth:`AnthropicProvider.is_clean_completion` gate when the response
+    carries an unclean ``stop_reason`` (#155 US-002, pins DEC-005 wiring).
+
+    This is the orchestrator-level pin for the per-provider unclean-path
+    contract. It proves three things in one assertion:
+
+    1. **The gate fires inside ``call_llm``, not at the call-site.** The
+       fake returns a real ``FakeMessage`` (not an exception); the raise
+       comes from the orchestrator's post-call check.
+
+    2. **The gate fires AFTER ``messages.create`` returns and BEFORE
+       :meth:`AnthropicProvider.extract_text_blocks`** — exactly one
+       create call is observed, and the partial text the response carried
+       never reaches the JSON parser downstream. This is the load-bearing
+       routing per DEC-005: a truncated/safety-blocked/tool-use response
+       routes to ``LLMResponseFormatError`` → (via grade-engine wrap)
+       ``GradeLLMError`` → conservative degrade, not to the wrong
+       typed degrade (``GradeOutputError`` from a partial-JSON parse).
+
+    3. **No retry is attempted.** ``LLMResponseFormatError`` is raised
+       outside the retry try/except (``client.py:476-488``) so it is
+       explicitly non-retryable — retrying a truncated generation gets
+       you the same truncation. Exactly one create call.
+
+    Companion sibling pin: ``tests/grade/test_gemini_neutrality.py:381``
+    asserts ``bad.reasoning == "call failed: GradeLLMError"`` for the
+    safety-blocked Gemini path, which now also covers MAX_TOKENS via the
+    same orchestrator routing. That pin MUST continue to pass unmodified
+    after this change lands.
+    """
+    fake = FakeAnthropicClient()
+    fake.expect_count_tokens(matching={}, returns=_ok_count_response())
+    # Truncated-at-max_tokens response with partial JSON in the content.
+    # Before #155, this would have slipped past ``extract_text_blocks``
+    # (which only raised on ZERO blocks), reached the JSON parser, and
+    # surfaced as ``GradeOutputError`` — the wrong typed degrade.
+    unclean = FakeMessage(
+        content=[FakeTextBlock(text='{"score": 0.9, "reasoning": "partial truncated')],
+        usage=FakeUsage(input_tokens=120, output_tokens=45),
+        stop_reason="max_tokens",
+    )
+    fake.expect_messages_create(matching={}, returns=unclean)
+
+    from signalforge.llm.errors import LLMResponseFormatError
+
+    with pytest.raises(LLMResponseFormatError) as excinfo:
+        call_llm(
+            system="sys",
+            cached_block="x" * _DEFAULT_CACHED_TOKENS,
+            dynamic_block="y" * 50,
+            model="claude-sonnet-4-6",
+            max_tokens=1024,
+            prompt_version="v1",
+            client=fake,
+        )
+
+    # The error message is what
+    # :meth:`AnthropicProvider.unclean_finish_reason_message` returned:
+    # vendor-accurate field name + the offending value.
+    assert "stop_reason" in str(excinfo.value)
+    assert "'max_tokens'" in str(excinfo.value)
+
+    # Exactly one create call — no retry, no leak through to
+    # extract_text_blocks.
+    assert len(fake.create_calls) == 1
+    fake.assert_all_expectations_met()

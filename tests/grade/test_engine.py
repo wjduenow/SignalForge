@@ -599,6 +599,71 @@ def test_grade_artifacts_one_criterion_retry_exhausted_does_not_fail_whole_repor
 
 
 # ---------------------------------------------------------------------------
+# Issue #158 — degrade-reasoning carries LLMResponseFormatError message
+# ---------------------------------------------------------------------------
+
+
+def test_format_degrade_reasoning_includes_response_format_error_message() -> None:
+    """``_format_degrade_reasoning`` surfaces the inner
+    :class:`LLMResponseFormatError` message — which names the vendor
+    ``finish_reason`` field + value — when the wrapped cause is a
+    response-shape error.
+
+    This is the issue #158 diagnostic upgrade: before this change every
+    Gemini ``MAX_TOKENS`` / ``SAFETY`` / ``RECITATION`` degrade collapsed
+    to the bare ``"call failed: GradeLLMError"`` string, forcing
+    operators to re-read stderr to distinguish them. The new shape
+    includes the provider-emitted message so the audit JSONL / sidecar
+    is self-diagnosing.
+    """
+    from signalforge.grade.engine import _format_degrade_reasoning
+    from signalforge.grade.errors import GradeLLMError
+    from signalforge.llm.errors import LLMResponseFormatError
+
+    inner = LLMResponseFormatError(
+        "Gemini response unclean (finish_reason='MAX_TOKENS').",
+    )
+    wrapped = GradeLLMError("LLM call failed", cause=inner)
+
+    reasoning = _format_degrade_reasoning(wrapped)
+
+    # Preserves the existing "call failed: <Wrapper>" prefix so the audit
+    # corpus stays diff-clean for the 90% case, AND grows the inner
+    # message after a colon so the finish_reason value survives.
+    assert reasoning == (
+        "call failed: GradeLLMError: Gemini response unclean (finish_reason='MAX_TOKENS')."
+    )
+
+
+def test_format_degrade_reasoning_preserves_bare_shape_for_non_response_format_causes() -> None:
+    """Every cause other than :class:`LLMResponseFormatError` keeps the
+    pre-#158 ``"call failed: <ClassName>"`` shape verbatim.
+
+    Acceptance criterion of bd issue: rate-limit / auth / parser failure
+    / budget-exceeded degrades stay diff-clean in the audit corpus —
+    only the response-shape branch grows the diagnostic.
+    """
+    from signalforge.grade.engine import _format_degrade_reasoning
+    from signalforge.grade.errors import GradeLLMError, GradeOutputError
+    from signalforge.llm.errors import LLMAuthError, LLMRateLimitError
+
+    rate_limit = GradeLLMError(
+        "rate limit exhausted",
+        cause=LLMRateLimitError("429", attempts=3, cause=RuntimeError("upstream")),
+    )
+    assert _format_degrade_reasoning(rate_limit) == "call failed: GradeLLMError"
+
+    auth = GradeLLMError(
+        "auth failed",
+        cause=LLMAuthError("401", cause=RuntimeError("upstream")),
+    )
+    assert _format_degrade_reasoning(auth) == "call failed: GradeLLMError"
+
+    parser = GradeOutputError("bad json", violation_type="json_parse")
+    assert _format_degrade_reasoning(parser) == "call failed: GradeOutputError"
+
+
+# ---------------------------------------------------------------------------
 # Whole-run pre-flight envelope-breach (DEC-013)
 # ---------------------------------------------------------------------------
 

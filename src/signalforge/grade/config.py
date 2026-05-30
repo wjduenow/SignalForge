@@ -113,7 +113,7 @@ class GradeConfig(BaseModel):
 
     max_retries_429: int = 3
     """Mirrors :attr:`signalforge.draft.DraftConfig.max_retries_429`.
-    The grader reuses the centralised :func:`signalforge.llm.call_anthropic`
+    The grader reuses the centralised :func:`signalforge.llm.call_llm`
     seam (#5 DEC-012) so the retry taxonomy is the full clauditor
     surface; this knob dials down the per-call attempt count for 429
     responses without changing the global default."""
@@ -123,6 +123,18 @@ class GradeConfig(BaseModel):
 
     max_retries_conn: int = 1
     """Mirrors :attr:`signalforge.draft.DraftConfig.max_retries_conn`."""
+
+    provider: str = "anthropic"
+    """LLM provider strategy name, resolved against the
+    :mod:`signalforge.llm.providers` registry (issue #135 DEC-007).
+
+    Threaded into :func:`signalforge.llm.call_llm` from the grade engine's
+    per-criterion judge call so a non-Anthropic provider (#136 OpenAI /
+    #137 Gemini) is selected per stage, independently of the drafter's
+    :attr:`signalforge.draft.DraftConfig.provider`. Deliberately a
+    registry-validated ``str``, NOT a ``Literal`` (DEC-007): the provider
+    registry is a plugin point designed to grow. The field validator fails
+    loud on an unknown value — listing the registered provider names."""
 
     total_budget_seconds: int = 300
     """Whole-run wall-clock budget (DEC-023). 5 minutes default — ~3×
@@ -192,6 +204,29 @@ class GradeConfig(BaseModel):
     def _non_negative(cls, v: int) -> int:
         if v < 0:
             raise ValueError("must be non-negative")
+        return v
+
+    @field_validator("provider")
+    @classmethod
+    def _provider_registered(cls, v: str) -> str:
+        """Reject an unknown provider name at config-load (issue #135 DEC-007).
+
+        Membership is checked against the live
+        :mod:`signalforge.llm.providers` registry via
+        :func:`signalforge.llm.providers.provider_for`, which raises
+        :class:`signalforge.llm.errors.UnknownProviderError` listing the
+        available provider names. Import is local to the validator to keep
+        the grade-config module free of any import-time coupling to the LLM
+        provider registry.
+
+        ``UnknownProviderError`` is an ``LLMError`` (an ``Exception`` that is
+        NOT a ``ValueError`` / ``TypeError`` / ``AssertionError``), so Pydantic
+        v2 does NOT wrap it into a ``ValidationError`` — it propagates raw and
+        ``load_grade_config`` surfaces it directly with its available-keys
+        remediation."""
+        from signalforge.llm.providers import provider_for
+
+        provider_for(v)
         return v
 
     @field_validator("min_pass_rate", "min_mean_score")

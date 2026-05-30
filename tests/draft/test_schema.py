@@ -19,6 +19,7 @@ from signalforge.draft import schema as draft_schema_mod
 from signalforge.draft.config import DraftConfig
 from signalforge.draft.errors import (
     LLMOutputJSONError,
+    LLMResponseAuditRecordTooLargeError,
     LLMResponseAuditWriteError,
 )
 from signalforge.draft.models import CandidateSchema
@@ -87,7 +88,7 @@ def _set_up_fake_anthropic(
     input_tokens: int = 1700,
     output_tokens: int = 800,
 ) -> None:
-    """Queue the two SDK calls `call_anthropic` makes: count_tokens then create."""
+    """Queue the two SDK calls `call_llm` makes: count_tokens then create."""
     fake.expect_count_tokens(
         matching=lambda kw: True,
         returns=FakeCountTokensResponse(input_tokens=cached_tokens),
@@ -304,6 +305,94 @@ def test_draft_from_request_audit_failure_drops_outcome(
     assert isinstance(exc_info.value.cause, OSError)
 
 
+def test_draft_from_request_record_too_large_propagates_typed(
+    model: Model,
+    manifest: Manifest,
+    config: DraftConfig,
+    valid_response_text: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``write_response_event`` raises ``LLMResponseAuditRecordTooLargeError``,
+    the typed-passthrough except clause (schema.py:247-250) re-raises it
+    as-is rather than wrapping it under ``LLMResponseAuditWriteError`` — the
+    record-too-large error is already a typed ``DraftError`` subclass and
+    downstream callers branch on its identity."""
+    request = LLMRequest(
+        model_unique_id=model.unique_id,
+        mode=SamplingMode.SCHEMA_ONLY,
+        columns_sent=(),
+        redactions=(),
+        sampled_rows=None,
+        aggregates=None,
+        schema=(),
+    )
+    anthropic_fake = FakeAnthropicClient()
+    _set_up_fake_anthropic(anthropic_fake, response_text=valid_response_text)
+
+    too_large = LLMResponseAuditRecordTooLargeError(size=5000, limit=4000)
+
+    def _raise_too_large(*_args: Any, **_kwargs: Any) -> None:
+        raise too_large
+
+    monkeypatch.setattr(draft_schema_mod, "write_response_event", _raise_too_large)
+
+    with pytest.raises(LLMResponseAuditRecordTooLargeError) as exc_info:
+        draft_from_request(
+            request,
+            model,
+            manifest,
+            config=config,
+            audit_path=tmp_path / "safety_audit.jsonl",
+            _client=anthropic_fake,
+        )
+    # Same identity — NOT wrapped under LLMResponseAuditWriteError.
+    assert exc_info.value is too_large
+    assert not isinstance(exc_info.value, LLMResponseAuditWriteError)
+
+
+def test_draft_from_request_keyboard_interrupt_propagates_untouched(
+    model: Model,
+    manifest: Manifest,
+    config: DraftConfig,
+    valid_response_text: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``write_response_event`` is interrupted by a Ctrl-C
+    (``KeyboardInterrupt``), the signal-shaped re-raise at schema.py:251-254
+    must propagate the signal untouched. Wrapping it as
+    ``LLMResponseAuditWriteError`` would silently demote a Ctrl-C into an
+    audit-shaped error and confuse the operator's break-out signal."""
+    request = LLMRequest(
+        model_unique_id=model.unique_id,
+        mode=SamplingMode.SCHEMA_ONLY,
+        columns_sent=(),
+        redactions=(),
+        sampled_rows=None,
+        aggregates=None,
+        schema=(),
+    )
+    anthropic_fake = FakeAnthropicClient()
+    _set_up_fake_anthropic(anthropic_fake, response_text=valid_response_text)
+
+    def _raise_keyboard_interrupt(*_args: Any, **_kwargs: Any) -> None:
+        raise KeyboardInterrupt("user pressed Ctrl-C mid-write")
+
+    monkeypatch.setattr(draft_schema_mod, "write_response_event", _raise_keyboard_interrupt)
+
+    # The signal-shaped exception propagates as-is — NOT wrapped.
+    with pytest.raises(KeyboardInterrupt):
+        draft_from_request(
+            request,
+            model,
+            manifest,
+            config=config,
+            audit_path=tmp_path / "safety_audit.jsonl",
+            _client=anthropic_fake,
+        )
+
+
 def test_draft_from_request_emits_prompt_version_debug_log_on_success(
     model: Model,
     manifest: Manifest,
@@ -489,17 +578,26 @@ def test_public_api_imports_match_dec_020() -> None:
         "PRICES",
         "PRICE_TABLE_VERSION",
         "AnthropicClientProtocol",
+        "AnthropicProvider",
         "EstimateUnknownModelError",
+        "ExceptionCategory",
+        "GeminiProvider",
         "LLMAuthError",
         "LLMCacheTooLargeError",
         "LLMConnectionError",
         "LLMError",
         "LLMHelperError",
+        "LLMProvider",
         "LLMRateLimitError",
         "LLMResponseFormatError",
         "LLMResult",
         "LLMServerError",
         "ModelPricing",
-        "call_anthropic",
+        "OpenAIProvider",
+        "UnknownProviderError",
+        "UsageMetrics",
+        "call_llm",
         "lookup",
+        "provider_for",
+        "register_provider",
     )

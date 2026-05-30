@@ -14,16 +14,21 @@ callers). It ships:
   same input → same USD math, every time. Field assignment raises
   :class:`dataclasses.FrozenInstanceError`.
 * :data:`PRICES` — immutable mapping (``types.MappingProxyType``) from SKU
-  string to :class:`ModelPricing`. v0.1 covers the three Anthropic SKUs
-  this project supports.
+  string to :class:`ModelPricing`. Covers three Anthropic SKUs +
+  four OpenAI SKUs (added in #136 US-004 per DEC-007 of the
+  provider-neutral grading-provider plan).
 * :func:`lookup` — the public access seam; raises
   :class:`signalforge.llm.errors.EstimateUnknownModelError` (CLI tier 2 —
   input-validation) on miss rather than returning ``None``, so downstream
   callers don't need to defensively branch.
 
-Note on prices. The four fields encode Anthropic's public per-million-token
-pricing for the message-batches / standard channel as of
-:data:`PRICE_TABLE_VERSION`:
+Note on prices. The four fields encode each provider's public
+per-million-token pricing for the message-batches / standard channel
+(Anthropic) or the standard chat-completions channel (OpenAI) as of
+:data:`PRICE_TABLE_VERSION`. OpenAI does not currently expose a
+prompt-cache discount tier comparable to Anthropic's
+``cache_control``, so the two cache fields on OpenAI SKUs are
+``0.0`` (no discount, no premium):
 
 * ``input_per_mtok``        — non-cached input tokens.
 * ``output_per_mtok``       — output (assistant) tokens.
@@ -53,13 +58,13 @@ __all__ = [
 ]
 
 
-PRICE_TABLE_VERSION: str = "2026-05-11"
+PRICE_TABLE_VERSION: str = "2026-05-28"
 """Sourcing-date stamp for :data:`PRICES`. Bump alongside any numeric edit."""
 
 
 @dataclass(frozen=True, slots=True)
 class ModelPricing:
-    """Per-million-token USD prices for one Anthropic SKU.
+    """Per-million-token USD prices for one provider SKU (Anthropic or OpenAI).
 
     ``frozen=True`` is the reproducibility invariant — once constructed,
     a :class:`ModelPricing` instance cannot mutate. ``slots=True`` keeps
@@ -77,13 +82,21 @@ class ModelPricing:
     cache_read_per_mtok: float
 
 
-# TODO: verify v0.1 ships with current pricing (refresh PRICE_TABLE_VERSION
-# above when these numbers change). Values below mirror Anthropic's
-# publicly published per-MTok pricing for the standard channel as of the
-# table version stamp; the Sonnet-family numbers are the canonical
-# reference point. Apply a deliberate refresh commit per the
-# "5-surface parity" rule in prune-engine.md when bumping any field.
+# TODO: verify each row ships with current pricing (refresh
+# PRICE_TABLE_VERSION above when these numbers change). Anthropic values
+# mirror the publicly published per-MTok pricing for the standard channel
+# as of the table version stamp; the Sonnet-family numbers are the
+# canonical reference point. OpenAI values are calibration figures
+# captured from OpenAI's public price page at PR-prep time (see
+# #136 US-004); operators should treat them as a sanity-check baseline
+# rather than a billing guarantee — bump PRICE_TABLE_VERSION any time
+# they're refreshed. OpenAI does not currently expose a prompt-cache
+# discount tier comparable to Anthropic's `cache_control`, so the two
+# OpenAI cache fields are 0.0 (no discount, no premium). Apply a
+# deliberate refresh commit per the "5-surface parity" rule in
+# prune-engine.md when bumping any field.
 _PRICES_MUTABLE: dict[str, ModelPricing] = {
+    # -- Anthropic SKUs ------------------------------------------------
     "claude-sonnet-4-6": ModelPricing(
         input_per_mtok=3.00,
         output_per_mtok=15.00,
@@ -102,10 +115,64 @@ _PRICES_MUTABLE: dict[str, ModelPricing] = {
         cache_write_5m_per_mtok=1.00,
         cache_read_per_mtok=0.08,
     ),
+    # -- OpenAI SKUs (#136 US-004, DEC-007) ----------------------------
+    # `gpt-4o` is the default judge per DEC-004; the other three are
+    # supported back-/cross-compat options. Cache fields are 0.0 — OpenAI
+    # has no Anthropic-equivalent `cache_control` discount tier.
+    "gpt-4o": ModelPricing(
+        input_per_mtok=2.50,
+        output_per_mtok=10.00,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
+    "gpt-4o-mini": ModelPricing(
+        input_per_mtok=0.15,
+        output_per_mtok=0.60,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
+    "gpt-4.1": ModelPricing(
+        input_per_mtok=2.00,
+        output_per_mtok=8.00,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
+    "gpt-4-turbo": ModelPricing(
+        input_per_mtok=10.00,
+        output_per_mtok=30.00,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
+    # -- Gemini SKUs (#137 US-006, DEC-017) ----------------------------
+    # `gemini-2.5-flash` is the documented mid-tier judge per DEC-004
+    # of #137; `gemini-2.5-pro` is the flagship; `gemini-2.0-flash` is
+    # the budget option. Cache fields are 0.0 — v0.3 Gemini ships
+    # without prompt caching (DEC-003). Per-Mtok USD figures from
+    # Google's public Gemini API pricing at PR-prep time
+    # (2026-05-27); `gemini-2.5-pro` figures are the base ≤200K
+    # context tier.
+    "gemini-2.5-pro": ModelPricing(
+        input_per_mtok=1.25,
+        output_per_mtok=10.00,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
+    "gemini-2.5-flash": ModelPricing(
+        input_per_mtok=0.30,
+        output_per_mtok=2.50,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
+    "gemini-2.0-flash": ModelPricing(
+        input_per_mtok=0.10,
+        output_per_mtok=0.40,
+        cache_write_5m_per_mtok=0.0,
+        cache_read_per_mtok=0.0,
+    ),
 }
 
 PRICES: Mapping[str, ModelPricing] = MappingProxyType(_PRICES_MUTABLE)
-"""Read-only mapping from Anthropic SKU to :class:`ModelPricing`.
+"""Read-only mapping from provider SKU (Anthropic or OpenAI) to :class:`ModelPricing`.
 
 ``MappingProxyType`` is the standard-library immutable-mapping wrapper:
 callers can iterate and look up entries, but cannot mutate the table
@@ -127,8 +194,8 @@ def lookup(model: str) -> ModelPricing:
     Raises :class:`EstimateUnknownModelError` (CLI tier 2) when ``model``
     is not in :data:`PRICES`. The remediation locked on
     :class:`EstimateUnknownModelError.default_remediation` points the
-    operator at either adding the SKU or picking one of the three v0.1
-    supported models.
+    operator at either adding the SKU or picking one of the supported
+    models (three Anthropic SKUs + four OpenAI SKUs as of #136 US-004).
 
     Returning the typed exception (rather than ``None`` or a sentinel)
     keeps downstream callers free of defensive branching — the

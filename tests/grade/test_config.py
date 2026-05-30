@@ -198,6 +198,74 @@ def test_grade_config_defaults_match_dec_023_to_027() -> None:
     assert cfg.min_mean_score == 0.5
     assert cfg.rubric is None
     assert cfg.fail_on_below_threshold is False
+    assert cfg.provider == "anthropic"
+
+
+# ----- Provider validator (issue #135 DEC-007) -----
+
+
+def test_grade_config_provider_defaults_to_anthropic() -> None:
+    """DEC-007 of #135: ``provider`` defaults to the registered ``"anthropic"``."""
+    assert GradeConfig().provider == "anthropic"
+
+
+def test_grade_config_provider_accepts_registered_name() -> None:
+    """DEC-007: a registered provider name is accepted by the validator."""
+    assert GradeConfig(provider="anthropic").provider == "anthropic"
+
+
+def test_grade_config_provider_accepts_openai() -> None:
+    """US-002 of #136: after ``OpenAIProvider`` is registered at import time,
+    ``GradeConfig(provider="openai", model="gpt-4o")`` validates without
+    error (DEC-005 of #136 — both stages accept ``provider: openai``)."""
+    cfg = GradeConfig(provider="openai", model="gpt-4o")
+    assert cfg.provider == "openai"
+    assert cfg.model == "gpt-4o"
+
+
+def test_grade_config_provider_accepts_gemini() -> None:
+    """#137 US-002: ``GeminiProvider`` registers under ``"gemini"`` at import
+    time so ``GradeConfig(provider="gemini", model="gemini-2.5-flash")``
+    validates cleanly. The registry membership IS the validation surface."""
+    cfg = GradeConfig(provider="gemini", model="gemini-2.5-flash")
+    assert cfg.provider == "gemini"
+    assert cfg.model == "gemini-2.5-flash"
+
+
+def test_grade_config_provider_rejects_unknown_with_available_keys() -> None:
+    """DEC-007: an unknown provider fails loud with a typed
+    :class:`UnknownProviderError` naming the registered providers.
+
+    ``UnknownProviderError`` is not a Pydantic ``ValidationError``, so it
+    propagates raw from the validator rather than being wrapped."""
+    from signalforge.llm.errors import UnknownProviderError
+
+    with pytest.raises(UnknownProviderError) as excinfo:
+        GradeConfig(provider="bogus")
+    assert excinfo.value.name == "bogus"
+    assert "anthropic" in str(excinfo.value)
+    assert "bogus" in str(excinfo.value)
+
+
+def test_load_grade_config_provider_round_trips_from_yaml(tmp_path: Path) -> None:
+    """DEC-007: the ``provider`` knob round-trips from the ``grade:`` block."""
+    (tmp_path / "signalforge.yml").write_text("grade:\n  provider: anthropic\n", encoding="utf-8")
+    cfg = load_grade_config(tmp_path)
+    assert cfg.provider == "anthropic"
+
+
+def test_load_grade_config_unknown_provider_fails_loud(tmp_path: Path) -> None:
+    """DEC-007: an unknown ``provider`` in ``signalforge.yml`` fails loud with
+    the typed :class:`UnknownProviderError` naming the registered providers.
+
+    The typed error propagates raw through ``load_grade_config`` rather than
+    being re-wrapped as ``GradeConfigError`` (it is not a ``ValidationError``)."""
+    from signalforge.llm.errors import UnknownProviderError
+
+    (tmp_path / "signalforge.yml").write_text("grade:\n  provider: bogus\n", encoding="utf-8")
+    with pytest.raises(UnknownProviderError) as excinfo:
+        load_grade_config(tmp_path)
+    assert "anthropic" in str(excinfo.value)
 
 
 # ----- Numeric validators -----

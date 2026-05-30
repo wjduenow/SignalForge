@@ -107,15 +107,16 @@ DEC-020 — every pipeline stage gets one top-level key). Sibling keys
 (`safety:`, `llm:`, `prune:`, future `diff:` …) are reserved for other
 stages and silently ignored by the grade loader.
 
-The full schema (every knob, every default, all v0.1 types) — extracted
-verbatim from `tests/fixtures/grade/example_config.yml` and exercised
-by `test_load_grade_config_doc_example_round_trips` so the doc and the
-loader cannot drift:
+The full schema (every knob, every default, all v0.1 types), mirroring
+`tests/fixtures/grade/example_config.yml` (exercised by
+`test_load_grade_config_doc_example_round_trips` so the example and the
+loader cannot drift):
 
 ```yaml
 # signalforge.yml — grade stage configuration (v0.1)
 grade:
-  model: claude-sonnet-4-6        # Anthropic model id (default)
+  provider: anthropic             # registry-validated; "anthropic" + "openai" + "gemini" are registered (see provider sections below)
+  model: claude-sonnet-4-6        # model id (default)
   cache_ttl: 1h                   # Prompt-cache TTL ('5m' or '1h')
   max_output_tokens: 256          # Per-criterion JSON response cap
   max_retries_429: 3              # Rate-limit retry budget
@@ -156,10 +157,11 @@ grade:
 
 Field-by-field:
 
-- **`model`** — The Anthropic model id used by every per-pair judge call. Default `claude-sonnet-4-6`. Mirrors `DraftConfig.model` default. Haiku 4.5 is documented as a v0.2 cost-conscious option but not exposed in v0.1.
+- **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point. Today `anthropic`, `openai`, and `gemini` are registered; see [OpenAI provider](#openai-provider) and [Gemini provider](#gemini-provider) below for the non-default options.
+- **`model`** — The model id used by every per-pair judge call. Default `claude-sonnet-4-6`. Mirrors `DraftConfig.model` default. Haiku 4.5 is documented as a v0.2 cost-conscious option but not exposed in v0.1.
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
 - **`max_output_tokens`** — Per-criterion judge response cap. Default `256`. The expected JSON response is ~150 tokens; 256 gives 2× safety. Independent of `DraftConfig.max_output_tokens`.
-- **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised `signalforge.llm.call_anthropic` seam (#5 DEC-012). Defaults `3 / 1 / 1` mirror `DraftConfig`; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.
+- **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised, provider-neutral `signalforge.llm.call_llm` seam (#5 DEC-012; #135 DEC-005). Defaults `3 / 1 / 1` mirror `DraftConfig`; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.
 - **`total_budget_seconds`** — Whole-run wall-clock budget. Default `300` (5 minutes — ~3× safety on 60 calls × 1s p50). Mirrors `PruneConfig.total_budget_seconds` semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped. **Crucially** the LLM-layer retry budget does NOT count against this — `total_budget_seconds` is a top-of-loop wall-clock check; an in-flight call is allowed to complete before the next iteration's check fires.
 - **`min_pass_rate`** — Floor on the fraction of `(artefact, criterion)` pairs that scored `passed=True` for the rubric to count as passed overall. Default `0.7`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_pass_rate`.
 - **`min_mean_score`** — Floor on the mean numeric score across non-null verdicts. Default `0.5`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_mean_score`.
@@ -431,12 +433,33 @@ what this costs.
 **Reference numbers, with the assumptions.** The default rubric has
 **4 criteria**; a typical drafted dbt model has **~12 artefacts**
 (column descriptions + column rationales + per-test rationales + model
-description + model rationale). With the default `model:
-claude-sonnet-4-6` and `cache_ttl: 1h`, a representative run costs:
+description + model rationale). A richer real-world fixture (the
+Austin bikeshare project used by the live e2e suite) exercises ~27
+artefacts/model → ~108 grade calls/model — adjust the per-model figures
+below proportionally for your own model shape.
 
-- **~$0.18 per model on Sonnet 4.6** (4 criteria × 12 artefacts × ~600
-  input tokens dynamic block + ~150 output tokens per call), pricing
-  date 2026-05.
+**Per-provider per-model cost (Austin bikeshare fixture, 2026-05-29
+measurement at pricing-table version `2026-05-28`):**
+
+| Provider × model                | Per-model cost | Notes                                                                                                            |
+|---------------------------------|----------------|------------------------------------------------------------------------------------------------------------------|
+| Anthropic `claude-sonnet-4-6`   | ~$0.38         | Drafter + grader on the BQ `[anthropic]` variant; baseline for the cost-control discussion below.                |
+| OpenAI `gpt-4o`                 | ~$0.21         | Grader-only on the BQ `[openai]` variant; drafter still Anthropic (DEC-011 of #155 pins drafter fixture stability). |
+| Gemini `gemini-2.5-flash`       | ~$0.045        | Grader-only on the BQ `[gemini]` variant; cheapest grade run by ~10× thanks to flash-tier pricing.               |
+
+These figures are a single 2026-05-29 measurement at pricing-table
+version `2026-05-28` — **calibration signal, not a billing guarantee.**
+Vendor pricing rotates; per-fixture artefact count varies; cache hit/miss
+state across a run drives ±5–10% noise on the Anthropic figure
+specifically. See
+[`plans/super/157-e2e-cost-and-parallel.md`](../plans/super/157-e2e-cost-and-parallel.md)
+§ "Measured baseline (2026-05-29)" for the full-suite rollup
+($1.38/run across the three providers).
+
+**Fan-out comparison vs the batched alternative:**
+
+- The per-criterion fan-out (one LLM call per `(criterion × artefact)`)
+  is what the figures above measure.
 - vs. **~$0.05 per model batched** (Q4=A in the plan — single judge
   call covering all criteria for one artefact at once). The
   per-criterion fan-out is **~3.4× more expensive**.
@@ -473,10 +496,16 @@ default fan-out is too expensive for their use case:
   off the output-token bill at marginal risk of truncated JSON
   (handled by `GradeOutputError(violation_type="json_parse")` and the
   degraded path).
-- **`cache_ttl: "1h"`** (default) — Cache-read economics. The cached
-  block (system prompt + rubric block) is constant across every call
-  in one `grade_artifacts` invocation; a 60-call run reads the cache
-  ~59 times after one write. Cache reads are 0.1× input pricing vs.
+- **`cache_ttl: "1h"`** (default) — Cache-read economics. Prompt
+  caching is a **provider capability** (issue #135): the `cache_control`
+  marker, the extended-cache-ttl beta header, and the pre-send
+  `count_tokens` gate are emitted only when the selected `LLMProvider`
+  reports `supports_prompt_caching` / `supports_token_count`. A provider
+  that supports neither reports 0 cache tokens and skips the marker; the
+  default `anthropic` provider supports both, so the economics below are
+  unchanged. The cached block (system prompt + rubric block) is constant
+  across every call in one `grade_artifacts` invocation; a 60-call run
+  reads the cache ~59 times after one write. Cache reads are 0.1× input pricing vs.
   1.25× for writes; the break-even is ~2 reads per write. Switching
   to `cache_ttl: "5m"` is rarely worth it — the only failure mode the
   shorter TTL catches is a multi-hour run where the cache would otherwise
@@ -488,6 +517,141 @@ default fan-out is too expensive for their use case:
 operators (DEC-014). The current architecture preserves the option:
 each criterion has its own prompt seam already, so a `cost_mode:
 batched` flag is additive rather than a rewrite.
+
+### Per-provider `max_output_tokens` recommended floors
+
+No per-provider override is enforced in code — `GradeConfig.max_output_tokens`
+is one knob across every provider. The floors below are observed-data
+recommendations from live grading runs; operators can lower for cost-cutting
+but must validate quality afterward. Truncated judge responses surface as
+`LLMResponseFormatError` (the provider-neutral `is_clean_completion` gate raises
+on any non-clean finish_reason — Anthropic `stop_reason="max_tokens"`, OpenAI
+`finish_reason="length"`, Gemini `finish_reason="MAX_TOKENS"`) and degrade
+the pair with `reasoning="call failed: GradeLLMError: <inner finish_reason message>"`
+per #155 DEC-005 + #158 (the inner provider message — naming the actual
+`finish_reason` value — is surfaced into the audit JSONL so a residual
+degrade is self-diagnosing without re-reading stderr).
+
+| Provider                 | Recommended floor | Rationale                                                                                                                                                                                                                                                  |
+|--------------------------|-------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Anthropic (Sonnet 4.6+)  | 1024              | Sufficient for full reasoning; tested in BQ smoke.                                                                                                                                                                                                         |
+| OpenAI (gpt-4o)          | 1024              | Same headroom; no observed truncation.                                                                                                                                                                                                                     |
+| Gemini (2.5-flash+)      | **4096**          | Verbose reasoning style; 512 / 1024 observed truncating mid-string (#155 DEC-008). 2048 verified safe at the 5-pair in-isolation smoke scale but **#158 found 5–6/108 pairs still degrade at 2048 on the full Austin fixture** — 4096 is the fixture-scale floor. |
+
+> **Fixture-scale caveat (issue #158):** these floors are *necessary
+> but not sufficient* — Gemini's per-pair `reasoning` length is
+> high-variance, so a fixture with substantially more artifacts than
+> the Austin bikeshare e2e (~27 artifacts × 4 criteria = ~108 pairs)
+> may still see residual `MAX_TOKENS` degrades at 4096. The honest
+> guidance is to treat the floor as fixture-scale-dependent: validate
+> with a full-fixture run, watch `GradingReport.aggregate_complete`,
+> and bump if any pair degrades with `reasoning` mentioning
+> `finish_reason='MAX_TOKENS'`. The diagnostic in the degrade reasoning
+> tells you exactly which `finish_reason` fired.
+
+## OpenAI provider
+
+Issue #136 registered `OpenAIProvider` as the second
+`signalforge.llm.providers.LLMProvider`. Select it by setting
+`grade.provider: openai` in `signalforge.yml`:
+
+```yaml
+grade:
+  provider: openai
+  model: gpt-4o            # default judge model for the OpenAI provider; any model id the SDK accepts is allowed
+  # cache_ttl, max_retries_*, total_budget_seconds, thresholds — same shape as the anthropic provider
+```
+
+Requirements:
+
+- **Install extra:** `pip install signalforge-dbt[openai]` (or `uv sync --dev` in a contributor checkout). Pulls `openai>=1.40` plus `tiktoken` for the `--estimate` cost-preview path.
+- **Env var:** `OPENAI_API_KEY` (mirrors `ANTHROPIC_API_KEY` for the default provider).
+- **Pricing SKUs registered:** `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4-turbo`. Other model ids raise `EstimateUnknownModelError` from the `--estimate` path (the live judge call still runs; `--estimate` is the only surface that requires a pricing row). See [`docs/cost-estimate-ops.md`](cost-estimate-ops.md).
+
+**No prompt caching (cost note).** OpenAI's Chat Completions surface
+does not expose Anthropic-style prompt caching. `OpenAIProvider`
+reports `supports_prompt_caching=False` and `supports_token_count=False`,
+which means the orchestrator (`signalforge.llm.call_llm`) skips both
+the `cache_control` marker and the pre-send `count_tokens` gate
+(issue #135 DEC-008). **Every grading call ships the full system +
+rubric block** — there is no cached read discount on subsequent
+criteria, so the per-`(artefact × criterion)` fan-out (see
+[Cost guidance](#cost-guidance-dec-014) above) costs a flat
+input-token bill on every call. Budget accordingly: a 4-criterion ×
+12-artefact run is 48 full system+rubric sends, not one write + 47
+reads. v0.3 ships without prompt caching; OpenAI's recent prompt-cache
+mechanism is a candidate for a follow-up.
+
+**Server-enforced JSON.** `OpenAIProvider.build_create_kwargs`
+attaches `response_format={"type": "json_object"}` so the judge model
+is forced to emit valid JSON server-side (DEC-006). The tolerant
+`extract_json_payload` parser (issue #144) remains as defence-in-depth
+for the same prose-preamble drift class the Anthropic path handles.
+
+**Live smoke gating.** A gated `@pytest.mark.openai` real-API
+end-to-end test exercises grading against `gpt-4o`. Run it with:
+
+```bash
+SF_RUN_OPENAI=1 OPENAI_API_KEY=sk-... uv run pytest -m openai --no-cov
+```
+
+Mirrors the `@pytest.mark.anthropic` precedent — excluded from the
+default CI run via `addopts -m 'not openai'`; both env vars are
+required (each missing var produces a clear skip reason). See
+[`docs/cost-estimate-ops.md`](cost-estimate-ops.md) for the
+maintainer's three-test smoke set (grader + drafter + `--estimate`).
+
+## Gemini provider
+
+Issue #137 registered `GeminiProvider` as the third LLM provider behind the
+provider-neutral seam (#135). Select it via `grade.provider: gemini` in
+`signalforge.yml`:
+
+```yaml
+grade:
+  provider: gemini
+  model: gemini-2.5-flash    # default mid-tier judge; gemini-2.5-pro and gemini-2.0-flash are also registered
+  cache_ttl: 1h              # accepted but ignored — Gemini ships without caching in v0.3
+```
+
+- **Install extra:** `pip install signalforge-dbt[gemini]` (or `uv sync --dev` in a contributor checkout). Pulls `google-genai>=0.5,<1`.
+- **Env var:** `GOOGLE_API_KEY` (read by the SDK; SignalForge never logs it).
+- **Server-side JSON enforcement:** `GeminiProvider.build_create_kwargs` sets `response_mime_type="application/json"` on the `GenerateContentConfig` (DEC-018 of #137). Belt-and-braces with the tolerant `extract_json_payload` parser.
+- **Safety-filter / non-clean finish_reason handling:** Two related paths both route through the same degrade. (1) The provider-neutral `LLMProvider.is_clean_completion(response)` gate inside `call_llm` (DEC-005 of #155) raises `LLMResponseFormatError` when `finish_reason` is anything but `STOP` — including `SAFETY`, `RECITATION`, `OTHER`, `MAX_TOKENS` (even when partial text is present). (2) The legacy `GeminiProvider.extract_text_blocks` raise (DEC-005 of #137) still fires when zero text parts are returned. Either way, the grade engine wraps the result as `GradeLLMError` and degrades the affected pair via the conservative `score=None` / `reasoning="call failed: GradeLLMError: <inner finish_reason message>"` taxonomy (#158 surfaces the inner provider message into the audit field so the actual `finish_reason` value — `SAFETY` vs `RECITATION` vs `MAX_TOKENS` — is recoverable from `.signalforge/grade.jsonl` alone).
+
+**No prompt caching (cost note — DEC-013 of #137).** v0.3 Gemini ships
+**without** prompt caching. `GeminiProvider` reports
+`supports_prompt_caching=False` / `supports_token_count=False`, so
+`call_llm` skips the `cache_control` marker, the `extended-cache-ttl` beta
+header, the dual-zero cache-anomaly WARNING, AND the pre-send
+`count_tokens` gate. Every grade call transmits the full system + rubric
+prompt; there is no Anthropic-style discount on the cached prefix. For a
+default 4-criterion rubric over a 12-column model (~48 sequential calls),
+budget the per-call cost accordingly. Explicit Gemini context caching is
+tracked as a follow-up.
+
+**`--estimate` integration (active).** `signalforge generate --estimate`
+with `grade.provider: gemini` works end-to-end via Gemini's native
+`client.models.count_tokens` (US-007 of #137; DEC-016). One extra API
+round-trip per estimate call — comparable in shape to Anthropic's
+`messages.count_tokens` and distinct from OpenAI's local `tiktoken`
+path. The grader-side USD figure uses the Gemini pricing SKUs registered
+in `signalforge.llm.pricing` (`gemini-2.5-pro`, `gemini-2.5-flash`,
+`gemini-2.0-flash`). Network or auth failures surface as
+`<unavailable: <ErrorClass>>` via the conservative-bias supplementary-
+failure path (DEC-005 of #36); operators see a calibration signal, not
+an aborted run.
+
+**Live smoke.** A `@pytest.mark.gemini` gated end-to-end test exercises
+grading against `gemini-2.5-flash`. Run it with:
+
+```bash
+SF_RUN_GEMINI=1 GOOGLE_API_KEY=... uv run pytest -m gemini --no-cov
+```
+
+Mirrors the `@pytest.mark.anthropic` / `@pytest.mark.openai` precedent —
+excluded from the default CI run via `addopts -m 'not gemini'`; both env
+vars are required.
 
 ## Prompt-injection mitigation
 

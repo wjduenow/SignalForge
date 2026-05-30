@@ -68,3 +68,6 @@ work-*/
 # MkDocs build output (CI publishes to gh-pages branch; local builds are throwaway)
 site/
 
+# Scratch / working notes — not part of the published docs set
+docs/temp/
+

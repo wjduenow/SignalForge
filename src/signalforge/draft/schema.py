@@ -59,9 +59,9 @@ from signalforge.draft.errors import (
 )
 from signalforge.draft.models import CandidateSchema
 from signalforge.draft.parser import _LLMResultMeta, parse_draft_response
-from signalforge.draft.prompts import render_prompt
+from signalforge.draft.prompts import _read_business_rules, render_prompt
 from signalforge.llm import AnthropicClientProtocol
-from signalforge.llm.client import call_anthropic
+from signalforge.llm.client import call_llm
 from signalforge.llm.models import LLMResult
 from signalforge.manifest.models import Manifest, Model
 from signalforge.safety.models import LLMRequest
@@ -123,7 +123,7 @@ def draft_from_request(
     Steps (each owned by a separate US):
 
     1. Render the four-part prompt (US-010 / :func:`render_prompt`).
-    2. Issue the LLM call via the seam (US-006 / :func:`call_anthropic`).
+    2. Issue the LLM call via the seam (US-006 / :func:`call_llm`).
     3. Parse + anchor-validate the response (US-011 /
        :func:`parse_draft_response`). Parse errors propagate as
        :class:`LLMOutputJSONError` /
@@ -155,7 +155,7 @@ def draft_from_request(
             JSONL sits next to it.
         _client: optional dependency-injection seam for tests. Production
             callers leave this ``None`` and let
-            :func:`signalforge.llm.client.call_anthropic` lazy-construct
+            :func:`signalforge.llm.client.call_llm` lazy-construct
             a real ``anthropic.Anthropic``.
 
     Returns:
@@ -183,7 +183,7 @@ def draft_from_request(
     )
 
     # 2. Issue the LLM call through the seam.
-    result = call_anthropic(
+    result = call_llm(
         system=system,
         cached_block=cached,
         dynamic_block=dynamic,
@@ -194,6 +194,7 @@ def draft_from_request(
         max_retries_429=config.max_retries_429,
         max_retries_5xx=config.max_retries_5xx,
         max_retries_conn=config.max_retries_conn,
+        provider=config.provider,
         client=_client,
     )
 
@@ -207,11 +208,27 @@ def draft_from_request(
         output_tokens=result.output_tokens,
     )
     model_columns: frozenset[str] = frozenset(c.name for c in model.columns_list)
+    # Issue #159 — build column-name → data_type map for the parser's
+    # type-coherence defence. v0.1 hard-codes BigQuery; v0.2 multi-warehouse
+    # threads the dialect through the safety policy (DEC-013).
+    # TODO: source dialect_name from safety_policy.warehouse_dialect_name
+    # when v0.2 multi-warehouse lands.
+    model_columns_by_type: dict[str, str | None] = {c.name: c.data_type for c in model.columns_list}
+    # Issue #163 US-002 — collect operator-declared business rules so the
+    # parser cardinality gate (DEC-002) can enforce at-least-one-custom_sql-
+    # test-per-rule. ``_read_business_rules`` is the single source of truth
+    # — same helper the prompt renderer uses, so the parser sees exactly
+    # the rule strings (with their ``(model)`` / ``(column X)`` prefixes)
+    # that the LLM saw.
+    business_rules: tuple[str, ...] = tuple(_read_business_rules(model))
     candidate = parse_draft_response(
         result.response_text,
         model_columns,
         llm_result_meta=meta,
         exclude_tests=frozenset(config.exclude_tests),
+        model_columns_by_type=model_columns_by_type,
+        dialect_name="bigquery",
+        business_rules=business_rules,
     )
 
     # 4. Write the response-audit record. Fail-closed (DEC-011):

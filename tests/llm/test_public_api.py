@@ -21,7 +21,7 @@ import signalforge.llm as llm_pkg
 
 _DOCUMENTED_PUBLIC = (
     # Function
-    "call_anthropic",
+    "call_llm",
     # Result model
     "LLMResult",
     # Client protocol (issue #44 — promoted from the private
@@ -41,11 +41,25 @@ _DOCUMENTED_PUBLIC = (
     "LLMCacheTooLargeError",
     # Errors — estimate cost preview (US-001 of #36)
     "EstimateUnknownModelError",
+    # Errors — provider registry (US-001 of #135)
+    "UnknownProviderError",
     # Pricing surface (US-001 of #36)
     "PRICE_TABLE_VERSION",
     "PRICES",
     "ModelPricing",
     "lookup",
+    # Provider seam (US-001 of #135) — neutral value objects + ABC + registry.
+    "ExceptionCategory",
+    "UsageMetrics",
+    "LLMProvider",
+    "register_provider",
+    "provider_for",
+    # Anthropic strategy (US-002 of #135) — registered at import time.
+    "AnthropicProvider",
+    # OpenAI strategy (US-002 of #136) — registered at import time.
+    "OpenAIProvider",
+    # Gemini strategy (US-002 of #137) — registered at import time.
+    "GeminiProvider",
 )
 
 
@@ -70,19 +84,28 @@ def test_each_public_name_is_importable_via_from_signalforge_llm() -> None:
         PRICE_TABLE_VERSION,
         PRICES,
         AnthropicClientProtocol,
+        AnthropicProvider,
         EstimateUnknownModelError,
+        ExceptionCategory,
+        GeminiProvider,
         LLMAuthError,
         LLMCacheTooLargeError,
         LLMConnectionError,
         LLMError,
         LLMHelperError,
+        LLMProvider,
         LLMRateLimitError,
         LLMResponseFormatError,
         LLMResult,
         LLMServerError,
         ModelPricing,
-        call_anthropic,
+        OpenAIProvider,
+        UnknownProviderError,
+        UsageMetrics,
+        call_llm,
         lookup,
+        provider_for,
+        register_provider,
     )
 
 
@@ -101,6 +124,7 @@ def test_typed_errors_subclass_llm_error() -> None:
         LLMRateLimitError,
         LLMResponseFormatError,
         LLMServerError,
+        UnknownProviderError,
     )
 
     for cls in (
@@ -112,5 +136,6 @@ def test_typed_errors_subclass_llm_error() -> None:
         LLMRateLimitError,
         LLMResponseFormatError,
         LLMServerError,
+        UnknownProviderError,
     ):
         assert issubclass(cls, LLMError), f"{cls.__name__} is not an LLMError subclass"

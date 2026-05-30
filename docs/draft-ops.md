@@ -15,10 +15,15 @@ call. It sits **after** the safety layer (which produces the
 `LLMRequest`) and **before** prune / grade / diff render
 (#6 / #7 / #8). Two subpackages share the work (DEC-001):
 
-- `signalforge.llm` — the centralized SDK seam. One function,
-  `call_anthropic`, owns retry policy, prompt-cache pre-send checks,
-  exception translation, and the `LLMResult` value object. No other
-  module imports the `anthropic` SDK.
+- `signalforge.llm` — the centralized, provider-neutral LLM seam. One
+  function, `call_llm`, owns the retry loop, backoff math, prompt-cache
+  pre-send checks, and the `LLMResult` value object; a pluggable
+  `LLMProvider` strategy (resolved from a process-level registry) owns
+  the vendor-specific request build, response extraction, and
+  exception classification (issue #135). The default provider is
+  `anthropic`; its SDK noise (type-stub gaps, lazy exception-class
+  import) stays confined to `signalforge.llm._anthropic_client`. No
+  other module imports the `anthropic` SDK.
 - `signalforge.draft` — the orchestration layer on top of that seam.
   Owns the prompt builder, the JSON + anchor-contract parser, the
   fail-closed response-audit JSONL writer, and the `draft_schema` /
@@ -51,7 +56,7 @@ the layer stays SDK-agnostic and pyright-clean.
 
 | Name                     | Kind      | Description                                                                                                          |
 | ------------------------ | --------- | -------------------------------------------------------------------------------------------------------------------- |
-| `call_anthropic`         | function  | The single Anthropic `messages.create` seam. Owns retry policy + cache pre-send check. Returns `LLMResult`.          |
+| `call_llm`               | function  | The single provider-neutral LLM seam. Owns retry policy + cache pre-send check; selects an `LLMProvider` strategy by name (default `"anthropic"`). Returns `LLMResult`. |
 | `LLMResult`              | model     | Frozen result shape: `text_blocks`, `response_text`, token counts (input/output/cache_creation/cache_read), `model`, `prompt_version`, `raw_message`. |
 | `LLMError`               | exception | Base class for everything in `signalforge.llm.errors`.                                                               |
 | `LLMHelperError`         | exception | Umbrella for SDK-call failures. Subclasses cover the retry-taxonomy branches.                                        |
@@ -275,6 +280,80 @@ Business-rule reading is **best-effort, never fail-loud.** A
 inferred-fallback path below covers the gap. Whitespace-only strings
 collapse to nothing, so an empty `meta` value emits no section.
 
+### Numbered envelope shape (`<BUSINESS_RULE id="N">…</BUSINESS_RULE>`)
+
+As of #163, each rule renders inside a numbered envelope rather than a
+bare bullet:
+
+```text
+## BUSINESS RULES
+
+Operator-supplied business rules for this model. Draft one custom_sql
+test per rule below, using the rule ID as a reference:
+
+<BUSINESS_RULE id="1">
+  (model) total_amount must never be negative
+</BUSINESS_RULE>
+<BUSINESS_RULE id="2">
+  (column discount_pct) discount_pct stays between 0 and 100 inclusive
+</BUSINESS_RULE>
+```
+
+IDs start at 1; bodies are indented 2 spaces and carry the existing
+`(model)` / `(column X)` scope prefix. The envelope gives the LLM
+unambiguous reference targets and parallels the existing `<MODEL_SQL>`
+fence around the model's raw SQL.
+
+**Envelope-breach guard.** A rule body containing the literal
+`</BUSINESS_RULE>` substring would terminate the fence early and let
+downstream content escape the data block. Before rendering, the
+drafter scans every rule for that exact substring (boring substring
+match — no whitespace / case normalisation, mirrors the `</MODEL_SQL>`
+precedent) and raises `PromptEnvelopeBreachError(envelope="BUSINESS_RULE",
+rule_index=N)` if found. **The opening tag `<BUSINESS_RULE>` alone
+is fine** (only the closing tag breaks the fence), as is any truncated
+fragment like `</BUSINESS_RUL`. The error class is the same one used
+for `</MODEL_SQL>` — extended in #163 with `envelope=` / `rule_index=`
+kwargs rather than subclassed. Future envelopes follow the same shape.
+
+### Cardinality contract (at-least-one-per-rule)
+
+The drafter's anchor-contract validator enforces a hard contract on
+the LLM's output: when `meta.signalforge.business_rules` declares N
+rules AND `custom_sql` is NOT excluded via `DraftConfig.exclude_tests`,
+the response MUST carry **at least N `custom_sql` tests** (counted
+across both model-level `tests:` and per-column `columns[*].tests`).
+Fewer is rejected loudly via `LLMOutputAnchorContractError` with a
+violation message that lists every declared rule verbatim:
+
+```text
+Expected ≥2 custom_sql test(s) (one per declared business rule), got 1.
+Declared rules: '(model) total_amount must never be negative',
+'(column discount_pct) discount_pct stays between 0 and 100 inclusive'.
+```
+
+The gate is **at-least, not exact-equality** — the LLM may legitimately
+decompose a complex rule into two SELECTs, and the excess is allowed.
+The collect-all invariant is preserved: a candidate with both a
+hallucinated column AND a cardinality miss surfaces both violations in
+one error. The gate is a no-op when no rules are declared (the
+inferred-fallback path stays open) and a no-op when `custom_sql` is in
+`DraftConfig.exclude_tests` (see below).
+
+### `exclude_tests` short-circuit
+
+When `draft.exclude_tests` in `signalforge.yml` contains `"custom_sql"`,
+both surfaces no-op:
+
+- `_render_business_rules_section` returns `""` — the drafter does not
+  send rules to the LLM (no point asking for tests the operator forbade).
+- The parser's cardinality gate is skipped — no violation fires even
+  when rules are declared.
+
+The per-test `exclude_tests` filter at the parser still catches any
+`custom_sql` an LLM defies-the-prompt to emit. The two layers are
+orthogonal — together they preserve the operator's choice.
+
 ### Inferred fallback
 
 You do **not** have to declare any rules. When no
@@ -338,6 +417,14 @@ file in the diff (see
 [`docs/cli-ops.md`](cli-ops.md#signalforge-generate-model)).
 
 ## Cache behaviour
+
+Prompt caching is a **provider capability** (issue #135): the seam
+emits a `cache_control` marker, the `extended-cache-ttl-2025-04-11`
+beta header, and the pre-send `count_tokens` gate only when the
+selected `LLMProvider` reports `supports_prompt_caching` /
+`supports_token_count`. A provider that supports neither simply reports
+0 cache tokens and skips the marker. The default `anthropic` provider
+supports both, so the behaviour below is unchanged.
 
 Default `cache_ttl="5m"`; opt in to `"1h"` via `DraftConfig.cache_ttl`
 (DEC-005, DEC-009). The `extended-cache-ttl-2025-04-11` beta header
@@ -457,6 +544,103 @@ except LLMOutputAnchorContractError as exc:
     raise
 ```
 
+## Type-coherence defence (issue #159)
+
+`_validate_anchor_contract` extends the structural anchor-contract
+checks with a sqlglot-based type-coherence pass for `custom_sql`
+business-rule tests. Cooperative LLMs see real warehouse column types
+in the cached manifest summary and emit type-coherent SQL on their
+own; this parser-side check is the belt-and-braces defence for
+candidates that slip past — a dual-defence pattern mirroring
+`exclude_tests` (prompt filter + parser rejection).
+
+### What it catches
+
+The check walks binary comparison nodes (`<>`, `=`, `<`, `>`, `<=`,
+`>=`) in the drafted SQL and flags violations where:
+
+- Both operands are bare column references (NOT `CAST`, `SAFE_CAST`,
+  `COALESCE`, `IFNULL`, function calls, subqueries, literals, `NULL`,
+  or window functions).
+- Both columns have known types in the manifest's `Column.data_type`
+  field.
+- The two types are incompatible per sqlglot's BigQuery
+  `TypeAnnotator.COERCES_TO` table (bidirectional check —
+  `INT64 ↔ STRING` is flagged; `INT64 ↔ FLOAT64` and
+  `NUMERIC ↔ BIGNUMERIC` are accepted as legal cross-numeric coercions
+  per BigQuery's conversion rules).
+
+Violations append to the same `LLMOutputAnchorContractError.violations`
+tuple as the structural checks — no new error class. A candidate with
+BOTH a hallucinated column AND a type mismatch surfaces BOTH
+violations in one error (collect-all invariant preserved).
+
+### What it deliberately skips
+
+Zero false-positives on legitimate SQL is the design contract; missing
+some real bugs is the acceptable tradeoff. The check skips silently
+when:
+
+- Either operand is wrapped in `CAST` / `SAFE_CAST` / `COALESCE` /
+  `IFNULL` / a function call / a subquery — the operator's intent is
+  ambiguous from a type perspective; defer to the warehouse.
+- Either side is a literal, `NULL`, or a window-function expression.
+- Either column's `data_type` is `None` (unknown — the drafter prompt
+  rendered "UNKNOWN" for the same column; the check can't be more
+  certain than the prompt).
+- The SQL fails to parse (`sqlglot.errors.ParseError`); the warehouse
+  adapter will catch it downstream and route through
+  `kept-without-evidence`.
+- The drafted SQL references `{{ this }}` or other Jinja templates —
+  these are substituted to a placeholder before parsing so the
+  WHERE-clause comparison nodes remain analysable.
+
+When the check skips, the prune engine remains the safety net:
+type-incoherent SQL that reaches the warehouse compiles to a
+`QuerySyntaxError`, which routes through `_InvalidIdentifier` →
+`kept-without-evidence` per `prune-engine.md` § "Conservative-bias
+routing template."
+
+### Threading column types into the parser
+
+`parse_draft_response` accepts two new keyword-only parameters:
+
+```python
+parse_draft_response(
+    raw_text,
+    model_columns,
+    *,
+    model_columns_by_type: Mapping[str, str | None] | None = None,
+    dialect_name: str = "bigquery",
+    exclude_tests: frozenset[str] = frozenset(),
+)
+```
+
+`draft_from_request` builds `model_columns_by_type` from
+`model.columns_list` and threads through. When
+`model_columns_by_type=None` or every column's `data_type` is `None`,
+the type-coherence arm is a no-op (structural anchor-contract checks
+still run as before). For populating `data_type` from your dbt
+project, see
+[`docs/manifest-loader-ops.md` § Column types from catalog.json](manifest-loader-ops.md#column-types-from-catalogjson-issue-159).
+
+### Dialect support
+
+v0.3 hardcodes `dialect_name="bigquery"` at the orchestrator (a TODO
+in `draft.schema` marks the v0.2-of-multi-warehouse handoff). sqlglot
+also supports Snowflake and Postgres dialects; when the warehouse
+layer surfaces those as first-class adapters, the orchestrator will
+source `dialect_name` from the safety policy or adapter. No prompt or
+config change planned.
+
+### Dependency
+
+sqlglot is pinned at `sqlglot>=30,<31` in
+`[project].dependencies`. It was a dev-only transitive (via
+`fakesnow`) before #159; promoting to runtime is a deliberate
+~15MB add for `signalforge-dbt` PyPI users in exchange for the
+type-coherence defence.
+
 ## `prompt_version` cross-reference
 
 `prompt_version` is a deterministic 16-hex-char blake2b digest of the
@@ -507,6 +691,7 @@ other stages and silently ignored by the draft loader.
 ```yaml
 # signalforge.yml
 llm:
+  provider: anthropic        # registry-validated; "anthropic" + "openai" + "gemini" are registered (see provider sections below)
   model: claude-sonnet-4-6
   cheap_model: claude-haiku-4-5-20251001
   max_output_tokens: 4096
@@ -519,9 +704,16 @@ llm:
 
 Field-by-field:
 
-- **`model`** — the Anthropic model id used by every `call_anthropic`
-  invocation. Default `claude-sonnet-4-6`. Any string the SDK accepts
-  is allowed.
+- **`provider`** — the LLM provider strategy name (issue #135 DEC-007),
+  resolved against the `signalforge.llm.providers` registry and threaded
+  into `call_llm` from `draft_schema`. Default `"anthropic"`. An unknown
+  value fails loud at config-load, listing the registered provider
+  names. Deliberately a registry-validated `str`, not a `Literal` — the
+  provider registry is a forward-looking plugin point. Today `anthropic`,
+  `openai`, and `gemini` are registered; see [OpenAI provider](#openai-provider)
+  and [Gemini provider](#gemini-provider) below for the non-default options.
+- **`model`** — the model id used by every `call_llm` invocation.
+  Default `claude-sonnet-4-6`. Any string the SDK accepts is allowed.
 - **`cheap_model`** — informational; not selected automatically.
   The CLI (#9) flips on `--cheap` to swap `model` for this value.
   Default `claude-haiku-4-5-20251001`.
@@ -557,6 +749,116 @@ trip the strict validator.
 If `signalforge.yml` is missing entirely (or the `llm:` key is absent),
 `load_draft_config(project_dir)` returns the built-in defaults
 silently — same behaviour as `load_safety_config`.
+
+### Per-provider `max_output_tokens` recommended floors
+
+No per-provider override is enforced in code — `DraftConfig.max_output_tokens`
+is one knob across every provider. The floors below are observed-data
+recommendations from live drafting runs; operators can lower for cost-cutting
+but must validate quality afterward (truncated draft responses surface as
+`LLMOutputJSONError` or `LLMOutputAnchorContractError` and fail the run rather
+than ship a partial `schema.yml`).
+
+| Provider                 | Recommended floor | Rationale                                                                                                                                                                                                                |
+|--------------------------|-------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Anthropic (Sonnet 4.6+)  | 1024              | Sufficient for full reasoning; tested in BQ smoke.                                                                                                                                                                       |
+| OpenAI (gpt-4o)          | 1024              | Same headroom; no observed truncation.                                                                                                                                                                                   |
+| Gemini (2.5-flash+)      | **4096**          | Verbose reasoning style; 512 / 1024 observed truncating mid-string (#155 DEC-008). The 4096 figure is a **conservative mirror of the #158 Gemini-grader floor** (Gemini's per-pair output is high-variance enough that the grader's 5–6/108 degrades-at-2048 finding applies to any verbose response). The drafter currently runs Anthropic in every shipped e2e, so this row is **pending Gemini-drafter live validation** — when that lands, update with measured evidence. |
+
+## OpenAI provider
+
+Issue #136 registered `OpenAIProvider` as the second
+`signalforge.llm.providers.LLMProvider`. Select it by setting
+`llm.provider: openai` in `signalforge.yml`:
+
+```yaml
+llm:
+  provider: openai
+  model: gpt-4o            # default drafter model for the OpenAI provider; any model id the SDK accepts is allowed
+  max_output_tokens: 4096
+  # cache_ttl, max_retries_*, exclude_tests — same shape as the anthropic provider (cache_ttl is ignored, see below)
+```
+
+Requirements:
+
+- **Install extra:** `pip install signalforge-dbt[openai]` (or `uv sync --dev` in a contributor checkout). Pulls `openai>=1.40` plus `tiktoken` for the `--estimate` cost-preview path.
+- **Env var:** `OPENAI_API_KEY` (mirrors `ANTHROPIC_API_KEY` for the default provider).
+- **Pricing SKUs registered:** `gpt-4o`, `gpt-4o-mini`, `gpt-4.1`, `gpt-4-turbo`. Other model ids raise `EstimateUnknownModelError` from the `--estimate` path (the live draft call still runs; `--estimate` is the only surface that requires a pricing row). See [`docs/cost-estimate-ops.md`](cost-estimate-ops.md).
+
+**No prompt caching (cost note).** OpenAI's Chat Completions surface
+does not expose Anthropic-style prompt caching. `OpenAIProvider`
+reports `supports_prompt_caching=False` and `supports_token_count=False`,
+which means the orchestrator (`signalforge.llm.call_llm`) skips both
+the `cache_control` marker and the pre-send `count_tokens` gate
+(issue #135 DEC-008). **The `cache_ttl` config knob is silently
+ignored** for the OpenAI provider — every drafting call ships the full
+system + cached manifest summary on every invocation, with no read
+discount. For batch-CLI usage (`signalforge generate --select`) the
+absence of caching is the main cost delta vs. the Anthropic provider;
+budget input-token spend at full per-call rates. v0.3 ships without
+OpenAI prompt caching; their recent prompt-cache mechanism is a
+candidate for a follow-up.
+
+**Server-enforced JSON.** `OpenAIProvider.build_create_kwargs`
+attaches `response_format={"type": "json_object"}` so the drafter
+model is forced to emit valid JSON server-side (DEC-006). The tolerant
+`extract_json_payload` parser (issue #144) remains as defence-in-depth.
+
+**Live smoke gating.** A gated `@pytest.mark.openai` real-API
+end-to-end test exercises drafting against `gpt-4o`. Run it with:
+
+```bash
+SF_RUN_OPENAI=1 OPENAI_API_KEY=sk-... uv run pytest -m openai --no-cov
+```
+
+Mirrors the `@pytest.mark.anthropic` precedent — excluded from the
+default CI run via `addopts -m 'not openai'`; both env vars are
+required (each missing var produces a clear skip reason). See
+[`docs/cost-estimate-ops.md`](cost-estimate-ops.md) for the
+maintainer's three-test smoke set (drafter + grader + `--estimate`).
+
+## Gemini provider
+
+Issue #137 registered `GeminiProvider` as the third LLM provider behind the
+provider-neutral seam (#135). Select it via `llm.provider: gemini` in
+`signalforge.yml`:
+
+```yaml
+llm:
+  provider: gemini
+  model: gemini-2.5-flash    # default mid-tier drafter; gemini-2.5-pro and gemini-2.0-flash are also registered
+  cache_ttl: 1h              # accepted but ignored — Gemini ships without caching in v0.3
+```
+
+- **Install extra:** `pip install signalforge-dbt[gemini]` (or `uv sync --dev` in a contributor checkout). Pulls `google-genai>=0.5,<1`.
+- **Env var:** `GOOGLE_API_KEY` (read by the SDK; SignalForge never logs it).
+- **Server-side JSON enforcement:** `GeminiProvider.build_create_kwargs` sets `response_mime_type="application/json"` on the `GenerateContentConfig` (DEC-018 of #137).
+
+**No prompt caching (cost note — DEC-013 of #137).** v0.3 Gemini ships
+**without** prompt caching. `GeminiProvider` reports
+`supports_prompt_caching=False` / `supports_token_count=False`, so
+`call_llm` skips the `cache_control` marker, the `extended-cache-ttl` beta
+header, and the pre-send `count_tokens` gate. Every drafter call
+transmits the full cached_block + dynamic_block; there is no
+Anthropic-style discount on the cached prefix. The drafter is one call
+per `signalforge generate` invocation, so the per-call overhead is
+modest compared to the grader's 4-criterion fan-out — but explicit
+Gemini context caching is still a tracked follow-up.
+
+**`--estimate` integration (active).** `signalforge generate --estimate`
+with `llm.provider: gemini` works end-to-end via Gemini's native
+`client.models.count_tokens` (US-007 of #137; DEC-016). One extra API
+round-trip per estimate call. The drafter-side USD figure uses the
+Gemini pricing SKUs registered in `signalforge.llm.pricing`. Network
+or auth failures surface as `<unavailable: <ErrorClass>>` via the
+conservative-bias supplementary-failure path.
+
+**Live smoke.** A `@pytest.mark.gemini` gated end-to-end test exercises
+drafting against `gemini-2.5-flash`. Run it with:
+
+```bash
+SF_RUN_GEMINI=1 GOOGLE_API_KEY=... uv run pytest -m gemini --no-cov
+```
 
 ## Error hierarchy
 
