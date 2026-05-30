@@ -380,3 +380,47 @@ def test_prompt_envelope_breach_business_rule_envelope_carries_rule_index_attr()
     err = PromptEnvelopeBreachError("model.sf.foo", envelope="BUSINESS_RULE", rule_index=3)
     assert err.rule_index == 3
     assert err.envelope == "BUSINESS_RULE"
+
+
+@pytest.mark.unit
+@pytest.mark.draft
+def test_prompt_envelope_breach_business_rule_envelope_without_rule_index_falls_through() -> None:
+    """QG invariant test (Pass 3 finding 1): a state-mismatched call
+    (``envelope="BUSINESS_RULE"`` with ``rule_index=None``) routes through
+    the ``else`` branch in ``__init__`` and renders the default
+    ``</MODEL_SQL>`` message. Attributes still reflect what was passed.
+
+    Pins the constructor invariant so a future refactor (e.g. a silent
+    fallback that defaults ``rule_index`` to ``1``) can't silently regress
+    the rendering of error messages on the BUSINESS_RULE side. The
+    production call sites always pair ``envelope="BUSINESS_RULE"`` with a
+    1-indexed ``rule_index`` — this test is the latent-invariant gate.
+    """
+    err = PromptEnvelopeBreachError("model.sf.foo", envelope="BUSINESS_RULE", rule_index=None)
+    # Attributes reflect what was passed (no silent normalisation).
+    assert err.envelope == "BUSINESS_RULE"
+    assert err.rule_index is None
+    # Message falls through to the MODEL_SQL branch — no "Rule #" prefix.
+    assert "Rule #" not in err.message
+    assert "</MODEL_SQL>" in err.message
+
+
+@pytest.mark.unit
+@pytest.mark.draft
+def test_prompt_envelope_breach_default_remediation_covers_both_envelopes() -> None:
+    """QG side-observation test (Pass 3): the ``default_remediation`` was
+    rotated in #163 to cover both envelopes (``</MODEL_SQL>`` and
+    ``</BUSINESS_RULE>``). The .message text is byte-equal to pre-#163 for
+    the default envelope, but the accompanying remediation hint now names
+    BOTH envelopes so an operator seeing the BUSINESS_RULE breach gets an
+    actionable steer.
+
+    Pin the remediation text so a future refactor can't silently re-rotate
+    it back to a MODEL_SQL-only wording (which would leave BUSINESS_RULE
+    operators without the breadcrumb).
+    """
+    # Both envelope names must appear in the shared remediation.
+    assert "</MODEL_SQL>" in PromptEnvelopeBreachError.default_remediation
+    assert "</BUSINESS_RULE>" in PromptEnvelopeBreachError.default_remediation
+    # The remediation steers to the meta.signalforge.business_rules surface.
+    assert "meta.signalforge.business_rules" in PromptEnvelopeBreachError.default_remediation
