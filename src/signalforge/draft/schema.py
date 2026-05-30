@@ -59,7 +59,7 @@ from signalforge.draft.errors import (
 )
 from signalforge.draft.models import CandidateSchema
 from signalforge.draft.parser import _LLMResultMeta, parse_draft_response
-from signalforge.draft.prompts import render_prompt
+from signalforge.draft.prompts import _read_business_rules, render_prompt
 from signalforge.llm import AnthropicClientProtocol
 from signalforge.llm.client import call_llm
 from signalforge.llm.models import LLMResult
@@ -214,6 +214,13 @@ def draft_from_request(
     # TODO: source dialect_name from safety_policy.warehouse_dialect_name
     # when v0.2 multi-warehouse lands.
     model_columns_by_type: dict[str, str | None] = {c.name: c.data_type for c in model.columns_list}
+    # Issue #163 US-002 — collect operator-declared business rules so the
+    # parser cardinality gate (DEC-002) can enforce at-least-one-custom_sql-
+    # test-per-rule. ``_read_business_rules`` is the single source of truth
+    # — same helper the prompt renderer uses, so the parser sees exactly
+    # the rule strings (with their ``(model)`` / ``(column X)`` prefixes)
+    # that the LLM saw.
+    business_rules: tuple[str, ...] = tuple(_read_business_rules(model))
     candidate = parse_draft_response(
         result.response_text,
         model_columns,
@@ -221,6 +228,7 @@ def draft_from_request(
         exclude_tests=frozenset(config.exclude_tests),
         model_columns_by_type=model_columns_by_type,
         dialect_name="bigquery",
+        business_rules=business_rules,
     )
 
     # 4. Write the response-audit record. Fail-closed (DEC-011):
