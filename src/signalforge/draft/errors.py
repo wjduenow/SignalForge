@@ -384,32 +384,67 @@ class DraftConfigInvalidError(DraftError):
 
 
 class PromptEnvelopeBreachError(DraftError):
-    """A model's ``raw_code`` contains the closing ``</MODEL_SQL>`` literal,
-    breaking the prompt-injection envelope (DEC-007) before it can be sent.
+    """A prompt fragment contains the closing tag of a prompt-injection
+    envelope (DEC-007 of #5; extended for ``<BUSINESS_RULE>`` by #163),
+    breaking the fence before it can be sent.
 
     The envelope is the documented defence against adversarial dbt content:
-    every byte between ``<MODEL_SQL>`` and ``</MODEL_SQL>`` is data, not
-    instructions. A ``raw_code`` containing the closing tag — whether placed
-    maliciously or by accident in a SQL comment — would terminate the fence
-    early and let everything after be read by the LLM as instructions.
+    every byte between ``<TAG>`` and ``</TAG>`` is data, not instructions.
+    A payload containing the closing tag — whether placed maliciously or by
+    accident in a SQL comment / business-rule string — would terminate the
+    fence early and let everything after be read by the LLM as instructions.
 
-    Raised BEFORE any LLM call so a poisoned model never reaches Anthropic.
+    Raised BEFORE any LLM call so a poisoned input never reaches the
+    provider.
+
+    Envelope-parameterised (#163 US-001, DEC-005):
+
+    * ``envelope="MODEL_SQL"`` (default) — the original ``<MODEL_SQL>``
+      envelope. Message is byte-equal to the pre-#163 rendering so the
+      existing call site keeps working unchanged.
+    * ``envelope="BUSINESS_RULE"`` + ``rule_index`` — the per-rule
+      ``<BUSINESS_RULE id="N">`` envelope around operator-supplied rules.
+      Message names the 1-indexed offending rule.
+
+    Future envelopes follow the same shape — extend with a new ``envelope=``
+    value, never a new error class.
     """
 
     default_remediation: ClassVar[str] = (
-        "The model's raw SQL contains the literal '</MODEL_SQL>' which would "
-        "break the prompt-injection envelope. Inspect the model file (likely "
-        "a SQL comment); remove the literal or escape it. If this is "
-        "legitimate content (rare), open an issue — the envelope tag will "
-        "need to rotate to an unguessable nonce."
+        "The input contains the literal closing tag of a prompt-injection "
+        "envelope (e.g. '</MODEL_SQL>' in a model's raw SQL, or "
+        "'</BUSINESS_RULE>' in an operator-supplied business rule), which "
+        "would break the envelope. Inspect the offending input (likely a "
+        "SQL comment or meta.signalforge.business_rules entry); remove the "
+        "literal or escape it. If this is legitimate content (rare), open "
+        "an issue — the envelope tag will need to rotate to an unguessable "
+        "nonce."
     )
 
-    def __init__(self, model_unique_id: str, *, remediation: str | None = None) -> None:
+    def __init__(
+        self,
+        model_unique_id: str,
+        *,
+        envelope: str = "MODEL_SQL",
+        rule_index: int | None = None,
+        remediation: str | None = None,
+    ) -> None:
         self.model_unique_id = model_unique_id
-        message = (
-            f"Model {_format_value(model_unique_id)} contains the literal "
-            f"'</MODEL_SQL>' in raw_code — refusing to render the prompt."
-        )
+        self.envelope = envelope
+        self.rule_index = rule_index
+        if envelope == "BUSINESS_RULE" and rule_index is not None:
+            message = (
+                f"Rule #{rule_index} of model {_format_value(model_unique_id)} "
+                f"contains the literal '</BUSINESS_RULE>' — refusing to render "
+                f"the prompt."
+            )
+        else:
+            # Default envelope ("MODEL_SQL"): byte-equal to the pre-#163
+            # message so the existing call site keeps working unchanged.
+            message = (
+                f"Model {_format_value(model_unique_id)} contains the literal "
+                f"'</MODEL_SQL>' in raw_code — refusing to render the prompt."
+            )
         super().__init__(message, remediation=remediation)
 
 
