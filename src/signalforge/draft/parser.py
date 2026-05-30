@@ -235,6 +235,7 @@ def _validate_anchor_contract(
     model_columns_by_type: Mapping[str, str | None] | None = None,
     dialect_name: str = "bigquery",
     exclude_tests: frozenset[str] = frozenset(),
+    business_rules: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     """Walk ``candidate`` collecting every anchor-contract violation.
 
@@ -267,6 +268,16 @@ def _validate_anchor_contract(
     it the structural checks above run unchanged). ``dialect_name`` is a
     string (not the typed :class:`signalforge.warehouse.models.Dialect`)
     so the parser doesn't import the warehouse layer (DEC-012 / DEC-013).
+
+    Issue #163 US-002 — ``business_rules`` is the tuple of operator-declared
+    rules (prefixed by :func:`signalforge.draft.prompts._read_business_rules`
+    with ``(model) `` / ``(column X) ``). When non-empty AND ``"custom_sql"``
+    is NOT in ``exclude_tests``, the validator enforces at-least-one-per-rule
+    cardinality (DEC-002): a single violation is appended if the total count
+    of ``custom_sql`` tests across model-level and column-level scopes falls
+    short of ``len(business_rules)``. ``business_rules=()`` is a no-op (the
+    inferred-fallback path stays open — DEC-008). The check appends to the
+    collect-all violations list, never short-circuits.
     """
     violations: list[str] = []
     type_arm_active = model_columns_by_type is not None and any(
@@ -362,6 +373,25 @@ def _validate_anchor_contract(
                 f"(excluded: {sorted(exclude_tests)})"
             )
 
+    # Issue #163 US-002 — business-rules cardinality gate (DEC-002, DEC-006,
+    # DEC-008). No-op when no rules are declared OR when ``custom_sql`` is
+    # in ``exclude_tests`` (the operator forbids the only test type that
+    # could satisfy the cardinality, so enforcing it would be incoherent).
+    # At-least-one-per-rule: excess is allowed (legitimate multi-test
+    # decomposition of a complex rule); under-coverage appends one
+    # collect-all violation that names every declared rule verbatim.
+    if business_rules and "custom_sql" not in exclude_tests:
+        custom_sql_count = sum(1 for test in candidate.tests if test.type == "custom_sql") + sum(
+            1 for column in candidate.columns for test in column.tests if test.type == "custom_sql"
+        )
+        if custom_sql_count < len(business_rules):
+            declared = ", ".join(repr(rule) for rule in business_rules)
+            violations.append(
+                f"Expected ≥{len(business_rules)} custom_sql test(s) "
+                f"(one per declared business rule), got {custom_sql_count}. "
+                f"Declared rules: {declared}."
+            )
+
     return tuple(violations)
 
 
@@ -373,6 +403,7 @@ def parse_draft_response(
     exclude_tests: frozenset[str] = frozenset(),
     model_columns_by_type: Mapping[str, str | None] | None = None,
     dialect_name: str = "bigquery",
+    business_rules: tuple[str, ...] = (),
 ) -> CandidateSchema:
     """Parse and validate the LLM's textual response.
 
@@ -435,6 +466,7 @@ def parse_draft_response(
         model_columns_by_type=model_columns_by_type,
         dialect_name=dialect_name,
         exclude_tests=exclude_tests,
+        business_rules=business_rules,
     )
     if violations:
         raise LLMOutputAnchorContractError(

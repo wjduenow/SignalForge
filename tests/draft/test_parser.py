@@ -1124,3 +1124,268 @@ def test_check_custom_sql_type_coherence_annotate_types_failure_skipped(
         dialect_name="bigquery",
     )
     assert result == ()
+
+
+# ---------------------------------------------------------------------------
+# Issue #163 US-002 — parser cardinality gate (business_rules → custom_sql)
+# ---------------------------------------------------------------------------
+
+
+def _candidate_with_custom_sql_counts(
+    *,
+    column_names: tuple[str, ...] = ("amount",),
+    model_level_count: int = 0,
+    column_level_count: int = 0,
+) -> CandidateSchema:
+    """Build a synthetic CandidateSchema with the requested number of
+    ``custom_sql`` tests split between model-level (``candidate.tests``)
+    and column-level (``columns[0].tests``).
+    """
+    parent = column_names[0]
+    column_tests: tuple[CandidateTestCustomSQL, ...] = tuple(
+        CandidateTestCustomSQL(
+            sql=f"select * from {{{{ this }}}} where {parent} = {i}",
+            column=parent,
+        )
+        for i in range(column_level_count)
+    )
+    model_tests: tuple[CandidateTestCustomSQL, ...] = tuple(
+        CandidateTestCustomSQL(
+            sql=f"select * from {{{{ this }}}} where {parent} = {i}",
+            column=None,
+        )
+        for i in range(model_level_count)
+    )
+    return CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=tuple(
+            CandidateColumn(
+                name=n,
+                description="...",
+                tests=column_tests if n == parent else (),
+            )
+            for n in column_names
+        ),
+        tests=model_tests,
+    )
+
+
+def test_cardinality_gate_rejects_under_coverage() -> None:
+    """Two declared business rules + one custom_sql test → violation."""
+    candidate = _candidate_with_custom_sql_counts(column_level_count=1)
+    raw = candidate.model_dump_json()
+    rules = (
+        "(model) every trip must start and end at the same station",
+        "(column amount) amount must be non-negative",
+    )
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"amount"}),
+            llm_result_meta=_meta(),
+            business_rules=rules,
+        )
+    assert any(
+        "Expected" in v and "custom_sql" in v and "got 1" in v for v in excinfo.value.violations
+    )
+
+
+def test_cardinality_gate_accepts_coverage_match() -> None:
+    """Two declared business rules + two custom_sql tests → accept."""
+    candidate = _candidate_with_custom_sql_counts(column_level_count=2)
+    raw = candidate.model_dump_json()
+    rules = (
+        "(model) rule one",
+        "(column amount) rule two",
+    )
+    result = parse_draft_response(
+        raw,
+        frozenset({"amount"}),
+        llm_result_meta=_meta(),
+        business_rules=rules,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_cardinality_gate_accepts_over_coverage() -> None:
+    """Two declared business rules + three custom_sql tests → accept
+    (excess is legitimate multi-test decomposition; DEC-002)."""
+    candidate = _candidate_with_custom_sql_counts(column_level_count=3)
+    raw = candidate.model_dump_json()
+    rules = (
+        "(model) rule one",
+        "(column amount) rule two",
+    )
+    result = parse_draft_response(
+        raw,
+        frozenset({"amount"}),
+        llm_result_meta=_meta(),
+        business_rules=rules,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_cardinality_gate_noop_when_no_rules_zero_custom_sql() -> None:
+    """Empty business_rules + zero custom_sql tests → accept
+    (preserves the inferred-fallback path's silent-no-rules behaviour)."""
+    candidate = _candidate_with_custom_sql_counts(column_level_count=0)
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"amount"}),
+        llm_result_meta=_meta(),
+        business_rules=(),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_cardinality_gate_noop_when_no_rules_with_custom_sql() -> None:
+    """Empty business_rules + custom_sql tests present → accept
+    (preserves the inferred-fallback path where the LLM volunteers
+    custom_sql tests without operator-declared rules)."""
+    candidate = _candidate_with_custom_sql_counts(column_level_count=2)
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"amount"}),
+        llm_result_meta=_meta(),
+        business_rules=(),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_cardinality_gate_noop_when_custom_sql_excluded() -> None:
+    """``exclude_tests=("custom_sql",)`` + two business rules + zero
+    custom_sql → accept the cardinality side (DEC-008). The operator
+    forbade custom_sql; the rules just aren't going to be enforced."""
+    # NB: candidate carries no custom_sql at all, so the exclude_tests
+    # backstop on per-test rejection has nothing to fire on either.
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(CandidateColumn(name="amount", description="...", tests=()),),
+    )
+    raw = candidate.model_dump_json()
+    rules = (
+        "(model) rule one",
+        "(column amount) rule two",
+    )
+    result = parse_draft_response(
+        raw,
+        frozenset({"amount"}),
+        llm_result_meta=_meta(),
+        exclude_tests=frozenset({"custom_sql"}),
+        business_rules=rules,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_cardinality_gate_counts_model_level_custom_sql() -> None:
+    """One declared rule + one model-level custom_sql (on candidate.tests)
+    → accept (model-level tests count toward the cardinality total)."""
+    candidate = _candidate_with_custom_sql_counts(model_level_count=1)
+    raw = candidate.model_dump_json()
+    rules = ("(model) rule one",)
+    result = parse_draft_response(
+        raw,
+        frozenset({"amount"}),
+        llm_result_meta=_meta(),
+        business_rules=rules,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_cardinality_gate_counts_column_level_custom_sql() -> None:
+    """One declared rule + one column-level custom_sql → accept
+    (column-level tests count toward the cardinality total)."""
+    candidate = _candidate_with_custom_sql_counts(column_level_count=1)
+    raw = candidate.model_dump_json()
+    rules = ("(column amount) rule one",)
+    result = parse_draft_response(
+        raw,
+        frozenset({"amount"}),
+        llm_result_meta=_meta(),
+        business_rules=rules,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_cardinality_gate_counts_mixed_model_and_column_custom_sql() -> None:
+    """Two declared rules + one model-level + one column-level → accept
+    (mixed counts sum across both scopes)."""
+    candidate = _candidate_with_custom_sql_counts(model_level_count=1, column_level_count=1)
+    raw = candidate.model_dump_json()
+    rules = (
+        "(model) rule one",
+        "(column amount) rule two",
+    )
+    result = parse_draft_response(
+        raw,
+        frozenset({"amount"}),
+        llm_result_meta=_meta(),
+        business_rules=rules,
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_cardinality_violation_message_includes_all_declared_rules() -> None:
+    """The violation message pins (DEC-006): names every declared rule
+    verbatim via ``repr()``, reports actual and minimum count."""
+    candidate = _candidate_with_custom_sql_counts(column_level_count=0)
+    raw = candidate.model_dump_json()
+    rules = (
+        "(model) every trip must start and end at the same station",
+        "(column amount) amount must be non-negative",
+    )
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"amount"}),
+            llm_result_meta=_meta(),
+            business_rules=rules,
+        )
+    matching = [
+        v
+        for v in excinfo.value.violations
+        if "Expected" in v and "custom_sql" in v and "got 0" in v
+    ]
+    assert len(matching) == 1
+    msg = matching[0]
+    # Pinned shape: count, both rules quoted via repr, and the "Declared rules:" prefix.
+    assert "Expected ≥2 custom_sql test(s)" in msg
+    assert "got 0" in msg
+    assert "Declared rules:" in msg
+    assert repr(rules[0]) in msg
+    assert repr(rules[1]) in msg
+
+
+def test_cardinality_gate_collect_all_with_other_violations() -> None:
+    """A candidate with a hallucinated column AND a cardinality miss must
+    produce BOTH violations in one ``LLMOutputAnchorContractError`` —
+    the cardinality gate appends, never short-circuits."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="hallucinated",
+                description="LLM made this up",
+                tests=(),
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    rules = ("(model) rule one",)
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"order_id"}),
+            llm_result_meta=_meta(),
+            business_rules=rules,
+        )
+    violations = excinfo.value.violations
+    assert any(
+        "CandidateColumn references nonexistent column 'hallucinated'" in v for v in violations
+    )
+    assert any("Expected" in v and "custom_sql" in v and "got 0" in v for v in violations)
