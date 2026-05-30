@@ -5,8 +5,8 @@
 - **Ticket:** [GH #141](https://github.com/wjduenow/SignalForge/issues/141)
 - **Branch:** `feature/141-claude-skill-install`
 - **Worktree:** `../worktrees/SignalForge/141-claude-skill-install`
-- **Phase:** detailing
-- **PR:** TBD
+- **Phase:** published
+- **PR:** [#166](https://github.com/wjduenow/SignalForge/pull/166)
 - **Epic:** TBD
 - **Sessions:**
   - 2026-05-29 — Phase 1 discovery kickoff (parallel research)
