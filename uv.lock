@@ -301,6 +301,19 @@ wheels = [
 ]
 
 [[package]]
+name = "clauditor-eval"
+version = "0.1.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "openai" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/18/a5/604d0226ccc176f352bcc91dead024b6a6146ad23f26b52ad685dfe4d764/clauditor_eval-0.1.3.tar.gz", hash = "sha256:0acd40063ea6aba9ae458f4bb73baa5bdc4cf47d6331946164c2a91f9d0e3231", size = 821353, upload-time = "2026-05-26T16:27:05.624Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/af/a0/8d98eba2726c47539b7b4f9b879aaa9e768ef6e1cb657fb04b185c940776/clauditor_eval-0.1.3-py3-none-any.whl", hash = "sha256:8fd87b4896a80411c367f3de7f5bc21c0147674bf80909b6a90749de1e4cc403", size = 370827, upload-time = "2026-05-26T16:27:03.827Z" },
+]
+
+[[package]]
 name = "click"
 version = "8.3.3"
 source = { registry = "https://pypi.org/simple" }
@@ -2252,6 +2265,7 @@ snowflake = [
 [package.dev-dependencies]
 dev = [
     { name = "build" },
+    { name = "clauditor-eval" },
     { name = "dbt-core" },
     { name = "fakesnow" },
     { name = "google-genai" },
@@ -2303,6 +2317,7 @@ provides-extras = ["dev", "gemini", "openai", "snowflake"]
 [package.metadata.requires-dev]
 dev = [
     { name = "build", specifier = ">=1.2,<2" },
+    { name = "clauditor-eval", specifier = ">=0.1,<1" },
     { name = "dbt-core", specifier = ">=1.8,<2" },
     { name = "fakesnow", specifier = ">=0.9" },
     { name = "google-genai", specifier = ">=0.5,<1" },
