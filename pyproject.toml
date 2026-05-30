@@ -72,6 +72,14 @@ dev = [
   "tiktoken>=0.7,<1.0",
   "google-genai>=0.5,<1",
   "sqlglot>=30,<31",
+  # clauditor-eval powers the pre-release SKILL.md self-grade run per
+  # DEC-014 of plans/super/141-claude-skill-install.md. PyPI dist name is
+  # `clauditor-eval`; it provides the `clauditor` CLI entry point. The
+  # maintainer runs `uv run clauditor grade
+  # src/signalforge/skills/signalforge/SKILL.md` and pins the score in
+  # `src/signalforge/skills/signalforge/assets/SKILL.eval.json`. No CI
+  # integration — manual pre-release only.
+  "clauditor-eval>=0.1,<1",
   {include-group = "docs"},
 ]
 

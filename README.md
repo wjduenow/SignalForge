@@ -1,4 +1,4 @@
-[![codecov](https://codecov.io/gh/wjduenow/SignalForge/branch/dev/graph/badge.svg)](https://codecov.io/gh/wjduenow/SignalForge) [![docs](https://img.shields.io/badge/docs-signalforge-blue?logo=materialformkdocs)](https://wjduenow.github.io/SignalForge/)
+[![codecov](https://codecov.io/gh/wjduenow/SignalForge/branch/dev/graph/badge.svg)](https://codecov.io/gh/wjduenow/SignalForge) [![docs](https://img.shields.io/badge/docs-signalforge-blue?logo=materialformkdocs)](https://wjduenow.github.io/SignalForge/) [![clauditor-graded](https://img.shields.io/badge/clauditor-pending-lightgrey)](src/signalforge/skills/signalforge/assets/SKILL.eval.json)
 
 # SignalForge
 

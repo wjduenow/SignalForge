@@ -123,6 +123,43 @@ suite makes drift impossible. The gate is mechanical only (subcommand
 names + demo command tokens present); reviewer attention still backs prose
 accuracy.
 
+## Self-grade
+
+The skill prose is graded with [clauditor](https://github.com/wjduenow/clauditor)
+(PyPI distribution `clauditor-eval`) — the LLM-as-judge harness
+SignalForge's own grading layer (`signalforge.grade`) shares its
+methodology with. The pinned score lives at
+`src/signalforge/skills/signalforge/assets/SKILL.eval.json` and is surfaced
+as the `clauditor-graded` shields.io badge on the
+[project README](https://github.com/wjduenow/SignalForge#readme).
+
+**Operating model — pre-release manual, no CI integration.** Per
+[DEC-014 of `plans/super/141-claude-skill-install.md`](https://github.com/wjduenow/SignalForge/blob/dev/plans/super/141-claude-skill-install.md),
+the maintainer regrades before tagging a release; the same commit bumps
+SKILL.md (if it changed), the pinned `assets/SKILL.eval.json`, and the
+README badge. No Anthropic key lives in repo secrets; no per-PR cost.
+
+**Regenerate the grade:**
+
+```bash
+uv run clauditor grade src/signalforge/skills/signalforge/SKILL.md
+```
+
+`clauditor-eval` is in `[dependency-groups].dev`, so `uv sync --dev` picks
+it up. The command reads an `EvalSpec` (the SignalForge-specific
+assertions + grading criteria, scaffolded via
+`uv run clauditor init <skill>` and then hand-tuned by the maintainer),
+runs the configured grading model against the skill's output, and writes
+per-iteration sidecars under `.clauditor/iteration-N/`. The maintainer
+then transcribes the resulting `score`, the current
+`signalforge.__version__`, and an ISO-8601 UTC `graded_at` timestamp into
+`assets/SKILL.eval.json` so the README badge reflects the latest pinned
+score.
+
+Until the first real grade lands, `assets/SKILL.eval.json` carries a
+`status: "pending-first-grade"` placeholder and the README badge reads
+`clauditor: pending`.
+
 ## Maintainer-only skills (excluded)
 
 Two skills live at repo-root `.claude/skills/` rather than under `src/`:

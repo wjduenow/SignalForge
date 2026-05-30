@@ -1,1 +1,10 @@
-{"score": null, "version": "0.0.0", "graded_at": null}
+{
+  "score": null,
+  "version": "0.4.0.dev0",
+  "graded_at": null,
+  "status": "pending-first-grade",
+  "skill_path": "src/signalforge/skills/signalforge/SKILL.md",
+  "grader": "clauditor-eval",
+  "regen_command": "uv run clauditor grade src/signalforge/skills/signalforge/SKILL.md",
+  "notes": "Pre-release manual grade per DEC-014 of plans/super/141-claude-skill-install.md. Maintainer crafts an EvalSpec tailored to the SignalForge skill (the auto-generated init template is boilerplate and grades noise-against-noise), runs the grade command above, and replaces this file with the resulting score, version (signalforge.__version__), and ISO-8601 UTC graded_at timestamp."
+}
