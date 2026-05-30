@@ -751,12 +751,3 @@ Capture durable lessons from this work. Likely additions:
   contracts that other rules also reference. If we update one and forget the other,
   the rules drift. Mitigation: keep skill-parity.md short and link out to
   cli-layer.md / python-build.md rather than restating their contracts.
-
-
-## Refinement log
-
-_Pending Phase 3._
-
-## Detailed breakdown
-
-_Pending Phase 4._

@@ -167,16 +167,20 @@ def install_skill(dest: Path | str) -> Path:
             f"destination {str(resolved_dest)!r} exists but is not a directory"
         )
 
-    # Symlinked-SKILL.md / symlinked-ancestor defence (DEC-005). ``copytree``
-    # with ``dirs_exist_ok=True`` will faithfully overwrite a regular file at
-    # the same path, but on a symlink it would follow the link and write into
-    # the link target — a destination the operator did not consent to. The
-    # check covers both SKILL.md itself AND every install-tree ancestor under
-    # ``<resolved_dest>`` back to ``.claude/`` so a symlinked ancestor (e.g.
-    # ``.claude/skills/signalforge/`` repointed elsewhere) cannot smuggle
-    # writes through. Refuse loudly before any source materialisation.
+    # Symlinked-target defence (DEC-005). ``copytree`` with
+    # ``dirs_exist_ok=True`` will faithfully overwrite a regular file at
+    # the same path, but on a symlink it would follow the link and write
+    # into the link target — a destination the operator did not consent
+    # to. The check covers:
+    #   (a) every install-tree ancestor under ``<resolved_dest>`` back to
+    #       ``.claude/`` (so a symlinked ``.claude/skills/signalforge/``
+    #       dir cannot smuggle writes through), AND
+    #   (b) every bundled file path we will overwrite — enumerated from
+    #       the source tree below — so a symlinked
+    #       ``assets/SKILL.eval.json`` (or symlinked ``assets/`` dir) is
+    #       refused, not just SKILL.md.
+    # Refuse loudly before any source materialisation.
     target_skill_dir = resolved_dest / _CLAUDE_DIR / _SKILLS_DIR / _SKILL_NAME
-    target_skill_md = target_skill_dir / _SKILL_MD
     for ancestor in (
         resolved_dest / _CLAUDE_DIR,
         resolved_dest / _CLAUDE_DIR / _SKILLS_DIR,
@@ -188,12 +192,6 @@ def install_skill(dest: Path | str) -> Path:
                 "would follow the link and write into the resolved target. Remove the "
                 "symlink first or pick a different destination."
             )
-    if target_skill_md.is_symlink():
-        raise SkillDestUnsafeError(
-            f"refusing to overwrite symlinked SKILL.md at {str(target_skill_md)!r}: "
-            "would follow the link and clobber the resolved target. Remove the "
-            "symlink first or pick a different destination."
-        )
 
     # Source lookup via importlib.resources — handles editable installs,
     # wheel installs, and zipapp/zipimport cases. ``as_file``
@@ -208,9 +206,39 @@ def install_skill(dest: Path | str) -> Path:
             "bundled signalforge/skills/signalforge/ tree not found in the installed package"
         )
 
+    # Per-bundled-path symlink defence. We enumerate every path the
+    # bundled source ships and refuse to overwrite any of them through
+    # a symlink (file OR dir). This generalises the SKILL.md-only check
+    # the original DEC-005 implementation carried — a symlinked
+    # ``assets/SKILL.eval.json`` or symlinked ``assets/`` dir would
+    # otherwise let copytree write into an arbitrary target.
+    with as_file(source_ref) as _src_for_enumeration:
+        bundled_rel_paths = tuple(
+            sorted(p.relative_to(_src_for_enumeration) for p in _src_for_enumeration.rglob("*"))
+        )
+    for rel in bundled_rel_paths:
+        target = target_skill_dir / rel
+        if target.is_symlink():
+            raise SkillDestUnsafeError(
+                f"refusing to overwrite symlinked bundled path at {str(target)!r}: "
+                "would follow the link and clobber the resolved target. Remove the "
+                "symlink first or pick a different destination."
+            )
+
     # Ensure the destination chain exists. ``exist_ok=True`` so an
     # already-present skill dir (the upgrade-in-place case) is fine.
-    target_skill_dir.mkdir(parents=True, exist_ok=True)
+    # A non-dir component along the chain (e.g. ``<dest>/.claude`` is a
+    # regular file) raises ``NotADirectoryError`` from ``mkdir``; wrap
+    # to :class:`SkillDestUnsafeError` so the operator sees a typed,
+    # remediation-bearing message instead of a raw OSError.
+    try:
+        target_skill_dir.mkdir(parents=True, exist_ok=True)
+    except NotADirectoryError as exc:
+        raise SkillDestUnsafeError(
+            f"cannot create install chain under {str(resolved_dest)!r}: a non-directory "
+            "component blocks ``.claude/skills/signalforge/``. Remove the offending file "
+            "or pick a different destination."
+        ) from exc
 
     with as_file(source_ref) as source_path:
         # ``dirs_exist_ok=True`` enables the overwrite-files /
@@ -230,4 +258,4 @@ def install_skill(dest: Path | str) -> Path:
     # Return the canonical resolved path to the installed SKILL.md so
     # callers (and the CLI's next-steps message) get an absolute path
     # they can hand to the user.
-    return target_skill_md.resolve()
+    return (target_skill_dir / _SKILL_MD).resolve()

@@ -167,13 +167,19 @@ def cmd_install_skill(args: argparse.Namespace) -> int:
     # Pre-probe for an existing SKILL.md so the DEC-017 suffix is
     # accurate. ``Path(...).expanduser()`` is enough — we do not need
     # full canonicalisation here; the lib seam does that. ``exists()``
-    # returns True for both regular files and symlinks (following the
-    # link); both shapes are "replaced" from the operator's POV. If the
-    # parent dir is unreadable the probe silently returns False and the
-    # suffix is omitted — the lib seam's own failure surfaces in the
-    # except ladder below.
+    # ``.exists()`` returns True for regular files AND working symlinks
+    # (it follows the link); ``.is_symlink()`` returns True for symlinks
+    # regardless of whether the target is broken. We OR both so the
+    # probe reports "replaced" for every shape an operator would call
+    # an existing SKILL.md — including a broken symlink, which the lib
+    # seam refuses with ``SkillDestUnsafeError`` (the suffix is moot for
+    # that path but the semantics stay honest). If the parent dir is
+    # unreadable the probe silently returns False and the suffix is
+    # omitted — the lib seam's own failure surfaces in the except
+    # ladder below.
     try:
-        existed_before = (Path(raw_dest).expanduser() / _INSTALLED_SKILL_REL).exists()
+        target_skill_md = Path(raw_dest).expanduser() / _INSTALLED_SKILL_REL
+        existed_before = target_skill_md.exists() or target_skill_md.is_symlink()
     except OSError:
         existed_before = False
 

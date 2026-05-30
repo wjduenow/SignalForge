@@ -133,6 +133,53 @@ def test_install_skill_refuses_when_install_dir_ancestor_is_symlink(
     assert not (elsewhere / "SKILL.md").exists()
 
 
+def test_install_skill_refuses_when_assets_dir_is_symlink(tmp_path: Path) -> None:
+    """DEC-005 (Copilot QG-extended): the symlink defence covers EVERY
+    bundled path (``SKILL.md`` AND ``assets/SKILL.eval.json`` AND any
+    future bundled asset), not just SKILL.md.
+
+    If a destination's ``assets/`` is a symlinked directory pointing
+    elsewhere, ``shutil.copytree(..., dirs_exist_ok=True)`` would follow
+    the link and overwrite ``assets/SKILL.eval.json`` at the resolved
+    target. The per-bundled-path enumeration refuses this BEFORE any
+    file is materialised.
+    """
+    elsewhere = tmp_path / "attacker-assets"
+    elsewhere.mkdir()
+    (elsewhere / "SKILL.eval.json").write_text("victim eval data", encoding="utf-8")
+
+    skill_dir = tmp_path / ".claude" / "skills" / "signalforge"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "assets").symlink_to(elsewhere, target_is_directory=True)
+
+    with pytest.raises(SkillDestUnsafeError):
+        install_skill(tmp_path)
+
+    # Defence: the link target's preexisting file is untouched.
+    assert (elsewhere / "SKILL.eval.json").read_text(encoding="utf-8") == "victim eval data"
+
+
+def test_install_skill_wraps_notadirectoryerror_from_mkdir_chain(
+    tmp_path: Path,
+) -> None:
+    """If a non-dir component blocks the install-chain creation
+    (``<dest>/.claude`` is a regular file rather than a directory),
+    the resulting ``NotADirectoryError`` from ``mkdir(parents=True)``
+    is wrapped as :class:`SkillDestUnsafeError` with a typed
+    remediation, NOT propagated as a raw OSError (CodeRabbit QG
+    finding on ``__init__.py:151``).
+    """
+    blocker = tmp_path / ".claude"
+    blocker.write_text("not a dir", encoding="utf-8")
+
+    with pytest.raises(SkillDestUnsafeError) as excinfo:
+        install_skill(tmp_path)
+
+    assert "non-directory" in str(excinfo.value)
+    # Blocker file untouched.
+    assert blocker.read_text(encoding="utf-8") == "not a dir"
+
+
 # ---------------------------------------------------------------------------
 # Symlink-cycle dest → SkillDestPathError (DEC-005, mirrors copy_demo)
 # ---------------------------------------------------------------------------

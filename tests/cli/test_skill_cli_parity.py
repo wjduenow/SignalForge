@@ -243,14 +243,29 @@ def test_parity_gate_catches_missing_subcommand_planted_violation(
 # ---------------------------------------------------------------------------
 
 
-# Match ``signalforge <subcommand> --<flag>`` occurrences inside SKILL.md so a
-# typo / stale-rebase that teaches a non-existent flag (the US-008-era
-# ``signalforge install-skill --force`` finding) trips the gate. Captures the
-# subcommand AND the flag separately so we can dispatch the validity check to
-# the right subparser. Plain ASCII flag chars only — the regex deliberately
-# does NOT match exotic shells (`/`, `=`, etc.) because skill prose only ever
-# teaches the conventional long-flag form.
-_SKILL_FLAG_USAGE_RE = re.compile(r"signalforge ([a-z][a-z0-9-]*)\s+(--[a-z][a-z0-9-]*)")
+# Match ``signalforge <subcommand> [<positional> ...] --<flag>`` occurrences
+# inside SKILL.md so a typo / stale-rebase that teaches a non-existent flag
+# (the US-008-era ``signalforge install-skill --force`` finding) trips the
+# gate. Captures the subcommand AND the flag separately so we can dispatch
+# the validity check to the right subparser.
+#
+# The intermediate ``(?:[ \t]+\S+)*?`` (non-greedy, **same-line only**)
+# absorbs zero or more positional arguments between the subcommand and
+# the flag — without it canonical shapes like ``signalforge generate
+# <model> --write`` and ``signalforge prune-existing <model> --schema
+# <path>`` slip past the gate (CodeRabbit + Copilot QG finding). We
+# constrain to ``[ \t]`` (NOT ``\s``) so the match cannot span newlines:
+# a paragraph that mentions ``signalforge installed (pip install ...)``
+# in one sentence and ``signalforge lint --model`` two paragraphs later
+# would otherwise yield a spurious ``installed --model`` capture (a
+# false positive caught during the QG fix).
+#
+# Plain ASCII flag chars only — the regex deliberately does NOT match
+# exotic shells (`/`, `=`, etc.) because skill prose only ever teaches
+# the conventional long-flag form.
+_SKILL_FLAG_USAGE_RE = re.compile(
+    r"signalforge ([a-z][a-z0-9-]*)(?:[ \t]+\S+)*?[ \t]+(--[a-z][a-z0-9-]*)"
+)
 
 
 def _subparser_flags(subcommand: str) -> frozenset[str]:
@@ -299,17 +314,29 @@ def test_skill_md_only_teaches_flags_that_exist_on_the_live_cli() -> None:
     assert _SKILL_MD.exists(), f"SKILL.md not found at {_SKILL_MD}"
     body = _SKILL_MD.read_text(encoding="utf-8")
 
+    live_subcommands = frozenset(_live_subcommand_names())
     bogus: list[tuple[str, str]] = []
+    unknown_subcmd: list[tuple[str, str]] = []
     for match in _SKILL_FLAG_USAGE_RE.finditer(body):
         subcommand, flag = match.group(1), match.group(2)
-        registered = _subparser_flags(subcommand)
-        if not registered:
-            # Subcommand itself doesn't exist on the live CLI — caught by
-            # category 1's gate, not this one. Skip to avoid double-counting.
+        if subcommand not in live_subcommands:
+            # A typo like ``signalforge instal-skill --force`` would
+            # previously slip past this gate because the subcommand is
+            # unknown. Fail loud — a misspelled subcommand example in
+            # SKILL.md is exactly the drift this gate exists to catch
+            # (Copilot QG finding).
+            unknown_subcmd.append((subcommand, flag))
             continue
+        registered = _subparser_flags(subcommand)
         if flag not in registered:
             bogus.append((subcommand, flag))
 
+    assert not unknown_subcmd, (
+        f"SKILL.md teaches a ``signalforge <subcommand> --<flag>`` example "
+        f"naming an unknown subcommand: {unknown_subcmd!r}. The subcommand "
+        "does not appear on the live argparse parser — likely a typo. Run "
+        "``signalforge --help`` for the real subcommand list."
+    )
     assert not bogus, (
         f"SKILL.md teaches flag(s) that do not exist on the live CLI: "
         f"{bogus!r}. Either the flag was renamed / removed (update SKILL.md) "

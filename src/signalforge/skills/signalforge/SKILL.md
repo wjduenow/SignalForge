@@ -1,7 +1,7 @@
 ---
 name: signalforge
 description: Use when the user wants to draft, prune, or grade dbt tests / docs with an LLM, has a dbt project (manifest.json + sql models), or asks about SignalForge. Drives the `signalforge` CLI end-to-end: drafts candidate tests, runs them against warehouse samples, drops the noise, and explains every kept/dropped artifact.
-compatibility: "Requires: signalforge installed (pip install signalforge-dbt) + ANTHROPIC_API_KEY (the drafter always calls Anthropic). For the zero-credential demo: no warehouse profile needed (samples a public BigQuery dataset under ADC). For real dbt projects: dbt-core + a populated manifest.json. For live e2e: a configured warehouse profile (BigQuery v0.1)."
+compatibility: "Requires: signalforge installed (pip install signalforge-dbt) + ANTHROPIC_API_KEY (the drafter always calls Anthropic). The `signalforge lint` and `signalforge install-skill` paths are fully offline. The bundled demo (`init-demo` + `generate`) reads a public BigQuery dataset, so it needs ADC (`gcloud auth application-default login`) + `GOOGLE_CLOUD_PROJECT` for billing — no proprietary warehouse setup of your own, but not credential-free. For real dbt projects: dbt-core + a populated manifest.json + your warehouse profile. For live e2e: BigQuery v0.1."
 metadata:
   signalforge-version: "0.5.0.dev0"
 allowed-tools: Bash(signalforge *), Bash(uv run signalforge *), Bash(uv run pytest -m e2e*), Bash(cat *), Bash(ls *), Bash(grep *), Bash(head *), Bash(tail *), Read, Write, Edit
@@ -13,7 +13,7 @@ You help the user drive SignalForge against a dbt project. SignalForge's differe
 
 The pipeline is four stages, each explainable:
 
-```
+```text
 model.sql + manifest + project ctx
   -> LLM drafts candidate artifacts          (draft)
   -> run candidates against warehouse samples (prune)
@@ -47,13 +47,7 @@ Before any pipeline command, verify the dbt project is in a state SignalForge ca
 ls target/manifest.json
 ```
 
-If the file is missing, the project has not been parsed yet. Run:
-
-```bash
-dbt parse
-```
-
-This requires a configured dbt profile (`~/.dbt/profiles.yml`) — `dbt parse` does NOT hit the warehouse, but it does need the profile to exist. If the user has no profile yet, jump to Section 2 (zero-credential demo) so they can try SignalForge before standing up a real warehouse.
+If the file is missing, the project has not been parsed yet. Ask the user to run `dbt parse` themselves — this skill's `allowed-tools` deliberately does NOT include `Bash(dbt *)` so it cannot run the parse for them. `dbt parse` requires a configured dbt profile (`~/.dbt/profiles.yml`) and does NOT hit the warehouse, but it does need the profile to exist. If the user has no profile yet, jump to Section 2 (bundled demo) so they can try SignalForge before standing up a real warehouse.
 
 Once `target/manifest.json` is present, identify the model to work on. SignalForge accepts:
 
@@ -69,9 +63,15 @@ signalforge lint --model stg_orders
 
 `lint` reads the manifest and surfaces obvious manifest-shape issues (missing model, hidden by `enabled: false`, ambiguous bare name) without making any LLM or warehouse calls.
 
-## 2. Zero-credential demo
+## 2. Bundled demo
 
-The fastest way to see the full pipeline is the bundled Austin bikeshare demo. It needs **no dbt profile of your own and no warehouse credentials** — the demo ships a frozen `manifest.json` and points at a public BigQuery dataset that resolves under Google Application Default Credentials (`gcloud auth application-default login`). The drafter still calls Anthropic, so `ANTHROPIC_API_KEY` must be set; Anthropic's free tier covers the demo.
+The fastest way to see the full pipeline end-to-end is the bundled Austin bikeshare demo. It removes the dbt-project setup cost (the demo ships a frozen `manifest.json` and a ready-to-go `signalforge.yml`) but it is **not credential-free** — the demo's `generate` step actually queries the public BigQuery dataset `bigquery-public-data.austin_bikeshare`, billed to your `GOOGLE_CLOUD_PROJECT`. Before running it, confirm:
+
+- `ANTHROPIC_API_KEY` is set (the drafter always calls Anthropic; free tier covers the demo).
+- `GOOGLE_CLOUD_PROJECT` is exported to your own GCP billing project.
+- ADC are configured: `gcloud auth application-default login`.
+
+If any of those are missing, fall back to the truly offline path: `signalforge lint --model <name>` reads only the manifest (no LLM, no warehouse) and surfaces shape issues. Use it to demonstrate manifest-shape diagnostics without spend.
 
 ```bash
 signalforge init-demo
