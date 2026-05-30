@@ -103,12 +103,20 @@ marker out of default runs automatically; this section just documents how
 a maintainer invokes the full suite when cutting a release (per DEC-010
 of [`plans/super/155-gemini-truncation-e2e-gap.md`](plans/super/155-gemini-truncation-e2e-gap.md)).
 
-**Cost ceiling:** ≈ **$0.30 per full-suite run** across the five paid e2e
-tests below (plus a handful of cents for the grade-only live-API
-companions). At ~2–3 pre-release audits per month for a one-maintainer
-project, that lands at roughly $0.60–$1.00/month — small enough that a
-shell wrapper around the invocation would add surface area without
-changing the contract.
+**Cost ceiling:** ≈ **$1.38 per full-suite run** (measured 2026-05-29
+against the Austin bikeshare fixture at pricing-table version `2026-05-28`;
+~108 grade calls/test × 6 paid e2e tests ≈ 660 LLM calls/run across the
+three providers). This is a **calibration signal, not a billing guarantee** —
+vendor pricing rotates and the per-test artifact count is workload-specific.
+See [`plans/super/157-e2e-cost-and-parallel.md`](plans/super/157-e2e-cost-and-parallel.md)
+§ "Measured baseline (2026-05-29)" for the per-provider breakdown (Anthropic
+~$0.87, OpenAI gpt-4o ~$0.42, Gemini 2.5-flash ~$0.087) and the per-test
+wall-clock table.
+
+At ~2–3 pre-release audits per month for a one-maintainer project, that
+lands at roughly **$2.80–$4.20/month** — still small enough that a shell
+wrapper around the invocation would add surface area without changing the
+contract.
 
 ### Tests in the live e2e suite
 
@@ -125,22 +133,32 @@ warehouses and real graders:
    additionally requires `SF_RUN_GEMINI=1` + `GOOGLE_API_KEY`. Variants
    missing their extra env vars skip cleanly; the baseline variant
    always runs when the BQ + Anthropic gate is satisfied.
-2. **`tests/cli/test_e2e_openai_smoke.py`** — `@pytest.mark.e2e` +
+2. **`tests/cli/test_e2e_business_rules.py`** — `@pytest.mark.e2e`.
+   The `custom_sql` business-rule path (issue #116): Anthropic drafter
+   + Anthropic grader against the Austin bikeshare BQ fixture with
+   `meta.signalforge.business_rules` injected into the per-run
+   manifest copy. Exercises ingest → draft → prune → grade → diff of
+   a singular-test SELECT. Gate: `SF_RUN_BQ=1` + `ANTHROPIC_API_KEY` +
+   `GOOGLE_CLOUD_PROJECT` (mirrors the BQ baseline variant).
+3. **`tests/cli/test_e2e_openai_smoke.py`** — `@pytest.mark.e2e` +
    `@pytest.mark.openai`. Anthropic drafter, OpenAI `gpt-4o` grader.
    Five-env-var gate (mirrors the Gemini sibling and the parametrized
    BQ smoke — drafter stays Anthropic Sonnet per DEC-011, so the
    Anthropic auth + BigQuery opt-in are part of the contract): `SF_RUN_OPENAI=1`
    + `OPENAI_API_KEY` + `SF_RUN_BQ=1` + `ANTHROPIC_API_KEY` +
    `GOOGLE_CLOUD_PROJECT`.
-3. **`tests/cli/test_e2e_gemini_smoke.py`** — `@pytest.mark.e2e` +
+4. **`tests/cli/test_e2e_gemini_smoke.py`** — `@pytest.mark.e2e` +
    `@pytest.mark.gemini`. Anthropic drafter, Gemini
-   `gemini-2.5-flash` grader with `grade.max_output_tokens=2048` (the
-   floor from DEC-008 of #155 — Gemini's verbose `reasoning` needs at
-   least 1024 tokens to land a clean `STOP` finish_reason; 2048 is the
-   verified-safe floor). Gate: `SF_RUN_GEMINI=1` + `GOOGLE_API_KEY` +
-   `SF_RUN_BQ=1` + `ANTHROPIC_API_KEY` + `GOOGLE_CLOUD_PROJECT`.
-4. **`tests/cli/test_e2e_snowflake_smoke.py`** — `@pytest.mark.e2e` +
-   `@pytest.mark.snowflake`. The other-warehouse path: Anthropic drafter,
+   `gemini-2.5-flash` grader with `grade.max_output_tokens=4096` (the
+   floor was originally 2048 per DEC-008 of #155 / verified-safe at
+   the 5-pair in-isolation smoke scale; #158 raised it to 4096 after
+   the full-Austin-fixture e2e run found 5-6/108 pairs still
+   degrading at 2048 — 4096 is the current fixture-scale floor). Gate:
+   `SF_RUN_GEMINI=1` + `GOOGLE_API_KEY` + `SF_RUN_BQ=1` +
+   `ANTHROPIC_API_KEY` + `GOOGLE_CLOUD_PROJECT`.
+5. **`tests/cli/test_e2e_snowflake_smoke.py`** — `@pytest.mark.snowflake`
+   (NOT `@pytest.mark.e2e` — reached via the `snowflake` marker, see the
+   `-m` note below). The other-warehouse path: Anthropic drafter,
    Anthropic grader, Snowflake adapter against read-only
    `SNOWFLAKE_SAMPLE_DATA.TPCH_SF1` with `prune.sample_strategy: oneshot`.
    Gate: `SF_RUN_SNOWFLAKE=1` + `ANTHROPIC_API_KEY` + `SNOWFLAKE_ACCOUNT`
@@ -167,6 +185,59 @@ invocations) live in the `## Gemini live smoke`,
 sections below. The block here documents how to run the **whole** suite
 in one go.
 
+### Parallel execution (recommended)
+
+`pytest-xdist` is a dev dep (added by issue #157 US-004 — `uv sync --dev`
+pulls it automatically). The recommended pre-release invocation runs the
+`@pytest.mark.e2e` files in parallel across 3 workers:
+
+```bash
+uv run pytest -m e2e -n 3 --no-cov
+```
+
+`-n 3` is a deliberate choice, NOT `-n auto`. Default `addopts` stays
+sequential — parallelism is opt-in only (per DEC-001 / DEC-003 of
+[`plans/super/157-e2e-cost-and-parallel.md`](plans/super/157-e2e-cost-and-parallel.md)).
+The `cli_subprocess` and `wheel_smoke` markers stay serial — do NOT add
+`-n` to those invocations.
+
+**Measured wall-clock (2026-05-29 baseline):** ~15 min at `-n 3`
+(893s end-to-end) vs ~40 min serial (`-n 1`) → ~2.6× speedup against the
+Austin bikeshare fixture. **Zero Anthropic rate-limit retries observed at
+`-n 3`** in this baseline; the rate-limit caveat below is still load-bearing
+guidance for larger fixtures or if the Anthropic 50-RPM tier changes.
+
+**Anthropic 50 RPM rate-limit caveat.** Every paid e2e test uses Anthropic
+as the drafter (the `[anthropic]` parametrize variant of the BQ smoke and
+the business-rules test also use Anthropic as the grader). With `-n 3`
+three parallel tests can collectively issue ~50 calls in a tight window
+and trigger the `WARNING: rate limit` retry path (see
+[`.claude/rules/llm-drafter.md`](.claude/rules/llm-drafter.md) §
+"Module-level `_sleep` / `_rand_uniform` aliases" — retries are bounded by
+`DraftConfig.max_retries_429` / `GradeConfig.max_retries_429`). The
+retries succeed in practice but extend wall-time; monitor with:
+
+```bash
+uv run pytest -m e2e -n 3 --no-cov 2>&1 | tee pytest-stderr.log
+grep -c "rate limit" pytest-stderr.log
+```
+
+or run with `--capture=no` for live visibility.
+
+**Downgrade path.** If you see a burst of `rate limit` retries
+(say, >10 across the run) or want to be more conservative on a paid-API
+budget:
+
+- `-n 2` — still ~2× speedup, half the Anthropic concurrency.
+- `-n 1` (or simply omit `-n`) — fully serial, equivalent to the
+  pre-#157 baseline.
+
+**Cost rollup after the run.** Per-test `tmp_path` directories under
+`/tmp/pytest-of-$USER/pytest-current/` carry each run's audit JSONLs and
+`grade.json` sidecars. Use
+[`scripts/measure_e2e_cost.py`](scripts/measure_e2e_cost.py) (added by
+issue #157 US-003) to roll up the per-test cost into a single total.
+
 ### Full pre-release invocation
 
 ```bash
@@ -180,7 +251,7 @@ GOOGLE_API_KEY=... \
 GOOGLE_CLOUD_PROJECT=<billing-project> \
 SNOWFLAKE_ACCOUNT=... SNOWFLAKE_USER=... SNOWFLAKE_PASSWORD=... \
 SNOWFLAKE_WAREHOUSE=... SNOWFLAKE_DATABASE=... SNOWFLAKE_SCHEMA=... \
-  uv run pytest -m 'e2e or anthropic or openai or gemini' --no-cov
+  uv run pytest -m 'e2e or anthropic or openai or gemini or snowflake' --no-cov
 ```
 
 `--no-cov` is required per `.claude/rules/python-build.md` § "Python
@@ -190,14 +261,16 @@ marker-specific run that exercises only a fraction of the codebase
 (mirrors `uv run pytest -m bigquery --no-cov` and
 `uv run pytest -m cli_subprocess --no-cov`).
 
-The `snowflake` marker is deliberately **omitted** from the `-m`
-expression above: that marker also covers the offline `fakesnow` +
-`sqlglot` validation suite (no env vars required), which the default
-post-PR validation already runs ad-hoc. The live Snowflake e2e is
-reached via the `e2e` marker on `test_e2e_snowflake_smoke.py` instead;
-if a maintainer wants to add the gated live `snowflake` tests
-(`test_snowflake_estimate_live.py`, `test_snowflake_prune_live.py`),
-append ` or snowflake` to the `-m` expression.
+The `snowflake` marker spans two tiers: an **offline** `fakesnow` +
+`sqlglot` validation suite (no env vars required — runs whenever the
+marker is invoked) AND the **live** Snowflake-warehouse tests
+(`test_e2e_snowflake_smoke.py`, `test_snowflake_estimate_live.py`,
+`test_snowflake_prune_live.py`) gated by `SF_RUN_SNOWFLAKE=1` and the
+six `SNOWFLAKE_*` connection env vars. The `-m` expression above
+includes `snowflake` so the full pre-release sweep covers the live
+Snowflake path; if you want to skip the live tier (e.g. no Snowflake
+credentials handy), unset `SF_RUN_SNOWFLAKE` and the live tests skip
+with their `_skip_reason()` while the offline tier still runs.
 
 If you need to skip a specific provider for a given release (e.g. an
 OpenAI quota hold), simply omit its `SF_RUN_<X>=1` env var — that

@@ -433,12 +433,33 @@ what this costs.
 **Reference numbers, with the assumptions.** The default rubric has
 **4 criteria**; a typical drafted dbt model has **~12 artefacts**
 (column descriptions + column rationales + per-test rationales + model
-description + model rationale). With the default `model:
-claude-sonnet-4-6` and `cache_ttl: 1h`, a representative run costs:
+description + model rationale). A richer real-world fixture (the
+Austin bikeshare project used by the live e2e suite) exercises ~27
+artefacts/model → ~108 grade calls/model — adjust the per-model figures
+below proportionally for your own model shape.
 
-- **~$0.18 per model on Sonnet 4.6** (4 criteria × 12 artefacts × ~600
-  input tokens dynamic block + ~150 output tokens per call), pricing
-  date 2026-05.
+**Per-provider per-model cost (Austin bikeshare fixture, 2026-05-29
+measurement at pricing-table version `2026-05-28`):**
+
+| Provider × model                | Per-model cost | Notes                                                                                                            |
+|---------------------------------|----------------|------------------------------------------------------------------------------------------------------------------|
+| Anthropic `claude-sonnet-4-6`   | ~$0.38         | Drafter + grader on the BQ `[anthropic]` variant; baseline for the cost-control discussion below.                |
+| OpenAI `gpt-4o`                 | ~$0.21         | Grader-only on the BQ `[openai]` variant; drafter still Anthropic (DEC-011 of #155 pins drafter fixture stability). |
+| Gemini `gemini-2.5-flash`       | ~$0.045        | Grader-only on the BQ `[gemini]` variant; cheapest grade run by ~10× thanks to flash-tier pricing.               |
+
+These figures are a single 2026-05-29 measurement at pricing-table
+version `2026-05-28` — **calibration signal, not a billing guarantee.**
+Vendor pricing rotates; per-fixture artefact count varies; cache hit/miss
+state across a run drives ±5–10% noise on the Anthropic figure
+specifically. See
+[`plans/super/157-e2e-cost-and-parallel.md`](../plans/super/157-e2e-cost-and-parallel.md)
+§ "Measured baseline (2026-05-29)" for the full-suite rollup
+($1.38/run across the three providers).
+
+**Fan-out comparison vs the batched alternative:**
+
+- The per-criterion fan-out (one LLM call per `(criterion × artefact)`)
+  is what the figures above measure.
 - vs. **~$0.05 per model batched** (Q4=A in the plan — single judge
   call covering all criteria for one artefact at once). The
   per-criterion fan-out is **~3.4× more expensive**.

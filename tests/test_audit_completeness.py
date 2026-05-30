@@ -689,6 +689,17 @@ _EXCEPTION_MAPPING_EXCLUDED_BASES: frozenset[str] = frozenset(
         # set; a forgotten concrete falls through to tier 1 and the AST scan
         # catches the missing per-class entry at test time.
         "IngestError",
+        # ``CostError`` (issue #157 / DEC-002 of US-001) — abstract base of
+        # the ``signalforge.llm.cost`` typed-error hierarchy (the 12th
+        # per-stage ``errors.py``, the first nested sub-stage one). Its
+        # three concrete subclasses are individually mapped at tier 2 in
+        # ``_EXCEPTION_TO_EXIT_CODE``; the base is ALSO dual-registered at
+        # tier 2 as a single-tier safety net (per ``cli-layer.md`` § "7th
+        # AST scan" — mirrors the nine other single-tier base entries),
+        # but it lives in this excluded set so the AST scan does not
+        # require it to be mapped (the table entry is the safety net, not
+        # the contract).
+        "CostError",
     }
 )
 
@@ -712,14 +723,26 @@ def _collect_error_class_declarations(
 
 def _enumerate_error_module_paths() -> list[Path]:
     """The exact set of files Scan 7 walks: every per-stage
-    ``errors.py`` under ``src/signalforge/*/errors.py`` plus the CLI's
-    own ``errors.py``.
+    ``errors.py`` under ``src/signalforge/*/errors.py`` plus every
+    sub-stage ``errors.py`` under ``src/signalforge/*/*/errors.py``,
+    plus the CLI's own ``errors.py``.
+
+    Issue #157 / DEC-002 of US-001 extended the glob to walk depth-2
+    paths so the first nested sub-stage ``errors.py`` (the
+    ``signalforge.llm.cost`` rollup layer) lands in the same
+    enforcement table as the eleven flat per-stage modules. The
+    depth-1 + depth-2 union is sorted and de-duplicated; ``set()``
+    handles the (unlikely but possible) case where a future contributor
+    accidentally lands an ``errors.py`` at both depths.
     """
-    # ``Path.glob`` is non-recursive on the directory level here — every
-    # stage's errors module lives one level under ``signalforge/``.
-    paths = sorted(_SIGNALFORGE_DIR.glob("*/errors.py"))
-    # ``cli/errors.py`` is already covered by the glob above (the CLI is
-    # a stage subpackage), but assert defensively in case the layout
+    # ``Path.glob`` is non-recursive on the directory level — depth-1
+    # walks every stage's flat errors module; depth-2 walks every
+    # sub-stage one (the first sub-stage being ``llm/cost/``).
+    depth_one = set(_SIGNALFORGE_DIR.glob("*/errors.py"))
+    depth_two = set(_SIGNALFORGE_DIR.glob("*/*/errors.py"))
+    paths = sorted(depth_one | depth_two)
+    # ``cli/errors.py`` is already covered by the depth-1 glob (the CLI
+    # is a stage subpackage), but assert defensively in case the layout
     # changes and a contributor moves the CLI to a sibling location.
     cli_errors = _SIGNALFORGE_DIR / "cli" / "errors.py"
     assert cli_errors in paths, (
@@ -802,8 +825,13 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
     """Sanity: ``_enumerate_error_module_paths`` finds every per-stage
     ``errors.py`` in the project. If a future stage forgets to ship
     ``errors.py`` the scan would still pass (because there'd be nothing
-    to walk for that stage); this test pins the expected set of eleven
+    to walk for that stage); this test pins the expected set of twelve
     modules.
+
+    Issue #157 / DEC-002 of US-001 added the first sub-stage
+    ``errors.py`` (``llm/cost/errors.py`` — the cost-rollup layer); the
+    glob was extended to depth-2 in lockstep so the expected count
+    bumped 11 → 12.
     """
     paths = _enumerate_error_module_paths()
     rel_names = sorted(p.relative_to(_SIGNALFORGE_DIR).as_posix() for p in paths)
@@ -814,15 +842,17 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
         "draft/errors.py",
         "grade/errors.py",
         "ingest/errors.py",
+        "llm/cost/errors.py",
         "llm/errors.py",
         "manifest/errors.py",
         "prune/errors.py",
         "safety/errors.py",
         "warehouse/errors.py",
     ], (
-        "Expected exactly eleven per-stage errors.py modules (one per "
-        "stage; demo added in #47, ingest in #104); got: "
-        f"{rel_names}. If this changes, update Scan 7's expected set."
+        "Expected exactly twelve per-stage errors.py modules (one per "
+        "stage; demo added in #47, ingest in #104, llm/cost added in "
+        f"#157); got: {rel_names}. If this changes, update Scan 7's "
+        "expected set."
     )
 
 
