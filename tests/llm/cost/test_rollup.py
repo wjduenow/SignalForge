@@ -400,6 +400,41 @@ def test_rollup_malformed_jsonl_line_raises_typed_error(tmp_path: Path) -> None:
     err = exc_info.value
     assert err.line_num == 2
     assert err.reason  # non-empty
+    # JSONDecodeError branch — reason should mention JSON.
+    assert "JSONDecodeError" in err.reason or "json" in err.reason.lower()
+
+
+def test_rollup_valid_json_but_invalid_event_shape_raises_typed_error(
+    tmp_path: Path,
+) -> None:
+    """Valid JSON, invalid event shape → ``CostRollupMalformedRecordError``.
+
+    Covers the ValidationError branch in ``_ingest_jsonl`` (distinct
+    from the JSONDecodeError branch above). A JSONL line that parses
+    as JSON but fails Pydantic's ``LLMResponseEvent.model_validate``
+    must still surface as a typed cost-rollup error with the
+    Pydantic-error-shape excerpt in ``reason`` — exercises the patch
+    diff's validation-failure path (codecov gap closed).
+    """
+    project = _make_project(tmp_path)
+    audit = _audit_dir(project)
+    # Valid JSON but missing every required LLMResponseEvent field.
+    text = "\n".join(
+        [
+            json.dumps({"not_a_real_field": "boom", "another_missing": 42}),
+        ]
+    )
+    (audit / "llm_responses.jsonl").write_text(text + "\n", encoding="utf-8")
+
+    with pytest.raises(CostRollupMalformedRecordError) as exc_info:
+        rollup_audit_dir(project)
+
+    err = exc_info.value
+    assert err.line_num == 1
+    assert err.reason  # non-empty
+    # ValidationError branch — reason should mention ValidationError
+    # (the engine prefixes the excerpt with the exception class name).
+    assert "ValidationError" in err.reason
 
 
 def test_rollup_unknown_model_raises_typed_error(tmp_path: Path) -> None:
@@ -673,3 +708,52 @@ def test_rollup_result_shapes_are_frozen(tmp_path: Path) -> None:
     assert isinstance(report, CostReport)
     assert isinstance(provider, ProviderRollup)
     assert isinstance(model, ModelRollup)
+
+
+# ---------------------------------------------------------------------------
+# Import-time provider-prefix coverage guard (post-PR-review #162).
+# The module body calls _verify_provider_prefix_coverage at import; the
+# helper is extracted (not inlined as an ``if``) so the raise arm is
+# unit-testable here without an importlib.reload dance.
+# ---------------------------------------------------------------------------
+
+
+def test_verify_provider_prefix_coverage_passes_when_every_model_covered() -> None:
+    """Happy path — every PRICES key maps to a provider; helper returns None."""
+    from signalforge.llm.cost._rollup import _verify_provider_prefix_coverage
+
+    prices = {"claude-sonnet-4-6": object(), "gpt-4o": object()}
+    model_to_provider = {"claude-sonnet-4-6": "anthropic", "gpt-4o": "openai"}
+
+    # Returns None; no raise.
+    assert _verify_provider_prefix_coverage(prices, model_to_provider) is None
+
+
+def test_verify_provider_prefix_coverage_raises_when_model_unmapped() -> None:
+    """Mismatch → RuntimeError naming the missing SKU(s).
+
+    Simulates the failure mode the import-time guard exists to catch:
+    a new SKU lands in PRICES without a matching ``_PROVIDER_PREFIXES``
+    entry. The raise must fire under ``python -O`` (assert-stripped),
+    so the explicit ``if/raise`` shape is the contract — not an assert.
+    """
+    from signalforge.llm.cost._rollup import _verify_provider_prefix_coverage
+
+    prices = {
+        "claude-sonnet-4-6": object(),
+        "gpt-4o": object(),
+        "mistral-large-2": object(),  # no matching prefix
+    }
+    model_to_provider = {
+        "claude-sonnet-4-6": "anthropic",
+        "gpt-4o": "openai",
+        # "mistral-large-2" intentionally missing.
+    }
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _verify_provider_prefix_coverage(prices, model_to_provider)
+
+    # Error message must name the missing model so the maintainer can
+    # find the SKU to fix.
+    assert "mistral-large-2" in str(exc_info.value)
+    assert "_PROVIDER_PREFIXES" in str(exc_info.value)

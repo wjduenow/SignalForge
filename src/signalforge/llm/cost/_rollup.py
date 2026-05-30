@@ -114,19 +114,35 @@ def _build_model_to_provider() -> Mapping[str, str]:
     return MappingProxyType(out)
 
 
+def _verify_provider_prefix_coverage(
+    prices: Mapping[str, object],
+    model_to_provider: Mapping[str, str],
+) -> None:
+    """Raise if any model in ``prices`` is missing from ``model_to_provider``.
+
+    The module body calls this at import time to fail loud when a new
+    ``PRICES`` SKU lands without a matching ``_PROVIDER_PREFIXES`` entry.
+    Extracted as a top-level callable (not just an inline ``if``) so the
+    raise arm is unit-testable without an ``importlib.reload`` dance.
+
+    Uses an explicit raise (not ``assert``) so the check still runs
+    under ``python -O``, which strips assertions (PR #162 review). The
+    check is load-bearing for provider-dispatch correctness — a missing
+    prefix would silently route the SKU to ``CostRollupUnknownModelError``
+    at rollup time instead of failing loud at
+    ``import signalforge.llm.cost``.
+    """
+    missing = sorted(set(prices) - set(model_to_provider))
+    if missing:
+        raise RuntimeError(
+            "every model id in signalforge.llm.pricing.PRICES must match a "
+            "_PROVIDER_PREFIXES entry; a new SKU was added without updating "
+            f"the provider-prefix table: missing {missing!r}"
+        )
+
+
 _MODEL_TO_PROVIDER: Mapping[str, str] = _build_model_to_provider()
-# Explicit raise (not `assert`) so the import-time sanity check still runs
-# under `python -O`, which strips assertions (PR #162 review). The check
-# is load-bearing for provider-dispatch correctness — a missing prefix
-# would silently route the SKU to CostRollupUnknownModelError at rollup
-# time instead of failing loud at `import signalforge.llm.cost`.
-if len(_MODEL_TO_PROVIDER) != len(PRICES):
-    _missing_models = sorted(set(PRICES) - set(_MODEL_TO_PROVIDER))
-    raise RuntimeError(
-        "every model id in signalforge.llm.pricing.PRICES must match a "
-        "_PROVIDER_PREFIXES entry; a new SKU was added without updating "
-        f"the provider-prefix table: missing {_missing_models!r}"
-    )
+_verify_provider_prefix_coverage(PRICES, _MODEL_TO_PROVIDER)
 
 
 # ---------------------------------------------------------------------------
