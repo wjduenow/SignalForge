@@ -1,0 +1,1 @@
+SELECT COUNT(*) FROM `fake_project.dataset.orders` WHERE event_date >= '2024-01-01'
