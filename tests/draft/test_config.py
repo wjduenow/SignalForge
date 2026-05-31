@@ -113,6 +113,28 @@ def test_draft_config_provider_accepts_gemini() -> None:
     assert cfg.model == "gemini-2.5-flash"
 
 
+def test_draft_config_exclude_tests_accepts_row_count_between() -> None:
+    """US-002 of #169: ``"row_count_between"`` round-trips through the
+    :attr:`DraftConfig.exclude_tests` validator without error — the
+    new sixth ``VALID_TEST_TYPES`` member is recognised at config load.
+    """
+    cfg = DraftConfig(exclude_tests=("row_count_between",))
+    assert cfg.exclude_tests == ("row_count_between",)
+
+
+def test_draft_config_exclude_tests_rejects_row_count_between_typo() -> None:
+    """US-002 of #169: a near-miss typo like ``"row_count_betwen"`` (missing
+    ``e``) is rejected with the "not a valid test type" error that lists
+    every member of :data:`VALID_TEST_TYPES`, including the new
+    ``"row_count_between"`` token. The "valid types: …" listing is what the
+    operator reads to find the right spelling."""
+    with pytest.raises(ValidationError) as excinfo:
+        DraftConfig(exclude_tests=("row_count_betwen",))
+    msg = str(excinfo.value)
+    assert "not a valid test type" in msg
+    assert "row_count_between" in msg
+
+
 def test_draft_config_provider_rejects_unknown_with_available_keys() -> None:
     """DEC-007: an unknown provider fails loud with a typed
     :class:`UnknownProviderError` that names the registered providers.

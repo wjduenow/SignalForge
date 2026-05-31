@@ -96,10 +96,20 @@ def test_exclude_tests_rejects_non_list_non_tuple() -> None:
 def test_valid_test_types_constant_matches_known_set() -> None:
     """Pin the canonical set so adding a new test type without updating
     VALID_TEST_TYPES (and the prompt catalogue) fails loud here. The four
-    standard dbt schema tests plus the ``custom_sql`` business-rule
-    variant (DEC-002)."""
+    standard dbt schema tests, the ``custom_sql`` business-rule variant
+    (DEC-002), and the ``row_count_between`` model-level row-count guard
+    (DEC-001 of #169)."""
     assert (
-        frozenset({"not_null", "unique", "accepted_values", "relationships", "custom_sql"})
+        frozenset(
+            {
+                "not_null",
+                "unique",
+                "accepted_values",
+                "relationships",
+                "custom_sql",
+                "row_count_between",
+            }
+        )
         == VALID_TEST_TYPES
     )
 
