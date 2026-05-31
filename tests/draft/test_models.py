@@ -21,6 +21,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
 )
 
@@ -132,6 +133,141 @@ def test_candidate_test_custom_sql_accepts_non_empty_sql() -> None:
     test = CandidateTestCustomSQL(sql="select 1 from t where x < 0")
     assert test.sql == "select 1 from t where x < 0"
     assert test.type == "custom_sql"
+
+
+# ---------------------------------------------------------------------------
+# CandidateTestRowCountBetween (#169, DEC-001 / DEC-008 / DEC-013)
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_test_row_count_between_accepts_both_bounds() -> None:
+    """Happy path: both bounds, no ``where``."""
+    test = CandidateTestRowCountBetween(minimum=100, maximum=10_000)
+    assert test.type == "row_count_between"
+    assert test.column is None
+    assert test.minimum == 100
+    assert test.maximum == 10_000
+    assert test.where is None
+    assert test.rationale is None
+
+
+def test_candidate_test_row_count_between_accepts_minimum_only() -> None:
+    test = CandidateTestRowCountBetween(minimum=1)
+    assert test.minimum == 1
+    assert test.maximum is None
+
+
+def test_candidate_test_row_count_between_accepts_maximum_only() -> None:
+    test = CandidateTestRowCountBetween(maximum=1_000)
+    assert test.minimum is None
+    assert test.maximum == 1_000
+
+
+def test_candidate_test_row_count_between_accepts_where_clause() -> None:
+    test = CandidateTestRowCountBetween(
+        minimum=10,
+        where="event_date >= '2024-01-01'",
+    )
+    assert test.where == "event_date >= '2024-01-01'"
+
+
+def test_candidate_test_row_count_between_rejects_negative_minimum() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountBetween(minimum=-1, maximum=10)
+
+
+def test_candidate_test_row_count_between_rejects_negative_maximum() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountBetween(minimum=0, maximum=-1)
+
+
+def test_candidate_test_row_count_between_accepts_zero_minimum() -> None:
+    """``minimum=0`` is structurally valid (the grader will score it as
+    vacuously broad — see #169 DEC-009 — but the model accepts it)."""
+    test = CandidateTestRowCountBetween(minimum=0, maximum=100)
+    assert test.minimum == 0
+
+
+def test_candidate_test_row_count_between_rejects_both_bounds_none() -> None:
+    """At-least-one-of-(minimum, maximum) — an unbounded row-count test
+    carries no signal."""
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountBetween()
+
+
+def test_candidate_test_row_count_between_rejects_minimum_greater_than_maximum() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountBetween(minimum=100, maximum=10)
+
+
+def test_candidate_test_row_count_between_minimum_equal_to_maximum_is_allowed() -> None:
+    """``minimum == maximum`` expresses an exact row-count assertion."""
+    test = CandidateTestRowCountBetween(minimum=42, maximum=42)
+    assert test.minimum == test.maximum == 42
+
+
+def test_candidate_test_row_count_between_rejects_empty_where() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountBetween(minimum=1, where="")
+
+
+def test_candidate_test_row_count_between_rejects_whitespace_only_where() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountBetween(minimum=1, where="   \t\n  ")
+
+
+def test_candidate_test_row_count_between_is_frozen() -> None:
+    test = CandidateTestRowCountBetween(minimum=1)
+    with pytest.raises(ValidationError):
+        test.minimum = 2  # type: ignore[misc]
+
+
+def test_candidate_test_row_count_between_round_trip_byte_stable() -> None:
+    """``model_validate_json`` ∘ ``model_dump_json`` is a no-op on a
+    populated variant — required for fixture-driven drift detection."""
+    test = CandidateTestRowCountBetween(
+        minimum=100,
+        maximum=10_000,
+        where="event_date >= '2024-01-01'",
+        rationale="bounded volume guardrail",
+    )
+    raw = test.model_dump_json()
+    reparsed = CandidateTestRowCountBetween.model_validate_json(raw)
+    assert reparsed == test
+
+
+def test_candidate_test_row_count_between_in_discriminated_union() -> None:
+    """The variant resolves correctly through the discriminated union."""
+    from pydantic import TypeAdapter
+
+    adapter: TypeAdapter[CandidateTest] = TypeAdapter(CandidateTest)
+    parsed = adapter.validate_python(
+        {
+            "type": "row_count_between",
+            "column": None,
+            "minimum": 100,
+            "maximum": 10_000,
+            "where": None,
+        }
+    )
+    assert isinstance(parsed, CandidateTestRowCountBetween)
+    assert parsed.minimum == 100
+
+
+def test_candidate_test_row_count_between_column_must_be_none() -> None:
+    """``column`` is hard-coded to ``None`` (model-level only); a
+    non-``None`` value fails type-validation."""
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountBetween(column="any_column", minimum=1)  # type: ignore[arg-type]
+
+
+def test_candidate_test_row_count_between_extra_ignored() -> None:
+    """``extra="ignore"`` is inherited from ``_BASE_CONFIG`` — an unknown
+    field is silently dropped (forward-compat with future LLM emissions)."""
+    test = CandidateTestRowCountBetween.model_validate(
+        {"type": "row_count_between", "minimum": 1, "phantom_field": "x"}
+    )
+    assert not hasattr(test, "phantom_field")
 
 
 def test_candidate_schema_extra_ignore_drops_unknown_field() -> None:
