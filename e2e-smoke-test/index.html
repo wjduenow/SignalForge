@@ -1,0 +1,1643 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/e2e-smoke-test/">
+      
+      
+        <link rel="prev" href="../audits/">
+      
+      
+        <link rel="next" href="../snowflake-e2e-setup/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>End-to-End Smoke Test - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#end-to-end-smoke-test" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              End-to-End Smoke Test
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-this-test-proves" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What this test proves
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#who-runs-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who runs it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-to-expect-when-it-passes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What to expect when it passes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-the-test" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running the test
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Running the test">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#why-the-profile-rewrite-matters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the profile rewrite matters
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-hygiene" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security hygiene
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-ceiling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost ceiling
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-this-test-does-not-prove" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What this test does not prove
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cross-references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cross-references
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-this-test-proves" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What this test proves
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#who-runs-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who runs it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-to-expect-when-it-passes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What to expect when it passes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-the-test" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running the test
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Running the test">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#why-the-profile-rewrite-matters" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why the profile rewrite matters
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-hygiene" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security hygiene
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-ceiling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost ceiling
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-this-test-does-not-prove" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What this test does not prove
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cross-references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cross-references
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="end-to-end-smoke-test">End-to-end smoke test</h1>
+<h2 id="what-this-test-proves">What this test proves</h2>
+<p>SignalForge has a lot of moving parts: it reads dbt project metadata,
+talks to your data warehouse, asks an LLM to draft <code>schema.yml</code>
+entries, runs each drafted test against real warehouse data to
+discard the no-signal ones, asks the LLM to grade the drafted prose
+against a quality rubric, and writes a unified diff so a reviewer
+can see what would land. Most of those parts are covered by unit
+tests with simulated dependencies — fast, deterministic, no money
+or accounts required to run them.</p>
+<p>But unit tests with simulated dependencies can't catch every class
+of bug. Real BigQuery rejects column names with subtle typos.
+Real Anthropic occasionally returns JSON in a slightly different
+shape than the parser expects. Real prompt-cache thresholds
+silently no-op below a model-specific minimum. <strong>The end-to-end
+smoke test exists to catch the bugs that only surface when the
+whole pipeline runs against real services.</strong></p>
+<p>It runs <code>signalforge generate</code> against
+<a href="https://console.cloud.google.com/marketplace/product/austin-bikeshare/austin-bikeshare-trips"><code>bigquery-public-data.austin_bikeshare</code></a>
+— a small, stable, public dataset of bike-share trips in Austin,
+Texas. The test exercises every stage of the pipeline (manifest
+load → safety → draft → prune → grade → diff) and asserts that
+the run completes cleanly, that at least one drafted test gets
+dropped because warehouse data shows it always passes, and that
+the diff sidecar lands on disk in the expected shape.</p>
+<p>If this test passes, you have evidence that the pipeline composes
+correctly against real Anthropic and real BigQuery. If it fails,
+you have a tight, reproducible signal that something in the
+integration is wrong before users notice.</p>
+<h2 id="who-runs-it">Who runs it</h2>
+<p>Maintainers, locally, before tagging a release. <strong>Not</strong> CI.</p>
+<p>CI doesn't have the credentials this test needs (an Anthropic API
+key, a Google Cloud billing project), and forked-PR CI runs strip
+secrets by design. So the test is gated by three environment
+variables and skipped by default; a missing variable produces a
+clear skip reason rather than a confusing failure.</p>
+<h2 id="what-to-expect-when-it-passes">What to expect when it passes</h2>
+<p>A typical successful run takes about 5–6 minutes wall-clock and
+costs about <strong>\$0.13</strong> in Anthropic API spend plus <strong>under
+500 MB</strong> of BigQuery data scanned (well within the free tier most
+projects have available). The test asserts seven invariants:</p>
+<ol>
+<li>The CLI exits cleanly (return code 0, no Python traceback in stderr).</li>
+<li>A diff sidecar (<code>diff.json</code>) lands at the expected path under
+   the project's <code>.signalforge/</code> directory.</li>
+<li>The diff produced <strong>at least one</strong> entry — kept, dropped, or
+   flagged. The pipeline isn't a no-op.</li>
+<li><strong>At least one drafted test was dropped</strong> with the reason
+   <code>always-passes</code>. This is the load-bearing claim of the project:
+   tests that pass for every row in real warehouse data are noise,
+   and SignalForge filters them out before they reach a reviewer.</li>
+<li><strong>At least one artifact was flagged</strong> as below the quality
+   threshold. The fixture pins very strict thresholds
+   (<code>min_pass_rate: 0.95</code>, <code>min_mean_score: 0.95</code>) so this branch
+   is exercised deterministically.</li>
+<li><strong>Every grade call completed cleanly</strong> (<code>aggregate_complete:
+   true</code> in the grading report). No grade pair degraded due to
+   network errors or timeouts.</li>
+<li><strong>No Python traceback escaped to stderr</strong> — the CLI's typed
+   error machinery handled every layer's failure modes (per
+   <code>cli-layer.md</code> DEC-016).</li>
+</ol>
+<h2 id="prerequisites">Prerequisites</h2>
+<p>Three things have to be true before the test will run:</p>
+<ol>
+<li><strong>Application Default Credentials for Google Cloud</strong> are
+   configured locally. Run once:</li>
+</ol>
+<div class="highlight"><pre><span></span><code>gcloud<span class="w"> </span>auth<span class="w"> </span>application-default<span class="w"> </span>login
+</code></pre></div>
+<p>This opens a browser window, asks you to sign in, and stores a
+   refresh token at <code>~/.config/gcloud/application_default_credentials.json</code>.</p>
+<ol>
+<li>
+<p><strong>A Google Cloud project that you can bill BigQuery jobs to.</strong>
+   <code>bigquery-public-data.austin_bikeshare</code> is publicly readable,
+   but BigQuery still has to charge <em>someone</em> for the query — and
+   it can't be <code>bigquery-public-data</code> itself. Your billing project
+   needs the <code>BigQuery Job User</code> IAM role (or equivalent). The
+   test scans roughly 200–500 MB per run, well below the 1 TB
+   monthly free tier that personal Google Cloud accounts get.</p>
+</li>
+<li>
+<p><strong>An Anthropic API key</strong> with budget for ~\$0.20 of spend. If
+   you don't have one, sign up at <a href="https://console.anthropic.com/">https://console.anthropic.com/</a>
+   and create a key.</p>
+</li>
+</ol>
+<p>You'll wire these into your shell session via three environment
+variables:</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SF_RUN_BQ=1</code></td>
+<td>Opt-in to the BigQuery-backed branch (mirrors the existing <code>tests/warehouse/test_bigquery_integration.py</code> precedent).</td>
+</tr>
+<tr>
+<td><code>GOOGLE_CLOUD_PROJECT</code></td>
+<td>The billing project ID (e.g. <code>my-personal-project-123456</code>).</td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td>Your Anthropic API key (starts with <code>sk-ant-...</code>).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="running-the-test">Running the test</h2>
+<p>From the repository root, in a freshly authenticated shell:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># 1. Authenticate to Google Cloud (first run only).</span>
+gcloud<span class="w"> </span>auth<span class="w"> </span>application-default<span class="w"> </span>login
+
+<span class="c1"># 2. Set the three required env vars.</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">SF_RUN_BQ</span><span class="o">=</span><span class="m">1</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">GOOGLE_CLOUD_PROJECT</span><span class="o">=</span>&lt;your-billing-project&gt;
+<span class="nb">export</span><span class="w"> </span><span class="nv">ANTHROPIC_API_KEY</span><span class="o">=</span>sk-ant-...
+
+<span class="c1"># 3. Run the gated test.</span>
+pytest<span class="w"> </span>-m<span class="w"> </span>e2e<span class="w"> </span>--no-cov
+</code></pre></div>
+<p>The <code>--no-cov</code> flag is required because pytest's coverage gate
+is set to 80% over the default test set; the e2e test on its own
+exercises only a fraction of the codebase, so coverage would fail
+spuriously without the flag.</p>
+<p>The test itself handles the profile-rewrite friction (see "Why the
+profile rewrite matters" below) — it copies the fixture into a
+per-run <code>tmp_path</code>, substitutes <code>GOOGLE_CLOUD_PROJECT</code> into
+<code>profiles.yml</code>, and runs <code>signalforge generate</code> against the temp
+project. If you want to run the same flow as a one-off CLI
+invocation (rather than through pytest), follow the README's
+<a href="../README.md#quick-start">Quick start</a> walkthrough — it uses
+<code>signalforge init-demo</code> to copy out the bundled demo project, whose
+<code>profiles.yml</code> already reads <code>GOOGLE_CLOUD_PROJECT</code> from the
+environment and ships the raised <code>maximum_bytes_billed</code> cap, so no
+profile rewrite is needed.</p>
+<h3 id="why-the-profile-rewrite-matters">Why the profile rewrite matters</h3>
+<p>The committed <code>profiles.yml</code> in <code>tests/fixtures/dbt_project_austin/</code>
+pins <code>project: bigquery-public-data</code>. That's correct for <code>dbt parse</code>
+(which only reads schema metadata about the source dataset and
+doesn't bill anything substantive). But at <em>query</em> time the BigQuery
+SDK uses <code>profile.project</code> as the <strong>billing</strong> project, and you
+can't bill <code>bigquery-public-data</code> itself (you don't own it).</p>
+<p>The test sidesteps this by writing a per-run <code>profiles.yml</code> into
+<code>tmp_path</code> that substitutes your <code>GOOGLE_CLOUD_PROJECT</code> and adds
+<code>maximum_bytes_billed: 1000000000</code> (the default 100 MB cap blocks
+the materialised-sample full-table scan over the ~2.27M-row source).
+This is the v0.1 workaround; a future ticket may teach the profile
+loader to render <code>${ENV_VAR}</code> references the way dbt does natively.</p>
+<p>A successful run prints <code>1 passed</code> and exits 0. A failure prints
+the assertion that fired plus the captured stderr from the CLI
+run; the test framework also preserves the test's <code>tmp_path</code>
+artifacts (manifest, profile, audit JSONLs, diff sidecar) under
+<code>/tmp/pytest-of-&lt;user&gt;/</code> for post-mortem inspection.</p>
+<h2 id="security-hygiene">Security hygiene</h2>
+<ul>
+<li>Use a fresh shell session, or <code>unset ANTHROPIC_API_KEY</code> after
+  the run, so your API key doesn't sit in <code>~/.bash_history</code>.</li>
+<li>The test never writes the API key to disk — it goes from your
+  environment straight into the in-memory Anthropic SDK client.
+  The audit JSONLs SignalForge writes (under
+  <code>.signalforge/</code>) only contain blake2b-8 hashes of inputs, never
+  raw secrets.</li>
+<li>The committed fixture (<code>tests/fixtures/dbt_project_austin/</code>)
+  contains zero secrets. The <code>profiles.yml</code> checked into git
+  references <code>bigquery-public-data</code> as the <em>source</em> project (the
+  read target); the <em>billing</em> project comes exclusively from your
+  <code>GOOGLE_CLOUD_PROJECT</code> env var via a per-run profile rewrite
+  inside the test.</li>
+</ul>
+<h2 id="cost-ceiling">Cost ceiling</h2>
+<p>The test pins <code>maximum_bytes_billed: 1_000_000_000</code> (1 GB) at the
+BigQuery client layer, so a runaway query physically cannot exceed
+that. Anthropic spend is bounded by the rubric size (4 default
+criteria × ~21 artifacts ≈ 84 calls × ~600 input tokens ≈
+\$0.13 per run on Sonnet 4.6 prices as of 2026-05). If either of
+those numbers ever drifts substantially, investigate before
+re-running.</p>
+<h2 id="what-this-test-does-not-prove">What this test does <strong>not</strong> prove</h2>
+<ul>
+<li>It runs against a single, small public dataset. Real-world dbt
+  projects with hundreds of models, partitioned tables, or
+  long-running materializations will exercise code paths the
+  smoke test doesn't touch. Use it as a release smoke, not as a
+  load test.</li>
+<li>It doesn't test the <code>--write</code> mode (writing the proposed
+  <code>schema.yml</code> back to disk) — only the default <code>--dry-run</code>
+  print-the-diff path. <code>--write</code> has its own unit-level coverage
+  but no e2e gate.</li>
+<li>It uses the v0.1 default models (Sonnet 4.6 for both draft and
+  grade). If you switch models in <code>signalforge.yml</code>, the smoke
+  test won't validate the new model — re-run it against the new
+  config to confirm.</li>
+</ul>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>1 skipped</code> with reason <code>SF_RUN_BQ=1 required ...</code></td>
+<td>One of the three env vars isn't set</td>
+<td>Re-export the missing variable; check <code>env \| grep -E '(SF_RUN_BQ\|GOOGLE_CLOUD_PROJECT\|ANTHROPIC_API_KEY)'</code></td>
+</tr>
+<tr>
+<td><code>User does not have bigquery.jobs.create permission in project bigquery-public-data</code></td>
+<td>Billing project not set; SDK fell back to the source</td>
+<td>Set <code>GOOGLE_CLOUD_PROJECT</code> to a project where you have the <code>BigQuery Job User</code> role</td>
+</tr>
+<tr>
+<td><code>Query exceeded max_bytes_billed (limit=100000000, ...)</code></td>
+<td>Old <code>maximum_bytes_billed</code> cap kicked in</td>
+<td>Refresh from <code>main</code> — issue #10 raised the cap to 1 GB in the per-run profile rewrite</td>
+</tr>
+<tr>
+<td><code>LLM response did not match the CandidateSchema shape</code></td>
+<td>Anthropic's response shape drifted vs. the parser</td>
+<td>Inspect <code>~/.anthropic-debug/</code> (set <code>ANTHROPIC_LOG=info</code>) for the raw response; file an issue</td>
+</tr>
+<tr>
+<td><code>aggregate_complete=False</code> in <code>grade.json</code></td>
+<td>Network blip during a grade call exhausted retries</td>
+<td>Re-run; if it persists, raise <code>grade.total_budget_seconds</code> in <code>signalforge.yml</code></td>
+</tr>
+<tr>
+<td><code>1 passed</code> but the wall-clock was &gt;10 minutes</td>
+<td>Anthropic API was slow; not a real failure</td>
+<td>Acceptable; the test isn't time-bounded</td>
+</tr>
+</tbody>
+</table>
+<h2 id="cross-references">Cross-references</h2>
+<ul>
+<li>The walk-through quickstart for end users: <code>README.md</code>
+  § "Quick start".</li>
+<li>The fixture itself:
+  <code>tests/fixtures/dbt_project_austin/</code>. Includes its own
+  <code>regenerate.sh</code> for refreshing the committed <code>target/manifest.json</code>
+  against a newer dbt-bigquery release.</li>
+<li>The full design and decisions log:
+  <code>plans/super/10-e2e-bigquery-smoke.md</code>.</li>
+<li>The CLI's full flag reference: <code>docs/cli-ops.md</code>.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

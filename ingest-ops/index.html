@@ -1,0 +1,2020 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/ingest-ops/">
+      
+      
+        <link rel="prev" href="../draft-ops/">
+      
+      
+        <link rel="next" href="../prune-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Ingest Layer - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#ingest-layer-operations-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Ingest Layer
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it does
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Public API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reader" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reader
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#result-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#minimal-usage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supported-vs-skipped-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported vs skipped tests
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supported vs skipped tests">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#parser-tolerances" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Parser tolerances
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#anchor-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Anchor contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#singular-testssql-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Singular tests/*.sql tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#safety-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Safety posture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#error-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Error reference
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Error reference">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ingestschemanotfounderror-tier-1-load" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IngestSchemaNotFoundError — tier 1 (load)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ingestschemaparseerror-tier-1-load" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IngestSchemaParseError — tier 1 (load)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ingestschematoolargeerror-tier-1-load" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IngestSchemaTooLargeError — tier 1 (load)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ingestmodelnotfounderror-tier-2-input" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IngestModelNotFoundError — tier 2 (input)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ingestanchorcontracterror-tier-2-input" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IngestAnchorContractError — tier 2 (input)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worked-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked example
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it does
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Public API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#reader" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reader
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#result-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#minimal-usage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supported-vs-skipped-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported vs skipped tests
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Supported vs skipped tests">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#parser-tolerances" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Parser tolerances
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#anchor-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Anchor contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#singular-testssql-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Singular tests/*.sql tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#safety-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Safety posture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#error-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Error reference
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Error reference">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#ingestschemanotfounderror-tier-1-load" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IngestSchemaNotFoundError — tier 1 (load)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ingestschemaparseerror-tier-1-load" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IngestSchemaParseError — tier 1 (load)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ingestschematoolargeerror-tier-1-load" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IngestSchemaTooLargeError — tier 1 (load)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ingestmodelnotfounderror-tier-2-input" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IngestModelNotFoundError — tier 2 (input)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ingestanchorcontracterror-tier-2-input" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        IngestAnchorContractError — tier 2 (input)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worked-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked example
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="ingest-layer-operations-guide">Ingest layer — operations guide</h1>
+<p>Operational reference for users of <code>signalforge.ingest</code>. Companion to
+<a href="../prune-ops/"><code>docs/prune-ops.md</code></a>,
+<a href="../draft-ops/"><code>docs/draft-ops.md</code></a>, and
+<a href="../manifest-loader-ops/"><code>docs/manifest-loader-ops.md</code></a>, and to the design
+record in
+<a href="../plans/super/104-ingest-external-tests.md"><code>plans/super/104-ingest-external-tests.md</code></a>.</p>
+<h2 id="what-it-does">What it does</h2>
+<p>The drafter (<code>signalforge.draft</code>) is one way to produce candidate tests:
+an LLM writes them. The ingest layer is the <em>other</em> way — point
+SignalForge at an existing dbt <code>schema.yml</code> (hand-written, or output from
+dbt-codegen, dbt Copilot, DinoAI, datapilot, …) and let the warehouse tell
+you which of <em>those</em> tests actually add signal.</p>
+<p>This extends Architectural Commitment #1 ("signal over volume") beyond
+SignalForge's own LLM drafts: you can prune <strong>any</strong> generator's tests, not
+just ours. <code>signalforge.ingest.read_schema</code> parses standard dbt test
+syntax into the same typed <code>CandidateSchema</code> the drafter emits, so
+<code>signalforge.prune.prune_tests</code> consumes it unchanged.</p>
+<p>The reader understands the four test types SignalForge can compile to
+warehouse SQL:</p>
+<table>
+<thead>
+<tr>
+<th>dbt test</th>
+<th>What prune checks</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>not_null</code></td>
+<td>column has no NULLs in the sample</td>
+</tr>
+<tr>
+<td><code>unique</code></td>
+<td>column has no duplicate non-NULL values</td>
+</tr>
+<tr>
+<td><code>accepted_values</code></td>
+<td>column has no values outside the declared set</td>
+</tr>
+<tr>
+<td><code>relationships</code></td>
+<td>every child key resolves to a parent key</td>
+</tr>
+</tbody>
+</table>
+<p>Plus a fifth, sourced from a different file: an operator's hand-authored
+<strong>singular</strong> tests under <code>tests/*.sql</code> are read into <code>custom_sql</code>
+business-rule candidates (issue #116; see
+<a href="#singular-testssql-tests">Singular <code>tests/*.sql</code> tests</a>).</p>
+<p>Every <em>generic</em> test the schema.yml carries that is not one of the four —
+<code>dbt_utils.*</code>, <code>dbt_expectations.*</code>, custom generics, anything
+namespaced — is <strong>skipped and recorded</strong>, never silently dropped (see
+<a href="#supported-vs-skipped-tests">Supported vs skipped</a>).</p>
+<p>!!! tip "There's a CLI for this"
+    The ingest layer is a <strong>library</strong> entry point — call <code>read_schema</code> and
+    hand the result's <code>candidate</code> to <code>prune_tests</code> yourself — but most
+    operators won't need to. The <code>signalforge prune-existing &lt;model&gt;
+    --schema &lt;path&gt;</code> subcommand (shipped in
+    <a href="https://github.com/wjduenow/SignalForge/issues/105">#105</a>) wires
+    ingest → prune → diff end to end with no LLM call. See the
+    <a href="../cli-ops/#signalforge-prune-existing-model-schema-path">CLI reference</a>.</p>
+<h2 id="public-api">Public API</h2>
+<p>Import from <code>signalforge.ingest</code>.</p>
+<h3 id="reader">Reader</h3>
+<ul>
+<li><strong><code>read_schema(schema, model, *, project_dir=None) -&gt; IngestResult</code></strong> —
+  the entry point. Parses an external <code>schema.yml</code> for one model and
+  returns an <code>IngestResult</code>.</li>
+<li><strong><code>read_test_files(tests_dir, model, manifest, *, project_dir=None, existing=None) -&gt; IngestResult</code></strong> —
+  reads the operator's <strong>singular</strong> dbt tests (<code>tests/*.sql</code>) for one
+  model into <code>custom_sql</code> candidates (issue #116; see
+  <a href="#singular-testssql-tests">Singular <code>tests/*.sql</code> tests</a>).</li>
+</ul>
+<p>The <code>schema</code> argument is overloaded <strong>by type</strong> — this str-vs-<code>Path</code> split
+is the contract:</p>
+<ul>
+<li><strong><code>schema: pathlib.Path</code></strong> → a FILE path. It is canonicalised
+  (symlink-/containment-hardened) against <code>project_dir</code> — defaulting to the
+  file's parent directory when <code>project_dir</code> is <code>None</code> — then read. A
+  missing file raises <code>IngestSchemaNotFoundError</code>; a symlink-loop / escape
+  re-raises as <code>IngestSchemaParseError</code>.</li>
+<li><strong><code>schema: str</code></strong> → RAW YAML CONTENT, not a path. No file read and no
+  canonicalisation happen; the string is parsed directly. (Useful for
+  testing or when the YAML is already in memory.)</li>
+</ul>
+<p><code>model</code> is the manifest <code>signalforge.manifest.Model</code> whose tests are being
+ingested. <code>model.name</code> selects the matching <code>models:</code> entry in the
+<code>schema.yml</code>; <code>model.columns</code> is the column set the
+<a href="#anchor-contract">anchor contract</a> validates against.</p>
+<h3 id="result-shapes">Result shapes</h3>
+<ul>
+<li><strong><code>IngestResult</code></strong> — the reader's return value. Two fields:<ul>
+<li><code>candidate: CandidateSchema</code> — the converted schema the prune stage
+  consumes unchanged.</li>
+<li><code>skipped: tuple[SkippedTest, ...]</code> — one record per test the reader
+  could not convert, in encounter order.</li>
+</ul>
+</li>
+<li><strong><code>SkippedTest</code></strong> — one structured skip record. Fields: <code>test_name: str</code>,
+  <code>column: str | None</code> (<code>None</code> for a model-level test), <code>reason: SkipReason</code>,
+  <code>detail: str</code> (a short free-text diagnostic).</li>
+<li><strong><code>SkipReason</code></strong> — the closed reason literal (three values; see below).</li>
+</ul>
+<p>These models are produced <strong>in process</strong> and handed straight to prune —
+they are not serialised to a JSONL audit / sidecar.</p>
+<h3 id="errors">Errors</h3>
+<p>The <code>IngestError</code> hierarchy: <code>IngestError</code> (base), plus
+<code>IngestSchemaNotFoundError</code>, <code>IngestSchemaParseError</code>,
+<code>IngestSchemaTooLargeError</code>, <code>IngestModelNotFoundError</code>,
+<code>IngestAnchorContractError</code>. See the <a href="#error-reference">Error reference</a>.</p>
+<h3 id="minimal-usage">Minimal usage</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+
+<span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.ingest</span><span class="w"> </span><span class="kn">import</span> <span class="n">read_schema</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.manifest</span><span class="w"> </span><span class="kn">import</span> <span class="n">load</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.prune</span><span class="w"> </span><span class="kn">import</span> <span class="n">prune_tests</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.warehouse</span><span class="w"> </span><span class="kn">import</span> <span class="n">WarehouseAdapter</span><span class="p">,</span> <span class="n">load_profile</span>
+
+<span class="n">project_dir</span> <span class="o">=</span> <span class="n">Path</span><span class="p">(</span><span class="s2">&quot;/path/to/dbt/project&quot;</span><span class="p">)</span>
+<span class="n">manifest</span> <span class="o">=</span> <span class="n">load</span><span class="p">(</span><span class="n">project_dir</span><span class="p">)</span>
+<span class="n">model</span> <span class="o">=</span> <span class="n">manifest</span><span class="o">.</span><span class="n">get_model</span><span class="p">(</span><span class="s2">&quot;model.my_project.orders&quot;</span><span class="p">)</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">read_schema</span><span class="p">(</span><span class="n">project_dir</span> <span class="o">/</span> <span class="s2">&quot;models/marts/schema.yml&quot;</span><span class="p">,</span> <span class="n">model</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">candidate</span><span class="o">.</span><span class="n">columns</span><span class="p">)</span><span class="si">}</span><span class="s2"> columns, &quot;</span>
+      <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="nb">len</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">skipped</span><span class="p">)</span><span class="si">}</span><span class="s2"> tests skipped&quot;</span><span class="p">)</span>
+<span class="k">for</span> <span class="n">s</span> <span class="ow">in</span> <span class="n">result</span><span class="o">.</span><span class="n">skipped</span><span class="p">:</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  skipped </span><span class="si">{</span><span class="n">s</span><span class="o">.</span><span class="n">test_name</span><span class="si">}</span><span class="s2"> on </span><span class="si">{</span><span class="n">s</span><span class="o">.</span><span class="n">column</span><span class="si">}</span><span class="s2">: </span><span class="si">{</span><span class="n">s</span><span class="o">.</span><span class="n">reason</span><span class="si">}</span><span class="s2"> — </span><span class="si">{</span><span class="n">s</span><span class="o">.</span><span class="n">detail</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+
+<span class="c1"># The candidate feeds prune unchanged. Pass an un-entered adapter —</span>
+<span class="c1"># prune_tests owns the `with adapter:` lifecycle.</span>
+<span class="n">profile</span> <span class="o">=</span> <span class="n">load_profile</span><span class="p">(</span><span class="n">project_dir</span><span class="p">)</span>
+<span class="n">adapter</span> <span class="o">=</span> <span class="n">WarehouseAdapter</span><span class="o">.</span><span class="n">from_profile</span><span class="p">(</span><span class="n">profile</span><span class="p">)</span>
+<span class="n">prune_result</span> <span class="o">=</span> <span class="n">prune_tests</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">adapter</span><span class="p">,</span> <span class="n">result</span><span class="o">.</span><span class="n">candidate</span><span class="p">,</span> <span class="n">manifest</span><span class="p">)</span>
+</code></pre></div>
+<h2 id="supported-vs-skipped-tests">Supported vs skipped tests</h2>
+<p>The four supported types map to a typed <code>CandidateTest</code>; everything else is
+recorded as a <code>SkippedTest</code>. The <code>SkipReason</code> literal is closed at three
+values:</p>
+<table>
+<thead>
+<tr>
+<th><code>SkipReason</code></th>
+<th>Triggered by</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"unsupported-test-type"</code></td>
+<td>a bare-string test that isn't <code>not_null</code> / <code>unique</code> (e.g. <code>- positive</code>)</td>
+</tr>
+<tr>
+<td><code>"custom-or-generic-test"</code></td>
+<td>a namespaced or project-defined test (<code>dbt_utils.*</code>, <code>dbt_expectations.*</code>, any custom generic), or a malformed test-entry shape</td>
+</tr>
+<tr>
+<td><code>"malformed-supported-test"</code></td>
+<td>a supported type whose required args are missing or empty (<code>accepted_values</code> with no <code>values</code>; <code>relationships</code> missing <code>to</code> or <code>field</code>)</td>
+</tr>
+</tbody>
+</table>
+<p>A skip is never a failure — the run continues. The skip records exist so an
+operator can see <em>what was left out and why</em> — the <code>signalforge
+prune-existing</code> CLI surfaces them as a "N tests skipped, here's why"
+stderr report (one summary line, with per-test detail under <code>--verbose</code>).
+Contrast this with the <a href="#anchor-contract">anchor contract</a>, which <strong>does</strong>
+fail loud.</p>
+<h3 id="parser-tolerances">Parser tolerances</h3>
+<p>The reader accepts the range of shapes dbt itself accepts:</p>
+<ul>
+<li><strong><code>tests:</code> and <code>data_tests:</code> are both read and unioned.</strong> dbt renamed
+  <code>tests:</code> → <code>data_tests:</code> in 1.8; the reader concatenates both lists (in
+  <code>tests:</code>-first encounter order) at column level and model level.</li>
+<li><strong>Identical tests are deduped.</strong> A test appearing under both <code>tests:</code> and
+  <code>data_tests:</code> (or twice in one list) collapses to one <code>CandidateTest</code>,
+  keyed by <code>(type, column, args)</code>.</li>
+<li><strong>Inline args AND <code>arguments:</code>-nested args.</strong> Both
+  <code>accepted_values: {values: [...]}</code> and the dbt 1.8+
+  <code>accepted_values: {arguments: {values: [...]}}</code> shapes are read.</li>
+<li><strong>Config keys are ignored, never mistaken for args.</strong> Interleaved
+  <code>config</code>, <code>severity</code>, <code>where</code>, <code>name</code>, <code>tags</code>, <code>error_if</code>, <code>warn_if</code>,
+  <code>store_failures</code>, <code>limit</code> keys are stripped before the required-arg check.</li>
+<li><strong><code>ref()</code> / <code>source()</code> are unwrapped on <code>relationships.to</code>.</strong> <code>ref('m')</code>
+  → <code>m</code>; <code>ref('pkg', 'm')</code> → <code>m</code> (last positional); <code>source('s', 't')</code> →
+  <code>s.t</code>. This is a bounded regex unwrap — no Jinja engine, no new
+  dependency. A <code>to</code> string matching neither pattern is carried verbatim.</li>
+<li><strong>A column with no supported tests is still a <code>CandidateColumn</code></strong> (it just
+  carries an empty <code>tests</code> tuple), and a column / model with no
+  <code>description</code> defaults to <code>""</code>.</li>
+</ul>
+<h2 id="anchor-contract">Anchor contract</h2>
+<p>A test that references a column <strong>absent from the manifest <code>Model</code></strong> means
+the ingested YAML is stale or wrong against the warehouse schema. That is a
+correctness error the operator must fix, so the reader <strong>fails loud</strong> —
+unlike unsupported types, which are skipped.</p>
+<p><code>read_schema</code> collects <strong>every</strong> anchor violation across the whole file
+(it does not stop at the first) and raises one <code>IngestAnchorContractError</code>
+whose <code>violations</code> tuple lists all of them — so you can fix the schema in a
+single pass. Three checks run:</p>
+<ul>
+<li>each <code>CandidateColumn</code> name must exist in <code>model.columns</code>;</li>
+<li>each column-scoped test must reference its own column;</li>
+<li>each test's referenced column (column-level or model-level) must exist in
+  <code>model.columns</code>.</li>
+</ul>
+<p>A clean candidate raises nothing.</p>
+<h2 id="singular-testssql-tests">Singular <code>tests/*.sql</code> tests</h2>
+<p><code>read_schema</code> covers <em>generic</em> tests declared in YAML. dbt also supports
+<strong>singular</strong> tests — a hand-authored <code>.sql</code> file under the project's
+<code>tests/</code> directory that <em>is</em> a full failing-rows SELECT (a non-empty
+result means the test failed). Those carry exactly the business rules
+the four generic types cannot express ("a refund never exceeds its
+order," "every shipped order has a ship date"). <code>read_test_files</code>
+ingests them into the same <code>custom_sql</code> candidate variant the drafter
+produces (issue #116), so they prune through the same engine.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.ingest</span><span class="w"> </span><span class="kn">import</span> <span class="n">read_test_files</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">read_test_files</span><span class="p">(</span>
+    <span class="n">project_dir</span> <span class="o">/</span> <span class="s2">&quot;tests&quot;</span><span class="p">,</span>          <span class="c1"># directory of *.sql files</span>
+    <span class="n">model</span><span class="p">,</span>                          <span class="c1"># the manifest Model to associate to</span>
+    <span class="n">manifest</span><span class="p">,</span>                       <span class="c1"># used to resolve ref()/source()</span>
+    <span class="n">existing</span><span class="o">=</span><span class="n">schema_result</span><span class="o">.</span><span class="n">candidate</span><span class="p">,</span>  <span class="c1"># optional: dedupe against schema.yml custom_sql</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>It enumerates every <code>*.sql</code> file <strong>directly under</strong> <code>tests_dir</code> (sorted
+by filename for byte-stable order) and classifies each:</p>
+<ul>
+<li><strong>ref/source/this resolution + association.</strong> Each <code>.sql</code>'s
+  dbt-Jinja refs are resolved with the <strong>bounded</strong> resolver
+  (<code>{{ this }}</code>, <code>{{ ref('m') }}</code>, <code>{{ source('s','t') }}</code> — no Jinja
+  <em>engine</em>). A file whose resolved refs reference <strong>this</strong> model
+  becomes a model-level <code>custom_sql</code> candidate associated to it.</li>
+<li><strong>Unrelated files are ignored, not skip-recorded.</strong> A <code>.sql</code> that
+  references <em>some other</em> model is simply not included — it is not a
+  defect of <em>this</em> model's ingest, so it produces no <code>SkippedTest</code>
+  record. (A bare SELECT with no resolvable <code>ref()</code> is treated as
+  unrelated, not associated.)</li>
+<li><strong>Unsupported Jinja is skip-recorded.</strong> A <code>.sql</code> carrying Jinja the
+  bounded resolver cannot evaluate (control-flow <code>{% if %}</code> / <code>{% for %}</code>,
+  <code>var()</code> / <code>env_var()</code>, macros) lands in <code>IngestResult.skipped</code> with
+  reason <code>malformed-supported-test</code> and a <code>singular .sql test contains
+  Jinja the bounded resolver cannot evaluate</code> detail — never silently
+  dropped. (The closed 3-value <code>SkipReason</code> literal has no singular-test
+  specific value; <code>malformed-supported-test</code> is the closest fit since the
+  <code>.sql</code> test cannot be compiled to runnable SQL.)</li>
+<li><strong>Dedupe across both sources.</strong> Associated tests dedupe by
+  <code>(model, "custom_sql", sql_hash)</code> where <code>sql_hash</code> is a 16-hex
+  blake2b-8 of the SQL body. Two <code>.sql</code> files with byte-identical SQL
+  collapse to one candidate; and when <code>existing</code> (a schema.yml-sourced
+  candidate, e.g. from a prior <code>read_schema</code> call) is passed, any <code>.sql</code>
+  whose SQL matches an <code>existing</code> <code>custom_sql</code> test is dropped so the
+  same rule is not pruned twice.</li>
+</ul>
+<p>No anchor-contract check runs here — singular tests are model-level, so
+there is no per-column reference to validate against <code>model.columns</code>.</p>
+<p>Each <code>.sql</code> is <strong>size-capped</strong> (from <code>stat().st_size</code>, before it is read
+into memory) by the same 5 MB cap that guards <code>read_schema</code>; oversize
+raises <code>IngestSchemaTooLargeError</code>. <code>tests_dir</code> is symlink-/containment-
+hardened against <code>project_dir</code> (defaulting to <code>tests_dir</code> itself); a
+missing or non-directory <code>tests_dir</code> raises <code>IngestSchemaNotFoundError</code>,
+and an unreadable file or canonicalisation failure raises
+<code>IngestSchemaParseError</code>.</p>
+<p>!!! tip "There's a CLI for this too"
+    The <code>signalforge prune-existing &lt;model&gt; --schema &lt;path&gt;</code> subcommand
+    reads singular <code>tests/*.sql</code> (override the directory with
+    <code>--tests-dir</code>) <em>alongside</em> the schema.yml in one run and prunes both
+    — see the
+    <a href="../cli-ops/#singular-testssql-business-rule-tests-us-014">CLI reference</a>.</p>
+<h2 id="safety-posture">Safety posture</h2>
+<p>Two attack surfaces, both mitigated before any parse:</p>
+<ul>
+<li><strong>Malicious YAML.</strong> Only <code>yaml.safe_load</code> is used (never <code>yaml.load</code>), and
+  the <strong>raw byte length is size-capped before the parse runs</strong> (5 MB) so a
+  billion-laughs / deeply-nested-anchor payload never reaches the parser.
+  Oversize raises <code>IngestSchemaTooLargeError</code>.</li>
+<li><strong>Path traversal / symlinks.</strong> A <code>Path</code> argument is canonicalised through
+  the project's symlink-/containment-hardened path safety helper before any
+  read.</li>
+</ul>
+<p>A <code>relationships.to</code> value carrying <code>ref('x')</code> or raw SQL is <strong>not</strong> an
+injection vector at ingest — prune's identifier safety check gates every
+identifier before it reaches compiled SQL.</p>
+<p>The ingest layer is a stage-0 reader: it emits <strong>no logging</strong>.
+Observability lives in the consuming prune / grade stages.</p>
+<h2 id="error-reference">Error reference</h2>
+<p>Every error subclasses <code>IngestError</code>, which renders its <code>message</code> plus a
+<code>↳ Remediation:</code> line. The CLI exit-code tier each maps to (for the
+fast-follow #105) is noted.</p>
+<h3 id="ingestschemanotfounderror-tier-1-load"><code>IngestSchemaNotFoundError</code> — tier 1 (load)</h3>
+<p>The supplied <code>schema.yml</code> <code>Path</code> does not exist.</p>
+<blockquote>
+<p>Verify the schema.yml path is correct and the file exists. Pass the path
+to the dbt YAML file that declares the model's tests (commonly
+<code>models/&lt;dir&gt;/schema.yml</code> or a per-model <code>_&lt;name&gt;.yml</code>).</p>
+</blockquote>
+<h3 id="ingestschemaparseerror-tier-1-load"><code>IngestSchemaParseError</code> — tier 1 (load)</h3>
+<p>The <code>schema.yml</code> could not be parsed: malformed YAML, an unreadable file
+(encoding / OS error), or a path-containment failure (symlink loop / escape
+from the project directory). The triggering exception is chained via
+<code>__cause__</code>.</p>
+<blockquote>
+<p>Verify the file is valid YAML (yaml.safe_load must parse it), is readable,
+and that no symlink in its path escapes the project directory. Run
+<code>dbt parse</code> to confirm dbt itself accepts the schema.</p>
+</blockquote>
+<h3 id="ingestschematoolargeerror-tier-1-load"><code>IngestSchemaTooLargeError</code> — tier 1 (load)</h3>
+<p>The raw <code>schema.yml</code> byte length exceeds the parse-safety cap (checked
+before any <code>yaml.safe_load</code>).</p>
+<blockquote>
+<p>The schema.yml exceeded the configured byte safety cap applied before
+yaml.safe_load. Inspect the file for accidental bloat or an attempted
+billion-laughs / deeply-nested-anchor payload. Trim the schema or split
+it across multiple files.</p>
+</blockquote>
+<h3 id="ingestmodelnotfounderror-tier-2-input"><code>IngestModelNotFoundError</code> — tier 2 (input)</h3>
+<p>No <code>models:</code> entry in the <code>schema.yml</code> matches <code>model.name</code>. A <code>schema.yml</code>
+can declare several models; the operator named one the file does not
+contain.</p>
+<blockquote>
+<p>Verify the model name matches a <code>name:</code> under <code>models:</code> in the
+schema.yml. Model names are matched exactly (case-sensitive).</p>
+</blockquote>
+<h3 id="ingestanchorcontracterror-tier-2-input"><code>IngestAnchorContractError</code> — tier 2 (input)</h3>
+<p>One or more tests reference a column absent from the <code>Model</code>. Carries the
+full <code>violations</code> tuple (all violations across the file).</p>
+<blockquote>
+<p>Each listed test references a column that is absent from the model.
+Either correct the column name in the schema.yml to match the model, or
+regenerate the manifest (<code>dbt parse</code>) so the model's column set is
+current.</p>
+</blockquote>
+<h2 id="worked-example">Worked example</h2>
+<p>Given this <code>schema.yml</code> (a dbt-codegen-shaped file) and an <code>orders</code> model
+whose columns are <code>order_id</code>, <code>status</code>, <code>customer_id</code>, <code>amount</code>,
+<code>created_at</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+
+<span class="nt">models</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">customers</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;An</span><span class="nv"> </span><span class="s">unrelated</span><span class="nv"> </span><span class="s">model</span><span class="nv"> </span><span class="s">in</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">same</span><span class="nv"> </span><span class="s">file</span><span class="nv"> </span><span class="s">—</span><span class="nv"> </span><span class="s">not</span><span class="nv"> </span><span class="s">selected.&quot;</span>
+<span class="w">    </span><span class="nt">columns</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">id</span>
+<span class="w">        </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">not_null</span>
+
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">orders</span>
+<span class="w">    </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Orders</span><span class="nv"> </span><span class="s">fact</span><span class="nv"> </span><span class="s">table.&quot;</span>
+<span class="w">    </span><span class="nt">columns</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">order_id</span>
+<span class="w">        </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;Surrogate</span><span class="nv"> </span><span class="s">key</span><span class="nv"> </span><span class="s">for</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">order.&quot;</span>
+<span class="w">        </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">not_null</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unique</span>
+<span class="w">        </span><span class="nt">data_tests</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unique</span><span class="w">          </span><span class="c1"># duplicate of the unique above — deduped</span>
+
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">status</span>
+<span class="w">        </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">accepted_values</span><span class="p">:</span><span class="w">           </span><span class="c1"># inline args</span>
+<span class="w">              </span><span class="nt">values</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;placed&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;shipped&quot;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&quot;cancelled&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">dbt_utils.unique_combination_of_columns</span><span class="p">:</span><span class="w">   </span><span class="c1"># namespaced — skipped</span>
+<span class="w">              </span><span class="nt">combination_of_columns</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">order_id</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">status</span><span class="p p-Indicator">]</span>
+
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">customer_id</span>
+<span class="w">        </span><span class="nt">data_tests</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">relationships</span><span class="p">:</span><span class="w">             </span><span class="c1"># arguments:-nested + ref() unwrap</span>
+<span class="w">              </span><span class="nt">arguments</span><span class="p">:</span>
+<span class="w">                </span><span class="nt">to</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;ref(&#39;customers&#39;)&quot;</span>
+<span class="w">                </span><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">id</span>
+
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">amount</span>
+<span class="w">        </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">positive</span><span class="w">                   </span><span class="c1"># bare unsupported string — skipped</span>
+
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">created_at</span><span class="w">               </span><span class="c1"># no description, no tests</span>
+
+<span class="w">    </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">dbt_utils.expression_is_true</span><span class="p">:</span><span class="w">  </span><span class="c1"># model-level custom generic — skipped</span>
+<span class="w">          </span><span class="nt">expression</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;amount</span><span class="nv"> </span><span class="s">&gt;=</span><span class="nv"> </span><span class="s">0&quot;</span>
+</code></pre></div>
+<p><code>read_schema(yaml_str, orders_model)</code> returns an <code>IngestResult</code> with:</p>
+<p><strong>Kept candidate tests</strong> (on <code>result.candidate</code>):</p>
+<table>
+<thead>
+<tr>
+<th>column</th>
+<th>test</th>
+<th>notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>order_id</code></td>
+<td><code>not_null</code></td>
+<td></td>
+</tr>
+<tr>
+<td><code>order_id</code></td>
+<td><code>unique</code></td>
+<td>the <code>data_tests:</code> duplicate collapsed away</td>
+</tr>
+<tr>
+<td><code>status</code></td>
+<td><code>accepted_values</code> values <code>("placed", "shipped", "cancelled")</code></td>
+<td>inline args</td>
+</tr>
+<tr>
+<td><code>customer_id</code></td>
+<td><code>relationships</code> <code>to="customers"</code>, <code>field="id"</code></td>
+<td><code>ref('customers')</code> unwrapped</td>
+</tr>
+</tbody>
+</table>
+<p><code>created_at</code> is present as a <code>CandidateColumn</code> with an empty <code>tests</code> tuple
+and <code>description=""</code>. The <code>customers</code> model is ignored — only the named
+<code>orders</code> model is selected.</p>
+<p><strong>Skipped tests</strong> (<code>result.skipped</code>):</p>
+<table>
+<thead>
+<tr>
+<th><code>test_name</code></th>
+<th><code>column</code></th>
+<th><code>reason</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>dbt_utils.unique_combination_of_columns</code></td>
+<td><code>status</code></td>
+<td><code>custom-or-generic-test</code></td>
+</tr>
+<tr>
+<td><code>positive</code></td>
+<td><code>amount</code></td>
+<td><code>unsupported-test-type</code></td>
+</tr>
+<tr>
+<td><code>dbt_utils.expression_is_true</code></td>
+<td><code>None</code> (model-level)</td>
+<td><code>custom-or-generic-test</code></td>
+</tr>
+</tbody>
+</table>
+<p>The four kept tests flow into <code>prune_tests</code> exactly as if the drafter had
+produced them; the three skipped tests are surfaced for the operator's
+review and do not stop the run.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

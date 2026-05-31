@@ -1,0 +1,1701 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/snowflake-e2e-setup/">
+      
+      
+        <link rel="prev" href="../e2e-smoke-test/">
+      
+      
+        <link rel="next" href="../codecov-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Snowflake E2E Setup - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#snowflake-end-to-end-test-setup" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Snowflake E2E Setup
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-these-tests-prove" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What these tests prove
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#who-runs-these" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who runs these
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-guardrails-set-these-up-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost guardrails (set these up first)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#local-environment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Local environment
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Local environment">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#dbt-profilesyml-snowflake-target" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        dbt profiles.yml Snowflake target
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-the-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running the tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-hygiene" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security hygiene
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-ceiling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost ceiling
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cross-references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cross-references
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#what-these-tests-prove" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What these tests prove
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#who-runs-these" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Who runs these
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-guardrails-set-these-up-first" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost guardrails (set these up first)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prerequisites" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prerequisites
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#local-environment" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Local environment
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Local environment">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#dbt-profilesyml-snowflake-target" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        dbt profiles.yml Snowflake target
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-the-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running the tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#security-hygiene" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Security hygiene
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-ceiling" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost ceiling
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cross-references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cross-references
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="snowflake-end-to-end-test-setup">Snowflake end-to-end test setup</h1>
+<p>This guide walks a contributor with no prior Snowflake exposure
+from zero to a green <code>pytest -m snowflake</code> run against a real
+Snowflake account. It's the Snowflake analogue of the BigQuery
+<a href="../e2e-smoke-test/">End-to-end smoke test</a> guide.</p>
+<blockquote>
+<p><strong>Read the <a href="#cost-guardrails-set-these-up-first">Cost guardrails</a>
+section first and set them up before you run anything.</strong> A
+runaway query against an un-capped warehouse can bill real
+credits. The guardrails below make that physically impossible.</p>
+</blockquote>
+<h2 id="what-these-tests-prove">What these tests prove</h2>
+<p>The Snowflake adapter has a lot of warehouse-specific surface that
+unit tests with <code>fakesnow</code> can't fully certify: real Snowflake folds
+unquoted identifiers to upper-case, rejects <code>HASH(*)</code> outside a
+<code>SELECT</code> projection, enforces read-only shares on the sample
+database, and reaps session-scoped temp tables on connection close.
+The gated <code>@pytest.mark.snowflake</code> tests split into two tiers:</p>
+<ul>
+<li><strong>Offline (<code>fakesnow</code>)</strong> — compiled-SQL validation and the
+  <code>EXPLAIN</code>-estimate parsing path run through the in-process
+  <code>fakesnow</code> engine. <strong>No credentials, no account, no cost.</strong></li>
+<li><strong>Live</strong> — the full <code>signalforge generate</code> pipeline (manifest →
+  safety → draft → prune → grade → diff) runs against the read-only
+  <code>SNOWFLAKE_SAMPLE_DATA.TPCH_SF1</code> sample dataset, plus the live
+  <code>EXPLAIN USING JSON</code> cost-estimate certification. These need a
+  real account and a real Anthropic key.</li>
+</ul>
+<p>The live e2e exercises the load-bearing claim of the project: the
+prune step drops at least one <code>always-passes</code> test on a natural
+NOT NULL source column (the TPCH primary key <code>c_custkey</code>). If it
+passes, you have evidence the pipeline composes correctly against
+real Snowflake and real Anthropic before users hit it.</p>
+<h2 id="who-runs-these">Who runs these</h2>
+<p>Maintainers and contributors, locally, before declaring a
+Snowflake-touching PR ready — <strong>not</strong> CI. CI doesn't carry the
+credentials these tests need, and forked-PR runs strip secrets by
+design. The tests are gated by <code>SF_RUN_SNOWFLAKE</code> plus connection
+env vars and self-skip with a clear reason when any are absent, so
+a default <code>pytest</code> run never accidentally bills your account.</p>
+<h2 id="cost-guardrails-set-these-up-first">Cost guardrails (set these up first)</h2>
+<p>Do this in the Snowflake UI <strong>before</strong> your first run. The whole
+point is that a mistake can't cost more than a few cents.</p>
+<ol>
+<li><strong>Create a resource monitor with a hard credit cap.</strong> In
+   Snowflake: <em>Admin → Cost Management → Resource Monitors → +
+   Resource Monitor</em>. Set a small monthly credit quota (e.g. <code>1</code>
+   credit) and a <code>SUSPEND</code> (or <code>SUSPEND_IMMEDIATE</code>) action at 100%.
+   Assign it to the warehouse you'll use for testing. This is the
+   backstop that makes a runaway query physically unable to bill
+   unbounded credits.</li>
+<li><strong>Use an XS warehouse.</strong> TPCH_SF1 is tiny; a full-scope
+   <code>COUNT(*)</code> over the ~150K-row <code>CUSTOMER</code> table is sub-second on
+   the smallest compute. Create a dedicated <code>XSMALL</code> warehouse for
+   testing rather than reusing a larger production warehouse:</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="k">CREATE</span><span class="w"> </span><span class="n">WAREHOUSE</span><span class="w"> </span><span class="k">IF</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">EXISTS</span><span class="w"> </span><span class="n">SIGNALFORGE_TEST_WH</span>
+<span class="w">  </span><span class="n">WAREHOUSE_SIZE</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;XSMALL&#39;</span>
+<span class="w">  </span><span class="n">AUTO_SUSPEND</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">60</span><span class="w">       </span><span class="c1">-- park after 60s idle</span>
+<span class="w">  </span><span class="n">AUTO_RESUME</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">TRUE</span>
+<span class="w">  </span><span class="n">INITIALLY_SUSPENDED</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">TRUE</span><span class="p">;</span>
+</code></pre></div>
+<ol>
+<li><strong>Set aggressive auto-suspend.</strong> <code>AUTO_SUSPEND = 60</code> (seconds)
+   parks the warehouse almost immediately after the test finishes
+   so you don't pay for idle compute. The <code>CREATE WAREHOUSE</code> above
+   already sets it; confirm it on any pre-existing warehouse you
+   reuse.</li>
+</ol>
+<p>With a resource monitor capped at 1 credit and an XS warehouse, a
+full live run costs a fraction of a credit on the Snowflake side
+(plus ~\$0.13–0.20 of Anthropic spend for the full-stack e2e — see
+<a href="#cost-ceiling">Cost ceiling</a>).</p>
+<h2 id="prerequisites">Prerequisites</h2>
+<ol>
+<li>
+<p><strong>A Snowflake account.</strong> A
+   <a href="https://signup.snowflake.com/">Snowflake trial</a> works — trials
+   ship with the <code>SNOWFLAKE_SAMPLE_DATA</code> shared database already
+   mounted, which is all the live tests read.</p>
+</li>
+<li>
+<p><strong>Access to <code>SNOWFLAKE_SAMPLE_DATA.TPCH_SF1</code>.</strong> This is a
+   read-only share Snowflake provides to every account. Confirm
+   you can query it:</p>
+</li>
+</ol>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">SNOWFLAKE_SAMPLE_DATA</span><span class="p">.</span><span class="n">TPCH_SF1</span><span class="p">.</span><span class="n">CUSTOMER</span><span class="p">;</span>
+<span class="c1">-- expect ~150000</span>
+</code></pre></div>
+<p>If the database isn't visible, an account admin can re-import it
+   from <em>Data → Private Sharing → SNOWFLAKE_SAMPLE_DATA</em>.</p>
+<ol>
+<li><strong>The <code>snowflake</code> dependencies installed.</strong> Either install the
+   published extra:</li>
+</ol>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;signalforge-dbt[snowflake]&quot;</span>
+</code></pre></div>
+<p>or, for development from source, <code>uv sync --dev</code> — the dev group
+   already includes <code>snowflake-connector-python</code> <strong>and</strong> <code>fakesnow</code>
+   (the offline harness), so a single sync gives you everything for
+   both test tiers.</p>
+<ol>
+<li><strong>An Anthropic API key</strong> with budget for ~\$0.20 of spend — only
+   needed for the <strong>full-stack e2e</strong> (<code>test_e2e_snowflake_smoke.py</code>),
+   which drives a real LLM draft + grade. The offline fakesnow tests
+   and the live <code>EXPLAIN</code>-estimate test don't call the LLM. Sign up
+   at <a href="https://console.anthropic.com/">https://console.anthropic.com/</a> if you don't have one.</li>
+</ol>
+<h2 id="local-environment">Local environment</h2>
+<p>Copy the committed template and fill in your values:</p>
+<div class="highlight"><pre><span></span><code>cp<span class="w"> </span>.env.example<span class="w"> </span>.env
+<span class="nv">$EDITOR</span><span class="w"> </span>.env
+</code></pre></div>
+<p><code>.env</code> is gitignored (<code>.gitignore:14</code>) so your filled-in secrets
+never get committed; only the placeholder <code>.env.example</code> is tracked.
+SignalForge doesn't auto-load <code>.env</code> — <code>source</code> it into your shell
+(or use <a href="https://direnv.net/">direnv</a>) before running:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">set</span><span class="w"> </span>-a<span class="p">;</span><span class="w"> </span><span class="nb">source</span><span class="w"> </span>.env<span class="p">;</span><span class="w"> </span><span class="nb">set</span><span class="w"> </span>+a<span class="w">   </span><span class="c1"># export every var in .env</span>
+</code></pre></div>
+<p>The required variables, mirroring the <code>SF_RUN_BQ</code> belt-and-suspenders
+pattern (the marker deselects the test in CI; the runtime
+<code>_skip_reason()</code> helper turns a missing var into an obvious
+skip-with-reason rather than a confusing failure):</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Required for</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SF_RUN_SNOWFLAKE=1</code></td>
+<td>every live test</td>
+<td>Opt-in to the Snowflake-backed branch (the Snowflake analogue of <code>SF_RUN_BQ=1</code>).</td>
+</tr>
+<tr>
+<td><code>SNOWFLAKE_ACCOUNT</code></td>
+<td>every live test</td>
+<td>Your account identifier (e.g. <code>myorg-account1</code> or <code>xy12345.us-east-1</code>).</td>
+</tr>
+<tr>
+<td><code>SNOWFLAKE_USER</code></td>
+<td>every live test</td>
+<td>The login user.</td>
+</tr>
+<tr>
+<td><code>SNOWFLAKE_PASSWORD</code></td>
+<td>every live test</td>
+<td>The user's password (password auth is the v0.2 default).</td>
+</tr>
+<tr>
+<td><code>SNOWFLAKE_WAREHOUSE</code></td>
+<td>every live test</td>
+<td>The XS warehouse compute context for prune/sample queries.</td>
+</tr>
+<tr>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td>full-stack e2e</td>
+<td>The LLM seam (draft + grade); starts with <code>sk-ant-...</code>.</td>
+</tr>
+<tr>
+<td><code>SNOWFLAKE_ROLE</code></td>
+<td>optional</td>
+<td>Override the user's default role if it lacks <code>SNOWFLAKE_SAMPLE_DATA</code> access.</td>
+</tr>
+<tr>
+<td><code>SNOWFLAKE_DATABASE</code></td>
+<td>optional</td>
+<td>Defaults to <code>SNOWFLAKE_SAMPLE_DATA</code> in the fixture profile.</td>
+</tr>
+<tr>
+<td><code>SNOWFLAKE_SCHEMA</code></td>
+<td>optional</td>
+<td>Defaults to <code>TPCH_SF1</code> in the fixture profile.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="dbt-profilesyml-snowflake-target">dbt <code>profiles.yml</code> Snowflake target</h3>
+<p>For a one-off CLI invocation (rather than through pytest), a
+Snowflake dbt profile target carries the same connection fields
+(<code>DbtProfileTarget</code>, issue #120). A minimal password-auth target:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">signalforge_test_tpch</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">target</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">dev</span>
+<span class="w">  </span><span class="nt">outputs</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">dev</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">snowflake</span>
+<span class="w">      </span><span class="nt">account</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{{</span><span class="nv"> </span><span class="s">env_var(&#39;SNOWFLAKE_ACCOUNT&#39;)</span><span class="nv"> </span><span class="s">}}&quot;</span>
+<span class="w">      </span><span class="nt">user</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{{</span><span class="nv"> </span><span class="s">env_var(&#39;SNOWFLAKE_USER&#39;)</span><span class="nv"> </span><span class="s">}}&quot;</span>
+<span class="w">      </span><span class="nt">password</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{{</span><span class="nv"> </span><span class="s">env_var(&#39;SNOWFLAKE_PASSWORD&#39;)</span><span class="nv"> </span><span class="s">}}&quot;</span>
+<span class="w">      </span><span class="nt">role</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{{</span><span class="nv"> </span><span class="s">env_var(&#39;SNOWFLAKE_ROLE&#39;,</span><span class="nv"> </span><span class="s">&#39;PUBLIC&#39;)</span><span class="nv"> </span><span class="s">}}&quot;</span>
+<span class="w">      </span><span class="nt">warehouse</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;{{</span><span class="nv"> </span><span class="s">env_var(&#39;SNOWFLAKE_WAREHOUSE&#39;)</span><span class="nv"> </span><span class="s">}}&quot;</span>
+<span class="w">      </span><span class="nt">database</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">SNOWFLAKE_SAMPLE_DATA</span>
+<span class="w">      </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">TPCH_SF1</span>
+</code></pre></div>
+<p>The live e2e test handles this friction for you — it copies the
+committed fixture into a per-run <code>tmp_path</code> and writes a profile
+target wired to your env vars, so you don't edit any committed file.</p>
+<h2 id="running-the-tests">Running the tests</h2>
+<p>From the repository root, with <code>.env</code> sourced into your shell:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># Offline only — no credentials, no cost. Runs the fakesnow</span>
+<span class="c1"># compiled-SQL + EXPLAIN-parse suites; the live tests self-skip.</span>
+uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span>-m<span class="w"> </span>snowflake<span class="w"> </span>--no-cov
+
+<span class="c1"># Full live run — needs every variable above set.</span>
+<span class="nb">set</span><span class="w"> </span>-a<span class="p">;</span><span class="w"> </span><span class="nb">source</span><span class="w"> </span>.env<span class="p">;</span><span class="w"> </span><span class="nb">set</span><span class="w"> </span>+a
+uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span>-m<span class="w"> </span>snowflake<span class="w"> </span>--no-cov
+</code></pre></div>
+<p>The same <code>-m snowflake</code> marker covers both tiers: with no
+credentials set, the offline fakesnow tests run and the live tests
+self-skip with a reason naming the missing variable; with everything
+set, the live tests run too.</p>
+<p>The <code>--no-cov</code> flag is <strong>required</strong> because <code>--cov-fail-under=80</code> in
+<code>addopts</code> would fail any marker-specific run that exercises only a
+fraction of the codebase (mirrors <code>pytest -m e2e --no-cov</code> for the
+BigQuery suite).</p>
+<p>A successful full run prints <code>N passed</code> and exits 0. A clean
+credential-absent run prints the gated tests as <code>skipped</code> with the
+missing-variable reason.</p>
+<h2 id="security-hygiene">Security hygiene</h2>
+<ul>
+<li>Keep secrets in <code>.env</code> (gitignored), never inline in a committed
+  file. <code>source</code> it into your shell; don't paste the password on the
+  command line where it lands in <code>~/.bash_history</code>.</li>
+<li>Use a fresh shell session, or <code>unset SNOWFLAKE_PASSWORD
+  ANTHROPIC_API_KEY</code> after the run.</li>
+<li>SignalForge never writes credentials to disk — they go from your
+  environment straight into the in-memory Snowflake / Anthropic SDK
+  clients. The audit JSONLs under <code>.signalforge/</code> carry only
+  blake2b-8 hashes of inputs, never raw secrets. The <code>SnowflakeAdapter</code>
+  <code>__repr__</code> deliberately shows only <code>account</code> + <code>warehouse</code>, never
+  <code>user</code> / <code>password</code> / <code>role</code> / <code>database</code> / <code>schema</code>.</li>
+<li>The committed fixture (<code>tests/fixtures/snowflake/</code>) contains zero
+  secrets — its <code>profiles.yml</code> carries placeholder credentials that
+  the test overwrites per-run from your environment.</li>
+</ul>
+<h2 id="cost-ceiling">Cost ceiling</h2>
+<ul>
+<li><strong>Snowflake:</strong> the resource monitor (capped at e.g. 1 credit) is
+  the hard backstop. The actual work — a handful of full-scope
+  <code>COUNT(*)</code> queries over the ~150K-row TPCH <code>CUSTOMER</code> table on an
+  XS warehouse — costs a small fraction of a credit. Auto-suspend
+  at 60s means you don't pay for idle compute after the run.</li>
+<li><strong>Anthropic:</strong> bounded by the rubric size for the full-stack e2e
+  (4 default criteria × the drafted artifact count), roughly
+  \$0.13–0.20 per run on Sonnet 4.6 prices as of 2026-05. The
+  offline fakesnow tests and the live <code>EXPLAIN</code>-estimate test make
+  no LLM calls.</li>
+</ul>
+<p>If either number drifts substantially, investigate before
+re-running.</p>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Live tests <code>skipped</code> with reason <code>SF_RUN_SNOWFLAKE=1 required ...</code></td>
+<td>The opt-in flag isn't set</td>
+<td><code>set -a; source .env; set +a</code>, then confirm with <code>env \| grep SF_RUN_SNOWFLAKE</code></td>
+</tr>
+<tr>
+<td><code>skipped</code> with <code>&lt;VAR&gt; required (Snowflake connection parameter ...)</code></td>
+<td>A connection env var is missing</td>
+<td>Set the named variable in <code>.env</code> and re-source it</td>
+</tr>
+<tr>
+<td><code>250001 Could not connect to Snowflake backend</code></td>
+<td>Wrong <code>SNOWFLAKE_ACCOUNT</code> format</td>
+<td>Use the org-account (<code>myorg-account1</code>) or legacy locator (<code>xy12345.us-east-1</code>) form, no <code>https://</code> prefix</td>
+</tr>
+<tr>
+<td><code>Object 'SNOWFLAKE_SAMPLE_DATA.TPCH_SF1.CUSTOMER' does not exist</code></td>
+<td>The sample share isn't mounted, or role lacks access</td>
+<td>Re-import <code>SNOWFLAKE_SAMPLE_DATA</code> (Data → Private Sharing); set <code>SNOWFLAKE_ROLE</code> to one with access</td>
+</tr>
+<tr>
+<td><code>No active warehouse selected in the current session</code></td>
+<td><code>SNOWFLAKE_WAREHOUSE</code> unset or warehouse suspended</td>
+<td>Set <code>SNOWFLAKE_WAREHOUSE</code>; <code>AUTO_RESUME = TRUE</code> lets it wake on the first query</td>
+</tr>
+<tr>
+<td><code>Cannot create temporary table ... in a read-only share</code></td>
+<td>Ran with <code>prune.scope: sample</code> + <code>materialised</code></td>
+<td>The e2e pins <code>prune.scope: full</code> for exactly this reason; don't override it against the sample dataset</td>
+</tr>
+<tr>
+<td><code>LLM response did not match the CandidateSchema shape</code></td>
+<td>Anthropic's response shape drifted vs. the parser</td>
+<td>Set <code>ANTHROPIC_LOG=info</code>, inspect <code>~/.anthropic-debug/</code>, file an issue</td>
+</tr>
+</tbody>
+</table>
+<h2 id="cross-references">Cross-references</h2>
+<ul>
+<li>The operator-facing Snowflake adapter reference (cost guidance,
+  <code>EXPLAIN</code>-estimate semantics): <a href="../warehouse-adapter-ops/">docs/warehouse-adapter-ops.md</a>.</li>
+<li>The BigQuery analogue of this guide: <a href="../e2e-smoke-test/">docs/e2e-smoke-test.md</a>.</li>
+<li>The committed Snowflake fixture: <code>tests/fixtures/snowflake/</code>.</li>
+<li>Test-marker conventions and the pre-release coverage audit:
+  <code>CONTRIBUTING.md</code> § "Test markers".</li>
+<li>The CLI's full flag reference: <a href="../cli-ops/">docs/cli-ops.md</a>.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

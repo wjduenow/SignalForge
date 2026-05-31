@@ -1,0 +1,2422 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/">
+      
+      
+      
+        <link rel="next" href="cli-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL(".",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#signalforge" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Home
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="." class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#why-this-exists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why this exists
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it does
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-it-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How it works
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#claude-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Claude Code
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supported-warehouses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported warehouses
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supported-llm-providers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported LLM providers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#quick-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick start
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Quick start">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Install
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-authenticate-to-bigquery-and-your-llm-provider" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Authenticate to BigQuery and your LLM provider
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-minimum-signalforgeyml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Minimum signalforge.yml
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-prepare-the-fixture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Prepare the fixture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-pre-flight-check-signalforge-lint" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Pre-flight check (signalforge lint)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-first-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. First run
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#7-expected-output" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Expected output
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#custom-business-rule-tests-worked-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Custom business-rule tests (worked example)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prune-the-tests-you-already-have" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prune the tests you already have
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#bigquery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        BigQuery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#snowflake" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Snowflake
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipeline-stage-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipeline-stage configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#data-safety" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data safety
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#llm-drafting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LLM drafting
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="LLM drafting">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-drafting-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How drafting works
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#auditability" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auditability
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#roadmap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Roadmap
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#design-principles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Design principles
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#related-projects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Related projects
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#license" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        License
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#contributing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contributing
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#why-this-exists" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Why this exists
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-it-does" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it does
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#how-it-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How it works
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#claude-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Claude Code
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supported-warehouses" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported warehouses
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#supported-llm-providers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Supported LLM providers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#quick-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick start
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Quick start">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#1-install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Install
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#2-authenticate-to-bigquery-and-your-llm-provider" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Authenticate to BigQuery and your LLM provider
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#3-minimum-signalforgeyml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Minimum signalforge.yml
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#4-prepare-the-fixture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. Prepare the fixture
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#5-pre-flight-check-signalforge-lint" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Pre-flight check (signalforge lint)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#6-first-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. First run
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#7-expected-output" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Expected output
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#custom-business-rule-tests-worked-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Custom business-rule tests (worked example)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#troubleshooting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Troubleshooting
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prune-the-tests-you-already-have" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prune the tests you already have
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#bigquery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        BigQuery
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#snowflake" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Snowflake
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipeline-stage-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipeline-stage configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#data-safety" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Data safety
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#llm-drafting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LLM drafting
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="LLM drafting">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#how-drafting-works" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How drafting works
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#auditability" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Auditability
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#roadmap" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Roadmap
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#design-principles" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Design principles
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#related-projects" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Related projects
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#license" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        License
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#contributing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Contributing
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<p><a href="https://codecov.io/gh/wjduenow/SignalForge"><img alt="codecov" src="https://codecov.io/gh/wjduenow/SignalForge/branch/dev/graph/badge.svg" /></a> <a href="https://wjduenow.github.io/SignalForge/"><img alt="docs" src="https://img.shields.io/badge/docs-signalforge-blue?logo=materialformkdocs" /></a> <a href="../src/signalforge/skills/signalforge/assets/SKILL.eval.json"><img alt="clauditor-graded" src="https://img.shields.io/badge/clauditor-pending-lightgrey" /></a></p>
+<h1 id="signalforge">SignalForge</h1>
+<blockquote>
+<p>LLM-drafted dbt schema.yml, tests, and docs — pruned against real warehouse data so only signal-bearing tests ship.</p>
+</blockquote>
+<h2 id="why-this-exists">Why this exists</h2>
+<p>Authoring <code>schema.yml</code>, tests, and documentation is the most-cited drudgery in the dbt ecosystem. AI tools that generate them already exist — dbt Copilot, dbt-codegen, Paradime DinoAI, Altimate datapilot — but their output is consistently described the same way: <em>noise</em>. Hundreds of <code>not_null</code> and <code>unique</code> tests that always pass. Generic docstrings that paraphrase the column name. Schemas that drift from the SELECT.</p>
+<p>SignalForge generates the same artifacts, then asks a different question: <strong>does this test produce signal?</strong> Every candidate test is run against your real warehouse data. Tests that always pass are dropped. Docs are graded against a project-specific rubric. Only signal-bearing artifacts are written to disk.</p>
+<p>And you don't have to start from SignalForge's own drafts. Point it at a <code>schema.yml</code> that dbt Copilot, dbt-codegen, DinoAI, datapilot — or your own hands — already produced, and it prunes <em>that</em>: <code>signalforge prune-existing &lt;model&gt; --schema &lt;path&gt;</code> runs the same warehouse-backed prune over your existing tests, no LLM call required.</p>
+<h2 id="what-it-does">What it does</h2>
+<ul>
+<li><strong>Drafts <code>schema.yml</code></strong> from your model SQL using an LLM with project-aware context (manifest, sibling models, your team's terminology).</li>
+<li><strong>Generates tests</strong> — <code>not_null</code>, <code>unique</code>, <code>accepted_values</code>, <code>relationships</code>, plus dbt-expectations-style data tests where appropriate.</li>
+<li><strong>Drafts custom business-rule tests</strong> — the fifth test type beyond <code>not_null</code> / <code>unique</code> / <code>accepted_values</code> / <code>relationships</code>. Declare a rule in plain English (<code>meta.signalforge.business_rules: "total_amount must never be negative"</code>) and SignalForge writes a singular <code>tests/*.sql</code> test for it, prunes it against your warehouse, and ships only the rules your data can actually violate. No declared rules? It infers checkable invariants from your SQL. Worked example: <a href="#custom-business-rule-tests-worked-example">Custom business-rule tests</a>.</li>
+<li><strong>Prunes the noise.</strong> Each candidate test runs against warehouse samples; tests that pass on every row of historical data add no signal and are dropped before they reach your repo.</li>
+<li><strong>Generates documentation</strong> — column-level descriptions and model-level overviews — graded by an LLM-as-judge against a configurable rubric.</li>
+<li><strong>Reports what was kept and what was dropped</strong>, with a one-line "why" per artifact. No black-box generation.</li>
+<li><strong>Prunes tests you already have.</strong> Point it at an existing <code>schema.yml</code> — from dbt-codegen, dbt Copilot, DinoAI, datapilot, or hand-written — and the warehouse tells you which of <em>those</em> tests add no signal. Same prune step, no LLM call (<code>signalforge prune-existing</code>).</li>
+<li><strong>Drives end-to-end from Claude Code.</strong> Run <code>signalforge install-skill</code> once in your dbt project and Claude recognises requests like "draft tests for <code>dim_customers</code>" or "prune my existing <code>schema.yml</code>," picks the right subcommand + flags, and explains the kept / kept-uncertain / dropped / flagged diff back. Deep dive: <a href="skills/">Claude Code skill</a>.</li>
+</ul>
+<h2 id="how-it-works">How it works</h2>
+<div class="highlight"><pre><span></span><code>┌──────────────┐    ┌─────────────┐    ┌──────────────┐    ┌──────────────┐
+│ model.sql +  │ -&gt; │ LLM drafts  │ -&gt; │ Run tests    │ -&gt; │ Quality-     │
+│ manifest +   │    │ candidate   │    │ against the  │    │ graded YAML  │
+│ project ctx  │    │ artifacts   │    │ warehouse    │    │ + diff       │
+└──────────────┘    └─────────────┘    └──────────────┘    └──────────────┘
+                                              │
+                                              v
+                                       Drop always-pass tests;
+                                       drop tests that fail on
+                                       known-clean data.
+</code></pre></div>
+<p>The grading layer reuses <a href="https://github.com/wjduenow/clauditor">clauditor</a>'s LLM-as-judge methodology, applied to a new artifact class.</p>
+<p>There's a second entry point that skips the LLM entirely. If you already have a <code>schema.yml</code> (from another generator or written by hand), <code>signalforge prune-existing</code> reads its tests and runs them straight through the prune step:</p>
+<div class="highlight"><pre><span></span><code>┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+│ existing     │ -&gt; │ Run tests    │ -&gt; │ diff: which  │
+│ schema.yml   │    │ against the  │    │ tests add    │
+│ + manifest   │    │ warehouse    │    │ signal       │
+└──────────────┘    └──────────────┘    └──────────────┘
+</code></pre></div>
+<p>No draft, no grade, no LLM call — just "which of these tests earn their place?" Tests SignalForge can't evaluate (custom / dbt-expectations / namespaced generics) are reported as skipped, never silently dropped.</p>
+<h2 id="claude-code">Claude Code</h2>
+<p>SignalForge ships a bundled <a href="https://docs.claude.com/en/docs/claude-code">Claude Code</a> skill so Claude can drive the <code>signalforge</code> CLI end-to-end against your dbt project. Install it once from your project root:</p>
+<div class="highlight"><pre><span></span><code>signalforge<span class="w"> </span>install-skill
+</code></pre></div>
+<p>This drops the skill into <code>&lt;project&gt;/.claude/skills/signalforge/</code>. With it in place, a Claude Code session opened against the project recognises requests in plain English:</p>
+<ul>
+<li>"Draft tests for <code>dim_customers</code> and explain what got dropped."</li>
+<li>"Prune the <code>schema.yml</code> I already have at <code>models/staging/schema.yml</code>."</li>
+<li>"Run the demo so I can see what SignalForge actually does."</li>
+</ul>
+<p>Claude picks the right subcommand and flags (<code>generate --write</code> vs <code>prune-existing --schema</code> vs <code>init-demo</code> vs <code>lint</code>), runs the pipeline, and explains the kept / kept-uncertain / dropped / flagged diff back to you — including the per-artifact "why" for each decision. The skill is shipped inside the <code>signalforge-dbt</code> wheel and stays in lockstep with the live CLI via a parity test, so a future subcommand or flag change updates the skill in the same commit.</p>
+<p>Full reference: <a href="skills/">Claude Code skill</a> — covers the install path and overwrite policy, the 7-step workflow the skill teaches, the zero-credential demo and gated live-e2e flows, the parity gate, and the optional clauditor self-grade.</p>
+<h2 id="supported-warehouses">Supported warehouses</h2>
+<p>SignalForge ships two production warehouse adapters today: <strong>BigQuery</strong> (the original target — exercised end-to-end by <code>signalforge init-demo</code> and the quick start below) and <strong>Snowflake</strong> (full sampling, materialised-sample CTAS, and <code>EXPLAIN</code>-based bytes estimation; one combination — <code>safety: aggregate-only</code> / Snowflake <code>column_stats</code> — is not yet implemented, every other mode/scope/strategy combination is functional). <strong>Postgres</strong> ships as a typed <code>NotImplementedError</code> stub; <strong>Databricks</strong> and <strong>Redshift</strong> remain on the roadmap.</p>
+<p>The architecture is warehouse-agnostic — adapters plug in behind a thin sampling/profiling interface (<code>WarehouseAdapter.from_profile</code>), so new vendors slot in without touching the draft / prune / grade / diff stages. Per-warehouse setup (auth, cost guardrails, profile-field requirements) lives in <a href="#configuration">Configuration</a>.</p>
+<blockquote>
+<p><strong>Live on PyPI</strong> — <code>pip install signalforge-dbt</code>. The quick start below runs against BigQuery (the bundled <code>init-demo</code> fixture targets the Austin bikeshare public dataset). Snowflake users wire their own dbt profile and project — see <a href="#configuration">Configuration</a> and <a href="snowflake-e2e-setup/">docs/snowflake-e2e-setup.md</a>.</p>
+</blockquote>
+<h2 id="supported-llm-providers">Supported LLM providers</h2>
+<p>SignalForge calls an LLM at exactly two stages: the <strong>drafter</strong> (one call per <code>generate</code> run, produces the candidate <code>schema.yml</code> + tests + docs) and the <strong>grader</strong> (one call per <code>(artifact × rubric criterion)</code> pair, scores the kept artifacts against a rubric). The other five stages — manifest, safety, prune, ingest, diff — are LLM-free. <code>signalforge prune-existing</code> and <code>signalforge lint</code> issue zero LLM calls.</p>
+<p>Three providers are supported behind a single provider-neutral seam:</p>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Install</th>
+<th>Env var</th>
+<th>Prompt caching</th>
+<th>Server-side JSON</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Anthropic</strong> (default)</td>
+<td>base <code>pip install signalforge-dbt</code></td>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td>✅ <code>cache_control</code> (5m / 1h)</td>
+<td>parser-side</td>
+</tr>
+<tr>
+<td><strong>OpenAI</strong></td>
+<td><code>pip install signalforge-dbt[openai]</code></td>
+<td><code>OPENAI_API_KEY</code></td>
+<td>❌</td>
+<td>✅ <code>response_format</code></td>
+</tr>
+<tr>
+<td><strong>Google Gemini</strong></td>
+<td><code>pip install signalforge-dbt[gemini]</code></td>
+<td><code>GOOGLE_API_KEY</code></td>
+<td>❌ (deferred)</td>
+<td>✅ <code>response_mime_type</code></td>
+</tr>
+</tbody>
+</table>
+<p>The drafter and grader resolve their providers independently — a common pattern is Anthropic drafter (benefits from prompt caching across <code>--select</code> siblings) + Gemini grader (cheaper per-token rates on the multi-call fan-out). All three providers integrate with <code>signalforge generate --estimate</code> for pre-flight cost preview.</p>
+<p>Full reference, capability matrix, cost / caching tradeoffs, and the "adding a fourth provider" recipe live in <a href="llm-providers-ops/">docs/llm-providers-ops.md</a>.</p>
+<h2 id="quick-start">Quick start</h2>
+<p>The wheel ships a minimal dbt demo project (Austin bikeshare staging
+model against the public
+<code>bigquery-public-data.austin_bikeshare.bikeshare_trips</code> dataset),
+copied out of the install via <code>signalforge init-demo</code>, so you can
+run <code>signalforge</code> end-to-end against a real warehouse with no
+infrastructure beyond a Google Cloud billing project and an
+Anthropic API key. A run scans ~200–500 MB of BigQuery (well under
+$0.01 at on-demand pricing) plus ~$0.13 of Anthropic spend (one
+draft call + ~84 grade calls on Sonnet 4.6); end-to-end wall-clock
+is roughly 5–6 minutes.</p>
+<h3 id="1-install">1. Install</h3>
+<p>SignalForge requires <strong>Python 3.11+</strong>.</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>signalforge-dbt
+</code></pre></div>
+<p>Verify the CLI is on your PATH:</p>
+<div class="highlight"><pre><span></span><code>signalforge<span class="w"> </span>--version
+</code></pre></div>
+<p>The PyPI distribution name is <strong><code>signalforge-dbt</code></strong> (the bare <code>signalforge</code> name
+is held by an unrelated DSP package); the import package and CLI command are both
+<strong><code>signalforge</code></strong>.</p>
+<p><strong>Prefer an isolated CLI install?</strong> <code>uv tool install signalforge-dbt</code> (or
+<code>pipx install signalforge-dbt</code>) puts the <code>signalforge</code> command on your PATH
+without adding it to a project environment.</p>
+<p><strong>Working from a clone (contributing)?</strong> Install the dev toolchain with
+<code>uv sync --dev</code> — see <a href="../CONTRIBUTING.md">CONTRIBUTING.md</a> for the full workflow.</p>
+<p><strong>Driving SignalForge from Claude Code?</strong> Per <a href="#claude-code">§ Claude Code</a>
+above, run <code>signalforge install-skill</code> from your dbt project root to drop the
+bundled skill into <code>.claude/skills/signalforge/</code>.</p>
+<h3 id="2-authenticate-to-bigquery-and-your-llm-provider">2. Authenticate to BigQuery and your LLM provider</h3>
+<div class="highlight"><pre><span></span><code>gcloud<span class="w"> </span>auth<span class="w"> </span>application-default<span class="w"> </span>login
+<span class="nb">export</span><span class="w"> </span><span class="nv">GOOGLE_CLOUD_PROJECT</span><span class="o">=</span>&lt;your-billing-project&gt;<span class="w">   </span><span class="c1"># any GCP project you have query access to</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ANTHROPIC_API_KEY</span><span class="o">=</span>sk-ant-...
+</code></pre></div>
+<p>Use a fresh shell session (or <code>unset ANTHROPIC_API_KEY</code> after the
+run) so the key doesn't persist in your bash history.</p>
+<p>Anthropic is the default LLM provider; OpenAI and Google Gemini ship
+behind the same provider-neutral seam. To switch providers, install
+the matching extra (<code>signalforge-dbt[openai]</code> / <code>signalforge-dbt[gemini]</code>),
+set the matching env var (<code>OPENAI_API_KEY</code> / <code>GOOGLE_API_KEY</code>), and
+add <code>llm.provider:</code> / <code>grade.provider:</code> to <code>signalforge.yml</code>. The
+drafter and grader knobs are independent — a mixed-provider run
+(e.g. Anthropic drafter + Gemini grader) is supported. Capability
+matrix and cost tradeoffs: <a href="llm-providers-ops/">docs/llm-providers-ops.md</a>.</p>
+<h3 id="3-minimum-signalforgeyml">3. Minimum <code>signalforge.yml</code></h3>
+<p>The fixture ships a working config; a minimum that exercises the full
+pipeline is:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># signalforge.yml — alongside dbt_project.yml</span>
+<span class="nt">llm</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">claude-sonnet-4-6</span>
+<span class="nt">safety</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">aggregate-only</span><span class="w">   </span><span class="c1"># schema-only is the default; aggregate-only sends column profiles, never row data</span>
+<span class="nt">prune</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">sample_strategy</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">materialised</span><span class="w">   </span><span class="c1"># default; one temp-table CTAS feeds every per-test query</span>
+<span class="nt">grade</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">min_pass_rate</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.95</span>
+<span class="w">  </span><span class="nt">min_mean_score</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.95</span>
+<span class="w">  </span><span class="nt">fail_on_below_threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">   </span><span class="c1"># report-only; flip to true to exit 2 on flagged artifacts</span>
+</code></pre></div>
+<p>Full reference: <a href="safety-ops/">docs/safety-ops.md</a>,
+<a href="prune-ops/">docs/prune-ops.md</a>,
+<a href="grade-ops/">docs/grade-ops.md</a>.</p>
+<h3 id="4-prepare-the-fixture">4. Prepare the fixture</h3>
+<p>Copy the bundled demo project to a writable directory and run
+<code>signalforge</code> against it:</p>
+<div class="highlight"><pre><span></span><code>signalforge<span class="w"> </span>init-demo<span class="w"> </span>/tmp/sf-austin
+</code></pre></div>
+<h3 id="5-pre-flight-check-signalforge-lint">5. Pre-flight check (<code>signalforge lint</code>)</h3>
+<p>Before paying for an LLM call, run the pre-flight validator. It loads
+<code>signalforge.yml</code> (every per-stage block) and the dbt manifest — no
+warehouse calls, no Anthropic calls, no network — and reports every
+failure in one shot. Sub-second; catches typos like
+<code>safety: { mdoel: ... }</code> that the <code>extra="forbid"</code> config models would
+otherwise surface only after a billable <code>generate</code> run, plus manifest
+schema-version mismatches (e.g. dbt 1.13 → v13, outside the supported
+v9–v12 range) that would otherwise surface mid-pipeline:</p>
+<div class="highlight"><pre><span></span><code>signalforge<span class="w"> </span>lint<span class="w"> </span>--project-dir<span class="w"> </span>/tmp/sf-austin
+</code></pre></div>
+<p>On success, stdout is silent (git-style) and the exit code is <code>0</code>.
+Failures are listed on stderr with the offending block(s) named —
+single-failure runs use the <code>ERROR: &lt;message&gt;</code> shape; multi-failure
+runs emit a header + one bullet per block. Pass <code>--model &lt;name&gt;</code> to
+also confirm a specific model resolves in the manifest (accepts a
+bare name, a <code>unique_id</code>, or a file path). See
+<a href="cli-ops/"><code>docs/cli-ops.md</code></a> § <code>signalforge lint</code> for the full
+contract.</p>
+<h3 id="6-first-run">6. First run</h3>
+<div class="highlight"><pre><span></span><code>signalforge<span class="w"> </span>generate<span class="w"> </span>models/staging/stg_bikeshare_trips.sql<span class="w"> </span>--project-dir<span class="w"> </span>/tmp/sf-austin
+</code></pre></div>
+<p>The bundled <code>profiles.yml</code> reads <code>GOOGLE_CLOUD_PROJECT</code> from your
+environment, so no profile editing is required. <code>signalforge
+init-demo</code> prints a next-steps message naming the env vars and the
+exact commands to run; pass <code>--force</code> to atomically replace a
+non-empty destination (refuses <code>/</code>, <code>$HOME</code>, and the current
+working directory as a blast-radius guard).</p>
+<p>Want to preview cost first? <code>signalforge generate --estimate &lt;model&gt;</code>
+prints the projected USD + warehouse bytes without making any billable
+Anthropic or warehouse call (one <code>count_tokens</code> round-trip per prompt
+plus a single BigQuery <code>dryRun</code>). See
+<a href="cli-ops/"><code>docs/cli-ops.md</code></a> § <code>--estimate</code> for the full
+contract.</p>
+<h3 id="7-expected-output">7. Expected output</h3>
+<p>The diff lists drafted column descriptions and signal-bearing tests
+alongside dropped tests with a one-line "why". Every artifact lands
+in one of four tiers — <code>kept</code> (survived prune with positive
+evidence), <code>kept-uncertain</code> (kept, but the warehouse couldn't be
+reached to evaluate it — e.g. a budget or connectivity issue),
+<code>dropped</code> (prune found it adds no signal), and <code>flagged</code> (kept, but
+graded below the quality threshold). The table looks like this
+(truncated):</p>
+<div class="highlight"><pre><span></span><code>diff: model.austin.stg_bikeshare_trips  kept=8  kept-uncertain=0  dropped=2  flagged=1
+
+TIER      ARTIFACT                      TEST            REASON                  SCORE    WHY
+kept      column.trip_id.description                                            0.97     Description added; passed all grading criteria.
+kept      test.column.trip_id.not_null  not_null                                —        Test returned non-zero failing rows on the warehouse sample.
+dropped   test.column.region.not_null   not_null        always-passes           —        Test returned zero failing rows on the representative sample.
+flagged   column.bike_id.description                                            0.45     Grading score 0.45 below threshold 0.95.
+...
+</code></pre></div>
+<p>At least one <code>dropped</code> row with <code>always-passes</code> is mathematically
+guaranteed — the fixture's staging SQL aliases a literal <code>'austin' AS
+region</code> column, so any LLM-drafted <code>not_null</code> on it must always-pass
+and the prune engine drops it. The strict 0.95 grade thresholds in
+the fixture config typically surface at least one <code>flagged</code> artifact.</p>
+<p><strong>A high drop rate is the working state, not the failure state.</strong> A
+typical staging model drops ~60-80% of the LLM-drafted tests as
+always-passes — the LLM proposes broadly and the prune layer trims the
+ones the warehouse data doesn't contradict. Internal testing on
+<code>bigquery-public-data.austin_bikeshare.bikeshare_trips</code> shows 5 of 8
+drafted tests dropped (62.5%); see
+<a href="prune-ops/#expected-drop-rates"><code>docs/prune-ops.md</code> § Expected drop rates</a>
+for the per-test-type breakdown.</p>
+<p>Two durable artefacts land under <code>/tmp/sf-austin/.signalforge/</code>:
+<code>grade.json</code> (per-criterion LLM-judge scores) and <code>diff.json</code> (the
+full rendered diff). The committed <code>.gitignore</code> covers <code>.signalforge/</code>.</p>
+<h3 id="custom-business-rule-tests-worked-example">Custom business-rule tests (worked example)</h3>
+<p>The four generic test types catch <em>structural</em> invariants (nullability,
+uniqueness, referential integrity). They cannot catch a <strong>business
+rule</strong> — "a refund never exceeds its order," "discount percent stays in
+0–100." For those, declare the rule in plain English in your model's
+<code>meta</code>, and SignalForge drafts a singular SQL test for it.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># models/marts/dim_customers.yml</span>
+<span class="nt">models</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">dim_customers</span>
+<span class="w">    </span><span class="nt">config</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">meta</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">signalforge</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">business_rules</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;total_amount</span><span class="nv"> </span><span class="s">must</span><span class="nv"> </span><span class="s">never</span><span class="nv"> </span><span class="s">be</span><span class="nv"> </span><span class="s">negative&quot;</span>
+</code></pre></div>
+<p>On the next <code>signalforge generate dim_customers</code>, the LLM translates the
+rule into a failing-rows SELECT — a <code>custom_sql</code> candidate test:</p>
+<div class="highlight"><pre><span></span><code><span class="c1">-- signalforge:generated a1b2c3d4</span>
+<span class="k">select</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">from</span><span class="w"> </span><span class="err">{{</span><span class="w"> </span><span class="n">this</span><span class="w"> </span><span class="err">}}</span><span class="w"> </span><span class="k">where</span><span class="w"> </span><span class="n">total_amount</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span>
+</code></pre></div>
+<p>That candidate runs through the <strong>same prune step</strong> as every other test.
+The decision is data-driven:</p>
+<ul>
+<li><strong>Kept</strong> if the warehouse has any negative-total rows — the rule
+  catches real bad data, so the test earns its place. With <code>--write</code> it
+  is materialised to <code>tests/dim_customers__total_amount_custom_sql_a1b2c3d4.sql</code>.</li>
+<li><strong>Dropped (<code>always-passes</code>)</strong> if no row ever violates it — the rule is
+  true but the data never tests it, so shipping it would be review-noise.</li>
+</ul>
+<p>You can also list multiple rules, scope a rule to a column, or skip the
+<code>meta</code> entirely and let SignalForge <strong>infer</strong> checkable invariants from
+your SQL. The drafted SQL may reference <code>{{ this }}</code>, <code>{{ ref('m') }}</code>,
+and <code>{{ source('s','t') }}</code> (control-flow Jinja is not supported). A
+multi-table rule (a <code>JOIN</code>) runs full-scan within the warehouse bytes
+cap rather than against a sample. See
+<a href="draft-ops/#custom-business-rule-tests-custom_sql"><code>docs/draft-ops.md</code> § Custom business-rule tests</a>
+and <a href="prune-ops/#custom_sql-evaluation"><code>docs/prune-ops.md</code> § <code>custom_sql</code> evaluation</a>.</p>
+<p>Already have hand-authored singular <code>tests/*.sql</code> files? <code>prune-existing</code>
+ingests and prunes those too — see
+<a href="#prune-the-tests-you-already-have">Prune the tests you already have</a>.</p>
+<h3 id="troubleshooting">Troubleshooting</h3>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>User does not have bigquery.jobs.create permission in project bigquery-public-data</code></td>
+<td><code>GOOGLE_CLOUD_PROJECT</code> not set; SDK fell back to the source project</td>
+<td>Export <code>GOOGLE_CLOUD_PROJECT=&lt;billing-project&gt;</code> where you have the <code>BigQuery Job User</code> role</td>
+</tr>
+<tr>
+<td><code>Query exceeded max_bytes_billed (limit=100000000, ...)</code></td>
+<td>Editing the profile dropped or lowered <code>maximum_bytes_billed</code></td>
+<td>Keep <code>maximum_bytes_billed: 1000000000</code> (1 GB) — the bundled demo <code>profiles.yml</code> ships this cap intentionally so the materialised-sample scan clears the adapter's 100 MB default</td>
+</tr>
+<tr>
+<td><code>Manifest not found</code> / <code>dbt_project.yml not found at ...</code></td>
+<td>CLI walked up from the wrong cwd, or <code>--project-dir</code> doesn't directly contain <code>dbt_project.yml</code></td>
+<td>Either <code>cd</code> into the project root, or pass <code>--project-dir &lt;abs-path&gt;</code> pointing at the directory holding <code>dbt_project.yml</code></td>
+</tr>
+<tr>
+<td><code>aggregate_complete=False</code> in <code>grade.json</code></td>
+<td>Network blip during a grade call exhausted retries</td>
+<td>Re-run; if it persists, raise <code>grade.total_budget_seconds</code> in <code>signalforge.yml</code></td>
+</tr>
+<tr>
+<td><code>LLM response did not match the CandidateSchema shape</code></td>
+<td>Anthropic response shape drifted vs. the parser</td>
+<td>Set <code>ANTHROPIC_LOG=info</code> and inspect <code>~/.anthropic-debug/</code>; file an issue</td>
+</tr>
+</tbody>
+</table>
+<p>Full per-flag reference, exit-code taxonomy, and environment
+variables: <a href="cli-ops/">docs/cli-ops.md</a>. For multi-model dbt
+projects, see <a href="cli-ops/#running-across-many-models">Running across many
+models</a> for the
+<code>--select</code> flag and shell-loop pattern. Maintainer-only walkthrough
+of the same flow as a gated test (<code>pytest -m e2e --no-cov</code>):
+<a href="e2e-smoke-test/">docs/e2e-smoke-test.md</a>. To run the
+Snowflake-backed gated tests (<code>pytest -m snowflake --no-cov</code>),
+start from <a href="snowflake-e2e-setup/">docs/snowflake-e2e-setup.md</a>
+(account setup, cost guardrails, and the <code>.env.example</code> template).</p>
+<h2 id="prune-the-tests-you-already-have">Prune the tests you already have</h2>
+<p>If you already have a <code>schema.yml</code> — written by hand, or generated by
+dbt-codegen / dbt Copilot / DinoAI / datapilot — you don't need
+SignalForge to redraft it. Point <code>prune-existing</code> at it and the
+warehouse tells you which of those tests add signal. There's no LLM
+call, so the only requirement is warehouse access (a dbt profile).</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># From inside your dbt project (with target/manifest.json present):</span>
+signalforge<span class="w"> </span>prune-existing<span class="w"> </span>customers<span class="w"> </span>--schema<span class="w"> </span>models/marts/schema.yml
+</code></pre></div>
+<p>What you get on stdout is a diff of <em>your</em> file: a kept / kept-uncertain
+/ dropped table with a one-line "why" per test, plus a unified diff
+showing exactly which tests to remove. Tests SignalForge doesn't yet
+evaluate — custom generics, <code>dbt_utils.*</code>, <code>dbt_expectations.*</code> — are
+summarised on stderr as skipped (run with <code>--verbose</code> for the per-test
+breakdown), never silently dropped.</p>
+<p>Your <strong>singular <code>tests/*.sql</code> business-rule tests are pruned in the same
+run.</strong> Each <code>.sql</code> whose <code>ref()</code> / <code>source()</code> / <code>{{ this }}</code> resolves to
+this model is read as a <code>custom_sql</code> candidate and pruned alongside the
+schema.yml tests, deduped against any matching schema.yml <code>custom_sql</code>.
+Override the directory with <code>--tests-dir</code>; files referencing other models
+are ignored, and a <code>.sql</code> carrying unsupported control-flow Jinja folds
+into the skipped report.</p>
+<p>It is <strong>read-only by design</strong>: there is no <code>--write</code> flag, so your
+hand-authored file is never overwritten. The rendered diff goes to
+stdout and a machine-readable copy to <code>.signalforge/diff.json</code>
+(<code>--dry-run</code> suppresses even that). Apply the removals yourself from the
+diff. See <a href="cli-ops/#signalforge-prune-existing-model-schema-path">docs/cli-ops.md § <code>signalforge
+prune-existing</code></a>
+for the full flag set and <a href="ingest-ops/">docs/ingest-ops.md</a> for
+which dbt test shapes are supported vs. skipped.</p>
+<h2 id="cli">CLI</h2>
+<p>The CLI exposes five subcommands, all shipped on PyPI:</p>
+<div class="highlight"><pre><span></span><code>signalforge<span class="w"> </span>generate<span class="w"> </span>&lt;model&gt;<span class="w">                     </span><span class="c1"># full draft -&gt; prune -&gt; grade -&gt; diff pipeline for one model</span>
+signalforge<span class="w"> </span>prune-existing<span class="w"> </span>&lt;model&gt;<span class="w"> </span>--schema<span class="w"> </span>&lt;p&gt;<span class="w">  </span><span class="c1"># prune an existing schema.yml&#39;s tests (ingest -&gt; prune -&gt; diff, no LLM)</span>
+signalforge<span class="w"> </span>init-demo<span class="w"> </span><span class="o">[</span>&lt;dest&gt;<span class="o">]</span><span class="w">                   </span><span class="c1"># copy the bundled Austin demo project into &lt;dest&gt;</span>
+signalforge<span class="w"> </span>lint<span class="w">                                 </span><span class="c1"># validate signalforge.yml config blocks (no LLM/warehouse calls)</span>
+signalforge<span class="w"> </span>version<span class="w">                              </span><span class="c1"># print the SignalForge version</span>
+</code></pre></div>
+<p>Key <code>generate</code> flags: <code>--project-dir</code>, <code>--manifest</code>, <code>--profiles-dir</code>
+(point at the project / manifest / profile); <code>--mode
+{schema-only,aggregate-only,sample}</code> and <code>--min-score</code> (pipeline
+behaviour); <code>--write</code> / <code>--dry-run</code> and <code>--format {ansi,markdown,json}</code>
+(output); <code>--estimate</code> (cost preview, no billable calls); <code>--select
+&lt;expr&gt;</code> (run across many models); <code>--scope</code>, <code>--sample-strategy</code>; and
+the <code>--quiet</code> / <code>--verbose</code> / <code>--no-color</code> observability triad.
+<code>prune-existing</code> takes the required <code>--schema &lt;path&gt;</code> plus
+<code>--project-dir</code>, <code>--manifest</code>, <code>--profiles-dir</code>, <code>--scope</code>,
+<code>--sample-strategy</code>, <code>--format {ansi,markdown,json}</code>, <code>--dry-run</code>, and
+the <code>--quiet</code> / <code>--verbose</code> / <code>--no-color</code> triad — it is read-only by
+design (no <code>--write</code>) and makes no LLM call. <code>init-demo</code> takes
+<code>--force</code>; <code>lint</code> takes <code>--config</code>, <code>--manifest</code>, <code>--model</code>,
+<code>--project-dir</code>.</p>
+<p><code>signalforge --help</code> prints the top-level help; each subcommand has its
+own <code>--help</code> page. See <a href="cli-ops/">docs/cli-ops.md</a> for the full
+reference, exit-code taxonomy, and environment variables.</p>
+<h2 id="configuration">Configuration</h2>
+<p>SignalForge reads your existing dbt <code>profiles.yml</code> and dispatches on
+<code>type:</code> — no second profile to maintain. The dispatch happens in
+<code>WarehouseAdapter.from_profile(profile)</code>; each adapter then exposes the
+same <code>sample_rows</code> / <code>materialise_sample</code> / <code>run_test_sql</code> /
+<code>estimate_query_bytes</code> surface to the rest of the pipeline.</p>
+<h3 id="bigquery">BigQuery</h3>
+<p>A standard <code>type: bigquery</code> dbt target works. Authenticate via
+Application Default Credentials and set the billing project:</p>
+<div class="highlight"><pre><span></span><code>gcloud<span class="w"> </span>auth<span class="w"> </span>application-default<span class="w"> </span>login
+<span class="nb">export</span><span class="w"> </span><span class="nv">GOOGLE_CLOUD_PROJECT</span><span class="o">=</span>&lt;your-billing-project&gt;
+</code></pre></div>
+<p>Cost is bounded by <code>maximum_bytes_billed</code> (100 MB default; the bundled
+demo <code>profiles.yml</code> raises it to 1 GB so the materialised-sample scan
+clears the cap). <code>use_query_cache</code> is forced off for reproducibility.
+Full reference — ADC setup, sampling strategy (and the TABLESAMPLE
+cost-asterisk), <code>PartitionFilter</code> use, and the typed-error reference —
+is in <a href="warehouse-adapter-ops/">docs/warehouse-adapter-ops.md</a>.</p>
+<h3 id="snowflake">Snowflake</h3>
+<p>A standard <code>type: snowflake</code> dbt target works — <code>account</code>, <code>user</code>,
+<code>warehouse</code>, plus either <code>password</code>, key-pair (<code>private_key_path</code> +
+<code>private_key_passphrase</code>), or SSO (<code>authenticator: externalbrowser</code>).
+<code>database</code> / <code>schema</code> / <code>role</code> are optional at profile level; SignalForge
+will not override them at runtime.</p>
+<p>Recommended cost guardrails before pointing it at a real Snowflake
+account: create a <strong>resource monitor</strong> (e.g. 1-credit daily cap), use
+an <strong>X-Small warehouse with aggressive auto-suspend</strong>, and start with
+<code>prune.scope: sample</code> + <code>prune.sample_strategy: materialised</code>. Setup
+walkthrough (incl. an <code>.env.example</code>) is in
+<a href="snowflake-e2e-setup/">docs/snowflake-e2e-setup.md</a>; adapter
+reference (sampling, session cleanup, <code>EXPLAIN</code>-based bytes estimation,
+known limitations) is in
+<a href="warehouse-adapter-ops/">docs/warehouse-adapter-ops.md § Snowflake adapter</a>.</p>
+<blockquote>
+<p><strong>Known limitation:</strong> <code>safety: aggregate-only</code> (Snowflake <code>column_stats</code>)
+is not yet implemented. Every other combination is functional.</p>
+</blockquote>
+<h3 id="pipeline-stage-configuration">Pipeline-stage configuration</h3>
+<p>Cross-cutting behaviour (sampling mode, prune scope, grade thresholds,
+diff rendering) is configured per stage in <code>signalforge.yml</code> — see
+<a href="safety-ops/">docs/safety-ops.md</a>,
+<a href="prune-ops/">docs/prune-ops.md</a>,
+<a href="grade-ops/">docs/grade-ops.md</a>, and
+<a href="diff-ops/">docs/diff-ops.md</a>. <code>signalforge lint</code> validates the
+file with no LLM or warehouse calls.</p>
+<h2 id="data-safety">Data safety</h2>
+<p>Schema-only is the default. The LLM never sees row data unless you
+explicitly opt in via <code>safety.mode: sample</code> in <code>signalforge.yml</code> (or
+the <code>--mode sample</code> CLI flag). Even column <em>names</em> that match the
+built-in PII patterns (<code>*email</code>, <code>*phone</code>, <code>*ssn</code>) — or that you flag
+via dbt <code>tags: ["pii"]</code> / <code>meta.contains_pii: true</code> /
+<code>meta.signalforge.sample: false</code> — are replaced with stable hashed
+placeholders (<code>col_&lt;8 hex&gt;</code>) before reaching the LLM.</p>
+<p>Note: the prune step runs warehouse SQL on every invocation regardless
+of <code>safety.mode</code>. To skip prune entirely (no warehouse contact), set
+<code>prune.enabled: false</code> in <code>signalforge.yml</code> — see
+<a href="prune-ops/#configuration-signalforgeyml-prune-block">docs/prune-ops.md</a>.</p>
+<p>Every LLM call produces one structured record at
+<code>.signalforge/audit.jsonl</code> (default; configurable via
+<code>safety.audit_path</code>). The file contains plaintext column-name metadata
+and should be treated as sensitive: this repo's <code>.gitignore</code> already
+covers <code>.signalforge/</code>; the writer creates the directory at <code>0o700</code>
+and the audit file at <code>0o600</code>. The audit writer is fail-closed — if
+the write fails, the LLM call is aborted (no silent drafts without an
+audit trail). See <a href="safety-ops/">docs/safety-ops.md</a> for the
+JSONL schema.</p>
+<p>Full reference — mode semantics, the four opt-out signals and their
+precedence, the <code>signalforge.yml</code> schema, the audit schema, debugging,
+and the typed-error reference — is in
+<a href="safety-ops/">docs/safety-ops.md</a>.</p>
+<h2 id="llm-drafting">LLM drafting</h2>
+<h3 id="how-drafting-works">How drafting works</h3>
+<p><code>signalforge.draft.draft_schema</code> takes a manifest model + warehouse
+adapter + safety policy and returns a <code>DraftOutcome</code> carrying the
+parsed <code>CandidateSchema</code>, the typed <code>LLMRequest</code> that was sent, and
+the <code>LLMResult</code> from the LLM. One LLM call per model; pre-send token
+counting, the full retry taxonomy, prompt caching, and a fail-closed
+response audit are all owned by the layer.</p>
+<div class="highlight"><pre><span></span><code>Manifest + Model + LLMRequest (from safety layer)
+  -&gt; render_prompt  (system + cached manifest summary + dynamic per-model SQL)
+  -&gt; call_llm       (provider-neutral seam, full retry taxonomy, prompt caching)
+  -&gt; parse_draft_response (JSON + anchor-contract validator)
+  -&gt; write_response_event (fail-closed JSONL audit)
+  -&gt; DraftOutcome(candidate, request, result)
+</code></pre></div>
+<p><code>call_llm</code> dispatches the vendor-specific request shape / response
+parse / exception classification to the registered <code>LLMProvider</code>
+strategy (Anthropic / OpenAI / Gemini). See
+<a href="llm-providers-ops/">docs/llm-providers-ops.md</a> for the
+capability matrix, the per-provider gotchas (Gemini truncation, the
+<code>finish_reason</code> degrade path, server-side JSON modes), and the
+recipe for adding a fourth provider.</p>
+<h3 id="auditability">Auditability</h3>
+<p>Two parallel audit streams sit under <code>policy.audit_path.parent</code>:</p>
+<ul>
+<li><code>audit.jsonl</code> (safety layer) records WHAT data went to the LLM —
+  columns sent, redactions applied, sampling mode in effect.</li>
+<li><code>llm_responses.jsonl</code> (draft layer) records WHAT the LLM produced —
+  hashes of the response text, the parsed schema, and the SQL sent;
+  token usage including cache creation/read; the <code>prompt_version</code>.</li>
+</ul>
+<p>Both streams are fail-closed: an audit-write failure aborts the call,
+the partial work is dropped, and an unaudited LLM call cannot
+silently happen. A reviewer correlates the two streams by
+<code>model_unique_id</code> + timestamp window. See
+<a href="draft-ops/">docs/draft-ops.md</a> for the response-audit schema,
+the retry taxonomy, the cache pre-send checks, and the typed-error
+reference.</p>
+<h2 id="roadmap">Roadmap</h2>
+<p>Shipped:</p>
+<table>
+<thead>
+<tr>
+<th>Version</th>
+<th>Released</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>v0.1</td>
+<td>2026-05-20</td>
+<td>Single-model draft + warehouse prune + LLM-as-judge grade + diff renderer; BigQuery adapter; <code>signalforge</code> CLI (<code>generate</code>, <code>lint</code>, <code>version</code>)</td>
+</tr>
+<tr>
+<td>v0.2</td>
+<td>2026-05-21</td>
+<td>Ingest externally-authored <code>schema.yml</code>; <code>signalforge prune-existing</code> (no-LLM prune path); <code>signalforge init-demo</code> first-run UX; uv tooling; Python 3.11–3.13</td>
+</tr>
+<tr>
+<td>v0.3</td>
+<td>2026-05-27</td>
+<td>Snowflake warehouse adapter (full sampling, materialised-sample CTAS, <code>EXPLAIN</code>-based bytes estimation); custom business-rule tests (<code>custom_sql</code>, the 5th test type) — drafted from <code>meta.signalforge.business_rules</code> or LLM inference, then pruned like any other test</td>
+</tr>
+<tr>
+<td>v0.4</td>
+<td>2026-05-28</td>
+<td><strong>Multi-provider LLM support</strong> — OpenAI (#136) and Google Gemini (#137) behind the provider-neutral seam established in #135 (Anthropic remains the default). <code>--estimate</code> is provider-aware: Anthropic uses <code>messages.count_tokens</code> (live SDK call), OpenAI uses local <code>tiktoken</code>, Gemini uses native <code>client.models.count_tokens</code></td>
+</tr>
+</tbody>
+</table>
+<p>Planned:</p>
+<table>
+<thead>
+<tr>
+<th>Version</th>
+<th>Scope</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>v0.5</td>
+<td><strong>Installable Claude Code skill</strong> — <code>signalforge install-skill</code> ships a SKILL.md that teaches Claude to drive the CLI</td>
+</tr>
+<tr>
+<td>v0.6</td>
+<td><strong>Airflow operator</strong> — drop SignalForge into a scheduled DAG for periodic schema drift / signal-rot detection</td>
+</tr>
+<tr>
+<td>v0.7</td>
+<td><strong>GitHub Action</strong> — PR-time invocation with inline comment integration (kept/dropped/flagged surfaced on the PR)</td>
+</tr>
+<tr>
+<td>v0.8</td>
+<td><strong>Rubric customization</strong> — project-specific grading criteria; organization-wide style profiles</td>
+</tr>
+<tr>
+<td>v1.0</td>
+<td><strong>dbt Fusion engine compatibility</strong> — dbt MCP server consumption; first-class Fusion integration</td>
+</tr>
+</tbody>
+</table>
+<p>Warehouse coverage beyond BigQuery + Snowflake — Postgres (stub today),
+Databricks, Redshift — slots in behind the existing <code>WarehouseAdapter</code>
+ABC and is roadmap-tracked but not version-pinned; PRs welcome.</p>
+<p>Detail is tracked in GitHub Issues against this repo.</p>
+<h2 id="design-principles">Design principles</h2>
+<ol>
+<li><strong>Signal over volume.</strong> A test that always passes is worse than no test — it consumes review attention without catching anything. SignalForge's job is to produce fewer, better artifacts.</li>
+<li><strong>Evaluation in the loop.</strong> Generation without grading is what produced the current "AI-test fatigue." Every artifact SignalForge ships has been scored.</li>
+<li><strong>OSS-first, Core-friendly.</strong> No dependency on dbt Cloud. Runs against any dbt-core project, locally or in CI.</li>
+<li><strong>Explainable diffs.</strong> Every kept and dropped artifact has a one-line "why." Reviewers see what changed and what the tool's reasoning was.</li>
+<li><strong>Permissive license.</strong> Apache-2.0. Use it commercially, vendor it, embed it.</li>
+</ol>
+<h2 id="related-projects">Related projects</h2>
+<ul>
+<li><strong><a href="https://github.com/wjduenow/clauditor">clauditor</a></strong> — the LLM-graded evaluation framework SignalForge's quality layer is built on.</li>
+<li><strong><a href="https://github.com/dbt-labs/dbt-codegen">dbt-codegen</a></strong> — the rule-based YAML scaffolder SignalForge complements (codegen scaffolds; SignalForge drafts, prunes, and grades).</li>
+<li><strong><a href="https://github.com/z3z1ma/dbt-osmosis">dbt-osmosis</a></strong> — schema.yml management and propagation; orthogonal concern.</li>
+<li><strong><a href="https://github.com/DataRecce/recce">Recce</a></strong> — PR-time data diff for dbt; complementary, addresses a different pain point.</li>
+</ul>
+<h2 id="license">License</h2>
+<p>Apache-2.0. See <a href="../LICENSE">LICENSE</a>.</p>
+<h2 id="contributing">Contributing</h2>
+<p>Issues welcome to shape the design. Open one against the <code>dev</code> branch describing the use case you'd like SignalForge to handle.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": ".", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

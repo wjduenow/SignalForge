@@ -1,0 +1,1771 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/audits/">
+      
+      
+        <link rel="prev" href="../cost-estimate-ops/">
+      
+      
+        <link rel="next" href="../e2e-smoke-test/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Audits & Sidecars - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#audit-jsonl-sidecar-consumer-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Audits & Sidecars
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#artefact-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Artefact table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#canonical-join-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Canonical join keys
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worked-examples-jq" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked examples — jq
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Worked examples — jq">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#drop-reason-histogram-across-the-prune-jsonl" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Drop-reason histogram across the prune JSONL
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#graceful-degrade-rate-per-criterion-from-the-grade-sidecar" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Graceful-degrade rate per criterion from the grade sidecar
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tier-breakdown-from-the-diff-sidecar" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tier breakdown from the diff sidecar
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#llm-token-cost-roll-up-across-the-grade-jsonl" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LLM token-cost roll-up across the grade JSONL
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#join-grade-sidecar-diff-sidecar-by-artifact_id" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Join grade sidecar ↔ diff sidecar by artifact_id
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worked-examples-pandas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked examples — pandas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#forward-compat-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Forward-compat policy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#privacy-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Privacy note
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Privacy note">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#whats-redacted" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What's redacted
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#whats-not-redacted" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What's NOT redacted
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#audit-log-rotation-and-retention" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit log rotation and retention
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        References
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#artefact-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Artefact table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#canonical-join-keys" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Canonical join keys
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worked-examples-jq" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked examples — jq
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Worked examples — jq">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#drop-reason-histogram-across-the-prune-jsonl" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Drop-reason histogram across the prune JSONL
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#graceful-degrade-rate-per-criterion-from-the-grade-sidecar" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Graceful-degrade rate per criterion from the grade sidecar
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tier-breakdown-from-the-diff-sidecar" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Tier breakdown from the diff sidecar
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#llm-token-cost-roll-up-across-the-grade-jsonl" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LLM token-cost roll-up across the grade JSONL
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#join-grade-sidecar-diff-sidecar-by-artifact_id" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Join grade sidecar ↔ diff sidecar by artifact_id
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worked-examples-pandas" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked examples — pandas
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#forward-compat-policy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Forward-compat policy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#privacy-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Privacy note
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Privacy note">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#whats-redacted" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What's redacted
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#whats-not-redacted" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What's NOT redacted
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#audit-log-rotation-and-retention" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit log rotation and retention
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        References
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="audit-jsonl-sidecar-consumer-guide">Audit JSONL &amp; sidecar consumer guide</h1>
+<p>Every <code>signalforge generate</code> run lands six durable artefacts under <code>&lt;project_dir&gt;/.signalforge/</code>. Four are append-only JSONL streams (one record per LLM call / prune decision / grade call); two are end-of-run sidecar JSON documents written as a single-document overwrite (<code>O_TRUNC</code> + write + <code>fsync</code>). The sidecar overwrite is not visible-atomic across the whole filesystem call — a concurrent reader during the write window can see an empty or partial file — so consumer pipelines should wait for the orchestrator to return before reading. This guide is the cross-cutting consumer surface — what's in each file, how to join them, and how to query them with <code>jq</code> or pandas.</p>
+<p>For the per-stage <em>production</em> contracts (defaults, error remediation, cost guidance), keep reading the per-stage ops docs:</p>
+<ul>
+<li><a href="../safety-ops/"><code>docs/safety-ops.md</code></a> — safety layer (PII redaction + LLM-request audit)</li>
+<li><a href="../draft-ops/"><code>docs/draft-ops.md</code></a> — LLM draft pipeline (response audit)</li>
+<li><a href="../prune-ops/"><code>docs/prune-ops.md</code></a> — test prune engine (per-decision audit)</li>
+<li><a href="../grade-ops/"><code>docs/grade-ops.md</code></a> — quality grader (per-call audit + end-of-run sidecar)</li>
+<li><a href="../diff-ops/"><code>docs/diff-ops.md</code></a> — diff renderer (end-of-run sidecar)</li>
+</ul>
+<h2 id="artefact-table">Artefact table</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>One-line content</th>
+<th>Per-record version field</th>
+<th>Drift-detector test</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.signalforge/audit.jsonl</code></td>
+<td>One safety <code>AuditEvent</code> per <code>build_llm_request</code> call (LLM request leaving the warehouse boundary, plus column-name redaction map)</td>
+<td><code>audit_schema_version: 3</code></td>
+<td><code>tests/safety/test_drift_detector.py</code></td>
+</tr>
+<tr>
+<td><code>.signalforge/llm_responses.jsonl</code></td>
+<td>One <code>LLMResponseEvent</code> per successful LLM round-trip in the draft layer (prompt + response hashes, cache-token economics)</td>
+<td><code>audit_schema_version: 1</code></td>
+<td><code>tests/draft/test_drift_detector.py</code></td>
+</tr>
+<tr>
+<td><code>.signalforge/prune.jsonl</code></td>
+<td>One <code>PruneEvent</code> per candidate test routed through the prune orchestrator (decision, reason, compiled SQL hash, optional sample failures)</td>
+<td><code>audit_schema_version: 2</code></td>
+<td><code>tests/prune/test_drift_detector.py</code></td>
+</tr>
+<tr>
+<td><code>.signalforge/grade.jsonl</code></td>
+<td>One <code>GradeEvent</code> per <code>(artifact × criterion)</code> LLM-as-judge call (score, evidence, reasoning, response-token economics)</td>
+<td><code>audit_schema_version: 1</code></td>
+<td><code>tests/grade/test_drift_detector.py</code></td>
+</tr>
+<tr>
+<td><code>.signalforge/grade.json</code></td>
+<td>End-of-run <code>GradingReport</code> sidecar — aggregate <code>pass_rate</code> / <code>mean_score</code>, <code>aggregate_complete</code>, every per-result row</td>
+<td><code>grade_schema_version: 1</code> (top-level)</td>
+<td><code>tests/grade/test_drift_detector.py</code></td>
+</tr>
+<tr>
+<td><code>.signalforge/diff.json</code></td>
+<td>End-of-run <code>DiffReport</code> sidecar — kept / kept-uncertain / dropped / flagged entries, proposed YAML, unified diff, reproducibility hashes</td>
+<td><code>schema_version: 1</code> + <code>audit_schema_version: 2</code> (top-level)</td>
+<td><code>tests/diff/test_drift_detector.py</code></td>
+</tr>
+</tbody>
+</table>
+<p>The four JSONLs are <strong>append-only</strong> — one record per write, fail-closed (<code>O_APPEND | O_CREAT | 0o600</code>, single <code>os.write</code>, <code>os.fsync</code>). Multi-model runs in one process append to the same files. Records are size-capped at 4000 bytes per line so concurrent multi-model appends interleave cleanly on Linux: for writes that fit in a single page (~4 KB) into a regular file opened with <code>O_APPEND</code>, the kernel atomically combines the offset adjustment and the write under the inode lock. Strict POSIX only requires <code>PIPE_BUF</code>-sized atomicity for pipes and FIFOs — not regular files — but mainstream Linux filesystems (ext4, XFS, btrfs) extend the guarantee. Operators on exotic filesystems (network mounts, FUSE drivers without inode locking) should treat concurrent multi-model appends with care.</p>
+<p>The two <code>.json</code> sidecars are <strong>single-document overwrite</strong> (<code>O_WRONLY | O_TRUNC</code>). Multi-model runs in one process leave only the <strong>last</strong> model's sidecars on disk. Operators who need per-model sidecars use the shell-loop pattern in <a href="../cli-ops/"><code>docs/cli-ops.md</code></a> (one process per model with <code>--project-dir</code>).</p>
+<p>The committed JSONL/JSON fixtures (<code>tests/fixtures/{safety,draft,prune,grade,diff}/*v1*</code>) are the drift-detector reference set. They are byte-frozen — adding a field to a production model without also updating the strict-mirror model OR the fixture breaks the corresponding drift-detector test loudly.</p>
+<h2 id="canonical-join-keys">Canonical join keys</h2>
+<p>Every audit shape carries <code>model_unique_id</code> so cross-stage joins on the model under run are direct. Within a single stage, intra-run grouping uses a stage-specific identifier; cross-stage post-hoc joins typically pair <code>model_unique_id</code> with a timestamp window.</p>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Per-record run identifier</th>
+<th>Per-record artifact identifier</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>safety</td>
+<td>(none)</td>
+<td>(none — payload-level)</td>
+<td>Records correspond 1-to-1 to <code>build_llm_request</code> calls; group via <code>(model_unique_id, timestamp)</code> ordering.</td>
+</tr>
+<tr>
+<td>draft</td>
+<td>(none)</td>
+<td>(none — payload-level)</td>
+<td>One record per successful LLM round-trip; pair with safety via <code>(model_unique_id, sent_sql_hash)</code> when the draft sends model SQL.</td>
+</tr>
+<tr>
+<td>prune</td>
+<td><code>config_hash</code> (16-hex; constant across all records emitted by one <code>prune_tests</code> call)</td>
+<td><code>test_anchor</code> (<code>"column.&lt;col&gt;"</code> or <code>"model"</code>)</td>
+<td><code>record_id</code> is a per-record uuid4 hex; <code>config_hash</code> is the run grouper.</td>
+</tr>
+<tr>
+<td>grade</td>
+<td><code>run_id</code> (uuid4 hex; constant across all <code>(artifact × criterion)</code> calls in one <code>grade_artifacts</code> invocation)</td>
+<td><code>artifact_id</code> (e.g. <code>column.&lt;col&gt;.description</code>, <code>test.column.&lt;col&gt;.&lt;type&gt;</code>)</td>
+<td><code>(run_id, artifact_id, criterion_id)</code> is the natural primary key for the per-call audit.</td>
+</tr>
+<tr>
+<td>grade sidecar</td>
+<td><code>run_id</code> (matches the per-call JSONL above)</td>
+<td><code>artifact_id</code> per entry</td>
+<td>Sidecar <code>results[]</code> is a frozen view of the JSONL records produced under the same <code>run_id</code>.</td>
+</tr>
+<tr>
+<td>diff sidecar</td>
+<td><code>run_id</code> (uuid4 hex generated at <code>render_diff</code> entry)</td>
+<td><code>artifact_id</code> per <code>entries[]</code></td>
+<td>Diff <code>run_id</code> is <strong>not</strong> the same as grade <code>run_id</code> — they are produced by different orchestrators. Use <code>model_unique_id</code> for cross-stage joins.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Cross-stage joins worth knowing:</strong></p>
+<ul>
+<li><strong>grade JSONL ↔ grade sidecar</strong> — direct match on <code>(run_id, artifact_id, criterion_id)</code>. The sidecar's <code>results[]</code> is a frozen view of the <code>GradingResult</code> shapes produced under the same <code>run_id</code>, plus run-level aggregates (<code>pass_rate</code>, <code>mean_score</code>, <code>aggregate_complete</code>). The JSONL's <code>GradeEvent</code> rows carry the same key triple plus the per-call audit metadata (timestamps, token economics, response-text hash) that the sidecar omits — join when you need the audit detail behind a sidecar row.</li>
+<li><strong>grade sidecar ↔ diff sidecar</strong> — match on <code>artifact_id</code> within the same <code>model_unique_id</code>. The <code>_artifact_id</code> formatter is hoisted to <code>signalforge._common.artifact_id</code> and identity-shared between layers, so the string form is byte-equal by construction.</li>
+<li><strong>prune JSONL ↔ diff sidecar</strong> — there is no direct join key. Prune emits <code>test_anchor</code> (<code>"column.&lt;col&gt;"</code> / <code>"model"</code>); diff emits the richer <code>artifact_id</code> (<code>"test.column.&lt;col&gt;.&lt;test_type&gt;"</code> / <code>"test.model.&lt;test_type&gt;"</code>). To reconstruct the diff <code>artifact_id</code> from a <code>PruneEvent</code>, format the test scope + column + type (and <code>args_hash</code> suffix when two tests in the same scope share a <code>test.type</code>). The shared helper is <code>signalforge._common.artifact_id.artifact_id_for(...)</code> — use it directly if you're writing Python, or apply the rule from <code>.claude/rules/grade-layer.md</code> § "<code>_artifact_id_for</code> canonical dotted-path format" by hand.</li>
+<li><strong>safety JSONL ↔ draft JSONL</strong> — no shared content hash. The safety <code>AuditEvent</code> records the LLM-request envelope shape (mode, columns sent, redactions, row count) but not SQL or any SQL hash; the draft <code>LLMResponseEvent</code> records <code>sent_sql_hash</code> over <code>Model.raw_code</code> plus the response-token economics. For cross-stage attribution within one <code>signalforge generate</code> invocation, group by <code>(model_unique_id, signalforge_version)</code> and order by <code>timestamp</code> — safety's audit fires before draft's in the same run.</li>
+</ul>
+<p><strong>Multi-model in-process iteration</strong> (one <code>signalforge generate --select &lt;expr&gt;</code> process running N models sequentially):</p>
+<ul>
+<li>Each model contributes its own records to the four append-only JSONLs. Group by <code>model_unique_id</code> and you get per-model slices.</li>
+<li>The two sidecars are last-writer-wins. If you need a per-model sidecar persisted, run one process per model (the shell-loop pattern in <a href="../cli-ops/"><code>docs/cli-ops.md</code></a> § "Running across many models").</li>
+<li>There is <strong>no top-level <code>run_id</code> that ties safety / draft / prune / grade together across all stages of one <code>generate</code> call</strong>. Stage identifiers (<code>config_hash</code>, <code>run_id</code>) are produced independently by each stage's orchestrator. For post-hoc cross-stage joins, pair <code>model_unique_id</code> with timestamp ordering or with the stage-specific identifier when the stage exposes one.</li>
+</ul>
+<h2 id="worked-examples-jq">Worked examples — <code>jq</code></h2>
+<p>The examples below run against the committed drift-detector fixtures (<code>tests/fixtures/{safety,draft,prune,grade,diff}/*v1*</code>) so you can copy-paste them and see live output without a real warehouse run.</p>
+<h3 id="drop-reason-histogram-across-the-prune-jsonl">Drop-reason histogram across the prune JSONL</h3>
+<div class="highlight"><pre><span></span><code>$<span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">&#39;[.model_unique_id, .reason] | @tsv&#39;</span><span class="w"> </span>tests/fixtures/prune/prune_event_v1.jsonl<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span><span class="p">|</span><span class="w"> </span>uniq<span class="w"> </span>-c<span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span>-rn
+<span class="w">      </span><span class="m">1</span><span class="w"> </span>model.sf_demo.fct_orders<span class="w">    </span>requires-future-data
+<span class="w">      </span><span class="m">1</span><span class="w"> </span>model.sf_demo.fct_orders<span class="w">    </span>kept
+<span class="w">      </span><span class="m">1</span><span class="w"> </span>model.sf_demo.fct_orders<span class="w">    </span>failed-on-known-clean-data
+<span class="w">      </span><span class="m">1</span><span class="w"> </span>model.sf_demo.fct_orders<span class="w">    </span>always-passes
+<span class="w">      </span><span class="m">1</span><span class="w"> </span>model.sf_demo.dim_customers<span class="w"> </span>kept-without-evidence
+</code></pre></div>
+<p>In a real run with hundreds of decisions, group by <code>.reason</code> (or <code>(.model_unique_id, .reason)</code>) to see which model accounts for the bulk of always-pass drops. See the drop-reason taxonomy in <a href="../prune-ops/#drop-reason-taxonomy"><code>docs/prune-ops.md</code></a>.</p>
+<h3 id="graceful-degrade-rate-per-criterion-from-the-grade-sidecar">Graceful-degrade rate per criterion from the grade sidecar</h3>
+<p><code>GradingResult.score == null</code> is the graceful-degrade signal (retries exhausted, parser failure, or per-call budget exhaustion — see <a href="../grade-ops/"><code>docs/grade-ops.md</code></a> § "Threshold-fail behaviour"). The sidecar's <code>aggregate_complete</code> flag is <code>false</code> whenever any result degraded.</p>
+<div class="highlight"><pre><span></span><code>$<span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">    .results[]</span>
+<span class="s1">    | [.criterion_id, (if .score == null then &quot;degraded&quot; else &quot;scored&quot; end)]</span>
+<span class="s1">    | @tsv</span>
+<span class="s1">  &#39;</span><span class="w"> </span>tests/fixtures/grade/grade_report_v1.json<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span><span class="p">|</span><span class="w"> </span>uniq<span class="w"> </span>-c
+<span class="w">      </span><span class="m">1</span><span class="w"> </span>clarity<span class="w"> </span>scored
+<span class="w">      </span><span class="m">1</span><span class="w"> </span>consistency<span class="w"> </span>scored
+<span class="w">      </span><span class="m">1</span><span class="w"> </span>rationale<span class="w">   </span>degraded
+</code></pre></div>
+<p>Across many runs (one <code>grade.json</code> per <code>signalforge generate</code> invocation; archive them per CI run), pivot the same query by <code>criterion_id</code> to see if any one criterion is failing the LLM judge more often than the others.</p>
+<h3 id="tier-breakdown-from-the-diff-sidecar">Tier breakdown from the diff sidecar</h3>
+<p>The four tiers (<code>kept</code>, <code>kept-uncertain</code>, <code>dropped</code>, <code>flagged</code>) tell the reviewer at a glance what the run produced. <code>kept-uncertain</code> means "we shipped this without positive evidence" (prune couldn't evaluate it — budget exceeded, warehouse error, SQL safety rejection, or <code>prune.enabled: false</code>).</p>
+<div class="highlight"><pre><span></span><code>$<span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">&#39;.entries[] | .tier&#39;</span><span class="w"> </span>tests/fixtures/diff/diff_report_v1.json<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span><span class="p">|</span><span class="w"> </span>uniq<span class="w"> </span>-c<span class="w"> </span><span class="p">|</span><span class="w"> </span>sort<span class="w"> </span>-rn
+<span class="w">      </span><span class="m">2</span><span class="w"> </span>kept
+<span class="w">      </span><span class="m">1</span><span class="w"> </span>kept-uncertain
+<span class="w">      </span><span class="m">1</span><span class="w"> </span>flagged
+<span class="w">      </span><span class="m">1</span><span class="w"> </span>dropped
+</code></pre></div>
+<h3 id="llm-token-cost-roll-up-across-the-grade-jsonl">LLM token-cost roll-up across the grade JSONL</h3>
+<p>Cost-per-run from the grade layer: input + output + cached tokens per <code>(artifact × criterion)</code> call. Multiply by the per-model price table in <code>signalforge.llm.pricing</code> for dollars; the example below shows totals.</p>
+<div class="highlight"><pre><span></span><code>$<span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">    [.model_unique_id, .model, .input_tokens, .output_tokens,</span>
+<span class="s1">     .cache_creation_input_tokens, .cache_read_input_tokens]</span>
+<span class="s1">    | @tsv</span>
+<span class="s1">  &#39;</span><span class="w"> </span>tests/fixtures/grade/grade_event_v1.jsonl
+model.shop.dim_customers<span class="w">    </span>claude-sonnet-4-6<span class="w">   </span><span class="m">1820</span><span class="w">    </span><span class="m">140</span><span class="w"> </span><span class="m">0</span><span class="w">   </span><span class="m">1500</span>
+</code></pre></div>
+<p>The draft layer's <code>llm_responses.jsonl</code> carries the same token shape (<code>input_tokens</code>, <code>output_tokens</code>, <code>cache_creation_input_tokens</code>, <code>cache_read_input_tokens</code>) — sum the two streams per <code>model_unique_id</code> for the full per-run LLM cost.</p>
+<p>(Warehouse-bytes cost lives on the <code>--estimate</code> preview report — see <a href="../cli-ops/"><code>docs/cli-ops.md</code></a> § "Estimate-style commands" — not in the durable run audits. The <code>prune.jsonl</code> <code>compiled_sql_hash</code> lets you correlate prune decisions back to a specific compiled SQL string if you saved one, but bytes-scanned is not currently emitted into <code>.signalforge/</code>.)</p>
+<h3 id="join-grade-sidecar-diff-sidecar-by-artifact_id">Join grade sidecar ↔ diff sidecar by <code>artifact_id</code></h3>
+<div class="highlight"><pre><span></span><code>$<span class="w"> </span>jq<span class="w"> </span>-s<span class="w"> </span><span class="s1">&#39;</span>
+<span class="s1">    (.[0].results | map({key: .artifact_id, value: {score, passed}}) | from_entries) as $grade</span>
+<span class="s1">    | .[1].entries</span>
+<span class="s1">    | map(. + {grade: ($grade[.artifact_id] // null)})</span>
+<span class="s1">    | .[]</span>
+<span class="s1">    | [.artifact_id, .tier, (.score // &quot;—&quot; | tostring),</span>
+<span class="s1">       (.grade.passed // &quot;—&quot; | tostring)]</span>
+<span class="s1">    | @tsv</span>
+<span class="s1">  &#39;</span><span class="w"> </span>tests/fixtures/grade/grade_report_v1.json<span class="w"> </span>tests/fixtures/diff/diff_report_v1.json
+column.customer_id.description<span class="w">  </span>kept<span class="w">    </span><span class="m">0</span>.85<span class="w">    </span>—
+test.column.customer_id.not_null<span class="w">    </span>kept<span class="w">    </span>—<span class="w">   </span>—
+test.column.email.not_null<span class="w">  </span>kept-uncertain<span class="w">  </span>—<span class="w">   </span>—
+test.column.customer_id.unique<span class="w">  </span>dropped<span class="w"> </span>—<span class="w">   </span>—
+column.email.description<span class="w">    </span>flagged<span class="w"> </span><span class="m">0</span>.45<span class="w">    </span>—
+</code></pre></div>
+<p>The <code>grade.passed</code> column is <code>—</code> on every row of this fixture pair because the fixtures were assembled independently — the grade-sidecar fixture covers <code>column.email.description</code> and <code>test.column.email.not_null</code>, while the diff-sidecar fixture covers <code>customer_id</code> artefacts plus the same <code>email.description</code> (mocked with a different score). In a real run, the two files produced by one <code>signalforge generate</code> invocation share <code>model_unique_id</code> and the join populates fully.</p>
+<h2 id="worked-examples-pandas">Worked examples — pandas</h2>
+<p>The same three queries in pandas. All assume <code>jq</code>-free Python with <code>pyarrow</code> available (<code>pip install pandas pyarrow</code>); replace <code>read_json</code> with the path on your disk.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">json</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
+
+<span class="c1"># Prune decisions — drop-reason histogram</span>
+<span class="n">prune</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_json</span><span class="p">(</span><span class="s2">&quot;.signalforge/prune.jsonl&quot;</span><span class="p">,</span> <span class="n">lines</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">prune</span><span class="o">.</span><span class="n">groupby</span><span class="p">([</span><span class="s2">&quot;model_unique_id&quot;</span><span class="p">,</span> <span class="s2">&quot;reason&quot;</span><span class="p">])</span><span class="o">.</span><span class="n">size</span><span class="p">()</span><span class="o">.</span><span class="n">sort_values</span><span class="p">(</span><span class="n">ascending</span><span class="o">=</span><span class="kc">False</span><span class="p">))</span>
+
+<span class="c1"># Graceful-degrade rate per criterion from the grade sidecar</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;.signalforge/grade.json&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">grade_report</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+<span class="n">grade_results</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span><span class="n">grade_report</span><span class="p">[</span><span class="s2">&quot;results&quot;</span><span class="p">])</span>
+<span class="n">grade_results</span><span class="p">[</span><span class="s2">&quot;degraded&quot;</span><span class="p">]</span> <span class="o">=</span> <span class="n">grade_results</span><span class="p">[</span><span class="s2">&quot;score&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">isna</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">grade_results</span><span class="o">.</span><span class="n">groupby</span><span class="p">(</span><span class="s2">&quot;criterion_id&quot;</span><span class="p">)[</span><span class="s2">&quot;degraded&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">mean</span><span class="p">()</span><span class="o">.</span><span class="n">sort_values</span><span class="p">(</span><span class="n">ascending</span><span class="o">=</span><span class="kc">False</span><span class="p">))</span>
+
+<span class="c1"># Tier breakdown from the diff sidecar</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;.signalforge/diff.json&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+    <span class="n">diff_report</span> <span class="o">=</span> <span class="n">json</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">f</span><span class="p">)</span>
+<span class="n">diff_entries</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">DataFrame</span><span class="p">(</span><span class="n">diff_report</span><span class="p">[</span><span class="s2">&quot;entries&quot;</span><span class="p">])</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">diff_entries</span><span class="p">[</span><span class="s2">&quot;tier&quot;</span><span class="p">]</span><span class="o">.</span><span class="n">value_counts</span><span class="p">())</span>
+
+<span class="c1"># LLM token-cost roll-up — draft + grade per model</span>
+<span class="n">draft</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_json</span><span class="p">(</span><span class="s2">&quot;.signalforge/llm_responses.jsonl&quot;</span><span class="p">,</span> <span class="n">lines</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">grade_jsonl</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_json</span><span class="p">(</span><span class="s2">&quot;.signalforge/grade.jsonl&quot;</span><span class="p">,</span> <span class="n">lines</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<span class="n">token_cols</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;input_tokens&quot;</span><span class="p">,</span> <span class="s2">&quot;output_tokens&quot;</span><span class="p">,</span>
+              <span class="s2">&quot;cache_creation_input_tokens&quot;</span><span class="p">,</span> <span class="s2">&quot;cache_read_input_tokens&quot;</span><span class="p">]</span>
+<span class="n">combined</span> <span class="o">=</span> <span class="p">(</span>
+    <span class="n">pd</span><span class="o">.</span><span class="n">concat</span><span class="p">([</span><span class="n">draft</span><span class="o">.</span><span class="n">assign</span><span class="p">(</span><span class="n">stage</span><span class="o">=</span><span class="s2">&quot;draft&quot;</span><span class="p">),</span> <span class="n">grade_jsonl</span><span class="o">.</span><span class="n">assign</span><span class="p">(</span><span class="n">stage</span><span class="o">=</span><span class="s2">&quot;grade&quot;</span><span class="p">)])</span>
+      <span class="o">.</span><span class="n">groupby</span><span class="p">([</span><span class="s2">&quot;model_unique_id&quot;</span><span class="p">,</span> <span class="s2">&quot;stage&quot;</span><span class="p">])[</span><span class="n">token_cols</span><span class="p">]</span>
+      <span class="o">.</span><span class="n">sum</span><span class="p">()</span>
+<span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">combined</span><span class="p">)</span>
+
+<span class="c1"># Grade ↔ diff join on artifact_id</span>
+<span class="n">joined</span> <span class="o">=</span> <span class="n">diff_entries</span><span class="o">.</span><span class="n">merge</span><span class="p">(</span>
+    <span class="n">grade_results</span><span class="o">.</span><span class="n">rename</span><span class="p">(</span><span class="n">columns</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;passed&quot;</span><span class="p">:</span> <span class="s2">&quot;grade_passed&quot;</span><span class="p">}),</span>
+    <span class="n">on</span><span class="o">=</span><span class="s2">&quot;artifact_id&quot;</span><span class="p">,</span>
+    <span class="n">how</span><span class="o">=</span><span class="s2">&quot;left&quot;</span><span class="p">,</span>
+    <span class="n">suffixes</span><span class="o">=</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="p">,</span> <span class="s2">&quot;_grade&quot;</span><span class="p">),</span>
+<span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">joined</span><span class="p">[[</span><span class="s2">&quot;artifact_id&quot;</span><span class="p">,</span> <span class="s2">&quot;tier&quot;</span><span class="p">,</span> <span class="s2">&quot;score_grade&quot;</span><span class="p">,</span> <span class="s2">&quot;grade_passed&quot;</span><span class="p">]])</span>
+</code></pre></div>
+<p><code>pd.read_json(..., lines=True)</code> is the right reader for JSONL streams. Use <code>dtype_backend="pyarrow"</code> (pandas 2.x) to avoid float-from-NaN coercion if you need to distinguish <code>null</code> scores from <code>0.0</code>.</p>
+<h2 id="forward-compat-policy">Forward-compat policy</h2>
+<p>Every event and report model across the five stages uses Pydantic v2 <code>extra="ignore"</code> — <code>AuditEvent</code> (safety), <code>LLMResponseEvent</code> (draft), <code>PruneEvent</code> (prune), <code>GradeEvent</code> + <code>GradingReport</code> (grade), <code>DiffEntry</code> + <code>DiffReport</code> (diff). This is the project's standard forward-compat seam: a future SignalForge release can add fields to any of these without breaking a downstream JSONL reader that knows only the old schema.</p>
+<p><strong>What is NOT a breaking change</strong> (does not bump <code>audit_schema_version</code>):</p>
+<ul>
+<li>Adding a new optional field. Existing readers ignore it; new readers consume it.</li>
+<li>Adding a new value to a non-<code>Literal</code> string field (e.g., a new <code>ModelPricing</code> SKU). Readers tolerate unknown values.</li>
+</ul>
+<p><strong>What IS a breaking change</strong> (bumps <code>audit_schema_version</code>):</p>
+<ul>
+<li>Removing a field, renaming a field, or changing a field's type (string → list, int → string).</li>
+<li>Changing the semantics of an existing field (e.g., <code>score</code> switching from <code>[0.0, 1.0]</code> to <code>[0.0, 100.0]</code>).</li>
+<li>Changing a <code>Literal[...]</code> discriminator's allowed values — adding, removing, or renaming. <code>DropReason</code> (prune) and <code>Tier</code> (diff) are closed <code>Literal</code> unions; an old typed reader fails Pydantic validation on a new literal value, and a new reader misses records carrying a dropped one. The prune layer has been deliberately conservative — five <code>DropReason</code> values as of v0.2 — for exactly this reason; any expansion ships a rule-file update plus a fixture refresh plus an <code>audit_schema_version</code> bump. Issue #50 widened <code>Tier</code> from three values to four and bumped <code>DiffReport.audit_schema_version</code> from 1 to 2 alongside the change.</li>
+</ul>
+<p><code>audit_schema_version</code> is per-shape, not project-wide. The pinned values today:</p>
+<ul>
+<li><code>AuditEvent.audit_schema_version: int = 3</code> (safety — bumped 1 → 2 in issue #54 for the <code>draft_skip_*</code> redaction reasons, 2 → 3 in issue #55 for the <code>policy_hash</code> recipe change)</li>
+<li><code>LLMResponseEvent.audit_schema_version: int = 1</code> (draft)</li>
+<li><code>PruneEvent.audit_schema_version: int = 2</code> (prune — bumped 1 → 2 in issue #55 when <code>config_hash</code> migrated to the <code>blake2b-8</code> recipe)</li>
+<li><code>GradeEvent.audit_schema_version: Literal[1] = 1</code> (grade per-call)</li>
+<li><code>GradingReport.grade_schema_version: Literal[1] = 1</code> (grade sidecar — separate field from the per-call event)</li>
+<li><code>DiffReport.schema_version: Literal[1] = 1</code> (diff sidecar overall) plus <code>DiffReport.audit_schema_version: Literal[3] = 3</code> (bumped 1 → 2 in issue #50 alongside the <code>kept-uncertain</code> tier literal, 2 → 3 in issue #116 alongside the <code>proposed_test_files</code> array for standalone <code>custom_sql</code> <code>.sql</code> test files)</li>
+</ul>
+<p>Consumer policy: gate on <code>version &gt;= N</code> (forward-compatible reads of newer minor versions), not <code>version == N</code> (strict equality, breaks on every additive bump). External CI parsers that key on the four-tier <code>DiffEntry.tier</code> taxonomy specifically should gate on <code>DiffReport.audit_schema_version &gt;= 2</code>; consumers of the <code>proposed_test_files</code> array gate on <code>&gt;= 3</code>.</p>
+<p>Drift-detector tests (<code>tests/{safety,draft,prune,grade,diff}/test_drift_detector.py</code>) pair every <code>extra="ignore"</code> production model with a one-off <code>Strict&lt;X&gt;(extra="forbid")</code> mirror validated against the committed fixture. Adding a field to production without also updating the strict mirror OR the fixture breaks the test loudly — the test is the safety net for accidental schema drift.</p>
+<h2 id="privacy-note">Privacy note</h2>
+<h3 id="whats-redacted">What's redacted</h3>
+<ul>
+<li><strong>Column names</strong> in safety records — every column the LLM sees in <code>schema-only</code> and <code>aggregate-only</code> modes is replaced with a stable <code>f"col_{blake2b(name.encode(), digest_size=4).hexdigest()}"</code> 8-hex-char hash (DEC-010 of <a href="../.claude/rules/safety-layer.md"><code>safety-layer.md</code></a>). The <code>(real → hashed)</code> map is recorded inside the safety JSONL's <code>redactions[]</code> array; the LLM only ever sees the hash. Use the audit log itself to map back.</li>
+<li><strong>Sample row values</strong> in <code>sample</code> mode — <code>RedactionRecord.redacted = true</code> on every column that matched a policy opt-out signal (column meta, model meta, <code>tags: [pii]</code>, <code>meta.contains_pii</code>, or pattern match against <code>redact_patterns</code>). The seven <code>RedactionReason</code> literals are documented in <a href="../safety-ops/"><code>docs/safety-ops.md</code></a> § "Per-column opt-out".</li>
+<li><strong>BigQuery session IDs in error WARNINGs</strong> — surfaced as <code>blake2b-4</code> hashes on the happy path (<code>session_id_hash</code>); the raw <code>session_id</code> appears <strong>only</strong> in the cleanup-failure WARNING where the operator needs it to construct the manual <code>bq query --connection_property=session_id=...</code> recovery command. Never in audit JSONL, never on the happy path.</li>
+</ul>
+<h3 id="whats-not-redacted">What's NOT redacted</h3>
+<ul>
+<li><strong>Model unique IDs and file paths</strong> — <code>model.&lt;pkg&gt;.&lt;name&gt;</code> appears verbatim in every stage's audit. Treat these as project-scoped identifiers, not PII.</li>
+<li><strong>Raw column types</strong> — <code>STRING</code>, <code>INT64</code>, <code>TIMESTAMP</code>, etc. Schema metadata, not data.</li>
+<li><strong>Compiled SQL</strong> — <code>PruneEvent.compiled_sql</code> is the literal SQL the warehouse ran (column names are real here, not hashed — the warehouse needs them). If a column name itself is PII (e.g., <code>customer_ssn</code> literally as a column name), the prune compile-time SQL leaks it via the file. Operators uneasy about column-name leakage to the prune audit set the column's <code>meta.contains_pii: true</code> and run in <code>schema-only</code> mode; the prune layer still compiles the SQL against the real name (no choice) but never sends it to the LLM.</li>
+<li><strong>Hashes</strong> — <code>signalforge_version</code>, <code>policy_hash</code>, <code>config_hash</code>, <code>rubric_hash</code>, <code>prompt_version</code>, <code>sent_sql_hash</code>, <code>response_text_hash</code>, <code>parsed_schema_hash</code>, <code>compiled_sql_hash</code>, <code>candidate_hash</code>, <code>prune_result_hash</code>, <code>grading_report_hash</code>. These are deterministic content addresses. They never carry user content; they let two reviewers confirm "yes, same inputs → same record."</li>
+<li><strong>LLM judge evidence quotes</strong> — <code>GradingResult.evidence</code> carries short verbatim quotes from artifact text (column descriptions, test rationales) so the reviewer can audit the judge. The audit captures this verbatim. If your column descriptions carry PII, the grade JSONL carries that PII too.</li>
+<li><strong><code>PruneEvent.sample_failures</code></strong> — only populated when <code>prune.capture_failure_rows: true</code> (default <code>false</code>); the failing rows are typed <code>dict[str, Any]</code> and contain raw warehouse data. Default-off; if you turn it on, treat <code>prune.jsonl</code> as PII-equivalent for that run.</li>
+<li><strong>Stack traces / error strings</strong> — typed-error <code>cause</code> chains can carry warehouse error messages that quote table names, query fragments, or (rarely) row contents from query-plan tooltips. Audit at the operator-WARNING level, not the LLM-input level — see <a href="../warehouse-adapter-ops/"><code>docs/warehouse-adapter-ops.md</code></a> for the WARNING-shape contract.</li>
+</ul>
+<h3 id="audit-log-rotation-and-retention">Audit log rotation and retention</h3>
+<p>The fail-closed writers append unboundedly. Operators in regulated environments should configure log rotation (or copy + truncate) at a cadence that respects their data-retention policy. The four JSONLs use <code>O_APPEND</code> + <code>O_CREAT</code> with <code>0o600</code> permissions; the two sidecars are <code>O_TRUNC</code> single-document and superseded every run. See <a href="../safety-ops/"><code>docs/safety-ops.md</code></a> § "Audit log rotation" for the safety-specific rotation pattern that applies symmetrically to draft, prune, and grade JSONLs.</p>
+<h2 id="references">References</h2>
+<ul>
+<li>Pinned schemas (production models): <code>signalforge.safety.models.AuditEvent</code>, <code>signalforge.draft.audit.LLMResponseEvent</code>, <code>signalforge.prune.models.PruneEvent</code>, <code>signalforge.grade.models.GradeEvent</code> / <code>GradingReport</code>, <code>signalforge.diff.models.DiffEntry</code> / <code>DiffReport</code>.</li>
+<li>Drift-detector fixtures: <code>tests/fixtures/safety/audit_events_sample.jsonl</code>, <code>tests/fixtures/draft/llm_response_audit_sample.jsonl</code>, <code>tests/fixtures/prune/prune_event_v1.jsonl</code>, <code>tests/fixtures/grade/grade_event_v1.jsonl</code> + <code>grade_report_v1.json</code>, <code>tests/fixtures/diff/diff_report_v1.json</code>.</li>
+<li>Rule files: <a href="../.claude/rules/safety-layer.md"><code>.claude/rules/safety-layer.md</code></a>, <a href="../.claude/rules/llm-drafter.md"><code>.claude/rules/llm-drafter.md</code></a>, <a href="../.claude/rules/prune-engine.md"><code>.claude/rules/prune-engine.md</code></a>, <a href="../.claude/rules/grade-layer.md"><code>.claude/rules/grade-layer.md</code></a>, <a href="../.claude/rules/diff-renderer.md"><code>.claude/rules/diff-renderer.md</code></a>.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

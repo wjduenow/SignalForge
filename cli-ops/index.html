@@ -1,0 +1,3115 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/cli-ops/">
+      
+      
+        <link rel="prev" href="..">
+      
+      
+        <link rel="next" href="../skills/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>CLI Reference - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#cli-operations-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              CLI Reference
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Installation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#subcommands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subcommands
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Subcommands">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-generate-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge generate &lt;model&gt;
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-init-demo-dest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge init-demo [&lt;dest&gt;]
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-install-skill-dest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge install-skill [&lt;dest&gt;]
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-lint" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge lint
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-prune-existing-model-schema-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge prune-existing &lt;model&gt; --schema &lt;path&gt;
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="signalforge prune-existing &lt;model&gt; --schema &lt;path&gt;">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#read-only-by-design-dec-003" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read-only by design (DEC-003)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unified-diff-against-your-file-dec-004" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Unified diff against your file (DEC-004)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#singular-testssql-business-rule-tests-us-014" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Singular tests/*.sql business-rule tests (US-014)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-version" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge version
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#project-root-discovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Project-root discovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#four-tier-exit-code-taxonomy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Four-tier exit-code taxonomy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Four-tier exit-code taxonomy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#stderr-message-shape-per-tier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stderr message shape per tier
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stderr-shapes-warning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stderr shapes (WARNING)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Stderr shapes (WARNING)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cleanup-failure-warning-issue-22-dec-014" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cleanup-failure WARNING (issue #22 DEC-014)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#materialisation-failure-degraded-run-warning-issue-22-dec-009" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Materialisation-failure / degraded-run WARNING (issue #22 DEC-009)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#budget-exceeded-warning-v01-prune-enginemd-dec-011" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Budget-exceeded WARNING (v0.1, prune-engine.md DEC-011)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#proposed-sql-overwrite-skip-warning-issue-116-dec-010dec-014" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Proposed .sql overwrite-skip WARNING (issue #116 DEC-010/DEC-014)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#threshold-fail-behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Threshold-fail behaviour
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment variables
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#logging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Logging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#progress-lines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Progress lines
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worked-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-across-many-models" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running across many models
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Running across many models">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#in-process-select-expr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In-process: --select &lt;expr&gt;
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#process-level-shell-loop-pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Process-level: shell-loop pattern
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cumulative-cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cumulative cost
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#subprocess-smoke-test" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subprocess smoke test
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cross-references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cross-references
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#installation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Installation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#subcommands" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subcommands
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Subcommands">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-generate-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge generate &lt;model&gt;
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-init-demo-dest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge init-demo [&lt;dest&gt;]
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-install-skill-dest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge install-skill [&lt;dest&gt;]
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-lint" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge lint
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-prune-existing-model-schema-path" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge prune-existing &lt;model&gt; --schema &lt;path&gt;
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="signalforge prune-existing &lt;model&gt; --schema &lt;path&gt;">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#read-only-by-design-dec-003" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read-only by design (DEC-003)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unified-diff-against-your-file-dec-004" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Unified diff against your file (DEC-004)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#singular-testssql-business-rule-tests-us-014" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Singular tests/*.sql business-rule tests (US-014)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforge-version" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge version
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#project-root-discovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Project-root discovery
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#four-tier-exit-code-taxonomy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Four-tier exit-code taxonomy
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Four-tier exit-code taxonomy">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#stderr-message-shape-per-tier" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stderr message shape per tier
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#stderr-shapes-warning" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Stderr shapes (WARNING)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Stderr shapes (WARNING)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#cleanup-failure-warning-issue-22-dec-014" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cleanup-failure WARNING (issue #22 DEC-014)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#materialisation-failure-degraded-run-warning-issue-22-dec-009" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Materialisation-failure / degraded-run WARNING (issue #22 DEC-009)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#budget-exceeded-warning-v01-prune-enginemd-dec-011" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Budget-exceeded WARNING (v0.1, prune-engine.md DEC-011)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#proposed-sql-overwrite-skip-warning-issue-116-dec-010dec-014" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Proposed .sql overwrite-skip WARNING (issue #116 DEC-010/DEC-014)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#threshold-fail-behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Threshold-fail behaviour
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment variables
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#logging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Logging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#progress-lines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Progress lines
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#worked-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked example
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-across-many-models" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running across many models
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Running across many models">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#in-process-select-expr" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In-process: --select &lt;expr&gt;
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#process-level-shell-loop-pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Process-level: shell-loop pattern
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cumulative-cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cumulative cost
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#subprocess-smoke-test" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Subprocess smoke test
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cross-references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cross-references
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="cli-operations-guide">CLI — operations guide</h1>
+<p>Operational reference for the <code>signalforge</code> command. Companion to
+<a href="../safety-ops/"><code>docs/safety-ops.md</code></a>,
+<a href="../draft-ops/"><code>docs/draft-ops.md</code></a>,
+<a href="../prune-ops/"><code>docs/prune-ops.md</code></a>,
+<a href="../grade-ops/"><code>docs/grade-ops.md</code></a>,
+<a href="../diff-ops/"><code>docs/diff-ops.md</code></a>,
+<a href="../manifest-loader-ops/"><code>docs/manifest-loader-ops.md</code></a>, and
+<a href="../warehouse-adapter-ops/"><code>docs/warehouse-adapter-ops.md</code></a>, and to the
+design record in
+<a href="../plans/super/9-cli-entrypoint.md"><code>plans/super/9-cli-entrypoint.md</code></a>.</p>
+<p>The CLI is the user-facing entry point for the v0.1 pipeline. It does
+not implement new pipeline behaviour; it wires the existing stages —
+<code>signalforge.manifest.load</code> → <code>signalforge.safety.load_safety_config</code> →
+<code>signalforge.draft.draft_schema</code> → <code>signalforge.prune.prune_tests</code> →
+<code>signalforge.grade.grade_artifacts</code> →
+<code>signalforge.diff.render_diff</code> — into a single command, applies the
+four-tier exit-code taxonomy on the way out, and renders the diff
+to stdout (plus the JSON sidecar to disk by default).</p>
+<p>This is the load-bearing operationalisation of Architectural Commitment
+#4 in <a href="../CLAUDE.md"><code>CLAUDE.md</code></a> — <strong>OSS-first, Core-friendly</strong>: the
+runnable surface a user installs from PyPI and runs against any
+dbt-core project, locally or in CI, with no dbt Cloud dependency.</p>
+<h2 id="installation">Installation</h2>
+<p>The published wheel:</p>
+<div class="highlight"><pre><span></span><code>pip<span class="w"> </span>install<span class="w"> </span>signalforge-dbt
+signalforge<span class="w"> </span>--version
+</code></pre></div>
+<p>The PyPI distribution name is <code>signalforge-dbt</code>; the import name and
+CLI command remain <code>signalforge</code>. The <code>-dbt</code> suffix exists because the
+bare <code>signalforge</code> name on PyPI is held by an unrelated DSP package.</p>
+<p>For development against a clone (<code>[dependency-groups].dev</code> pulls in
+pytest, ruff, pyright, and <code>build</code>):</p>
+<div class="highlight"><pre><span></span><code>uv<span class="w"> </span>sync<span class="w"> </span>--dev<span class="w">   </span><span class="c1"># canonical</span>
+<span class="c1"># back-compat fallback for contributors without uv:</span>
+pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span><span class="s2">&quot;.[dev]&quot;</span><span class="w">  </span><span class="c1"># note: does not include the uv-only `build` extra</span>
+<span class="w">                         </span><span class="c1"># used by the wheel_smoke marker (issue #47)</span>
+</code></pre></div>
+<p><code>uv.lock</code> is committed; <code>uv sync --dev</code> reproduces the exact resolved
+versions CI uses across the 3.11 / 3.12 matrix.</p>
+<p>After install, the <code>signalforge</code> console script is registered via
+<code>pyproject.toml</code>'s <code>[project.scripts]</code> entry and resolves to
+<code>signalforge.cli:main</code>.</p>
+<h2 id="subcommands">Subcommands</h2>
+<p>The CLI exposes six subcommands: <code>generate</code>, <code>init-demo</code>,
+<code>install-skill</code>, <code>lint</code>, <code>prune-existing</code>, <code>version</code>. <code>signalforge
+--help</code> prints the top-level help; each subcommand has its own
+<code>--help</code> page (e.g. <code>signalforge generate --help</code>).</p>
+<h3 id="signalforge-generate-model"><code>signalforge generate &lt;model&gt;</code></h3>
+<p>Run the full pipeline against <code>&lt;model&gt;</code>: load the manifest, build the
+safety policy, draft candidate artifacts via the LLM, prune
+always-pass / known-clean-fail tests against warehouse samples, grade
+the survivors, and render a diff against any existing <code>schema.yml</code>.</p>
+<blockquote>
+<p><strong>Note:</strong> the prune step runs warehouse SQL on every invocation
+regardless of <code>safety.mode</code>. To skip the prune layer entirely, set
+<code>prune.enabled: false</code> in <code>signalforge.yml</code> (see
+<a href="../prune-ops/#configuration-signalforgeyml-prune-block"><code>docs/prune-ops.md</code></a>).</p>
+</blockquote>
+<p>Positional argument:</p>
+<ul>
+<li><code>&lt;model&gt;</code> — Model under draft. Accepts a dbt <code>unique_id</code>
+  (e.g. <code>model.proj.customers</code>) or a file path (e.g.
+  <code>models/marts/customers.sql</code>). Routes to
+  <code>Manifest.get_model(...)</code> which canonicalises the path and
+  raises <code>ModelNotFoundError</code> / <code>ModelDisabledError</code> /
+  <code>ModelPathOutsideProjectError</code> / <code>ModelMissingSqlError</code> on
+  failure. Mutually exclusive with <code>--select</code>; exactly one of
+  the two must be supplied.</li>
+</ul>
+<p>Multi-model flag:</p>
+<ul>
+<li><code>--select &lt;expr&gt;</code> — Run <code>generate</code> across multiple models in
+  one process. <code>&lt;expr&gt;</code> is a comma-separated union of atoms (set
+  OR); whitespace around commas is stripped. Three atom shapes:<ul>
+<li><code>tag:&lt;name&gt;</code> — matches when <code>&lt;name&gt;</code> is in
+  <code>Model.tags ∪ Model.config.tags</code>.</li>
+<li><code>path:&lt;glob&gt;</code> — shell-style <code>fnmatch</code> against
+  <code>Model.original_file_path</code>. dbt's path-prefix convention
+  diverges; v0.2 uses fnmatch and operators write
+  <code>path:models/staging/*</code> (with the trailing wildcard),
+  not <code>path:models/staging</code> (DEC-016 of
+  <a href="../plans/super/37-multi-model-select.md"><code>plans/super/37-multi-model-select.md</code></a>).</li>
+<li>bare <code>&lt;value&gt;</code> — <code>model.&lt;...&gt;</code> prefix routes as
+  <code>unique_id</code>; otherwise routes as a file path (mirrors the
+  v0.1 positional <code>&lt;model&gt;</code> semantics).</li>
+</ul>
+</li>
+</ul>
+<p>Match results are deduplicated and ordered by <code>unique_id</code>
+  (deterministic). Three concrete examples:</p>
+<div class="highlight"><pre><span></span><code>signalforge<span class="w"> </span>generate<span class="w"> </span>--select<span class="w"> </span>tag:staging
+signalforge<span class="w"> </span>generate<span class="w"> </span>--select<span class="w"> </span>path:models/marts/*
+signalforge<span class="w"> </span>generate<span class="w"> </span>--select<span class="w"> </span>tag:staging,path:models/marts/*
+</code></pre></div>
+<p>Mutually exclusive with the positional <code>&lt;model&gt;</code>. Empty atoms
+  (<code>--select ,tag:foo</code>) exit 2 with <code>CliSelectorParseError</code>; a
+  well-formed selector that matches zero models exits 2 with
+  <code>CliSelectorNoMatchError</code>. See <a href="#running-across-many-models">Running across many
+  models</a> for semantics, the
+  shell-loop alternative, and cumulative-cost guidance.</p>
+<p>Path / project-discovery flags:</p>
+<ul>
+<li><code>--project-dir PATH</code> — Absolute assertion: <code>&lt;PATH&gt;</code> must contain
+  <code>dbt_project.yml</code>. The CLI does NOT walk up from the override
+  (DEC-027). Default: walk up from the current working directory
+  until <code>dbt_project.yml</code> is found (DEC-001).</li>
+<li><code>--manifest PATH</code> — Override the default
+  <code>&lt;project_dir&gt;/target/manifest.json</code>. Path is canonicalised
+  against the resolved project_dir.</li>
+<li><code>--profiles-dir PATH</code> — Override the default <code>profiles.yml</code>
+  search location. Mirrors dbt-core's <code>--profiles-dir</code> flag.
+  Sets <code>DBT_PROFILES_DIR</code> in the current process environment.</li>
+</ul>
+<p>Runtime knob flags:</p>
+<ul>
+<li><code>--mode {schema-only,aggregate-only,sample}</code> — Override the
+  safety sampling mode. Precedence: CLI flag &gt;
+  <code>safety.mode</code> in <code>signalforge.yml</code> &gt; library default. Applied
+  via <code>SafetyPolicy.with_mode(...)</code> so the validators (notably
+  the sample-mode warning from <code>safety-layer.md</code> DEC-021) re-run
+  on the override. Argparse rejects unknown values → exit 2.</li>
+<li><code>--min-score N</code> — Override <code>grade.min_mean_score</code> (closed
+  interval <code>[0.0, 1.0]</code>). This is the <strong>aggregate-verdict</strong>
+  threshold: it is consumed by <code>GradingReport.passed</code> (and, when
+  <code>grade.fail_on_below_threshold=true</code>, by <code>GradeBelowThresholdError</code>).
+  <strong>Reporting-only by default</strong> — does NOT affect the exit code
+  by itself; the threshold-fail consequence lives in
+  <code>signalforge.yml</code> (see <a href="#threshold-fail-behaviour">Threshold-fail
+  behaviour</a> below). The diff renderer's
+  <code>flagged</code> tier is driven by per-criterion <code>GradingResult.passed</code>
+  (set verbatim by the LLM judge), not by <code>min_mean_score</code>, so this
+  flag does not change the kept/dropped/flagged counts in the diff
+  table — it only changes the aggregate verdict and (opt-in) exit
+  code. Out-of-range values exit 2.</li>
+<li><code>--write</code> — Write the proposed <code>schema.yml</code> to disk under
+  <code>&lt;project_dir&gt;/&lt;model_dir&gt;/schema.yml</code>. <strong>Additionally</strong> writes
+  each proposed singular <code>.sql</code> business-rule test to its
+  <code>tests/&lt;model&gt;__&lt;descriptor&gt;_&lt;hash&gt;.sql</code> path under the project
+  (DEC-010/DEC-014 of issue #116); each file is prepended with a
+  <code>-- signalforge:generated &lt;hash&gt;</code> header marker. The JSON sidecar
+  is still written to <code>&lt;project_dir&gt;/.signalforge/diff.json</code>.
+  Mutually exclusive with <code>--dry-run</code>. See <code>--force</code> for the
+  <code>.sql</code> overwrite policy.</li>
+<li><code>--force</code> — With <code>--write</code>, governs overwrite of an existing
+  proposed <code>.sql</code> test file (DEC-010 of issue #116). New files
+  always write. A file that already exists and carries
+  SignalForge's <code>-- signalforge:generated</code> marker is overwritten
+  <strong>only</strong> with <code>--force</code>; without <code>--force</code> it is skipped with a
+  stderr WARNING naming the file. A file that exists <strong>without</strong>
+  the marker (hand-authored) is <strong>never</strong> overwritten, even with
+  <code>--force</code> — it is skipped with a clear stderr WARNING (we never
+  clobber human-written tests). No-op without <code>--write</code>.</li>
+<li><code>--dry-run</code> — Run the FULL pipeline (LLM + warehouse + grade)
+  and print the diff to stdout, but write nothing — neither the
+  <code>schema.yml</code>, the proposed <code>.sql</code> test files, nor the
+  <code>.signalforge/diff.json</code> sidecar. Overrides the default-on
+  sidecar (DEC-010). Mutually exclusive with <code>--write</code>.</li>
+<li><code>--estimate</code> — Print a pre-flight cost preview and exit
+  without making any billable Anthropic or warehouse call. The
+  full pipeline prelude still runs (manifest, safety, draft,
+  prune, grade, diff configs; warehouse profile; adapter
+  construction) so typos in <code>--profiles-dir</code> /
+  <code>signalforge.yml</code> surface BEFORE the estimate is computed
+  (DEC-009 of <code>plans/super/36-estimate-cost-preview.md</code>).
+  The estimate uses <code>client.messages.count_tokens(...)</code> for the
+  drafter prompt and one representative artifact per grading
+  criterion (<code>1 + len(rubric)</code> calls; <code>messages.create</code> is never
+  invoked), plus one BigQuery <code>dryRun</code> to project the warehouse
+  bytes for the prune step. Mutually exclusive with <code>--write</code>
+  and <code>--dry-run</code>; argparse rejects two of the three with
+  exit 2.</li>
+</ul>
+<p>Output goes to stdout as plain text with three sections —
+  Draft / Grade / Warehouse — followed by totals and a footer
+  listing the price-table version
+  (<code>signalforge.llm.pricing.PRICE_TABLE_VERSION</code>) and the
+  <code>3.5 tests/column</code> heuristic the prune-bytes projection uses
+  (DEC-012). The exact byte-shape is pinned by
+  <code>tests/cli/test_estimate_render.py</code> against
+  <code>tests/fixtures/estimate/output_happy.txt</code>. The estimate
+  reports a billing ceiling: actual scans usually come in
+  lower because cache hits, sampled rows, and shorter LLM
+  responses all trim the projected numbers.</p>
+<p>Exit codes: <code>0</code> on success AND on the partial-failure path
+  where the warehouse <code>dryRun</code> raises any <code>WarehouseError</code>
+  subclass (per DEC-005, mirrors <code>prune-engine.md</code> DEC-009's
+  conservative-bias degrade — the operator still gets the LLM
+  half of the estimate; the warehouse section renders
+  <code>bytes-per-row: &lt;unavailable: &lt;ErrorClass&gt;&gt;</code> and the totals
+  show <code>&lt;unknown&gt;</code> for the warehouse contribution; a single
+  stderr WARNING carries the one-line reason). <code>3</code> (API tier)
+  if the LLM <code>count_tokens</code> call fails on auth / connection /
+  quota — <code>count_tokens</code> is a real round-trip against the
+  Anthropic API, so <code>ANTHROPIC_API_KEY</code> is required (DEC-006).
+  Tier-2 errors that fire before the short-circuit
+  (<code>EstimateUnknownModelError</code> if <code>llm.model</code> in
+  <code>signalforge.yml</code> isn't in <code>signalforge.llm.pricing.PRICES</code>,
+  manifest / model-resolver failures) propagate via the usual
+  <code>cmd_generate</code> catch surface.</p>
+<p>Example invocation:</p>
+<p><div class="highlight"><pre><span></span><code>signalforge<span class="w"> </span>generate<span class="w"> </span>models/staging/stg_bikeshare_trips.sql<span class="w"> </span>--estimate
+</code></pre></div>
+- <code>--format {ansi,markdown,json}</code> — Select the diff renderer.
+  ANSI: coloured terminal output (default). Markdown:
+  GitHub-friendly report. JSON: stdout receives the JSON
+  sidecar's contents.
+- <code>--scope {sample,full}</code> — Override <code>prune.scope</code>
+  (default: from config). <code>sample</code>: tests run against a
+  100k-row deterministic sample. <code>full</code>: tests run against
+  the entire source table (no sampling). Per-run override;
+  the config-file value is the durable default. (DEC-011 of
+  issue #22.)
+- <code>--sample-strategy {oneshot,materialised}</code> — Override
+  <code>prune.sample_strategy</code> (default: from config). Only
+  meaningful when <code>scope=sample</code>. <code>materialised</code> (default):
+  materialise the sample once into a BigQuery temp table,
+  then run all candidate tests against it. <code>oneshot</code>:
+  re-sample per test (v0.1 behaviour, much costlier on wide
+  tables). Per-run override; the config-file value is the
+  durable default. (DEC-011 of issue #22; see
+  <code>docs/prune-ops.md</code> cost model section.)</p>
+<p>Observability flags:</p>
+<ul>
+<li><code>--quiet</code> — Suppress per-stage stderr progress lines and raise
+  the log level to <code>WARNING</code>. Mutually exclusive with <code>--verbose</code>.</li>
+<li><code>--verbose</code> — Raise the log level to <code>DEBUG</code> and surface
+  panic-path tracebacks for unexpected errors. Mutually exclusive
+  with <code>--quiet</code>.</li>
+<li><code>--no-color</code> — Strip ANSI colour codes from stdout. Sets
+  <code>NO_COLOR=1</code> in the current process environment so the AnsiRenderer's
+  existing precedence chain emits plain text.</li>
+</ul>
+<p>The flag → config precedence chain is uniform across knobs: <strong>CLI
+flag &gt; <code>signalforge.yml</code> block &gt; library default</strong>. Library defaults
+are documented per-stage in each layer's ops doc.</p>
+<h3 id="signalforge-init-demo-dest"><code>signalforge init-demo [&lt;dest&gt;]</code></h3>
+<p>Copy the bundled Austin bikeshare demo project (a minimal dbt
+project pointing at the public
+<code>bigquery-public-data.austin_bikeshare.bikeshare_trips</code> dataset)
+out of the installed wheel into <code>&lt;dest&gt;</code> so a first-run PyPI user
+can <code>cd</code> into a working project and exercise the full pipeline
+without authoring their own dbt setup. The bundled <code>profiles.yml</code>
+reads <code>GOOGLE_CLOUD_PROJECT</code> from the operator's environment, so
+no profile editing is required.</p>
+<p>Wraps the public library entry point
+<code>signalforge.demo.copy_demo(dest, *, force=False) -&gt; Path</code>; the
+CLI re-raises the lower-level <code>DemoError</code> subclasses as
+<code>CliInitDemo*Error</code> wrappers at the handler boundary so the
+four-tier exit-code taxonomy stays homogeneous (DEC-012 of
+<a href="../plans/super/47-init-demo.md"><code>plans/super/47-init-demo.md</code></a>).</p>
+<p>Positional argument:</p>
+<ul>
+<li><code>&lt;dest&gt;</code> — Destination directory. Optional; default
+  <code>./signalforge-demo/</code>. Relative paths resolve against the
+  current working directory; <code>~</code> expands;
+  <code>Path(dest).expanduser().resolve(strict=False)</code> follows
+  symlinks and raises <code>CliPathError</code> on a cycle. <strong>No
+  <code>--project-dir</code> containment gate applies</strong> —
+  <code>init-demo</code> is the one subcommand that <em>creates</em> a project
+  rather than operating <em>inside</em> one, so the
+  <code>canonicalise_user_path(...)</code> containment helper used by
+  every other CLI flag is deliberately bypassed (DEC-004).</li>
+</ul>
+<p>Flags:</p>
+<ul>
+<li><code>--force</code> — Atomically replace <code>&lt;dest&gt;</code> if it exists and is
+  non-empty (<code>shutil.rmtree</code> then <code>shutil.copytree</code>). Without
+  <code>--force</code>, a non-empty <code>&lt;dest&gt;</code> raises
+  <code>CliInitDemoDestExistsError</code> (tier 2); empty existing
+  directories proceed without <code>--force</code>. As a blast-radius
+  guard (DEC-001), <code>--force</code> refuses <code>/</code>, <code>$HOME</code>, and the
+  current working directory and raises
+  <code>CliInitDemoDestUnsafeError</code> (tier 2) on any of those.</li>
+</ul>
+<p>Exit codes (four-tier taxonomy; see § Four-tier exit-code
+taxonomy for the full table):</p>
+<ul>
+<li><code>0</code> — copy succeeded; next-steps message printed to stdout.</li>
+<li><code>1</code> — broken install (<code>CliInitDemoFixtureMissingError</code>:
+  the wheel didn't ship <code>signalforge/_demo/</code>), symlink-cycle
+  resolve failure (<code>CliPathError</code>), or generic filesystem
+  failure such as <code>ENOSPC</code> / <code>EACCES</code> / <code>EROFS</code>
+  (<code>CliInitDemoCopyError</code>).</li>
+<li><code>2</code> — operator-side dest mistakes:
+  <code>CliInitDemoDestExistsError</code> (non-empty dest without
+  <code>--force</code>) or <code>CliInitDemoDestUnsafeError</code> (<code>--force</code>
+  against <code>/</code>, <code>$HOME</code>, or cwd).</li>
+</ul>
+<p>Output: on success, a plain-text "next steps" message lands on
+stdout (DEC-014) — no ANSI colour codes, no Markdown, no env-var
+<em>values</em>, just the env-var <em>names</em> (<code>GOOGLE_CLOUD_PROJECT</code> and
+<code>ANTHROPIC_API_KEY</code>) and the three first-run commands an operator
+needs to run (<code>cd &lt;dest&gt;</code>, <code>signalforge lint</code>, then
+<code>signalforge generate models/staging/stg_bikeshare_trips.sql --dry-run</code>).
+The message survives <code>--no-color</code> because it carries no colour
+codes.</p>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code>signalforge<span class="w"> </span>init-demo<span class="w"> </span>/tmp/sf-austin
+<span class="nb">cd</span><span class="w"> </span>/tmp/sf-austin
+<span class="nb">export</span><span class="w"> </span><span class="nv">GOOGLE_CLOUD_PROJECT</span><span class="o">=</span>&lt;your-billing-project&gt;
+<span class="nb">export</span><span class="w"> </span><span class="nv">ANTHROPIC_API_KEY</span><span class="o">=</span>sk-ant-...
+signalforge<span class="w"> </span>lint
+signalforge<span class="w"> </span>generate<span class="w"> </span>models/staging/stg_bikeshare_trips.sql<span class="w"> </span>--dry-run
+</code></pre></div>
+<h3 id="signalforge-install-skill-dest"><code>signalforge install-skill [&lt;dest&gt;]</code></h3>
+<p>Copy the bundled SignalForge Claude Code skill into
+<code>&lt;dest&gt;/.claude/skills/signalforge/</code>. With the skill installed, a
+Claude Code session in <code>&lt;dest&gt;</code> recognises requests like "draft tests
+for <code>dim_customers</code>" or "prune my existing <code>schema.yml</code>," picks the
+right <code>signalforge</code> subcommand and flags, and explains the resulting
+kept / dropped / flagged diff back to the user. See
+<a href="../skills/">docs/skills.md</a> for the skill catalog entry and the body
+sections it covers (DEC-021 of
+<a href="../plans/super/141-claude-skill-install.md"><code>plans/super/141-claude-skill-install.md</code></a>).</p>
+<p>Wraps the public library entry point
+<code>signalforge.skill.install_skill(dest) -&gt; Path</code>; the CLI re-raises
+the lower-level <code>SkillError</code> subclasses as <code>CliInstallSkill*Error</code>
+wrappers at the handler boundary so the four-tier exit-code taxonomy
+stays homogeneous (DEC-008).</p>
+<p>Positional argument:</p>
+<ul>
+<li><code>&lt;dest&gt;</code> — Destination directory. Optional; default <code>.</code> (the
+  current working directory), so the common invocation from a dbt
+  project root is just <code>signalforge install-skill</code>. Relative paths
+  resolve against the current working directory; <code>~</code> expands.
+  Symlink-cycle defence applies (resolves via <code>.resolve(strict=True)</code>,
+  falling back to <code>.resolve(strict=False)</code> on
+  <code>FileNotFoundError</code> / <code>NotADirectoryError</code>) and raises
+  <code>CliInstallSkillPathError</code> on a cycle on every supported Python
+  version (gh-108958). <strong>No <code>--project-dir</code> containment gate applies</strong>
+  — <code>install-skill</code> is the second subcommand that <em>creates</em> a project
+  context rather than operating <em>inside</em> one (the first is
+  <code>init-demo</code>), so the <code>canonicalise_user_path(...)</code> containment
+  helper used by every other CLI flag is deliberately bypassed
+  (DEC-006).</li>
+</ul>
+<p>Flags: none. There is <strong>no <code>--force</code> flag</strong> (DEC-003): the library
+seam always overwrites every file SignalForge ships and preserves
+every other file in the destination tree, so the
+<code>--force</code>-against-symlink-dest hazard <code>init-demo --force</code> defends
+against does not apply here.</p>
+<p>Install path: <code>&lt;dest&gt;/.claude/skills/signalforge/SKILL.md</code>. The
+companion <code>assets/</code> subtree (also part of the bundled skill) lands
+alongside it.</p>
+<p>Exit codes (four-tier taxonomy; see § Four-tier exit-code taxonomy
+for the full table):</p>
+<ul>
+<li><code>0</code> — install succeeded; INFO line printed to stdout.</li>
+<li><code>1</code> — <code>CliInstallSkillPathError</code> (symlink cycle on <code>&lt;dest&gt;</code>) or
+  <code>CliInstallSkillPackageDataMissingError</code> (broken wheel install:
+  the bundled skill tree could not be located via
+  <code>importlib.resources</code> — practically unreachable on a clean
+  <code>pip install signalforge-dbt</code> run).</li>
+<li><code>2</code> — <code>CliInstallSkillDestUnsafeError</code>: <code>&lt;dest&gt;</code> exists as a
+  regular file (not a directory), OR the existing <code>SKILL.md</code> is a
+  symlink (writing would follow the link and clobber an arbitrary
+  destination).</li>
+<li><code>3</code> — n/a. <code>install-skill</code> makes no network, warehouse, or LLM
+  call.</li>
+</ul>
+<p>Stdout shapes:</p>
+<ul>
+<li>New install (no existing <code>SKILL.md</code> at the target):
+  <div class="highlight"><pre><span></span><code>Installed SignalForge skill to &lt;abs path&gt;
+</code></pre></div></li>
+<li>Upgrade-in-place (existing <code>SKILL.md</code> was overwritten — detected
+  via <code>Path.exists()</code> BEFORE the copy, DEC-017):
+  <div class="highlight"><pre><span></span><code>Installed SignalForge skill to &lt;abs path&gt; (replaced existing SKILL.md)
+</code></pre></div></li>
+</ul>
+<p>The <code>(replaced existing SKILL.md)</code> suffix surfaces the lib seam's
+  upgrade-in-place overwrite policy so operators know their
+  hand-edited <code>SKILL.md</code> was replaced. The operator can <code>git diff</code> if
+  they had the file under version control.</p>
+<p>Stderr shapes: standard <code>ERROR: &lt;message&gt;</code> + optional
+<code>↳ Remediation: &lt;text&gt;</code> per tier (see § Stderr message shape per
+tier); no multi-violation header / bullet form fires from this
+subcommand.</p>
+<p>Example:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>/repo/dbt/analytics
+signalforge<span class="w"> </span>install-skill
+<span class="c1"># stdout: Installed SignalForge skill to /repo/dbt/analytics/.claude/skills/signalforge/SKILL.md</span>
+<span class="nb">echo</span><span class="w"> </span><span class="nv">$?</span>
+<span class="c1"># 0</span>
+</code></pre></div>
+<h3 id="signalforge-lint"><code>signalforge lint</code></h3>
+<p>Validate the five existing <code>signalforge.yml</code> config blocks (<code>safety:</code>,
+<code>llm:</code>, <code>prune:</code>, <code>grade:</code>, <code>diff:</code>) against their per-stage loaders,
+then load the dbt manifest. No warehouse, no LLM, no network —
+sub-second target. The natural pre-flight check operators run on every
+save.</p>
+<p>Flags:</p>
+<ul>
+<li><code>--config PATH</code> — Override the default
+  <code>&lt;project_dir&gt;/signalforge.yml</code>. Path is canonicalised against
+  the resolved project_dir.</li>
+<li><code>--manifest PATH</code> — Override the default
+  <code>&lt;project_dir&gt;/target/manifest.json</code>. Path is canonicalised against
+  the resolved project_dir and must stay inside it (no symlink
+  escapes).</li>
+<li><code>--model NAME</code> — Optional. Also resolve a model in the loaded
+  manifest and report whether it exists. Accepts three forms:</li>
+<li><strong>unique_id</strong> — <code>model.&lt;pkg&gt;.&lt;name&gt;</code></li>
+<li><strong>file path</strong> — <code>models/path/to/&lt;name&gt;.sql</code></li>
+<li><strong>bare name</strong> — <code>&lt;name&gt;</code> (matches against <code>Model.name</code> across
+    enabled nodes via <code>Manifest.iter_models</code>; sidesteps the
+    <code>Manifest.get_model</code> gotcha that routes bare names through the
+    file-path branch). A bare name matching two or more enabled
+    models fails loud with a disambiguation list.</li>
+<li><code>--project-dir PATH</code> — Same semantics as <code>generate</code>'s flag
+  (DEC-027 absolute assertion; walk-up applies only when the flag
+  is omitted).</li>
+</ul>
+<p>Multi-error reporting (DEC-008): when more than one block fails,
+<code>lint</code> collects every failure and emits a header + bullet list rather
+than short-circuiting on the first. The header generalises to
+<code>ERROR: lint found N validation errors:</code> so manifest / model entries
+sit alongside the five config blocks under the same shape. Stdout is
+silent on success (git-style); stderr carries the failures.</p>
+<p>The manifest load is appended <strong>after</strong> the config loaders so the
+operator sees <code>signalforge.yml</code> typos AND a missing or
+schema-mismatched <code>target/manifest.json</code> in one run rather than fixing
+them one cascade at a time. Common manifest failures <code>lint</code> surfaces:</p>
+<table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Typed error</th>
+<th>Exit tier</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>target/manifest.json</code> is missing</td>
+<td><code>ManifestNotFoundError</code></td>
+<td>1 (load)</td>
+<td>Run <code>dbt parse</code> (or <code>dbt compile</code>) inside the project.</td>
+</tr>
+<tr>
+<td>Manifest schema is outside v9–v12 (e.g. dbt 1.13 → v13, Fusion → v20)</td>
+<td><code>UnsupportedManifestVersionError</code></td>
+<td>1 (load)</td>
+<td>Pin the project to a supported dbt version, or wait for the upstream tracking issue.</td>
+</tr>
+<tr>
+<td><code>--model &lt;name&gt;</code> does not resolve</td>
+<td><code>ModelNotFoundError</code> / <code>ModelDisabledError</code></td>
+<td>2 (input)</td>
+<td>Check the spelling, or pass the unique_id (<code>model.&lt;pkg&gt;.&lt;name&gt;</code>) / file-path form.</td>
+</tr>
+</tbody>
+</table>
+<p><code>--model</code> resolution skips silently when the manifest load itself
+fails — the resolver depends on a loaded manifest and emitting a
+spurious second bullet would mislead the operator. The manifest entry
+alone surfaces.</p>
+<p>The Quick Start in <a href="../README.md#5-pre-flight-check-signalforge-lint"><code>README.md</code></a>
+runs <code>signalforge lint</code> immediately after the fixture is prepared and
+before the first <code>signalforge generate</code> call — sub-second, free, and
+catches <code>extra="forbid"</code> typos (e.g. <code>safety: { mdoel: ... }</code>) plus
+the manifest-version / model-name mistakes that would otherwise
+surface only after a billable LLM round-trip.</p>
+<h3 id="signalforge-prune-existing-model-schema-path"><code>signalforge prune-existing &lt;model&gt; --schema &lt;path&gt;</code></h3>
+<p>Prune your existing dbt tests against real warehouse data. Runs
+<strong>ingest → prune → diff</strong> — no draft, no grade, <strong>no LLM call</strong> — and
+reports which of your existing tests add signal (kept), which could not
+be evaluated (kept-uncertain), and which always pass or fail on
+known-clean data (dropped). Both your externally-authored <code>schema.yml</code>
+(<code>not_null</code> / <code>unique</code> / <code>accepted_values</code> / <code>relationships</code>) <strong>and</strong>
+your project's singular <code>tests/*.sql</code> business-rule tests are ingested
+and pruned in one run (US-014): each <code>.sql</code> referencing this model
+becomes a model-level <code>custom_sql</code> test, deduped against the
+schema.yml tests and pruned alongside them. The product story: <em>point
+SignalForge at your existing dbt tests and let the warehouse tell you
+which ones add no signal</em> — extending Architectural Commitment #1
+("signal over volume") to any generator's tests (hand-written,
+dbt-codegen, dbt Copilot, DinoAI, datapilot). The library seams this
+wraps are <code>signalforge.ingest.read_schema(...)</code> (issue #104) and
+<code>signalforge.ingest.read_test_files(...)</code> (US-014); the subcommand is
+issue #105 (DEC-002 … DEC-010 of
+<a href="../plans/super/105-prune-existing-cli.md"><code>plans/super/105-prune-existing-cli.md</code></a>).
+For which dbt test shapes are supported vs. skipped (and the <code>tests:</code> /
+<code>data_tests:</code> and <code>ref()</code> / <code>source()</code> tolerances), see the
+<a href="../ingest-ops/#supported-vs-skipped-tests">ingest layer guide</a>.</p>
+<p>Because there is no LLM call, this is strictly cheaper than
+<code>generate</code>: the only warehouse cost is exactly what the prune step
+already incurs.</p>
+<p>Positional argument:</p>
+<ul>
+<li><code>&lt;model&gt;</code> — Model whose existing tests to prune. Accepts a
+  <strong>bare model name</strong> (e.g. <code>customers</code>), a dbt <strong>unique_id</strong>
+  (e.g. <code>model.proj.customers</code>), or a <strong>file path</strong> (e.g.
+  <code>models/marts/customers.sql</code>). Resolved via the shared
+  <code>_resolve_model_by_key</code> helper (DEC-008): bare names match against
+  <code>Model.name</code> across enabled nodes; a bare name matching two or more
+  enabled models fails loud with a disambiguation list.</li>
+</ul>
+<p>Flag reference:</p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Required</th>
+<th>Choices / default</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--schema PATH</code></td>
+<td><strong>yes</strong></td>
+<td>—</td>
+<td>The externally-authored dbt <code>schema.yml</code> whose tests to prune. Canonicalised via <code>canonicalise_user_path</code> (symlink/containment → <code>CliPathError</code>); the <code>Path</code> is passed to <code>read_schema</code> so the full ingest typed-error surface fires (DEC-005), and the same file's UTF-8 text is fed to the diff renderer as <code>existing_schema</code> (DEC-004).</td>
+</tr>
+<tr>
+<td><code>--project-dir PATH</code></td>
+<td>no</td>
+<td>walk-up default</td>
+<td>Absolute assertion: <code>&lt;PATH&gt;</code> must contain <code>dbt_project.yml</code>; the CLI does NOT walk up from the override (DEC-027). Default: walk up from the current working directory.</td>
+</tr>
+<tr>
+<td><code>--manifest PATH</code></td>
+<td>no</td>
+<td><code>&lt;project_dir&gt;/target/manifest.json</code></td>
+<td>Override the manifest location. Canonicalised against the resolved project_dir.</td>
+</tr>
+<tr>
+<td><code>--profiles-dir PATH</code></td>
+<td>no</td>
+<td>dbt default search</td>
+<td>Override the <code>profiles.yml</code> search location (mirrors dbt-core's flag). Sets <code>DBT_PROFILES_DIR</code> in the current process environment.</td>
+</tr>
+<tr>
+<td><code>--tests-dir PATH</code></td>
+<td>no</td>
+<td><code>&lt;project_dir&gt;/tests</code></td>
+<td>Override the singular-test directory enumerated for model-level <code>tests/*.sql</code> files (US-014). Each <code>.sql</code> referencing this model is pruned alongside the schema.yml tests; unrelated files are ignored. The <strong>default</strong> directory is optional — when absent only the schema.yml tests are pruned; an <strong>explicit</strong> <code>--tests-dir</code> pointing at a missing directory fails loud (<code>IngestSchemaNotFoundError</code>).</td>
+</tr>
+<tr>
+<td><code>--scope {sample,full}</code></td>
+<td>no</td>
+<td>from config</td>
+<td>Override <code>prune.scope</code>. Applied via <code>PruneConfig.model_validate</code> so validators re-run (DEC-002).</td>
+</tr>
+<tr>
+<td><code>--sample-strategy {oneshot,materialised}</code></td>
+<td>no</td>
+<td>from config</td>
+<td>Override <code>prune.sample_strategy</code>. Applied via <code>PruneConfig.model_validate</code> (DEC-002).</td>
+</tr>
+<tr>
+<td><code>--format {ansi,markdown,json}</code></td>
+<td>no</td>
+<td><code>ansi</code></td>
+<td>Select the diff renderer. ANSI: coloured terminal output. Markdown: GitHub-friendly report. JSON: stdout receives the JSON sidecar's contents.</td>
+</tr>
+<tr>
+<td><code>--dry-run</code></td>
+<td>no</td>
+<td>off</td>
+<td>Run ingest → prune → diff and print the diff to stdout, suppressing the default-on <code>.signalforge/diff.json</code> sidecar. The fail-closed <code>.signalforge/prune.jsonl</code> audit is <strong>still written</strong> (every prune run leaves a durable receipt — the cross-stage fail-closed invariant; mirrors <code>generate</code>). There is <strong>no <code>--write</code></strong> (read-only w.r.t. your <code>schema.yml</code>).</td>
+</tr>
+<tr>
+<td><code>--quiet</code></td>
+<td>no</td>
+<td>off</td>
+<td>Suppress per-stage stderr progress lines and the skipped-test report, and raise the log level to <code>WARNING</code>. Mutually exclusive with <code>--verbose</code>.</td>
+</tr>
+<tr>
+<td><code>--verbose</code></td>
+<td>no</td>
+<td>off</td>
+<td>Raise the log level to <code>DEBUG</code>, list each skipped test in detail, and surface panic-path tracebacks. Mutually exclusive with <code>--quiet</code>.</td>
+</tr>
+<tr>
+<td><code>--no-color</code></td>
+<td>no</td>
+<td>off</td>
+<td>Strip ANSI colour codes from stdout. Sets <code>NO_COLOR=1</code> in the current process environment.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Dropped vs. <code>generate</code></strong> (DEC-002 / DEC-003): <code>--mode</code>,
+<code>--min-score</code>, <code>--estimate</code>, <code>--select</code>, <code>--write</code>. <code>--mode</code> shapes
+the LLM payload, which doesn't exist on this path, so it would be a
+dead flag; <code>--scope</code> / <code>--sample-strategy</code> are the genuinely-relevant
+warehouse knobs that take its place.</p>
+<h4 id="read-only-by-design-dec-003">Read-only by design (DEC-003)</h4>
+<p><code>prune-existing</code> deliberately ships <strong>no <code>--write</code> flag</strong>. The
+<code>--schema</code> file is hand-authored, so silently overwriting it would be
+surprising and destructive. The command prints the rendered diff to
+stdout and writes the <code>.signalforge/diff.json</code> sidecar by default;
+<code>--dry-run</code> suppresses that sidecar for a pure-stdout diff. (The
+fail-closed <code>.signalforge/prune.jsonl</code> audit is still written even under
+<code>--dry-run</code> — every prune run leaves a durable receipt by design, the
+same as <code>generate</code>; <code>--dry-run</code> governs only the end-of-run diff
+sidecar.) Re-pruning into the file is a possible v0.3 follow-up with a
+confirmation/backup story.</p>
+<h4 id="unified-diff-against-your-file-dec-004">Unified diff against your file (DEC-004)</h4>
+<p>The deliverable is a unified diff against your <em>actual</em> <code>schema.yml</code>:
+the <code>--schema</code> content is fed to <code>render_diff</code> as <code>existing_schema</code>,
+so the diff shows exactly what to remove from that file. There is no
+grading report (<code>grading_report=None</code>), so the diff renders <strong>kept /
+kept-uncertain / dropped only — never <code>flagged</code></strong> (the <code>flagged</code> tier
+requires a grading report, locked by #104 DEC-011).</p>
+<blockquote>
+<p><strong>Cosmetic-reformatting caveat.</strong> The proposed YAML is re-emitted
+from the kept <code>CandidateSchema</code> via the diff emitter, so it may
+reorder keys or normalise whitespace relative to your hand-authored
+file, adding cosmetic diff lines. This is accepted and documented;
+the <strong>kept / kept-uncertain / dropped table is the load-bearing
+signal</strong>, not the byte-exact diff body.</p>
+</blockquote>
+<h4 id="singular-testssql-business-rule-tests-us-014">Singular <code>tests/*.sql</code> business-rule tests (US-014)</h4>
+<p>In addition to the <code>--schema</code> file, <code>prune-existing</code> ingests your
+project's <strong>singular tests</strong> — the hand-authored <code>.sql</code> files under
+<code>&lt;project_dir&gt;/tests</code> (override with <code>--tests-dir</code>). Each <code>.sql</code> whose
+resolved <code>ref()</code> / <code>source()</code> / <code>this</code> references the model under
+prune becomes a model-level <code>custom_sql</code> candidate test and is pruned
+<strong>alongside</strong> the schema.yml tests in the same warehouse run, so the
+warehouse tells you which of <em>all</em> your existing tests — schema.yml
+AND singular — add no signal. Specifics:</p>
+<ul>
+<li><strong>Dedupe across both sources.</strong> A singular <code>.sql</code> whose body matches
+  a <code>custom_sql</code> test already present in the schema.yml collapses to
+  one (deduped by SQL hash via <code>read_test_files(..., existing=...)</code>).</li>
+<li><strong>Unrelated <code>.sql</code> files are ignored</strong>, not recorded — a singular
+  test referencing a <em>different</em> model is simply not included.</li>
+<li><strong>Unsupported Jinja folds into the skipped-test report.</strong> A <code>.sql</code>
+  carrying control-flow Jinja, <code>var()</code> / <code>env_var()</code>, or macro calls
+  the bounded resolver cannot evaluate is recorded as
+  <code>malformed-supported-test</code> and appears in the same grouped stderr
+  summary as the schema.yml skips.</li>
+<li><strong>Multi-table singular tests run full-scan</strong> (within the bytes cap)
+  rather than against a sampled CTE — a business rule spanning a JOIN
+  must see the whole join.</li>
+<li><strong>Read-only still holds:</strong> kept <code>custom_sql</code> tests surface as
+  standalone <code>.sql</code> proposals in the diff; nothing is written back to
+  your test files.</li>
+</ul>
+<p>Exit codes (four-tier taxonomy; see § Four-tier exit-code taxonomy):</p>
+<ul>
+<li><code>0</code> — pipeline completed; diff printed to stdout.</li>
+<li><code>1</code> — load/parse failure: ingest schema errors
+  (<code>IngestSchemaNotFoundError</code> / <code>IngestSchemaParseError</code> /
+  <code>IngestSchemaTooLargeError</code>), <code>CliPathError</code>, <code>ManifestNotFoundError</code>,
+  <code>ProfileNotFoundError</code>, the panic-path catch.</li>
+<li><code>2</code> — input-validation failure: <code>IngestModelNotFoundError</code> /
+  <code>IngestAnchorContractError</code> (a test references a column absent from
+  the model), <code>ModelNotFoundError</code>.</li>
+<li><code>3</code> — external-dependency / fail-closed audit-write failure:
+  <code>WarehouseAuthError</code>, <code>BytesBilledExceededError</code>, the prune/diff
+  audit-write durability errors.</li>
+</ul>
+<p>No bespoke <code>CliPruneExisting*</code> wrapper classes exist (DEC-006): the
+five <code>IngestError</code> concretes are already first-class in
+<code>_EXCEPTION_TO_EXIT_CODE</code> (#104 DEC-004 landed them precisely so #105
+needs no rework), so they route to the correct tier via the
+<code>map_exception_to_exit_code</code> MRO walk.</p>
+<p>Stderr shapes:</p>
+<ul>
+<li><strong>Skipped-test summary</strong> (DEC-007) — after <code>read_schema</code>, when
+  <code>IngestResult.skipped</code> is non-empty and not <code>--quiet</code>, one line
+  grouped by <code>SkipReason</code>:</li>
+</ul>
+<div class="highlight"><pre><span></span><code>Skipped 3 unsupported tests: custom-or-generic-test×2, unsupported-test-type×1
+</code></pre></div>
+<p>Under <code>--verbose</code>, one indented line per <code>SkippedTest</code> follows
+  (<code>test_name</code>, <code>column</code>, <code>reason</code>, <code>detail</code>). Emitted via
+  <code>print_stderr</code> (the ANSI-safe sink), not <code>_LOGGER</code> — it is
+  operator-facing info, not a log event. <code>--quiet</code> suppresses both.</p>
+<ul>
+<li>
+<p><strong>Errors</strong> — the standard <code>ERROR: &lt;message&gt;</code> + optional
+  <code>↳ Remediation: &lt;text&gt;</code> shape (see § Stderr message shape per
+  tier).</p>
+</li>
+<li>
+<p><strong>Progress</strong> — three stages (DEC-010): <code>[1/3] ingest</code>,
+  <code>[2/3] prune</code>, <code>[3/3] diff</code>, each with a paired <code>done in &lt;X&gt;</code> line.
+  TTY-gated via <code>should_emit_progress</code>; <code>--quiet</code> suppresses,
+  <code>--verbose</code> forces on.</p>
+</li>
+</ul>
+<p>Worked example:</p>
+<div class="highlight"><pre><span></span><code>$ cd /repo/dbt/analytics
+$ signalforge prune-existing customers --schema models/marts/schema.yml
+# stderr (TTY): three entry lines + three done lines
+[1/3] ingest: parsing schema.yml...
+[1/3] ingest: done in 0.0s
+Skipped 1 unsupported test: dbt-expectations×1
+[2/3] prune: running 7 existing tests against warehouse...
+[2/3] prune: done in 18.4s
+[3/3] diff: rendering...
+[3/3] diff: done in 0.1s
+# stdout: rendered ANSI diff (kept / kept-uncertain / dropped; never flagged)
+Kept (4):
+  column.customer_id.test.not_null     — caught a real failing row
+  ...
+Dropped (3):
+  column.region.test.not_null          — always-passes
+  ...
+$ echo $?
+0
+</code></pre></div>
+<p><code>--dry-run</code> would skip the <code>.signalforge/diff.json</code> sidecar while
+still printing the diff to stdout. <code>--format json</code> would emit the
+JSON sidecar's contents to stdout.</p>
+<h3 id="signalforge-version"><code>signalforge version</code></h3>
+<p>Print the same string as <code>signalforge --version</code> and exit 0. Both
+surfaces share one source of truth (<code>signalforge.__version__</code> in
+<code>src/signalforge/__init__.py</code>); the flag uses argparse's
+<code>action="version"</code>, the subcommand prints directly.</p>
+<h2 id="project-root-discovery">Project-root discovery</h2>
+<p>The CLI resolves the dbt project root before any pipeline work
+(DEC-001 + DEC-027). The convention mirrors how <code>git</code> discovers
+<code>.git</code>:</p>
+<ul>
+<li><strong>No flag → walk-up.</strong> Ascend from <code>Path.cwd()</code> until a directory
+  containing <code>dbt_project.yml</code> is found. If we reach the filesystem
+  root without finding one, the CLI exits 1 with remediation.</li>
+<li><strong><code>--project-dir &lt;PATH&gt;</code> → absolute assertion.</strong> The override is
+  NOT a walk-up starting point. The supplied path must directly
+  contain <code>dbt_project.yml</code>; if not, the CLI exits 1.</li>
+</ul>
+<p>Worked example. Suppose your dbt project lives at
+<code>/repo/dbt/my_project/</code> and your shell is in
+<code>/repo/dbt/my_project/models/marts/</code>:</p>
+<div class="highlight"><pre><span></span><code>$ pwd
+/repo/dbt/my_project/models/marts
+
+$ signalforge generate customers.sql
+# walk-up resolves to /repo/dbt/my_project (the nearest dir
+# containing dbt_project.yml). Equivalent to:
+$ signalforge generate customers.sql --project-dir /repo/dbt/my_project
+</code></pre></div>
+<p>When the override points at a directory that does NOT contain
+<code>dbt_project.yml</code>:</p>
+<div class="highlight"><pre><span></span><code>$ signalforge generate models/marts/customers.sql --project-dir /tmp
+ERROR: --project-dir &#39;/tmp&#39; does not contain dbt_project.yml
+  ↳ Remediation: Pass a path that points directly at a dbt project
+    root (the directory containing dbt_project.yml). The flag is an
+    absolute assertion; the CLI does not walk up from it.
+$ echo $?
+1
+</code></pre></div>
+<p>The discovered (or asserted) directory is logged at DEBUG level —
+run with <code>--verbose</code> to surface it.</p>
+<h2 id="four-tier-exit-code-taxonomy">Four-tier exit-code taxonomy</h2>
+<p>Every <code>cmd_&lt;name&gt;</code> handler in the CLI returns an integer drawn from
+exactly four values. Ported from clauditor's
+<code>llm-cli-exit-code-taxonomy.md</code> rule and pinned by the AST scan in
+<code>tests/test_audit_completeness.py</code> (DEC-019 / DEC-024) and the
+parametrized tests in <code>tests/cli/test_exit_codes.py</code>. See
+<a href="../.claude/rules/cli-layer.md"><code>.claude/rules/cli-layer.md</code></a> for the
+canonical statement of the rule.</p>
+<table>
+<thead>
+<tr>
+<th>Exit</th>
+<th>Tier</th>
+<th>Meaning</th>
+<th>Example sources</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0</code></td>
+<td>success</td>
+<td>Artifact written / printed; pipeline completed cleanly.</td>
+<td>Happy path.</td>
+</tr>
+<tr>
+<td><code>1</code></td>
+<td>load</td>
+<td>Configuration / path / manifest / system not in a coherent state to start work.</td>
+<td><code>ManifestNotFoundError</code>, <code>ProfileNotFoundError</code>, <code>ConfigNotFoundError</code>, <code>DraftConfigInvalidError</code>, <code>DiffError</code>, <code>CliPathError</code>, the panic-path catch for unexpected exceptions.</td>
+</tr>
+<tr>
+<td><code>2</code></td>
+<td>input</td>
+<td>Caller-supplied data is wrong, OR a post-call invariant failed.</td>
+<td><code>ModelNotFoundError</code>, <code>LLMOutputAnchorContractError</code>, <code>TableNotFoundError</code> (DEC-012 — the model's table reference is wrong), <code>GradeBelowThresholdError</code> (DEC-011), <code>DiffCandidateModelMismatchError</code>, <code>CliInputError</code>.</td>
+</tr>
+<tr>
+<td><code>3</code></td>
+<td>API</td>
+<td>External dependency unavailable.</td>
+<td><code>LLMRateLimitError</code>, <code>LLMAuthError</code>, <code>LLMServerError</code>, <code>WarehouseAuthError</code>, <code>BytesBilledExceededError</code>, <code>GradeLLMError</code>, <code>GradeAuditWriteError</code>, every fail-closed audit-write durability error.</td>
+</tr>
+</tbody>
+</table>
+<p>Do NOT invent a fifth category. Do NOT collapse categories 2 and 3
+into one "bad exit"; pipelines need the split to decide retry vs
+don't-retry. The mapping table lives at
+<code>signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE</code> and the AST scan
+asserts every typed exception under <code>src/signalforge/*/errors.py</code>
+appears there.</p>
+<h3 id="stderr-message-shape-per-tier">Stderr message shape per tier</h3>
+<p>Per DEC-008 — CI parsers key on the shape:</p>
+<ul>
+<li>
+<p><strong>Tier 1 and 3</strong> — single line: <code>ERROR: &lt;message&gt;</code>, optionally
+  followed by <code>↳ Remediation: &lt;text&gt;</code> when the typed error
+  carries one. The remediation footer is rendered by the typed
+  error's own <code>__str__</code> (the layer-base pattern from
+  <code>signalforge.safety.errors</code> and its siblings); the CLI passes
+  it through unchanged.</p>
+</li>
+<li>
+<p><strong>Tier 2</strong> — header + bullets for multi-violation errors;
+  single line for everything else. The drafter's
+  <code>LLMOutputAnchorContractError</code> and the <code>lint</code> subcommand's
+  multi-block failures both use this shape:</p>
+</li>
+</ul>
+<div class="highlight"><pre><span></span><code>ERROR: candidate response failed anchor contract: 3 violations
+  - column &#39;phantom&#39; not in model
+  - test &#39;not_null&#39; on column &#39;foo&#39; has duplicate parameter-less tests
+  - test &#39;relationships&#39; references missing model &#39;orders&#39;
+  ↳ Remediation: Inspect the LLM response in the response audit JSONL ...
+</code></pre></div>
+<p>Multi-violation formatting lives in
+<code>signalforge.cli._helpers.format_error_to_stderr</code> — the CLI is the
+sink; the layer error classes do NOT override <code>__str__</code> for the
+header+bullet shape (DEC-017, "escape at the sink").</p>
+<h2 id="stderr-shapes-warning">Stderr shapes (WARNING)</h2>
+<p>Three operator-facing WARNINGs surface to stderr through the CLI's
+log handler (<code>setup_logging</code>, default level <code>INFO</code>). They are
+distinct from the four-tier exit-code message shapes above —
+WARNINGs are signal that the run continued (or that a cleanup
+side-effect failed), not signal that the run failed. CI parsers
+that key on <code>ERROR:</code> lines should ignore these.</p>
+<h3 id="cleanup-failure-warning-issue-22-dec-014">Cleanup-failure WARNING (issue #22 DEC-014)</h3>
+<p>Source: <code>BigQueryAdapter.__exit__</code> after a failed
+<code>CALL BQ.ABORT_SESSION();</code> cleanup attempt at the end of a
+materialised-strategy prune run. The materialisation work succeeded;
+only the explicit teardown failed (network blip, session already
+revoked, quota issue). BigQuery's server-side session timeout will
+reap the orphan (~24h max) but the operator can clean up
+immediately by running the printed manual command.</p>
+<p>Multi-line shape (verbatim from issue #22 DEC-014 — the manual
+command's flag form is load-bearing; do not paraphrase):</p>
+<div class="highlight"><pre><span></span><code>BigQuery session cleanup failed; session will auto-expire in &lt;N&gt;s (BigQuery TTL).
+  Session ID: &lt;raw session_id&gt;
+  Reason: &lt;exception class name&gt;
+  To clean up immediately:
+    bq query --connection_property=session_id=&lt;raw&gt; --use_legacy_sql=false &quot;CALL BQ.ABORT_SESSION();&quot;
+</code></pre></div>
+<p><code>&lt;N&gt;</code> is <code>max(1, int(ttl_seconds - elapsed_in_session))</code> — floor
+at 1 avoids "auto-expire in 0s" confusion. The raw <code>session_id</code>
+appears only in this WARNING (deliberate exception to the
+otherwise-strict redaction rule per issue #22 DEC-003): it's the
+only piece of info the operator needs to construct the manual
+command, the audience is the same principal who owns the session
+(BigQuery rejects <code>BQ.ABORT_SESSION()</code> from any other identity),
+and the surface is bounded (cleanup-failure path only, never on the
+happy path, never in audit JSONL, never in <code>__repr__</code>).</p>
+<p><strong><code>--quiet</code> does NOT suppress this WARNING.</strong> <code>--quiet</code> raises the
+log floor to <code>WARNING</code>, which keeps WARNINGs flowing. The
+cleanup-failure WARNING is operator-actionable (manual command +
+identifier inside) — silently dropping it would defeat the point.</p>
+<p>See <a href="../warehouse-adapter-ops/#session-cleanup--manual-recovery"><code>docs/warehouse-adapter-ops.md</code> § Session cleanup &amp; manual
+recovery</a>
+for the three-layer cleanup model and the
+<code>INFORMATION_SCHEMA.JOBS_BY_PROJECT</code> query template that surfaces
+orphan sessions for periodic audits.</p>
+<h3 id="materialisation-failure-degraded-run-warning-issue-22-dec-009">Materialisation-failure / degraded-run WARNING (issue #22 DEC-009)</h3>
+<p>Source: <code>prune_tests</code> orchestrator at the head of the
+conservative-bias routing path, BEFORE the per-decision JSONL
+audit writes. Fires when <code>adapter.materialise_sample(...)</code> raises
+any <code>WarehouseError</code> subclass (<code>MaterialisationFailedError</code>,
+<code>MaterialisationNotSupportedError</code>, <code>UnknownTableSizeError</code>,
+<code>SamplingRequiresPartitionFilterError</code>, etc.) at orchestrator entry.
+The orchestrator catches the exception, routes every candidate
+test to <code>kept-without-evidence</code>, and emits one stderr WARNING so
+the operator gets a one-line out-of-band signal that the run was
+degraded (the only in-band signal is N identical
+<code>why="sample materialisation failed: ..."</code> fields buried in the
+<code>prune.jsonl</code> audit).</p>
+<p>Single-line lazy-format JSON (passes the grep gate at
+<code>tests/llm/test_logger_grep_gate.py</code>):</p>
+<div class="highlight"><pre><span></span><code>materialisation failed; routing all tests to kept-without-evidence: {&quot;model_unique_id&quot;: &quot;model.proj.customers&quot;, &quot;candidate_count&quot;: 30, &quot;error_class&quot;: &quot;MaterialisationFailedError&quot;, &quot;error_message&quot;: &quot;BigQuery API: 503 Service Unavailable&quot;}
+</code></pre></div>
+<p>Distinct from the per-decision <code>why</code> field (the in-band signal in
+the prune JSONL audit) and from the cleanup-failure WARNING above
+(different boundary — that's <code>__exit__</code> cleanup; this is
+orchestrator entry). The exit code is still <code>0</code> if everything else
+succeeds — the run produces a valid <code>PruneResult</code> with every
+candidate marked <code>kept-without-evidence</code>. Operators that want a
+hard-fail on degraded runs use <code>prune.sample_strategy: oneshot</code>
+to bypass materialisation entirely.</p>
+<p>Mirrors the existing budget-exceeded WARNING pattern (next
+section).</p>
+<h3 id="budget-exceeded-warning-v01-prune-enginemd-dec-011">Budget-exceeded WARNING (v0.1, prune-engine.md DEC-011)</h3>
+<p>Source: <code>prune_tests</code> orchestrator after <code>total_budget_seconds</code>
+has elapsed. Existing v0.1 surface; documented here for parity
+with the two new WARNINGs above so all three sit in one place for
+operator reference.</p>
+<p>Single-line lazy-format JSON:</p>
+<div class="highlight"><pre><span></span><code>budget exceeded: {&quot;unstarted_count&quot;: 14, &quot;model&quot;: &quot;model.proj.customers&quot;}
+</code></pre></div>
+<p>The orchestrator marks every remaining un-started test
+<code>kept-without-evidence</code> with
+<code>why="total prune budget exceeded before evaluation"</code> and emits one
+final WARNING with the count of un-started tests. No partial
+evaluation results — a test that was running when the budget
+tripped is <code>kept-without-evidence</code>, not <code>kept</code> (failing-rows count
+is unknown). See
+<a href="../prune-ops/#drop-reason-taxonomy"><code>docs/prune-ops.md</code> § Drop-reason taxonomy</a>.</p>
+<h3 id="proposed-sql-overwrite-skip-warning-issue-116-dec-010dec-014">Proposed <code>.sql</code> overwrite-skip WARNING (issue #116 DEC-010/DEC-014)</h3>
+<p>Source: <code>generate --write</code> when materialising a proposed singular
+<code>.sql</code> business-rule test whose target file already exists and the
+overwrite policy declines to clobber it. Two distinct shapes:</p>
+<div class="highlight"><pre><span></span><code>WARNING: &lt;tests/...sql&gt; already exists; pass --force to overwrite SignalForge-generated tests. Skipping.
+WARNING: refusing to overwrite hand-authored &lt;tests/...sql&gt; (no &#39;-- signalforge:generated&#39; marker); skipping.
+</code></pre></div>
+<p>The first fires when the existing file carries SignalForge's
+<code>-- signalforge:generated</code> marker but <code>--force</code> was not passed; the
+second fires when the existing file does NOT carry the marker
+(hand-authored) — that file is <strong>never</strong> overwritten, even with
+<code>--force</code>. The run continues and exits <code>0</code> for the skip; only the
+named file is left untouched. New files (no existing target) write
+silently.</p>
+<h2 id="threshold-fail-behaviour">Threshold-fail behaviour</h2>
+<p>By default, a below-threshold rubric is reported (the diff renderer
+shows the artifacts as <code>flagged</code>) but does NOT fail the run — the
+operator's diff surfaces the verdict and the operator decides. This
+matches the grade layer's "report-only by default" posture; see
+<a href="../grade-ops/#threshold-fail-behaviour"><code>docs/grade-ops.md</code> § Threshold-fail
+behaviour</a> for the full
+ordering invariant on the grade-layer side.</p>
+<p>Operators that want hard-fail-on-threshold behaviour opt in by
+setting the grade-layer config knob:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># signalforge.yml</span>
+<span class="nt">grade</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">fail_on_below_threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+<p>When the knob is true and <code>GradingReport.passed</code> is <code>False</code>,
+<code>grade_artifacts(...)</code> raises <code>GradeBelowThresholdError</code> AFTER the
+sidecar JSON is durably persisted. The CLI catches the typed error
+and exits 2 (input/invariant tier). The complete <code>grade.json</code> and
+per-pair <code>grade.jsonl</code> audit are on disk so the operator can
+diagnose <em>why</em> the run fell below threshold; raising before the
+sidecar write would defeat that durable hand-off (graduated in #9
+US-002 / DEC-021 from the grade layer's v0.2 reservation).</p>
+<p><code>--min-score N</code> is reporting-only and never affects the exit code by
+itself. The two surfaces are deliberately layered: the flag overrides
+the aggregate-verdict threshold (<code>grade.min_mean_score</code>) consumed by
+<code>GradingReport.passed</code>; the config knob (<code>grade.fail_on_below_threshold</code>)
+turns that aggregate signal into an exit-code consequence. The diff
+renderer's <code>flagged</code> tier is driven by per-criterion
+<code>GradingResult.passed</code> (set by the LLM judge) — separate from the
+aggregate threshold. Operators can have any combination of the three
+signals (per-criterion pass/fail in the diff, aggregate pass/fail in
+the report, exit-code consequence) without the others.</p>
+<h2 id="environment-variables">Environment variables</h2>
+<p>The CLI honours three environment variables:</p>
+<ul>
+<li><strong><code>NO_COLOR</code></strong> — when set to a non-empty string, the AnsiRenderer's
+  precedence chain (DEC-021 of <code>diff-renderer.md</code>) emits plain text.
+  <code>--no-color</code> is the CLI-side ergonomic equivalent: it sets
+  <code>NO_COLOR=1</code> for the duration of the call (DEC-023). The
+  unconditional ANSI strip on user-content fields (DEC-007 of
+  <code>diff-renderer.md</code>) runs regardless — that's the security boundary,
+  not a UX knob.</li>
+<li><strong><code>FORCE_COLOR</code></strong> — overrides <code>NO_COLOR</code> per the diff layer's
+  precedence chain. <code>--no-color</code> clears <code>FORCE_COLOR</code>
+  belt-and-braces so an environmental override doesn't defeat the
+  operator's explicit opt-out.</li>
+<li><strong><code>DBT_PROFILES_DIR</code></strong> — read by the warehouse profile loader. The
+  <code>--profiles-dir &lt;PATH&gt;</code> flag sets this in the current process
+  environment (DEC-007); a pre-existing value is honoured when the
+  flag is omitted.</li>
+</ul>
+<p>There is no env-var override for <code>--project-dir</code>, <code>--mode</code>, or
+<code>--min-score</code>. Project-discovery is the walk-up convention; the
+behaviour-knob flags map to <code>signalforge.yml</code> blocks under the
+documented precedence chain.</p>
+<h2 id="logging">Logging</h2>
+<p>The CLI configures the root logger once via <code>setup_logging(...)</code> in
+<code>signalforge.cli._helpers</code>. Logger name: <code>signalforge.cli</code>. Default
+level is <code>INFO</code>; <code>--quiet</code> raises to <code>WARNING</code>; <code>--verbose</code> lowers
+to <code>DEBUG</code>. Output goes to stderr in
+<code>%(asctime)s [%(levelname)s] %(name)s: %(message)s</code> format.</p>
+<p>Every logger call in <code>src/signalforge/cli/</code> uses the lazy-format
+JSON convention — <code>_LOGGER.debug("...: %s", json.dumps({...}))</code> —
+enforced by the grep gate at
+<code>tests/llm/test_logger_grep_gate.py</code>, which now covers six
+directories (<code>{llm, draft, prune, grade, diff, cli}</code>).</p>
+<p><code>--verbose</code> additionally suppresses the <code>_safe_excepthook</code>
+installation, so any panic-path traceback (an exception that
+escapes the <code>cmd_&lt;name&gt;</code> boundary) reaches stderr. Default
+behaviour strips the traceback (DEC-016): no <code>Traceback (most
+recent call last):</code> ever leaks to a non-verbose run.</p>
+<h2 id="progress-lines">Progress lines</h2>
+<p>When the CLI is attached to an interactive terminal (both stderr AND
+stdout return <code>True</code> from <code>isatty()</code>), <code>cmd_generate</code> emits one
+stderr progress line per stage entry plus a paired <code>done in &lt;X&gt;</code>
+line at stage exit (DEC-014, DEC-026). Live values; no hardcoded
+duration hints. Example shape:</p>
+<div class="highlight"><pre><span></span><code>[1/5] safety: building LLM request...
+[1/5] safety: done in 0.0s
+[2/5] draft: calling LLM (model claude-sonnet-4-6)...
+[2/5] draft: done in 41.7s
+[3/5] prune: running 12 candidate tests against warehouse...
+[3/5] prune: done in 18.4s
+[4/5] grade: scoring 8 artifacts × 4 criteria (32 calls)...
+[4/5] grade: done in 1m 12s
+[5/5] diff: rendering...
+[5/5] diff: done in 0.1s
+</code></pre></div>
+<p>Non-TTY runs (piped, redirected, CI logs) emit no progress lines by
+default. <code>--quiet</code> suppresses regardless of TTY; <code>--verbose</code> forces
+progress on regardless of TTY (the operator explicitly opted in).</p>
+<p>The <code>&lt;fact&gt;</code> field on each entry line is computed from objects
+already in scope (model id, candidate test count,
+<code>kept_count × criteria_count</code>) so the operator sees the size of the
+work that's about to happen rather than a stale estimate.</p>
+<h2 id="worked-example">Worked example</h2>
+<p>A complete <code>signalforge generate</code> session against a sample dbt
+project. Shell prompt is <code>$</code>; commentary is in <code>#</code> comments;
+stderr / stdout are annotated.</p>
+<div class="highlight"><pre><span></span><code>$ cd /repo/dbt/analytics
+$ signalforge generate models/marts/customers.sql --mode schema-only
+# stderr (TTY): five entry lines + five done lines
+[1/5] safety: building LLM request...
+[1/5] safety: done in 0.0s
+[2/5] draft: calling LLM (model claude-sonnet-4-6)...
+[2/5] draft: done in 38.2s
+[3/5] prune: running 14 candidate tests against warehouse...
+[3/5] prune: done in 22.6s
+[4/5] grade: scoring 9 artifacts × 4 criteria (36 calls)...
+[4/5] grade: done in 1m 24s
+[5/5] diff: rendering...
+[5/5] diff: done in 0.1s
+# stdout: rendered ANSI diff (truncated for brevity)
+Kept (8):
+  column.customer_id.description       — Stable surrogate key from upstream...
+  column.customer_id.test.not_null     — Always-pass=false on warehouse sample
+  ...
+Dropped (6):
+  column.email.test.not_null           — always-passes (kept_without_evidence=0)
+  column.created_at.test.relationships — requires-future-data
+  ...
+$ echo $?
+0
+$ ls -la .signalforge/
+diff.json   # the JSON sidecar (DEC-002 default)
+grade.json  # the grading report sidecar
+grade.jsonl # the per-(artifact, criterion) audit
+prune.jsonl # the per-decision prune audit
+</code></pre></div>
+<p><code>--write</code> would additionally produce
+<code>models/marts/schema.yml</code> (or merge into the existing one); <code>--dry-run</code>
+would skip both <code>schema.yml</code> and <code>.signalforge/diff.json</code> while
+still printing the diff to stdout.</p>
+<p>For a guided end-to-end run against a public BigQuery dataset
+(requires <code>gcloud auth application-default login</code>, the
+<code>GOOGLE_CLOUD_PROJECT</code> env var for BigQuery billing, and
+<code>ANTHROPIC_API_KEY</code>), see the README's
+<a href="../README.md#quick-start">Quick start</a> section for the
+walkthrough or <a href="../e2e-smoke-test/">docs/e2e-smoke-test.md</a> for the
+deeper operator guide (prerequisites, cost ceiling, troubleshooting
+matrix). The fixture lives at <code>tests/fixtures/dbt_project_austin/</code>;
+the gated maintainer-only test that exercises the same flow lives
+at <code>tests/cli/test_e2e_bigquery_smoke.py</code> (run via
+<code>pytest -m e2e --no-cov</code>).</p>
+<h2 id="running-across-many-models">Running across many models</h2>
+<p>A typical dbt project has dozens or hundreds of models. SignalForge
+v0.2 supports two patterns for running <code>generate</code> across many of them:
+an in-process selector (<code>--select</code>) and a process-per-model shell
+loop. Pick based on whether you want shared LLM prompt-cache state
+across models (in-process wins) or process-level isolation and
+per-model sidecars (shell loop wins). See
+<a href="../plans/super/37-multi-model-select.md"><code>plans/super/37-multi-model-select.md</code></a>
+for the design record (DEC-001 … DEC-017).</p>
+<h3 id="in-process-select-expr">In-process: <code>--select &lt;expr&gt;</code></h3>
+<p><code>--select</code> matches models from the manifest and iterates <code>generate</code>
+over each in invocation order. Grammar (also pinned in the argparse
+<code>--help</code> string and in DEC-001 / DEC-016 of the design plan):</p>
+<ul>
+<li><code>tag:&lt;name&gt;</code> — matches when <code>&lt;name&gt;</code> is in
+  <code>Model.tags ∪ Model.config.tags</code> (the union of model-level and
+  config-block tags, case-sensitive).</li>
+<li><code>path:&lt;glob&gt;</code> — shell-style <code>fnmatch</code> against
+  <code>Model.original_file_path</code>. dbt's own selector grammar uses a
+  path-prefix-with-implicit-wildcard convention; v0.2 deliberately
+  uses fnmatch instead, which means operators write
+  <code>path:models/staging/*</code> (with the trailing wildcard) rather than
+  <code>path:models/staging</code> (dbt-compat semantics are a v0.3 ask;
+  DEC-016).</li>
+<li>bare <code>&lt;value&gt;</code> — <code>model.&lt;...&gt;</code> prefix routes as <code>unique_id</code>;
+  otherwise routes as a file path. Mirrors the v0.1 positional
+  <code>&lt;model&gt;</code> resolver (<code>Manifest.get_model</code>).</li>
+</ul>
+<p>Atoms combine as a comma-separated union (set OR); whitespace around
+commas is stripped. Match results are deduplicated by <code>unique_id</code> and
+ordered lexicographically.</p>
+<p>Three concrete examples:</p>
+<div class="highlight"><pre><span></span><code>signalforge<span class="w"> </span>generate<span class="w"> </span>--select<span class="w"> </span>tag:staging
+signalforge<span class="w"> </span>generate<span class="w"> </span>--select<span class="w"> </span>path:models/marts/*
+signalforge<span class="w"> </span>generate<span class="w"> </span>--select<span class="w"> </span>tag:staging,path:models/marts/*
+</code></pre></div>
+<p>Semantics:</p>
+<ul>
+<li><strong>Sequential.</strong> Models are processed one at a time in
+  lexicographic <code>unique_id</code> order. Parallelism inside one process is
+  a v0.3 ask; use the shell-loop pattern below if you need it now.</li>
+<li><strong>Fresh <code>BigQueryAdapter</code> per model</strong> (DEC-010). The batch driver
+  constructs a new adapter inside the per-model loop, not once at
+  batch start, so <code>_active_session_id</code> and the rest of the BigQuery
+  session state cannot bleed between iterations. Adds ~100-500ms BQ
+  client init per model — acceptable vs. state-corruption risk.</li>
+<li><strong>Anthropic prompt cache behavior</strong> (DEC-015). The drafter's
+  explicitly cache-marked block is the manifest summary (model
+  under draft + its neighbours), which <strong>changes per model</strong> — so
+  the marked cache does NOT amortise across siblings in a batch.
+  Cost savings within one process come from Anthropic's automatic
+  caching of the static system prompt, which IS byte-stable across
+  iterations once it crosses the auto-cache size threshold. Net:
+  expect partial cache savings on system-prompt tokens; do not
+  expect the marked manifest-summary block to hit on subsequent
+  models.</li>
+<li><strong>Per-model progress prefix.</strong> When a TTY is attached and the
+  batch driver runs, each iteration emits one stderr line
+  <code>[i/N] &lt;model_unique_id&gt;</code> before that model's existing stage
+  progress lines fire. <code>--quiet</code> suppresses; <code>--verbose</code> forces on.
+  The single-model (positional) path does not emit the prefix.</li>
+<li><strong>Continue on per-model failure.</strong> A model that raises an
+  exception logs the failure, continues to the next model, and
+  contributes to the run-level exit code via
+  <code>max(per_model_exit_codes)</code> across the four-tier taxonomy.</li>
+</ul>
+<p>At end of run, an aggregated summary lands on stderr (DEC-005). The
+summary always emits when ≥2 models matched OR ≥1 model failed:</p>
+<div class="highlight"><pre><span></span><code>Generated 142 kept / 31 dropped / 8 flagged across 12 models in 4m 18s
+2 models failed:
+  - model.proj.broken_a        exit 3  (LLMRateLimitError)
+  - model.proj.broken_b        exit 2  (LLMOutputAnchorContractError)
+</code></pre></div>
+<p>Failed-model list is capped at 50 entries; overflow renders
+<code>... and &lt;K&gt; more</code>.</p>
+<p><strong>Sidecar caveat (DEC-003 — last-writer-wins).</strong>
+<code>.signalforge/grade.json</code> and <code>.signalforge/diff.json</code> are
+single-document overwrite (<code>O_TRUNC</code>) per-call; across N in-process
+iterations, only the FINAL model's sidecars persist. The four
+append-only JSONLs (<code>audit.jsonl</code>, <code>llm_responses.jsonl</code>,
+<code>prune.jsonl</code>, <code>grade.jsonl</code>) accumulate across iterations and
+survive — that's where the per-model auditable record lives. If you
+need per-model JSON sidecars, use the shell-loop pattern below.</p>
+<h3 id="process-level-shell-loop-pattern">Process-level: shell-loop pattern</h3>
+<p>When you need process-level isolation (per-model sidecars, parallel
+execution, hard memory boundaries between models), run one
+<code>signalforge</code> process per model from a shell loop:</p>
+<div class="highlight"><pre><span></span><code>find<span class="w"> </span>models<span class="w"> </span>-name<span class="w"> </span><span class="s1">&#39;*.sql&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>xargs<span class="w"> </span>-n1<span class="w"> </span>-P4<span class="w"> </span>-I<span class="o">{}</span><span class="w"> </span>signalforge<span class="w"> </span>generate<span class="w"> </span><span class="o">{}</span><span class="w"> </span>--project-dir<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$PWD</span><span class="s2">&quot;</span>
+</code></pre></div>
+<p>Parallelism caveats:</p>
+<ul>
+<li><strong>BigQuery session isolation:</strong> safe. Each process has its own
+  <code>BigQueryAdapter</code> instance with its own <code>_active_session_id</code>;
+  sessions cannot cross process boundaries. The cleanup-failure
+  WARNING (above) still surfaces per-process when teardown fails.</li>
+<li><strong>Anthropic prompt cache:</strong> each process pays its own
+  cache-creation tokens on its first call. With <code>-P4</code>, four
+  processes redundantly pay the cache-creation cost on the cached
+  block (the system prompt + neighbours portion). Choose <code>-P1</code>
+  (cheaper, slower) vs. <code>-P4</code> (faster, more LLM cost) based on
+  budget. In-process <code>--select</code> amortises the cache cost across
+  iterations within one process.</li>
+<li><strong>Sidecar overwrite:</strong> each process writes
+  <code>.signalforge/grade.json</code> and <code>.signalforge/diff.json</code> to the
+  same project dir; whichever process finishes last wins. If you
+  need per-model sidecars, either invoke each process with a
+  per-model <code>--project-dir</code> overlay (e.g. <code>cp -r</code> the project into
+  a tmp dir per model) or accept last-writer-wins semantics.</li>
+<li><strong>Anti-pattern: do NOT share <code>.signalforge/</code> across concurrent
+  processes</strong> if which model "owns" the surviving sidecars matters.
+  Configure per-process project directories, or run sequentially
+  (<code>-P1</code>), or accept the overwrite.</li>
+</ul>
+<h3 id="cumulative-cost">Cumulative cost</h3>
+<p>Per-call cost caps already exist — <code>maximum_bytes_billed</code> in the
+BigQuery profile (see
+<a href="../warehouse-adapter-ops/"><code>docs/warehouse-adapter-ops.md</code></a>) bounds
+each prune query, and the LLM draft + grade calls have per-call
+retry / token budgets in their respective config blocks. Multi-model
+runs are N independent calls; cumulative cost is the operator's
+responsibility (DEC-008).</p>
+<p>Recommendations:</p>
+<ul>
+<li>Preview the match-count before committing to a large batch. The
+  library-level helper <code>signalforge.manifest.select_models(manifest, expr)</code>
+  returns matches without invoking the pipeline; a quick Python
+  shell call (<code>from signalforge.manifest import load, select_models;
+  m = load("."); print(len(select_models(m, "tag:staging")))</code>)
+  tells you how many models a given selector would touch.</li>
+<li>Start with a single tag (e.g. <code>--select tag:staging</code>) before
+  running a wider union, to confirm cost and runtime on a smaller
+  slice.</li>
+<li>A <code>cli.max_models_per_run</code> config knob is reserved as a v0.3
+  forward-compat surface (not shipped in v0.2). For now, the
+  operator's selector is the only governor on batch size.</li>
+</ul>
+<h2 id="subprocess-smoke-test">Subprocess smoke test</h2>
+<p>The CLI ships one belt-and-braces test gated behind the
+<code>cli_subprocess</code> pytest marker (DEC-018):</p>
+<div class="highlight"><pre><span></span><code>pytest<span class="w"> </span>-m<span class="w"> </span>cli_subprocess<span class="w"> </span>--no-cov
+</code></pre></div>
+<p>The marker is registered in <code>pyproject.toml</code> and
+<code>addopts</code> excludes it by default (<code>-m 'not bigquery and not anthropic
+and not cli_subprocess'</code>). Mirrors the <code>bigquery</code> and <code>anthropic</code>
+integration-test gates from
+<a href="../warehouse-adapter-ops/"><code>docs/warehouse-adapter-ops.md</code></a>. Maintainers
+should run <code>pytest -m cli_subprocess --no-cov</code> once before declaring a CLI PR
+ready — the in-process <code>main(argv)</code> tests that run on every default
+suite cannot catch a typo in <code>pyproject.toml</code>'s <code>[project.scripts]</code>
+entry or a console-script wrapper regression after a wheel rebuild.</p>
+<h2 id="cross-references">Cross-references</h2>
+<ul>
+<li><a href="../safety-ops/"><code>docs/safety-ops.md</code></a> — <code>--mode</code> flag wiring,
+  PII redaction, audit JSONL schema.</li>
+<li><a href="../draft-ops/"><code>docs/draft-ops.md</code></a> — LLM retry taxonomy
+  (mapped to exit 3), prompt cache, response audit.</li>
+<li><a href="../prune-ops/"><code>docs/prune-ops.md</code></a> — drop-reason taxonomy,
+  <code>prune.jsonl</code> audit, total-budget semantics.</li>
+<li><a href="../grade-ops/"><code>docs/grade-ops.md</code></a> — threshold-fail
+  behaviour, sidecar shape, rubric reproducibility.</li>
+<li><a href="../diff-ops/"><code>docs/diff-ops.md</code></a> — <code>--format</code> flag wiring
+  (<code>render_kind</code>), <code>render_to_text</code> helper, ANSI / Markdown
+  safety, sidecar JSON shape.</li>
+<li><a href="../manifest-loader-ops/"><code>docs/manifest-loader-ops.md</code></a> —
+  <code>&lt;model&gt;</code> resolver, manifest schema-version tolerance.</li>
+<li><a href="../warehouse-adapter-ops/"><code>docs/warehouse-adapter-ops.md</code></a> —
+  profile loader, BigQuery adapter, sampling cost defaults.</li>
+<li><a href="../.claude/rules/cli-layer.md"><code>.claude/rules/cli-layer.md</code></a> —
+  CLI rules distilled from this ticket (load-bearing for
+  contributors).</li>
+<li><a href="../plans/super/9-cli-entrypoint.md"><code>plans/super/9-cli-entrypoint.md</code></a>
+  — design record (DEC-001 … DEC-027).</li>
+</ul>
+<p>Cross-reference DECs (from <code>plans/super/9-cli-entrypoint.md</code>):
+DEC-001 (project-root walk-up), DEC-002 (default print-diff =
+stdout + JSON sidecar), DEC-006 (lint = config-only, sub-second),
+DEC-007 (path canonicalisation at the orchestrator), DEC-008
+(stderr message shape per tier), DEC-010 (<code>--dry-run</code> writes
+nothing), DEC-011 (grade-layer <code>fail_on_below_threshold</code> graduation
+→ exit 2), DEC-012 (<code>TableNotFoundError</code> → tier 2), DEC-014
+(stderr progress lines), DEC-015 (<code>render_to_text</code> helper),
+DEC-016 (no traceback ever leaks), DEC-017 (<code>format_error_to_stderr</code>
+single source of truth), DEC-018 (subprocess-gated smoke test),
+DEC-019 (7th AST scan: every typed exception → exit-code mapping),
+DEC-020 (<code>--format</code> wires <code>render_kind</code>), DEC-023 (<code>--no-color</code>
+sets <code>NO_COLOR</code>), DEC-026 (progress with live values), DEC-027
+(<code>--project-dir</code> is an absolute assertion).</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

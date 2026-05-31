@@ -1,0 +1,2319 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/prune-ops/">
+      
+      
+        <link rel="prev" href="../ingest-ops/">
+      
+      
+        <link rel="next" href="../grade-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Prune Engine - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#prune-layer-operations-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Prune Engine
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#default-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default posture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Public API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#orchestrator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Orchestrator
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#result-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#discriminator-literals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discriminator literals
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#audit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-signalforgeyml-prune-block" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration: signalforge.yml prune: block
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#drop-reason-taxonomy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Drop-reason taxonomy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#custom_sql-evaluation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        custom_sql evaluation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#expected-drop-rates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Expected drop rates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-model-us-003-verification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost model (US-003 verification)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Cost model (US-003 verification)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#post-q4c-temp-table-materialised-sample-v02-issue-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Post-Q4=C: temp-table-materialised sample (v0.2, issue #22)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-jsonl-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit JSONL schema
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Audit JSONL schema">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#audit-reading-guide-spotting-materialised-vs-oneshot-runs-issue-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit reading guide: spotting materialised vs. oneshot runs (issue #22)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-log-sensitivity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit log sensitivity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-real-warehouse-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running real-warehouse tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#snowflake-compiler-dialect-v02-issue-121" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Snowflake compiler dialect (v0.2, issue #121)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v02-deferrals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.2 deferrals
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli-integration-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI integration note
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#default-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default posture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Public API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#orchestrator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Orchestrator
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#result-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#discriminator-literals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discriminator literals
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#audit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-signalforgeyml-prune-block" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration: signalforge.yml prune: block
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#drop-reason-taxonomy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Drop-reason taxonomy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#custom_sql-evaluation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        custom_sql evaluation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#expected-drop-rates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Expected drop rates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-model-us-003-verification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost model (US-003 verification)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Cost model (US-003 verification)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#post-q4c-temp-table-materialised-sample-v02-issue-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Post-Q4=C: temp-table-materialised sample (v0.2, issue #22)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-jsonl-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit JSONL schema
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Audit JSONL schema">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#audit-reading-guide-spotting-materialised-vs-oneshot-runs-issue-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit reading guide: spotting materialised vs. oneshot runs (issue #22)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-log-sensitivity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit log sensitivity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-real-warehouse-tests" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running real-warehouse tests
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#snowflake-compiler-dialect-v02-issue-121" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Snowflake compiler dialect (v0.2, issue #121)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#v02-deferrals" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        v0.2 deferrals
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli-integration-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI integration note
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="prune-layer-operations-guide">Prune layer — operations guide</h1>
+<p>Operational reference for users of <code>signalforge.prune</code>. Companion to
+<a href="../safety-ops/"><code>docs/safety-ops.md</code></a>,
+<a href="../draft-ops/"><code>docs/draft-ops.md</code></a>,
+<a href="../manifest-loader-ops/"><code>docs/manifest-loader-ops.md</code></a>, and
+<a href="../warehouse-adapter-ops/"><code>docs/warehouse-adapter-ops.md</code></a>, and to the
+design record in <a href="../plans/super/6-prune-engine.md"><code>plans/super/6-prune-engine.md</code></a>.</p>
+<p>The prune layer sits between the LLM-drafting layer (#5) and the diff
+renderer (#8). Every candidate test produced by the drafter goes through
+one entry point — <code>signalforge.prune.prune_tests</code> — which compiles the
+test to failing-rows SQL, runs it against the warehouse, classifies the
+verdict, and writes a fail-closed JSONL audit record per decision.</p>
+<p>This is the load-bearing differentiator (Architectural Commitment #1 in
+<a href="../CLAUDE.md"><code>CLAUDE.md</code></a>) — competitors generate; SignalForge
+generates <em>and</em> grades.</p>
+<h2 id="default-posture">Default posture</h2>
+<p>Sample-scope is the default. Architectural Commitment #1 (signal over
+volume) penalises always-pass tests because they consume reviewer
+attention without catching anything; sampling 100k rows is enough signal
+to detect always-pass while keeping query bytes under control.</p>
+<p>The layer is fail-closed on the audit-write boundary: any I/O error from
+<code>PruneEvent</code> persistence aborts the run as <code>PruneAuditWriteError</code>
+(DEC-016, mirrors safety's DEC-011 and draft's DEC-006). And the layer
+is conservative on the verdict boundary: tests we cannot evaluate
+(warehouse error, total-budget exhausted, ambiguous evidence) are
+<strong>kept</strong>, not dropped — <code>kept-without-evidence</code> lands the test in front
+of a human reviewer rather than silently losing potential signal.</p>
+<p>User-facing tagline: <strong>always-pass tests are dropped; everything we
+cannot confidently drop is kept.</strong></p>
+<h2 id="public-api">Public API</h2>
+<p>Import from <code>signalforge.prune</code>. The 14 names exported by <code>__all__</code>:</p>
+<h3 id="orchestrator">Orchestrator</h3>
+<ul>
+<li><strong><code>prune_tests(model, adapter, candidates, manifest, *, config=None, project_dir=None, audit_path=None) -&gt; PruneResult</code></strong> — End-to-end orchestrator. Compiles every <code>CandidateTest</code>, runs each through the warehouse adapter, writes one JSONL audit record per decision, returns the aggregate <code>PruneResult</code>. Mirrors <code>signalforge.draft.draft_schema</code> so the CLI / wrapper layers see one consistent end-to-end shape across pipeline stages. <code>project_dir</code> defaults to <code>Path.cwd()</code>. <code>audit_path</code> defaults to <code>&lt;project_dir&gt;/.signalforge/prune.jsonl</code>.</li>
+</ul>
+<h3 id="result-shapes">Result shapes</h3>
+<ul>
+<li>
+<p><strong><code>PruneResult</code></strong> — Aggregate verdict for one model. Frozen Pydantic model with fields <code>prune_schema_version: Literal[1]</code>, <code>model_unique_id: str</code>, <code>decisions: tuple[PruneDecision, ...]</code>, <code>elapsed_ms: int</code>, <code>signalforge_version: str</code>. Computed properties: <code>kept_decisions</code>, <code>dropped_decisions</code>, <code>kept_count</code>, <code>dropped_count</code>, <code>total_tests</code> — all derived from <code>decisions</code> (DEC-003) so a <code>PruneResult</code> reconstructed from a JSONL log carries identical views to a freshly produced one.</p>
+</li>
+<li>
+<p><strong><code>PruneDecision</code></strong> — One verdict per candidate test. Carries <code>test_anchor: str</code> (<code>"column.&lt;name&gt;"</code> or <code>"model"</code>), <code>test: CandidateTest</code> (the typed discriminated union from the drafter — five variants as of issue #116, including <code>custom_sql</code>; NOT a loose dict — DEC-004; the grader and diff renderer reuse the drafter's per-variant display logic), <code>decision: Literal["kept", "dropped"]</code>, <code>reason: DropReason</code>, <code>failures: int</code>, <code>sampled_rows: int | None</code>, <code>scope: Scope</code>, <code>elapsed_ms: int</code>, <code>compiled_sql_hash: str</code> (16 hex chars; blake2b-8 per DEC-005), <code>compiled_sql: str</code>, <code>why: str</code>, <code>sample_failures: tuple[dict[str, Any], ...] | None</code>.</p>
+</li>
+</ul>
+<h3 id="configuration">Configuration</h3>
+<ul>
+<li>
+<p><strong><code>PruneConfig</code></strong> — User-facing knobs. Frozen Pydantic model with <code>extra="forbid"</code> (config-shaped per DEC-015 — typos fail loud). Field reference: see <a href="#configuration-signalforgeyml-prune-block">Configuration</a> below.</p>
+</li>
+<li>
+<p><strong><code>load_prune_config(project_dir, path=None) -&gt; PruneConfig</code></strong> — Loads the <code>prune:</code> block from <code>signalforge.yml</code>. Resolves to <code>&lt;project_dir&gt;/signalforge.yml</code> when <code>path</code> is <code>None</code>. Returns defaults when the file is missing, empty, or the <code>prune:</code> key is absent. Raises <code>PruneConfigError</code> on parse / schema failures. Mirrors <code>load_safety_config</code> / <code>load_draft_config</code> so the CLI sees one calling convention across stages.</p>
+</li>
+</ul>
+<h3 id="discriminator-literals">Discriminator literals</h3>
+<ul>
+<li>
+<p><strong><code>DropReason</code></strong> — <code>Literal["always-passes", "requires-future-data", "failed-on-known-clean-data", "kept", "kept-without-evidence"]</code>. Closed set so the diff renderer (#8) can branch on the literal value rather than sniffing prose.</p>
+</li>
+<li>
+<p><strong><code>Scope</code></strong> — <code>Literal["sample", "full"]</code>. When <code>scope == "full"</code>, <code>PruneDecision.sampled_rows</code> is <code>None</code> (every row inspected).</p>
+</li>
+</ul>
+<h3 id="audit">Audit</h3>
+<ul>
+<li><strong><code>PruneEvent</code></strong> — One JSONL audit record per <code>PruneDecision</code>. Constructed ONLY by <code>signalforge.prune.audit._build_prune_event</code> (DEC-018; AST-gated by <code>tests/test_audit_completeness.py</code>). <code>extra="ignore"</code> for forward-compat read-back. See <a href="#audit-jsonl-schema">Audit JSONL schema</a> for the field set.</li>
+</ul>
+<h3 id="errors">Errors</h3>
+<p><code>from signalforge.prune import errors</code>. Every exception subclasses
+<code>PruneError</code> and carries a class-level <code>default_remediation</code> rendered on
+a <code>↳ Remediation:</code> line by <code>__str__</code>.</p>
+<ul>
+<li><strong><code>PruneError</code></strong> — Base class. Never raised directly.</li>
+<li><strong><code>PruneConfigError</code></strong> — <code>signalforge.yml</code> <code>prune:</code> block failed parse or schema validation.</li>
+<li><strong><code>PruneTrustedModelNotFoundError</code></strong> — <code>prune.trusted_models</code> references a <code>unique_id</code> not in the manifest. Subclass of <code>PruneConfigError</code>. Raised at orchestrator entry, BEFORE any warehouse call (DEC-008).</li>
+<li><strong><code>PruneTimeoutError</code></strong> — Internal control-flow signal for budget-exhausted dispatch. Callers of <code>prune_tests</code> do NOT see this — the orchestrator routes the in-flight test plus every remaining un-started test to <code>kept-without-evidence</code> (DEC-011).</li>
+<li><strong><code>PruneAuditWriteError</code></strong> — Fail-closed audit-write failure (<code>OSError</code> / <code>PermissionError</code> / encoding / <code>fsync</code>). Aborts the run; original cause exposed via <code>.cause</code> and <code>__cause__</code> (DEC-016).</li>
+<li><strong><code>PruneAuditRecordTooLargeError</code></strong> — Serialised JSONL line exceeded the POSIX-atomic-append cap (4000 bytes). Raised BEFORE any file is opened so an oversize record leaves no on-disk artefact.</li>
+</ul>
+<p>DEC-006 deliberately omits a <code>PruneCompilerError</code> class. Compilation
+always succeeds; failures like <code>relationships(to: unknown)</code> emit a
+structured <code>requires-future-data</code> drop reason rather than an exception.</p>
+<h2 id="configuration-signalforgeyml-prune-block">Configuration: <code>signalforge.yml</code> <code>prune:</code> block</h2>
+<p>Top-level namespace is <code>prune:</code> (DEC-020; sibling keys <code>safety:</code>,
+<code>llm:</code>, future <code>grade:</code> are reserved for other stages and silently
+ignored by the prune loader).</p>
+<div class="highlight"><pre><span></span><code><span class="nt">safety</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># ... (loaded by signalforge.safety)</span>
+<span class="nt">llm</span><span class="p">:</span>
+<span class="w">  </span><span class="c1"># ... (loaded by signalforge.draft)</span>
+<span class="nt">prune</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">            </span><span class="c1"># set false to skip prune entirely (no warehouse contact)</span>
+<span class="w">  </span><span class="nt">scope</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sample</span><span class="w">            </span><span class="c1"># &quot;sample&quot; | &quot;full&quot;</span>
+<span class="w">  </span><span class="nt">sample_strategy</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">materialised</span><span class="w">  </span><span class="c1"># &quot;materialised&quot; (default, v0.2) | &quot;oneshot&quot; (v0.1 fallback)</span>
+<span class="w">  </span><span class="nt">sample_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100000</span><span class="w">      </span><span class="c1"># rows</span>
+<span class="w">  </span><span class="nt">test_timeout_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30</span>
+<span class="w">  </span><span class="nt">total_budget_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">600</span>
+<span class="w">  </span><span class="nt">capture_failure_rows</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span>
+<span class="w">  </span><span class="nt">min_kept_rate_warn</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.0</span><span class="w">  </span><span class="c1"># WARN when kept/total &lt;= this; 0.0 = warn on &quot;all dropped&quot;</span>
+<span class="w">  </span><span class="nt">trusted_models</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">model.shop.dim_customers</span>
+<span class="w">  </span><span class="nt">partition_filter</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">event_dt</span>
+<span class="w">    </span><span class="nt">op</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&gt;=&quot;</span>
+<span class="w">    </span><span class="nt">value</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;2026-01-01&quot;</span>
+</code></pre></div>
+<p>Field-by-field:</p>
+<ul>
+<li><strong><code>enabled</code></strong> — <code>bool</code>. Default <code>true</code>. When <code>false</code>, <code>prune_tests</code> short-circuits: it does NOT issue any warehouse calls, does NOT validate <code>trusted_models</code>, and routes every candidate to <code>kept-without-evidence</code> with <code>why="prune disabled in signalforge.yml"</code>. The audit JSONL still records one <code>PruneEvent</code> per candidate (fail-closed audit preserved). The CLI emits an INFO line at prune-stage entry. <strong>Trade-off:</strong> disabling prune lets always-pass tests reach the diff — directly counter to Architectural Commitment #1 (signal over volume). Use as a temporary escape hatch when warehouse contact is unavailable (offline, credentials issue, cost ceiling) and you still need a draft run.</li>
+<li><strong><code>scope</code></strong> — <code>"sample"</code> | <code>"full"</code>. Default <code>"sample"</code>. Whether candidate tests run against a deterministic warehouse sample or a full table scan. Switch to <code>"full"</code> only when the model is small enough that <code>sample_size</code> would scan most of it anyway.</li>
+<li><strong><code>sample_strategy</code></strong> — <code>"materialised"</code> | <code>"oneshot"</code>. Default <code>"materialised"</code> (v0.2 — see issue #22). When set to <code>"materialised"</code>, <code>prune_tests</code> calls <code>adapter.materialise_sample(...)</code> ONCE before the per-test loop — the adapter creates a <code>_SESSION._sf_sample_&lt;run_id&gt;</code> temp table and every test's compiled SQL reads from it (per-test bytes drop from ~9.92 GB to &lt;100 MB on the AR-B1 reference workload). When set to <code>"oneshot"</code>, the v0.1 path runs unchanged — every test issues its own deterministic-sample query against the source table. Adapters that don't override <code>materialise_sample</code> (any non-BigQuery adapter in v0.2) raise <code>MaterialisationNotSupportedError</code>; the orchestrator then routes every candidate to <code>kept-without-evidence</code> per the conservative-bias rule (see <a href="#drop-reason-taxonomy">Drop-reason taxonomy</a>). Operators on non-BQ adapters opt out via <code>sample_strategy: oneshot</code>.</li>
+<li><strong><code>sample_size</code></strong> — Integer row count for sample scope. Default <code>100_000</code>. Passed to <code>WarehouseAdapter.sample_rows</code>. Increase when the always-pass false-positive rate on small samples hides real signal; decrease to cap query bytes on very wide tables (column-pruning does NOT apply through <code>FARM_FINGERPRINT(TO_JSON_STRING(t))</code> — see <a href="#cost-model-us-003-verification">Cost model</a>).</li>
+<li><strong><code>test_timeout_seconds</code></strong> — Per-test wall-clock budget. Default <code>30</code>. <strong>Reserved for v0.2</strong> — the adapter's <code>_default_job_config(timeout_ms=...)</code> plumbing exists (US-002 of issue #3) but <code>WarehouseAdapter.run_test_sql</code> does not yet accept a per-call timeout kwarg, so v0.1 does not enforce this knob. Per-test wall-clock control in v0.1 comes implicitly from <code>total_budget_seconds</code> plus the <code>WarehouseError</code> catch path: a test that exceeds the warehouse's own budget surfaces as a typed error → <code>kept-without-evidence</code>. See <a href="#v02-deferrals">v0.2 deferrals</a>.</li>
+<li><strong><code>total_budget_seconds</code></strong> — Whole-run wall-clock budget. Default <code>600</code>. Once exceeded, every remaining test drains to <code>kept-without-evidence</code> with <code>why="Total prune budget (Ns) exceeded before evaluation."</code> (DEC-011). Conservative bias — no test is silently dropped because the run ran long.</li>
+<li><strong><code>capture_failure_rows</code></strong> — Number of failing rows recorded on the <code>PruneDecision.sample_failures</code> field per failed test. Default <code>3</code>. Set to <code>0</code> to omit row-level evidence entirely (the audit record stays compact for very wide tables).</li>
+<li><strong><code>trusted_models</code></strong> — List of manifest <code>unique_id</code>s whose data is treated as known-clean. A failure on a trusted model surfaces as <code>failed-on-known-clean-data</code> (drop, presumed buggy test) rather than <code>kept</code>. Opt-in only (Q1=B). Validated against the manifest at <code>prune_tests</code> entry — typos raise <code>PruneTrustedModelNotFoundError</code> BEFORE any warehouse call (DEC-008).</li>
+<li><strong><code>min_kept_rate_warn</code></strong> — Float in <code>[0.0, 1.0]</code>. Default <code>0.0</code>. Soft signal threshold for "did the prune work as intended?" (issue #51). When <code>kept_count / total_tests</code> is at or below this value AND at least one candidate was evaluated, the orchestrator emits one <code>WARNING</code>-level log line summarising the run shape (model id, total/kept/dropped counts, kept rate, threshold). Default <code>0.0</code> fires only when every candidate was dropped — the "did we lose the whole LLM draft?" signal. Set to <code>0.10</code> to catch "fewer than 10% kept" on typical staging models, or to <code>1.0</code> to always emit the summary line. The WARNING is informational — the run still returns a <code>PruneResult</code> and exits cleanly. Empty candidate sets skip the check (no division-by-zero; the drafter producing nothing is its own degenerate signal). See <a href="#expected-drop-rates">Expected drop rates</a> for the empirical context this threshold is meant to calibrate against.</li>
+<li><strong><code>partition_filter</code></strong> — Optional <code>PartitionFilter</code> ADT (<code>{column, op, value}</code>) scoping every sample query. Required by the warehouse adapter for tables with <code>num_rows &gt;= 100M</code>; otherwise optional. Pydantic recursively validates the YAML mapping into the typed shape.</li>
+</ul>
+<p>Unknown keys under <code>prune:</code> raise <code>PruneConfigError</code> (Pydantic
+<code>extra="forbid"</code>, DEC-015). Typos like <code>scop:</code> or
+<code>total_budget_secnds:</code> fail loud at load time rather than silently
+no-op'ing.</p>
+<h2 id="drop-reason-taxonomy">Drop-reason taxonomy</h2>
+<p>Every kept and dropped test ships with a structured <code>PruneDecision</code>
+carrying a one-line <code>why</code>. The reasons are a closed <code>DropReason</code> literal
+so the diff renderer (#8) can branch on the value.</p>
+<table>
+<thead>
+<tr>
+<th>Reason</th>
+<th>Decision</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>always-passes</code></td>
+<td>dropped</td>
+<td>Zero failing rows on the sampled or full set; no signal worth shipping. The load-bearing case for Architectural Commitment #1.</td>
+</tr>
+<tr>
+<td><code>requires-future-data</code></td>
+<td>dropped</td>
+<td>A <code>relationships</code> test references a <code>to:</code> parent model not in the loaded manifest, OR a <code>custom_sql</code> test's <code>{{ ref() }}</code> / <code>{{ source() }}</code> target is absent from the manifest (issue #116). No warehouse call issued — the compiler returns a <code>_RequiresFutureData</code> sentinel and the orchestrator routes it directly to this reason (DEC-026).</td>
+</tr>
+<tr>
+<td><code>failed-on-known-clean-data</code></td>
+<td>dropped</td>
+<td>Test failed AND <code>model.unique_id</code> is in <code>prune.trusted_models</code>; the test is presumed buggy. Symmetric noise-direction split with <code>always-passes</code> — both directions of noise need pruning per <code>CLAUDE.md</code>.</td>
+</tr>
+<tr>
+<td><code>kept</code></td>
+<td>kept</td>
+<td>Test failed on an untrusted model with non-zero failures. Reviewer should evaluate.</td>
+</tr>
+<tr>
+<td><code>kept-without-evidence</code></td>
+<td>kept</td>
+<td>Could not evaluate — warehouse error (typed <code>WarehouseError</code> subclass), total budget exceeded (DEC-011), or a <code>custom_sql</code> test whose SQL carries unsupported Jinja / an ambiguous <code>ref()</code> / a SQL-safety rejection (issue #116; see <a href="#custom_sql-evaluation"><code>custom_sql</code> evaluation</a>). Ship conservatively; reviewer decides.</td>
+</tr>
+</tbody>
+</table>
+<p>Conservative bias: when in doubt, keep. Architectural Commitment #1
+penalises always-pass tests (no signal, consumes reviewer attention) but
+does not penalise kept tests with ambiguous evidence — those land in
+front of a human reviewer who can make the final call.</p>
+<h2 id="custom_sql-evaluation"><code>custom_sql</code> evaluation</h2>
+<p>The drafter's fifth test variant — <code>custom_sql</code>, the free-form singular
+SQL business-rule test (issue #116; see
+<a href="../draft-ops/#custom-business-rule-tests-custom_sql"><code>docs/draft-ops.md</code></a>)
+— is pruned through the same orchestrator and routes to the same five
+<code>DropReason</code> literals as the four built-ins. There is <strong>no new drop
+reason</strong>; what differs is how the test compiles and gets sampled.</p>
+<p><strong>Jinja resolution first.</strong> <code>custom_sql.sql</code> may reference <code>{{ this }}</code>,
+<code>{{ ref('&lt;model&gt;') }}</code>, and <code>{{ source('&lt;src&gt;', '&lt;table&gt;') }}</code>. The
+compiler resolves these via the bounded resolver
+(<code>signalforge.manifest.template.resolve_template_refs</code>) before any
+warehouse call. The resolution outcome decides the routing:</p>
+<ul>
+<li><strong>Resolved cleanly</strong> → the test is sampled / full-scanned and routes
+  to <code>always-passes</code> / <code>kept</code> / <code>failed-on-known-clean-data</code> exactly
+  like a built-in.</li>
+<li><strong><code>{{ ref() }}</code> / <code>{{ source() }}</code> targets a model/source absent from
+  the manifest</strong> → <code>requires-future-data</code> (mirrors the <code>relationships</code>
+  missing-target precedent — the referenced model simply isn't built
+  yet; revisit when the dependency lands). No warehouse call.</li>
+<li><strong>Control-flow Jinja (<code>{% if %}</code>, <code>{% for %}</code>, <code>var()</code>, <code>env_var()</code>,
+  macros), an ambiguous <code>ref()</code> (matches multiple packages), or a
+  SQL-safety pre-flight rejection on the resolved SQL</strong> →
+  <code>kept-without-evidence</code>. We cannot evaluate it, so we ship it for the
+  reviewer rather than silently dropping it. No warehouse call.</li>
+</ul>
+<p><strong>Single-table vs. multi-table sampling.</strong> Once the SQL resolves, the
+compiler decides how to bound the scan with a cheap heuristic — does a
+word-boundary <code>JOIN</code> keyword survive string-literal stripping?</p>
+<ul>
+<li><strong>Single-table</strong> (no <code>JOIN</code>) — the resolved SQL references only the
+  model's own table. In <code>scope="sample"</code> the model's table is
+  substituted with the deterministic-sample CTE alias (identical to the
+  built-ins, so per-test bytes stay bounded). In <code>scope="full"</code> a
+  partition filter is applied when one is configured.</li>
+<li><strong>Multi-table</strong> (a <code>JOIN</code> survives literal-stripping) — runs
+  <strong>full-scan (unsampled)</strong>, because sampling only one side of a join is
+  semantically wrong: an orphan-detection join against a <em>sampled</em> child
+  would report false orphans for parents that are simply absent from the
+  sample. A partition filter is still applied to the model's own table
+  when one is available.</li>
+</ul>
+<p><strong>The bytes cap is the only guardrail on a multi-table full-scan.</strong> A
+multi-table <code>custom_sql</code> test reads every row of the joined tables —
+there is no sample CTE to bound it. The adapter's
+<code>maximum_bytes_billed</code> cap (default 100 MB, DEC-005; raise via the
+profile-level <code>maximum_bytes_billed</code> field — see
+<a href="../warehouse-adapter-ops/"><code>docs/warehouse-adapter-ops.md</code></a>) is what
+stops a runaway scan. <strong>Tuning note:</strong> if a multi-table business rule
+spans large fact tables, either raise the cap deliberately (and accept
+the per-test cost) or scope the rule with a <code>partition_filter</code> so the
+model's own side is bounded. When the resolved query's pre-execution
+byte estimate exceeds the cap, the warehouse rejects the query before
+execution; the typed <code>WarehouseError</code> is caught and the test routes to
+<code>kept-without-evidence</code> (<code>why</code> carries the warehouse error class) — the
+test ships, unevaluated, for the reviewer.</p>
+<p>In the <a href="#expected-drop-rates">expected-drop-rate</a> framing below,
+<code>custom_sql</code> tests behave like the built-ins: a business rule that the
+warehouse data never violates is <code>always-passes</code> (dropped, no signal); a
+rule the data <em>does</em> violate is <code>kept</code> (real signal — exactly the rows a
+reviewer wants to see). The one categorical difference is the higher
+<code>kept-without-evidence</code> / <code>requires-future-data</code> fraction: free-form SQL
+has more ways to be unevaluable (unsupported Jinja, unbuilt refs) than a
+generic schema test. That is the conservative-bias contract working as
+designed — an unevaluable business rule is shipped, never silently lost.</p>
+<h2 id="expected-drop-rates">Expected drop rates</h2>
+<p><strong>A high drop rate is the working state, not the failure state.</strong> The
+LLM is intentionally drafting broadly — it proposes <code>not_null</code> on every
+column, <code>unique</code> on every column that looks like a primary key, etc.
+The prune layer trims the candidates that always pass on warehouse
+samples (no signal) and the ones that fail on known-clean data (likely
+buggy test). What survives is what a human reviewer should actually
+look at. A run that drops ~60-80% of the drafted tests on a typical
+staging model is doing exactly what it's supposed to.</p>
+<p><strong>Reference numbers — Austin bikeshare staging fixture.</strong> Run captured
+2026-05-09 against
+<code>bigquery-public-data.austin_bikeshare.bikeshare_trips</code> (~2.27M rows,
+7 columns), <code>safety.mode: aggregate-only</code>,
+<code>prune.sample_strategy: materialised</code>, <code>claude-sonnet-4-6</code> drafter:</p>
+<ul>
+<li><strong>Total candidate tests drafted:</strong> 8</li>
+<li><strong>Dropped (<code>always-passes</code>):</strong> 5 (62.5%)</li>
+<li><strong>Kept (<code>reason="kept"</code>, non-zero failing rows):</strong> 3 (37.5%)</li>
+</ul>
+<p>Per-test-type breakdown for this run:</p>
+<table>
+<thead>
+<tr>
+<th>Test type</th>
+<th>Drafted</th>
+<th>Dropped</th>
+<th>Kept</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>not_null</code></td>
+<td>7</td>
+<td>4 (57%)</td>
+<td>3 (43%)</td>
+<td>Dropped on natural NOT NULL columns (<code>trip_id</code>, <code>bike_id</code>, <code>start_time</code>, <code>duration_minutes</code>); kept on <code>subscriber_type</code> (249 nulls — walk-up users), <code>start_station_id</code> (199 nulls), <code>end_station_id</code> (1408 nulls — stations decommissioned mid-trip)</td>
+</tr>
+<tr>
+<td><code>unique</code></td>
+<td>1</td>
+<td>1 (100%)</td>
+<td>0</td>
+<td><code>trip_id</code> is the natural primary key — <code>unique</code> always passes</td>
+</tr>
+</tbody>
+</table>
+<p>The three kept tests are exactly the signal the differentiator
+promises: real nullability that a reviewer should think about before
+shipping a <code>not_null</code> test. The five dropped tests would have been
+review-noise — they pass deterministically against the source data.</p>
+<p><strong>Calibration heuristics</strong> (based on internal testing across staging
+models):</p>
+<ul>
+<li><strong>Wide fact tables with mostly-NOT-NULL surrogate keys</strong> drop more
+  aggressively — most <code>not_null</code> candidates trivially pass; the kept
+  set concentrates on FK columns and optional dimensions.</li>
+<li><strong>Narrow dimension tables</strong> tend to have a higher kept rate — fewer
+  drafted tests overall, and the columns under test are usually
+  declared-nullable business attributes.</li>
+<li><strong><code>unique</code> candidates on declared primary keys</strong> are almost always
+  dropped as always-passes (the warehouse data matches the model's
+  contract). When a <code>unique</code> candidate is <em>kept</em>, that's high-signal:
+  the surrogate-key contract is broken in production data.</li>
+<li><strong><code>relationships</code> candidates</strong> are usually kept (referential
+  integrity is rarely perfect at warehouse scale); when they drop as
+  <code>requires-future-data</code>, the target model isn't in the manifest yet
+  (likely an unimplemented downstream).</li>
+</ul>
+<p>A run that drops everything is the failure mode to watch for — it
+suggests the LLM proposed nothing the warehouse data contradicted, or
+that the model under draft has so little data that every test is
+trivially passing on the sample. Set
+<a href="#configuration-signalforgeyml-prune-block"><code>prune.min_kept_rate_warn</code></a>
+to surface this case at run time.</p>
+<h2 id="cost-model-us-003-verification">Cost model (US-003 verification)</h2>
+<p>The deterministic-sample predicate</p>
+<div class="highlight"><pre><span></span><code><span class="k">WHERE</span><span class="w"> </span><span class="k">MOD</span><span class="p">(</span><span class="k">ABS</span><span class="p">(</span><span class="n">FARM_FINGERPRINT</span><span class="p">(</span><span class="n">TO_JSON_STRING</span><span class="p">(</span><span class="n">t</span><span class="p">))),</span><span class="w"> </span><span class="n">bucket</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">1</span>
+</code></pre></div>
+<p>serialises the entire row into the predicate. BigQuery cannot
+column-prune through a function argument, so sample-mode reads <strong>all
+columns</strong> of the table, not just the column under test. The Phase-1
+estimate that pruning 30 candidate tests against a 100k-row sample would
+cost approximately 24 MB / approximately one tenth of one US cent
+assumed only the column under test would be read; the worst case is
+50–500x that figure.</p>
+<p><strong>Verified figure (US-003): 9,924,771,840 bytes (≈9.92 GB), run 2026-05-01
+against <code>bigquery-public-data.iowa_liquor_sales.sales</code> (~30M rows, ~24
+columns), 100k-row deterministic sample.</strong> AR-B1 confirmed: the
+<code>TO_JSON_STRING(t)</code> predicate triggers a full-row scan, and the actual
+cost is <strong>~99× the Phase-1 estimate</strong> (24 MB) and ~2× the probe's 5 GB
+sanity ceiling. The figure is BigQuery's pre-execution analyzer estimate;
+the adapter's 100 MB <code>maximum_bytes_billed</code> cap (DEC-005) blocked the
+query before execution, so this is the cost the user would pay if the
+cap were lifted, not a measured <code>total_bytes_billed</code> off a completed
+job. The pre-execution estimate matches what BQ would bill on a real
+prune run (the analyzer reads the same statistics the billing pipeline
+uses).</p>
+<p>To reproduce:</p>
+<div class="highlight"><pre><span></span><code>gcloud<span class="w"> </span>auth<span class="w"> </span>application-default<span class="w"> </span>login
+<span class="nv">SF_RUN_BQ</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>pytest<span class="w"> </span>-m<span class="w"> </span>bigquery<span class="w"> </span>tests/warehouse/test_sample_cost_probe.py<span class="w"> </span>-s<span class="w"> </span>--no-cov
+</code></pre></div>
+<p>The probe currently fails (rather than <code>xfail</code>s) on the
+<code>bytesBilledLimitExceeded</code> path because the assertion ceiling and the
+adapter cap are decoupled. Refining the probe to detect the BigQuery
+reason code <code>bytesBilledLimitExceeded</code> (which appears in the error
+message regardless of HTTP status) and <code>xfail</code> cleanly is tracked as a
+follow-up. Note the SDK exception class is unstable on this path: the
+adapter's <code>map_bq_exception</code> (<code>adapters/_client.py</code>) catches
+<code>google.api_core.exceptions.BadRequest</code> (HTTP 400), but the live run
+on 2026-05-01 with <code>google-cloud-bigquery==3.41.0</code> raised
+<code>google.api_core.exceptions.InternalServerError</code> (HTTP 500). The reason
+code is the durable identifier; match on substring rather than the
+exception class. The 9.92 GB figure is captured directly from the
+error message: <code>Query exceeded limit for bytes billed: 100000000.
+9924771840 or higher required.</code></p>
+<p><strong>Q4=A is NOT adequate for v0.1 sample-mode on wide tables.</strong> Issue #22
+tracks Q4=C escalation (temp-table-materialised sample) for v0.2. In the
+meantime, sample-mode prune runs on tables wider than ~10 columns will
+either trip the adapter's 100 MB cap and fail, or — if a maintainer
+raises the cap via the profile-level <code>maximum_bytes_billed</code> field
+(<code>load_profile</code>, see <code>docs/warehouse-adapter-ops.md</code>) — bill at roughly
+<code>(rows × bytes_per_row)</code> for <strong>every test</strong> in the candidate set.
+Schema-only mode remains the v0.1 default precisely because the cost
+model for sample-mode is not where we want it.</p>
+<p>Probe thresholds (constants in the test, kept for the post-Q4=C run):</p>
+<ul>
+<li><code>_BYTES_WARN_AT = 500_000_000</code> (500 MB) — soft WARNING fires above this.</li>
+<li><code>_BYTES_CEILING = 15_000_000_000</code> (15 GB) — assertion fires above this; the test fails. Raised from 5 GB during the 2026-05-08 maintainer probe-run after AR-B1's 9.98 GB measurement was confirmed to genuinely exceed the original 5 GB ceiling (probe self-inconsistency).</li>
+</ul>
+<h3 id="post-q4c-temp-table-materialised-sample-v02-issue-22">Post-Q4=C: temp-table-materialised sample (v0.2, issue #22)</h3>
+<p>Issue #22 lands <code>sample_strategy: materialised</code> as the v0.2 default.
+The materialise-once pattern amortises the full-row scan across every
+candidate test by pre-computing the deterministic sample into a
+<code>_SESSION._sf_sample_&lt;run_id&gt;</code> temp table; per-test queries read from
+the materialised sample (post-LIMIT, narrow) rather than re-running
+<code>MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), &lt;bucket&gt;) &lt; 1</code> against
+the source table for every test.</p>
+<p>Maintainer-run figures (recorded 2026-05-08 against
+<code>bigquery-public-data.iowa_liquor_sales.sales</code>, ~30M rows, 100k-row
+deterministic sample, billed to <code>duenow-nest</code>):</p>
+<ul>
+<li><strong>Materialisation query bytes_billed:</strong> ~9.98 GB (one-time CTAS;
+  scans every column once with the deterministic predicate
+  <code>MOD(ABS(FARM_FINGERPRINT(TO_JSON_STRING(t))), &lt;bucket&gt;) &lt; 1</code>).
+  Effectively the same scan as the v0.1 oneshot path, but paid once
+  per <code>prune_tests</code> invocation rather than once per candidate test.</li>
+<li><strong>Per-test bytes_billed (representative <code>IS NULL</code> test):</strong> <strong>10,485,760
+  bytes</strong> (~10 MB). Two orders of magnitude under the 100 MB
+  acceptance gate.</li>
+<li><strong>Total run bytes_billed (1 materialise + 30 per-test):</strong> ~9.98 GB +
+  30 × ~10 MB ≈ <strong>10.3 GB</strong>.</li>
+<li><strong>Cost ratio vs. v0.1 oneshot baseline</strong> (~9.98 GB × 30 = ~299 GB):
+  <strong>≈29× cheaper</strong> end-to-end on a 30-test run; ratio scales linearly
+  with N as the materialisation cost amortises across more tests.</li>
+</ul>
+<p>The two regression-guard tests (<code>@pytest.mark.bigquery</code>, DEC-007 of
+issue #22):</p>
+<ul>
+<li><code>test_sample_rows_cost_baseline_oneshot</code> — pins the AR-B1 9.92 GB
+  baseline for <code>sample_strategy=oneshot</code> so a regression in the
+  oneshot path stays visible after the materialised default takes
+  over.</li>
+<li><code>test_sample_rows_cost_materialised</code> — asserts per-test
+  bytes_billed drops below 100 MB under
+  <code>sample_strategy=materialised</code>.</li>
+</ul>
+<p>The 9.92 GB AR-B1 figure remains the v0.1 oneshot reference and the
+oneshot fallback's cost story for non-BQ adapters in v0.2.</p>
+<h2 id="audit-jsonl-schema">Audit JSONL schema</h2>
+<blockquote>
+<p><strong>Consumer guide.</strong> For cross-stage joins, <code>jq</code> / pandas worked examples,
+the forward-compat policy, and the redaction surface, see
+<a href="../audits/"><code>docs/audits.md</code></a>. This section is the prune-layer
+production contract.</p>
+</blockquote>
+<p>Every <code>PruneDecision</code> produces exactly one JSONL record at
+<code>audit_path</code> (default <code>&lt;project&gt;/.signalforge/prune.jsonl</code>). One record
+per line; atomic concurrent appends via <code>O_APPEND | O_CREAT | 0o600</code> and
+a single <code>os.write</code> (DEC-016). The third instance of the convention
+across the codebase — mirrors <code>signalforge.safety.audit</code> (DEC-011 of
+safety) and <code>signalforge.draft.audit</code> (DEC-006/008/013 of llm-drafter).</p>
+<p><code>PruneEvent</code> fields (~19 total):</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>audit_schema_version</code></td>
+<td>integer (<code>Literal[2]</code>)</td>
+<td>Audit shape version. Currently <code>2</code> (bumped 1→2 by issue #55 when <code>config_hash</code> migrated to <code>blake2b-8</code>). Bump only on shape change; <code>extra="ignore"</code> handles additions.</td>
+</tr>
+<tr>
+<td><code>signalforge_version</code></td>
+<td>PEP-440 version string</td>
+<td>Package version that produced the record.</td>
+</tr>
+<tr>
+<td><code>record_id</code></td>
+<td>32-hex-char string</td>
+<td>Fresh <code>uuid4().hex</code> per record; gives reviewers a stable handle for a single decision.</td>
+</tr>
+<tr>
+<td><code>timestamp</code></td>
+<td>ISO-8601 UTC, microsecond, <code>Z</code></td>
+<td>When the decision was finalised.</td>
+</tr>
+<tr>
+<td><code>config_hash</code></td>
+<td>16 hex chars</td>
+<td><code>blake2b(canonical_config_json, digest_size=8)</code>. Migrated from <code>SHA-256[:16]</code> by issue #55 so the audit corpus reads one hash recipe across every writer. Mirrors safety's <code>policy_hash</code> (DEC-005).</td>
+</tr>
+<tr>
+<td><code>model_unique_id</code></td>
+<td>string</td>
+<td>dbt <code>unique_id</code> of the pruned model.</td>
+</tr>
+<tr>
+<td><code>test</code></td>
+<td>discriminated-union object</td>
+<td>The original <code>CandidateTest</code> from the drafter (typed; not a loose dict — DEC-004).</td>
+</tr>
+<tr>
+<td><code>test_anchor</code></td>
+<td>string</td>
+<td><code>"column.&lt;name&gt;"</code> for column-scoped tests; literal <code>"model"</code> for model-level tests.</td>
+</tr>
+<tr>
+<td><code>decision</code></td>
+<td><code>"kept"</code> | <code>"dropped"</code></td>
+<td>Top-level verdict.</td>
+</tr>
+<tr>
+<td><code>reason</code></td>
+<td><code>DropReason</code> literal</td>
+<td>One of the five reasons in <a href="#drop-reason-taxonomy">Drop-reason taxonomy</a>.</td>
+</tr>
+<tr>
+<td><code>failures</code></td>
+<td>integer</td>
+<td>Failing-row count from the warehouse. <code>0</code> for <code>always-passes</code> and <code>requires-future-data</code>.</td>
+</tr>
+<tr>
+<td><code>sampled_rows</code></td>
+<td>integer or <code>null</code></td>
+<td>Sample size the test ran against. <code>null</code> for full-scope or no-warehouse-call decisions.</td>
+</tr>
+<tr>
+<td><code>scope</code></td>
+<td><code>"sample"</code> | <code>"full"</code></td>
+<td>Mirrors <code>PruneConfig.scope</code>.</td>
+</tr>
+<tr>
+<td><code>elapsed_ms</code></td>
+<td>integer</td>
+<td>Per-test wall-clock cost. <code>0</code> for budget-exhausted (test never ran).</td>
+</tr>
+<tr>
+<td><code>compiled_sql_hash</code></td>
+<td>16 hex chars</td>
+<td><code>blake2b(sql.encode(), digest_size=8).hexdigest()</code>. Stable empty-string hash for no-SQL outcomes.</td>
+</tr>
+<tr>
+<td><code>compiled_sql</code></td>
+<td>string</td>
+<td>The exact SELECT issued to the warehouse. Empty for <code>requires-future-data</code> and budget-exhausted.</td>
+</tr>
+<tr>
+<td><code>why</code></td>
+<td>string</td>
+<td>One-line human-readable rationale. Architectural Commitment #5.</td>
+</tr>
+<tr>
+<td><code>sample_failures</code></td>
+<td>array of object or <code>null</code></td>
+<td>Up to <code>capture_failure_rows</code> failing rows. <code>null</code> when capture is disabled or no failures.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Fail-closed semantics.</strong> <code>OSError</code> / <code>PermissionError</code> / encoding
+failures from <code>os.write</code> / <code>os.fsync</code> propagate raw; the orchestrator
+wraps them as <code>PruneAuditWriteError</code> and aborts the run.
+<code>PruneAuditRecordTooLargeError</code> (size cap, raised before any file open)
+also aborts the run. Don't wrap audit-write calls in defensive
+try/except — propagation IS the defence (mirrors
+<code>safety-layer.md</code> DEC-011).</p>
+<p><strong>Schema-drift gate.</strong> <code>tests/fixtures/prune/prune_event_v1.jsonl</code> is
+the canonical schema fixture; <code>tests/prune/test_drift_detector.py</code>
+pairs the production model (<code>extra="ignore"</code>) with a one-off
+<code>extra="forbid"</code> strict model and validates against the fixture.
+Adding a field to <code>PruneEvent</code> without updating the strict model OR
+the fixture breaks the test loudly. Don't bypass.</p>
+<h3 id="audit-reading-guide-spotting-materialised-vs-oneshot-runs-issue-22">Audit reading guide: spotting materialised vs. oneshot runs (issue #22)</h3>
+<p>The <code>compiled_sql</code> field on every <code>PruneEvent</code> is the durable signal
+that distinguishes a materialised-strategy run from a oneshot run:</p>
+<ul>
+<li><strong>Materialised (v0.2 default):</strong> every test's <code>compiled_sql</code>
+  references the temp table — look for <code>FROM \</code><em>SESSION._sf_sample</em><run_id>`<code>(two-part</code><em>SESSION._sf_sample</em><run_id><code>; no</code><project>.<code>prefix
+  because the adapter returns</code>TableRef(project=None, ...)<code>—
+  BigQuery rejects the three-part</code><project>.<em>SESSION.<name><code>form
+  even inside the owning session). The</code>_SESSION<code>dataset and the</code>_sf_sample</em>&lt;16-hex&gt;<code>table name are load-bearing —</code>_SESSION<code>is
+  BigQuery's session-scoped namespace, and the 16-hex</code>run_id<code>derives deterministically from</code>blake2b(table.qualified_name + signalforge_version + str(n) + canonical_json(partition_filter), digest_size=8).hexdigest()<code>(inputs joined with NUL separator). Same input → same</code>run_id<code>→
+  same</code>compiled_sql_hash` (DEC-001 of #22).</li>
+<li><strong>Oneshot (v0.1 fallback / non-BQ adapters):</strong> <code>compiled_sql</code>
+  references the source table directly — no <code>_SESSION</code> prefix.</li>
+</ul>
+<p>Joining a <code>prune.jsonl</code> line to the materialisation query in
+<code>INFORMATION_SCHEMA.JOBS_BY_PROJECT</code> is the operator's path for
+post-mortem cost attribution; see
+<a href="../warehouse-adapter-ops/#session-cleanup--manual-recovery"><code>docs/warehouse-adapter-ops.md</code> § Session cleanup &amp; manual recovery</a>
+for the query template.</p>
+<p>A <code>kept-without-evidence</code> decision whose <code>why</code> field starts with
+<code>"sample materialisation failed: "</code> is the conservative-bias signal
+that materialisation raised at orchestrator entry — every candidate
+in the run shares the same <code>why</code> shape, and the operator should
+inspect the orchestrator-level WARNING (see
+<a href="../cli-ops/#stderr-shapes-warning"><code>docs/cli-ops.md</code> § Stderr shapes</a>)
+for the materialisation error class and message.</p>
+<h2 id="audit-log-sensitivity">Audit log sensitivity</h2>
+<p><code>prune.jsonl</code> contains the model's compiled SQL and (when
+<code>capture_failure_rows &gt; 0</code>) up to N rows of failing data per test.
+Treat the file at-rest the same way you treat the safety audit:</p>
+<ul>
+<li><strong>Gitignore <code>.signalforge/</code></strong> (already configured in this repo's <code>.gitignore</code>).</li>
+<li><strong>Restrict at-rest permissions.</strong> The writer creates the file at <code>0o600</code> on first call; the parent directory is created via <code>mkdir(parents=True, exist_ok=True)</code> (Python's <code>mkdir</code> does not tighten an existing directory's permissions, so verify the existing <code>.signalforge/</code> mode is <code>0o700</code> on shared hosts).</li>
+<li><strong>Don't ship as a build artifact.</strong> Strip from container images and CI uploads.</li>
+<li><strong>Set <code>capture_failure_rows: 0</code></strong> for PII-laden models if the safety layer's redaction policy isn't enough — the prune layer captures real warehouse rows for failures, which can include PII not flagged for the LLM redactor.</li>
+</ul>
+<h2 id="running-real-warehouse-tests">Running real-warehouse tests</h2>
+<p>The prune layer's integration tests share the warehouse adapter's
+gating discipline. Default CI excludes them via the <code>-m 'not bigquery'</code>
+filter; opt-in requires both the marker and an <code>SF_RUN_BQ=1</code> env var.</p>
+<div class="highlight"><pre><span></span><code>gcloud<span class="w"> </span>auth<span class="w"> </span>application-default<span class="w"> </span>login
+<span class="nv">SF_RUN_BQ</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>pytest<span class="w"> </span>-m<span class="w"> </span>bigquery<span class="w"> </span>--no-cov
+</code></pre></div>
+<p>The prune-layer integration test (<code>tests/prune/test_integration_bigquery.py</code>)
+requires ambient gcloud auth (matches the warehouse adapter's
+<code>tests/warehouse/test_bigquery_integration.py</code>).</p>
+<p>The diagnostic cost probe (US-003) at
+<code>tests/warehouse/test_sample_cost_probe.py</code> runs under the same gate.
+It is a documentation-grade probe — a soft WARNING fires at 500 MB; the
+test fails only above the 5 GB sanity ceiling. See
+<a href="#cost-model-us-003-verification">Cost model</a>.</p>
+<h2 id="debugging">Debugging</h2>
+<p>Logger name: <code>signalforge.prune.engine</code> (and sibling modules under
+<code>signalforge.prune</code>).</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;signalforge.prune&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">)</span>
+</code></pre></div>
+<p>Levels:</p>
+<ul>
+<li><strong>WARNING</strong> — One line per <code>kept-without-evidence</code> decision routed by a typed <code>WarehouseError</code>. Lazy-format JSON per DEC-017 (<code>signalforge_version</code>, <code>model_unique_id</code>, <code>test_anchor</code>, <code>error_class</code>). Never f-string-interpolate user-controlled strings into a logger call — a column name or model id containing ANSI escapes (<code>\x1b[31m...</code>) would inject into log viewers.</li>
+<li><strong>INFO</strong> / <strong>DEBUG</strong> — reserved for future budget-loop / batching observability; v0.1 emits no INFO/DEBUG from the engine.</li>
+</ul>
+<p>The prune layer never logs full row data. The audit JSONL is the single
+durable record of decision-level detail; logger output is a hint that
+the decision happened, not what was in it.</p>
+<p><strong>Reading a fail-closed <code>PruneAuditWriteError</code>.</strong> The cause is exposed
+as <code>.cause</code> and on <code>__cause__</code>. Common causes:</p>
+<ul>
+<li>Parent directory not writable (no <code>+w</code> for the user, or <code>.signalforge/</code> is a symlink to a read-only mount).</li>
+<li>Disk full (<code>ENOSPC</code>).</li>
+<li>Oversize record (raises <code>PruneAuditRecordTooLargeError</code> instead — reduce <code>capture_failure_rows</code> or trim <code>compiled_sql</code> size by simplifying the candidate test; the cap is 4000 bytes for POSIX-atomic concurrent appends).</li>
+</ul>
+<h2 id="snowflake-compiler-dialect-v02-issue-121">Snowflake compiler dialect (v0.2, issue #121)</h2>
+<p>The prune compiler emits valid Snowflake SQL purely from the <code>SNOWFLAKE_DIALECT</code>
+value object — no branching on warehouse name, no warehouse SDK import under
+<code>signalforge/prune/</code>. Everything warehouse-specific is read from <code>Dialect</code>
+fields: the identifier quote char, per-component vs whole-path qualified-name
+quoting, the deterministic-sample row-hash expression, the date/timestamp
+literal cast form, the sample-CTE alias, and <code>identifier_case</code>.</p>
+<p><strong>Identifier case-folding.</strong> Snowflake folds <em>unquoted</em> identifiers to
+UPPERCASE and matches <em>quoted</em> identifiers verbatim, so a conventional
+<code>CREATE TABLE … (customer_id …)</code> stores the column as <code>CUSTOMER_ID</code>. The
+compiler therefore folds every identifier (columns and each qualified-name
+component) to UPPER <strong>before</strong> quoting (<code>"CUSTOMER_ID"</code>, <code>"DB"."SCHEMA"."T"</code>),
+which resolves correctly against conventionally-created Snowflake tables while
+keeping the always-quote injection-safe posture. <strong>Residual:</strong> a table
+genuinely created with quoted-lowercase DDL (<code>CREATE TABLE … ("customer_id" …)</code>)
+would not match <code>"CUSTOMER_ID"</code> — accepted as the rare case; the conventional
+majority is the right default. BigQuery's <code>identifier_case="preserve"</code> is a
+no-op, so BigQuery output is byte-identical to v0.1.</p>
+<p><strong>Sampling reproducibility caveat.</strong> BigQuery's <code>FARM_FINGERPRINT</code> is stable
+across time, so the deterministic sample is reproducible indefinitely.
+Snowflake's <code>HASH()</code> is deterministic only <em>within a Snowflake release</em> —
+Snowflake documents that it may change across versions. This satisfies
+SignalForge's reproducibility commitment (same input → same prune decision
+<em>within a run</em>) but is a weaker cross-time guarantee than BigQuery's. Prune
+decisions made in one run are internally consistent regardless.</p>
+<p><strong><code>QUALIFY</code> not used.</strong> Snowflake supports <code>QUALIFY</code>, but the <code>unique</code> test
+keeps the dialect-portable <code>GROUP BY … HAVING COUNT(*) &gt; 1</code> (works on both
+warehouses); <code>supports_qualify</code> stays forward-compat metadata.</p>
+<p><strong>Validation.</strong> Snowflake SQL is pinned by byte-exact snapshot fixtures under
+<code>tests/fixtures/prune/compiled_sql/snowflake/</code>. A maintainer-only gated suite
+(<code>uv run pytest -m snowflake --no-cov</code>) executes the four built-ins through
+<code>fakesnow</code> (asserting failing-row <em>shape</em> by rule semantics, never <code>HASH()</code>
+values) and parses every fixture through <code>sqlglot</code>'s Snowflake dialect.
+Real-Snowflake <code>HASH(*)</code> semantics, true case-folding, and sampling behaviour
+are validated by the live harness in issue #124.</p>
+<h2 id="v02-deferrals">v0.2 deferrals</h2>
+<p>The prune layer is intentionally narrow in v0.1. The following
+concerns are explicitly deferred:</p>
+<ul>
+<li><strong>Per-decision <code>bytes_billed</code> recording (DEC-027).</strong> The adapter does not surface job stats in v0.1; the diagnostic probe (US-003) reads them via <code>INFORMATION_SCHEMA.JOBS_BY_USER</code> out-of-band rather than through the adapter API. v0.2 extends the adapter's seam to return job stats so the <code>PruneDecision</code> can carry the figure natively.</li>
+<li><strong>Per-test <code>timeout_ms</code> threading.</strong> <code>PruneConfig.test_timeout_seconds</code> is documented but not yet threaded through <code>WarehouseAdapter.run_test_sql</code> per call. The plumbing exists in <code>make_query_job_config</code> (DEC-013, AR-B2 of issue #6); surfacing it through the public adapter signature is a v0.2 task.</li>
+<li><strong>Test batching — Q4=B / Q4=C optimisations.</strong> The Phase-1 plan catalogues two cost optimisations (per-column <code>COUNTIF</code> batching; temp-table-materialised sample). v0.1 does not adopt either. US-003 produces the data needed to evaluate the temp-table option in v0.2.</li>
+<li><strong>Multi-warehouse adapters.</strong> Postgres, Databricks, Redshift adapters slot in behind <code>WarehouseAdapter</code> without prune changes once their adapters land. The prune compiler is fully dialect-driven (DEC-025), reading all warehouse-specific SQL from the <code>Dialect</code> value object, never branching on dialect <code>name</code>. <strong>Snowflake compiler support landed in issue #121</strong> (see § "Snowflake compiler dialect" above); its live warehouse harness is #124. A new vendor populates a <code>Dialect</code> and the compiler emits correct SQL with no compiler change.</li>
+<li><strong>Confidence intervals on <code>always-passes</code>.</strong> Surfacing "less than or equal to 3/N upper-bound failure rate at 95 percent confidence" (rule of three) on the decision record so reviewers can calibrate the always-pass verdict. Also covers great-expectations-style <code>mostly:</code> thresholds.</li>
+<li><strong>Historical always-pass evidence.</strong> Running candidate tests against multiple <code>run_results.json</code> snapshots to assert "never failed in last N runs." The Phase-1 plan considers this for the <code>failed-on-known-clean-data</code> evidence channel and defers to v0.2.</li>
+<li><strong>dbt-utils test types.</strong> <code>dbt_utils.unique_combination_of_columns</code>, <code>dbt_utils.accepted_range</code>, <code>dbt_utils.expression_is_true</code>, etc. The drafter's <code>CandidateTest</code> union has five variants — the four generic schema tests plus the <code>custom_sql</code> business-rule escape hatch (issue #116); the prune compiler compiles all five. The namespaced dbt-utils / dbt-expectations macros remain v0.2+ territory (a <code>custom_sql</code> test can express many of them by hand in the meantime).</li>
+<li><strong><code>where:</code> test modifier and <code>severity: warn</code> / <code>mostly:</code>.</strong> dbt-core supports a <code>where:</code> predicate on every test plus <code>severity</code> and <code>mostly</code> knobs; v0.1 prune does not consume any of these.</li>
+<li><strong><code>prune_decision_id</code>-keyed checkpoint / resumption.</strong> Long-running prune runs that resume from disk after a crash. v0.2.</li>
+<li><strong>LLM-generated rationale on <code>kept</code> decisions.</strong> The grader (#7) produces rubric-scored rationale; prune writes only the structured drop reason plus failure count plus scope.</li>
+</ul>
+<h2 id="cli-integration-note">CLI integration note</h2>
+<p>Tracked in <a href="https://github.com/wjduenow/SignalForge/issues/9">issue #9</a>.
+The <code>signalforge generate</code> CLI will load the prune config via
+<code>load_prune_config(...)</code> and invoke <code>prune_tests(...)</code> after the LLM
+draft completes; the diff renderer (#8) consumes the returned
+<code>PruneResult</code> to emit kept/dropped artifacts with their per-decision
+<code>why</code> lines (Architectural Commitment #5 — explainable diffs).</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

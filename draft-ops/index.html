@@ -1,0 +1,1842 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/draft-ops/">
+      
+      
+        <link rel="prev" href="../safety-ops/">
+      
+      
+        <link rel="next" href="../ingest-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>LLM Drafter - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#llm-draft-pipeline-operations-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              LLM Drafter
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api-surface" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API surface
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Public API surface">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#signalforgedraft__all__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge.draft.__all__
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforgellm__all__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge.llm.__all__
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#draftoutcome-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DraftOutcome shape
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#response-audit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Response audit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prompt-injection-mitigation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prompt-injection mitigation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#custom-business-rule-tests-custom_sql" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Custom business-rule tests (custom_sql)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Custom business-rule tests (custom_sql)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-a-custom_sql-test-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a custom_sql test is
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#authoring-rules-via-metasignalforgebusiness_rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Authoring rules via meta.signalforge.business_rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#numbered-envelope-shape-business_rule-idnbusiness_rule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Numbered envelope shape (&lt;BUSINESS_RULE id="N"&gt;…&lt;/BUSINESS_RULE&gt;)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api-surface" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API surface
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Public API surface">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#signalforgedraft__all__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge.draft.__all__
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#signalforgellm__all__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge.llm.__all__
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#draftoutcome-shape" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DraftOutcome shape
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#response-audit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Response audit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prompt-injection-mitigation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prompt-injection mitigation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#custom-business-rule-tests-custom_sql" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Custom business-rule tests (custom_sql)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Custom business-rule tests (custom_sql)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-a-custom_sql-test-is" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What a custom_sql test is
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#authoring-rules-via-metasignalforgebusiness_rules" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Authoring rules via meta.signalforge.business_rules
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#numbered-envelope-shape-business_rule-idnbusiness_rule" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Numbered envelope shape (&lt;BUSINESS_RULE id="N"&gt;…&lt;/BUSINESS_RULE&gt;)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="llm-draft-pipeline-operations-guide">LLM draft pipeline — operations guide</h1>
+<p>Operational reference for users of <code>signalforge.draft</code> and
+<code>signalforge.llm</code>. Companion to <a href="../safety-ops/"><code>docs/safety-ops.md</code></a>,
+<a href="../manifest-loader-ops/"><code>docs/manifest-loader-ops.md</code></a>, and
+<a href="../warehouse-adapter-ops/"><code>docs/warehouse-adapter-ops.md</code></a>, and to the
+design record in
+<a href="../plans/super/5-llm-draft-pipeline.md"><code>plans/super/5-llm-draft-pipeline.md</code></a>.</p>
+<h2 id="overview">Overview</h2>
+<p>The draft pipeline turns one dbt model into one <code>CandidateSchema</code> —
+the typed value the prune layer (#6) consumes — by issuing one LLM
+call. It sits <strong>after</strong> the safety layer (which produces the
+<code>LLMRequest</code>) and <strong>before</strong> prune / grade / diff render
+(#6 / #7 / #8). Two subpackages share the work (DEC-001):</p>
+<ul>
+<li><code>signalforge.llm</code> — the centralized, provider-neutral LLM seam. One
+  function, <code>call_llm</code>, owns the retry loop, backoff math, prompt-cache
+  pre-send checks, and the <code>LLMResult</code> value object; a pluggable
+  <code>LLMProvider</code> strategy (resolved from a process-level registry) owns
+  the vendor-specific request build, response extraction, and
+  exception classification (issue #135). The default provider is
+  <code>anthropic</code>; its SDK noise (type-stub gaps, lazy exception-class
+  import) stays confined to <code>signalforge.llm._anthropic_client</code>. No
+  other module imports the <code>anthropic</code> SDK.</li>
+<li><code>signalforge.draft</code> — the orchestration layer on top of that seam.
+  Owns the prompt builder, the JSON + anchor-contract parser, the
+  fail-closed response-audit JSONL writer, and the <code>draft_schema</code> /
+  <code>draft_from_request</code> entry points.</li>
+</ul>
+<p>The seam split keeps the SDK noise (type-stub gaps, retry plumbing,
+exception-class lazy-import) confined to one subpackage; the rest of
+the layer stays SDK-agnostic and pyright-clean.</p>
+<h2 id="public-api-surface">Public API surface</h2>
+<h3 id="signalforgedraft__all__"><code>signalforge.draft.__all__</code></h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>draft_schema</code></td>
+<td>function</td>
+<td><code>draft_schema(model, adapter, policy, manifest, *, config) -&gt; DraftOutcome</code>. End-to-end entry point: builds the safety-layer <code>LLMRequest</code>, renders the prompt, calls the LLM, parses, audits.</td>
+</tr>
+<tr>
+<td><code>draft_from_request</code></td>
+<td>function</td>
+<td><code>draft_from_request(request, model, manifest, *, config, audit_path) -&gt; DraftOutcome</code>. Same pipeline minus the safety-layer step; takes a pre-built <code>LLMRequest</code>.</td>
+</tr>
+<tr>
+<td><code>DraftOutcome</code></td>
+<td>model</td>
+<td>Frozen Pydantic value object: <code>(candidate, request, result)</code>. The thing every downstream stage receives.</td>
+</tr>
+<tr>
+<td><code>CandidateSchema</code></td>
+<td>model</td>
+<td>The parsed schema the LLM produced: <code>(name, description, columns, tests, …)</code>. Frozen, <code>extra="ignore"</code> for read-back tolerance.</td>
+</tr>
+<tr>
+<td><code>CandidateColumn</code></td>
+<td>model</td>
+<td>One column on a <code>CandidateSchema</code>: <code>(name, description, rationale, tests, meta)</code>.</td>
+</tr>
+<tr>
+<td><code>CandidateTest</code></td>
+<td>type</td>
+<td>Discriminated union over <code>not_null</code> / <code>unique</code> / <code>accepted_values</code> / <code>relationships</code> / <code>custom_sql</code> test variants. Discriminator: <code>type</code>.</td>
+</tr>
+<tr>
+<td><code>CandidateTestCustomSQL</code></td>
+<td>model</td>
+<td>The fifth variant (issue #116): a custom singular SQL business-rule test. Carries <code>sql</code> (a failing-rows SELECT), optional <code>column</code>, optional <code>rationale</code>. See <a href="#custom-business-rule-tests-custom_sql">§ Custom business-rule tests</a>.</td>
+</tr>
+<tr>
+<td><code>DraftConfig</code></td>
+<td>model</td>
+<td>Config-shaped (<code>extra="forbid"</code>) Pydantic model mirroring the <code>llm:</code> block of <code>signalforge.yml</code>.</td>
+</tr>
+<tr>
+<td><code>load_draft_config</code></td>
+<td>function</td>
+<td><code>load_draft_config(project_dir, path=None) -&gt; DraftConfig</code>. Mirrors <code>load_safety_config</code>.</td>
+</tr>
+<tr>
+<td><code>LLMResponseEvent</code></td>
+<td>model</td>
+<td>One JSONL audit record per LLM response. Fields are documented in <a href="#response-audit">§4</a>.</td>
+</tr>
+<tr>
+<td><code>DraftError</code></td>
+<td>exception</td>
+<td>Base class for every failure surface in this layer.</td>
+</tr>
+<tr>
+<td><code>LLMOutputError</code></td>
+<td>exception</td>
+<td>Base for parse-time failures (JSON / validation / anchor contract). Carries the bad-JSON envelope.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="signalforgellm__all__"><code>signalforge.llm.__all__</code></h3>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th>Kind</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>call_llm</code></td>
+<td>function</td>
+<td>The single provider-neutral LLM seam. Owns retry policy + cache pre-send check; selects an <code>LLMProvider</code> strategy by name (default <code>"anthropic"</code>). Returns <code>LLMResult</code>.</td>
+</tr>
+<tr>
+<td><code>LLMResult</code></td>
+<td>model</td>
+<td>Frozen result shape: <code>text_blocks</code>, <code>response_text</code>, token counts (input/output/cache_creation/cache_read), <code>model</code>, <code>prompt_version</code>, <code>raw_message</code>.</td>
+</tr>
+<tr>
+<td><code>LLMError</code></td>
+<td>exception</td>
+<td>Base class for everything in <code>signalforge.llm.errors</code>.</td>
+</tr>
+<tr>
+<td><code>LLMHelperError</code></td>
+<td>exception</td>
+<td>Umbrella for SDK-call failures. Subclasses cover the retry-taxonomy branches.</td>
+</tr>
+<tr>
+<td><code>LLMAuthError</code></td>
+<td>exception</td>
+<td>401 / 403 from the Anthropic API. No retry.</td>
+</tr>
+<tr>
+<td><code>LLMRateLimitError</code></td>
+<td>exception</td>
+<td>429 retry budget exhausted. Carries <code>attempts</code>.</td>
+</tr>
+<tr>
+<td><code>LLMServerError</code></td>
+<td>exception</td>
+<td>5xx retry budget exhausted.</td>
+</tr>
+<tr>
+<td><code>LLMConnectionError</code></td>
+<td>exception</td>
+<td>Connection / transport retry budget exhausted.</td>
+</tr>
+<tr>
+<td><code>LLMCacheTooLargeError</code></td>
+<td>exception</td>
+<td>Pre-send: cached block exceeds the SignalForge cap (8000 input tokens).</td>
+</tr>
+</tbody>
+</table>
+<p><code>LLMResponseFormatError</code> is exported from
+<code>signalforge.llm.errors</code> but not from the top-level <code>__all__</code>; reach
+for it via <code>from signalforge.llm.errors import LLMResponseFormatError</code>.</p>
+<h2 id="draftoutcome-shape"><code>DraftOutcome</code> shape</h2>
+<div class="highlight"><pre><span></span><code><span class="k">class</span><span class="w"> </span><span class="nc">DraftOutcome</span><span class="p">(</span><span class="n">BaseModel</span><span class="p">):</span>
+    <span class="n">candidate</span><span class="p">:</span> <span class="n">CandidateSchema</span>
+    <span class="n">request</span><span class="p">:</span> <span class="n">LLMRequest</span>
+    <span class="n">result</span><span class="p">:</span> <span class="n">LLMResult</span>
+</code></pre></div>
+<p>Three fields, each load-bearing for a different downstream stage:</p>
+<ul>
+<li><strong><code>candidate</code></strong> — the parsed <code>CandidateSchema</code> ready for the prune
+  step (#6). The prune layer iterates <code>candidate.columns[*].tests</code> and
+  <code>candidate.tests</code> to decide what to run against the warehouse.</li>
+<li><strong><code>request</code></strong> — the safety-layer <code>LLMRequest</code> that was sent to the
+  LLM. The audit log ties the request to a durable receipt; keeping
+  the typed object on the outcome lets prune cross-check
+  <code>columns_sent</code> / <code>redactions</code> without re-running the safety layer.</li>
+<li><strong><code>result</code></strong> — the typed <code>LLMResult</code> with token usage,
+  <code>prompt_version</code>, and <code>raw_message</code>. The grader (#7) reads
+  <code>result.prompt_version</code> for incident-response queries; the diff
+  renderer (#8) uses <code>result.cache_creation_input_tokens</code> /
+  <code>result.cache_read_input_tokens</code> to surface cache economics in the
+  per-run summary.</li>
+</ul>
+<p><code>DraftOutcome</code> is <code>frozen=True, extra="ignore"</code>: downstream stages
+hold an outcome without worrying about post-construction mutation,
+and forward-compat field additions don't break older readers.</p>
+<h2 id="response-audit">Response audit</h2>
+<blockquote>
+<p><strong>Consumer guide.</strong> For cross-stage joins, <code>jq</code> / pandas worked examples,
+the forward-compat policy, and the redaction surface, see
+<a href="../audits/"><code>docs/audits.md</code></a>. This section is the draft-layer
+production contract.</p>
+</blockquote>
+<p>Path: <code>audit_path.with_name("llm_responses.jsonl")</code> — adjacent to the
+safety layer's <code>audit.jsonl</code>. Both audit streams share a parent
+directory so the privacy boundary is uniform (DEC-006).</p>
+<p>One JSONL record per successful LLM call. The writer mirrors
+<code>signalforge.safety.audit</code> exactly: serialise → size-check (BEFORE any
+file open) → <code>mkdir -p</code> parent at <code>0o700</code> → <code>os.open</code> with
+<code>O_APPEND | O_CREAT | 0o600</code> → single <code>os.write</code> → <code>os.fsync</code> → close.</p>
+<p><code>LLMResponseEvent</code> fields:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>timestamp</code></td>
+<td>ISO 8601 datetime</td>
+<td>UTC timestamp of the response.</td>
+</tr>
+<tr>
+<td><code>model_unique_id</code></td>
+<td>string</td>
+<td>dbt unique_id of the drafted model.</td>
+</tr>
+<tr>
+<td><code>prompt_version</code></td>
+<td>16 hex chars</td>
+<td>Deterministic blake2b digest of the prompt template content. See <a href="#prompt_version-cross-reference">§9</a>.</td>
+</tr>
+<tr>
+<td><code>response_text_hash</code></td>
+<td>16 hex chars</td>
+<td>blake2b digest of the LLM's raw response text. Reviewers correlate to a captured response by re-hashing the cleartext.</td>
+</tr>
+<tr>
+<td><code>parsed_schema_hash</code></td>
+<td>16 hex chars</td>
+<td>blake2b digest of the canonicalised parsed <code>CandidateSchema</code> (sorted keys via <code>json.dumps</code>).</td>
+</tr>
+<tr>
+<td><code>sent_sql_hash</code></td>
+<td>16 hex chars</td>
+<td>blake2b digest of the model SQL placed in the <code>&lt;MODEL_SQL&gt;</code> envelope. Detects prompt drift between runs.</td>
+</tr>
+<tr>
+<td><code>cache_creation_input_tokens</code></td>
+<td>integer</td>
+<td>Tokens charged at 1.25× input pricing for cache writes.</td>
+</tr>
+<tr>
+<td><code>cache_read_input_tokens</code></td>
+<td>integer</td>
+<td>Tokens charged at 0.1× input pricing for cache reads.</td>
+</tr>
+<tr>
+<td><code>input_tokens</code></td>
+<td>integer</td>
+<td>Total input tokens billed.</td>
+</tr>
+<tr>
+<td><code>output_tokens</code></td>
+<td>integer</td>
+<td>Total output tokens billed.</td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td>string</td>
+<td>The Anthropic model id used (e.g. <code>claude-sonnet-4-6</code>).</td>
+</tr>
+<tr>
+<td><code>signalforge_version</code></td>
+<td>PEP-440 version</td>
+<td>The package version that produced the record. Read from <code>signalforge.__version__</code> at write time.</td>
+</tr>
+<tr>
+<td><code>audit_schema_version</code></td>
+<td>integer</td>
+<td>Audit shape version. Currently <code>1</code>. Bump when the JSONL schema evolves; v0.2 readers gate on this.</td>
+</tr>
+</tbody>
+</table>
+<p>Storing hashes (not cleartext) keeps individual records under the
+POSIX-atomic-append cap (<code>_RESPONSE_AUDIT_RECORD_LIMIT_BYTES = 4000</code>)
+and avoids re-emitting whatever PII the LLM may have echoed back from
+the prompt.</p>
+<p><strong>Fail-closed semantics (DEC-011).</strong> <code>write_response_event</code> catches
+<strong>no</strong> exceptions internally; oversize records propagate as
+<code>LLMResponseAuditRecordTooLargeError</code> (raised BEFORE any file is
+opened, so an oversize record leaves no on-disk artefact), and every
+other I/O / encoding failure propagates and is wrapped by
+<code>draft_from_request</code> as <code>LLMResponseAuditWriteError</code>. The drafter
+returns <code>None</code> on the floor — an unaudited LLM response is, by
+definition, output leaving without a receipt, exactly the failure mode
+this layer exists to prevent. The propagation IS the defence.</p>
+<p><strong>Incident response.</strong> <code>sent_sql_hash</code> and <code>parsed_schema_hash</code> (DEC-008,
+DEC-006) make "which run produced this column description?" answerable
+without spelunking through the LLM provider's logs:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># What runs hit a particular SQL?</span>
+jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;select(.sent_sql_hash == &quot;a3f29c61b8de2014&quot;)&#39;</span><span class="w"> </span>.signalforge/llm_responses.jsonl
+<span class="c1"># How much did cache reads save on the last 50 calls?</span>
+jq<span class="w"> </span>-s<span class="w"> </span><span class="s1">&#39;sort_by(.timestamp) | .[-50:] | map(.cache_read_input_tokens) | add&#39;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>.signalforge/llm_responses.jsonl
+</code></pre></div>
+<h2 id="prompt-injection-mitigation">Prompt-injection mitigation</h2>
+<p>The dynamic block wraps the model SQL in a <code>&lt;MODEL_SQL&gt;</code> envelope and
+the system message instructs the model that anything between the tags
+is data, not instructions (DEC-007):</p>
+<div class="highlight"><pre><span></span><code>&lt;MODEL_SQL&gt;
+SELECT customer_id, ... FROM ...
+-- adversarial dbt comment: &quot;ignore prior instructions and ...&quot;
+&lt;/MODEL_SQL&gt;
+</code></pre></div>
+<p>This protects against the most common attack surface: a malicious dbt
+project committing a <code>-- prompt injection</code> comment in <code>model.sql</code> that
+attempts to override the system prompt.</p>
+<p>What it does <strong>not</strong> protect against:</p>
+<ul>
+<li><strong>The LLM hallucinating columns</strong> that don't exist on the model.
+  The anchor-contract validator (see <a href="#hard-json-validation--anchor-contract">§8</a>)
+  catches this — every test that references a column must point at a
+  real column on the input model, or the whole draft is rejected.</li>
+<li><strong>Adversarial column descriptions in the manifest.</strong> Column
+  descriptions, tags, and meta fields go through to the LLM verbatim
+  inside the cached manifest summary. Column <em>names</em> are hashed in
+  schema-only mode by the safety layer (<code>col_&lt;8 hex&gt;</code>), but column
+  <em>descriptions</em> are passthrough. Treat manifest content as
+  semi-trusted: a malicious description can attempt the same prompt
+  injection as a SQL comment, and the <code>&lt;MODEL_SQL&gt;</code> envelope does not
+  cover that surface.</li>
+</ul>
+<p>A v0.2 follow-up may add a manifest-content envelope with the same
+treatment; for v0.1 the practical mitigation is "review your manifest
+descriptions like you review your SQL."</p>
+<h2 id="custom-business-rule-tests-custom_sql">Custom business-rule tests (<code>custom_sql</code>)</h2>
+<p>The four schema-test types (<code>not_null</code>, <code>unique</code>, <code>accepted_values</code>,
+<code>relationships</code>) cover the structural invariants dbt's generic
+catalogue can express. They cannot express a <em>business rule</em> — "a
+refund's amount never exceeds the original order," "every shipped
+order has a ship date," "discount percent stays between 0 and 100."
+The fifth test variant, <code>custom_sql</code> (issue #116), is the escape hatch:
+a free-form <strong>singular</strong> SQL test the drafter authors per dbt's
+singular-test convention.</p>
+<h3 id="what-a-custom_sql-test-is">What a <code>custom_sql</code> test is</h3>
+<p><code>CandidateTestCustomSQL</code> carries:</p>
+<ul>
+<li><strong><code>sql</code></strong> — the complete failing-rows SELECT. Per dbt's singular-test
+  contract, the query returns the rows that <strong>violate</strong> the rule: a
+  non-empty result means the test failed. (Zero rows = pass.) This
+  mirrors how the four built-in variants compile to an inner
+  failing-rows SELECT — the prune adapter wraps every test in
+  <code>SELECT COUNT(*) AS failures FROM (&lt;sql&gt;) AS t</code>.</li>
+<li><strong><code>column</code></strong> — optional. A non-empty string scopes the rule to one
+  column (and the test renders as <code>test.column.&lt;col&gt;.custom_sql</code> in the
+  diff / grade artifact ids); <code>null</code> (the default) marks a model-level
+  business-rule assertion.</li>
+<li><strong><code>rationale</code></strong> — optional one-line "why," surfaced in the diff.</li>
+</ul>
+<p>Like the four built-ins, <code>custom_sql</code> <strong>can</strong> be excluded via
+<code>DraftConfig.exclude_tests</code> — it is a member of <code>VALID_TEST_TYPES</code>
+(US-021). When <code>"custom_sql"</code> is in <code>exclude_tests</code>,
+<code>_render_system_prompt</code> omits its JSON-shape illustration and drops it
+from the <code>### SCOPE</code> line, so a cooperative LLM never proposes one; if
+the LLM defies that, the parser's anchor-contract check rejects the
+<code>custom_sql</code> candidate (defence in depth — prompt + parser). Otherwise
+the system prompt appends the <code>custom_sql</code> JSON-shape illustration after
+the (possibly filtered) four standard entries.</p>
+<h3 id="authoring-rules-via-metasignalforgebusiness_rules">Authoring rules via <code>meta.signalforge.business_rules</code></h3>
+<p>You steer the drafter toward specific rules by declaring them in your
+dbt model's <code>meta</code>. The drafter reads <code>meta.signalforge.business_rules</code>
+at <strong>both</strong> the column level (<code>columns[*].meta.signalforge</code>) and the
+model level (<code>config.meta.signalforge</code>). The value accepts two shapes:</p>
+<ul>
+<li><strong>A single natural-language string:</strong></li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="nt">models</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">dim_customers</span>
+<span class="w">    </span><span class="nt">config</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">meta</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">signalforge</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">business_rules</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;lifetime_value</span><span class="nv"> </span><span class="s">must</span><span class="nv"> </span><span class="s">never</span><span class="nv"> </span><span class="s">be</span><span class="nv"> </span><span class="s">negative&quot;</span>
+<span class="w">    </span><span class="nt">columns</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">discount_pct</span>
+<span class="w">        </span><span class="nt">meta</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">signalforge</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">business_rules</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;discount_pct</span><span class="nv"> </span><span class="s">stays</span><span class="nv"> </span><span class="s">between</span><span class="nv"> </span><span class="s">0</span><span class="nv"> </span><span class="s">and</span><span class="nv"> </span><span class="s">100</span><span class="nv"> </span><span class="s">inclusive&quot;</span>
+</code></pre></div>
+<ul>
+<li><strong>A list of rules:</strong></li>
+</ul>
+<div class="highlight"><pre><span></span><code><span class="nt">config</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">meta</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">signalforge</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">business_rules</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;total_amount</span><span class="nv"> </span><span class="s">equals</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">sum</span><span class="nv"> </span><span class="s">of</span><span class="nv"> </span><span class="s">line-item</span><span class="nv"> </span><span class="s">amounts&quot;</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;every</span><span class="nv"> </span><span class="s">order</span><span class="nv"> </span><span class="s">with</span><span class="nv"> </span><span class="s">status=&#39;shipped&#39;</span><span class="nv"> </span><span class="s">has</span><span class="nv"> </span><span class="s">a</span><span class="nv"> </span><span class="s">non-null</span><span class="nv"> </span><span class="s">ship_date&quot;</span>
+</code></pre></div>
+<p>When any rules are present, the drafter renders a <code>## BUSINESS RULES</code>
+section into the prompt's data block (model-level rules first, then
+per-column rules, columns sorted by name for byte-stable prompts;
+duplicate rule strings are de-duplicated) and instructs the LLM to
+draft <strong>one <code>custom_sql</code> test per stated rule</strong>, translating each
+natural-language rule into a failing-rows SELECT.</p>
+<p>Business-rule reading is <strong>best-effort, never fail-loud.</strong> A
+<code>business_rules</code> value that isn't a <code>str</code> or <code>list</code> (a number, a
+<code>dict</code>, <code>None</code>) yields no rules — the drafter still runs, and the
+inferred-fallback path below covers the gap. Whitespace-only strings
+collapse to nothing, so an empty <code>meta</code> value emits no section.</p>
+<h3 id="numbered-envelope-shape-business_rule-idnbusiness_rule">Numbered envelope shape (<code>&lt;BUSINESS_RULE id="N"&gt;…&lt;/BUSINESS_RULE&gt;</code>)</h3>
+<p>As of #163, each rule renders inside a numbered envelope rather than a
+bare bullet:</p>
+<div class="highlight"><pre><span></span><code>## BUSINESS RULES
+
+Operator-supplied business rules for this model. Draft one custom_sql
+test per rule below, using the rule ID as a reference:
+
+&lt;BUSINESS_RULE id=&quot;1&quot;&gt;
+  (model) total_amount must never be negative
+&lt;/BUSINESS_RULE&gt;
+&lt;BUSINESS_RULE id=&quot;2&quot;&gt;
+  (column discount_pct) discount_pct stays between 0 and 100 inclusive
+&lt;/BUSINESS_RULE&gt;
+</code></pre></div>
+<p>IDs start at 1; bodies are indented 2 spaces and carry the existing
+<code>(model)</code> / <code>(column X)</code> scope prefix. The envelope gives the LLM
+unambiguous reference targets and parallels the existing <code>&lt;MODEL_SQL&gt;</code>
+fence around the model's raw SQL.</p>
+<p><strong>Envelope-breach guard.</strong> A rule body containing the literal
+<code>&lt;/BUSINESS_RULE&gt;</code> substring would terminate the fence early and let
+downstream content escape the data block. Before rendering, the
+drafter scans every rule for that exact substring (boring substring
+match — no whitespace / case normalisation, mirrors the <code>&lt;/MODEL_SQL&gt;</code>
+precedent) and raises <code>PromptEnvelopeBreachError(envelope="BUSINESS_RULE",
+rule_index=N)</code> if found. <strong>The opening tag <code>&lt;BUSINESS_RULE&gt;</code> alone
+is fine</strong> (only the closing tag breaks the fence), as is any truncated
+fragment like `</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

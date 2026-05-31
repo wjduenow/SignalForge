@@ -1,0 +1,1756 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/llm-providers-ops/">
+      
+      
+        <link rel="prev" href="../diff-ops/">
+      
+      
+        <link rel="next" href="../cost-estimate-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>LLM Providers - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#llm-usage-providers" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              LLM Providers
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="llm-usage-providers">LLM usage &amp; providers</h1>
+<p>Where SignalForge calls an LLM, which providers are supported, and
+how to pick one. The deep-dive companion to the brief mention in
+<a href="../README.md">the README</a> and the per-stage ops references
+(<a href="../draft-ops/"><code>draft-ops.md</code></a>, <a href="../grade-ops/"><code>grade-ops.md</code></a>,
+<a href="../cost-estimate-ops/"><code>cost-estimate-ops.md</code></a>).</p>
+<blockquote>
+<p>Issue <a href="https://github.com/wjduenow/SignalForge/issues/134">#134</a>
+shipped the pluggable provider epic
+(<a href="https://github.com/wjduenow/SignalForge/issues/135">#135</a> +
+<a href="https://github.com/wjduenow/SignalForge/issues/136">#136</a> +
+<a href="https://github.com/wjduenow/SignalForge/issues/137">#137</a>). Before</p>
+<h1 id="134-the-llm-seam-was-anthropic-only">134, the LLM seam was Anthropic-only.</h1>
+</blockquote>
+<h2 id="where-llms-are-and-arent-used">Where LLMs are (and aren't) used</h2>
+<p>SignalForge is a five-stage pipeline; exactly <strong>two</strong> stages issue
+LLM calls:</p>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Module</th>
+<th>LLM calls per <code>signalforge generate &lt;model&gt;</code></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Manifest loader</strong></td>
+<td><code>signalforge.manifest</code></td>
+<td>0 — deterministic JSON parse.</td>
+</tr>
+<tr>
+<td><strong>Safety layer</strong></td>
+<td><code>signalforge.safety</code></td>
+<td>0 — redacts PII before the drafter ever runs.</td>
+</tr>
+<tr>
+<td><strong>Drafter</strong></td>
+<td><code>signalforge.draft</code></td>
+<td><strong>1</strong> — drafts <code>schema.yml</code> + tests + docs from the model SQL.</td>
+</tr>
+<tr>
+<td><strong>Prune engine</strong></td>
+<td><code>signalforge.prune</code></td>
+<td>0 — compiles candidate tests to SQL, runs them against the warehouse.</td>
+</tr>
+<tr>
+<td><strong>Grader</strong></td>
+<td><code>signalforge.grade</code></td>
+<td><strong>N × M</strong> — one judge call per <code>(artifact × rubric criterion)</code>. Default 4 criteria; ~12 artifacts on a typical staging model → ~48 calls.</td>
+</tr>
+<tr>
+<td><strong>Diff renderer</strong></td>
+<td><code>signalforge.diff</code></td>
+<td>0 — renders the kept/dropped/flagged tier table + unified diff.</td>
+</tr>
+<tr>
+<td><strong>Ingest layer</strong></td>
+<td><code>signalforge.ingest</code></td>
+<td>0 — reads existing <code>schema.yml</code> / <code>tests/*.sql</code> for <code>prune-existing</code>.</td>
+</tr>
+</tbody>
+</table>
+<p><code>signalforge prune-existing</code> issues <strong>zero</strong> LLM calls — it skips the
+drafter and the grader entirely and runs warehouse-only pruning over
+your already-authored tests.</p>
+<p><code>signalforge lint</code> issues zero LLM calls and makes no warehouse
+calls — it loads <code>signalforge.yml</code> and the dbt manifest and reports
+typos / missing keys offline.</p>
+<p><code>signalforge generate --estimate</code> issues a small number of cheap
+calls per provider to project cost (one <code>count_tokens</code> per prompt,
+plus a warehouse <code>dryRun</code>); the full <code>messages.create</code> call is never
+invoked. See <a href="../cost-estimate-ops/"><code>cost-estimate-ops.md</code></a>.</p>
+<h3 id="two-independent-provider-knobs">Two independent provider knobs</h3>
+<p>The drafter and grader resolve their providers separately:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># signalforge.yml</span>
+<span class="nt">llm</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">anthropic</span><span class="w">       </span><span class="c1"># drafter — one call per `generate` run</span>
+<span class="nt">grade</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span><span class="w">          </span><span class="c1"># grader — N × M calls per `generate` run</span>
+</code></pre></div>
+<p>Common pattern: <strong>Anthropic drafter, Gemini grader</strong> — the drafter
+call benefits from Anthropic's prompt caching (the cached manifest
+summary is read across siblings within a <code>--select</code> batch), while the
+grader fan-out runs against Gemini's cheaper per-token rates. See
+<a href="#choosing-a-provider">Choosing a provider</a> below.</p>
+<h2 id="the-provider-neutral-seam">The provider-neutral seam</h2>
+<p>Issue <a href="https://github.com/wjduenow/SignalForge/issues/135">#135</a>
+replaced the Anthropic-bound <code>call_anthropic</code> helper with a
+provider-neutral <code>call_llm</code> orchestrator. The shape:</p>
+<div class="highlight"><pre><span></span><code>signalforge.llm
+├── client.py            — call_llm (retry loop, backoff, budgets, logs, LLMResult assembly)
+├── providers.py         — LLMProvider ABC + register_provider + provider_for
+├── _anthropic_client.py — SDK shim; every `# pyright: ignore` for anthropic confined here
+├── _openai_client.py    — SDK shim; every `# pyright: ignore` for openai + tiktoken confined here
+├── _gemini_client.py    — SDK shim; every `# pyright: ignore` for google-genai confined here
+└── cost/                — pricing table + `rollup_audit_dir` for post-run USD tallies
+</code></pre></div>
+<p><code>call_llm</code> owns the generic machinery — retry loop with
+<code>(2 ** attempt) * uniform(0.75, 1.25)</code> backoff, per-class budgets,
+WARNING/INFO logs, <code>LLMResult</code> assembly. It dispatches the
+vendor-specific bits (request shape, response parsing, exception
+classification, token counting) to an <code>LLMProvider</code> strategy
+resolved from the registry. Capability flags
+(<code>supports_prompt_caching</code>, <code>supports_token_count</code>) govern whether
+the orchestrator attaches a <code>cache_control</code> marker or runs the
+pre-send <code>count_tokens</code> gate.</p>
+<p>Adding a fourth provider is a one-file shim + a <code>LLMProvider</code>
+subclass + <code>register_provider("&lt;name&gt;", &lt;class&gt;)</code>. The drafter and
+grader pick it up automatically; no edits to <code>call_llm</code>, no edits to
+<code>DraftConfig</code>/<code>GradeConfig</code> (provider is a registry-validated <code>str</code>,
+not a <code>Literal</code>). See <a href="#adding-a-provider">Adding a provider</a> below.</p>
+<h2 id="capability-matrix">Capability matrix</h2>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>Anthropic</th>
+<th>OpenAI</th>
+<th>Gemini</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Install</strong></td>
+<td>base (<code>pip install signalforge-dbt</code>)</td>
+<td><code>pip install signalforge-dbt[openai]</code></td>
+<td><code>pip install signalforge-dbt[gemini]</code></td>
+</tr>
+<tr>
+<td><strong>Env var</strong></td>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td><code>OPENAI_API_KEY</code></td>
+<td><code>GOOGLE_API_KEY</code></td>
+</tr>
+<tr>
+<td><strong>Drafter (<code>llm.provider</code>)</strong></td>
+<td>✅ default</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong>Grader (<code>grade.provider</code>)</strong></td>
+<td>✅ default</td>
+<td>✅</td>
+<td>✅</td>
+</tr>
+<tr>
+<td><strong><code>--estimate</code> integration</strong></td>
+<td>✅ live <code>messages.count_tokens</code></td>
+<td>✅ local <code>tiktoken</code></td>
+<td>✅ live <code>models.count_tokens</code></td>
+</tr>
+<tr>
+<td><strong>Prompt caching</strong></td>
+<td>✅ <code>cache_control</code> (5m / 1h tiers)</td>
+<td>❌ no Chat Completions caching tier</td>
+<td>❌ explicit caching deferred</td>
+</tr>
+<tr>
+<td><strong>Server-side JSON mode</strong></td>
+<td>n/a (Anthropic parser tolerant)</td>
+<td>✅ <code>response_format={"type":"json_object"}</code></td>
+<td>✅ <code>response_mime_type="application/json"</code></td>
+</tr>
+<tr>
+<td><strong>Pre-send <code>count_tokens</code> gate</strong></td>
+<td>✅</td>
+<td>❌ (no SDK token-count API)</td>
+<td>❌ (deferred — Gemini has the API but we don't gate on it for cache parity)</td>
+</tr>
+<tr>
+<td><strong><code>cache_ttl</code> config</strong></td>
+<td>honoured (<code>"5m"</code> / <code>"1h"</code>)</td>
+<td>silently ignored</td>
+<td>silently ignored</td>
+</tr>
+<tr>
+<td><strong>Default model</strong></td>
+<td><code>claude-sonnet-4-6</code> (drafter + grader)</td>
+<td><code>gpt-4o</code></td>
+<td>drafter unset; grader <code>gemini-2.5-flash</code></td>
+</tr>
+<tr>
+<td><strong>Live smoke marker</strong></td>
+<td><code>@pytest.mark.anthropic</code></td>
+<td><code>@pytest.mark.openai</code></td>
+<td><code>@pytest.mark.gemini</code></td>
+</tr>
+<tr>
+<td><strong>Live smoke env</strong></td>
+<td><code>ANTHROPIC_API_KEY</code></td>
+<td><code>SF_RUN_OPENAI=1</code> + <code>OPENAI_API_KEY</code></td>
+<td><code>SF_RUN_GEMINI=1</code> + <code>GOOGLE_API_KEY</code></td>
+</tr>
+</tbody>
+</table>
+<p>A <code>❌</code> on prompt caching does <strong>not</strong> mean the provider is unusable —
+it means every drafter call ships the full system + cached_block
+without a read discount. For a one-call-per-<code>generate</code> drafter this
+is modest; for the multi-call grader, budget per-call input-token
+spend at full rates.</p>
+<h2 id="supported-providers">Supported providers</h2>
+<h3 id="anthropic-default">Anthropic (default)</h3>
+<p>The shipped default for both stages. No extra install; set
+<code>ANTHROPIC_API_KEY</code> and SignalForge runs out of the box.</p>
+<ul>
+<li><strong>Default models:</strong> <code>claude-sonnet-4-6</code> (drafter + grader),
+  <code>claude-haiku-4-5-20251001</code> (drafter <code>cheap_model</code>).</li>
+<li><strong>Prompt caching:</strong> active. Drafter caches the manifest summary
+  block; grader caches the rubric criterion list. <code>cache_ttl: 1h</code>
+  opts into the <code>extended-cache-ttl-2025-04-11</code> beta header. The
+  drafter's cached prefix is amortised across siblings within a
+  single <code>--select</code> batch but <strong>NOT</strong> across process boundaries —
+  the cache lives in Anthropic's infrastructure.</li>
+<li><strong><code>--estimate</code>:</strong> one live <code>messages.count_tokens</code> round-trip per
+  prompt. Reports a billing ceiling.</li>
+<li><strong>Pricing SKUs:</strong> <code>claude-sonnet-4-6</code>, <code>claude-opus-4-7</code>,
+  <code>claude-haiku-4-5</code> (4-tier rate: input / output / cache-write 5m /
+  cache-read).</li>
+<li><strong>Reference:</strong> <a href="../draft-ops/"><code>docs/draft-ops.md</code></a> for the drafter
+  configuration block, retry taxonomy, and prompt-injection
+  envelope. <a href="../grade-ops/"><code>docs/grade-ops.md</code></a> for the grader's
+  per-criterion fan-out and the <code>&lt;ARTIFACT&gt;</code> envelope.</li>
+</ul>
+<h3 id="openai">OpenAI</h3>
+<p>Registered by issue
+<a href="https://github.com/wjduenow/SignalForge/issues/136">#136</a>. Select
+via <code>llm.provider: openai</code> and/or <code>grade.provider: openai</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># signalforge.yml</span>
+<span class="nt">llm</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openai</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gpt-4o</span><span class="w">            </span><span class="c1"># default; any model id the SDK accepts is allowed</span>
+<span class="w">  </span><span class="nt">max_output_tokens</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4096</span>
+<span class="nt">grade</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openai</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gpt-4o</span>
+</code></pre></div>
+<ul>
+<li><strong>Install:</strong> <code>pip install signalforge-dbt[openai]</code> — pulls
+  <code>openai&gt;=1.40,&lt;3.0</code> plus <code>tiktoken</code> for local <code>--estimate</code> token
+  counting.</li>
+<li><strong>Env var:</strong> <code>OPENAI_API_KEY</code>.</li>
+<li><strong>Prompt caching:</strong> none. <code>OpenAIProvider.supports_prompt_caching</code>
+  is <code>False</code>; the orchestrator skips the <code>cache_control</code> marker and
+  the pre-send <code>count_tokens</code> gate. <code>cache_ttl</code> in <code>signalforge.yml</code>
+  is accepted but silently ignored. The grader's 48-call fan-out
+  ships the full system + rubric block on every call.</li>
+<li><strong>Server-side JSON:</strong> active. <code>OpenAIProvider.build_create_kwargs</code>
+  attaches <code>response_format={"type": "json_object"}</code>; the tolerant
+  <code>extract_json_payload</code> parser remains as defence-in-depth.</li>
+<li><strong><code>--estimate</code>:</strong> local <code>tiktoken</code> (no extra API round-trip per
+  count). <code>tiktoken.encoding_for_model(model)</code> with a graceful
+  <code>cl100k_base</code> fallback for unknown ids.</li>
+<li><strong>Pricing SKUs:</strong> <code>gpt-4o</code>, <code>gpt-4o-mini</code>, <code>gpt-4.1</code>, <code>gpt-4-turbo</code>
+  (cache fields zero — no discount tier).</li>
+<li><strong><code>.messages.create</code> adapter:</strong> OpenAI's SDK exposes
+  <code>client.chat.completions.create(...)</code>; the SignalForge shim wraps
+  it in a <code>_OpenAIClientAdapter.messages</code> namespace so the
+  orchestrator's vendor-neutral call shape (<code>llm_client.messages.create(...)</code>)
+  works unchanged.</li>
+<li><strong>Reference:</strong> <a href="../draft-ops/#openai-provider"><code>docs/draft-ops.md</code> § OpenAI provider</a>
+  · <a href="../grade-ops/#openai-provider"><code>docs/grade-ops.md</code> § OpenAI provider</a>
+  · <a href="../cost-estimate-ops/#openai-provider--openai-install-extra"><code>docs/cost-estimate-ops.md</code> § OpenAI provider</a>.</li>
+</ul>
+<h3 id="google-gemini">Google Gemini</h3>
+<p>Registered by issue
+<a href="https://github.com/wjduenow/SignalForge/issues/137">#137</a>. Select
+via <code>llm.provider: gemini</code> and/or <code>grade.provider: gemini</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># signalforge.yml</span>
+<span class="nt">llm</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini-2.5-flash</span><span class="w">    </span><span class="c1"># mid-tier; gemini-2.5-pro and gemini-2.0-flash are also registered</span>
+<span class="w">  </span><span class="nt">max_output_tokens</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4096</span><span class="w">    </span><span class="c1"># see Gemini truncation note below</span>
+<span class="nt">grade</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini-2.5-flash</span>
+<span class="w">  </span><span class="nt">max_output_tokens</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">4096</span>
+</code></pre></div>
+<ul>
+<li><strong>Install:</strong> <code>pip install signalforge-dbt[gemini]</code> — pulls
+  <code>google-genai&gt;=0.5,&lt;1</code>.</li>
+<li><strong>Env var:</strong> <code>GOOGLE_API_KEY</code> (read by the SDK; SignalForge never
+  logs it).</li>
+<li><strong>Prompt caching:</strong> none. v0.3 ships without Anthropic-style prompt
+  caching (<code>supports_prompt_caching=False</code>). Explicit Gemini context
+  caching is a tracked follow-up.</li>
+<li><strong>Server-side JSON:</strong> active.
+  <code>GeminiProvider.build_create_kwargs</code> sets
+  <code>response_mime_type="application/json"</code> on the
+  <code>GenerateContentConfig</code>.</li>
+<li><strong><code>--estimate</code>:</strong> native <code>client.models.count_tokens(...)</code> — one
+  extra API round-trip per estimate call. Distinct from OpenAI's
+  local <code>tiktoken</code> path because Gemini has no equivalent client-side
+  BPE.</li>
+<li><strong>Pricing SKUs:</strong> <code>gemini-2.5-pro</code> (flagship, base ≤200K-context
+  tier), <code>gemini-2.5-flash</code> (mid-tier; default judge),
+  <code>gemini-2.0-flash</code> (budget). Cache fields zero.</li>
+<li><strong><code>.messages.create</code> adapter:</strong> <code>google-genai</code>'s native surface is
+  <code>client.models.generate_content(...)</code>; the SignalForge shim wraps
+  it in a <code>_GeminiClientAdapter.messages</code> namespace so the
+  orchestrator's call shape is unchanged. The SDK ships as a
+  namespace package (<code>from google import genai</code>), confined by an AST
+  scan to <code>_gemini_client.py</code> only.</li>
+<li><strong>Truncation / non-clean finish_reason handling:</strong>
+  <code>LLMProvider.is_clean_completion(response)</code> (issue
+  <a href="https://github.com/wjduenow/SignalForge/issues/155">#155</a>)
+  raises <code>LLMResponseFormatError</code> when Gemini's <code>finish_reason</code> is
+  anything but <code>STOP</code> — including <code>MAX_TOKENS</code> with partial text,
+  <code>SAFETY</code>, <code>RECITATION</code>, <code>OTHER</code>. The grader wraps the result as
+  <code>GradeLLMError</code> and degrades the affected pair to
+  <code>score=None, passed=False, reasoning="call failed: GradeLLMError: &lt;inner finish_reason message&gt;"</code>.
+  The aggregate <code>GradingReport.aggregate_complete=False</code> flags the
+  partial report.</li>
+<li><strong>Recommended <code>max_output_tokens</code> floor: 4096.</strong> Gemini's
+  reasoning style is verbose; smaller ceilings observed truncating
+  mid-string (issue <a href="https://github.com/wjduenow/SignalForge/issues/155">#155</a>
+  DEC-008, issue <a href="https://github.com/wjduenow/SignalForge/issues/158">#158</a>).
+  Treat the figure as fixture-scale-dependent: validate with a full
+  run and bump if any pair degrades.</li>
+<li><strong>Reference:</strong> <a href="../draft-ops/#gemini-provider"><code>docs/draft-ops.md</code> § Gemini provider</a>
+  · <a href="../grade-ops/#gemini-provider"><code>docs/grade-ops.md</code> § Gemini provider</a>
+  · <a href="../cost-estimate-ops/"><code>docs/cost-estimate-ops.md</code></a> for Gemini's
+  <code>count_tokens</code> integration.</li>
+</ul>
+<h2 id="prompt-caching-what-it-is-and-why-providers-differ">Prompt caching — what it is and why providers differ</h2>
+<p>The capability matrix marks Anthropic with a ✅ for prompt caching
+and OpenAI / Gemini with a ❌. That's the most consequential row in
+the table for anyone budgeting a real workload, so it earns its own
+section.</p>
+<h3 id="what-prompt-caching-is-business-framing">What prompt caching is (business framing)</h3>
+<p>Every LLM call bills you for <strong>every input token, every time</strong> —
+even if 90% of the prompt is boilerplate you sent five seconds ago
+on the previous call. Prompt caching is the provider's offer: tell
+me which chunk of the prompt is the <em>stable prefix</em>, I'll fingerprint
+it on my side, and on subsequent calls within a TTL window I'll
+charge you a steep discount on those tokens instead of the full
+input rate.</p>
+<p>Anthropic's published rates for <code>claude-sonnet-4-6</code> (SignalForge's
+default; the figures live in
+<a href="https://github.com/wjduenow/SignalForge/blob/dev/src/signalforge/llm/pricing.py"><code>signalforge/llm/pricing.py</code></a>):</p>
+<table>
+<thead>
+<tr>
+<th>Token class</th>
+<th>Rate (USD / Mtok)</th>
+<th>vs. full input</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Full input</td>
+<td>$3.00</td>
+<td>baseline</td>
+</tr>
+<tr>
+<td>Cache <strong>write</strong> (first call seeds the cache)</td>
+<td>$3.75</td>
+<td>25% premium</td>
+</tr>
+<tr>
+<td>Cache <strong>read</strong> (later calls within TTL hit the cache)</td>
+<td>$0.30</td>
+<td>90% discount</td>
+</tr>
+</tbody>
+</table>
+<p>You pay a small premium once to seed the cache, then 10¢ on the
+dollar for every read. Break-even is roughly one follow-up call;
+from the 2nd call onward you're saving money.</p>
+<h3 id="where-this-matters-in-signalforge">Where this matters in SignalForge</h3>
+<ul>
+<li><strong>Drafter</strong> — one LLM call per <code>signalforge generate</code> invocation.
+  The cached prefix is the system prompt + the manifest summary.
+  Inside a single <code>--select</code> batch of 20 models, calls 2–20 hit the
+  cache. Modest but real savings.</li>
+<li><strong>Grader</strong> — ~48 LLM calls on a typical model (~12 artifacts × 4
+  rubric criteria; see
+  <a href="../grade-ops/"><code>grade-ops.md</code> § One LLM call per artifact × criterion</a>).
+  The cached prefix is the rubric criterion list. Once per run the
+  rubric is "written" to the cache; the other ~47 calls "read" it
+  at 90% off. This is where prompt caching pays for itself
+  loudest.</li>
+</ul>
+<h3 id="why-openai-isnt-supported">Why OpenAI isn't supported</h3>
+<p>OpenAI's Chat Completions API has an automatic prompt-caching
+feature, but it's deliberately opaque:</p>
+<ol>
+<li><strong>No marker, no control surface.</strong> Anthropic exposes an inline
+   <code>cache_control</code> marker on the block you want cached; OpenAI's
+   backend pattern-matches recent prompts and applies discounts
+   silently. SignalForge cannot <em>steer</em> the cache toward the
+   system + cached-block prefix that matters.</li>
+<li><strong>No public per-MTok rate.</strong> Anthropic publishes a cache-write
+   premium and a cache-read discount, so
+   <code>signalforge.llm.pricing.PRICES</code> can model both. OpenAI's
+   discount tier isn't published in the same shape, so
+   <code>--estimate</code> cannot project caching savings honestly.</li>
+<li><strong>No <code>cache_creation_input_tokens</code> / <code>cache_read_input_tokens</code>
+   in the usage response.</strong> Anthropic returns both fields per call,
+   which feeds the dual-zero cache-anomaly WARNING and the audit
+   JSONL's reproducibility hashes. OpenAI's usage shape carries no
+   equivalent — even <em>measuring</em> whether a cache hit fired after
+   the fact is awkward.</li>
+</ol>
+<p>So <code>OpenAIProvider.supports_prompt_caching = False</code> is the honest
+posture: we can't steer the cache, we can't price the cache, and we
+can't audit the cache. Whatever automatic discount OpenAI applies
+on their side, the operator gets — SignalForge just doesn't model
+it. <code>cache_ttl</code> in <code>signalforge.yml</code> is accepted and silently
+ignored for OpenAI.</p>
+<h3 id="why-gemini-isnt-supported-yet">Why Gemini isn't supported (yet)</h3>
+<p>Gemini ships <strong>context caching</strong> — a real, usable feature — but its
+shape is fundamentally different from Anthropic's inline marker:</p>
+<ol>
+<li><strong>Separate API call.</strong> You call <code>CachedContent.create(...)</code>
+   before the generation call to upload the chunk to a named cache
+   resource, get back a handle, and reference the handle on every
+   subsequent <code>generate_content(...)</code>. Anthropic's <code>cache_control</code>
+   marker is a single field inside the existing
+   <code>messages.create(...)</code> call.</li>
+<li><strong>Separate pricing dimension.</strong> Gemini bills cache <strong>storage</strong>
+   per hour while the cached resource lives, plus a per-token
+   discount on cached reads. The cost model is "rent the cache
+   slot, get cheaper reads" — fundamentally different from
+   Anthropic's "pay a write premium once, get cheap reads."</li>
+<li><strong>Minimum payload + lifecycle.</strong> Gemini's cached content has a
+   minimum size and an explicit TTL the operator manages; an
+   abandoned cache keeps billing storage until it expires.</li>
+</ol>
+<p>Wiring Gemini context caching correctly into SignalForge means a
+separate "warm the cache" code path, a TTL strategy, an
+<code>LLMResult.usage</code> shape that includes Gemini's distinct cache
+fields, and a <code>pricing.py</code> schema extension carrying the storage
+rate alongside the existing per-MTok rates. None of that was in
+scope for issue
+<a href="https://github.com/wjduenow/SignalForge/issues/137">#137</a> (which
+landed Gemini as a third provider proving the seam holds). It's a
+tracked follow-up — <code>GeminiProvider.supports_prompt_caching = False</code>
+today; <code>cache_ttl</code> is accepted and silently ignored.</p>
+<p>The asymmetry isn't "Gemini is worse than Anthropic"; it's
+"Anthropic's caching maps onto the existing seam in one config line
+(<code>cache_ttl: 5m | 1h</code>), and Gemini's caching needs a code path we
+haven't built yet."</p>
+<h3 id="the-practical-bottom-line">The practical bottom line</h3>
+<p>On the grader (the high-call-count surface where caching matters
+most), the math typically nets out:</p>
+<ul>
+<li><strong>Anthropic</strong> — 1 cache-write rubric + ~47 cache-read rubrics at
+  10¢-on-the-dollar input tokens.</li>
+<li><strong>Gemini <code>gemini-2.5-flash</code></strong> — 48 full-input rubrics, but each
+  input token costs ~10× less than <code>claude-sonnet-4-6</code>.</li>
+<li><strong>OpenAI <code>gpt-4o-mini</code></strong> — 48 full-input rubrics, input tokens
+  ~20× cheaper than <code>claude-sonnet-4-6</code>.</li>
+</ul>
+<p>Cheaper-per-token providers usually still come out ahead on
+absolute dollars even without caching — they're just leaving
+optimization on the table that Anthropic doesn't. If Gemini
+context caching lands as a follow-up, Gemini becomes substantially
+cheaper still.</p>
+<h2 id="choosing-a-provider">Choosing a provider</h2>
+<p>Three dimensions to weigh:</p>
+<ol>
+<li><strong>Per-token cost.</strong> At PR-prep prices
+   (<a href="https://github.com/wjduenow/SignalForge/blob/dev/src/signalforge/llm/pricing.py"><code>signalforge/llm/pricing.py</code></a>),
+   the cheapest grader SKU is <code>gpt-4o-mini</code>
+   ($0.15 / $0.60 per Mtok in/out), followed by <code>gemini-2.0-flash</code>
+   ($0.10 / $0.40 per Mtok in/out — even cheaper, but a budget
+   model). <code>claude-sonnet-4-6</code> at $3 / $15 per Mtok costs ~20× more
+   per token, partly offset by prompt caching on the cached
+   prefix.</li>
+<li><strong>Caching impact.</strong> Anthropic's prompt-cache discount (5m or 1h
+   TTL) is meaningful for the drafter's cached manifest block AND
+   for the grader's cached rubric block when grading multiple
+   artifacts per criterion. Neither OpenAI nor Gemini exposes a
+   comparable discount today — every call pays the full input rate.</li>
+<li><strong>Quality variance.</strong> Gemini's verbose reasoning needs the 4096
+   <code>max_output_tokens</code> floor to avoid mid-string truncation
+   (issue #155); OpenAI's tighter <code>response_format</code> JSON mode is the
+   simplest route to a clean parse but has shown lower judge
+   evidence quality on some fixtures. Anthropic's judge model
+   carries the longest production exposure (the v0.1–v0.2 e2e
+   smokes all ran Anthropic).</li>
+</ol>
+<p><strong>Practical patterns:</strong></p>
+<ul>
+<li><strong>Single-provider Anthropic</strong> (the default). Simplest setup, best
+  caching, highest unit cost. Right answer when you don't want to
+  manage two API keys.</li>
+<li><strong>Anthropic drafter + Gemini grader.</strong> Drafter benefits from
+  caching across <code>--select</code> siblings; grader fan-out runs at the
+  cheaper per-token rate. The shipped end-to-end smoke fixture
+  exercises this configuration (issue
+  <a href="https://github.com/wjduenow/SignalForge/issues/155">#155</a>).</li>
+<li><strong>OpenAI both stages.</strong> Right answer when you're already
+  standardised on OpenAI billing and don't want to manage an
+  Anthropic key. <code>gpt-4o</code> + <code>gpt-4o-mini</code> are inexpensive and
+  reliable; no caching discount but no truncation risk either.</li>
+<li><strong>Gemini both stages.</strong> Cheapest per-token; needs the 4096
+  <code>max_output_tokens</code> floor and a tolerance for occasional
+  <code>aggregate_complete=False</code> reports when the safety filter or
+  truncation fires.</li>
+</ul>
+<h2 id="cost-token-accounting">Cost &amp; token accounting</h2>
+<p><code>signalforge generate --estimate</code> projects per-stage cost before the
+billable run. Each provider supplies its own token counter via
+<code>LLMProvider.estimate_input_tokens(model, text, *, system="", client=None)</code>:</p>
+<ul>
+<li><strong>Anthropic</strong> — live <code>messages.count_tokens</code>; <code>system</code> is passed
+  as its own kwarg so the system envelope is counted server-side.</li>
+<li><strong>OpenAI</strong> — local <code>tiktoken</code> (no API round-trip);
+  <code>tiktoken.encoding_for_model(model)</code> with <code>cl100k_base</code> fallback.</li>
+<li><strong>Gemini</strong> — native <code>models.count_tokens</code>; <code>system + text</code>
+  concatenated into one <code>contents</code> entry (Gemini doesn't
+  distinguish a system envelope).</li>
+</ul>
+<p><code>signalforge.llm.cost.rollup_audit_dir(project_dir) -&gt; CostReport</code>
+walks <code>.signalforge/llm_responses.jsonl</code> and <code>.signalforge/grade.jsonl</code>
+after a run and computes per-provider per-model USD against the
+frozen <code>signalforge.llm.pricing.PRICES</code> table. The CLI wrapper is
+<code>scripts/measure_e2e_cost.py</code>. See
+<a href="../cost-estimate-ops/"><code>docs/cost-estimate-ops.md</code></a> for the full
+contract, including the <code>&lt;unavailable: &lt;ErrorClass&gt;&gt;</code> degrade when a
+supplementary surface fails.</p>
+<h2 id="reliability-error-handling">Reliability &amp; error handling</h2>
+<h3 id="retry-taxonomy-drafter-grader">Retry taxonomy (drafter + grader)</h3>
+<p>Every provider classifies SDK exceptions through
+<code>LLMProvider.classify_exception(exc) -&gt; ExceptionCategory</code> (one of
+<code>AUTH</code>, <code>RATE_LIMIT</code>, <code>SERVER_ERROR</code>, <code>CONNECTION</code>, <code>NO_RETRY</code>).
+<code>call_llm</code> runs the same generic retry loop regardless of provider:
+429 × 3, 5xx × 1, connection × 1, 401/403 no-retry-but-hint, 4xx
+no-retry. Each retry emits one <code>WARNING</code> with <code>attempt</code> / <code>delay</code>
+/ <code>error_class</code> / <code>model</code>. Per-class budgets are configurable per
+stage (<code>DraftConfig.max_retries_429</code> /
+<code>GradeConfig.max_retries_429</code>).</p>
+<h3 id="conservative-degrade-grader">Conservative degrade (grader)</h3>
+<p>A grade pair that exhausts retries, hits a non-clean <code>finish_reason</code>,
+or trips its per-pair budget routes through the conservative
+<code>score=None, passed=False, reasoning="&lt;failure reason&gt;"</code> degrade —
+never aborts the whole run. The aggregate
+<code>pass_rate</code> / <code>mean_score</code> are computed over the <strong>scored</strong> subset
+only; <code>aggregate_complete: bool</code> flags partial reports. The whole
+run aborts <strong>only</strong> if the audit JSONL writer itself fails. See
+<a href="../grade-ops/"><code>docs/grade-ops.md</code> § Conservative score-and-degrade taxonomy</a>.</p>
+<h3 id="fail-loud-drafter">Fail-loud (drafter)</h3>
+<p>The drafter has no equivalent degrade path — a single failing LLM
+call is a hard failure. The retry loop runs; on exhaustion, the
+CLI exits at tier 3 (Anthropic / external dependency failure) with
+a typed error message and no traceback. See
+<a href="../draft-ops/#retry-taxonomy"><code>docs/draft-ops.md</code> § Retry taxonomy</a>.</p>
+<h3 id="prompt-injection-envelopes">Prompt-injection envelopes</h3>
+<p>User-controlled content (model SQL for the drafter, drafted artifact
+text for the grader) is wrapped in named fences:</p>
+<ul>
+<li>Drafter: <code>&lt;MODEL_SQL&gt;...&lt;/MODEL_SQL&gt;</code> and
+  <code>&lt;BUSINESS_RULE id="N"&gt;...&lt;/BUSINESS_RULE&gt;</code> (the latter for
+  <code>meta.signalforge.business_rules</code>, see
+  <a href="../draft-ops/#custom-business-rule-tests-custom_sql"><code>docs/draft-ops.md</code> § Custom business-rule tests</a>).</li>
+<li>Grader: <code>&lt;ARTIFACT&gt;...&lt;/ARTIFACT&gt;</code>.</li>
+</ul>
+<p>A payload containing the literal closing tag raises
+<code>PromptEnvelopeBreachError</code> / <code>GradePromptEnvelopeBreachError</code>
+BEFORE the LLM call is issued — a fail-loud pre-flight scan over
+every payload at orchestrator entry. The defence is a boring
+substring match; no whitespace / case normalisation.</p>
+<h2 id="audit-reproducibility">Audit &amp; reproducibility</h2>
+<p>Every LLM call lands a structured record on disk. Both writers are
+fail-closed: the call only "succeeds" once the audit byte hits disk
+via <code>os.write</code> + <code>os.fsync</code>. An audit-write failure aborts the run
+with a typed <code>LLMResponseAuditWriteError</code> / <code>GradeAuditWriteError</code>
+(CLI tier 3).</p>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Layer</th>
+<th>Shape</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.signalforge/audit.jsonl</code></td>
+<td>safety</td>
+<td>One record per <code>build_llm_request</code> — what data went to the LLM (columns sent, redactions applied, sampling mode).</td>
+</tr>
+<tr>
+<td><code>.signalforge/llm_responses.jsonl</code></td>
+<td>drafter</td>
+<td>One record per drafter call — <code>sent_sql_hash</code>, <code>parsed_schema_hash</code>, <code>response_text_hash</code>, <code>prompt_version</code>, cache token usage, model id, <code>signalforge_version</code>.</td>
+</tr>
+<tr>
+<td><code>.signalforge/grade.jsonl</code></td>
+<td>grader</td>
+<td>One record per <code>(artifact × criterion)</code> pair — <code>rubric_hash</code>, <code>prompt_version_template</code>, <code>criterion_prompt_hash</code>, <code>response_text_hash</code>, scored / degraded state.</td>
+</tr>
+<tr>
+<td><code>.signalforge/grade.json</code></td>
+<td>grader</td>
+<td>End-of-run sidecar; <code>GradingReport</code> with per-criterion scores + the <code>aggregate_complete</code> flag.</td>
+</tr>
+<tr>
+<td><code>.signalforge/diff.json</code></td>
+<td>diff</td>
+<td>Sidecar with the kept/dropped/flagged tier table + unified diff + reproducibility hashes.</td>
+</tr>
+</tbody>
+</table>
+<p>The reproducibility hash fields make per-run output bytewise
+verifiable: same input → same hashes → same decisions. See
+<a href="../audits/"><code>docs/audits.md</code></a> for the per-file schemas and
+correlation patterns.</p>
+<h2 id="adding-a-provider">Adding a provider</h2>
+<p>The seam is designed for plug-in extension. A new vendor needs four
+artifacts:</p>
+<ol>
+<li><strong>SDK shim</strong> at <code>src/signalforge/llm/_&lt;vendor&gt;_client.py</code>. Every
+   <code># pyright: ignore</code> / <code># type: ignore</code> for the vendor SDK is
+   confined here. Expose a <code>_&lt;Vendor&gt;ClientProtocol</code> duck-typed at
+   <code>messages.create</code> and (optionally) <code>messages.count_tokens</code>. AST
+   scan in <code>tests/test_audit_completeness.py</code> enforces the
+   confinement.</li>
+<li><strong><code>LLMProvider</code> subclass</strong> at <code>src/signalforge/llm/providers.py</code>.
+   Implement <code>make_client</code>, <code>build_create_kwargs</code>,
+   <code>build_count_tokens_kwargs</code>, <code>extract_text_blocks</code>,
+   <code>extract_usage</code>, <code>classify_exception</code>, <code>is_clean_completion</code>,
+   <code>unclean_finish_reason_message</code>, <code>estimate_input_tokens</code>, plus
+   the capability flags. The orchestrator (<code>call_llm</code>) gates
+   behaviour on those flags — never name-branch.</li>
+<li><strong><code>register_provider("&lt;name&gt;", &lt;class&gt;)</code></strong> so
+   <code>DraftConfig.provider</code> / <code>GradeConfig.provider</code> validators
+   accept the new key. The provider config field is a
+   registry-validated <code>str</code>, not a <code>Literal</code>, so no churn in two
+   places.</li>
+<li><strong>Pricing SKUs</strong> in <code>signalforge.llm.pricing._PRICES_MUTABLE</code> for
+   <code>--estimate</code> integration, and a <code>[&lt;vendor&gt;]</code> extra in
+   <code>pyproject.toml</code> so users opt in to the SDK weight.</li>
+</ol>
+<p>The shipped Anthropic / OpenAI / Gemini providers are the
+worked-examples — each landed as a self-contained slice without
+touching <code>call_llm</code>. See <code>llm-drafter.md</code> (the rules file) for the
+load-bearing conventions (capability-gated behaviour, server-side
+JSON modes where available, namespace-package SDK considerations).</p>
+<h2 id="reference">Reference</h2>
+<ul>
+<li><a href="../draft-ops/"><code>docs/draft-ops.md</code></a> — drafter configuration,
+  retry taxonomy, prompt-injection envelopes, per-provider sections.</li>
+<li><a href="../grade-ops/"><code>docs/grade-ops.md</code></a> — grader configuration,
+  conservative degrade taxonomy, per-criterion fan-out,
+  per-provider sections.</li>
+<li><a href="../cost-estimate-ops/"><code>docs/cost-estimate-ops.md</code></a> —
+  <code>--estimate</code> semantics, per-provider token counters, pricing
+  table, <code>EstimateUnknownModelError</code>.</li>
+<li><a href="../audits/"><code>docs/audits.md</code></a> — fail-closed audit JSONLs and
+  sidecars across every stage.</li>
+<li><a href="../safety-ops/"><code>docs/safety-ops.md</code></a> — what data goes to the
+  LLM (PII redaction, sampling modes).</li>
+<li>Issues:
+  <a href="https://github.com/wjduenow/SignalForge/issues/134">#134 epic</a> ·
+  <a href="https://github.com/wjduenow/SignalForge/issues/135">#135 provider-neutral seam</a> ·
+  <a href="https://github.com/wjduenow/SignalForge/issues/136">#136 OpenAI</a> ·
+  <a href="https://github.com/wjduenow/SignalForge/issues/137">#137 Gemini</a> ·
+  <a href="https://github.com/wjduenow/SignalForge/issues/155">#155 Gemini truncation + per-provider e2e gap</a> ·
+  <a href="https://github.com/wjduenow/SignalForge/issues/158">#158 Gemini grader <code>MAX_TOKENS</code> floor</a>.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

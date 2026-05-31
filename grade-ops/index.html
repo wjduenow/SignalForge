@@ -1,0 +1,2742 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/grade-ops/">
+      
+      
+        <link rel="prev" href="../prune-ops/">
+      
+      
+        <link rel="next" href="../diff-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Quality Grader - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#grade-layer-operations-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Quality Grader
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#default-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default posture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Public API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#orchestrator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Orchestrator
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#result-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rubric-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rubric shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#audit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#discriminator-literal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discriminator literal
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-signalforgeyml-grade-block" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration: signalforge.yml grade: block
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#threshold-fail-behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Threshold-fail behaviour
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision-matrix" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decision matrix
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-jsonl-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit JSONL schema
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Audit JSONL schema">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#artefact-id-format" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Artefact-id format
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sidecar-json-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sidecar JSON schema
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reproducibility-hash-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reproducibility / hash fields
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-guidance-dec-014" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost guidance (DEC-014)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Cost guidance (DEC-014)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#per-provider-max_output_tokens-recommended-floors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-provider max_output_tokens recommended floors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai-provider" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenAI provider
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#gemini-provider" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gemini provider
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prompt-injection-mitigation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prompt-injection mitigation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-log-sensitivity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit log sensitivity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-modes-typed-error-cross-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure modes / typed-error cross-reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#regen-instructions-for-fixtures" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Regen instructions for fixtures
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli-integration-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI integration note
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        References
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#default-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default posture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Public API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#orchestrator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Orchestrator
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#result-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#rubric-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Rubric shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#audit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#discriminator-literal" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discriminator literal
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-signalforgeyml-grade-block" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration: signalforge.yml grade: block
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#threshold-fail-behaviour" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Threshold-fail behaviour
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision-matrix" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decision matrix
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-jsonl-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit JSONL schema
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Audit JSONL schema">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#artefact-id-format" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Artefact-id format
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sidecar-json-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sidecar JSON schema
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reproducibility-hash-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reproducibility / hash fields
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-guidance-dec-014" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost guidance (DEC-014)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Cost guidance (DEC-014)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#per-provider-max_output_tokens-recommended-floors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-provider max_output_tokens recommended floors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#openai-provider" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenAI provider
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#gemini-provider" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Gemini provider
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#prompt-injection-mitigation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Prompt-injection mitigation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-log-sensitivity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit log sensitivity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-modes-typed-error-cross-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure modes / typed-error cross-reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#regen-instructions-for-fixtures" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Regen instructions for fixtures
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli-integration-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI integration note
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        References
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="grade-layer-operations-guide">Grade layer — operations guide</h1>
+<p>Operational reference for users of <code>signalforge.grade</code>. Companion to
+<a href="../safety-ops/"><code>docs/safety-ops.md</code></a>,
+<a href="../draft-ops/"><code>docs/draft-ops.md</code></a>,
+<a href="../prune-ops/"><code>docs/prune-ops.md</code></a>,
+<a href="../manifest-loader-ops/"><code>docs/manifest-loader-ops.md</code></a>, and
+<a href="../warehouse-adapter-ops/"><code>docs/warehouse-adapter-ops.md</code></a>, and to the
+design record in
+<a href="../plans/super/7-quality-grader.md"><code>plans/super/7-quality-grader.md</code></a>.</p>
+<p>The grade layer sits between the prune layer (#6) and the diff renderer
+(#8). Every drafted artefact that survives prune — column descriptions,
+column rationales, model description, model rationale, and per-test
+rationales — is scored by an LLM-as-judge against a configurable rubric
+through one entry point: <code>signalforge.grade.grade_artifacts</code>. The
+orchestrator issues one LLM call per <code>(artifact, criterion)</code> pair,
+parses each response, writes a fail-closed JSONL audit record per
+decision, and at end-of-run persists a sidecar JSON <code>GradingReport</code>.</p>
+<p>This is the load-bearing operationalisation of Architectural Commitment
+#2 in <a href="../CLAUDE.md"><code>CLAUDE.md</code></a> — <strong>evaluation in the loop</strong>:
+SignalForge generates AND grades; competitors only generate.</p>
+<h2 id="default-posture">Default posture</h2>
+<p>The grader is <strong>report-only by default</strong>. A below-threshold rubric does
+not fail the run; the operator's diff surfaces the verdict and the
+operator decides. Operators that want hard-fail-on-threshold behaviour
+opt in by setting <code>fail_on_below_threshold: true</code> in <code>signalforge.yml</code>
+(see <a href="#threshold-fail-behaviour">Threshold-fail behaviour</a> below).</p>
+<p>The layer is fail-closed on the audit-write boundary: any I/O error
+from <code>GradeEvent</code> JSONL persistence or from the end-of-run sidecar
+write aborts the run as <code>GradeAuditWriteError</code> (DEC-006 / DEC-012,
+mirrors safety's DEC-011, draft's DEC-006, and prune's DEC-016). The
+layer is conservative on the per-pair boundary: an LLM retry-exhausted,
+parser-failed, or budget-exceeded pair lands as a degraded
+<code>GradingResult(score=None, passed=False, reasoning="…")</code> rather than
+silently dropped (DEC-015) — the diff renderer flags partial aggregates
+explicitly so operators don't mistake a degraded-path mean for a real
+one.</p>
+<p>User-facing tagline: <strong>every drafted artefact that ships is scored;
+every scored artefact has a durable receipt; partial runs surface as
+partial, not silent.</strong></p>
+<h2 id="public-api">Public API</h2>
+<p>Import from <code>signalforge.grade</code>. The 18 names exported by <code>__all__</code>:</p>
+<h3 id="orchestrator">Orchestrator</h3>
+<ul>
+<li><strong><code>grade_artifacts(model, candidate, prune_result, *, rubric=None, config=None, audit_path=None, sidecar_path=None, client=None, project_dir=None) -&gt; GradingReport</code></strong> — End-to-end orchestrator. Validates the rubric, scans every artefact payload for the prompt-envelope close tag, iterates every <code>(criterion, artefact)</code> pair, issues one LLM-judge call per pair, writes one JSONL audit record per decision, builds the aggregate report, writes the sidecar JSON. Mirrors <code>signalforge.draft.draft_schema</code> and <code>signalforge.prune.prune_tests</code> so the CLI / wrapper layers see one consistent end-to-end shape across pipeline stages. <code>project_dir</code> defaults to <code>Path.cwd()</code>. <code>audit_path</code> defaults to <code>&lt;project_dir&gt;/.signalforge/grade.jsonl</code>. <code>sidecar_path</code> defaults to <code>&lt;project_dir&gt;/.signalforge/grade.json</code>.</li>
+</ul>
+<h3 id="result-shapes">Result shapes</h3>
+<ul>
+<li>
+<p><strong><code>GradingReport</code></strong> — Aggregate verdict for one model. Frozen Pydantic model with fields <code>grade_schema_version: Literal[1]</code>, <code>signalforge_version: str</code>, <code>run_id: str</code>, <code>timestamp: datetime</code>, <code>duration_seconds: float</code>, <code>model_unique_id: str</code>, <code>rubric_hash: str</code>, <code>thresholds: tuple[float, float]</code>, <code>results: tuple[GradingResult, ...]</code>. Computed properties: <code>pass_rate</code>, <code>mean_score</code>, <code>aggregate_complete</code>, <code>passed</code> — all derived from <code>results</code> so a <code>GradingReport</code> reconstructed from the sidecar carries identical views to a freshly produced one. Custom <code>__repr__</code> collapses to identity + aggregate counts (DEC-022 of #6) so accidental <code>_LOGGER.warning("report: %s", report)</code> does not dump multi-paragraph evidence into log sinks.</p>
+</li>
+<li>
+<p><strong><code>GradingResult</code></strong> — One verdict per <code>(artifact, criterion)</code> pair. Carries <code>artifact_id: str</code> (canonical dotted-path per DEC-009), <code>criterion_id: str</code>, <code>score: float | None</code> (the <code>None</code> sentinel is the DEC-015 degraded path), <code>passed: bool</code>, <code>evidence: str</code>, <code>reasoning: str</code>. Computed property <code>one_line_why</code> returns the first sentence of <code>reasoning</code> capped at 120 characters — the diff renderer (#8) consumes this directly so display logic stays in the data layer. Custom <code>__repr__</code> omits <code>evidence</code> and <code>reasoning</code> to protect against accidental log dumps.</p>
+</li>
+</ul>
+<h3 id="configuration">Configuration</h3>
+<ul>
+<li>
+<p><strong><code>GradeConfig</code></strong> — User-facing knobs. Frozen Pydantic model with <code>extra="forbid"</code> (config-shaped per <code>safety-layer.md</code> DEC-015 — typos fail loud). Field reference: see <a href="#configuration-signalforgeyml-grade-block">Configuration</a> below.</p>
+</li>
+<li>
+<p><strong><code>load_grade_config(project_dir, path=None) -&gt; GradeConfig</code></strong> — Loads the <code>grade:</code> block from <code>signalforge.yml</code>. Resolves to <code>&lt;project_dir&gt;/signalforge.yml</code> when <code>path</code> is <code>None</code>. Returns defaults when the file is missing, empty, or the <code>grade:</code> key is absent. Raises <code>GradeConfigError</code> on parse / schema failures. Mirrors <code>load_safety_config</code> / <code>load_draft_config</code> / <code>load_prune_config</code> so the CLI sees one calling convention across stages.</p>
+</li>
+</ul>
+<h3 id="rubric-shapes">Rubric shapes</h3>
+<ul>
+<li>
+<p><strong><code>Criterion</code></strong> — One rubric entry: <code>id: str</code> plus <code>criterion: str</code> (the prompt text sent to the LLM-judge). Frozen, <code>extra="forbid"</code> (DEC-017) so a typo like <code>weight: 1.0</code> in user-authored rubric YAML fails loud. Both fields required, non-empty, non-whitespace-only.</p>
+</li>
+<li>
+<p><strong><code>Rubric</code></strong> — <code>TypeAlias</code> over <code>tuple[Criterion, ...]</code> (DEC-011). Deliberately not a wrapper class; mirrors <code>PruneResult.decisions: tuple[PruneDecision, ...]</code>.</p>
+</li>
+<li>
+<p><strong><code>DEFAULT_RUBRIC</code></strong> — <code>Final[Rubric]</code> carrying the four locked criteria from DEC-016 verbatim: <code>clarity</code>, <code>consistency</code>, <code>rationale</code>, <code>no-redundant</code>. The IDs and exact criterion text are load-bearing for <code>rubric_hash</code> reproducibility — every change is a hash change, which means audit records written under v0.1 are no longer reproducible. Bump <code>audit_schema_version</code> before changing any of this in v0.2.</p>
+</li>
+<li>
+<p><strong><code>GradeThresholds</code></strong> — Per-rubric pass/fail thresholds. <code>min_pass_rate: float = 0.7</code>, <code>min_mean_score: float = 0.5</code> (defaults match DEC-016). Both bounded <code>[0.0, 1.0]</code> inclusive. The <code>GradingReport.thresholds</code> tuple carries the active values forward into the sidecar.</p>
+</li>
+</ul>
+<h3 id="audit">Audit</h3>
+<ul>
+<li><strong><code>GradeEvent</code></strong> — One JSONL audit record per LLM-judge call. Constructed ONLY by <code>signalforge.grade.audit._build_grade_event</code> (US-009 AST scan target — sixth of the AST-gated event types). <code>extra="ignore"</code> for forward-compat read-back. See <a href="#audit-jsonl-schema">Audit JSONL schema</a> for the field set.</li>
+</ul>
+<h3 id="discriminator-literal">Discriminator literal</h3>
+<ul>
+<li><strong><code>GradeOutputViolationType</code></strong> — <code>Literal["json_parse", "missing_required_field", "missing_criterion_id", "criterion_id_mismatch", "score_out_of_range", "score_not_a_number", "passed_not_a_bool", "unknown_artifact_id", "ambiguous_artifact_id"]</code>. Closed taxonomy carried by <code>GradeOutputError.violation_type</code> so audit-log consumers / orchestrator branches can pattern-match exhaustively rather than sniff message text.</li>
+</ul>
+<h3 id="errors">Errors</h3>
+<p><code>from signalforge.grade import errors</code>. Every exception subclasses
+<code>GradeError</code> and carries a class-level <code>default_remediation</code> rendered
+on a <code>↳ Remediation:</code> line by <code>__str__</code>.</p>
+<ul>
+<li><strong><code>GradeError</code></strong> — Base class. Never raised directly.</li>
+<li><strong><code>GradeConfigError</code></strong> — <code>signalforge.yml</code> <code>grade:</code> block failed parse or schema validation.</li>
+<li><strong><code>GradeRubricError</code></strong> — Rubric YAML structurally invalid (duplicate <code>id</code>, empty rubric, malformed criterion entry).</li>
+<li><strong><code>GradeLLMError</code></strong> — One-level adapter wrapping <code>signalforge.llm.LLMError</code>. The original error is preserved on <code>__cause__</code> and exposed via the <code>cause</code> attribute.</li>
+<li><strong><code>GradeBudgetExceededError</code></strong> — <code>total_budget_seconds</code> tripped before any criterion was graded (a hard "the run did nothing" failure). A partial run completes normally with a <code>GradingReport</code> whose <code>aggregate_complete</code> flag is <code>False</code>.</li>
+<li><strong><code>GradePromptEnvelopeBreachError</code></strong> — Artefact payload contained the literal <code>&lt;/ARTIFACT&gt;</code> close tag. Refuses to render rather than ship a degraded envelope. Mirrors the drafter's <code>PromptEnvelopeBreachError</code> (#5 DEC-007).</li>
+<li><strong><code>GradeOutputError</code></strong> — LLM-judge response failed parse or anchor-contract validation. Carries <code>violation_type: GradeOutputViolationType</code>.</li>
+<li><strong><code>GradeAuditWriteError</code></strong> — Fail-closed audit-write failure (<code>OSError</code> / <code>PermissionError</code> / encoding / <code>fsync</code> / symlink containment). Aborts the run; original cause exposed via <code>.cause</code> and <code>__cause__</code>.</li>
+<li><strong><code>GradeAuditRecordTooLargeError</code></strong> — Serialised JSONL line (or sidecar JSON document) exceeded the size cap. Raised BEFORE any file is opened so an oversize record leaves no on-disk artefact.</li>
+</ul>
+<h2 id="configuration-signalforgeyml-grade-block">Configuration: <code>signalforge.yml</code> <code>grade:</code> block</h2>
+<p>Top-level namespace is <code>grade:</code> (claimed per the convention from
+<code>safety-layer.md</code> DEC-025 / <code>llm-drafter.md</code> DEC-027 / <code>prune-engine.md</code>
+DEC-020 — every pipeline stage gets one top-level key). Sibling keys
+(<code>safety:</code>, <code>llm:</code>, <code>prune:</code>, future <code>diff:</code> …) are reserved for other
+stages and silently ignored by the grade loader.</p>
+<p>The full schema (every knob, every default, all v0.1 types), mirroring
+<code>tests/fixtures/grade/example_config.yml</code> (exercised by
+<code>test_load_grade_config_doc_example_round_trips</code> so the example and the
+loader cannot drift):</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># signalforge.yml — grade stage configuration (v0.1)</span>
+<span class="nt">grade</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">anthropic</span><span class="w">             </span><span class="c1"># registry-validated; &quot;anthropic&quot; + &quot;openai&quot; + &quot;gemini&quot; are registered (see provider sections below)</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">claude-sonnet-4-6</span><span class="w">        </span><span class="c1"># model id (default)</span>
+<span class="w">  </span><span class="nt">cache_ttl</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1h</span><span class="w">                   </span><span class="c1"># Prompt-cache TTL (&#39;5m&#39; or &#39;1h&#39;)</span>
+<span class="w">  </span><span class="nt">max_output_tokens</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">256</span><span class="w">          </span><span class="c1"># Per-criterion JSON response cap</span>
+<span class="w">  </span><span class="nt">max_retries_429</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span><span class="w">              </span><span class="c1"># Rate-limit retry budget</span>
+<span class="w">  </span><span class="nt">max_retries_5xx</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<span class="w">  </span><span class="nt">max_retries_conn</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<span class="w">  </span><span class="nt">total_budget_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">300</span><span class="w">       </span><span class="c1"># Wall-clock budget across the whole run</span>
+<span class="w">  </span><span class="nt">min_pass_rate</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.7</span><span class="w">              </span><span class="c1"># Aggregate threshold: fraction of passed criteria</span>
+<span class="w">  </span><span class="nt">min_mean_score</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.5</span><span class="w">             </span><span class="c1"># Aggregate threshold: mean score across criteria</span>
+<span class="w">  </span><span class="nt">fail_on_below_threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span><span class="w">  </span><span class="c1"># opt-in hard-fail; default report-only</span>
+<span class="w">  </span><span class="c1"># rubric:                       # Optional override; omitted = use DEFAULT_RUBRIC</span>
+<span class="w">  </span><span class="c1">#   - id: clarity</span>
+<span class="w">  </span><span class="c1">#     criterion: &quot;...&quot;</span>
+</code></pre></div>
+<p>A minimal <code>signalforge.yml</code> is just <code>grade: {}</code> (or no <code>grade:</code> key at
+all) — every field has a locked default from DEC-023..DEC-027 and the
+loader returns <code>GradeConfig()</code> silently. A customised example that
+overrides the rubric:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">grade</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">claude-sonnet-4-6</span>
+<span class="w">  </span><span class="nt">total_budget_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">600</span>
+<span class="w">  </span><span class="nt">min_pass_rate</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.8</span>
+<span class="w">  </span><span class="nt">rubric</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">clarity</span>
+<span class="w">      </span><span class="nt">criterion</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">&gt;</span>
+<span class="w">        </span><span class="no">Is the column description clear, specific, and actionable?</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">precision</span>
+<span class="w">      </span><span class="nt">criterion</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">&gt;</span>
+<span class="w">        </span><span class="no">Does the description state exactly what is captured (units,</span>
+<span class="w">        </span><span class="no">timezone, encoding) without hand-waving?</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">id</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">jargon</span>
+<span class="w">      </span><span class="nt">criterion</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">&gt;</span>
+<span class="w">        </span><span class="no">Is the description free of acronyms or domain-jargon a</span>
+<span class="w">        </span><span class="no">downstream analyst could not look up in five seconds?</span>
+</code></pre></div>
+<p>Field-by-field:</p>
+<ul>
+<li><strong><code>provider</code></strong> — The LLM provider strategy name (issue #135 DEC-007), resolved against the <code>signalforge.llm.providers</code> registry and threaded into <code>call_llm</code> from the per-criterion judge call, independently of the drafter's <code>DraftConfig.provider</code>. Default <code>"anthropic"</code>. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated <code>str</code>, not a <code>Literal</code> — the provider registry is a forward-looking plugin point. Today <code>anthropic</code>, <code>openai</code>, and <code>gemini</code> are registered; see <a href="#openai-provider">OpenAI provider</a> and <a href="#gemini-provider">Gemini provider</a> below for the non-default options.</li>
+<li><strong><code>model</code></strong> — The model id used by every per-pair judge call. Default <code>claude-sonnet-4-6</code>. Mirrors <code>DraftConfig.model</code> default. Haiku 4.5 is documented as a v0.2 cost-conscious option but not exposed in v0.1.</li>
+<li><strong><code>cache_ttl</code></strong> — <code>Literal["5m", "1h"]</code>. Default <code>"1h"</code> (vs. the drafter's <code>"5m"</code>) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; <code>"1h"</code> gives margin at no extra cost (cache writes are one-shot regardless of TTL).</li>
+<li><strong><code>max_output_tokens</code></strong> — Per-criterion judge response cap. Default <code>256</code>. The expected JSON response is ~150 tokens; 256 gives 2× safety. Independent of <code>DraftConfig.max_output_tokens</code>.</li>
+<li><strong><code>max_retries_429</code> / <code>max_retries_5xx</code> / <code>max_retries_conn</code></strong> — Per-call retry budgets at the centralised, provider-neutral <code>signalforge.llm.call_llm</code> seam (#5 DEC-012; #135 DEC-005). Defaults <code>3 / 1 / 1</code> mirror <code>DraftConfig</code>; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.</li>
+<li><strong><code>total_budget_seconds</code></strong> — Whole-run wall-clock budget. Default <code>300</code> (5 minutes — ~3× safety on 60 calls × 1s p50). Mirrors <code>PruneConfig.total_budget_seconds</code> semantics: when the budget trips, every remaining <code>(artefact, criterion)</code> pair lands as a degraded <code>GradingResult(score=None)</code> rather than silently dropped. <strong>Crucially</strong> the LLM-layer retry budget does NOT count against this — <code>total_budget_seconds</code> is a top-of-loop wall-clock check; an in-flight call is allowed to complete before the next iteration's check fires.</li>
+<li><strong><code>min_pass_rate</code></strong> — Floor on the fraction of <code>(artefact, criterion)</code> pairs that scored <code>passed=True</code> for the rubric to count as passed overall. Default <code>0.7</code>. Bounded <code>[0.0, 1.0]</code>. Mirrors <code>GradeThresholds.min_pass_rate</code>.</li>
+<li><strong><code>min_mean_score</code></strong> — Floor on the mean numeric score across non-null verdicts. Default <code>0.5</code>. Bounded <code>[0.0, 1.0]</code>. Mirrors <code>GradeThresholds.min_mean_score</code>.</li>
+<li><strong><code>fail_on_below_threshold</code></strong> — Hard-fail switch for the aggregate threshold check. Default <code>false</code> — v0.1 ships report-only posture by default. When <code>true</code>, <code>grade_artifacts(...)</code> raises <code>GradeBelowThresholdError</code> once the aggregate <code>GradingReport.passed</code> is <code>False</code> (<code>pass_rate &lt; min_pass_rate</code> and/or <code>mean_score &lt; min_mean_score</code>). The raise lands AFTER the sidecar JSON is durably persisted so the operator has a complete <code>grade.json</code> for diagnosis. See <a href="#threshold-fail-behaviour">Threshold-fail behaviour</a> below for the full ordering invariant. Graduated from v0.2 reservation to v0.1 wiring in #9 (US-002).</li>
+<li><strong><code>rubric</code></strong> — Optional rubric override. <code>None</code> (the default) means the orchestrator falls back to <code>DEFAULT_RUBRIC</code>. When provided, must be a non-empty list of mappings, each with non-empty <code>id</code> and <code>criterion</code> strings; duplicate <code>id</code> values raise <code>GradeRubricError</code>. Override is <strong>wholesale</strong>, not merge.</li>
+</ul>
+<p>Unknown keys under <code>grade:</code> raise <code>GradeConfigError</code> (Pydantic
+<code>extra="forbid"</code>). Typos like <code>mdoel:</code> or <code>total_budget_secnds:</code> fail
+loud at load time rather than silently no-op'ing.</p>
+<h2 id="threshold-fail-behaviour">Threshold-fail behaviour</h2>
+<p>Default posture is report-only — <code>grade_artifacts(...)</code> always returns a
+<code>GradingReport</code>, and the operator inspects <code>report.passed</code> /
+<code>report.pass_rate</code> / <code>report.mean_score</code> to decide what to do with the
+verdict. Setting <code>fail_on_below_threshold: true</code> in <code>signalforge.yml</code>
+opts the run into hard-fail behaviour: when the aggregate report does
+not meet <strong>both</strong> <code>min_pass_rate</code> AND <code>min_mean_score</code>,
+<code>grade_artifacts(...)</code> raises <code>GradeBelowThresholdError</code> instead of
+returning the report.</p>
+<p>The raise lands <strong>after</strong> the fail-closed sidecar write
+(<code>write_grading_report(...)</code>) and the per-pair JSONL audit are durably
+on disk, and <strong>before</strong> <code>grade_artifacts(...)</code> returns. Order is
+load-bearing (DEC-021):</p>
+<ol>
+<li>Iterate every <code>(criterion, artefact)</code> pair → write one
+   <code>grade.jsonl</code> line per decision.</li>
+<li>Build the aggregate <code>GradingReport</code> from the per-pair results.</li>
+<li>Write the <code>grade.json</code> sidecar (fail-closed; <code>O_TRUNC</code> overwrite).</li>
+<li>Emit the single INFO log per invocation (<code>grade completed: …</code>).</li>
+<li><strong>If</strong> <code>fail_on_below_threshold=True</code> AND <code>report.passed=False</code>,
+   raise <code>GradeBelowThresholdError</code> carrying <code>pass_rate</code>, <code>mean_score</code>,
+   <code>min_pass_rate</code>, <code>min_mean_score</code>, <code>aggregate_complete</code>.</li>
+<li>Otherwise return the report.</li>
+</ol>
+<p>Pinned by <code>tests/grade/test_engine.py::test_grade_below_threshold_writes_sidecar_before_raising</code>
+— a threshold-fail run leaves a complete <code>grade.json</code> on disk so the
+operator can diagnose <strong>why</strong> the run fell below threshold (which
+criterion failed, which artefact's score dragged the mean down, the
+full evidence/reasoning text). Raising before the sidecar would defeat
+the durable hand-off; the test catches the raise then asserts the
+sidecar exists and round-trips through <code>GradingReport.model_validate_json</code>.</p>
+<p><code>GradeBelowThresholdError</code> carries the five aggregate fields so a
+caller catching the error can render a diagnostic without reaching back
+to the report:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.grade</span><span class="w"> </span><span class="kn">import</span> <span class="n">GradeBelowThresholdError</span><span class="p">,</span> <span class="n">grade_artifacts</span>
+
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">report</span> <span class="o">=</span> <span class="n">grade_artifacts</span><span class="p">(</span>
+        <span class="n">model</span><span class="p">,</span> <span class="n">candidate</span><span class="p">,</span> <span class="n">prune_result</span><span class="p">,</span>
+        <span class="n">config</span><span class="o">=</span><span class="n">load_grade_config</span><span class="p">(</span><span class="n">project_dir</span><span class="p">),</span>
+        <span class="n">project_dir</span><span class="o">=</span><span class="n">project_dir</span><span class="p">,</span>
+    <span class="p">)</span>
+<span class="k">except</span> <span class="n">GradeBelowThresholdError</span> <span class="k">as</span> <span class="n">exc</span><span class="p">:</span>
+    <span class="c1"># Sidecar JSON is on disk at &lt;project_dir&gt;/.signalforge/grade.json.</span>
+    <span class="n">log</span><span class="o">.</span><span class="n">error</span><span class="p">(</span>
+        <span class="s2">&quot;grade below threshold: pass_rate=</span><span class="si">%.3f</span><span class="s2"> (min </span><span class="si">%.3f</span><span class="s2">), mean_score=</span><span class="si">%.3f</span><span class="s2"> (min </span><span class="si">%.3f</span><span class="s2">)&quot;</span><span class="p">,</span>
+        <span class="n">exc</span><span class="o">.</span><span class="n">pass_rate</span><span class="p">,</span> <span class="n">exc</span><span class="o">.</span><span class="n">min_pass_rate</span><span class="p">,</span> <span class="n">exc</span><span class="o">.</span><span class="n">mean_score</span><span class="p">,</span> <span class="n">exc</span><span class="o">.</span><span class="n">min_mean_score</span><span class="p">,</span>
+    <span class="p">)</span>
+    <span class="n">sys</span><span class="o">.</span><span class="n">exit</span><span class="p">(</span><span class="mi">2</span><span class="p">)</span>
+</code></pre></div>
+<p>The CLI (#9) wires the raise into its <code>INPUT</code> exit-code tier (exit 2);
+see <a href="../cli-ops/"><code>docs/cli-ops.md</code></a> for the full exit-code table once
+US-009 lands.</p>
+<h2 id="decision-matrix">Decision matrix</h2>
+<p>Per-pair scoring is a <code>[0.0, 1.0]</code> float plus an explicit
+<code>passed: bool</code>. The judge prompt (US-005) instructs the model to emit
+both — the score is the granular signal, and <code>passed</code> is the model's
+own pass/fail call against the criterion's intent. The diff renderer
+(#8) rescales the float to a 0–5-star display at render time; the data
+layer stays in clauditor shape (DEC-002).</p>
+<table>
+<thead>
+<tr>
+<th>Verdict shape</th>
+<th><code>score</code></th>
+<th><code>passed</code></th>
+<th>What it means</th>
+<th>Display in diff (#8)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Strong pass</td>
+<td><code>0.8</code>–<code>1.0</code></td>
+<td><code>True</code></td>
+<td>Artefact meets the criterion clearly.</td>
+<td>4–5 stars.</td>
+</tr>
+<tr>
+<td>Weak pass</td>
+<td><code>0.5</code>–<code>0.79</code></td>
+<td><code>True</code></td>
+<td>Meets the criterion with caveats; reasoning calls them out.</td>
+<td>2–3 stars.</td>
+</tr>
+<tr>
+<td>Weak fail</td>
+<td><code>0.2</code>–<code>0.49</code></td>
+<td><code>False</code></td>
+<td>Falls short; the artefact ships only because it survived prune.</td>
+<td>1–2 stars.</td>
+</tr>
+<tr>
+<td>Strong fail</td>
+<td><code>0.0</code>–<code>0.19</code></td>
+<td><code>False</code></td>
+<td>Material problem; reviewer should rewrite or remove.</td>
+<td>0–1 star.</td>
+</tr>
+<tr>
+<td>Degraded</td>
+<td><code>null</code></td>
+<td><code>False</code></td>
+<td>Could not evaluate (LLM retry exhausted, parser failed, total budget tripped). DEC-015 sentinel.</td>
+<td>"—" (no stars); <code>aggregate_complete: false</code> flag fires.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Aggregate semantics (DEC-002 — clauditor's threshold-AND pattern).</strong>
+The <code>GradingReport.passed</code> computed field is <code>True</code> iff <strong>both</strong>:</p>
+<ul>
+<li><code>pass_rate &gt;= thresholds[0]</code> (default <code>0.7</code>) — <code>pass_rate</code> is the
+  mean of <code>passed</code> over results with a non-null <code>score</code>.</li>
+<li><code>mean_score &gt;= thresholds[1]</code> (default <code>0.5</code>) — <code>mean_score</code> is the
+  mean of <code>score</code> over results with a non-null score.</li>
+</ul>
+<p><strong>AND, not OR.</strong> A rubric where every criterion is a soft pass at
+<code>score=0.55</code> averages well above the mean-score floor but might still
+fail the pass-rate floor (if those <code>0.55</code> scores came in as
+<code>passed=False</code>). The two thresholds defend two different failure modes:
+<code>min_pass_rate</code> catches "a few catastrophic failures masked by many
+soft passes"; <code>min_mean_score</code> catches "many tepid passes that cluster
+just above the bool boundary."</p>
+<p><strong>Degraded-path skip (DEC-015).</strong> Both aggregate computations skip
+results where <code>score is None</code>. A criterion's retry-exhaustion does not
+silently lower the <code>pass_rate</code> of the criteria that did run
+successfully — but <code>aggregate_complete</code> flips to <code>False</code>, so the diff
+renderer flags the report as partial.</p>
+<h2 id="audit-jsonl-schema">Audit JSONL schema</h2>
+<blockquote>
+<p><strong>Consumer guide.</strong> For cross-stage joins (including grade JSONL ↔
+grade sidecar ↔ diff sidecar on <code>artifact_id</code>), <code>jq</code> / pandas worked
+examples, the forward-compat policy, and the redaction surface, see
+<a href="../audits/"><code>docs/audits.md</code></a>. This section is the grade-layer
+production contract.</p>
+</blockquote>
+<p>Every per-pair <code>GradingResult</code> produces exactly one JSONL record at
+<code>audit_path</code> (default <code>&lt;project_dir&gt;/.signalforge/grade.jsonl</code>). One
+record per line; atomic concurrent appends via
+<code>O_APPEND | O_CREAT | 0o600</code> and a single <code>os.write</code> (looped on short
+returns) followed by <code>os.fsync</code> (DEC-006). The fourth instance of the
+convention across the codebase — mirrors <code>signalforge.safety.audit</code>,
+<code>signalforge.draft.audit</code>, and <code>signalforge.prune.audit</code>.</p>
+<p><code>GradeEvent</code> fields (~19 total):</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>audit_schema_version</code></td>
+<td>integer (<code>Literal[1]</code>)</td>
+<td>Audit shape version. Currently <code>1</code>. Bump only on shape change; <code>extra="ignore"</code> handles additions.</td>
+</tr>
+<tr>
+<td><code>signalforge_version</code></td>
+<td>PEP-440 version string</td>
+<td>Package version that produced the record.</td>
+</tr>
+<tr>
+<td><code>run_id</code></td>
+<td>32-hex-char string</td>
+<td>Single <code>uuid4().hex</code> per <code>grade_artifacts</code> invocation (DEC-020). Repeated on every JSONL record AND on the sidecar so JSONL → sidecar correlation never depends on timestamp ranges.</td>
+</tr>
+<tr>
+<td><code>timestamp</code></td>
+<td>ISO-8601 UTC datetime</td>
+<td>When the per-call decision was finalised. Distinct from the sidecar's <code>started_at</code>.</td>
+</tr>
+<tr>
+<td><code>model_unique_id</code></td>
+<td>string</td>
+<td>dbt <code>unique_id</code> of the graded model.</td>
+</tr>
+<tr>
+<td><code>artifact_id</code></td>
+<td>string (canonical dotted-path)</td>
+<td>DEC-009 canonical shape — see <a href="#artefact-id-format">Artefact-id format</a> below.</td>
+</tr>
+<tr>
+<td><code>criterion_id</code></td>
+<td>string</td>
+<td>The <code>Criterion.id</code> the judge scored against. Stable across artefacts of one run.</td>
+</tr>
+<tr>
+<td><code>score</code></td>
+<td>float <code>[0.0, 1.0]</code> or <code>null</code></td>
+<td>Numeric verdict. <code>null</code> is the DEC-015 degraded sentinel.</td>
+</tr>
+<tr>
+<td><code>passed</code></td>
+<td>bool</td>
+<td>The judge's own pass/fail call. <code>False</code> for every degraded record by construction.</td>
+</tr>
+<tr>
+<td><code>evidence</code></td>
+<td>string</td>
+<td>The judge's quoted-fragment evidence pulled from the artefact text. Empty for degraded records.</td>
+</tr>
+<tr>
+<td><code>reasoning</code></td>
+<td>string</td>
+<td>The judge's free-text rationale. Empty for degraded records other than the leading "call failed" / "grade budget exceeded" descriptor.</td>
+</tr>
+<tr>
+<td><code>rubric_hash</code></td>
+<td>16 hex chars</td>
+<td><code>blake2b(canonical_rubric_json, digest_size=8).hexdigest()</code> (DEC-010). Carried on every record AND the sidecar.</td>
+</tr>
+<tr>
+<td><code>prompt_version_template</code></td>
+<td>16 hex chars</td>
+<td><code>blake2b-8</code> of the system prompt + cached rubric block + envelope tag. Constant across all criteria of one run.</td>
+</tr>
+<tr>
+<td><code>criterion_prompt_hash</code></td>
+<td>16 hex chars</td>
+<td><code>blake2b-8</code> of the per-criterion prompt fragment. Stable across artefacts of one run.</td>
+</tr>
+<tr>
+<td><code>response_text_hash</code></td>
+<td>16 hex chars</td>
+<td><code>blake2b-8</code> of the raw LLM response text. Empty string for degraded records (no response text to hash).</td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td>string</td>
+<td>The Anthropic model id used for the call (e.g. <code>claude-sonnet-4-6</code>).</td>
+</tr>
+<tr>
+<td><code>input_tokens</code></td>
+<td>integer</td>
+<td>Total input tokens billed for the call. <code>0</code> for degraded records.</td>
+</tr>
+<tr>
+<td><code>output_tokens</code></td>
+<td>integer</td>
+<td>Total output tokens billed. <code>0</code> for degraded records.</td>
+</tr>
+<tr>
+<td><code>cache_creation_input_tokens</code></td>
+<td>integer</td>
+<td>Tokens charged at 1.25× input pricing for cache writes. <code>0</code> on cache-read-only calls.</td>
+</tr>
+<tr>
+<td><code>cache_read_input_tokens</code></td>
+<td>integer</td>
+<td>Tokens charged at 0.1× input pricing for cache reads.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="artefact-id-format">Artefact-id format</h3>
+<p><code>artifact_id</code> is a canonical dotted-path string (DEC-009). Six shapes
+the formatter emits — the same shapes the resolver in
+<code>signalforge.grade.prompts.extract_artifact_text</code> consumes:</p>
+<ul>
+<li><code>column.&lt;col&gt;.description</code> — column documentation.</li>
+<li><code>column.&lt;col&gt;.rationale</code> — column rationale.</li>
+<li><code>model.description</code> — model documentation.</li>
+<li><code>model.rationale</code> — model rationale.</li>
+<li><code>test.column.&lt;col&gt;.&lt;test.type&gt;</code> — column-scoped test (e.g. <code>test.column.email.not_null</code>).</li>
+<li><code>test.model.&lt;test.type&gt;</code> (or <code>test.model.&lt;test.type&gt;.&lt;args_hash&gt;</code>) — model-level test. The <code>args_hash</code> (8-hex <code>blake2b-4</code> of the test's identifying args, sorted for argument-order invariance) appears only when two model-level tests share a <code>test.type</code>.</li>
+</ul>
+<p>A drift in the formatter is caught downstream when the resolver
+produces a string that doesn't match <code>^(column|test|model)\.</code>.</p>
+<h2 id="sidecar-json-schema">Sidecar JSON schema</h2>
+<p>End-of-run, one JSON document per invocation at <code>sidecar_path</code> (default
+<code>&lt;project_dir&gt;/.signalforge/grade.json</code>). Single-document overwrite via
+<code>O_WRONLY | O_CREAT | O_TRUNC</code> (DEC-012); a re-run replaces the prior
+sidecar atomically (subject to platform truncate semantics). The
+sidecar size cap is 1 MiB (<code>_GRADE_SIDECAR_RECORD_LIMIT_BYTES</code>) — much
+larger than the JSONL audit's 4 KiB <code>PIPE_BUF</code>-bound limit because
+there is no concurrent-append contract.</p>
+<p>The sidecar carries the same <code>GradingReport</code> shape the orchestrator
+returns:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;grade_schema_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;signalforge_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0.1.0.dev0&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;run_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;a1b2c3d4e5f6478890aabbccddeeff00&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-05-01T17:42:13.123456Z&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;duration_seconds&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">12.473</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;model_unique_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;model.shop.dim_customers&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;rubric_hash&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0123456789abcdef&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;thresholds&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="mf">0.7</span><span class="p">,</span><span class="w"> </span><span class="mf">0.5</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;results&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;artifact_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;column.email.description&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;criterion_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;clarity&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;score&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.8</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;passed&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;evidence&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;reasoning&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;...&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;pass_rate&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">1.0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;mean_score&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.8</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;aggregate_complete&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;passed&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Aggregate computed fields (<code>pass_rate</code>, <code>mean_score</code>,
+<code>aggregate_complete</code>, <code>passed</code>) round-trip through the JSON via
+Pydantic's <code>@computed_field</code> serialisation — a sidecar reader gets the
+same view as a freshly-produced <code>GradingReport</code>.</p>
+<p><strong><code>run_id</code> correlation (DEC-020).</strong> Every JSONL record from this run
+carries the same <code>run_id</code> as the sidecar's <code>run_id</code>. To pull every
+per-pair record for a sidecar:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">RUN_ID</span><span class="o">=</span><span class="k">$(</span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">&#39;.run_id&#39;</span><span class="w"> </span>.signalforge/grade.json<span class="k">)</span>
+jq<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;select(.run_id == \&quot;</span><span class="nv">$RUN_ID</span><span class="s2">\&quot;)&quot;</span><span class="w"> </span>.signalforge/grade.jsonl
+</code></pre></div>
+<p><strong>Partial-run signal.</strong> JSONL exists but the sidecar is absent → the
+run crashed mid-iteration (most likely an audit-write failure on a
+later pair, which propagated as <code>GradeAuditWriteError</code>). Per-pair JSONL
+records up to the crash point are durable receipts of the work that
+DID complete. The crash was deliberate (DEC-006 fail-closed) — an
+unaudited grade decision is, by definition, a verdict without a
+receipt, exactly the failure mode the audit exists to prevent.</p>
+<p><strong>Drift gates.</strong> <code>tests/fixtures/grade/grade_event_v1.jsonl</code> and
+<code>grade_report_v1.json</code> are the canonical schema fixtures;
+<code>tests/grade/test_drift_detector.py</code> pairs each production model
+(<code>extra="ignore"</code>) with a one-off <code>extra="forbid"</code> strict mirror and
+validates against the fixture. Adding a field to <code>GradeEvent</code> /
+<code>GradingReport</code> / <code>GradingResult</code> without updating the strict mirror
+OR the fixture breaks the test loudly. Don't bypass.</p>
+<h2 id="reproducibility-hash-fields">Reproducibility / hash fields</h2>
+<p>Three hash fields land on every <code>GradeEvent</code>, all 16-hex-char <code>blake2b</code>
+with <code>digest_size=8</code>. The cross-stage hash domain is consistent — a
+reviewer querying "what response text produced criterion X for
+artefact Y on date Z" can compare bytes verbatim across draft and
+grade JSONLs.</p>
+<ul>
+<li><strong><code>rubric_hash</code></strong> — <code>blake2b-8</code> of the canonical rubric JSON (list of <code>{id, criterion}</code> mappings, sorted by <code>id</code>, dumped with <code>sort_keys=True, separators=(",", ":")</code>). Deterministic and order-invariant by construction — swapping two criteria in the rubric tuple does not change the digest. Carried on every event AND on the sidecar <code>GradingReport</code>. Same <code>rubric_hash</code> across all records in a run = same rubric; differs = rubric changed mid-run (which doesn't happen in v0.1 since the rubric is locked at orchestrator entry, but a reader can still verify).</li>
+<li><strong><code>prompt_version_template</code></strong> — <code>blake2b-8</code> of the system prompt + cached rubric block + envelope-tag template. Constant across all criteria of one run; constant across runs of the same SignalForge version with the same rubric.</li>
+<li><strong><code>criterion_prompt_hash</code></strong> — <code>blake2b-8</code> of the per-criterion prompt fragment. Stable across artefacts of one run; reading the same criterion's prompt fragment from a v0.2 deployment with a tweaked prompt template surfaces a hash drift even when the criterion text itself is unchanged.</li>
+<li><strong><code>response_text_hash</code></strong> — <code>blake2b-8</code> of the raw LLM response text. Empty string for degraded records (no response text). Mirrors <code>LLMResponseEvent.response_text_hash</code> (#5).</li>
+</ul>
+<p>To find every JSONL record produced by a specific rubric:</p>
+<div class="highlight"><pre><span></span><code>jq<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;select(.rubric_hash == &quot;0123456789abcdef&quot;)&#39;</span><span class="w"> </span>.signalforge/grade.jsonl
+</code></pre></div>
+<p>To verify a sidecar's <code>rubric_hash</code> matches the rubric still on disk,
+reload via <code>_canonical_rubric_hash(DEFAULT_RUBRIC)</code> from a Python
+session and compare; a mismatch means the rubric drifted between the
+graded run and the current code.</p>
+<h2 id="cost-guidance-dec-014">Cost guidance (DEC-014)</h2>
+<p>The grader's per-criterion fan-out (DEC-004) is the most expensive
+option of those evaluated in
+<a href="../plans/super/7-quality-grader.md"><code>plans/super/7-quality-grader.md</code></a>:
+<strong>one LLM call per <code>(artefact × criterion)</code> pair</strong>. Be clear-eyed about
+what this costs.</p>
+<p><strong>Reference numbers, with the assumptions.</strong> The default rubric has
+<strong>4 criteria</strong>; a typical drafted dbt model has <strong>~12 artefacts</strong>
+(column descriptions + column rationales + per-test rationales + model
+description + model rationale). A richer real-world fixture (the
+Austin bikeshare project used by the live e2e suite) exercises ~27
+artefacts/model → ~108 grade calls/model — adjust the per-model figures
+below proportionally for your own model shape.</p>
+<p><strong>Per-provider per-model cost (Austin bikeshare fixture, 2026-05-29
+measurement at pricing-table version <code>2026-05-28</code>):</strong></p>
+<table>
+<thead>
+<tr>
+<th>Provider × model</th>
+<th>Per-model cost</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Anthropic <code>claude-sonnet-4-6</code></td>
+<td>~$0.38</td>
+<td>Drafter + grader on the BQ <code>[anthropic]</code> variant; baseline for the cost-control discussion below.</td>
+</tr>
+<tr>
+<td>OpenAI <code>gpt-4o</code></td>
+<td>~$0.21</td>
+<td>Grader-only on the BQ <code>[openai]</code> variant; drafter still Anthropic (DEC-011 of #155 pins drafter fixture stability).</td>
+</tr>
+<tr>
+<td>Gemini <code>gemini-2.5-flash</code></td>
+<td>~$0.045</td>
+<td>Grader-only on the BQ <code>[gemini]</code> variant; cheapest grade run by ~10× thanks to flash-tier pricing.</td>
+</tr>
+</tbody>
+</table>
+<p>These figures are a single 2026-05-29 measurement at pricing-table
+version <code>2026-05-28</code> — <strong>calibration signal, not a billing guarantee.</strong>
+Vendor pricing rotates; per-fixture artefact count varies; cache hit/miss
+state across a run drives ±5–10% noise on the Anthropic figure
+specifically. See
+<a href="../plans/super/157-e2e-cost-and-parallel.md"><code>plans/super/157-e2e-cost-and-parallel.md</code></a>
+§ "Measured baseline (2026-05-29)" for the full-suite rollup
+($1.38/run across the three providers).</p>
+<p><strong>Fan-out comparison vs the batched alternative:</strong></p>
+<ul>
+<li>The per-criterion fan-out (one LLM call per <code>(criterion × artefact)</code>)
+  is what the figures above measure.</li>
+<li>vs. <strong>~$0.05 per model batched</strong> (Q4=A in the plan — single judge
+  call covering all criteria for one artefact at once). The
+  per-criterion fan-out is <strong>~3.4× more expensive</strong>.</li>
+</ul>
+<p><strong>Why fan-out anyway?</strong> Three load-bearing reasons (recorded in
+DEC-004 of the plan):</p>
+<ol>
+<li><strong>Per-criterion retry isolation.</strong> One LLM call per criterion means
+   one bad criterion (parser failure, retry-exhausted) does not
+   fail-loud the whole report — the orchestrator routes that pair to
+   the DEC-015 degraded path and the rest of the rubric still produces
+   signal. Batched mode would force "all-or-nothing" parsing.</li>
+<li><strong>Per-criterion prompt tuning headroom for v0.2.</strong> Each criterion
+   already has its own prompt seam; adding a v0.2 per-criterion prompt
+   override is a one-line config addition. Batched mode would require
+   a prompt-template overhaul.</li>
+<li><strong>Trivial anchor contract.</strong> Single criterion = no positional
+   alignment problem in the response parser. Batched mode would have
+   to validate a multi-criterion response array against the rubric
+   ordering, exactly the kind of loose-contract surface the safety /
+   draft layers' anchor contracts exist to avoid.</li>
+</ol>
+<p><strong>Cost-control knobs.</strong> Three levers operators can pull when the
+default fan-out is too expensive for their use case:</p>
+<ul>
+<li><strong><code>total_budget_seconds</code></strong> (default <code>300</code>) — Whole-run wall-clock
+  cap. Tripping this routes every remaining pair to the degraded path
+  rather than billing for the whole rubric × every artefact. A
+  <code>GradeBudgetExceededError</code> only fires if the budget trips before
+  ANY criterion runs (a hard "the run did nothing" failure); a partial
+  run completes with <code>aggregate_complete: false</code>.</li>
+<li><strong><code>max_output_tokens</code></strong> (default <code>256</code>) — Per-call output cap. The
+  expected JSON response is ~150 tokens; tightening to 192 trims ~25%
+  off the output-token bill at marginal risk of truncated JSON
+  (handled by <code>GradeOutputError(violation_type="json_parse")</code> and the
+  degraded path).</li>
+<li><strong><code>cache_ttl: "1h"</code></strong> (default) — Cache-read economics. Prompt
+  caching is a <strong>provider capability</strong> (issue #135): the <code>cache_control</code>
+  marker, the extended-cache-ttl beta header, and the pre-send
+  <code>count_tokens</code> gate are emitted only when the selected <code>LLMProvider</code>
+  reports <code>supports_prompt_caching</code> / <code>supports_token_count</code>. A provider
+  that supports neither reports 0 cache tokens and skips the marker; the
+  default <code>anthropic</code> provider supports both, so the economics below are
+  unchanged. The cached block (system prompt + rubric block) is constant
+  across every call in one <code>grade_artifacts</code> invocation; a 60-call run
+  reads the cache ~59 times after one write. Cache reads are 0.1× input pricing vs.
+  1.25× for writes; the break-even is ~2 reads per write. Switching
+  to <code>cache_ttl: "5m"</code> is rarely worth it — the only failure mode the
+  shorter TTL catches is a multi-hour run where the cache would otherwise
+  expire mid-iteration, which means the per-call reads stop landing,
+  which the dual-zero cache-anomaly WARNING (DEC-014 of #5) surfaces
+  loudly. Leave at <code>"1h"</code> unless you have a specific reason.</li>
+</ul>
+<p><strong>v0.2 will offer batched-criteria as opt-in</strong> for cost-conscious
+operators (DEC-014). The current architecture preserves the option:
+each criterion has its own prompt seam already, so a <code>cost_mode:
+batched</code> flag is additive rather than a rewrite.</p>
+<h3 id="per-provider-max_output_tokens-recommended-floors">Per-provider <code>max_output_tokens</code> recommended floors</h3>
+<p>No per-provider override is enforced in code — <code>GradeConfig.max_output_tokens</code>
+is one knob across every provider. The floors below are observed-data
+recommendations from live grading runs; operators can lower for cost-cutting
+but must validate quality afterward. Truncated judge responses surface as
+<code>LLMResponseFormatError</code> (the provider-neutral <code>is_clean_completion</code> gate raises
+on any non-clean finish_reason — Anthropic <code>stop_reason="max_tokens"</code>, OpenAI
+<code>finish_reason="length"</code>, Gemini <code>finish_reason="MAX_TOKENS"</code>) and degrade
+the pair with <code>reasoning="call failed: GradeLLMError: &lt;inner finish_reason message&gt;"</code>
+per #155 DEC-005 + #158 (the inner provider message — naming the actual
+<code>finish_reason</code> value — is surfaced into the audit JSONL so a residual
+degrade is self-diagnosing without re-reading stderr).</p>
+<table>
+<thead>
+<tr>
+<th>Provider</th>
+<th>Recommended floor</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Anthropic (Sonnet 4.6+)</td>
+<td>1024</td>
+<td>Sufficient for full reasoning; tested in BQ smoke.</td>
+</tr>
+<tr>
+<td>OpenAI (gpt-4o)</td>
+<td>1024</td>
+<td>Same headroom; no observed truncation.</td>
+</tr>
+<tr>
+<td>Gemini (2.5-flash+)</td>
+<td><strong>4096</strong></td>
+<td>Verbose reasoning style; 512 / 1024 observed truncating mid-string (#155 DEC-008). 2048 verified safe at the 5-pair in-isolation smoke scale but <strong>#158 found 5–6/108 pairs still degrade at 2048 on the full Austin fixture</strong> — 4096 is the fixture-scale floor.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Fixture-scale caveat (issue #158):</strong> these floors are <em>necessary
+but not sufficient</em> — Gemini's per-pair <code>reasoning</code> length is
+high-variance, so a fixture with substantially more artifacts than
+the Austin bikeshare e2e (~27 artifacts × 4 criteria = ~108 pairs)
+may still see residual <code>MAX_TOKENS</code> degrades at 4096. The honest
+guidance is to treat the floor as fixture-scale-dependent: validate
+with a full-fixture run, watch <code>GradingReport.aggregate_complete</code>,
+and bump if any pair degrades with <code>reasoning</code> mentioning
+<code>finish_reason='MAX_TOKENS'</code>. The diagnostic in the degrade reasoning
+tells you exactly which <code>finish_reason</code> fired.</p>
+</blockquote>
+<h2 id="openai-provider">OpenAI provider</h2>
+<p>Issue #136 registered <code>OpenAIProvider</code> as the second
+<code>signalforge.llm.providers.LLMProvider</code>. Select it by setting
+<code>grade.provider: openai</code> in <code>signalforge.yml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">grade</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">openai</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gpt-4o</span><span class="w">            </span><span class="c1"># default judge model for the OpenAI provider; any model id the SDK accepts is allowed</span>
+<span class="w">  </span><span class="c1"># cache_ttl, max_retries_*, total_budget_seconds, thresholds — same shape as the anthropic provider</span>
+</code></pre></div>
+<p>Requirements:</p>
+<ul>
+<li><strong>Install extra:</strong> <code>pip install signalforge-dbt[openai]</code> (or <code>uv sync --dev</code> in a contributor checkout). Pulls <code>openai&gt;=1.40</code> plus <code>tiktoken</code> for the <code>--estimate</code> cost-preview path.</li>
+<li><strong>Env var:</strong> <code>OPENAI_API_KEY</code> (mirrors <code>ANTHROPIC_API_KEY</code> for the default provider).</li>
+<li><strong>Pricing SKUs registered:</strong> <code>gpt-4o</code>, <code>gpt-4o-mini</code>, <code>gpt-4.1</code>, <code>gpt-4-turbo</code>. Other model ids raise <code>EstimateUnknownModelError</code> from the <code>--estimate</code> path (the live judge call still runs; <code>--estimate</code> is the only surface that requires a pricing row). See <a href="../cost-estimate-ops/"><code>docs/cost-estimate-ops.md</code></a>.</li>
+</ul>
+<p><strong>No prompt caching (cost note).</strong> OpenAI's Chat Completions surface
+does not expose Anthropic-style prompt caching. <code>OpenAIProvider</code>
+reports <code>supports_prompt_caching=False</code> and <code>supports_token_count=False</code>,
+which means the orchestrator (<code>signalforge.llm.call_llm</code>) skips both
+the <code>cache_control</code> marker and the pre-send <code>count_tokens</code> gate
+(issue #135 DEC-008). <strong>Every grading call ships the full system +
+rubric block</strong> — there is no cached read discount on subsequent
+criteria, so the per-<code>(artefact × criterion)</code> fan-out (see
+<a href="#cost-guidance-dec-014">Cost guidance</a> above) costs a flat
+input-token bill on every call. Budget accordingly: a 4-criterion ×
+12-artefact run is 48 full system+rubric sends, not one write + 47
+reads. v0.3 ships without prompt caching; OpenAI's recent prompt-cache
+mechanism is a candidate for a follow-up.</p>
+<p><strong>Server-enforced JSON.</strong> <code>OpenAIProvider.build_create_kwargs</code>
+attaches <code>response_format={"type": "json_object"}</code> so the judge model
+is forced to emit valid JSON server-side (DEC-006). The tolerant
+<code>extract_json_payload</code> parser (issue #144) remains as defence-in-depth
+for the same prose-preamble drift class the Anthropic path handles.</p>
+<p><strong>Live smoke gating.</strong> A gated <code>@pytest.mark.openai</code> real-API
+end-to-end test exercises grading against <code>gpt-4o</code>. Run it with:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">SF_RUN_OPENAI</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">OPENAI_API_KEY</span><span class="o">=</span>sk-...<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span>-m<span class="w"> </span>openai<span class="w"> </span>--no-cov
+</code></pre></div>
+<p>Mirrors the <code>@pytest.mark.anthropic</code> precedent — excluded from the
+default CI run via <code>addopts -m 'not openai'</code>; both env vars are
+required (each missing var produces a clear skip reason). See
+<a href="../cost-estimate-ops/"><code>docs/cost-estimate-ops.md</code></a> for the
+maintainer's three-test smoke set (grader + drafter + <code>--estimate</code>).</p>
+<h2 id="gemini-provider">Gemini provider</h2>
+<p>Issue #137 registered <code>GeminiProvider</code> as the third LLM provider behind the
+provider-neutral seam (#135). Select it via <code>grade.provider: gemini</code> in
+<code>signalforge.yml</code>:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">grade</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">provider</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini</span>
+<span class="w">  </span><span class="nt">model</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">gemini-2.5-flash</span><span class="w">    </span><span class="c1"># default mid-tier judge; gemini-2.5-pro and gemini-2.0-flash are also registered</span>
+<span class="w">  </span><span class="nt">cache_ttl</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1h</span><span class="w">              </span><span class="c1"># accepted but ignored — Gemini ships without caching in v0.3</span>
+</code></pre></div>
+<ul>
+<li><strong>Install extra:</strong> <code>pip install signalforge-dbt[gemini]</code> (or <code>uv sync --dev</code> in a contributor checkout). Pulls <code>google-genai&gt;=0.5,&lt;1</code>.</li>
+<li><strong>Env var:</strong> <code>GOOGLE_API_KEY</code> (read by the SDK; SignalForge never logs it).</li>
+<li><strong>Server-side JSON enforcement:</strong> <code>GeminiProvider.build_create_kwargs</code> sets <code>response_mime_type="application/json"</code> on the <code>GenerateContentConfig</code> (DEC-018 of #137). Belt-and-braces with the tolerant <code>extract_json_payload</code> parser.</li>
+<li><strong>Safety-filter / non-clean finish_reason handling:</strong> Two related paths both route through the same degrade. (1) The provider-neutral <code>LLMProvider.is_clean_completion(response)</code> gate inside <code>call_llm</code> (DEC-005 of #155) raises <code>LLMResponseFormatError</code> when <code>finish_reason</code> is anything but <code>STOP</code> — including <code>SAFETY</code>, <code>RECITATION</code>, <code>OTHER</code>, <code>MAX_TOKENS</code> (even when partial text is present). (2) The legacy <code>GeminiProvider.extract_text_blocks</code> raise (DEC-005 of #137) still fires when zero text parts are returned. Either way, the grade engine wraps the result as <code>GradeLLMError</code> and degrades the affected pair via the conservative <code>score=None</code> / <code>reasoning="call failed: GradeLLMError: &lt;inner finish_reason message&gt;"</code> taxonomy (#158 surfaces the inner provider message into the audit field so the actual <code>finish_reason</code> value — <code>SAFETY</code> vs <code>RECITATION</code> vs <code>MAX_TOKENS</code> — is recoverable from <code>.signalforge/grade.jsonl</code> alone).</li>
+</ul>
+<p><strong>No prompt caching (cost note — DEC-013 of #137).</strong> v0.3 Gemini ships
+<strong>without</strong> prompt caching. <code>GeminiProvider</code> reports
+<code>supports_prompt_caching=False</code> / <code>supports_token_count=False</code>, so
+<code>call_llm</code> skips the <code>cache_control</code> marker, the <code>extended-cache-ttl</code> beta
+header, the dual-zero cache-anomaly WARNING, AND the pre-send
+<code>count_tokens</code> gate. Every grade call transmits the full system + rubric
+prompt; there is no Anthropic-style discount on the cached prefix. For a
+default 4-criterion rubric over a 12-column model (~48 sequential calls),
+budget the per-call cost accordingly. Explicit Gemini context caching is
+tracked as a follow-up.</p>
+<p><strong><code>--estimate</code> integration (active).</strong> <code>signalforge generate --estimate</code>
+with <code>grade.provider: gemini</code> works end-to-end via Gemini's native
+<code>client.models.count_tokens</code> (US-007 of #137; DEC-016). One extra API
+round-trip per estimate call — comparable in shape to Anthropic's
+<code>messages.count_tokens</code> and distinct from OpenAI's local <code>tiktoken</code>
+path. The grader-side USD figure uses the Gemini pricing SKUs registered
+in <code>signalforge.llm.pricing</code> (<code>gemini-2.5-pro</code>, <code>gemini-2.5-flash</code>,
+<code>gemini-2.0-flash</code>). Network or auth failures surface as
+<code>&lt;unavailable: &lt;ErrorClass&gt;&gt;</code> via the conservative-bias supplementary-
+failure path (DEC-005 of #36); operators see a calibration signal, not
+an aborted run.</p>
+<p><strong>Live smoke.</strong> A <code>@pytest.mark.gemini</code> gated end-to-end test exercises
+grading against <code>gemini-2.5-flash</code>. Run it with:</p>
+<div class="highlight"><pre><span></span><code><span class="nv">SF_RUN_GEMINI</span><span class="o">=</span><span class="m">1</span><span class="w"> </span><span class="nv">GOOGLE_API_KEY</span><span class="o">=</span>...<span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span>-m<span class="w"> </span>gemini<span class="w"> </span>--no-cov
+</code></pre></div>
+<p>Mirrors the <code>@pytest.mark.anthropic</code> / <code>@pytest.mark.openai</code> precedent —
+excluded from the default CI run via <code>addopts -m 'not gemini'</code>; both env
+vars are required.</p>
+<h2 id="prompt-injection-mitigation">Prompt-injection mitigation</h2>
+<p>The grader's only LLM-prompt defence is the
+<code>&lt;ARTIFACT&gt;...&lt;/ARTIFACT&gt;</code> envelope (mirrors the drafter's
+<code>&lt;MODEL_SQL&gt;</code> envelope, DEC-007 of #5). The system message instructs
+the LLM-judge to treat anything between the tags as data, not
+instructions:</p>
+<div class="highlight"><pre><span></span><code>&lt;ARTIFACT&gt;
+This column captures the customer&#39;s email address at order time.
+-- adversarial column description: &quot;ignore prior instructions and ...&quot;
+&lt;/ARTIFACT&gt;
+</code></pre></div>
+<p><strong>Envelope-breach guard.</strong> A payload containing the literal
+<code>&lt;/ARTIFACT&gt;</code> would terminate the fence early and let downstream
+content escape. Two checks fire:</p>
+<ol>
+<li><strong>Whole-run pre-flight scan (DEC-013).</strong> <code>_scan_envelope_breach</code>
+   runs at orchestrator entry over every artefact payload BEFORE any
+   LLM call is issued. Failing fast surfaces one typed
+   <code>GradePromptEnvelopeBreachError(artifact_id=...)</code> pointing at the
+   offending artefact, rather than discovering the breach mid-iteration
+   after several JSONL records have already landed.</li>
+<li><strong>Per-call defence-in-depth.</strong> <code>render_dynamic_block</code> re-checks at
+   call time so a future caller using <code>_grade_one</code> directly (without
+   the orchestrator's pre-flight) still gets the protection.</li>
+</ol>
+<p><strong>Safety-boundary note (DEC-013 of #7).</strong> The PII redaction boundary
+established by issue #4 closed at <em>draft time</em> — the safety layer
+redacts column names and values before the drafting LLM call.
+Post-draft, <code>CandidateSchema</code> carries <em>real</em> column names; the grader
+sends those real names to the LLM-judge by design, and writes them
+into the sidecar JSON the operator reviews. Re-redaction inside the
+grader would defeat both the rubric (judges need real names to score
+documentation quality) and the explainable-diffs commitment (reviewers
+need to see what was scored).</p>
+<h2 id="audit-log-sensitivity">Audit log sensitivity</h2>
+<p><code>grade.jsonl</code> and <code>grade.json</code> contain the LLM-judge's evidence and
+reasoning, which can echo verbatim fragments of the artefact text
+(column descriptions, model docs, test rationales). Treat both files
+at-rest the same way you treat the safety / draft / prune audits:</p>
+<ul>
+<li><strong>Gitignore <code>.signalforge/</code></strong> (already configured in this repo's <code>.gitignore</code>).</li>
+<li><strong>Restrict at-rest permissions.</strong> The writers create files at <code>0o600</code> on first call; the parent directory is created via <code>mkdir(parents=True, exist_ok=True)</code> (Python's <code>mkdir</code> does not tighten an existing directory's permissions, so verify the existing <code>.signalforge/</code> mode is <code>0o700</code> on shared hosts).</li>
+<li><strong>Don't ship as a build artefact.</strong> Strip from container images and CI uploads.</li>
+<li><strong>Symlink-hardened paths.</strong> Both writers route <code>audit_path</code> and <code>sidecar_path</code> through <code>signalforge.warehouse._path_safety.canonicalise_path</code> at writer entry. A symlinked <code>.signalforge/grade.jsonl -&gt; /etc/passwd</code> is rejected as <code>GradeAuditWriteError</code> (wrapping the underlying <code>ProfileNotFoundError</code>) before the <code>os.open</code> ever fires.</li>
+</ul>
+<h2 id="debugging">Debugging</h2>
+<p>Logger name: <code>signalforge.grade.engine</code> (and sibling modules under
+<code>signalforge.grade</code>).</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;signalforge.grade&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">)</span>
+</code></pre></div>
+<p>Levels:</p>
+<ul>
+<li><strong>INFO</strong> — One line per <code>grade_artifacts</code> invocation at the end of the run, lazy-format JSON per DEC-027 (<code>run_id</code>, <code>model_unique_id</code>, <code>pass_rate</code>, <code>mean_score</code>, <code>passed</code>, <code>aggregate_complete</code>, <code>duration_seconds</code>, <code>results</code>). Mirrors <code>safety-layer.md</code> DEC-022 / <code>llm-drafter.md</code> DEC-011 / <code>prune-engine.md</code> DEC-017 — never f-string-interpolate user-controlled strings into a logger call.</li>
+<li><strong>WARNING</strong> — One line when <code>total_budget_seconds</code> trips, JSON-encoded <code>{run_id, model_unique_id, evaluated, remaining_pairs, total_budget_seconds}</code>. Plus the inherited <code>signalforge.llm</code> retry warnings (one per retry attempt at the LLM seam).</li>
+<li><strong>DEBUG</strong> — Reserved for future per-criterion latency observability; v0.1 emits no DEBUG from the engine.</li>
+</ul>
+<p>The grade layer never logs full evidence / reasoning content. The
+audit JSONL is the single durable record of decision-level detail;
+logger output is a hint that the decision happened, not what was in
+it. The custom <code>__repr__</code> on <code>GradingResult</code> and <code>GradingReport</code>
+defends accidental <code>_LOGGER.warning("result: %s", result)</code> calls from
+dumping multi-paragraph reasoning into log sinks.</p>
+<p><strong>Reading a fail-closed <code>GradeAuditWriteError</code>.</strong> The cause is exposed
+as <code>.cause</code> and on <code>__cause__</code>. Common causes:</p>
+<ul>
+<li>Parent directory not writable (no <code>+w</code> for the user, or <code>.signalforge/</code> is a symlink to a read-only mount).</li>
+<li>Disk full (<code>ENOSPC</code>).</li>
+<li>Symlink containment violation (the audit / sidecar path canonicalises outside <code>&lt;project_dir&gt;</code>). The cause is a <code>signalforge.warehouse.errors.ProfileNotFoundError</code>.</li>
+<li>Oversize record (raises <code>GradeAuditRecordTooLargeError</code> instead — for the JSONL writer, reduce the LLM's <code>reasoning</code> payload via <code>max_output_tokens</code>; for the sidecar, the 1 MiB cap is generous enough that hitting it suggests a runaway LLM response that should already have been rejected by the JSONL writer's per-call cap).</li>
+</ul>
+<h2 id="failure-modes-typed-error-cross-reference">Failure modes / typed-error cross-reference</h2>
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>When raised</th>
+<th>Where it surfaces</th>
+<th>How to fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GradeError</code></td>
+<td>Base class; never raised directly.</td>
+<td><code>signalforge.grade.errors</code></td>
+<td>Catch it to handle every grade-layer failure uniformly.</td>
+</tr>
+<tr>
+<td><code>GradeConfigError</code></td>
+<td><code>signalforge.yml</code> <code>grade:</code> block failed parse / schema validation (<code>extra="forbid"</code>, out-of-range knob, malformed rubric override).</td>
+<td><code>load_grade_config</code></td>
+<td>Inspect the <code>grade:</code> block. Typos like <code>mdoel:</code> are caught here.</td>
+</tr>
+<tr>
+<td><code>GradeRubricError</code></td>
+<td>The resolved rubric is empty or carries duplicate <code>id</code> values.</td>
+<td><code>validate_rubric</code> (called at <code>grade_artifacts</code> entry and inside <code>load_grade_config</code>'s rubric validator)</td>
+<td>Provide at least one criterion; ensure every <code>id</code> is unique.</td>
+</tr>
+<tr>
+<td><code>GradeLLMError</code></td>
+<td>One-level wrap of <code>signalforge.llm.LLMError</code>. Retry budget exhausted, auth failure, server error, malformed cache block.</td>
+<td><code>_grade_one</code> per pair (degraded by orchestrator); only escapes if the entire run can't recover.</td>
+<td>Inspect <code>.cause</code> / <code>__cause__</code> for the underlying LLM-layer detail. Common: missing <code>ANTHROPIC_API_KEY</code>, rate-limit exhaustion.</td>
+</tr>
+<tr>
+<td><code>GradeBudgetExceededError</code></td>
+<td><code>total_budget_seconds</code> tripped before ANY criterion was graded (a "the run did nothing" failure).</td>
+<td><code>grade_artifacts</code> (rare — the normal budget path is per-pair degrade).</td>
+<td>Raise <code>total_budget_seconds</code>, narrow the candidate set, or reduce the rubric's criterion count.</td>
+</tr>
+<tr>
+<td><code>GradePromptEnvelopeBreachError</code></td>
+<td>An artefact payload contains the literal <code>&lt;/ARTIFACT&gt;</code> close tag.</td>
+<td>Whole-run pre-flight <code>_scan_envelope_breach</code>; per-call defence-in-depth in <code>render_dynamic_block</code>.</td>
+<td>Inspect the offending artefact (<code>exc.artifact_id</code>); remove the literal tag from the column description / rationale.</td>
+</tr>
+<tr>
+<td><code>GradeOutputError</code></td>
+<td>LLM-judge response failed parse / anchor-contract validation. Carries <code>violation_type</code>.</td>
+<td><code>parse_grade_response</code> per pair (degraded by orchestrator).</td>
+<td>Pattern-match on <code>.violation_type</code> (<code>json_parse</code>, <code>criterion_id_mismatch</code>, <code>score_out_of_range</code>, …). Re-running typically resolves transient JSON failures; structural mismatches usually point at a prompt-template regression.</td>
+</tr>
+<tr>
+<td><code>GradeAuditWriteError</code></td>
+<td>Fail-closed audit / sidecar write failure (<code>OSError</code>, <code>PermissionError</code>, encoding, <code>fsync</code>, symlink containment). DEC-006 / DEC-012.</td>
+<td><code>write_grade_event</code> / <code>write_grading_report</code> (wrapped at the orchestrator's audit-write seams).</td>
+<td>Verify <code>&lt;project_dir&gt;/.signalforge/</code> is writable, has disk space, and is not a symlink escaping the project tree. Fix the I/O issue and re-run.</td>
+</tr>
+<tr>
+<td><code>GradeAuditRecordTooLargeError</code></td>
+<td>Serialised JSONL line &gt; 4000 bytes OR sidecar JSON &gt; 1 MiB. Raised BEFORE any file open.</td>
+<td><code>write_grade_event</code> / <code>write_grading_report</code>.</td>
+<td>For JSONL: reduce <code>max_output_tokens</code> so the judge's reasoning stays short; for sidecar: investigate any single result with megabyte-range reasoning (likely a prompt regression).</td>
+</tr>
+</tbody>
+</table>
+<h2 id="regen-instructions-for-fixtures">Regen instructions for fixtures</h2>
+<p>The grade-layer fixtures at <code>tests/fixtures/grade/grade_event_v1.jsonl</code>
+and <code>grade_report_v1.json</code> are <strong>hand-authored</strong>, not produced by a
+live LLM run. They exist solely as drift gates for the
+<code>extra="forbid"</code> strict mirrors in
+<code>tests/grade/test_drift_detector.py</code>. To regenerate after a model
+field change:</p>
+<ol>
+<li>Update the production model (<code>signalforge.grade.models</code> —
+   <code>GradeEvent</code>, <code>GradingReport</code>, or <code>GradingResult</code>).</li>
+<li>Update the matching strict mirror in
+   <code>tests/grade/test_drift_detector.py</code>. Both must change in the same
+   commit, or the strict-validates-fixture check fails.</li>
+<li>Edit the fixture JSON / JSONL by hand to add / remove the field.
+   Keep the values readable (no test fixture should be a wall of
+   placeholder hashes).</li>
+<li>Run <code>pytest tests/grade/test_drift_detector.py -v</code> — the strict
+   model must validate the fixture after the change.</li>
+</ol>
+<p><code>tests/fixtures/grade/sample_candidate.json</code> is also hand-authored;
+regen by editing in place. v0.2 may add a regenerate.sh script under
+<code>tests/fixtures/regenerate.sh</code>-style convention if the rubric / model
+shape stabilises enough that a deterministic generator pays for itself.</p>
+<p><code>tests/fixtures/grade/example_config.yml</code> is the source of truth for
+the worked example in <a href="#configuration-signalforgeyml-grade-block">Configuration</a>
+above — the <code>test_load_grade_config_doc_example_round_trips</code> test
+loads it through <code>load_grade_config</code> and asserts the defaults from
+DEC-023..DEC-027 are populated, so the doc and the loader cannot
+silently drift.</p>
+<h2 id="cli-integration-note">CLI integration note</h2>
+<p>Tracked in <a href="https://github.com/wjduenow/SignalForge/issues/9">issue #9</a>.
+The <code>signalforge generate</code> CLI will load the grade config via
+<code>load_grade_config(...)</code> and invoke <code>grade_artifacts(...)</code> after the
+prune step completes; the diff renderer (#8) consumes the returned
+<code>GradingReport</code> to render per-criterion stars + per-artefact
+<code>one_line_why</code> lines (Architectural Commitment #5 — explainable
+diffs). When <code>fail_on_below_threshold: true</code> is set in <code>signalforge.yml</code>,
+the CLI catches the resulting <code>GradeBelowThresholdError</code> and exits with
+the <code>INPUT</code> exit-code tier (exit 2) — see
+<a href="#threshold-fail-behaviour">Threshold-fail behaviour</a> above and
+<a href="../cli-ops/"><code>docs/cli-ops.md</code></a> once US-009 lands. The default
+posture (report-only) is preserved: a below-threshold run with the
+default <code>fail_on_below_threshold: false</code> returns the report and the
+CLI exits 0 once the diff renders.</p>
+<h2 id="references">References</h2>
+<ul>
+<li>Design record: <a href="../plans/super/7-quality-grader.md"><code>plans/super/7-quality-grader.md</code></a>.</li>
+<li>Prune-layer counterpart (the layer the grader mirrors most patterns
+  from for fail-closed audit + budget semantics):
+  <a href="../prune-ops/"><code>docs/prune-ops.md</code></a>.</li>
+<li>Drafter counterpart (the layer the grader mirrors for the LLM SDK
+  seam, prompt-injection envelope, and per-call response audit):
+  <a href="../draft-ops/"><code>docs/draft-ops.md</code></a>.</li>
+<li>Safety-layer counterpart (the layer that establishes the fail-closed
+  JSONL convention and <code>extra="forbid"</code> config-shape rule):
+  <a href="../safety-ops/"><code>docs/safety-ops.md</code></a>.</li>
+<li>Manifest reader conventions
+  (<code>frozen</code> / <code>extra="ignore"</code> / drift-detector pattern):
+  <a href="../.claude/rules/manifest-readers.md"><code>.claude/rules/manifest-readers.md</code></a>.</li>
+</ul>
+<p>Cross-reference DECs: DEC-001 (public API surface), DEC-002 (per-pair
+score shape + threshold-AND aggregate), DEC-004 (per-criterion
+fan-out — one LLM call per <code>(artefact, criterion)</code> pair), DEC-005
+(<code>fail_on_below_threshold</code> graduated in #9 / US-002 / DEC-021), DEC-006 (fail-closed JSONL
+audit), DEC-007 (locked default rubric), DEC-009 (canonical
+<code>artifact_id</code> dotted-path format), DEC-010 (<code>rubric_hash</code>
+reproducibility), DEC-011 (<code>Rubric</code> as <code>TypeAlias</code>), DEC-012
+(end-of-run sidecar JSON), DEC-013 (whole-run envelope-breach scan),
+DEC-014 (cost transparency — this doc's <a href="#cost-guidance-dec-014">Cost guidance</a>
+section), DEC-015 (degraded path on retry-exhaustion / parser-failure
+/ budget-exceeded), DEC-016 (default rubric criterion text + threshold
+defaults), DEC-017 (<code>Criterion</code> shape), DEC-018 (criterion-outer /
+artefact-inner iteration order; <code>one_line_why</code> cap), DEC-020
+(<code>run_id</code>), DEC-022 (<code>project_dir</code> semantics), DEC-023..DEC-027
+(locked config defaults), DEC-028 (nine-class error hierarchy).</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

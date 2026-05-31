@@ -1,0 +1,1982 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/safety-ops/">
+      
+      
+        <link rel="prev" href="../warehouse-adapter-ops/">
+      
+      
+        <link rel="next" href="../draft-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Safety Layer - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#pii-safety-layer-operations-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Safety Layer
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#default-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default posture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Modes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Modes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#schema-only-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        schema-only (default)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#aggregate-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        aggregate-only
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sample" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        sample
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#signalforgeyml-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge.yml reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#redaction-patterns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Redaction patterns
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#per-column-opt-out" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-column opt-out
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#column-name-redaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Column-name redaction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-jsonl-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit JSONL schema
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-log-sensitivity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit log sensitivity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-log-rotation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit log rotation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#typed-error-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Typed-error reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli-integration-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI integration note
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#default-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default posture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Modes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Modes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#schema-only-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        schema-only (default)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#aggregate-only" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        aggregate-only
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#sample" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        sample
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#signalforgeyml-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        signalforge.yml reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#redaction-patterns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Redaction patterns
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#per-column-opt-out" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-column opt-out
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#column-name-redaction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Column-name redaction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-jsonl-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit JSONL schema
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-log-sensitivity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit log sensitivity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-log-rotation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit log rotation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#typed-error-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Typed-error reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli-integration-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI integration note
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="pii-safety-layer-operations-guide">PII safety layer — operations guide</h1>
+<p>Operational reference for users of <code>signalforge.safety</code>. Companion to
+<a href="../manifest-loader-ops/"><code>docs/manifest-loader-ops.md</code></a> and
+<a href="../warehouse-adapter-ops/"><code>docs/warehouse-adapter-ops.md</code></a>, and to the
+design record in <a href="../plans/super/4-pii-safety.md"><code>plans/super/4-pii-safety.md</code></a>.</p>
+<p>The safety layer sits between the warehouse adapter and the LLM-drafting
+layer. Every LLM call goes through one entry point —
+<code>signalforge.safety.build_llm_request</code> — which writes a structured audit
+record before the request is handed back. There are no other sanctioned
+constructors of <code>LLMRequest</code>.</p>
+<h2 id="default-posture">Default posture</h2>
+<p>Schema-only is the default sampling mode. Architectural Commitment #1
+(signal over volume) means the LLM should see the <em>least</em> data needed to
+draft useful artifacts; raw row data is opt-in, not opt-out. See §4.5 of
+<a href="../research/dbt-claude-technical-surface/"><code>docs/research/dbt-claude-technical-surface.md</code></a>
+for the threat model the layer is sized against.</p>
+<p>The layer is fail-closed: any audit-write failure aborts the LLM call
+(DEC-011) and propagates as <code>AuditWriteError</code>. The default mode is
+asserted at three layers — config defaults, policy defaults, and the
+schema-only branch in <code>build_llm_request</code> performs zero adapter calls
+(DEC-012). Column NAMES are redacted in addition to values, because a
+column name alone (<code>john_smith_ssn_1234</code>) can leak PII (DEC-010).</p>
+<p>User-facing tagline: <strong>the LLM never sees row data unless you've
+explicitly opted in via <code>safety.mode: sample</code></strong> (<code>aggregate-only</code> still
+sends per-column statistics — count, distinct, nulls, min, max — to the
+LLM; only <code>schema-only</code> sends column names + types and nothing else).
+Note: <code>safety.mode</code> controls what the <em>LLM</em> sees — the <em>prune step</em>
+(<code>signalforge.prune.prune_tests</code>) runs warehouse SQL on every invocation
+regardless of <code>safety.mode</code>, because it needs warehouse evidence to
+decide which candidate tests carry signal (always-pass tests get
+dropped; tests that fail on known-clean data also get dropped). To skip
+the prune step entirely, see
+<a href="../prune-ops/#configuration-signalforgeyml-prune-block"><code>prune.enabled</code></a>
+in <code>docs/prune-ops.md</code>.</p>
+<h2 id="modes">Modes</h2>
+<p>Three modes, set via <code>safety.mode</code> in <code>signalforge.yml</code> or overridden
+via the CLI's <code>--mode</code> flag (post-#9):</p>
+<h3 id="schema-only-default"><code>schema-only</code> (default)</h3>
+<p>Only column names + types reach the LLM. No warehouse queries are
+issued — <code>build_llm_request</code> does not even open the adapter context.
+Names matching a redaction signal (per-column meta/tags or a redact
+pattern) are replaced with stable hashed placeholders of the form
+<code>col_&lt;8 hex&gt;</code> (DEC-010). The resulting <code>LLMRequest.schema</code> is a tuple
+of <code>(display_name, type_string)</code> pairs; <code>sampled_rows</code> and <code>aggregates</code>
+are both <code>None</code>.</p>
+<p>This applies only to <code>build_llm_request</code>. The prune step still queries
+the warehouse on every run — see
+<a href="../prune-ops/#configuration-signalforgeyml-prune-block"><code>prune.enabled</code></a>
+to skip it entirely.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.safety</span><span class="w"> </span><span class="kn">import</span> <span class="n">SafetyPolicy</span><span class="p">,</span> <span class="n">SamplingMode</span><span class="p">,</span> <span class="n">build_llm_request</span>
+
+<span class="n">policy</span> <span class="o">=</span> <span class="n">SafetyPolicy</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="n">SamplingMode</span><span class="o">.</span><span class="n">SCHEMA_ONLY</span><span class="p">)</span>
+<span class="n">request</span> <span class="o">=</span> <span class="n">build_llm_request</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">adapter</span><span class="p">,</span> <span class="n">policy</span><span class="p">)</span>
+<span class="c1"># request.schema == ((&quot;customer_id&quot;, &quot;INT64&quot;), (&quot;col_a3f29c61&quot;, &quot;STRING&quot;), ...)</span>
+<span class="c1"># request.sampled_rows is None</span>
+<span class="c1"># request.aggregates is None</span>
+</code></pre></div>
+<h3 id="aggregate-only"><code>aggregate-only</code></h3>
+<p>Column-level statistics — <code>count</code>, <code>distinct</code>, <code>nulls</code>, <code>min</code>, <code>max</code>,
+<code>data_type</code> — reach the LLM via the <code>aggregates</code> field. Calls
+<code>WarehouseAdapter.column_stats</code> once per non-redacted column inside a
+single <code>with adapter:</code> block. Redacted columns still appear as entries
+in the returned tuple, but their statistic value is <code>None</code> and their
+column name is the hashed placeholder.</p>
+<p><code>LLMRequest.aggregates</code> is a <code>tuple[tuple[str, ColumnStats | None], ...]</code>
+(not a dict) so <code>frozen=True</code> actually prevents mutation downstream
+(DEC-022 transitive immutability).</p>
+<div class="highlight"><pre><span></span><code><span class="n">policy</span> <span class="o">=</span> <span class="n">SafetyPolicy</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="n">SamplingMode</span><span class="o">.</span><span class="n">AGGREGATE_ONLY</span><span class="p">)</span>
+<span class="n">request</span> <span class="o">=</span> <span class="n">build_llm_request</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">adapter</span><span class="p">,</span> <span class="n">policy</span><span class="p">)</span>
+<span class="c1"># request.aggregates == (</span>
+<span class="c1">#     (&quot;customer_id&quot;, ColumnStats(count=42, distinct=42, nulls=0, ...)),</span>
+<span class="c1">#     (&quot;col_a3f29c61&quot;, None),  # redacted</span>
+<span class="c1">#     ...</span>
+<span class="c1"># )</span>
+</code></pre></div>
+<h3 id="sample"><code>sample</code></h3>
+<p>Row-level data reaches the LLM. Calls <code>WarehouseAdapter.sample_rows</code>
+inside a <code>with adapter:</code> block. Default sample size is 100 rows
+(<code>safety.sample_size</code>). Values for redacted columns are replaced with
+the literal string <code>"&lt;REDACTED&gt;"</code>. Row dict keys for redacted columns
+are rewritten to their hashed placeholders so the keys match the
+identifiers the LLM sees in <code>schema</code> and <code>columns_sent</code>.</p>
+<p>Constructing a <code>SafetyPolicy(mode=SamplingMode.SAMPLE)</code> emits a single
+WARNING via <code>signalforge.safety</code> on policy load (DEC-021).</p>
+<div class="highlight"><pre><span></span><code><span class="n">policy</span> <span class="o">=</span> <span class="n">SafetyPolicy</span><span class="p">(</span><span class="n">mode</span><span class="o">=</span><span class="n">SamplingMode</span><span class="o">.</span><span class="n">SAMPLE</span><span class="p">,</span> <span class="n">sample_size</span><span class="o">=</span><span class="mi">100</span><span class="p">)</span>
+<span class="n">request</span> <span class="o">=</span> <span class="n">build_llm_request</span><span class="p">(</span><span class="n">model</span><span class="p">,</span> <span class="n">adapter</span><span class="p">,</span> <span class="n">policy</span><span class="p">)</span>
+<span class="c1"># request.sampled_rows == (</span>
+<span class="c1">#     {&quot;customer_id&quot;: 1, &quot;col_a3f29c61&quot;: &quot;&lt;REDACTED&gt;&quot;, &quot;country&quot;: &quot;US&quot;},</span>
+<span class="c1">#     ...</span>
+<span class="c1"># )</span>
+</code></pre></div>
+<h2 id="signalforgeyml-reference"><code>signalforge.yml</code> reference</h2>
+<p>Top-level namespace is locked to <code>safety:</code> per DEC-025; every other
+top-level key (<code>llm:</code>, <code>prune:</code>, …) is reserved for future stages and
+silently ignored by the safety loader.</p>
+<div class="highlight"><pre><span></span><code><span class="nt">safety</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">schema-only</span><span class="w">          </span><span class="c1"># one of schema-only / aggregate-only / sample (case-insensitive)</span>
+<span class="w">  </span><span class="nt">sample_size</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100</span>
+<span class="w">  </span><span class="nt">audit_path</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">.signalforge/audit.jsonl</span><span class="w">   </span><span class="c1"># default; must stay inside project_dir</span>
+<span class="w">  </span><span class="nt">redact</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">extend</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;*custom_*&quot;</span><span class="p p-Indicator">]</span><span class="w">    </span><span class="c1"># appends to built-ins; mutually exclusive with replace</span>
+<span class="w">    </span><span class="c1"># replace: [...]         # substitutes built-ins entirely; empty list disables (WARNING)</span>
+</code></pre></div>
+<p>Field-by-field:</p>
+<ul>
+<li><strong><code>mode</code></strong> — <code>schema-only</code> | <code>aggregate-only</code> | <code>sample</code>. Case- and
+  separator-insensitive: <code>Schema-Only</code>, <code>schema_only</code>, <code>SCHEMA-ONLY</code>
+  all parse. Anything else raises <code>InvalidSamplingModeError</code> at load
+  time.</li>
+<li><strong><code>sample_size</code></strong> — Integer row count for <code>sample</code> mode; ignored by
+  the other two. Default <code>100</code>.</li>
+<li><strong><code>audit_path</code></strong> — JSONL audit-log path. Project-relative or
+  absolute; must canonicalise to a path inside <code>project_dir</code>. Default
+  is <code>.signalforge/audit.jsonl</code>. Containment is enforced via the same
+  symlink-hardened gate used by the manifest loader (<code>..</code> segments
+  rejected outright; symlink loops raise <code>InvalidConfigError</code>).</li>
+<li><strong><code>redact.extend</code></strong> — List of fnmatch globs appended to the built-in
+  patterns. Mutually exclusive with <code>redact.replace</code>.</li>
+<li><strong><code>redact.replace</code></strong> — List of fnmatch globs that substitutes the
+  built-ins entirely. An empty list disables redaction and emits a
+  WARNING.</li>
+</ul>
+<p>Unknown keys under <code>safety:</code> or <code>safety.redact:</code> raise
+<code>UnknownConfigKeyError</code> (the policy uses Pydantic's <code>extra="forbid"</code>,
+DEC-015). Typos like <code>redacts:</code> or <code>mode_:</code> fail loud at load time
+rather than silently doing nothing.</p>
+<h2 id="redaction-patterns">Redaction patterns</h2>
+<p>Patterns are case-insensitive <code>fnmatch</code> globs matched against the
+<em>lowercased</em> column name. The six built-ins are:</p>
+<div class="highlight"><pre><span></span><code>*email
+email
+*phone
+phone
+*ssn
+ssn
+</code></pre></div>
+<p>Each PII class has a prefixed form (<code>*email</code>) and a bare form (<code>email</code>)
+so both <code>user_email</code> and <code>email</code> match.</p>
+<p><strong>Override semantics.</strong></p>
+<ul>
+<li><code>redact.extend</code> appends to the six built-ins.</li>
+<li><code>redact.replace</code> substitutes the built-ins entirely.</li>
+<li><code>redact.replace: []</code> disables redaction (with a WARNING).</li>
+<li>Specifying both <code>extend</code> and <code>replace</code> raises <code>InvalidConfigError</code>.</li>
+</ul>
+<p><strong>Footgun-rejected patterns.</strong> Three values are rejected at policy-load
+time with <code>InvalidPatternError</code>:</p>
+<ul>
+<li><code>""</code> — never matches anything.</li>
+<li><code>"*"</code> — matches every column; use <code>redact.replace: []</code> to disable
+  explicitly.</li>
+<li><code>"?"</code> — matches every single-character column.</li>
+</ul>
+<p><strong>Suspicious-unmatched-column heuristic.</strong> When a column's lowercased
+name contains one of <code>email</code> / <code>phone</code> / <code>ssn</code> / <code>password</code> / <code>token</code> /
+<code>secret</code> / <code>api_key</code> AND no signal fired (no opt-out, no pattern
+match), the redactor logs a single WARNING with the model unique_id
+and column name. The column is <strong>not</strong> auto-redacted — the heuristic
+flags potential misconfiguration for the operator to decide.</p>
+<h2 id="per-column-opt-out">Per-column opt-out</h2>
+<p>Seven precedence steps override the pattern matcher (DEC-003, plus the
+two <code>skip_draft</code> signals added by issue #54). Listed by precedence —
+first match wins, top to bottom:</p>
+<ol>
+<li><strong>Column-level <code>meta.signalforge.skip_draft: true</code></strong> (#54) — strongest;
+   beats every PII signal. Column is <strong>omitted entirely</strong> from the
+   LLM payload (<code>columns_sent</code> / <code>schema</code> / <code>aggregates</code> / <code>sampled_rows</code>)
+   while its <code>RedactionRecord</code> still rides on the audit event for
+   traceability. Reason code <code>draft_skip_column_meta</code>. Requires
+   explicit <code>True</code> — <code>"true"</code> / <code>1</code> are config noise and do not fire.</li>
+<li><strong>Model-level <code>meta.signalforge.skip_draft: true</code></strong> (#54) — same
+   omit-entirely semantics but cascades to every column on the model.
+   Reason code <code>draft_skip_model_meta</code>.</li>
+<li><strong>Column-level <code>meta.signalforge.sample: false</code></strong> — beats every
+   PII signal below. Column is sent under a hashed placeholder
+   (<code>col_&lt;8 hex&gt;</code>), not omitted. Reason code <code>column_meta_optout</code>.</li>
+<li><strong>Column-level <code>tags: ["pii"]</code></strong> — case-insensitive; <code>["PII"]</code> and
+   <code>["Pii"]</code> both fire. Lowercase recommended. Reason code
+   <code>tag_pii_column</code>.</li>
+<li><strong>Column-level <code>meta.contains_pii: true</code></strong> — truthy values
+   accepted; non-bool truthy values (<code>"yes"</code>, <code>1</code>) emit a DEBUG log
+   noting the coercion. Reason code <code>meta_contains_pii_column</code>.</li>
+<li><strong>Model-level fallbacks</strong> — the same three signals at the model
+   level (<code>meta.signalforge.sample</code>, <code>tags: [pii]</code>,
+   <code>meta.contains_pii</code>) cascade to every column. Reason codes
+   <code>model_meta_optout</code> / <code>tag_pii_model</code> / <code>meta_contains_pii_model</code>.</li>
+<li><strong>Pattern match</strong> — last resort. Reason code <code>pattern_match</code>.</li>
+</ol>
+<p><strong><code>skip_draft</code> vs. <code>sample: false</code> — which to use?</strong> <code>sample: false</code>
+sends a hashed placeholder so the LLM still sees that a column exists
+(and proposes shape-only tests on the placeholder name). <code>skip_draft</code>
+omits the column entirely — useful when the column is operational
+plumbing the operator never wants the drafter reasoning about
+(internal tokens, mirror columns, computed-elsewhere data) and the
+hashed-placeholder noise is itself unhelpful. Both record in the
+audit event for traceability.</p>
+<p>Concrete dbt YAML:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># models/marts/customers.yml</span>
+<span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">2</span>
+<span class="nt">models</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">customers</span>
+<span class="w">    </span><span class="nt">columns</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">internal_token</span>
+<span class="w">        </span><span class="c1"># Signal 1 (#54): omit entirely from the LLM payload.</span>
+<span class="w">        </span><span class="nt">meta</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">signalforge</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">skip_draft</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">customer_email</span>
+<span class="w">        </span><span class="c1"># Signal 3: strongest PII opt-out — hashed placeholder, not omitted.</span>
+<span class="w">        </span><span class="nt">meta</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">signalforge</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">sample</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">phone_number</span>
+<span class="w">        </span><span class="c1"># Signal 4: case-insensitive tag match.</span>
+<span class="w">        </span><span class="nt">tags</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&quot;pii&quot;</span><span class="p p-Indicator">]</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">home_address</span>
+<span class="w">        </span><span class="c1"># Signal 5: truthy values accepted.</span>
+<span class="w">        </span><span class="nt">meta</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">contains_pii</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="c1"># Model-level fallback — every column on the model is redacted.</span>
+<span class="nt">models</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">hr_employees</span>
+<span class="w">    </span><span class="nt">config</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">meta</span><span class="p">:</span>
+<span class="w">        </span><span class="nt">signalforge</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">sample</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</code></pre></div>
+<h2 id="column-name-redaction">Column-name redaction</h2>
+<p>Every redacted column's name is hashed via <code>blake2b</code> with
+<code>digest_size=4</code> (DEC-010), yielding a placeholder of the form
+<code>col_&lt;8 hex&gt;</code>:</p>
+<div class="highlight"><pre><span></span><code>customer_ssn  -&gt;  col_a3f29c61
+</code></pre></div>
+<p>The mapping (<code>real_name -&gt; hashed_name</code>) is recorded in the audit log's
+<code>redactions</code> array; the LLM never sees the real name. This closes the
+"column name itself leaks PII" gap — names like <code>john_smith_ssn_1234</code>
+or <code>card_number_last4</code> would otherwise reach the LLM even when the
+<em>values</em> were redacted.</p>
+<p>The hash is deterministic across runs, so re-running a draft against
+the same model produces the same placeholder; reviewers can correlate
+audit records to manifest columns by re-hashing the real name.</p>
+<h2 id="audit-jsonl-schema">Audit JSONL schema</h2>
+<blockquote>
+<p><strong>Consumer guide.</strong> For cross-stage joins, <code>jq</code> / pandas worked examples,
+the forward-compat policy, and the redaction surface across all five
+stages, see <a href="../audits/"><code>docs/audits.md</code></a>. This section is the
+safety-layer production contract.</p>
+</blockquote>
+<p>Every LLM call produces exactly one JSONL record at <code>safety.audit_path</code>
+(default <code>.signalforge/audit.jsonl</code>). One record per line; atomic
+append via <code>O_APPEND</code> + a single <code>os.write</code> (DEC-005).</p>
+<p><code>AuditEvent</code> fields:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Meaning</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>timestamp</code></td>
+<td>ISO 8601 datetime</td>
+<td>UTC timestamp of the LLM call.</td>
+<td><code>"2026-04-28T14:33:01.122Z"</code></td>
+</tr>
+<tr>
+<td><code>model_unique_id</code></td>
+<td>string</td>
+<td>dbt unique_id of the drafted model.</td>
+<td><code>"model.shop.dim_customers"</code></td>
+</tr>
+<tr>
+<td><code>mode</code></td>
+<td>string</td>
+<td>Sampling mode in effect.</td>
+<td><code>"schema-only"</code></td>
+</tr>
+<tr>
+<td><code>columns_sent</code></td>
+<td>array of string</td>
+<td>LLM-visible column names (hashed for redacted columns).</td>
+<td><code>["customer_id", "col_a3f29c61"]</code></td>
+</tr>
+<tr>
+<td><code>redactions</code></td>
+<td>array of <code>RedactionRecord</code></td>
+<td>Full redaction decisions — both real and hashed names. <strong>Sensitive.</strong></td>
+<td><code>[{"column_name": "customer_ssn", ...}]</code></td>
+</tr>
+<tr>
+<td><code>row_count</code></td>
+<td>integer or <code>null</code></td>
+<td>Row count for sample mode; <code>null</code> for schema-only / aggregate-only.</td>
+<td><code>100</code> or <code>null</code></td>
+</tr>
+<tr>
+<td><code>signalforge_version</code></td>
+<td>PEP-440 version string</td>
+<td>The package version that produced the record.</td>
+<td><code>"0.1.0"</code></td>
+</tr>
+<tr>
+<td><code>policy_hash</code></td>
+<td>16 hex chars</td>
+<td><code>blake2b(policy, digest_size=8)</code>. Migrated from <code>SHA-256[:16]</code> by issue #55. DEC-014.</td>
+<td><code>"6f1c0e3d2c44c012"</code></td>
+</tr>
+<tr>
+<td><code>audit_schema_version</code></td>
+<td>integer</td>
+<td>Audit shape version. Currently <code>3</code> (bumped 1→2 by #54, 2→3 by #55).</td>
+<td><code>3</code></td>
+</tr>
+<tr>
+<td><code>policy_flags</code></td>
+<td>array of string</td>
+<td>Closed set of flag literals — see below.</td>
+<td><code>["sample_mode_enabled"]</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong><code>policy_flags</code> closed set:</strong></p>
+<ul>
+<li><code>sample_mode_enabled</code> — <code>policy.mode is SamplingMode.SAMPLE</code>.</li>
+<li><code>redaction_disabled</code> — <code>policy.redact_patterns</code> is empty.</li>
+<li><code>audit_path_overridden</code> — <code>policy.audit_path != DEFAULT_AUDIT_PATH</code>.</li>
+</ul>
+<p><code>RedactionRecord</code> fields: <code>column_name</code> (real), <code>hashed_name</code>
+(<code>col_&lt;8 hex&gt;</code>), <code>redacted</code> (bool), <code>reason</code> (one of nine literal
+strings — see <a href="#per-column-opt-out">Per-column opt-out</a>; the two
+<code>draft_skip_*</code> reasons added in issue #54 indicate omit-entirely
+semantics rather than hashed-placeholder substitution).</p>
+<p><strong>Audit schema version 2 (issue #54).</strong> The bump from 1 → 2 reflects
+the new <code>draft_skip_column_meta</code> / <code>draft_skip_model_meta</code>
+<code>RedactionReason</code> values. Consumers parsing audit JSONLs should gate
+on <code>audit_schema_version &gt;= 2</code> before pattern-matching the new
+reasons. Older v1 records continue to round-trip cleanly (the
+production model keeps <code>audit_schema_version: int</code>, not
+<code>Literal[2]</code>).</p>
+<h2 id="audit-log-sensitivity">Audit log sensitivity</h2>
+<p>The audit JSONL contains plaintext column names in
+<code>RedactionRecord.column_name</code>. For PII-laden schemas this metadata can
+itself be sensitive; treat the file at-rest as such.</p>
+<p>Recommendations:</p>
+<ul>
+<li><strong>Gitignore <code>.signalforge/</code></strong> (already configured in this repo's
+  <code>.gitignore</code>).</li>
+<li><strong>Restrict at-rest permissions.</strong> The writer creates
+  <code>.signalforge/</code> at <code>0o700</code> and <code>audit.jsonl</code> at <code>0o600</code> on first
+  call. Don't relax these. Note: if <code>.signalforge/</code> already exists
+  with looser permissions (e.g. created by a different process or
+  user), the writer's <code>mkdir(exist_ok=True, mode=0o700)</code> will NOT
+  tighten the existing directory — Python's <code>mkdir</code> only applies
+  <code>mode</code> when creating. Verify pre-existing directory permissions
+  before deploying; tighten manually if needed
+  (<code>chmod 700 .signalforge/</code>).</li>
+<li><strong>Don't ship as a build artifact.</strong> Strip from container images and
+  CI uploads.</li>
+<li><strong>Don't check in.</strong> The "explainable diffs" commitment applies to
+  the YAML SignalForge writes — not to the audit log.</li>
+</ul>
+<h2 id="audit-log-rotation">Audit log rotation</h2>
+<p>User responsibility. v0.1 has no built-in rotation.</p>
+<p>Suggestions:</p>
+<ul>
+<li><strong><code>logrotate</code> on the JSONL.</strong> Standard Linux log rotation; works
+  because each line is self-contained.</li>
+<li><strong>External log shipping.</strong> Tail to a SIEM or centralised log store;
+  rotate the on-disk file on the shipping side.</li>
+<li><strong>Per-run prefixed paths.</strong> Set <code>safety.audit_path</code> to
+  <code>.signalforge/audit-&lt;run_id&gt;.jsonl</code> per CI run if rotation is too
+  coarse.</li>
+</ul>
+<p>Why no in-process rotation: it would put failure modes (rename races,
+disk-full mid-rotate, fsync ordering) inside the fail-closed
+audit-write hot path, which conflicts with DEC-011. v0.2 may revisit.</p>
+<h2 id="debugging">Debugging</h2>
+<p>Logger name: <code>signalforge.safety</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;signalforge.safety&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">)</span>
+</code></pre></div>
+<p>Levels:</p>
+<ul>
+<li><strong>INFO</strong> — One line per <code>audit.write</code> (the JSON-encoded summary:
+  <code>unique_id</code>, <code>mode</code>, <code>columns_sent</code> count, <code>redactions</code> count,
+  <code>audit_schema_version</code>).</li>
+<li><strong>WARNING</strong> — Sample-mode-enabled (one per policy construction); the
+  empty-redaction <code>redact: replace: []</code> warning; the
+  suspicious-unmatched-column heuristic (one per offending column).
+  Oversize records raise <code>AuditRecordTooLargeError</code> rather than log.</li>
+<li><strong>DEBUG</strong> — <code>meta.contains_pii</code> coercion notes (e.g. value <code>"yes"</code>
+  coerced to <code>True</code>); empty-config-file fallback to defaults.</li>
+</ul>
+<p>The safety layer never logs full row data, full column lists, or the
+real names of redacted columns. INFO output is a hint about <em>that</em> a
+call happened, not <em>what</em> was in it.</p>
+<p><strong>Reading a fail-closed <code>AuditWriteError</code>.</strong> The cause is exposed as
+<code>.cause</code>; the path is exposed as <code>.path</code>. Common causes:</p>
+<ul>
+<li>Parent directory not writable (no <code>+w</code> for the user, or
+  <code>.signalforge/</code> is a symlink to a read-only mount).</li>
+<li>Disk full (<code>ENOSPC</code>).</li>
+<li>Oversize record (raises <code>AuditRecordTooLargeError</code> instead — reduce
+  <code>columns_sent</code> or <code>redactions</code> count; the cap is 4000 bytes for
+  POSIX-atomic concurrent appends).</li>
+</ul>
+<h2 id="typed-error-reference">Typed-error reference</h2>
+<p>Public API: <code>from signalforge.safety import errors</code>. Every exception
+subclasses <code>SafetyError</code> and carries a class-level <code>default_remediation</code>
+rendered on a <code>↳ Remediation:</code> line by <code>__str__</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>When raised</th>
+<th>Where it surfaces</th>
+<th>How to fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SafetyError</code></td>
+<td>Base class; never raised directly.</td>
+<td><code>signalforge.safety.errors</code></td>
+<td>Catch it to handle every safety-layer failure uniformly.</td>
+</tr>
+<tr>
+<td><code>ConfigNotFoundError</code></td>
+<td>Explicit <code>path=</code> argument to <code>load_safety_config</code> pointed at a missing file.</td>
+<td><code>load_safety_config</code></td>
+<td>Verify the path, or pass <code>path=None</code> to fall back to defaults.</td>
+</tr>
+<tr>
+<td><code>InvalidConfigError</code></td>
+<td>Parent for parse / schema failures in <code>signalforge.yml</code>. Free-form message.</td>
+<td><code>load_safety_config</code></td>
+<td>Check <code>signalforge.yml</code> against this doc's schema.</td>
+</tr>
+<tr>
+<td><code>InvalidSamplingModeError</code></td>
+<td><code>safety.mode</code> is not one of <code>schema-only</code> / <code>aggregate-only</code> / <code>sample</code>.</td>
+<td><code>SafetyPolicy._normalise_mode</code></td>
+<td>Set <code>safety.mode</code> to one of the documented values.</td>
+</tr>
+<tr>
+<td><code>InvalidPatternError</code></td>
+<td>A redact pattern is empty or one of the bare wildcards <code>"*"</code> / <code>"?"</code>.</td>
+<td><code>SafetyPolicy._validate_patterns</code></td>
+<td>Use a non-empty fnmatch glob; use <code>redact.replace: []</code> to disable redaction explicitly.</td>
+</tr>
+<tr>
+<td><code>ColumnNotInModelError</code></td>
+<td>A safety helper looked up a column not declared on the manifest model.</td>
+<td><code>aggregate_columns</code> / sibling helpers</td>
+<td>Verify the column exists in <code>manifest.nodes[model].columns</code>.</td>
+</tr>
+<tr>
+<td><code>AuditWriteError</code></td>
+<td>Appending to the JSONL audit log failed (any I/O or encoding error). DEC-011 fail-closed.</td>
+<td><code>audit.write</code></td>
+<td>Check <code>&lt;project_dir&gt;/.signalforge/</code> exists and is writable; resolve disk / permission.</td>
+</tr>
+<tr>
+<td><code>AuditRecordTooLargeError</code></td>
+<td>Serialised audit line exceeded the POSIX-atomic-append cap (4000 bytes).</td>
+<td><code>audit.write</code></td>
+<td>Reduce <code>columns_sent</code> or <code>redactions</code> count.</td>
+</tr>
+<tr>
+<td><code>PolicyValidationError</code></td>
+<td>Generic Pydantic validation failure not covered by a more specific subclass.</td>
+<td><code>load_safety_config</code> (last-resort wrap)</td>
+<td>Inspect <code>.field</code>, <code>.value</code>, <code>.reason</code>; reconcile against the documented field types.</td>
+</tr>
+<tr>
+<td><code>UnknownConfigKeyError</code></td>
+<td>A typo'd / unsupported key under a known scope (<code>safety.redacts:</code>, etc.).</td>
+<td><code>SafetyPolicy.model_validate</code> / redact resolver</td>
+<td>Remove or rename the unknown key; see this doc's schema.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="cli-integration-note">CLI integration note</h2>
+<p>Tracked in <a href="https://github.com/wjduenow/SignalForge/issues/9">issue #9</a>.
+The <code>signalforge generate</code> CLI's <code>--mode</code> flag will load the policy via
+<code>load_safety_config(...)</code> and override via
+<code>policy.with_mode(SamplingMode.SAMPLE)</code> (DEC-018) — that is the
+canonical override seam. <code>SafetyPolicy</code> is frozen, so <code>with_mode</code> is
+the only sanctioned mutation path.</p>
+<p><strong>There is no env-var override for <code>mode</code>.</strong> The mode must be set in
+<code>signalforge.yml</code> or via <code>--mode</code> (post-#9). This is intentional:
+an env-var override would let a CI misconfiguration silently flip
+schema-only into sample mode, which conflicts with the layer's
+fail-closed posture.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

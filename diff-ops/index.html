@@ -1,0 +1,2366 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/diff-ops/">
+      
+      
+        <link rel="prev" href="../grade-ops/">
+      
+      
+        <link rel="next" href="../llm-providers-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Diff Renderer - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#diff-layer-operations-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Diff Renderer
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#default-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default posture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Public API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#orchestrator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Orchestrator
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#result-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-signalforgeyml-diff-block" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration: signalforge.yml diff: block
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#renderer-kinds-dec-004" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renderer kinds (DEC-004)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sidecar-json-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sidecar JSON schema
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reproducibility-hash-fields-dec-016" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reproducibility / hash fields (DEC-016)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision-matrix-the-kept-kept-uncertain-dropped-flagged-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decision matrix — the kept / kept-uncertain / dropped / flagged table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#operational-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Operational notes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Operational notes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#symlink-hardened-path-canonicalisation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Symlink-hardened path canonicalisation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#soft-warning-on-large-existing-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Soft warning on large existing schema
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#log-event-policy-dec-015" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Log event policy (DEC-015)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ansi-escape-stripping-dec-007" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ANSI escape stripping (DEC-007)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#markdown-injection-escaping-dec-008" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Markdown injection escaping (DEC-008)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#snapshot-fixture-matrix-dec-017" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Snapshot fixture matrix (DEC-017)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-log-sensitivity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit-log sensitivity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-modes-typed-error-cross-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure modes / typed-error cross-reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#regen-instructions-for-fixtures" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Regen instructions for fixtures
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli-integration-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI integration note
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        References
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#default-posture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Default posture
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#public-api" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Public API
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Public API">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#orchestrator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Orchestrator
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#result-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result shapes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#errors" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Errors
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-signalforgeyml-diff-block" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration: signalforge.yml diff: block
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#renderer-kinds-dec-004" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renderer kinds (DEC-004)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sidecar-json-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sidecar JSON schema
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reproducibility-hash-fields-dec-016" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reproducibility / hash fields (DEC-016)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#decision-matrix-the-kept-kept-uncertain-dropped-flagged-table" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Decision matrix — the kept / kept-uncertain / dropped / flagged table
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#operational-notes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Operational notes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Operational notes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#symlink-hardened-path-canonicalisation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Symlink-hardened path canonicalisation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#soft-warning-on-large-existing-schema" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Soft warning on large existing schema
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#log-event-policy-dec-015" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Log event policy (DEC-015)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#ansi-escape-stripping-dec-007" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ANSI escape stripping (DEC-007)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#markdown-injection-escaping-dec-008" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Markdown injection escaping (DEC-008)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#snapshot-fixture-matrix-dec-017" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Snapshot fixture matrix (DEC-017)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#audit-log-sensitivity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Audit-log sensitivity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#debugging" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Debugging
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#failure-modes-typed-error-cross-reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Failure modes / typed-error cross-reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#regen-instructions-for-fixtures" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Regen instructions for fixtures
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cli-integration-note" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        CLI integration note
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        References
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="diff-layer-operations-guide">Diff layer — operations guide</h1>
+<p>Operational reference for users of <code>signalforge.diff</code>. Companion to
+<a href="../safety-ops/"><code>docs/safety-ops.md</code></a>,
+<a href="../draft-ops/"><code>docs/draft-ops.md</code></a>,
+<a href="../prune-ops/"><code>docs/prune-ops.md</code></a>,
+<a href="../grade-ops/"><code>docs/grade-ops.md</code></a>,
+<a href="../manifest-loader-ops/"><code>docs/manifest-loader-ops.md</code></a>, and
+<a href="../warehouse-adapter-ops/"><code>docs/warehouse-adapter-ops.md</code></a>, and to the
+design record in
+<a href="../plans/super/8-diff-renderer.md"><code>plans/super/8-diff-renderer.md</code></a>.</p>
+<p>The diff layer is the terminal stage of SignalForge's draft → prune →
+grade → diff pipeline. It consumes the upstream typed results
+(<code>Model</code>, <code>CandidateSchema</code>, <code>PruneResult</code>, optional <code>GradingReport</code>)
+and produces:</p>
+<ol>
+<li>A <strong>unified diff</strong> between the existing committed <code>schema.yml</code> and
+   the canonical proposed YAML emitted from the candidate (kept tests
+   only).</li>
+<li>A <strong>kept / kept-uncertain / dropped / flagged table</strong> with one row per candidate
+   artefact and a one-line <code>why</code> for every entry.</li>
+<li>A typed :class:<code>DiffReport</code> for in-process consumption (returned to
+   the caller).</li>
+<li>An optional on-disk <strong>JSON sidecar</strong> that mirrors the report
+   verbatim — the durable hand-off to the diff-rendering CLI (#9), to
+   PR-comment posters, or to GitHub Action runs.</li>
+</ol>
+<p>This is the load-bearing operationalisation of Architectural
+Commitment #5 in <a href="../CLAUDE.md"><code>CLAUDE.md</code></a> — <strong>explainable diffs</strong>:
+every kept and dropped artefact ships with a one-line <code>why</code>, and the
+diff itself is a one-glance summary of what would change if the
+operator merged the proposed YAML.</p>
+<h2 id="default-posture">Default posture</h2>
+<p>The diff layer is <strong>render-only</strong> in v0.1 — it does not gate the run.
+A flagged tier surfaces visually but does not return a non-zero exit
+code; the operator's eyes are the merge boundary. v0.2 may wire
+<code>fail_on_below_threshold</code> (currently a no-op held by <code>GradeConfig</code>,
+not a diff knob) into the CLI exit path.</p>
+<p>The layer is fail-closed on three boundaries:</p>
+<ul>
+<li><strong>Boundary checks (DEC-002).</strong> <code>candidate.name</code> must match
+  <code>model.name</code>; <code>prune_result.model_unique_id</code> must match
+  <code>model.unique_id</code>; the optional <code>grading_report.model_unique_id</code>
+  must match <code>model.unique_id</code>. Mismatch raises a typed
+  <code>Diff*ModelMismatchError</code> BEFORE any rendering work.</li>
+<li><strong>Existing-schema size cap (DEC-006).</strong> <code>existing_schema</code> is checked
+  against a 10 MB byte cap BEFORE any <code>yaml.safe_load</code>. Defends against
+  billion-laughs / deep-nesting attacks regardless of <code>safe_load</code>'s
+  constructor restrictions.</li>
+<li><strong>Sidecar size cap (DEC-009).</strong> The serialised JSON is checked
+  against a 10 MB cap BEFORE any <code>os.open</code>. Above the cap raises
+  <code>DiffSidecarRecordTooLargeError</code>; below the cap proceeds to a
+  single-document overwrite via <code>O_WRONLY | O_CREAT | O_TRUNC</code>,
+  followed by <code>os.fsync</code>.</li>
+</ul>
+<p>Unlike the safety / draft / prune / grade audits, the diff layer does
+<strong>not</strong> ship a JSONL audit (DEC-018). The sidecar is a <strong>read-back</strong>
+JSON that mirrors <code>DiffReport</code> — the kept/dropped decisions were
+already audited upstream. The diff layer's job is to <strong>project</strong> those
+decisions into an operator-readable form, not to re-record them.</p>
+<p>User-facing tagline: <strong>every kept/dropped artefact ships with a
+one-line "why"; the diff is a unified diff against the existing
+schema.yml; the sidecar is a durable receipt of what was rendered.</strong></p>
+<h2 id="public-api">Public API</h2>
+<p>Import from <code>signalforge.diff</code>. The names exported by <code>__all__</code>:</p>
+<h3 id="orchestrator">Orchestrator</h3>
+<ul>
+<li><strong><code>render_diff(model, candidate, prune_result, *, grading_report=None, existing_schema=None, config=None, output_path=None, sidecar_path=None, write_sidecar=True, project_dir=None) -&gt; DiffReport</code></strong> — End-to-end orchestrator. Boundary-checks the inputs, computes the canonical proposed YAML, builds the unified diff, builds the per-row entry tuple (assigning <code>tier="kept" | "kept-uncertain" | "dropped" | "flagged"</code> per DEC-012, with <code>kept-uncertain</code> added in issue #50), computes the three reproducibility hashes, dispatches to the configured renderer, optionally writes the rendered text to <code>output_path</code> and the JSON sidecar to <code>sidecar_path</code>. Mirrors <code>signalforge.grade.grade_artifacts</code> and <code>signalforge.prune.prune_tests</code> in calling-convention shape: keyword-only optionals, model-front-paired, sequential execution. <code>project_dir</code> defaults to <code>Path.cwd()</code> and is used for symlink-hardened canonicalisation of <code>output_path</code> / <code>sidecar_path</code> (DEC-016 of <code>prune-engine.md</code>). The sidecar is <strong>on by default</strong> (<code>write_sidecar=True</code>); when <code>sidecar_path</code> is omitted the sidecar lands at <code>&lt;project_dir&gt;/.signalforge/diff.json</code>. Pass <code>write_sidecar=False</code> to skip the sidecar entirely (library callers running in-process without a durable artefact).</li>
+</ul>
+<h3 id="result-shapes">Result shapes</h3>
+<ul>
+<li>
+<p><strong><code>DiffReport</code></strong> — Aggregate output for one model. Frozen Pydantic model carrying <code>schema_version: Literal[1]</code>, <code>audit_schema_version: Literal[2]</code> (bumped 1 → 2 in issue #50; external sidecar consumers gate on <code>&gt;= 2</code> for the four-tier taxonomy), <code>signalforge_version: str</code>, <code>model_unique_id: str</code>, <code>run_id: str</code>, <code>duration_seconds: float</code>, <code>proposed_yaml: str</code>, <code>existing_yaml: str | None</code>, <code>unified_diff: str</code>, <code>entries: tuple[DiffEntry, ...]</code>, <code>kept_count: int</code>, <code>kept_uncertain_count: int</code> (added in issue #50), <code>dropped_count: int</code>, <code>flagged_count: int</code>, <code>has_existing_schema: bool</code>, <code>candidate_hash: str</code>, <code>prune_result_hash: str</code>, <code>grading_report_hash: str | None</code>. Custom <code>__repr__</code> collapses to identity + aggregate counts (DEC-020) so accidental <code>_LOGGER.warning("report: %s", report)</code> does not dump multi-megabyte diff content into log sinks. The full content remains accessible via field access / <code>model_dump()</code>.</p>
+</li>
+<li>
+<p><strong><code>DiffEntry</code></strong> — One row in the rendered table. Carries <code>artifact_id: str</code> (canonical dotted-path mirroring <code>grade.GradingResult.artifact_id</code>), <code>test_type: str | None</code>, <code>tier: Tier</code>, <code>drop_reason: DropReason | None</code>, <code>why: str</code>, <code>score: float | None</code>, <code>passed: bool | None</code>. Custom <code>__repr__</code> omits the prose <code>why</code> to protect against accidental log dumps.</p>
+</li>
+<li>
+<p><strong><code>Tier</code></strong> — <code>Literal["kept", "kept-uncertain", "dropped", "flagged"]</code>. Closed enumeration of per-entry tiers (DEC-012; <code>kept-uncertain</code> added in issue #50). <code>flagged</code> is set only when a grading report is provided AND the artefact's grading is below threshold (any criterion failed OR <code>score=None</code> graceful-degrade) AND the prune decision had positive evidence. <code>kept-uncertain</code> fires when the per-row <code>PruneDecision.reason == "kept-without-evidence"</code> (origin dominates over grading — a test we couldn't evaluate cannot meaningfully fail a rubric). <code>kept</code> and <code>dropped</code> mirror the prune layer's binary verdict for the with-evidence path.</p>
+</li>
+</ul>
+<h3 id="configuration">Configuration</h3>
+<ul>
+<li>
+<p><strong><code>DiffConfig</code></strong> — User-facing knobs. Frozen Pydantic model with <code>extra="forbid"</code> (config-shaped per <code>safety-layer.md</code> DEC-015 — typos fail loud). Field reference: see <a href="#configuration-signalforgeyml-diff-block">Configuration</a> below.</p>
+</li>
+<li>
+<p><strong><code>load_diff_config(project_dir, path=None) -&gt; DiffConfig</code></strong> — Loads the <code>diff:</code> block from <code>signalforge.yml</code>. Resolves to <code>&lt;project_dir&gt;/signalforge.yml</code> when <code>path</code> is <code>None</code>. Returns defaults when the file is missing, empty, or the <code>diff:</code> key is absent. Raises <code>DiffError</code> on parse / schema failures. Mirrors <code>load_safety_config</code> / <code>load_draft_config</code> / <code>load_prune_config</code> / <code>load_grade_config</code> so the CLI sees one calling convention across stages.</p>
+</li>
+</ul>
+<h3 id="errors">Errors</h3>
+<p><code>from signalforge.diff import errors</code>. Every exception subclasses
+<code>DiffError</code> and carries a class-level <code>default_remediation</code> rendered
+on a <code>↳ Remediation:</code> line by <code>__str__</code>.</p>
+<ul>
+<li><strong><code>DiffError</code></strong> — Base class. Reused as a typed wrapper by <code>load_diff_config</code> for config-load failures (US-003 deferred a dedicated <code>DiffConfigError</code> to v0.2 — the base class with a remediation is sufficient for v0.1).</li>
+<li><strong><code>DiffCandidateModelMismatchError</code></strong> — <code>candidate.name</code> does not match <code>model.name</code> (DEC-002). Raised at orchestrator entry BEFORE any rendering work.</li>
+<li><strong><code>DiffPruneResultModelMismatchError</code></strong> — <code>prune_result.model_unique_id</code> does not match <code>model.unique_id</code> (DEC-002). Same fail-fast posture as the candidate boundary check.</li>
+<li><strong><code>DiffGradingReportModelMismatchError</code></strong> — <code>grading_report.model_unique_id</code> does not match <code>model.unique_id</code> (DEC-002). Only raised when <code>grading_report</code> is provided.</li>
+<li><strong><code>DiffInputTooLargeError</code></strong> — <code>existing_schema</code> byte length exceeded <code>existing_schema_size_limit_bytes</code> (default 10 MB). Refused BEFORE any <code>yaml.safe_load</code> to defend against billion-laughs / deep-nesting attacks (DEC-006).</li>
+<li><strong><code>DiffSidecarRecordTooLargeError</code></strong> — Serialised sidecar JSON exceeded <code>sidecar_size_limit_bytes</code> (default 10 MB). Refused BEFORE any <code>os.open</code> so an oversize payload leaves no on-disk artefact (DEC-009).</li>
+<li><strong><code>DiffSidecarWriteError</code></strong> — Fail-closed wrapper around OS errors raised inside the sidecar writer (<code>OSError</code> / <code>PermissionError</code> / encoding / <code>fsync</code> / symlink containment failure). Original cause exposed via <code>.cause</code> and <code>__cause__</code>.</li>
+</ul>
+<h2 id="configuration-signalforgeyml-diff-block">Configuration: <code>signalforge.yml</code> <code>diff:</code> block</h2>
+<p>Top-level namespace is <code>diff:</code> (claimed per the convention from
+<code>safety-layer.md</code> DEC-025 / <code>llm-drafter.md</code> DEC-027 / <code>prune-engine.md</code>
+DEC-020 / <code>grade-layer.md</code> DEC-029 — every pipeline stage gets one
+top-level key). Sibling keys (<code>safety:</code>, <code>llm:</code>, <code>prune:</code>, <code>grade:</code>,
+future <code>cli:</code>) are reserved for other stages and silently ignored by
+the diff loader.</p>
+<p>The full schema (every knob, every default, all v0.1 types):</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># signalforge.yml — diff stage configuration (v0.1)</span>
+<span class="nt">diff</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">context_lines</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">3</span><span class="w">                      </span><span class="c1"># difflib.unified_diff(n=...) — diff -u default</span>
+<span class="w">  </span><span class="nt">max_why_chars</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">80</span><span class="w">                     </span><span class="c1"># per-row &quot;why&quot; truncation cap</span>
+<span class="w">  </span><span class="nt">narrow_terminal_threshold</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60</span><span class="w">         </span><span class="c1"># cols below which AnsiRenderer compacts</span>
+<span class="w">  </span><span class="nt">markdown_max_diff_chars</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">60000</span><span class="w">        </span><span class="c1"># Markdown body truncation cap (DEC-005)</span>
+<span class="w">  </span><span class="nt">existing_schema_size_limit_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10485760</span><span class="w">    </span><span class="c1"># 10 MB hard cap (DEC-006)</span>
+<span class="w">  </span><span class="nt">existing_schema_warn_at_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1000000</span><span class="w">        </span><span class="c1"># 1 MB soft warning (DEC-014)</span>
+<span class="w">  </span><span class="nt">sidecar_size_limit_bytes</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">10000000</span><span class="w">    </span><span class="c1"># 10 MB sidecar JSON cap (DEC-009)</span>
+<span class="w">  </span><span class="nt">render_kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ansi</span><span class="w">                     </span><span class="c1"># ansi | markdown | json (DEC-004)</span>
+<span class="w">  </span><span class="nt">respect_no_color_env</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span><span class="w">            </span><span class="c1"># honour NO_COLOR / FORCE_COLOR / isatty (DEC-021)</span>
+</code></pre></div>
+<p>A minimal <code>signalforge.yml</code> is just <code>diff: {}</code> (or no <code>diff:</code> key at
+all) — every field has a locked default from DEC-010 and the loader
+returns <code>DiffConfig()</code> silently.</p>
+<p>Field-by-field:</p>
+<ul>
+<li><strong><code>context_lines</code></strong> — Number of context lines around each hunk in the unified diff. Passed through to <code>difflib.unified_diff(n=...)</code>. Default <code>3</code> (the <code>diff -u</code> default). Tighten to <code>1</code> for compact PR comments; widen to <code>7</code> for review-heavy contexts where reviewers need more surrounding YAML.</li>
+<li><strong><code>max_why_chars</code></strong> — Hard truncation cap on the per-row <code>why</code> column in the kept/dropped table. Beyond this, the renderer truncates with an ellipsis. Default <code>80</code>. Keeps the table readable at any terminal width without forcing the upstream layers (prune, grade) to second-guess display constraints.</li>
+<li><strong><code>narrow_terminal_threshold</code></strong> — Below this column count, the <code>AnsiRenderer</code> drops the <code>why</code> column from the kept/dropped table and emits each <code>why</code> as a wrapped follow-up line below its row (DEC-013). Default <code>60</code>. Tested against a 40-col snapshot fixture.</li>
+<li><strong><code>markdown_max_diff_chars</code></strong> — Truncation cap on the rendered Markdown diff body (DEC-005). Default <code>60_000</code>. GitHub PR comments are 65_536 chars; the 60_000 cap leaves room for the table, the prelude, and the truncation footer (<code>... (N more lines truncated — see &lt;project_dir&gt;/.signalforge/diff.json for full diff)</code>). The kept/dropped/flagged table always renders fully (one line per artifact; small).</li>
+<li><strong><code>existing_schema_size_limit_bytes</code></strong> — Hard cap on <code>existing_schema</code> YAML byte length, enforced BEFORE any <code>yaml.safe_load</code> call (DEC-006). Default <code>10_485_760</code> (10 MB). Defends against billion-laughs / deep-nesting attacks regardless of <code>safe_load</code>'s constructor restrictions. Above the cap raises <code>DiffInputTooLargeError</code>.</li>
+<li><strong><code>existing_schema_warn_at_bytes</code></strong> — Soft warning threshold for <code>existing_schema</code> YAML byte length (DEC-014). Default <code>1_000_000</code> (1 MB). The renderer emits one <code>WARNING</code> log line when the payload exceeds this threshold but stays below the hard cap; mirrors <code>signalforge.warehouse.profiles</code> DEC-023 ("operators get a heads-up before the hard cap trips").</li>
+<li><strong><code>sidecar_size_limit_bytes</code></strong> — Hard cap on the diff sidecar JSON byte length, enforced BEFORE any <code>os.open</code> (DEC-009). Default <code>10_000_000</code> (10 MB — an order of magnitude above the grade sidecar's 1 MB cap because diff text is naturally larger). Above the cap raises <code>DiffSidecarRecordTooLargeError</code>.</li>
+<li><strong><code>render_kind</code></strong> — <code>Literal["ansi", "markdown", "json"]</code>. Default <code>"ansi"</code>. Selects which renderer concrete drives stdout output (DEC-004). The sidecar always uses the JSON renderer regardless of this setting; <code>render_kind</code> only governs the human-facing output. See <a href="#renderer-kinds-dec-004">Renderer kinds</a> below.</li>
+<li><strong><code>respect_no_color_env</code></strong> — When <code>True</code> (the default), the AnsiRenderer honours <code>NO_COLOR</code> and <code>FORCE_COLOR</code> environment variables along with <code>sys.stdout.isatty()</code> (DEC-021). When <code>False</code>, colour is forced regardless — useful for tests and non-tty pipelines that want ANSI output.</li>
+</ul>
+<p>Unknown keys under <code>diff:</code> raise <code>DiffError</code> (Pydantic
+<code>extra="forbid"</code>). Typos like <code>contxt_lines:</code> or <code>max_why_chrs:</code>
+fail loud at load time rather than silently no-op'ing. The outer
+<code>_DiffConfigFile</code> wrapper uses <code>extra="ignore"</code> at the top level so
+sibling top-level keys from other stages don't break the loader.</p>
+<h2 id="renderer-kinds-dec-004">Renderer kinds (DEC-004)</h2>
+<p>Three concretes ship under <code>signalforge.diff._renderers</code> (private per
+DEC-004 — only the typed-result + orchestrator + config + errors form
+the public API). Each implements <code>Renderer.render(report: DiffReport) -&gt; str</code>,
+a pure-return signature: the renderer produces the rendered text and
+the orchestrator handles I/O. Pure-return is testable against
+byte-for-byte snapshot fixtures; streaming is a v0.2 ask (DEC-011).</p>
+<table>
+<thead>
+<tr>
+<th><code>render_kind</code></th>
+<th>Output</th>
+<th>Use case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ansi</code></td>
+<td>ANSI-coloured text + box-drawn kept/dropped table</td>
+<td>Default. Local terminal, <code>signalforge generate</code> interactive run.</td>
+</tr>
+<tr>
+<td><code>markdown</code></td>
+<td>GitHub-flavoured Markdown with fenced diff blocks</td>
+<td>PR comments, GitHub Actions step summary, anywhere a Markdown renderer parses the output.</td>
+</tr>
+<tr>
+<td><code>json</code></td>
+<td>Single JSON document mirroring <code>DiffReport</code></td>
+<td>The sidecar shape. Always emitted for the <code>sidecar_path</code> write regardless of <code>render_kind</code>.</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>AnsiRenderer</code> honours <strong>NO_COLOR</strong> spec precedence (DEC-021):
+<code>config.respect_no_color_env=False</code> (forces colour) → <code>--no-color</code> CLI
+flag (wired by #9 to a renderer parameter) → <code>FORCE_COLOR=1</code> env →
+<code>NO_COLOR</code> env (any value) → <code>sys.stdout.isatty()</code>. ANSI escape
+<strong>stripping</strong> (DEC-007) on every user-content field
+(<code>description</code>, <code>rationale</code>, <code>evidence</code>, <code>reasoning</code>, <code>why</code>) runs
+<strong>unconditionally</strong> — the precedence only decides whether the
+renderer's own colour codes get emitted on top. A drafted column
+description containing <code>\x1b[31mevil</code> cannot inject colour into the
+rendered output regardless of the operator's terminal setting.</p>
+<p>The <code>MarkdownRenderer</code> escapes Markdown-injection vectors in table
+cells (DEC-008): triple-backticks, pipe (<code>|</code>), backslash (<code>\</code>). Raw
+HTML (<code>&lt;...&gt;</code>) is HTML-entity-encoded for table cells. **Inside the
+fenced <code>``diff block, raw content passes through** — the diff is
+YAML, and GitHub doesn't interpret HTML inside a fenced</code>diff` block.
+Snapshot fixtures pin the escaping behaviour.</p>
+<p>The <code>JsonRenderer</code> round-trips <code>DiffReport.model_dump_json()</code> so a
+sidecar-reading consumer gets the same view as the orchestrator's
+return value.</p>
+<h2 id="sidecar-json-schema">Sidecar JSON schema</h2>
+<blockquote>
+<p><strong>Consumer guide.</strong> For cross-stage joins (grade sidecar ↔ diff sidecar
+on <code>artifact_id</code>), <code>jq</code> / pandas worked examples, the forward-compat
+policy (including the <code>audit_schema_version: 2</code> bump from issue #50),
+and the redaction surface, see <a href="../audits/"><code>docs/audits.md</code></a>. This
+section is the diff-layer production contract.</p>
+</blockquote>
+<p>End-of-run write — <strong>on by default</strong> (<code>render_diff(..., write_sidecar=True)</code>
+is the default; pass <code>write_sidecar=False</code> to skip). When
+<code>sidecar_path</code> is <code>None</code> and <code>write_sidecar=True</code>, the sidecar lands at
+<code>&lt;project_dir&gt;/.signalforge/diff.json</code>. Mirrors grade / prune's
+"always-write" posture for the durable hand-off; library callers that
+need an in-process render without a disk artefact opt out via
+<code>write_sidecar=False</code>.</p>
+<p>The sidecar is the durable hand-off for cases where the operator needs
+structured access (CI, PR comments, dashboards, reproducibility
+checks); the renderer's stdout output is the primary human-facing
+surface.</p>
+<p>When written, the file lives at <code>sidecar_path</code> (caller-supplied) or at
+<code>&lt;project_dir&gt;/.signalforge/diff.json</code> (the default convention).
+Single-document overwrite via <code>O_WRONLY | O_CREAT | O_TRUNC</code> (DEC-009);
+a re-run replaces the prior sidecar atomically (subject to platform
+truncate semantics). The sidecar size cap is 10 MB
+(<code>_DIFF_SIDECAR_RECORD_LIMIT_BYTES</code>).</p>
+<p>The sidecar carries the <code>DiffReport</code> shape verbatim (the same shape
+the orchestrator returns):</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;schema_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;audit_schema_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;signalforge_version&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0.1.0.dev0&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;model_unique_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;model.shop.dim_customers&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;run_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;a1b2c3d4e5f6478890aabbccddeeff00&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;duration_seconds&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.041</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;proposed_yaml&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;version: 2\nmodels:\n  - name: dim_customers\n    ...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;existing_yaml&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;version: 2\nmodels:\n  - name: dim_customers\n    ...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;unified_diff&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;--- a/models/dim_customers.yml\n+++ b/models/dim_customers.yml\n@@ ...&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;entries&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;artifact_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;column.email.description&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;test_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;tier&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;kept&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;drop_reason&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;why&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;kept by prune; clarity 0.85, consistency 0.90&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;score&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.875</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;passed&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;artifact_id&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;test.column.email.unique&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;test_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;unique&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;tier&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;kept-uncertain&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;drop_reason&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;why&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;total prune budget exceeded before evaluation&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;score&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;passed&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;proposed_test_files&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;tests/dim_customers__total_amount_custom_sql_a1b2c3d4.sql&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;sql&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;-- signalforge:generated a1b2c3d4\n\nselect * from {{ ref(&#39;dim_customers&#39;) }} where total_amount &lt; 0\n&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;kept_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">8</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;kept_uncertain_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;dropped_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;flagged_count&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;has_existing_schema&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;candidate_hash&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;0123456789abcdef&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;prune_result_hash&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;fedcba9876543210&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;grading_report_hash&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;abcdef0123456789&quot;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p><strong><code>audit_schema_version: 3</code></strong> is the issue-#116 bump (was <code>2</code> after
+issue #50, <code>1</code> in v0.1). Issue #116 added the <code>proposed_test_files</code>
+array — the tuple of standalone <code>.sql</code> test files emitted for every
+KEPT singular <code>custom_sql</code> business-rule test (these are NOT
+schema.yml blocks, so they never appear in <code>proposed_yaml</code> /
+<code>unified_diff</code>; each carries a slug-safe relative <code>path</code> and the SQL
+body with its <code>-- signalforge:generated &lt;hash&gt;</code> header marker). The
+prior issue-#50 bump (<code>1 → 2</code>) added the <code>kept-uncertain</code> tier literal
++ <code>kept_uncertain_count</code>. External sidecar consumers (CI parsers, the
+v0.3 GitHub Action) gate on <code>audit_schema_version &gt;= 3</code> to consume the
+proposed-test-files array, and on <code>&gt;= 2</code> for the four-tier taxonomy; a
+reader gating on <code>== 1</code> / <code>== 2</code> will reject newer sidecars (the bump is
+intentionally a hard break — the sidecar is <code>O_TRUNC</code> write-only and
+prior runs' bytes are not preserved).</p>
+<p><strong><code>run_id</code> correlation.</strong> <code>run_id</code> is a fresh <code>uuid4().hex</code> stamped at
+orchestrator entry. The diff layer doesn't have a JSONL audit, but the
+field exists so future cross-stage tooling (e.g. a multi-model batch
+runner) can correlate one diff sidecar with sibling grade JSONLs that
+ran in the same logical "render" event.</p>
+<p><strong>Drift gates.</strong> <code>tests/fixtures/diff/diff_report_v1.json</code> and
+<code>diff_entry_v1.json</code> are the canonical schema fixtures;
+<code>tests/diff/test_drift_detector.py</code> pairs each production model
+(<code>extra="ignore"</code>) with a one-off <code>extra="forbid"</code> strict mirror and
+validates against the fixture. Adding a field to <code>DiffReport</code> /
+<code>DiffEntry</code> without updating the strict mirror OR the fixture breaks
+the test loudly. Don't bypass.</p>
+<h2 id="reproducibility-hash-fields-dec-016">Reproducibility / hash fields (DEC-016)</h2>
+<p>Three hash fields land on every <code>DiffReport</code>, all 16-hex-char
+<code>blake2b</code> with <code>digest_size=8</code>. The cross-stage hash domain is
+consistent — a reviewer querying "which prune-result drove this diff"
+can compare bytes verbatim against the prune sidecar / JSONL's hashes.</p>
+<ul>
+<li><strong><code>candidate_hash</code></strong> — <code>blake2b-8</code> of <code>candidate.model_dump_json(sort_keys=True)</code>. Fingerprints the post-draft (and post-anchor-contract-validated) candidate schema. Same <code>candidate_hash</code> across two runs = same drafted artefacts = same kept/dropped table modulo prune-side variation.</li>
+<li><strong><code>prune_result_hash</code></strong> — <code>blake2b-8</code> of <code>prune_result.model_dump_json(sort_keys=True)</code>. Fingerprints the prune verdict. Two runs against the same warehouse data with the same trusted-models / sample-size config should produce the same prune hash.</li>
+<li><strong><code>grading_report_hash</code></strong> — <code>blake2b-8</code> of <code>grading_report.model_dump_json(sort_keys=True)</code> when provided; <code>None</code> otherwise. Fingerprints the rubric verdicts (and indirectly the rubric itself via <code>grading_report.rubric_hash</code>).</li>
+</ul>
+<p>A reproducibility check for "did the diff change because the candidate
+changed, or because prune verdicts shifted?" reads to: compare the
+three hashes between two <code>DiffReport</code>s. Any single hash differing
+points to that stage's input changing.</p>
+<h2 id="decision-matrix-the-kept-kept-uncertain-dropped-flagged-table">Decision matrix — the kept / kept-uncertain / dropped / flagged table</h2>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Source</th>
+<th>One-line <code>why</code> example</th>
+<th>Display in <code>ansi</code> renderer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kept</code></td>
+<td><code>PruneDecision.decision == "kept"</code> AND <code>PruneDecision.reason == "kept"</code> (positive prune evidence). No grading report OR grading passed.</td>
+<td>"kept by prune; clarity 0.85, consistency 0.90"</td>
+<td>green, full row</td>
+</tr>
+<tr>
+<td><code>kept-uncertain</code></td>
+<td><code>PruneDecision.decision == "kept"</code> AND <code>PruneDecision.reason == "kept-without-evidence"</code> (issue #50). The prune layer could not positively evaluate the test — total budget exhausted, identifier rejected by SQL safety check, warehouse call raised, <code>prune.enabled: false</code>, or sample materialisation failed. <strong>Origin dominates over grading</strong> — never collapses to <code>flagged</code>.</td>
+<td>"total prune budget exceeded before evaluation"</td>
+<td>cyan, full row, no score</td>
+</tr>
+<tr>
+<td><code>dropped</code></td>
+<td><code>PruneDecision.decision == "dropped"</code>. <code>drop_reason</code> carries the prune layer's <code>DropReason</code> literal.</td>
+<td>"always-passes (sample of 10000 rows; 0 failing rows)"</td>
+<td>red, dimmed row</td>
+</tr>
+<tr>
+<td><code>flagged</code></td>
+<td>Kept by prune (with positive evidence) AND grading is below threshold (any criterion failed OR <code>score=None</code> degraded sentinel).</td>
+<td>"passed prune; clarity 0.30 (failed)"</td>
+<td>yellow, full row with score badge</td>
+</tr>
+</tbody>
+</table>
+<p><code>flagged</code> is set only when <code>grading_report is not None</code> AND the entry's
+grading is below threshold AND the prune decision had positive evidence.
+Without a grading report, no entry can be <code>flagged</code>; without a prune
+drop, no entry can be <code>dropped</code>; and a kept-without-evidence prune
+decision projects to <code>kept-uncertain</code> regardless of grading attachment.
+The diff layer never <em>creates</em> signal; it only <strong>projects</strong> upstream
+signal.</p>
+<p><strong>Why kept-uncertain is its own tier (issue #50).</strong> Architectural
+Commitment #5 ("explainable diffs") and the prune layer's conservative
+bias (<code>.claude/rules/prune-engine.md</code> DEC-006, DEC-011) jointly say:
+a test we couldn't positively evaluate is shipped (kept) but the
+reviewer must see "we shipped this without evidence" distinctly from
+"this test caught a real failing row." Pre-#50 the diff renderer
+collapsed both into <code>tier="kept"</code> (green) and the only signal was the
+prose <code>why</code> field; the load-bearing conservative-bias message was
+visually invisible. Issue #50 added the fourth tier so reviewers
+scanning the kept column see the kept-uncertain rows immediately.</p>
+<p><strong><code>why</code> cascade for kept-uncertain.</strong> Kept-uncertain rows bypass the
+rationale → evidence → fallback cascade used for ordinary kept rows
+(<code>why</code> priority is <code>CandidateTest.rationale</code> → first non-empty
+<code>GradingResult.evidence</code> → <code>decision.why</code> for plain kept rows). For
+kept-uncertain rows, the prune layer's <code>decision.why</code> is surfaced
+directly — it carries the deterministic load-bearing message ("total
+prune budget exceeded before evaluation" / "sample materialisation
+failed: …" / "identifier rejected by SQL safety check") that names
+the actual cause. The drafter's rationale and the grader's evidence
+are not meaningful for a test we couldn't evaluate.</p>
+<h2 id="operational-notes">Operational notes</h2>
+<h3 id="symlink-hardened-path-canonicalisation">Symlink-hardened path canonicalisation</h3>
+<p>Every caller-supplied path that the orchestrator opens routes through
+<code>signalforge.warehouse._path_safety.canonicalise_path</code> BEFORE the
+write — <code>output_path</code> for the rendered text and <code>sidecar_path</code> for the
+JSON sidecar. A symlink at <code>&lt;project&gt;/.signalforge/diff.json</code>
+pointing outside the project tree is rejected with
+<code>DiffSidecarWriteError(cause=...)</code> (the underlying cause is a
+<code>signalforge.warehouse.errors.ProfileNotFoundError</code>). Mirrors the
+post-QG fix recorded in <code>prune-engine.md</code> and <code>grade-layer.md</code>: trust
+the writer to derive <code>project_dir</code> is unsafe; the orchestrator is the
+place that knows the true <code>project_dir</code>.</p>
+<p>The writer's own <code>canonicalise_path</code> call stays as defence-in-depth.</p>
+<h3 id="soft-warning-on-large-existing-schema">Soft warning on large existing schema</h3>
+<p><code>render_diff</code> emits one <code>WARNING</code> log line when
+<code>len(existing_schema.encode("utf-8")) &gt; existing_schema_warn_at_bytes</code>
+(default 1 MB):</p>
+<div class="highlight"><pre><span></span><code>WARNING signalforge.diff.engine: large existing schema.yml: {&quot;bytes&quot;: 1234567, &quot;model_unique_id&quot;: &quot;model.shop.dim_customers&quot;, &quot;warn_at&quot;: 1000000}
+</code></pre></div>
+<p>Lazy-format JSON per DEC-014 — never f-string. The soft warning
+(default 1 MB) fires below the hard cap
+(<code>existing_schema_size_limit_bytes</code>, default 10 MB), giving operators
+a heads-up before the hard cap trips and a typed
+<code>DiffInputTooLargeError</code> is raised.</p>
+<h3 id="log-event-policy-dec-015">Log event policy (DEC-015)</h3>
+<p>Two <code>_LOGGER</code> events in the entire diff layer — both lazy-format JSON:</p>
+<ol>
+<li><strong>INFO</strong> — One line at the end of every <code>render_diff</code> happy path:</li>
+</ol>
+<p><div class="highlight"><pre><span></span><code>INFO signalforge.diff.engine: rendered diff: {&quot;model_unique_id&quot;: &quot;...&quot;, &quot;kept&quot;: 8, &quot;kept_uncertain&quot;: 1, &quot;dropped&quot;: 2, &quot;flagged&quot;: 1, &quot;has_existing_schema&quot;: true, &quot;duration_seconds&quot;: 0.041}
+</code></pre></div>
+2. <strong>WARNING</strong> — The DEC-014 large-schema warning (above). One line per
+   <code>render_diff</code> call when <code>existing_schema</code> exceeds
+   <code>existing_schema_warn_at_bytes</code> (default 1 MB) but stays below the
+   hard cap (default 10 MB).</p>
+<p>No separate <code>WARNING</code> before raising typed errors — the exception IS
+the signal (mirrors grade DEC-006). The diff layer never logs full
+rendered text or YAML content; the sidecar JSON is the durable
+record of decision-level detail. The custom <code>__repr__</code> on <code>DiffReport</code>
+and <code>DiffEntry</code> defends accidental
+<code>_LOGGER.warning("report: %s", report)</code> calls from dumping multi-megabyte
+diff content into log sinks.</p>
+<h3 id="ansi-escape-stripping-dec-007">ANSI escape stripping (DEC-007)</h3>
+<p>Every user-content field the AnsiRenderer touches (<code>description</code>,
+<code>rationale</code>, <code>evidence</code>, <code>reasoning</code>, <code>why</code>) is routed through
+<code>signalforge.diff._ansi_safety.strip_ansi_escapes</code> BEFORE colourising.
+The strict regex is <code>r'\x1b\[[0-9;]*[a-zA-Z]'</code> (covers SGR plus all
+CSI). The renderer adds its own sanctioned colour codes after
+stripping; user content cannot inject. Mirrors the DEC-022 logger gate
+(audit channel) at the stdout sink (a separate sink with separate
+defences).</p>
+<h3 id="markdown-injection-escaping-dec-008">Markdown injection escaping (DEC-008)</h3>
+<p><code>signalforge.diff._markdown_safety.escape_markdown_scalar</code> handles
+table cells: triple-backticks (<code>```</code> → <code>`\```</code>), pipe (<code>|</code> → <code>\|</code>),
+backslash (<code>\</code> → <code>\\</code>). Raw HTML (<code>&lt;...&gt;</code>) is HTML-entity-encoded for
+table cells; **inside the fenced <code>``diff block, raw content passes
+through** (the diff is YAML; backticks don't break a</code>diff` fence;
+GitHub doesn't interpret HTML inside fenced blocks).</p>
+<p>Test fixtures exercise the escaping for: triple-backticks in
+description, <code>&lt;/details&gt;</code>, <code>[evil](javascript:...)</code>, pipe in column
+name.</p>
+<h2 id="snapshot-fixture-matrix-dec-017">Snapshot fixture matrix (DEC-017)</h2>
+<p>Ten cases under <code>tests/fixtures/diff/</code>, regenerable via
+<code>tests/fixtures/diff/regenerate.sh</code>. Plain-text fixtures, byte-for-byte
+diff (no syrupy dep). The matrix is 3 surfaces × 3 happy/edge/hostile
+cases plus the no-existing-schema branch and an injection-payload
+fixture:</p>
+<table>
+<thead>
+<tr>
+<th>Fixture</th>
+<th>Inputs</th>
+<th>Surface</th>
+<th>What it covers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>full_with_grade</code></td>
+<td>Kept + dropped + flagged, grading provided</td>
+<td><code>ansi</code></td>
+<td>Happy path, all three tiers represented.</td>
+</tr>
+<tr>
+<td><code>full_with_grade.md</code></td>
+<td>Same inputs</td>
+<td><code>markdown</code></td>
+<td>Markdown table + fenced diff + truncation footer behaviour.</td>
+</tr>
+<tr>
+<td><code>full_with_grade.json</code></td>
+<td>Same inputs</td>
+<td><code>json</code></td>
+<td>The sidecar shape; round-trips via Pydantic.</td>
+</tr>
+<tr>
+<td><code>no_existing_schema</code></td>
+<td><code>existing_schema=None</code></td>
+<td><code>ansi</code></td>
+<td>Unified diff sources from <code>/dev/null</code>; first-time-rendering case.</td>
+</tr>
+<tr>
+<td><code>kept_only</code></td>
+<td>Every artefact <code>decision="kept"</code></td>
+<td><code>ansi</code></td>
+<td>Empty dropped table; all-pass UX.</td>
+</tr>
+<tr>
+<td><code>dropped_only</code></td>
+<td>Every artefact <code>decision="dropped"</code></td>
+<td><code>ansi</code></td>
+<td>Empty kept table; rare but possible.</td>
+</tr>
+<tr>
+<td><code>no_grading_report</code></td>
+<td><code>grading_report=None</code></td>
+<td><code>ansi</code></td>
+<td>No flagged tier; per-row score columns absent.</td>
+</tr>
+<tr>
+<td><code>plain_no_color</code></td>
+<td><code>NO_COLOR=1</code></td>
+<td><code>ansi</code></td>
+<td>Asserts no escape codes in output (DEC-021 precedence).</td>
+</tr>
+<tr>
+<td><code>narrow_terminal</code></td>
+<td>40-col TTY</td>
+<td><code>ansi</code></td>
+<td>DEC-013 compact mode (drops <code>why</code> column, emits as wrapped follow-up).</td>
+</tr>
+<tr>
+<td><code>injection_payloads</code></td>
+<td>Descriptions contain <code>\x1b[31m</code>, triple-backticks, <code>&lt;/details&gt;</code></td>
+<td><code>ansi</code> + <code>markdown</code></td>
+<td>DEC-007 + DEC-008 + AR-9 escaping verifies ANSI strip + Markdown escape.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="audit-log-sensitivity">Audit-log sensitivity</h2>
+<p>The diff sidecar can carry verbatim fragments of the artefact text
+(column descriptions, model docs, test rationales) and the full
+<code>unified_diff</code> body. Treat at-rest the same way you treat the safety /
+draft / prune / grade audits:</p>
+<ul>
+<li><strong>Gitignore <code>.signalforge/</code></strong> (already configured in this repo's <code>.gitignore</code>).</li>
+<li><strong>Restrict at-rest permissions.</strong> The writer creates files at <code>0o600</code> on first call; the parent directory is created via <code>mkdir(parents=True, exist_ok=True)</code> (Python's <code>mkdir</code> does not tighten an existing directory's permissions, so verify the existing <code>.signalforge/</code> mode is <code>0o700</code> on shared hosts).</li>
+<li><strong>Don't ship as a build artefact.</strong> Strip from container images and CI uploads; if the diff sidecar is the input to a PR comment, post the rendered Markdown / JSON contents into the comment and delete the file from the runner.</li>
+<li><strong>Symlink-hardened paths.</strong> Both <code>output_path</code> and <code>sidecar_path</code> route through <code>signalforge.warehouse._path_safety.canonicalise_path</code> at orchestrator entry. A symlinked <code>.signalforge/diff.json -&gt; /etc/passwd</code> is rejected as <code>DiffSidecarWriteError</code> before the <code>os.open</code> ever fires.</li>
+</ul>
+<h2 id="debugging">Debugging</h2>
+<p>Logger name: <code>signalforge.diff.engine</code> (and sibling modules under
+<code>signalforge.diff</code>).</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;signalforge.diff&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">)</span>
+</code></pre></div>
+<p>Levels:</p>
+<ul>
+<li><strong>INFO</strong> — One line per <code>render_diff</code> happy-path invocation, lazy-format JSON per DEC-015 (<code>model_unique_id</code>, <code>kept</code>, <code>kept_uncertain</code>, <code>dropped</code>, <code>flagged</code>, <code>has_existing_schema</code>, <code>duration_seconds</code>). Mirrors <code>safety-layer.md</code> DEC-022 / <code>llm-drafter.md</code> DEC-011 / <code>prune-engine.md</code> DEC-017 / <code>grade-layer.md</code> DEC-029 — never f-string-interpolate user-controlled strings into a logger call. The logger grep gate at <code>tests/llm/test_logger_grep_gate.py</code> enforces this for <code>src/signalforge/diff/</code> (DEC-019 of #8).</li>
+<li><strong>WARNING</strong> — One line when <code>existing_schema</code> exceeds <code>existing_schema_warn_at_bytes</code> (DEC-014).</li>
+<li><strong>DEBUG</strong> — Reserved for future per-row latency observability; v0.1 emits no DEBUG from the engine.</li>
+</ul>
+<p>The diff layer never logs full rendered text or YAML content. The
+sidecar JSON is the single durable record of decision-level detail;
+logger output is a hint that the rendering happened, not what was in
+it.</p>
+<p><strong>Reading a fail-closed <code>DiffSidecarWriteError</code>.</strong> The cause is exposed
+as <code>.cause</code> and on <code>__cause__</code>. Common causes:</p>
+<ul>
+<li>Parent directory not writable (no <code>+w</code> for the user, or <code>.signalforge/</code> is a symlink to a read-only mount).</li>
+<li>Disk full (<code>ENOSPC</code>).</li>
+<li>Symlink containment violation (the sidecar / output path canonicalises outside <code>&lt;project_dir&gt;</code>). The cause is a <code>signalforge.warehouse.errors.ProfileNotFoundError</code>.</li>
+<li>Oversize record (raises <code>DiffSidecarRecordTooLargeError</code> instead — for the sidecar, a 10 MB cap suggests a runaway candidate / prune payload that the upstream stages should already have rejected).</li>
+</ul>
+<h2 id="failure-modes-typed-error-cross-reference">Failure modes / typed-error cross-reference</h2>
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>When raised</th>
+<th>Where it surfaces</th>
+<th>How to fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>DiffError</code></td>
+<td>Base class; also raised by <code>load_diff_config</code> on parse / schema failure (US-003 deferred a typed config error to v0.2).</td>
+<td><code>signalforge.diff.errors</code></td>
+<td>Catch it to handle every diff-layer failure uniformly.</td>
+</tr>
+<tr>
+<td><code>DiffCandidateModelMismatchError</code></td>
+<td><code>candidate.name != model.name</code> (DEC-002).</td>
+<td><code>render_diff</code> orchestrator entry.</td>
+<td>Confirm the candidate the drafter produced was for <code>model</code>. Stale <code>CandidateSchema</code> from a different draft = rebuild.</td>
+</tr>
+<tr>
+<td><code>DiffPruneResultModelMismatchError</code></td>
+<td><code>prune_result.model_unique_id != model.unique_id</code> (DEC-002).</td>
+<td><code>render_diff</code> orchestrator entry.</td>
+<td>Confirm <code>prune_tests</code> ran against the same model. A stale <code>PruneResult</code> from a sibling model is the usual cause.</td>
+</tr>
+<tr>
+<td><code>DiffGradingReportModelMismatchError</code></td>
+<td><code>grading_report.model_unique_id != model.unique_id</code> (DEC-002).</td>
+<td><code>render_diff</code> orchestrator entry.</td>
+<td>Confirm <code>grade_artifacts</code> ran against the same model.</td>
+</tr>
+<tr>
+<td><code>DiffInputTooLargeError</code></td>
+<td><code>existing_schema</code> byte length exceeded the cap (default 10 MB; DEC-006).</td>
+<td><code>render_diff</code> orchestrator (pre-<code>yaml.safe_load</code>).</td>
+<td>Trim the existing <code>schema.yml</code> (likely a runaway dbt-osmosis or codegen output). Or raise the cap if the YAML is legitimately large.</td>
+</tr>
+<tr>
+<td><code>DiffSidecarRecordTooLargeError</code></td>
+<td>Serialised sidecar JSON exceeded the cap (default 10 MB; DEC-009).</td>
+<td><code>write_sidecar</code> (pre-<code>os.open</code>).</td>
+<td>Investigate the candidate / prune payload — a sidecar above 10 MB suggests a 1000-column model with hostile descriptions.</td>
+</tr>
+<tr>
+<td><code>DiffSidecarWriteError</code></td>
+<td>Path containment failure or any underlying I/O failure on the write path.</td>
+<td><code>write_sidecar</code> and <code>_write_rendered_text</code> (wrapped at orchestrator entry).</td>
+<td>Verify <code>&lt;project_dir&gt;/.signalforge/</code> is writable, has disk space, and is not a symlink escaping the project tree. Inspect <code>.cause</code>.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="regen-instructions-for-fixtures">Regen instructions for fixtures</h2>
+<p>The diff-layer snapshot fixtures under <code>tests/fixtures/diff/</code> are
+<strong>hand-authored</strong> (they don't depend on a live LLM run). The
+companion <code>tests/fixtures/diff/regenerate.sh</code> script provides a
+deterministic regeneration path that writes the fixtures via the
+production renderer with pinned inputs — useful when a renderer
+template change is intentional. To regenerate after a model field /
+renderer change:</p>
+<ol>
+<li>Update the production model (<code>signalforge.diff.models</code> —
+   <code>DiffReport</code> / <code>DiffEntry</code>) or the renderer
+   (<code>signalforge.diff._renderers</code>).</li>
+<li>Update the matching strict mirror in
+   <code>tests/diff/test_drift_detector.py</code>. Both must change in the same
+   commit, or the strict-validates-fixture check fails.</li>
+<li>Run <code>tests/fixtures/diff/regenerate.sh</code> to refresh the snapshot
+   fixtures from the production renderer.</li>
+<li>Run <code>pytest tests/diff/ -v</code> — the strict model must validate the
+   fixture, AND every snapshot test must pass byte-for-byte.</li>
+</ol>
+<p><code>tests/fixtures/diff/diff_report_v1.json</code> and <code>diff_entry_v1.json</code>
+are the schema-drift fixtures (independent of the snapshot fixtures);
+edit by hand to add / remove fields. Keep the values readable (no
+test fixture should be a wall of placeholder hashes).</p>
+<h2 id="cli-integration-note">CLI integration note</h2>
+<p>Tracked in <a href="https://github.com/wjduenow/SignalForge/issues/9">issue #9</a>.
+The <code>signalforge generate</code> CLI will load the diff config via
+<code>load_diff_config(...)</code> and invoke <code>render_diff(...)</code> after the grade
+step completes (or directly after prune if <code>--no-grade</code> is supplied).
+Renderer selection (<code>--render=ansi|markdown|json</code>) overrides
+<code>config.render_kind</code>; <code>--no-color</code> overrides
+<code>config.respect_no_color_env</code> to <code>False</code> and the AnsiRenderer's
+precedence ladder routes through to a plain ANSI strip.</p>
+<p>The CLI will also surface the kept / dropped / flagged counts to the
+operator's stdout summary, but <strong>will not</strong> gate exit code on
+<code>flagged_count &gt; 0</code> in v0.1 — the diff layer is render-only, and the
+operator's eyes are the merge boundary. v0.2 may wire a
+<code>--fail-on-flagged</code> CLI flag for CI-strict deployments.</p>
+<h2 id="references">References</h2>
+<ul>
+<li>Design record: <a href="../plans/super/8-diff-renderer.md"><code>plans/super/8-diff-renderer.md</code></a>.</li>
+<li>Grade-layer counterpart (the layer the diff renderer mirrors most
+  patterns from for fail-closed sidecar + <code>__repr__</code> discipline +
+  drift-detector convention):
+  <a href="../grade-ops/"><code>docs/grade-ops.md</code></a>.</li>
+<li>Prune-layer counterpart (the layer the diff renderer mirrors for
+  symlink-hardened path canonicalisation at orchestrator entry):
+  <a href="../prune-ops/"><code>docs/prune-ops.md</code></a>.</li>
+<li>Drafter counterpart (the layer the diff renderer mirrors for the
+  <code>&lt;MODEL_SQL&gt;</code>-style envelope-breach guard semantics, even though the
+  diff layer's defences are at the stdout / Markdown sinks rather than
+  the LLM-prompt sink):
+  <a href="../draft-ops/"><code>docs/draft-ops.md</code></a>.</li>
+<li>Manifest reader conventions
+  (<code>frozen</code> / <code>extra="ignore"</code> / drift-detector pattern):
+  <a href="../.claude/rules/manifest-readers.md"><code>.claude/rules/manifest-readers.md</code></a>.</li>
+</ul>
+<p>Cross-reference DECs (from <code>plans/super/8-diff-renderer.md</code>):
+DEC-002 (boundary checks), DEC-003 (drift detectors), DEC-004
+(renderer concretes private; orchestrator picks via <code>render_kind</code>),
+DEC-005 (Markdown body truncation), DEC-006 (existing-schema YAML
+size cap), DEC-007 (ANSI escape stripping in user content), DEC-008
+(Markdown injection escaping), DEC-009 (sidecar size cap), DEC-010
+(<code>DiffConfig</code> field set + <code>diff:</code> namespace), DEC-011 (renderer ABC
+pure-return signature), DEC-012 (<code>Tier</code> literal), DEC-013
+(terminal-width compact mode), DEC-014 (soft warning on large
+existing schema), DEC-015 (two-event log policy), DEC-016 (sidecar
+field set with reproducibility hashes), DEC-017 (snapshot fixture
+matrix), DEC-018 (no <code>DiffEvent</code> AST scan in v0.1), DEC-019 (logger
+grep gate extends to <code>src/signalforge/diff/</code> — fifth directory),
+DEC-020 (custom <code>__repr__</code> on result-shaped models), DEC-021
+(NO_COLOR precedence for the AnsiRenderer).</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

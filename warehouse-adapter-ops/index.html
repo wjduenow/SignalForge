@@ -1,0 +1,2279 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/warehouse-adapter-ops/">
+      
+      
+        <link rel="prev" href="../manifest-loader-ops/">
+      
+      
+        <link rel="next" href="../safety-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Warehouse Adapter - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#warehouse-adapter-operations-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Warehouse Adapter
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#quick-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dbt-profile-resolution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        dbt profile resolution
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-defaults" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost defaults
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sampling-strategy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sampling strategy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#column_stats-access-pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        column_stats access pattern
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#materialised-sampling-v02-issue-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Materialised sampling (v0.2, issue #22)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#query-bytes-estimation-v02-issue-36" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Query-bytes estimation (v0.2, issue #36)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#session-cleanup-manual-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Session cleanup &amp; manual recovery
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Session cleanup &amp; manual recovery">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#edge-case-sdk-returns-session_infonone" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Edge case: SDK returns session_info=None
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#spotting-orphaned-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Spotting orphaned sessions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#snowflake-adapter-v02-epic-118" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Snowflake adapter (v0.2, epic #118)
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#quick-start" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Quick start
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#dbt-profile-resolution" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        dbt profile resolution
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#cost-defaults" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost defaults
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#sampling-strategy" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Sampling strategy
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#column_stats-access-pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        column_stats access pattern
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#materialised-sampling-v02-issue-22" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Materialised sampling (v0.2, issue #22)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#query-bytes-estimation-v02-issue-36" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Query-bytes estimation (v0.2, issue #36)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#session-cleanup-manual-recovery" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Session cleanup &amp; manual recovery
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Session cleanup &amp; manual recovery">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#edge-case-sdk-returns-session_infonone" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Edge case: SDK returns session_info=None
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#spotting-orphaned-sessions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Spotting orphaned sessions
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#snowflake-adapter-v02-epic-118" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Snowflake adapter (v0.2, epic #118)
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="warehouse-adapter-operations-guide">Warehouse adapter — operations guide</h1>
+<p>Operational reference for users of <code>signalforge.warehouse</code>. Companion to
+<a href="../manifest-loader-ops/"><code>docs/manifest-loader-ops.md</code></a> and the design
+record in <a href="../plans/super/3-bigquery-adapter.md"><code>plans/super/3-bigquery-adapter.md</code></a>.</p>
+<p>v0.1 ships the BigQuery adapter only. Snowflake and Postgres are tracked
+for v0.2; the public ABC (<code>WarehouseAdapter</code>) and the <code>from_profile</code>
+factory are warehouse-agnostic so adding a sibling adapter is purely
+additive.</p>
+<p><strong>Snowflake skeleton (v0.2, issue #119).</strong> <code>from_profile</code> now dispatches
+<code>type: snowflake</code> to a <code>SnowflakeAdapter</code> skeleton — <code>dialect()</code> returns the
+Snowflake <code>Dialect</code> (<code>quote_char='"'</code>, <code>identifier_case='upper'</code>,
+<code>supports_qualify=True</code>), but the sampling / profiling / test-running methods
+raise <code>NotImplementedError</code> naming epic #118 until #122–#124 land. The
+connector is an optional extra — install it with
+<code>pip install "signalforge-dbt[snowflake]"</code> (or <code>uv pip install "signalforge-dbt[snowflake]"</code>);
+the base install never pulls <code>snowflake-connector-python</code>.</p>
+<p><strong>Snowflake profile parsing (v0.2, issue #120).</strong> <code>load_profile</code> parses a
+<code>type: snowflake</code> target into a <code>DbtProfileTarget</code> carrying <code>account</code>,
+<code>user</code>, <code>role</code>, <code>warehouse</code>, <code>database</code>, <code>schema</code>, <code>threads</code>, and the auth
+fields. Required keys are <code>account</code> / <code>user</code> / <code>warehouse</code> — a missing one
+raises <code>IncompleteProfileError</code> listing every missing key. <strong>Auth methods:</strong>
+v0.2 supports <code>password</code>, key-pair (<code>private_key_path</code> +
+<code>private_key_passphrase</code>), and SSO (<code>authenticator: externalbrowser</code>); OAuth
+(<code>authenticator: oauth</code> + <code>token</code>), inline <code>private_key</code>, and MFA
+(<code>username_password_mfa</code>) are deferred and fail loud with a remediation
+naming the supported set. <strong>Identifier validation:</strong> <code>warehouse</code>,
+<code>database</code>, <code>schema</code>, and <code>role</code> are validated as strict SQL identifiers at
+load time (they become SQL when #122 opens the connection). <strong>Known
+limitation:</strong> the strict identifier grammar rejects Snowflake's legal <code>$</code> in
+<code>warehouse</code>/<code>database</code>/<code>schema</code>/<code>role</code> names (e.g. <code>WH$PROD</code>) — a documented
+v0.x deferral. The <code>account</code> locator uses a separate permissive grammar
+(accepts org-account <code>myorg-account1</code> and region-suffixed <code>xy12345.us-east-1</code>
+forms; rejects quotes, <code>;</code>, whitespace, control chars).</p>
+<h2 id="quick-start">Quick start</h2>
+<p>One-time, on a fresh machine:</p>
+<div class="highlight"><pre><span></span><code>gcloud<span class="w"> </span>auth<span class="w"> </span>application-default<span class="w"> </span>login
+</code></pre></div>
+<p>Application Default Credentials (ADC) is the only supported auth method
+in v0.1 (see <a href="#dbt-profile-resolution">§2 dbt profile resolution</a>).</p>
+<p>Then, from Python:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">pathlib</span><span class="w"> </span><span class="kn">import</span> <span class="n">Path</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.warehouse</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">WarehouseAdapter</span><span class="p">,</span>
+    <span class="n">TableRef</span><span class="p">,</span>
+    <span class="n">load_profile</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="n">profile</span> <span class="o">=</span> <span class="n">load_profile</span><span class="p">(</span><span class="n">Path</span><span class="p">(</span><span class="s2">&quot;my_dbt_project&quot;</span><span class="p">))</span>
+<span class="k">with</span> <span class="n">WarehouseAdapter</span><span class="o">.</span><span class="n">from_profile</span><span class="p">(</span><span class="n">profile</span><span class="p">)</span> <span class="k">as</span> <span class="n">adapter</span><span class="p">:</span>
+    <span class="n">sample</span> <span class="o">=</span> <span class="n">adapter</span><span class="o">.</span><span class="n">sample_rows</span><span class="p">(</span>
+        <span class="n">TableRef</span><span class="p">(</span><span class="n">project</span><span class="o">=</span><span class="s2">&quot;my-gcp-project&quot;</span><span class="p">,</span> <span class="n">dataset</span><span class="o">=</span><span class="s2">&quot;analytics&quot;</span><span class="p">,</span> <span class="n">name</span><span class="o">=</span><span class="s2">&quot;dim_users&quot;</span><span class="p">),</span>
+        <span class="n">n</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span>
+    <span class="p">)</span>
+</code></pre></div>
+<p><code>WarehouseAdapter.from_profile</code> dispatches on <code>profile.type</code>.
+<code>profile.type == "bigquery"</code> is fully implemented; <code>profile.type ==
+"postgres"</code> (v0.2 stub, #53) and <code>profile.type == "snowflake"</code> (v0.2
+skeleton, #119) dispatch to their adapters, whose warehouse-operation
+methods raise <code>NotImplementedError</code> until the full implementations land.
+Any other <code>profile.type</code> raises <code>UnsupportedProfileTypeError</code> with a
+remediation pointing at the v0.2 roadmap entry.</p>
+<h2 id="dbt-profile-resolution">dbt profile resolution</h2>
+<p><code>load_profile(project_dir, target=None)</code> resolves a <code>profiles.yml</code> in
+this order (DEC-009):</p>
+<ol>
+<li><code>$DBT_PROFILES_DIR/profiles.yml</code> — user-trusted; honoured first when
+   the env var is set.</li>
+<li><code>&lt;project_dir&gt;/profiles.yml</code> — symlink-hardened via the same path
+   gate the manifest loader uses (<code>canonicalise_path</code>); a symlink that
+   escapes the project tree raises <code>ProfileNotFoundError</code> rather than
+   silently falling through to the home-dir path.</li>
+<li><code>~/.dbt/profiles.yml</code> — user-trusted.</li>
+</ol>
+<p><code>ProfileNotFoundError</code> lists every path searched in its remediation, so
+"why didn't you find my profile?" answers itself from the exception
+message.</p>
+<p><strong>Active-target resolution.</strong> Within the resolved profile, the active
+output is selected as: explicit <code>target=</code> argument → the profile's own
+<code>target:</code> field → <code>ProfileTargetNotFoundError</code>. <code>ProfileTargetNotFoundError</code>
+inherits from <code>ProfileNotFoundError</code>, so a single <code>except</code> clause covers
+both "no profile" and "wrong target" if the caller does not need to
+distinguish them.</p>
+<p><strong>Auth-method support (v0.1, DEC-017).</strong> Only <code>method: oauth</code> (or unset,
+which means "let dbt-bigquery default to ADC") is accepted. Every other
+documented dbt-bigquery method raises <code>UnsupportedAuthMethodError</code> from
+the Pydantic field validator, with the remediation pointing at
+<code>gcloud auth application-default login</code>:</p>
+<table>
+<thead>
+<tr>
+<th><code>method</code> value</th>
+<th>v0.1 behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>oauth</code> / unset</td>
+<td>accepted; uses ADC</td>
+</tr>
+<tr>
+<td><code>service-account</code></td>
+<td><code>UnsupportedAuthMethodError</code></td>
+</tr>
+<tr>
+<td><code>service-account-json</code></td>
+<td><code>UnsupportedAuthMethodError</code></td>
+</tr>
+<tr>
+<td><code>oauth-secrets</code></td>
+<td><code>UnsupportedAuthMethodError</code></td>
+</tr>
+<tr>
+<td><code>impersonate-service-account</code></td>
+<td><code>UnsupportedAuthMethodError</code></td>
+</tr>
+</tbody>
+</table>
+<p>Service-account methods land in v0.2; the v0.1 surface is intentionally
+narrow so the auth path has one well-tested branch.</p>
+<p><code>DbtProfileTarget</code> is a strict (<code>extra="forbid"</code>) Pydantic v2 model.
+Unknown profile keys raise <code>ValidationError</code>; this is a deliberate
+divergence from the manifest reader's <code>extra="ignore"</code> posture (DEC-017),
+because silently dropping an auth-config key could mean SignalForge
+falls back to ADC when the user thought they had configured something
+else. Forward-compat against new dbt-bigquery fields is the drift-detector
+test's responsibility (<code>tests/warehouse/test_profiles.py</code>).</p>
+<h2 id="cost-defaults">Cost defaults</h2>
+<p>The BigQuery adapter is opinionated about cost on every query.</p>
+<ul>
+<li><strong><code>maximum_bytes_billed = 100 MB</code> by default</strong> (DEC-005). <code>BigQueryAdapter</code>
+  takes a <code>max_bytes_billed=</code> kwarg; the dbt profile's
+  <code>maximum_bytes_billed</code> field flows through <code>load_profile</code> and
+  <code>from_profile</code> and overrides the default. Queries that exceed the cap
+  raise <code>BytesBilledExceededError</code>. The exception's <code>limit</code> field always
+  carries the configured cap; <code>job_id</code> and <code>bytes_billed</code> are populated
+  only when BigQuery's <code>BadRequest</code> exposes them (it usually doesn't on
+  the pre-execution rejection path) and are otherwise <code>None</code>. The error
+  message and remediation are sufficient to act on without those fields;
+  v0.2 may revisit by surfacing the failed <code>QueryJob</code> so the IDs flow
+  through.</li>
+<li><strong><code>use_query_cache=False</code> on every query</strong> (DEC-015). Architectural
+  Commitment #5 — explainable diffs — requires that the same input
+  produce the same prune decision; cached results break that contract.
+  v0.2 may re-enable caching behind an explicit opt-in; in v0.1 it is
+  unconditionally off.</li>
+<li><strong>Per-call <code>timeout_ms</code></strong> (DEC-013 of issue #6): pass an integer to
+  <code>_default_job_config(stage="...", timeout_ms=...)</code> to set
+  <code>QueryJobConfig.job_timeout_ms</code>; BigQuery cancels the job
+  server-side at expiry. Bytes-scanned through the cancellation point
+  still bill — set conservatively. Default <code>None</code> (no timeout).
+  Reserved for v0.2 prune layer integration (issue #6 ships with
+  <code>total_budget_seconds</code> enforcement only; v0.1 has no public
+  <code>WarehouseAdapter.run_test_sql</code> kwarg for per-test timeouts).</li>
+<li><strong>BigQuery job labels are auto-set</strong> on every query:</li>
+<li><code>signalforge_stage</code> — the pipeline stage that issued the query.
+    Values are <code>warehouse_sample</code> (from <code>sample_rows</code>),
+    <code>warehouse_sample_materialise</code> (from <code>materialise_sample</code>, v0.2 —
+    see <a href="#materialised-sampling-v02-issue-22">Materialised sampling</a>),
+    <code>warehouse_stats</code> (from <code>column_stats</code>), <code>warehouse_test</code> (from
+    <code>run_test_sql</code>), and <code>warehouse_session_abort</code> (from the
+    <code>__exit__</code> cleanup <code>CALL BQ.ABORT_SESSION()</code> query — DEC-013 of
+    #22).</li>
+<li><code>signalforge_version</code> — the package version (with <code>.</code> rewritten to
+    <code>_</code> to satisfy BigQuery's label-character constraint).</li>
+</ul>
+<p>Both are filterable in <code>INFORMATION_SCHEMA.JOBS_BY_PROJECT</code> for v0.2
+  cost analysis. Stage labels are <code>warehouse_sample</code>,
+  <code>warehouse_sample_materialise</code> (v0.2), <code>warehouse_stats</code>,
+  <code>warehouse_test</code>, and <code>warehouse_session_abort</code> (v0.2; one per
+  pipeline stage that issues a query):</p>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="n">job_id</span><span class="p">,</span><span class="w"> </span><span class="n">total_bytes_billed</span>
+<span class="k">FROM</span><span class="w"> </span><span class="o">`</span><span class="n">region</span><span class="o">-</span><span class="n">us</span><span class="o">`</span><span class="p">.</span><span class="n">INFORMATION_SCHEMA</span><span class="p">.</span><span class="n">JOBS_BY_PROJECT</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">labels</span><span class="p">.</span><span class="n">signalforge_stage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;warehouse_sample&#39;</span>
+</code></pre></div>
+<h2 id="sampling-strategy">Sampling strategy</h2>
+<p><code>adapter.sample_rows(table, n, partition_filter=None)</code> returns up to
+<code>n</code> rows from <code>table</code>, deterministically.</p>
+<p><strong>Default: hash-mod (DEC-006).</strong> Every call wraps the table in:</p>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="o">&lt;</span><span class="n">quoted</span><span class="o">&gt;</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">t</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="k">MOD</span><span class="p">(</span><span class="k">ABS</span><span class="p">(</span><span class="n">FARM_FINGERPRINT</span><span class="p">(</span><span class="n">TO_JSON_STRING</span><span class="p">(</span><span class="n">t</span><span class="p">))),</span><span class="w"> </span><span class="n">bucket</span><span class="p">)</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">1</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">FARM_FINGERPRINT</span><span class="p">(</span><span class="n">TO_JSON_STRING</span><span class="p">(</span><span class="n">t</span><span class="p">))</span>
+<span class="k">LIMIT</span><span class="w"> </span><span class="n">n</span>
+</code></pre></div>
+<p>The trailing <code>ORDER BY</code> makes the <code>LIMIT</code> truncation deterministic when
+the bucket filter retains more than <code>n</code> rows; without it BigQuery's
+<code>LIMIT</code> picks an arbitrary subset and breaks the same-input →
+same-output prune contract.</p>
+<p><code>bucket</code> is sized from <code>Table.num_rows</code> so the expected sample size lands
+near <code>n</code>. The hash-mod approach is deterministic across runs, works on
+views, materialised views, wildcard tables, and CTEs, and behaves
+correctly when <code>TABLESAMPLE</code> does not.</p>
+<p><strong>The TABLESAMPLE cost-asterisk.</strong> <code>TABLESAMPLE SYSTEM</code> is documented in
+BigQuery as the canonical sampling primitive, but it does <strong>not</strong>
+proportionally reduce bytes billed on un-clustered tables — it scans the
+whole table and then drops blocks. It is only cost-effective on
+clustered tables or in conjunction with a partition filter. Hash-mod
+has the same cost story (it scans everything too) without the
+determinism downside, so it is the v0.1 default. v0.2 will add an
+opt-in TABLESAMPLE strategy for clustered tables where the bytes-billed
+math works out.</p>
+<p><strong><code>PartitionFilter</code> (DEC-014).</strong> Scope a sample to a specific partition
+to actually reduce bytes billed:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">datetime</span><span class="w"> </span><span class="kn">import</span> <span class="n">date</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.warehouse</span><span class="w"> </span><span class="kn">import</span> <span class="n">PartitionFilter</span>
+
+<span class="n">adapter</span><span class="o">.</span><span class="n">sample_rows</span><span class="p">(</span>
+    <span class="n">table</span><span class="p">,</span>
+    <span class="n">n</span><span class="o">=</span><span class="mi">100</span><span class="p">,</span>
+    <span class="n">partition_filter</span><span class="o">=</span><span class="n">PartitionFilter</span><span class="p">(</span>
+        <span class="n">column</span><span class="o">=</span><span class="s2">&quot;event_date&quot;</span><span class="p">,</span>
+        <span class="n">op</span><span class="o">=</span><span class="s2">&quot;&gt;=&quot;</span><span class="p">,</span>
+        <span class="n">value</span><span class="o">=</span><span class="n">date</span><span class="p">(</span><span class="mi">2024</span><span class="p">,</span> <span class="mi">1</span><span class="p">,</span> <span class="mi">1</span><span class="p">),</span>
+    <span class="p">),</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>Each adapter renders its own SQL for <code>PartitionFilter</code>. The typed
+<code>column</code>/<code>op</code>/<code>value</code> triple — <code>op</code> is a <code>Literal["=", "&gt;", "&gt;=", "&lt;",
+"&lt;=", "!="]</code> and <code>column</code> is identifier-validated at construction time —
+removes a SQL-injection seam and prevents cross-warehouse SQL leaks
+(DEC-018).</p>
+<p><strong>Fail-loud thresholds (DEC-024).</strong> Sampling refuses to silently
+over-spend in two cases:</p>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Exception</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Table.num_rows</code> is <code>None</code>/<code>0</code> and no partition filter</td>
+<td><code>UnknownTableSizeError</code></td>
+</tr>
+<tr>
+<td><code>Table.num_rows &gt;= 100_000_000</code> and no partition filter</td>
+<td><code>SamplingRequiresPartitionFilterError</code></td>
+</tr>
+</tbody>
+</table>
+<p>Both carry the offending <code>table</code> (and <code>num_rows</code>, where known) and a
+remediation that names the fix. Fail-loud is preferred over a guessed
+bucket size because the worst case — a terabyte-scale unscoped scan —
+is silent on the user's side and very loud on the bill.</p>
+<h2 id="column_stats-access-pattern"><code>column_stats</code> access pattern</h2>
+<p><code>adapter.column_stats(table, column)</code> returns a <code>ColumnStats</code> object
+with <code>count</code>, <code>distinct</code>, <code>nulls</code>, <code>min</code>, <code>max</code>, and <code>data_type</code>. The
+call MUST be inside a <code>with adapter:</code> block (DEC-025); calling it
+outside one raises <code>RuntimeError</code>.</p>
+<p><strong>Flush semantics in v0.1.</strong> Inside an active <code>with adapter:</code> block,
+calls to <code>adapter.column_stats(table, col)</code> accumulate per table. The
+<strong>first</strong> call for a given table flushes every column queued for that
+table in a single batched aggregate query, populating the cache;
+subsequent <code>column_stats(table, ...)</code> calls for columns already in the
+cache return without issuing another query. Columns queued <em>after</em> a
+flush are batched into the next flush when the first uncached column is
+requested.</p>
+<p>The returned <code>ColumnStats</code> is a fully-populated typed value (no lazy
+proxy). v0.2 may add a lazy proxy that defers the flush until a field is
+read, but the v0.1 contract is "first call flushes the queued batch" —
+predictable and easy to reason about at a <code>with</code>-block boundary.</p>
+<p>Use the recommended pattern below to keep call sites cheap to refactor
+when the lazy form lands:</p>
+<div class="highlight"><pre><span></span><code><span class="k">with</span> <span class="n">WarehouseAdapter</span><span class="o">.</span><span class="n">from_profile</span><span class="p">(</span><span class="n">profile</span><span class="p">)</span> <span class="k">as</span> <span class="n">adapter</span><span class="p">:</span>
+    <span class="n">refs</span> <span class="o">=</span> <span class="p">{</span><span class="n">col</span><span class="p">:</span> <span class="n">adapter</span><span class="o">.</span><span class="n">column_stats</span><span class="p">(</span><span class="n">table</span><span class="p">,</span> <span class="n">col</span><span class="p">)</span> <span class="k">for</span> <span class="n">col</span> <span class="ow">in</span> <span class="p">[</span><span class="s2">&quot;a&quot;</span><span class="p">,</span> <span class="s2">&quot;b&quot;</span><span class="p">,</span> <span class="s2">&quot;c&quot;</span><span class="p">]}</span>
+    <span class="k">for</span> <span class="n">col</span><span class="p">,</span> <span class="n">stats</span> <span class="ow">in</span> <span class="n">refs</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+        <span class="nb">print</span><span class="p">(</span><span class="n">col</span><span class="p">,</span> <span class="n">stats</span><span class="o">.</span><span class="n">count</span><span class="p">,</span> <span class="n">stats</span><span class="o">.</span><span class="n">distinct</span><span class="p">,</span> <span class="n">stats</span><span class="o">.</span><span class="n">nulls</span><span class="p">)</span>
+</code></pre></div>
+<p>In v0.1 this issues three queries (one per <code>column_stats</code> call); v0.2
+will collapse all three into a single batched query at first field
+read.</p>
+<p><strong>Complex types (DEC-016).</strong> For BigQuery types where ordering is not
+meaningful — <code>GEOGRAPHY</code>, <code>JSON</code>, <code>BYTES</code>, <code>ARRAY&lt;...&gt;</code>, <code>STRUCT&lt;...&gt;</code>,
+<code>RANGE&lt;...&gt;</code> — <code>min</code> and <code>max</code> are <code>None</code>. <code>count</code>, <code>distinct</code>, and
+<code>nulls</code> are populated for every type. The prune layer keys decisions on
+<code>data_type</code> (the raw BigQuery type string) without re-reading the
+catalog.</p>
+<h2 id="materialised-sampling-v02-issue-22">Materialised sampling (v0.2, issue #22)</h2>
+<p>The <code>WarehouseAdapter</code> ABC ships a <code>materialise_sample</code> method in v0.2
+that pre-computes a deterministic sample into a session-scoped temp
+table, so every candidate test's per-test query reads from the
+narrow materialised sample rather than re-running the full-row hash
+filter against the source table for every test (see
+<a href="../prune-ops/#cost-model-us-003-verification"><code>docs/prune-ops.md</code> § Cost model</a>
+for the cost story).</p>
+<p>ABC signature (<code>signalforge.warehouse.base</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">materialise_sample</span><span class="p">(</span>
+    <span class="bp">self</span><span class="p">,</span>
+    <span class="n">table</span><span class="p">:</span> <span class="n">TableRef</span><span class="p">,</span>
+    <span class="n">n</span><span class="p">:</span> <span class="nb">int</span><span class="p">,</span>
+    <span class="o">*</span><span class="p">,</span>
+    <span class="n">partition_filter</span><span class="p">:</span> <span class="n">PartitionFilter</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+    <span class="n">ttl_seconds</span><span class="p">:</span> <span class="nb">int</span> <span class="o">=</span> <span class="mi">3600</span><span class="p">,</span>
+<span class="p">)</span> <span class="o">-&gt;</span> <span class="n">TableRef</span><span class="p">:</span> <span class="o">...</span>
+</code></pre></div>
+<p>The default ABC implementation raises <code>MaterialisationNotSupportedError</code>
+with a remediation pointing at <code>prune.sample_strategy: oneshot</code> in
+<code>signalforge.yml</code>. The <code>BigQueryAdapter</code> overrides; non-BQ adapters
+inherit the default until v0.3.</p>
+<p><strong>BigQueryAdapter session-state pattern.</strong> The first call to
+<code>materialise_sample</code> runs <code>CREATE TEMP TABLE _sf_sample_&lt;run_id&gt; AS SELECT ...</code>
+(the CTAS itself uses the bare <code>_sf_sample_&lt;run_id&gt;</code> name — no
+<code>_SESSION.</code> prefix) with <code>QueryJobConfig(create_session=True, ...)</code>
+against the <code>warehouse_sample_materialise</code> stage label. <strong>BigQuery
+assigns the session_id server-side</strong>; the adapter captures it from
+<code>job.session_info.session_id</code> and stores it on the adapter instance
+as <code>self._active_session_id</code> for the duration of the prune run.
+Subsequent <code>run_test_sql</code> calls automatically attach
+<code>ConnectionProperty(key="session_id", value=self._active_session_id)</code>
+so the per-test query resolves <code>_SESSION._sf_sample_&lt;run_id&gt;</code> against
+the same session. The returned <code>TableRef</code> carries
+<code>project=None, dataset="_SESSION", name="_sf_sample_&lt;run_id&gt;"</code> —
+two-part <code>qualified_name</code> <code>_SESSION._sf_sample_&lt;run_id&gt;</code>. <code>project=None</code>
+is load-bearing because BigQuery rejects the three-part
+<code>&lt;project&gt;._SESSION.&lt;name&gt;</code> form even inside the owning session.</p>
+<p>The <code>run_id</code> is OUR derivation —
+<code>blake2b(table.qualified_name + signalforge_version + str(n) + canonical_json(partition_filter), digest_size=8).hexdigest()</code>
+(inputs joined with NUL separator; 16 hex chars) — so the temp-table
+name is deterministic across runs and the <code>compiled_sql_hash</code>
+reproducibility invariant on <code>PruneEvent</code> (DEC-005 of issue #6) is
+preserved.</p>
+<p><strong><code>ttl_seconds</code> is OUR-side hint, not a BQ knob.</strong> BigQuery sessions
+have a server-enforced max lifetime (~24h regardless of activity)
+plus a BQ-default idle timeout. The <code>ttl_seconds=3600</code> parameter is
+NOT passed to BigQuery — it's a hint to the cleanup-WARNING text
+(the "auto-expire in Ns" line below). Don't go looking for a BQ SDK
+call to set it; there isn't one in v0.2.</p>
+<p>The session-state pattern mirrors <code>column_stats</code>'s batching state
+(DEC-008 / DEC-025 of issue #3): adapter-instance state scoped to a
+<code>with adapter:</code> block; cleanup driven by <code>__exit__</code>.</p>
+<p><strong>v0.2 → v0.3 migration story for non-BQ adapters.</strong> Snowflake and
+Postgres adapters in v0.2 inherit the default <code>materialise_sample</code> →
+<code>MaterialisationNotSupportedError</code> raise. Operators on those
+warehouses opt in to the v0.1 oneshot path via
+<code>prune.sample_strategy: oneshot</code> in <code>signalforge.yml</code>. Each
+non-BigQuery adapter then ships its own session-equivalent in v0.3
+(Snowflake: temporary tables tied to the session; Postgres:
+<code>CREATE TEMP TABLE</code> inside a transaction). The ABC default-raise is
+the v0.2 stop-gap, not a permanent surface.</p>
+<blockquote>
+<p><strong>Snowflake update (#122/#124/#139):</strong> Snowflake no longer inherits the
+<code>MaterialisationNotSupportedError</code> default — <code>materialise_sample</code> is
+implemented, and (since #139) emits a <strong>projection-subquery</strong> sample shape
+(<code>SELECT * EXCLUDE (_sf_sample_hash) FROM (SELECT t.*, ABS(HASH(*)) AS
+_sf_sample_hash …)</code>) so the <code>HASH(*)</code> row-hash sits in the SELECT projection
+rather than the rejected <code>WHERE</code>/<code>ORDER BY</code> position. <strong><code>materialised</code>
+sample-mode prune now works on live Snowflake.</strong> The <code>oneshot</code> strategy works
+too since #140 routed its sample row-count through the vendor-neutral
+<code>WarehouseAdapter.get_row_count</code> seam (it previously reached a BigQuery-only
+<code>_get_client</code>); see "Known limitations on live Snowflake" below.</p>
+</blockquote>
+<h2 id="query-bytes-estimation-v02-issue-36">Query-bytes estimation (v0.2, issue #36)</h2>
+<p>The <code>WarehouseAdapter</code> ABC ships an <code>estimate_query_bytes</code> method in
+v0.2 so the <code>signalforge generate --estimate</code> cost-preview flow can
+estimate how many bytes a candidate query would process WITHOUT
+actually scanning the source table. The BigQuery override uses
+<code>QueryJobConfig(dry_run=True)</code> and reads <code>job.total_bytes_processed</code>
+off the returned job; the Snowflake override (issue #130) runs
+<code>EXPLAIN USING JSON</code> and parses <code>GlobalStats.bytesAssigned</code> from the
+returned plan. Adapters without their own primitive inherit the ABC's
+default <code>EstimateNotSupportedError</code> raise.</p>
+<p>ABC signature (<code>signalforge.warehouse.base</code>):</p>
+<div class="highlight"><pre><span></span><code><span class="k">def</span><span class="w"> </span><span class="nf">estimate_query_bytes</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">sql</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">int</span><span class="p">:</span> <span class="o">...</span>
+</code></pre></div>
+<p>The default ABC implementation raises <code>EstimateNotSupportedError</code> with
+the locked remediation: <code>"Use --estimate with a BigQuery profile, or
+wait for v0.3 multi-warehouse estimation support."</code> Concrete adapters
+override; v0.2 ships the BigQuery override (<code>dry_run</code>) and the Snowflake
+override (<code>EXPLAIN USING JSON</code>, issue #130). The Postgres stub still
+inherits the default raise pending its own <code>EXPLAIN</code> override.</p>
+<p><strong>BigQuery override mechanism.</strong> A <code>dry_run=True</code> query asks BigQuery
+to validate the SQL server-side and return the estimated bytes
+processed, without committing to any actual scan or row return.
+BigQuery does NOT bill bytes for a dry_run, so the production
+<code>QueryJobConfig</code> deliberately omits <code>maximum_bytes_billed</code> — a cap on
+something that never bills would be dead config; worse, it could
+mislead a reader into thinking the dry_run was guarded against
+runaway cost. The job is tagged with the <code>warehouse_estimate_query_bytes</code>
+stage label for <code>INFORMATION_SCHEMA.JOBS_BY_PROJECT</code> cost attribution.</p>
+<p>The same <code>_sql_safety.validate_test_sql</code> cheap-reject pass that
+<code>run_test_sql</code> applies fires before the SDK call: a SQL with a
+top-level <code>;</code>, a <code>--</code> comment, a <code>/* */</code> block comment, or unbalanced
+parens raises <code>QuerySyntaxError</code> and never reaches BigQuery.</p>
+<p><strong>Snowflake override mechanism (issue #130).</strong> The Snowflake adapter
+validates the caller SQL through the same <code>_sql_safety.validate_test_sql</code>
+pass, then prepends the literal <code>EXPLAIN USING JSON</code> prefix (with a single
+trailing space) and runs the EXPLAIN through its connection cursor. Snowflake has no BigQuery-style
+<code>dry_run</code> (bytes-without-billing); <code>EXPLAIN</code> is the closest primitive,
+reporting the query planner's estimated partitions and bytes in a single
+JSON cell. The override parses <code>GlobalStats.bytesAssigned</code> from that plan
+as the <code>int</code>-bytes estimate. <code>EXPLAIN</code> is planner-only — it scans no
+partitions and bills no bytes.</p>
+<p><strong>Planner-estimate accuracy caveat.</strong> The figure <code>EXPLAIN USING JSON</code>
+returns is the planner's <em>estimate</em>, not a measured scan. It can differ
+from the bytes a real query ultimately processes, and the planner's
+output may vary across Snowflake releases (the same caveat that applies
+to Snowflake's <code>HASH()</code> row-sampling expression — see
+<code>prune-engine.md</code>). It is a cost <em>preview</em>, calibrated for "is this
+roughly cheap or roughly expensive," not a billing guarantee.</p>
+<p><strong>Estimation-unavailable degrade (<code>EstimateUnavailableError</code>).</strong> When the
+Snowflake <code>EXPLAIN</code> <em>succeeds</em> but the returned plan carries no parseable
+<code>GlobalStats.bytesAssigned</code> — a metadata-only query, a plan-shape change
+across Snowflake versions, or a malformed cell — the adapter raises
+<code>EstimateUnavailableError</code> rather than fabricating a number (a <code>return 0</code>
+would silently report $0 cost on a future plan-shape change). This is
+distinct from <code>EstimateNotSupportedError</code>: the adapter <em>supports</em>
+estimation, it just couldn't extract the figure for THIS query. The
+<code>--estimate</code> engine catches it at the supplementary-source boundary
+(issue #36 DEC-005) and renders <code>&lt;unavailable: EstimateUnavailableError&gt;</code>,
+falling back to a price-only preview rather than aborting the run.</p>
+<p><strong>v0.2 → v0.3 migration story for remaining adapters.</strong> The Postgres stub
+still inherits the default <code>estimate_query_bytes</code> →
+<code>EstimateNotSupportedError</code> raise until it grows its own override
+(Postgres's <code>EXPLAIN</code> is the natural primitive). The CLI's <code>--estimate</code>
+flow surfaces the typed error with the locked remediation so operators
+see the expansion plan inline. Snowflake's <code>--estimate</code> path is no longer
+a degrade: it returns a real EXPLAIN-based estimate (issue #130), having
+graduated from the issue #123 <code>&lt;unavailable: EstimateNotSupportedError&gt;</code>
+placeholder once the connection seam landed (#122).</p>
+<h2 id="session-cleanup-manual-recovery">Session cleanup &amp; manual recovery</h2>
+<p>Sessions opened by <code>materialise_sample</code> need to be torn down so
+their <code>_SESSION._sf_sample_&lt;run_id&gt;</code> temp tables don't linger until
+BigQuery's server-side timeout reaps them (~24h). The adapter
+implements a three-layer cleanup model — explicit close on the happy
+path, swallow-and-warn on cleanup failure, BQ's own session timeout
+as the durable fallback (issue #22 DEC-013 / DEC-014).</p>
+<p><strong>Layer 1 — explicit <code>__exit__</code> close (happy path).</strong> When an
+operator wraps the adapter in a <code>with</code> block (the recommended pattern
+that the CLI's <code>cmd_generate</code> always uses), <code>__exit__</code> checks
+<code>self._active_session_id</code>; if non-<code>None</code>, it issues
+<code>CALL BQ.ABORT_SESSION();</code> on the same session via
+<code>ConnectionProperty(key="session_id", value=self._active_session_id)</code>.
+On success, the adapter emits one <code>INFO</code> log (<code>session_id_hash</code>,
+<code>ttl_remaining_seconds</code>) and resets <code>_active_session_id = None</code> in a
+<code>finally</code> clause so subsequent <code>__exit__</code> calls are no-ops.</p>
+<p><strong>Layer 2 — swallow-and-warn (cleanup failure).</strong> If
+<code>CALL BQ.ABORT_SESSION();</code> itself raises (network blip, session
+already revoked, quota issue), the adapter <strong>swallows the exception</strong>
+and emits a single multi-line WARNING — cleanup must never block the
+user's actual work, which already succeeded. The WARNING contains
+the <strong>raw session_id</strong> (deliberate exception to the otherwise-strict
+session-id redaction rule, see DEC-003 / DEC-014 of issue #22) and
+the manual <code>bq query</code> command the operator can run to clean up
+immediately. State is reset in <code>finally</code> so a second <code>__exit__</code> call
+is a no-op.</p>
+<p><strong>Layer 3 — BigQuery server-side session timeout (durable
+fallback).</strong> Hard process death (SIGKILL, OOM, host failure, the
+operator forgetting to use a <code>with</code> block in a notebook session)
+cannot fire <code>__exit__</code>. BigQuery's own session timeout (BQ-managed,
+~24h max regardless of activity) reaps the orphan automatically.
+The operator pays a small cost in temp-table storage until the
+timeout fires, but no human intervention is required.</p>
+<p><strong>Manual recovery command.</strong> When the cleanup-failure WARNING
+fires, the operator copy-pastes the manual command verbatim from
+the WARNING body. The exact form is (per DEC-014 of issue #22 —
+this is the text the WARNING emits, do not paraphrase):</p>
+<div class="highlight"><pre><span></span><code>bq<span class="w"> </span>query<span class="w"> </span>--connection_property<span class="o">=</span><span class="nv">session_id</span><span class="o">=</span>&lt;raw&gt;<span class="w"> </span>--use_legacy_sql<span class="o">=</span><span class="nb">false</span><span class="w"> </span><span class="s2">&quot;CALL BQ.ABORT_SESSION();&quot;</span>
+</code></pre></div>
+<p><code>&lt;raw&gt;</code> is the same raw session_id printed in the WARNING's
+<code>Session ID:</code> line; the manual command is the only remediation
+that doesn't wait for the BQ timeout. Authorisation: BigQuery
+rejects <code>BQ.ABORT_SESSION()</code> calls from any identity other than the
+session's owner, so only the operator who started the prune run can
+execute the manual command — hence the raw session_id in the WARNING
+is bounded in surface (read-only to the principal who already owned
+the session).</p>
+<p><strong>Reading the cleanup-failure WARNING.</strong> See
+<a href="../cli-ops/#stderr-shapes-warning"><code>docs/cli-ops.md</code> § Stderr shapes (WARNING)</a>
+for the full WARNING shape and the <code>--quiet</code> interaction (the
+cleanup-failure WARNING is operator-actionable and is NOT suppressed
+by <code>--quiet</code>).</p>
+<h3 id="edge-case-sdk-returns-session_infonone">Edge case: SDK returns <code>session_info=None</code></h3>
+<p>If <code>materialise_sample</code>'s first query succeeds server-side but the
+BigQuery SDK returns <code>job.session_info=None</code> (or <code>session_id=None</code>),
+the adapter cannot stash the id and <code>__exit__</code> will not fire
+<code>BQ.ABORT_SESSION()</code> — <code>_active_session_id is None</code>, so the cleanup
+short-circuits to a no-op. The server-side session lives until BQ's
+own timeout (~24h max). This is the SDK contract violating its own
+documented behaviour and is not expected in practice; the
+<strong>Spotting orphaned sessions</strong> query below catches it. If you see
+materialisation jobs in <code>INFORMATION_SCHEMA.JOBS_BY_PROJECT</code> whose
+<code>session_info.session_id</code> is set but no matching <code>BQ.ABORT_SESSION</code>
+job ever ran for that session, this is the path that produced them.</p>
+<h3 id="spotting-orphaned-sessions">Spotting orphaned sessions</h3>
+<p>When a maintainer wants to audit a project for orphan sessions
+(e.g., after a known-bad release that bypassed <code>__exit__</code>, or as a
+periodic cleanup hygiene task), the adapter's <code>signalforge_stage</code>
+job label is the durable signal. Run this <code>INFORMATION_SCHEMA.JOBS_BY_PROJECT</code>
+query to list materialisation jobs older than 2× the expected TTL
+(default <code>ttl_seconds=3600</code> → look for jobs older than 2h that may
+have leaked sessions):</p>
+<div class="highlight"><pre><span></span><code><span class="k">SELECT</span>
+<span class="w">  </span><span class="n">job_id</span><span class="p">,</span>
+<span class="w">  </span><span class="n">user_email</span><span class="p">,</span>
+<span class="w">  </span><span class="n">creation_time</span><span class="p">,</span>
+<span class="w">  </span><span class="n">session_info</span><span class="p">.</span><span class="n">session_id</span><span class="p">,</span>
+<span class="w">  </span><span class="k">state</span><span class="p">,</span>
+<span class="w">  </span><span class="n">TIMESTAMP_DIFF</span><span class="p">(</span><span class="k">CURRENT_TIMESTAMP</span><span class="p">(),</span><span class="w"> </span><span class="n">creation_time</span><span class="p">,</span><span class="w"> </span><span class="k">MINUTE</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">age_minutes</span>
+<span class="k">FROM</span><span class="w"> </span><span class="o">`</span><span class="n">region</span><span class="o">-</span><span class="n">us</span><span class="o">`</span><span class="p">.</span><span class="n">INFORMATION_SCHEMA</span><span class="p">.</span><span class="n">JOBS_BY_PROJECT</span>
+<span class="k">WHERE</span><span class="w"> </span><span class="n">labels</span><span class="p">.</span><span class="n">signalforge_stage</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;warehouse_sample_materialise&#39;</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">creation_time</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">TIMESTAMP_SUB</span><span class="p">(</span><span class="k">CURRENT_TIMESTAMP</span><span class="p">(),</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="mi">24</span><span class="w"> </span><span class="n">HOUR</span><span class="p">)</span>
+<span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">TIMESTAMP_DIFF</span><span class="p">(</span><span class="k">CURRENT_TIMESTAMP</span><span class="p">(),</span><span class="w"> </span><span class="n">creation_time</span><span class="p">,</span><span class="w"> </span><span class="k">MINUTE</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">120</span>
+<span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">creation_time</span><span class="w"> </span><span class="k">DESC</span><span class="p">;</span>
+</code></pre></div>
+<p>Adjust <code>region-us</code> to your dataset's region and the
+<code>INTERVAL 24 HOUR</code> window to your retention if <code>INFORMATION_SCHEMA.JOBS_BY_PROJECT</code>
+is set up differently. Each row identifies one session that was
+opened but whose <code>__exit__</code>-driven <code>CALL BQ.ABORT_SESSION();</code> never
+fired (or fired and failed silently in v0.2 if the WARNING was
+suppressed). Operators with permission to abort each session can
+reuse the manual recovery command above with the per-row
+<code>session_info.session_id</code>.</p>
+<h2 id="snowflake-adapter-v02-epic-118">Snowflake adapter (v0.2, epic #118)</h2>
+<p>The Snowflake seam ships across issues #119 (skeleton), #120 (profile),</p>
+<h1 id="121-compiler-dialect-122-sampling-session-130-explain">121 (compiler dialect), #122 (sampling + session), #130 (EXPLAIN</h1>
+<p>estimate), and #124 (test harness + ops docs). This section consolidates
+what an operator running SignalForge against Snowflake needs; the
+cross-cutting sections above (sampling, materialised sampling, estimation,
+error reference) carry the BigQuery + Snowflake detail inline.</p>
+<p><strong>Install.</strong> <code>pip install "signalforge-dbt[snowflake]"</code> (or <code>uv pip install
+"signalforge-dbt[snowflake]"</code>). The base install never pulls
+<code>snowflake-connector-python</code>; it lives only under the <code>[snowflake]</code> extra.</p>
+<p><strong>Profile keys.</strong> A <code>type: snowflake</code> target requires <code>account</code>, <code>user</code>,
+and <code>warehouse</code>; <code>database</code> / <code>schema</code> / <code>role</code> are optional (dbt allows
+them at model level / via the user's default role). Auth scope:
+password, key-pair (<code>private_key_path</code> + optional <code>private_key_passphrase</code>),
+and SSO (<code>authenticator: externalbrowser</code>). <code>oauth</code> /
+<code>username_password_mfa</code> are deferred (raise <code>UnsupportedAuthMethodError</code>).
+Known limitation: the strict identifier grammar rejects Snowflake's legal
+<code>$</code> in identifiers.</p>
+<p><strong>Dialect.</strong> <code>SNOWFLAKE_DIALECT</code> sets <code>quote_char='"'</code>,
+<code>identifier_case='upper'</code> (Snowflake folds unquoted identifiers to
+upper-case, so the compiler folds-then-quotes — <code>"CUSTOMER_ID"</code> resolves
+against conventional unquoted DDL), per-component quoting
+(<code>"DB"."SCHEMA"."T"</code>), <code>ABS(HASH(*))</code> as the deterministic row-sample
+hash, <code>'{value}'::TIMESTAMP/::DATE</code> partition-filter literals, and a
+quoted <code>"sample"</code> CTE alias (<code>SAMPLE</code> is a Snowflake reserved word, so an
+unquoted <code>WITH sample AS …</code> is a syntax error). <code>HASH()</code> is deterministic
+only <em>within a Snowflake release</em> — sufficient for within-run prune
+determinism, not cross-time stable (mirrors the EXPLAIN planner-estimate
+caveat). Since #139 <code>SNOWFLAKE_DIALECT</code> also sets
+<code>sample_hash_in_projection=True</code> + <code>sample_hash_alias="_sf_sample_hash"</code>:
+<code>HASH(*)</code> is rejected as a <code>WHERE</code>/<code>ORDER BY</code> predicate (<code>002079</code>), so the
+shared <code>render_sample_select</code> helper computes the hash once in an inner
+<code>SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash</code> projection and references the
+<code>_sf_sample_hash</code> alias in the outer <code>WHERE MOD(…)</code>/<code>ORDER BY</code>, with
+<code>SELECT * EXCLUDE (_sf_sample_hash)</code> stripping the helper column so sampled
+rows carry only original columns. BigQuery keeps the default
+(<code>sample_hash_in_projection=False</code>) — its <code>FARM_FINGERPRINT</code> row hash is legal
+inline, so its emitted bytes are unchanged.</p>
+<p><strong>Connection-bound session.</strong> Unlike BigQuery (which threads a server-side
+<code>session_id</code> on every query), the Snowflake <em>connection</em> holds the session
+— <code>materialise_sample</code> creates a session-scoped
+<code>CREATE TEMPORARY TABLE "&lt;SRC DB&gt;"."&lt;SRC SCHEMA&gt;"."_SF_SAMPLE_&lt;RUN_ID&gt;"</code>
+colocated with the source (each component fold-to-UPPER then quoted, per
+<code>_quote</code>), and <code>__exit__</code> closes the connection (reaping its temp tables).
+<strong>Cost-relevant consequence:</strong> the source table must be <strong>writable</strong> —
+materialised sampling against a read-only shared database (e.g.
+<code>SNOWFLAKE_SAMPLE_DATA</code>) fails the CTAS. The materialised-sample CTAS uses the
+projection-subquery shape from #139 (<code>SELECT * EXCLUDE (_sf_sample_hash) FROM
+(SELECT t.*, ABS(HASH(*)) AS _sf_sample_hash …)</code>), so <code>prune.scope: sample</code> +
+<code>prune.sample_strategy: materialised</code> works on live Snowflake (against a
+writable source). The <code>oneshot</code> strategy also works since #140 routed its
+sample row-count through the vendor-neutral <code>WarehouseAdapter.get_row_count</code>
+seam (no CTAS, so no writable source needed) — see "Known limitations" below.</p>
+<p><strong>Session cleanup is fail-soft with no manual command.</strong> A Snowflake temp
+table is unreachable outside its owning session, so there is no
+<code>bq</code>-style abort command and no <code>auto-expire in &lt;N&gt;s</code> countdown — the
+honest durable fallback is Snowflake's server-side idle-session reap. On a
+cleanup failure the adapter swallows the error and emits one
+operator-actionable WARNING quoting the raw <code>session_id</code> (the only path
+where the raw id appears; success logs hash it). <code>--quiet</code> does <strong>not</strong>
+suppress this WARNING.</p>
+<p><strong>Estimate.</strong> <code>signalforge generate --estimate</code> runs <code>EXPLAIN USING JSON</code>
+and parses <code>GlobalStats.bytesAssigned</code> (see <a href="#query-bytes-estimation-v02-issue-36">§ Query-bytes
+estimation</a>). EXPLAIN figures are
+<em>planner estimates</em> — a calibration signal, not a billing guarantee — and
+may be absent for metadata-only queries (<code>EstimateUnavailableError</code> →
+the engine degrades to a price-only preview).</p>
+<p><strong>Error taxonomy (#124).</strong> <code>map_snowflake_exception</code> mirrors
+<code>map_bq_exception</code>: a connector <code>ProgrammingError</code> for "object does not
+exist" (errno 002003) → <code>TableNotFoundError</code>; "invalid identifier"
+(errno 000904) → <code>ColumnNotFoundError</code>; residual <code>ProgrammingError</code> →
+<code>QuerySyntaxError</code>; <code>ForbiddenError</code> / auth-flavoured
+<code>DatabaseError</code>/<code>OperationalError</code> → <code>WarehouseAuthError</code>; everything else
+passes through unchanged. No <code>BytesBilledExceededError</code> equivalent —
+Snowflake has no bytes-billed cap (cost is governed by warehouse size +
+auto-suspend, see below).</p>
+<p><strong>Known limitations on live Snowflake (v0.2) — use <code>safety: schema-only</code>.</strong> One
+deferred path remains after #139 fixed the <code>HASH(*)</code>-in-predicate bug and #140
+added the vendor-neutral row-count seam. Both <code>prune.sample_strategy</code> values now
+work; the combinations certified green by the gated live e2e are
+<code>safety: schema-only</code> + <code>prune.scope: full</code>, or <code>prune.scope: sample</code> with
+either <code>prune.sample_strategy: materialised</code> or <code>oneshot</code>:</p>
+<ul>
+<li><strong><code>safety: aggregate-only</code> — unsupported.</strong> Profiles columns via
+  <code>adapter.column_stats</code>, which <code>SnowflakeAdapter</code> leaves as a deferred
+  <code>NotImplementedError</code> (the one v0.2 method not yet implemented).
+  <code>generate</code> with <code>safety.mode: aggregate-only</code> fails (exit 1).</li>
+</ul>
+<p><strong>Fixed by #140:</strong> <code>prune.scope: sample</code> + <code>prune.sample_strategy: oneshot</code> on a
+non-BigQuery adapter no longer raises at the engine seam. The sample row-count is
+now fetched through the vendor-neutral <code>WarehouseAdapter.get_row_count</code> seam
+(BigQuery wraps its cached <code>get_table</code>; Snowflake wraps
+<code>_get_num_rows</code> → <code>INFORMATION_SCHEMA.TABLES.ROW_COUNT</code>) rather than a
+BigQuery-only <code>_get_client</code>. Certified by the gated live
+<code>test_prune_drops_always_passes_not_null_live_oneshot_sample</code>
+(<code>bd_1-scaffolding-tft</code>).</p>
+<p><strong>Fixed by #139:</strong> the deterministic row-hash sampling SQL no longer emits
+<code>MOD(ABS(HASH(*)), n) &lt; 1</code> in <code>WHERE</code>/<code>ORDER BY</code> (which Snowflake rejected with
+<code>002079</code>). The shared <code>render_sample_select</code> helper now emits the
+projection-subquery form (<code>SELECT * EXCLUDE (_sf_sample_hash) FROM (SELECT t.*,
+ABS(HASH(*)) AS _sf_sample_hash …)</code>), so <code>safety: sample</code> and
+<code>prune.scope: sample</code> + <code>prune.sample_strategy: materialised</code> work on live
+Snowflake (against a writable source — <code>materialise_sample</code> colocates its temp
+table in the source db/schema).</p>
+<p><code>schema-only</code> (redacted column names/types to the LLM) runs the full
+draft → prune → grade → diff pipeline against Snowflake today; <code>run_test_sql</code>
+(test execution), <code>materialise_sample</code> (materialised sampling), and
+<code>estimate_query_bytes</code> are implemented and certified live.</p>
+<p><strong>Cost guidance — read before running any live Snowflake test.</strong> Snowflake
+bills compute by warehouse-second, so an unbounded or forgotten run costs
+real money. <strong>Set a resource monitor on your account FIRST</strong> (a hard
+credit ceiling with a suspend action), use an <strong>XS warehouse</strong>, and
+configure <strong>aggressive auto-suspend</strong> (e.g. 60s) so an idle warehouse
+stops billing promptly. The gated live tests (below) sample with <code>LIMIT</code>
+and target the tiny <code>TPCH_SF1</code> / a small engineered table to keep scans
+minimal, but the resource monitor is the load-bearing guardrail.</p>
+<p><strong>Offline test harness.</strong> The adapter's emitted SQL is validated offline
+two ways without a live warehouse: (1) <code>fakesnow</code> (in-memory DuckDB
+Snowflake emulator) <strong>executes</strong> the non-<code>HASH</code> SQL (<code>run_test_sql</code>
+COUNT-wrapper, <code>INFORMATION_SCHEMA.TABLES.ROW_COUNT</code> sizing) with
+rule-semantic assertions — never <code>HASH()</code> value-equality; (2) the
+hash-mod sample-mode SQL (which fakesnow's DuckDB <code>HASH</code> cannot execute)
+is asserted to <strong>parse</strong> under <code>sqlglot</code>'s Snowflake dialect — the syntax
+gate that caught the <code>"sample"</code> reserved-word bug. A hand-rolled
+<code>FakeSnowflakeConnection</code> (<code>expect_execute</code> / <code>assert_all_expectations_met</code>)
+covers session/cleanup/error-mapping behaviour. Real <code>HASH</code> execution +
+case-folding are certified only by the gated live tests.</p>
+<h2 id="integration-tests-maintainer-only">Integration tests (maintainer-only)</h2>
+<p>The default <code>pytest</code> invocation skips warehouse-touching tests via
+<code>addopts = -m 'not bigquery and ... and not snowflake'</code>. To run them locally:</p>
+<div class="highlight"><pre><span></span><code><span class="c1"># BigQuery (free under the 1 TB/month tier; bills GOOGLE_CLOUD_PROJECT)</span>
+<span class="nv">SF_RUN_BQ</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span>-m<span class="w"> </span>bigquery<span class="w"> </span>--no-cov
+
+<span class="c1"># Snowflake — set a resource monitor + XS warehouse + auto-suspend FIRST (bills compute)</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">SF_RUN_SNOWFLAKE</span><span class="o">=</span><span class="m">1</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">SNOWFLAKE_ACCOUNT</span><span class="o">=</span>&lt;org-account&gt;<span class="w"> </span><span class="nv">SNOWFLAKE_USER</span><span class="o">=</span>&lt;user&gt;<span class="w"> </span><span class="nv">SNOWFLAKE_PASSWORD</span><span class="o">=</span>&lt;pw&gt;
+<span class="nb">export</span><span class="w"> </span><span class="nv">SNOWFLAKE_WAREHOUSE</span><span class="o">=</span>&lt;xs-warehouse&gt;
+<span class="c1"># warehouse+prune live e2e additionally needs a WRITABLE target:</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">SNOWFLAKE_DATABASE</span><span class="o">=</span>&lt;your-db&gt;<span class="w"> </span><span class="nv">SNOWFLAKE_SCHEMA</span><span class="o">=</span>&lt;your-schema&gt;
+<span class="c1"># full generate-pipeline e2e additionally needs an LLM key:</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ANTHROPIC_API_KEY</span><span class="o">=</span>sk-...
+uv<span class="w"> </span>run<span class="w"> </span>pytest<span class="w"> </span>-m<span class="w"> </span>snowflake<span class="w"> </span>--no-cov
+</code></pre></div>
+<p>The <code>SF_RUN_BQ=1</code> / <code>SF_RUN_SNOWFLAKE=1</code> env-var gates live on top of the
+markers so even an explicit <code>-m bigquery</code> / <code>-m snowflake</code> will not fire
+warehouse requests in CI by accident. Each test surfaces a distinct
+skip-with-reason when a prerequisite is missing. The <code>snowflake</code> marker
+covers both the offline <code>fakesnow</code>/<code>sqlglot</code> suites (which run with no env
+vars) and the gated live tests (which self-skip without credentials):
+<code>tests/prune/test_compiler_fakesnow.py</code>,
+<code>tests/warehouse/test_snowflake_adapter_fakesnow.py</code> (offline);
+<code>tests/warehouse/test_snowflake_prune_live.py</code> (live, materialised + oneshot,
+writable schema), <code>tests/warehouse/test_snowflake_estimate_live.py</code> (live EXPLAIN),
+<code>tests/cli/test_e2e_snowflake_smoke.py</code> (live full pipeline vs <code>TPCH_SF1</code>,
+<code>oneshot</code>).</p>
+<p>Fixtures use <code>bigquery-public-data.samples.shakespeare</code> (BigQuery, free
+under the 1 TB/month tier) and <code>SNOWFLAKE_SAMPLE_DATA.TPCH_SF1</code> plus a
+hand-crafted seed at <code>tests/fixtures/snowflake/</code> (Snowflake). There is no
+CI job for these tests; they run on whatever interpreter <code>uv run</code> resolves
+(target the matrix ceiling for packaging-sensitive paths).</p>
+<h2 id="debugging">Debugging</h2>
+<p>Enable <code>DEBUG</code>-level logs from anywhere in the adapter layer:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">logging</span>
+<span class="n">logging</span><span class="o">.</span><span class="n">getLogger</span><span class="p">(</span><span class="s2">&quot;signalforge.warehouse&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">setLevel</span><span class="p">(</span><span class="n">logging</span><span class="o">.</span><span class="n">DEBUG</span><span class="p">)</span>
+</code></pre></div>
+<p>The adapter never logs full SQL or row data (DEC-027) — only batch-flush
+events, metadata-cache misses, and the two soft-threshold warnings
+(profile size, query bytes). Treat <code>DEBUG</code> output as a hint about <em>when</em>
+the adapter went to the warehouse, not <em>what</em> it sent.</p>
+<p><strong>Finding the BigQuery job ID for a failed query.</strong> Every typed error
+carries the contextual fields the BigQuery console needs:</p>
+<ul>
+<li><code>BytesBilledExceededError</code> — <code>.job_id</code>, <code>.bytes_billed</code>, <code>.limit</code></li>
+<li><code>QuerySyntaxError</code> — <code>.detail</code> (the BigQuery error text verbatim)</li>
+<li><code>TableNotFoundError</code> — <code>.table</code></li>
+<li><code>ColumnNotFoundError</code> — <code>.table</code>, <code>.column</code></li>
+</ul>
+<p><strong>Common errors and where they surface:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Error</th>
+<th>First thing to check</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>WarehouseAuthError</code></td>
+<td><code>gcloud auth application-default login</code> (ADC not set up).</td>
+</tr>
+<tr>
+<td><code>BytesBilledExceededError</code></td>
+<td>Raise <code>max_bytes_billed=</code> on <code>BigQueryAdapter</code>, or supply a <code>PartitionFilter</code>.</td>
+</tr>
+<tr>
+<td><code>UnknownTableSizeError</code></td>
+<td>Supply a <code>PartitionFilter</code>, or call <code>adapter.refresh_table_metadata</code>.</td>
+</tr>
+<tr>
+<td><code>SamplingRequiresPartitionFilterError</code></td>
+<td>Supply a <code>PartitionFilter</code> to scope the sample.</td>
+</tr>
+<tr>
+<td><code>InvalidIdentifierError</code></td>
+<td>Check <code>TableRef</code>/<code>PartitionFilter.column</code> against <code>[A-Za-z_][A-Za-z0-9_]*</code>.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="error-reference">Error reference</h2>
+<p>Public API: <code>from signalforge.warehouse import errors</code>. Every exception
+subclasses <code>WarehouseError</code> and carries a <code>default_remediation</code> rendered
+on a <code>↳ Remediation:</code> line by <code>__str__</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Class</th>
+<th>When raised</th>
+<th>Carried fields</th>
+<th>Default remediation (abbreviated)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>WarehouseError</code></td>
+<td>Base class; never raised directly.</td>
+<td><code>message</code>, <code>remediation</code></td>
+<td><em>(no remediation set — base class)</em></td>
+</tr>
+<tr>
+<td><code>WarehouseAuthError</code></td>
+<td>Wraps <code>google.auth.exceptions.DefaultCredentialsError</code> / <code>RefreshError</code>.</td>
+<td><code>message</code></td>
+<td>Run <code>gcloud auth application-default login</code> to set up ADC.</td>
+</tr>
+<tr>
+<td><code>UnsupportedProfileTypeError</code></td>
+<td>dbt profile's <code>type</code> is not <code>"bigquery"</code>, <code>"postgres"</code>, or <code>"snowflake"</code>.</td>
+<td><code>profile_type</code></td>
+<td><code>bigquery</code> is fully implemented; <code>postgres</code>/<code>snowflake</code> dispatch to v0.2 stub/skeleton adapters (warehouse ops raise <code>NotImplementedError</code>). Other types are unsupported.</td>
+</tr>
+<tr>
+<td><code>UnsupportedAuthMethodError</code></td>
+<td>dbt profile's <code>method</code> is not <code>"oauth"</code> (or unset).</td>
+<td><code>method</code></td>
+<td>v0.1 supports <code>method: oauth</code> (or unset) only; run <code>gcloud auth application-default login</code>.</td>
+</tr>
+<tr>
+<td><code>ProfileNotFoundError</code></td>
+<td>None of the three search paths yielded a <code>profiles.yml</code> (or the project file is missing/malformed).</td>
+<td><code>searched_paths</code></td>
+<td>Create a <code>profiles.yml</code> at one of the searched paths, or set <code>DBT_PROFILES_DIR</code>.</td>
+</tr>
+<tr>
+<td><code>ProfileTargetNotFoundError</code></td>
+<td>The profile resolved but the requested <code>target</code> is missing. Inherits <code>ProfileNotFoundError</code>.</td>
+<td><code>profile_name</code>, <code>target</code>, <code>searched_paths</code></td>
+<td>Add the target to <code>profiles.yml</code>, or pass an explicit <code>target=</code> that exists in the profile.</td>
+</tr>
+<tr>
+<td><code>IncompleteProfileError</code></td>
+<td>A profile parsed but is missing required keys for its <code>type</code> (e.g. a <code>snowflake</code> target without <code>account</code>/<code>user</code>/<code>warehouse</code>). Collect-all — lists every missing key.</td>
+<td><code>profile_type</code>, <code>missing</code></td>
+<td>Add the listed missing key(s) to the target in <code>profiles.yml</code>.</td>
+</tr>
+<tr>
+<td><code>ManifestProjectNotFoundError</code></td>
+<td><code>Model.database</code> is <code>None</code> so <code>TableRef.from_model</code> cannot construct a fully-qualified ref.</td>
+<td><code>model_unique_id</code></td>
+<td>Set <code>database:</code> for the model in dbt, or pass an explicit <code>project=</code>.</td>
+</tr>
+<tr>
+<td><code>ManifestSchemaNotFoundError</code></td>
+<td><code>Model.schema_</code> is <code>None</code> so <code>TableRef.from_model</code> cannot construct a fully-qualified ref.</td>
+<td><code>model_unique_id</code></td>
+<td>Set <code>schema:</code> for the model in dbt, or pass an explicit <code>dataset=</code>.</td>
+</tr>
+<tr>
+<td><code>InvalidIdentifierError</code></td>
+<td>A SQL identifier (project / dataset / table / column) failed the <code>[A-Za-z_][A-Za-z0-9_]*</code> regex.</td>
+<td><code>field</code>, <code>value</code></td>
+<td>Identifiers must match <code>[A-Za-z_][A-Za-z0-9_]*</code>.</td>
+</tr>
+<tr>
+<td><code>BytesBilledExceededError</code></td>
+<td>BigQuery rejected a query because <code>maximum_bytes_billed</code> was exceeded.</td>
+<td><code>job_id</code>, <code>bytes_billed</code>, <code>limit</code></td>
+<td>Narrow the query (partition filter / smaller sample) or raise <code>max_bytes_billed</code>.</td>
+</tr>
+<tr>
+<td><code>TableNotFoundError</code></td>
+<td>BigQuery 404 for the requested <code>TableRef</code>.</td>
+<td><code>table</code></td>
+<td>Verify the <code>project.dataset.table</code> exists and credentials have read access.</td>
+</tr>
+<tr>
+<td><code>ColumnNotFoundError</code></td>
+<td>A column reference does not exist on the resolved table schema.</td>
+<td><code>table</code>, <code>column</code></td>
+<td>Verify the column name against the table schema (<code>INFORMATION_SCHEMA.COLUMNS</code>).</td>
+</tr>
+<tr>
+<td><code>QuerySyntaxError</code></td>
+<td>BigQuery rejected a query as malformed (separates from <code>BytesBilledExceededError</code> despite both being 400).</td>
+<td><code>detail</code></td>
+<td>Inspect the BigQuery error detail and fix the SQL (or update the drafter prompt if recurring).</td>
+</tr>
+<tr>
+<td><code>SamplingError</code></td>
+<td>Parent for sampling-time failures; never raised directly. Catch it to handle both subclasses uniformly.</td>
+<td><em>(none)</em></td>
+<td>Inspect the subclass remediation; fail-loud is preferred to silent over-spend.</td>
+</tr>
+<tr>
+<td><code>SamplingRequiresPartitionFilterError</code></td>
+<td><code>Table.num_rows &gt;= 100_000_000</code> and no <code>PartitionFilter</code> was supplied.</td>
+<td><code>table</code>, <code>num_rows</code></td>
+<td>Pass a <code>PartitionFilter</code> to scope the sample.</td>
+</tr>
+<tr>
+<td><code>UnknownTableSizeError</code></td>
+<td><code>Table.num_rows</code> is <code>None</code>/<code>0</code> and no <code>PartitionFilter</code> was supplied.</td>
+<td><code>table</code></td>
+<td>Provide <code>partition_filter</code>, or call <code>adapter.refresh_table_metadata</code> once <code>num_rows</code> is populated.</td>
+</tr>
+<tr>
+<td><code>MaterialisationFailedError</code> (v0.2)</td>
+<td><code>BigQueryAdapter.materialise_sample</code> wraps an SDK / network / quota failure during the materialisation query.</td>
+<td><code>cause</code></td>
+<td>Inspect <code>.cause</code> for the underlying exception; falls back to <code>prune.sample_strategy: oneshot</code> to bypass materialisation.</td>
+</tr>
+<tr>
+<td><code>MaterialisationNotSupportedError</code> (v0.2)</td>
+<td><code>WarehouseAdapter.materialise_sample</code> default impl raised because the concrete adapter doesn't override it (any non-BigQuery adapter in v0.2).</td>
+<td><em>(none)</em></td>
+<td>Set <code>prune.sample_strategy: oneshot</code> in <code>signalforge.yml</code> to fall back to per-test sampling, or wait for v0.3 multi-warehouse materialisation support.</td>
+</tr>
+<tr>
+<td><code>EstimateNotSupportedError</code> (v0.2)</td>
+<td><code>WarehouseAdapter.estimate_query_bytes</code> default impl raised because the concrete adapter doesn't override it (the Postgres stub in v0.2; BigQuery + Snowflake both override).</td>
+<td><code>adapter_name</code></td>
+<td>Use <code>--estimate</code> with a BigQuery or Snowflake profile, or wait for v0.3 multi-warehouse estimation support.</td>
+</tr>
+<tr>
+<td><code>EstimateUnavailableError</code> (v0.2, #130)</td>
+<td>The adapter <em>supports</em> estimation but couldn't extract a figure for THIS query — e.g. Snowflake's <code>EXPLAIN USING JSON</code> ran but the plan carried no parseable <code>GlobalStats.bytesAssigned</code> (metadata-only query / plan-shape change / malformed cell). The <code>--estimate</code> engine degrades to a price-only preview.</td>
+<td><code>detail</code></td>
+<td>The query plan carried no parseable byte estimate; the run falls back to a price-only cost preview. EXPLAIN figures are planner estimates and may be absent for some query shapes — re-run without <code>--estimate</code> to skip the preview entirely.</td>
+</tr>
+</tbody>
+</table>
+<h2 id="v02-follow-ups">v0.2 follow-ups</h2>
+<p>Known gaps that ship in a later release; tracked here so users can plan
+around them and maintainers can keep the doc honest as scope changes.</p>
+<ul>
+<li><strong>Lazy <code>column_stats</code> proxy.</strong> v0.1 flushes one query per
+  <code>column_stats</code> call (see <a href="#column_stats-access-pattern">§<code>column_stats</code> access
+  pattern</a>). v0.2 will land a proxy on
+  <code>ColumnStats</code> so the queued columns of a table flush as a single
+  batched query at first field read.</li>
+<li><strong>Legacy domain-scoped project IDs.</strong> v0.1 rejects
+  <code>example.com:my-project</code> style IDs (Google Workspace tenants
+  pre-2014). The fix needs both a regex update <em>and</em> a <code>_quote()</code> change
+  to render the colon outside the backtick group. Defer to v0.2 with
+  proper round-trip tests against an actual domain-scoped project.</li>
+<li><strong>Drift detector for <code>DbtProfileTarget</code>.</strong> v0.1 validates a
+  hand-curated fixture against a hand-curated <code>StrictModel</code> — both
+  drift together if a maintainer updates one without the other. v0.2
+  will regenerate <code>dbt_bigquery_drift_v1_X.yml</code> from a pinned
+  <code>dbt-bigquery==1.X.*</code> release via <code>uvx</code>, mirroring the manifest
+  fixture regeneration pattern from issue #2's <code>tests/fixtures/regenerate.sh</code>.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

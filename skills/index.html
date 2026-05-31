@@ -1,0 +1,1546 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/skills/">
+      
+      
+        <link rel="prev" href="../cli-ops/">
+      
+      
+        <link rel="next" href="../manifest-loader-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Claude Code Skill - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#claude-code-skill" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Claude Code Skill
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-the-skill-teaches" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the skill teaches
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-demo-paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two demo paths
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Two demo paths">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#zero-credential-demo-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Zero-credential demo (default)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#live-e2e-opt-in-gated" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Live e2e (opt-in, gated)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#parity-gate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Parity gate
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#self-grade" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Self-grade
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maintainer-only-skills-excluded" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maintainer-only skills (excluded)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#install" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-the-skill-teaches" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What the skill teaches
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#two-demo-paths" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Two demo paths
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Two demo paths">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#zero-credential-demo-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Zero-credential demo (default)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#live-e2e-opt-in-gated" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Live e2e (opt-in, gated)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#parity-gate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Parity gate
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#self-grade" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Self-grade
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maintainer-only-skills-excluded" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maintainer-only skills (excluded)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reference
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="claude-code-skill">Claude Code Skill</h1>
+<p>SignalForge ships a <a href="https://docs.claude.com/en/docs/claude-code/skills">Claude Code skill</a>
+that teaches Claude to drive the <code>signalforge</code> CLI end-to-end against a dbt
+project. With the skill installed, a Claude Code session in the project root
+recognises requests like "draft tests for <code>dim_customers</code>," "prune my existing
+<code>schema.yml</code>," or "run the demo," picks the right <code>signalforge</code> subcommand and
+flags, and explains the kept / kept-uncertain / dropped / flagged diff back to
+the user.</p>
+<p>The skill is bundled inside the <code>signalforge-dbt</code> wheel under
+<code>src/signalforge/skills/signalforge/</code> and installed into your project with one
+command (issue <a href="https://github.com/wjduenow/SignalForge/issues/141">#141</a>).</p>
+<h2 id="install">Install</h2>
+<div class="highlight"><pre><span></span><code>signalforge<span class="w"> </span>install-skill<span class="w"> </span><span class="o">[</span>&lt;dest&gt;<span class="o">]</span>
+</code></pre></div>
+<p>Drops the bundled skill into <code>&lt;dest&gt;/.claude/skills/signalforge/SKILL.md</code>.
+<code>&lt;dest&gt;</code> defaults to the current working directory, so the common invocation
+from a dbt project root is just <code>signalforge install-skill</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Default <code>&lt;dest&gt;</code></td>
+<td>current working directory (<code>.</code>)</td>
+</tr>
+<tr>
+<td>Install path</td>
+<td><code>&lt;dest&gt;/.claude/skills/signalforge/SKILL.md</code></td>
+</tr>
+<tr>
+<td>Overwrite policy</td>
+<td>Always replaces every file SignalForge ships (no <code>--force</code> flag). <strong>Preserves</strong> every other file in the destination tree — your hand-edited <code>.claude/</code> siblings are untouched.</td>
+</tr>
+<tr>
+<td>Overwrite signal</td>
+<td>On success, stdout prints <code>Installed SignalForge skill to &lt;abs path&gt;</code>; appends <code>(replaced existing SKILL.md)</code> when an existing file was overwritten.</td>
+</tr>
+</tbody>
+</table>
+<p>The CLI handler wraps the public <code>signalforge.skill.install_skill(dest)</code>
+library entry point at the <code>cmd_install_skill</code> boundary and re-raises the
+three <code>SkillError</code> subclasses as <code>CliInstallSkill*Error</code> wrappers so the
+four-tier exit-code taxonomy stays homogeneous. Exit codes:</p>
+<table>
+<thead>
+<tr>
+<th>Tier</th>
+<th>Exit</th>
+<th>Causes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Load</td>
+<td><code>1</code></td>
+<td><code>CliInstallSkillPathError</code> (symlink cycle on <code>&lt;dest&gt;</code>); <code>CliInstallSkillPackageDataMissingError</code> (broken wheel install — the bundled skill tree could not be located via <code>importlib.resources</code>).</td>
+</tr>
+<tr>
+<td>Input</td>
+<td><code>2</code></td>
+<td><code>CliInstallSkillDestUnsafeError</code> — <code>&lt;dest&gt;</code> exists as a regular file, OR the existing <code>SKILL.md</code> is a symlink (writing would follow the link).</td>
+</tr>
+<tr>
+<td>API</td>
+<td><code>3</code></td>
+<td>n/a — install-skill makes no network / warehouse / LLM call.</td>
+</tr>
+</tbody>
+</table>
+<p>Pointer to <a href="../cli-ops/#signalforge-install-skill-dest">docs/cli-ops.md § <code>signalforge install-skill</code></a>
+for the full flag table and stderr shapes.</p>
+<h2 id="what-the-skill-teaches">What the skill teaches</h2>
+<p>The SKILL.md body is a numbered workflow that walks Claude through the full
+SignalForge surface (DEC-021 of
+<a href="../plans/super/141-claude-skill-install.md"><code>plans/super/141-claude-skill-install.md</code></a>):</p>
+<ol>
+<li><strong>Point at a dbt project</strong> — verify <code>target/manifest.json</code> exists, name a
+   model to work on.</li>
+<li><strong>Zero-credential demo</strong> — <code>signalforge init-demo</code> followed by
+   <code>signalforge generate &lt;model&gt; --write</code> against the bundled Austin
+   bikeshare fixture. No warehouse needed; runs entirely from the wheel.</li>
+<li><strong>Real project: draft + prune</strong> — <code>signalforge generate &lt;model&gt; --write</code>
+   with the safety posture (schema-only default; <code>--mode sample</code> is opt-in;
+   document the cost) and <code>--estimate</code> for a pre-flight cost preview.</li>
+<li><strong>Grade tests you already have</strong> — <code>signalforge prune-existing &lt;model&gt;
+   --schema &lt;path&gt;</code> runs the prune step (no LLM call) over an externally
+   authored <code>schema.yml</code>, so the warehouse tells you which existing tests
+   add signal.</li>
+<li><strong>Reading the diff</strong> — kept / kept-uncertain / dropped / flagged tiers
+   and the per-artifact "why" cascade (rationale → evidence → fallback).</li>
+<li><strong>Optional: live e2e demonstration</strong> — gated behind explicit user
+   confirmation, env-var checks, and a cost warning. Runs the maintainer
+   <code>pytest -m e2e --no-cov</code> flow against the public BigQuery dataset.</li>
+<li><strong>Troubleshooting</strong> — common errors (<code>ModelNotFoundError</code>,
+   <code>WarehouseAuthError</code>, <code>LLMCacheTooLargeError</code>, etc.) with one-line fixes
+   and a pointer to <a href="../cli-ops/">docs/cli-ops.md</a>.</li>
+</ol>
+<p>The skill always activates against the live <code>signalforge</code> CLI on the user's
+PATH — <code>signalforge version</code> (the subcommand) is the first thing it runs to
+confirm the install resolved.</p>
+<h2 id="two-demo-paths">Two demo paths</h2>
+<p>The skill body offers two ways to demonstrate SignalForge to a user. Pick
+based on whether the user has warehouse credentials ready.</p>
+<h3 id="zero-credential-demo-default">Zero-credential demo (default)</h3>
+<p><code>signalforge init-demo</code> copies the bundled Austin bikeshare demo project out
+of the wheel into a writable directory; <code>signalforge generate &lt;model&gt;
+--write</code> then runs the full draft + prune + grade + diff pipeline against
+that fixture.</p>
+<p><strong>No warehouse access required.</strong> The drafter still calls Anthropic (so the
+demo needs <code>ANTHROPIC_API_KEY</code>), but the prune step works against the local
+fixture rather than a live warehouse. This is the default path the skill
+recommends — fastest time-to-signal, zero cloud setup. See
+<a href="../cli-ops/#signalforge-init-demo-dest">docs/cli-ops.md § <code>signalforge init-demo</code></a>
+for the dest-policy and overwrite story.</p>
+<h3 id="live-e2e-opt-in-gated">Live e2e (opt-in, gated)</h3>
+<p>The full end-to-end smoke runs <code>uv run pytest -m e2e --no-cov</code> against the
+public <code>bigquery-public-data.austin_bikeshare.bikeshare_trips</code> dataset. The
+skill body <strong>forces an explicit user confirmation</strong> before triggering this
+path: it checks that <code>SF_RUN_BQ=1</code>, <code>GOOGLE_CLOUD_PROJECT</code>, and
+<code>ANTHROPIC_API_KEY</code> are all set, warns about the LLM + warehouse cost (a
+single run typically lands well under \$0.15 of Anthropic spend plus
+~200–500 MB of BigQuery scan), and only then invokes the gated test. See
+<a href="../e2e-smoke-test/">docs/e2e-smoke-test.md</a> for the maintainer-facing
+walkthrough of the same flow.</p>
+<h2 id="parity-gate">Parity gate</h2>
+<p>A pytest gate at <code>tests/cli/test_skill_cli_parity.py</code> parses the live CLI
+(every registered subcommand from the <code>argparse</code> subparser registry) and
+asserts that each subcommand AND the four canonical demo commands
+(<code>signalforge init-demo</code>, <code>signalforge generate &lt;model&gt; --write</code>,
+<code>signalforge prune-existing &lt;model&gt; --schema &lt;path&gt;</code>,
+<code>signalforge install-skill</code>) appear in <code>SKILL.md</code>. The gate runs inside the
+canonical <code>VALIDATE_CMD</code>
+(<code>uv run pytest</code>), so a CLI change that drifts the surface from the skill
+fails validation until <code>SKILL.md</code> is updated in the same change.</p>
+<p>This is the gate-over-prompt enforcement described in
+<a href="https://github.com/wjduenow/SignalForge/blob/dev/.claude/rules/skill-parity.md"><code>.claude/rules/skill-parity.md</code></a>
+— the contributor never has to remember to update SKILL.md; the test
+suite makes drift impossible. The gate is mechanical only (subcommand
+names + demo command tokens present); reviewer attention still backs prose
+accuracy.</p>
+<h2 id="self-grade">Self-grade</h2>
+<p>The skill prose is graded with <a href="https://github.com/wjduenow/clauditor">clauditor</a>
+(PyPI distribution <code>clauditor-eval</code>) — the LLM-as-judge harness
+SignalForge's own grading layer (<code>signalforge.grade</code>) shares its
+methodology with. The pinned score lives at
+<code>src/signalforge/skills/signalforge/assets/SKILL.eval.json</code> and is surfaced
+as the <code>clauditor-graded</code> shields.io badge on the
+<a href="https://github.com/wjduenow/SignalForge#readme">project README</a>.</p>
+<p><strong>Operating model — pre-release manual, no CI integration.</strong> Per
+<a href="https://github.com/wjduenow/SignalForge/blob/dev/plans/super/141-claude-skill-install.md">DEC-014 of <code>plans/super/141-claude-skill-install.md</code></a>,
+the maintainer regrades before tagging a release; the same commit bumps
+SKILL.md (if it changed), the pinned <code>assets/SKILL.eval.json</code>, and the
+README badge. No Anthropic key lives in repo secrets; no per-PR cost.</p>
+<p><strong>Regenerate the grade:</strong></p>
+<div class="highlight"><pre><span></span><code>uv<span class="w"> </span>run<span class="w"> </span>clauditor<span class="w"> </span>grade<span class="w"> </span>src/signalforge/skills/signalforge/SKILL.md
+</code></pre></div>
+<p><code>clauditor-eval</code> is in <code>[dependency-groups].dev</code>, so <code>uv sync --dev</code> picks
+it up. The command reads an <code>EvalSpec</code> (the SignalForge-specific
+assertions + grading criteria, scaffolded via
+<code>uv run clauditor init &lt;skill&gt;</code> and then hand-tuned by the maintainer),
+runs the configured grading model against the skill's output, and writes
+per-iteration sidecars under <code>.clauditor/iteration-N/</code>. The maintainer
+then transcribes the resulting <code>score</code>, the current
+<code>signalforge.__version__</code>, and an ISO-8601 UTC <code>graded_at</code> timestamp into
+<code>assets/SKILL.eval.json</code> so the README badge reflects the latest pinned
+score.</p>
+<p>Until the first real grade lands, <code>assets/SKILL.eval.json</code> carries a
+<code>status: "pending-first-grade"</code> placeholder and the README badge reads
+<code>clauditor: pending</code>.</p>
+<h2 id="maintainer-only-skills-excluded">Maintainer-only skills (excluded)</h2>
+<p>Two skills live at repo-root <code>.claude/skills/</code> rather than under <code>src/</code>:
+<code>release-manager</code> (drives the PyPI release flow) and
+<code>review-agentskills-spec</code> (the maintainer's reference for the
+agentskills-spec project). Both are <strong>outside the wheel by construction</strong>
+— Hatch's <code>tool.hatch.build.targets.wheel.packages = ["src/signalforge"]</code>
+declaration only ships the <code>src/</code> tree, so a <code>pip install signalforge-dbt</code>
+user never sees them and <code>signalforge install-skill</code> cannot install them.</p>
+<p>This intent is documented by a negative assertion in
+<code>tests/test_wheel_packaging.py::test_wheel_excludes_maintainer_only_claude_skills</code>,
+which builds the wheel and asserts neither maintainer-only skill name
+appears in the artefact's file list.</p>
+<h2 id="reference">Reference</h2>
+<ul>
+<li><a href="../cli-ops/#signalforge-install-skill-dest">docs/cli-ops.md § <code>signalforge install-skill</code></a>
+  — full flag table, exit-code mapping, stderr shapes for the
+  <code>install-skill</code> subcommand.</li>
+<li><a href="../e2e-smoke-test/">docs/e2e-smoke-test.md</a> — operator walkthrough of
+  the live e2e flow the skill's gated demo path triggers.</li>
+<li><a href="https://github.com/wjduenow/SignalForge/blob/dev/.claude/rules/skill-parity.md"><code>.claude/rules/skill-parity.md</code></a>
+  — contributor rule that documents the SKILL ↔ CLI parity gate.</li>
+<li><a href="https://github.com/wjduenow/SignalForge/blob/dev/plans/super/141-claude-skill-install.md"><code>plans/super/141-claude-skill-install.md</code></a>
+  — design record (DEC-001 … DEC-024), including the seven SKILL.md body
+  sections (DEC-021), the bundled-skill-vs-maintainer-skill split
+  (DEC-022), and this docs entry (DEC-023).</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
