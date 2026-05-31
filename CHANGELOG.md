@@ -4,7 +4,9 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 ## [Unreleased]
 
-_Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
+### Docs
+
+- **README overview promotes the Claude Code skill.** Adds a "Drives end-to-end from Claude Code" bullet to § What it does and a new top-level § Claude Code section (between § How it works and § Supported warehouses) with the `signalforge install-skill` command, three example prompts, and a pointer to [docs/skills.md](docs/skills.md) as the deep dive. The pre-existing Quick-start install hint stays as a cross-link reminder rather than the first mention. v0.5.0 shipped the skill itself; this surfaces it where prospective users decide whether SignalForge is for them.
 
 ## [0.5.0] — 2026-05-30
 
