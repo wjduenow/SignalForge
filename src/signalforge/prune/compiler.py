@@ -62,6 +62,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
 )
 from signalforge.manifest.errors import (
@@ -805,6 +806,63 @@ def _compile_custom_sql(
     return resolved_sql
 
 
+def _compile_row_count_between(
+    test: CandidateTestRowCountBetween,
+    table_ref: TableRef,
+    dialect: Dialect,
+) -> str | _InvalidIdentifier:
+    """Compile ``row_count_between(minimum, maximum, where?)`` to a
+    ``SELECT COUNT(*) FROM <table_ref> [WHERE <where>]`` statement (#169 DEC-003).
+
+    Unlike the four built-in failing-rows variants and ``custom_sql`` (which
+    return *rows* that the adapter then COUNT-wraps), ``row_count_between`` is
+    fundamentally a row-count check: the compiled SQL itself is the
+    ``COUNT(*)``. The prune engine (US-008) reads the single returned scalar
+    and compares it against ``minimum`` / ``maximum`` to derive the
+    decision. The adapter MUST NOT re-wrap with another ``COUNT(*)`` — the
+    engine's ``row_count_between`` arm is responsible for the right
+    interpretation (US-008).
+
+    **Sample-mode is deliberately bypassed (DEC-003).** The compiled SQL is
+    identical regardless of ``prune.scope`` — a sampled ``COUNT(*)`` is
+    semantically wrong (a bucket-mod'd subset cannot be compared against the
+    full-table bounds). Under ``prune.scope="sample"`` +
+    ``sample_strategy="materialised"`` the orchestrator passes
+    ``table_ref=<temp table>`` (the materialised sample), so the count lands
+    cheap against the temp table without sampling its rows again — this is
+    the materialised-sample-substitution contract from issue #116.
+
+    **DEC-005 — compose-then-validate.** ``where`` is freeform LLM- or
+    operator-supplied SQL (e.g. ``"event_date >= '2024-01-01'"``). We
+    compose the full ``SELECT COUNT(*) FROM <table> WHERE <where>``
+    statement THEN call the existing
+    :func:`signalforge.warehouse._sql_safety.validate_test_sql` on it. The
+    composed-then-validated path catches every shape ``validate_test_sql``
+    catches (stray ``;`` / ``--`` / ``/* */`` / unbalanced parens) without
+    rolling a separate ``validate_where_fragment`` helper — reusing the
+    existing surface keeps the cheap-rejects rules in lockstep across
+    ``custom_sql`` and ``row_count_between``.
+
+    A safety-rejected composed SQL routes via :class:`_InvalidIdentifier` to
+    ``kept-without-evidence`` (DEC-011): the LLM proposed the test; absent
+    a clean ``where`` we cannot evaluate it, but we ship it so the operator
+    can fix the prompt or hand-edit the rule. Mirrors the ``custom_sql``
+    conservative-bias routing precedent.
+    """
+    table = _qualified_table_name(table_ref, dialect)
+    if test.where is None:
+        sql = f"SELECT COUNT(*) FROM {table}"
+    else:
+        sql = f"SELECT COUNT(*) FROM {table} WHERE {test.where}"
+    try:
+        validate_test_sql(sql)
+    except QuerySyntaxError:
+        return _InvalidIdentifier(
+            reason="row_count_between rejected by SQL safety check on composed SQL"
+        )
+    return sql
+
+
 def _compile_test(
     test: CandidateTest,
     table_ref: TableRef,
@@ -917,8 +975,17 @@ def _compile_test(
             sample_bucket=sample_bucket,
             partition_filter=partition_filter,
         )
-    # The discriminated union is closed over the five variants above; an
-    # unreachable arm here means a sixth variant was added without a
+    if isinstance(test, CandidateTestRowCountBetween):
+        # row_count_between bypasses scope / sample_size / sample_bucket /
+        # partition_filter by design (DEC-003): the compiled SQL is the
+        # COUNT(*) check itself, not a failing-rows SELECT, and a sampled
+        # COUNT(*) cannot be compared against full-table bounds. Under
+        # materialised-sample the orchestrator passes ``table_ref=<temp
+        # table>`` so the count still lands on a cheap sample without
+        # double-sampling.
+        return _compile_row_count_between(test, table_ref, dialect)
+    # The discriminated union is closed over the six variants above; an
+    # unreachable arm here means a seventh variant was added without a
     # compiler branch.
     raise NotImplementedError(  # pragma: no cover
         f"no compiler branch for candidate test variant {type(test).__name__}"
