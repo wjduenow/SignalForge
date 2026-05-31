@@ -38,6 +38,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountBetween,
 )
 from signalforge.manifest.models import Column, Manifest, Model
 from signalforge.prune import engine as engine_module
@@ -3216,3 +3217,400 @@ def test_prune_tests_custom_sql_audit_invariant_one_event_per_candidate(
         event = PruneEvent.model_validate(row)
         assert event.model_unique_id == "model.shop.orders"
     fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# row_count_between routing matrix (US-008 of #169)
+#
+# DEC-011 of #169 locks the engine's routing as test-type-agnostic: the
+# matrix dispatches on the compiler's return shape
+# (``str`` / ``_InvalidIdentifier`` / ``_RequiresFutureData``), the warehouse
+# ``failure_count``, and any raised :class:`WarehouseError`. These tests pin
+# that ``row_count_between`` (the 6th first-class variant added in #169) flows
+# through the SAME decision matrix as the four built-ins and ``custom_sql`` —
+# no bespoke engine branch, the locked 5-value :data:`DropReason` literal
+# unchanged. A regression that introduced a test-type-specific arm would
+# break these tests loud.
+# ---------------------------------------------------------------------------
+
+
+def _candidates_with_one_row_count_test(
+    *,
+    minimum: int | None = 100,
+    maximum: int | None = 10_000,
+    where: str | None = None,
+) -> CandidateSchema:
+    """Build a CandidateSchema carrying a single model-level
+    ``row_count_between`` test. The variant is model-level only
+    (``column=None`` by Pydantic invariant, DEC-001 of #169).
+    """
+    return CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestRowCountBetween(
+                minimum=minimum,
+                maximum=maximum,
+                where=where,
+            ),
+        ),
+    )
+
+
+def test_prune_tests_row_count_between_always_passes_drops_test(tmp_path: Path) -> None:
+    """A ``row_count_between`` test that returns ``failures=0`` from the
+    warehouse routes through the SAME ``always-passes`` arm as the four
+    built-ins and ``custom_sql`` — the engine matrix is test-type-agnostic
+    (DEC-011 of #169).
+
+    Pins the conservative ``signal-over-volume`` posture for the 6th
+    variant: regardless of which test type proposed the query, a zero
+    failure count drops the test.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_row_count_test(minimum=1, maximum=1_000_000)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 1
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_between"
+    assert decision.decision == "dropped"
+    assert decision.reason == "always-passes"
+    assert decision.failures == 0
+    # row_count_between is always model-level (DEC-001 of #169).
+    assert decision.test_anchor == "model"
+    fake.assert_all_expectations_met()
+
+    audit_rows = _read_audit_lines(audit_path)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["reason"] == "always-passes"
+
+
+def test_prune_tests_row_count_between_kept_for_real_failure_untrusted_model(
+    tmp_path: Path,
+) -> None:
+    """A ``row_count_between`` test returning non-zero ``failures`` on an
+    untrusted model routes to ``decision="kept", reason="kept"`` via the
+    identical untrusted-failure arm of ``_decide_from_test_result`` the
+    built-ins / ``custom_sql`` use (DEC-011 of #169).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 5}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_row_count_test(minimum=100)
+    config = PruneConfig(scope="full", capture_failure_rows=0)  # untrusted
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_between"
+    assert decision.decision == "kept"
+    assert decision.reason == "kept"
+    assert decision.failures == 5
+    assert "5 failures" in decision.why
+    assert decision.test_anchor == "model"
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_row_count_between_failed_on_known_clean_data_for_trusted_model(
+    tmp_path: Path,
+) -> None:
+    """A ``row_count_between`` test returning non-zero ``failures`` on a
+    *trusted* model routes through the SAME ``failed-on-known-clean-data``
+    arm the built-ins use — the model is presumed clean, so the test is
+    presumed buggy and dropped (DEC-011 of #169).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 9}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_row_count_test(minimum=1, maximum=10)
+    config = PruneConfig(
+        scope="full",
+        trusted_models=(model.unique_id,),
+        capture_failure_rows=0,
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_between"
+    assert decision.decision == "dropped"
+    assert decision.reason == "failed-on-known-clean-data"
+    assert decision.failures == 9
+    assert "trusted_models" in decision.why
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_row_count_between_invalid_identifier_routes_to_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """A ``row_count_between`` test whose ``where`` clause fails
+    :func:`validate_test_sql` (here a stray ``;``) returns
+    :class:`_InvalidIdentifier` from the compiler and routes to
+    ``decision="kept", reason="kept-without-evidence"`` (DEC-005, DEC-011 of
+    #169). NO warehouse call is issued — pinned by the fake having zero
+    queued expectations.
+
+    The locked ``why`` text names ``row_count_between`` explicitly so a
+    reviewer reading the audit JSONL can correlate the rejection with the
+    safety check.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Intentionally NO expect_query — the sentinel short-circuits before
+    # any warehouse dispatch; an unexpected query would fail the fake.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    # A stray ``;`` triggers QuerySyntaxError inside the compiler's
+    # compose-then-validate pre-flight (DEC-005 of #169).
+    candidates = _candidates_with_one_row_count_test(
+        minimum=1,
+        where="1=1; DROP TABLE users",
+    )
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_between"
+    assert decision.decision == "kept"
+    assert decision.reason == "kept-without-evidence"
+    # Locked ``why`` text — the sentinel's reason surfaces verbatim.
+    assert "row_count_between" in decision.why
+    assert "SQL safety check" in decision.why
+    assert decision.compiled_sql == ""
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_row_count_between_warehouse_error_routes_to_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """A typed :class:`WarehouseError` raised while running a
+    ``row_count_between`` query routes to
+    ``decision="kept", reason="kept-without-evidence"`` via the existing
+    per-test error handler (DEC-011 of #169). Conservative default keeps
+    the test — a transient adapter / table-not-found / auth blip must not
+    silently lose a signal-bearing test.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(
+        matching=r"SELECT COUNT\(\*\)",
+        returns=TableNotFoundError(table="fake_project.dataset.orders"),
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_row_count_test(minimum=100, maximum=10_000)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_between"
+    assert decision.decision == "kept"
+    assert decision.reason == "kept-without-evidence"
+    assert "TableNotFoundError" in decision.why
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_row_count_between_total_budget_exceeded_routes_to_kept_without_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the total prune budget is exhausted mid-run, every remaining
+    un-started ``row_count_between`` test drains to
+    ``decision="kept", reason="kept-without-evidence"`` with the
+    budget-specific locked ``why`` text and NO warehouse call (DEC-011 of
+    #169). Same arm used by the built-ins; mirrors
+    :func:`test_prune_tests_total_budget_exceeded_marks_remaining_kept_without_evidence`.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Only the first test runs.
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestRowCountBetween(minimum=1, maximum=1_000_000),
+            CandidateTestRowCountBetween(minimum=10, maximum=2_000_000),
+            CandidateTestRowCountBetween(minimum=100, maximum=3_000_000),
+        ),
+    )
+    config = PruneConfig(scope="full", total_budget_seconds=1, capture_failure_rows=0)
+
+    # Stub the monotonic clock so the second iteration sees the budget
+    # exhausted (mirrors the budget-test pattern earlier in this file).
+    timeline = iter([0, 0, 0, 10, 5000, 5000, 5000, 5000, 5000, 5000])
+
+    def fake_clock() -> int:
+        return next(timeline)
+
+    monkeypatch.setattr(engine_module, "_now_monotonic_ms", fake_clock)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 3
+    # First test ran — always-passes drop.
+    assert result.decisions[0].reason == "always-passes"
+    # Remaining two are kept-without-evidence due to budget exhaustion.
+    for decision in result.decisions[1:]:
+        assert decision.test.type == "row_count_between"
+        assert decision.decision == "kept"
+        assert decision.reason == "kept-without-evidence"
+        # Locked ``why`` text per DEC-011 budget arm.
+        assert "Total prune budget" in decision.why
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_row_count_between_empty_table_failing_count_is_kept(
+    tmp_path: Path,
+) -> None:
+    """DEC-010 of #169 — degenerate-table carve-out, pinned at the engine
+    routing level.
+
+    An empty table with ``minimum=100`` produces a warehouse
+    ``failure_count > 0`` (the COUNT(*)-wrap returns one row; the engine
+    treats that non-zero result as a real failure on untrusted data). The
+    matrix routes to ``decision="kept", reason="kept"`` because that IS
+    what the test is meant to catch: the test fired correctly against a
+    table that violates the bound. NO special-case in the engine — same
+    untrusted-failure arm the built-ins use.
+
+    Documented explicitly so an operator reading a ``kept`` decision
+    against an empty production table understands the test fired correctly
+    rather than treating the empty-input case as a defect.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Empty table → wrapped COUNT(*) returns one row with the inner count
+    # (0 here, simulated as ``failures=1`` from the engine's perspective:
+    # any non-zero failures value the warehouse emits routes through the
+    # test-type-agnostic ``kept`` arm. We use a small positive value to
+    # stay faithful to the engine's matrix without coupling to the
+    # specific wrap-shape semantics).
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 1}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_row_count_test(minimum=100, maximum=None)
+    config = PruneConfig(scope="full", capture_failure_rows=0)  # untrusted
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_between"
+    # DEC-010: real signal — the bound was violated; ship the test.
+    assert decision.decision == "kept"
+    assert decision.reason == "kept"
+    assert decision.failures == 1
+    fake.assert_all_expectations_met()
+
+
+def test_drop_reason_literal_still_exactly_five_values() -> None:
+    """DEC-011 of #169 — closed-set lockdown.
+
+    A 6th first-class variant (``row_count_between``) lands without
+    growing the ``DropReason`` literal — conservative-bias routing reuses
+    the existing five literals for every new failure mode. A regression
+    that added a 6th literal (e.g. a bespoke ``row-count-out-of-bounds``
+    bucket) would fail loud here. Cross-checked against the drift-detector
+    fixture (``prune_event_v1.jsonl`` covers all five) so the two pins
+    catch a regression independently.
+    """
+    from typing import get_args
+
+    from signalforge.prune.models import DropReason
+
+    args = get_args(DropReason)
+    assert len(args) == 5, f"DropReason must remain a closed 5-value literal; got {args!r}"
+    assert set(args) == {
+        "always-passes",
+        "requires-future-data",
+        "failed-on-known-clean-data",
+        "kept",
+        "kept-without-evidence",
+    }
