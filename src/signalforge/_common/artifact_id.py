@@ -55,6 +55,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
 )
 
@@ -99,6 +100,20 @@ def model_test_args_hash(test: CandidateTest) -> str:
             "type": test.type,
             "column": test.column,
             "sql": test.sql,
+        }
+    elif isinstance(test, CandidateTestRowCountBetween):
+        # Identifying args are the bounds + optional ``where`` clause.
+        # ``column`` is always ``None`` (model-level only) but included
+        # for shape-parity with the other arms. Two row_count_between
+        # tests with identical ``(minimum, maximum, where)`` triples
+        # collide deterministically; differing any field rotates the
+        # hash so the artifact_id join stays unique.
+        payload = {
+            "type": test.type,
+            "column": test.column,
+            "minimum": test.minimum,
+            "maximum": test.maximum,
+            "where": test.where,
         }
     else:  # pragma: no cover - exhaustive dispatch over the closed union
         raise ValueError(

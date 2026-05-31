@@ -38,6 +38,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
 )
 from signalforge.grade.engine import (
@@ -335,6 +336,42 @@ def test_custom_sql_cross_stage_parity() -> None:
     assert artifact_id_for(scope="model", test=cs_model) == (
         _grade_artifact_id_for(scope="model", test=cs_model)
     )
+
+
+# ---------------------------------------------------------------------------
+# row_count_between variant (US-006 of #169) — args-hash domain
+# ---------------------------------------------------------------------------
+
+
+def test_row_count_between_identical_args_same_hash() -> None:
+    """Two ``row_count_between`` tests with identical ``(minimum, maximum,
+    where)`` triples hash identically (deterministic collision)."""
+    rcb1 = CandidateTestRowCountBetween(minimum=100, maximum=1000, where="status = 'active'")
+    rcb2 = CandidateTestRowCountBetween(minimum=100, maximum=1000, where="status = 'active'")
+    assert _model_test_args_hash(rcb1) == _model_test_args_hash(rcb2)
+
+
+def test_row_count_between_distinct_minimum_distinct_hash() -> None:
+    """Differing ``minimum`` rotates the hash."""
+    rcb1 = CandidateTestRowCountBetween(minimum=100, maximum=1000)
+    rcb2 = CandidateTestRowCountBetween(minimum=200, maximum=1000)
+    h1 = _model_test_args_hash(rcb1)
+    h2 = _model_test_args_hash(rcb2)
+    assert h1 != h2
+    assert len(h1) == 8
+    assert all(c in "0123456789abcdef" for c in h1)
+
+
+def test_row_count_between_distinct_where_distinct_hash() -> None:
+    """Differing ``where`` (``None`` vs a non-empty clause) rotates the hash.
+
+    Without ``where`` in the hash domain, two row_count_between tests with
+    identical bounds but different ``where`` clauses would silently collide
+    on the artifact_id join.
+    """
+    rcb_no_where = CandidateTestRowCountBetween(minimum=100, maximum=1000)
+    rcb_with_where = CandidateTestRowCountBetween(minimum=100, maximum=1000, where="x > 1")
+    assert _model_test_args_hash(rcb_no_where) != _model_test_args_hash(rcb_with_where)
 
 
 # ---------------------------------------------------------------------------
