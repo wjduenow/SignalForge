@@ -67,12 +67,23 @@ class StrictCandidateTestCustomSQL(BaseModel):
     rationale: str | None = None
 
 
+class StrictCandidateTestRowCountBetween(BaseModel):
+    model_config = _STRICT_BASE
+    type: Literal["row_count_between"] = "row_count_between"
+    column: None = None
+    minimum: int | None = None
+    maximum: int | None = None
+    where: str | None = None
+    rationale: str | None = None
+
+
 _StrictCandidateTest = Annotated[
     StrictCandidateTestNotNull
     | StrictCandidateTestUnique
     | StrictCandidateTestAcceptedValues
     | StrictCandidateTestRelationships
-    | StrictCandidateTestCustomSQL,
+    | StrictCandidateTestCustomSQL
+    | StrictCandidateTestRowCountBetween,
     Field(discriminator="type"),
 ]
 
