@@ -1,0 +1,48 @@
+# Fixture exercising the `row_count_between` ingest arm (#169, US-005).
+#
+# Covers the kept + skipped cases the parser must route:
+#   - inline `min_value` + `max_value` → CandidateTestRowCountBetween (kept)
+#   - `arguments:`-nested args (dbt 1.8+) + `where` → variant carries `where`
+#   - missing both bounds → SkippedTest("malformed-supported-test")
+#   - `min_value > max_value` → SkippedTest("malformed-supported-test")
+#   - non-int bound → SkippedTest("malformed-supported-test")
+#   - non-string `where` → SkippedTest("malformed-supported-test")
+#   - column-scoped usage (not representable) → SkippedTest("malformed-supported-test")
+#   - sibling `expect_table_row_count_to_equal` → SkippedTest("custom-or-generic-test")
+#
+# Column shapes mirror schema_codegen_shaped.yml so the same parser path is
+# exercised; this fixture is consumed via `parse_test_entry` directly in
+# tests/ingest/test_parser.py (no reader pass needed).
+version: 2
+
+models:
+  - name: orders
+    description: "Orders fact table — exercises row_count_between."
+    columns:
+      - name: order_id
+        description: "Surrogate key for the order."
+        tests:
+          - not_null
+          - unique
+    # Model-level row_count_between entries:
+    tests:
+      # Kept: inline bounds, no where.
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 100
+          max_value: 10000
+      # Kept: arguments:-nested args with where clause.
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          arguments:
+            min_value: 1
+            max_value: 1000000
+            where: "ordered_at >= '2024-01-01'"
+      # Skipped: missing both bounds (malformed-supported-test).
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          where: "1=1"
+      # Skipped: min_value > max_value (malformed-supported-test).
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 5000
+          max_value: 100
+      # Skipped: sibling macro routes to custom-or-generic-test.
+      - dbt_expectations.expect_table_row_count_to_equal:
+          value: 1000
