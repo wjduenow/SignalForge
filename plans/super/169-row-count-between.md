@@ -4,7 +4,7 @@
 
 - **Ticket:** [#169](https://github.com/wjduenow/SignalForge/issues/169) — Add row_count_between as a 6th first-class test primitive (drafter + prune + grade)
 - **Branch / worktree:** `feature/169-row-count-between` at `../worktrees/SignalForge/169-row-count-between`
-- **Phase:** detailing
+- **Phase:** devolved
 - **Sessions:** 1 (2026-05-30)
 - **Sibling tickets:**
   - **#154** — grade-existing-dbt-expectations-tests (complementary; meeting point at ingest)
@@ -600,6 +600,47 @@ US-013      ─→ US-014 (Patterns & Memory)
 
 ~35–50 new tests across `tests/draft/`, `tests/prune/`, `tests/diff/`, `tests/ingest/`, `tests/grade/`, plus 1 gated e2e assertion. Precedent #116 was ~40 — this ticket is slightly simpler (no `.sql` file emission, no `proposed_test_files` arm, no new fail-closed writer) but slightly more complex on the `where` + ingest side. Net: comparable order of magnitude.
 
-## Beads Manifest
+## Beads Manifest (Phase 7)
 
-*(Phase 7 — pending plan approval.)*
+Devolved 2026-05-31. Worktree: `../worktrees/SignalForge/169-row-count-between` on branch `feature/169-row-count-between`. PR: [#176](https://github.com/wjduenow/SignalForge/pull/176).
+
+**Epic:** `bd_1-scaffolding-tt8` — #169: Add row_count_between as 6th first-class test primitive
+
+| Bead ID | Story | Depends on |
+|--|--|--|
+| `bd_1-scaffolding-tt8.1` | US-001 — model + drift detector + fixture row | — (entry point) |
+| `bd_1-scaffolding-tt8.2` | US-002 — `VALID_TEST_TYPES` token + `exclude_tests` round-trip | `.1` |
+| `bd_1-scaffolding-tt8.3` | US-004 — parser anchor-contract arm + sqlglot type-coherence | `.1` |
+| `bd_1-scaffolding-tt8.4` | US-005 — ingest parser (AC-5) | `.1` |
+| `bd_1-scaffolding-tt8.5` | US-006 — `_common.artifact_id` arm + cross-stage parity | `.1` |
+| `bd_1-scaffolding-tt8.6` | US-007 — prune compiler + BigQuery + Snowflake snapshots | `.1` |
+| `bd_1-scaffolding-tt8.7` | US-009 — grade rubric calibration + grade `_PROMPT_VERSION` rotation | `.1` |
+| `bd_1-scaffolding-tt8.8` | US-010 — diff emitter arm + dbt-expectations YAML | `.1` |
+| `bd_1-scaffolding-tt8.9` | US-003 — drafter prompt catalogue + drafter `_PROMPT_VERSION` rotation | `.1`, `.2` |
+| `bd_1-scaffolding-tt8.10` | US-008 — prune engine routing matrix coverage | `.6` |
+| `bd_1-scaffolding-tt8.11` | US-011 — docs (5 ops + CHANGELOG + SKILL.md) | `.2, .3, .4, .5, .7, .8, .9, .10` |
+| `bd_1-scaffolding-tt8.12` | US-012 — engineered-determinism live e2e | `.11` |
+| `bd_1-scaffolding-tt8.13` | Quality Gate — code-review × 4 + CodeRabbit | `.12` |
+| `bd_1-scaffolding-tt8.14` | Patterns & Memory — update business-rule-tests rule + memory | `.13` |
+
+**Ralph entry point:** `bd ready` → `bd_1-scaffolding-tt8.1` is the only ready implementation story; everything else is blocked until it lands. After `.1` closes, eight stories (`.2`, `.3`, `.4`, `.5`, `.6`, `.7`, `.8`, `.9`) become ready in parallel; budget Ralph workers accordingly. `.9` (US-003) waits on `.2` (`VALID_TEST_TYPES`) because the prompt builder reads it.
+
+**Serialize-shared-registry caution.** Per memory [[ralph-serialize-shared-registry-beads]], avoid running two concurrent workers on stories that touch the same shared surface. For this epic, the main risk surfaces:
+- `.9` (US-003) rotates the drafter `_PROMPT_VERSION` and touches `tests/llm/test_prompt_cache_stability.py`.
+- `.7` (US-009) rotates the grade-side `_PROMPT_VERSION` and touches a different cache-stability test (parallel module).
+
+Different files; safe to parallelize, but if conflicts surface, serialize `.7` after `.9`.
+
+## Output
+
+```
+Plan devolved to beads.
+
+Epic: bd_1-scaffolding-tt8 (#169)
+Tasks: 14 (12 implementation + Quality Gate + Patterns & Memory) with dependencies
+
+Next steps:
+1. Run Ralph: /ralph-run
+2. Monitor: bd list --status=in_progress
+3. When done: /closeout
+```
