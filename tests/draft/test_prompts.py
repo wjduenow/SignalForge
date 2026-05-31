@@ -313,6 +313,66 @@ def test_system_prompt_custom_sql_mentions_jinja_refs() -> None:
     assert "{{ ref('<model>') }}" in _SYSTEM_PROMPT
 
 
+# ---------------------------------------------------------------------------
+# row_count_between catalogue (issue #169, DEC-012)
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_advertises_row_count_between_test_type() -> None:
+    """The JSON-shape illustration carries a ``row_count_between`` entry
+    (issue #169, DEC-012). The drafter reads this as an example shape."""
+    assert '"type": "row_count_between"' in _SYSTEM_PROMPT
+
+
+def test_system_prompt_row_count_between_illustrates_both_where_forms() -> None:
+    """DEC-012 requires the catalogue entry illustrate BOTH the no-``where``
+    (whole-table bound) and with-``where`` (filtered bound) shapes so the
+    drafter has two forms to mirror."""
+    # The with-where form names the ``where`` field; the no-where form does
+    # not. Two distinct shapes appear in the rendered prompt.
+    assert '"where"' in _SYSTEM_PROMPT
+    # Both forms carry minimum / maximum bound fields.
+    assert '"minimum"' in _SYSTEM_PROMPT
+    assert '"maximum"' in _SYSTEM_PROMPT
+    # Two occurrences of the type literal — one per illustrated form.
+    assert _SYSTEM_PROMPT.count('"type": "row_count_between"') == 2
+
+
+def test_render_system_prompt_includes_row_count_between_when_not_excluded() -> None:
+    """Default render (no exclusions) includes the ``row_count_between``
+    catalogue line (issue #169, DEC-012)."""
+    from signalforge.draft.prompts import _render_system_prompt
+
+    rendered = _render_system_prompt(())
+    assert '"type": "row_count_between"' in rendered
+
+
+def test_render_system_prompt_excludes_row_count_between_when_in_exclude_tests() -> None:
+    """``exclude_tests=("row_count_between",)`` drops the catalogue line
+    AND removes ``row_count_between`` from the SCOPE phrase (issue #169,
+    DEC-012; mirrors the ``exclude_tests`` filter contract from #54)."""
+    from signalforge.draft.prompts import _render_system_prompt
+
+    rendered = _render_system_prompt(("row_count_between",))
+    assert '"type": "row_count_between"' not in rendered
+    # The SCOPE phrase no longer names row_count_between.
+    assert "`row_count_between`" not in rendered
+    # Other types still present (the other survivors).
+    assert '"type": "not_null"' in rendered
+    assert '"type": "custom_sql"' in rendered
+
+
+def test_render_system_prompt_byte_stable_across_two_calls() -> None:
+    """The no-exclusion render is deterministic; two calls produce
+    byte-identical output (issue #169, DEC-012 — the cache-stability
+    contract this user story extends)."""
+    from signalforge.draft.prompts import _render_system_prompt
+
+    first = _render_system_prompt(())
+    second = _render_system_prompt(())
+    assert first == second
+
+
 def test_custom_sql_survives_when_only_standard_types_excluded() -> None:
     # custom_sql is appended after the (possibly filtered) four standard
     # types. Excluding standard types only (NOT custom_sql) leaves custom_sql

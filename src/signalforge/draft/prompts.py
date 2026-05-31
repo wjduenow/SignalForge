@@ -70,16 +70,29 @@ _TEST_CATALOGUE_LINES: dict[str, str] = {
     "relationships": (
         '        {"type": "relationships", "column": "<column name>",\n'
         '         "to": "ref(\'<other_model>\')", "field": "<other column>",\n'
+        '         "rationale": "<1 sentence>"},'
+    ),
+    "row_count_between": (
+        '        {"type": "row_count_between", "minimum": <int or null>,\n'
+        '         "maximum": <int or null>, "rationale": "<1 sentence>"},\n'
+        '        {"type": "row_count_between", "minimum": <int or null>,\n'
+        '         "maximum": <int or null>, "where": "<SQL predicate>",\n'
         '         "rationale": "<1 sentence>"}'
     ),
 }
 """Per-test-type catalogue lines for the system prompt (issue #54).
 
-The four entries are emitted in this fixed order so the rendered prompt
-stays byte-stable when no exclusions apply. When :class:`DraftConfig`
-sets ``exclude_tests``, the excluded entries are dropped before
-rendering and the surviving entries' trailing-comma placement is fixed
-up so the JSON example stays well-formed.
+The five entries (extended in issue #169 with ``row_count_between``) are
+emitted in this fixed order so the rendered prompt stays byte-stable
+when no exclusions apply. When :class:`DraftConfig` sets
+``exclude_tests``, the excluded entries are dropped before rendering
+and the surviving entries' trailing-comma placement is fixed up so the
+JSON example stays well-formed.
+
+The ``row_count_between`` entry (issue #169, DEC-012) illustrates BOTH
+the no-``where`` form (whole-table bound) and the with-``where`` form
+(filtered bound, e.g. a recent-data window) so the drafter has two
+shapes to mirror.
 
 The ``custom_sql`` singular-test illustration (issue #116, DEC-001 /
 DEC-015) lives in :data:`_CUSTOM_SQL_CATALOGUE_LINE` rather than here.
@@ -212,7 +225,7 @@ def _render_system_prompt(exclude_tests: tuple[str, ...]) -> str:
             "at least one type must remain so the drafter has something to propose."
         )
     catalogue_lines = [_TEST_CATALOGUE_LINES[t] for t in allowed]
-    # The four standard entries carry trailing commas in the rendered JSON
+    # The standard entries carry trailing commas in the rendered JSON
     # example; the comma-less ``custom_sql`` line (when allowed) goes last.
     # Ensure every preceding entry ends with a comma so the JSON stays
     # well-formed regardless of which entries survived filtering.
