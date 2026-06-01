@@ -721,3 +721,139 @@ def test_row_count_between_does_not_appear_in_proposed_test_files() -> None:
     result = _result(_decision(rcb, test_anchor="model"))
 
     assert emit_proposed_test_files(candidate, result) == ()
+
+
+# ---------------------------------------------------------------------------
+# unique_combination variant (US-006 of #170) — dbt_utils YAML shape
+# ---------------------------------------------------------------------------
+
+from signalforge.draft.models import CandidateTestUniqueCombination  # noqa: E402
+
+
+def test_unique_combination_renders_dbt_utils_block_without_where() -> None:
+    """No-where YAML shape: only ``combination_of_columns`` appears under
+    the ``dbt_utils.unique_combination_of_columns`` key.
+
+    **Field-name mapping seam** (DEC-002 of #170): Pydantic-side
+    ``columns`` maps to the dbt-utils macro key ``combination_of_columns``
+    on emission. The internal model keeps the prefix-free name
+    (matches the ``values`` / ``to`` / ``field`` precedent on the other
+    variants); the macro naming lives only in the emitter.
+
+    Emission preserves the order Pydantic carries — sorting is only for
+    the canonical hash domain (DEC-011), NOT for YAML output, so the
+    operator's review surface reflects the LLM's declared order.
+    """
+    uc = CandidateTestUniqueCombination(columns=("order_id", "line_no"))
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(
+            CandidateColumn(name="order_id", description="PK."),
+            CandidateColumn(name="line_no", description="Line no."),
+        ),
+        tests=(uc,),
+    )
+    result = _result(_decision(uc, test_anchor="model"))
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    model_tests = parsed["models"][0]["tests"]
+    assert model_tests == [
+        {
+            "dbt_utils.unique_combination_of_columns": {
+                "combination_of_columns": ["order_id", "line_no"],
+            }
+        }
+    ]
+
+
+def test_unique_combination_includes_where_when_set() -> None:
+    """With-where YAML shape: the ``where`` field is rendered verbatim
+    under the macro block when non-null. ``yaml.safe_dump`` handles the
+    string quoting.
+    """
+    uc = CandidateTestUniqueCombination(
+        columns=("user_id", "event_date"),
+        where="status = 'active'",
+    )
+    candidate = CandidateSchema(
+        name="events",
+        description="d",
+        columns=(
+            CandidateColumn(name="user_id", description="User."),
+            CandidateColumn(name="event_date", description="Date."),
+        ),
+        tests=(uc,),
+    )
+    result = _result(_decision(uc, test_anchor="model"))
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    [block] = parsed["models"][0]["tests"]
+    body = block["dbt_utils.unique_combination_of_columns"]
+    assert body == {
+        "combination_of_columns": ["user_id", "event_date"],
+        "where": "status = 'active'",
+    }
+
+
+def test_unique_combination_preserves_declared_column_order_not_sorted() -> None:
+    """Emission preserves the order Pydantic carries — the canonical-hash
+    sort (DEC-011) is for the artifact_id domain only. The YAML body
+    surfaces the LLM's declared order to the operator review surface."""
+    # Deliberately NOT alphabetic so a stray sort() would flip the order.
+    uc = CandidateTestUniqueCombination(columns=("z_id", "a_id", "m_id"))
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(
+            CandidateColumn(name="z_id", description="z"),
+            CandidateColumn(name="a_id", description="a"),
+            CandidateColumn(name="m_id", description="m"),
+        ),
+        tests=(uc,),
+    )
+    result = _result(_decision(uc, test_anchor="model"))
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    [block] = parsed["models"][0]["tests"]
+    body = block["dbt_utils.unique_combination_of_columns"]
+    assert body["combination_of_columns"] == ["z_id", "a_id", "m_id"]
+
+
+def test_unique_combination_dropped_decision_filtered_out() -> None:
+    """A dropped ``unique_combination`` is filtered before rendering —
+    the model has no ``tests:`` key in the emitted YAML."""
+    uc = CandidateTestUniqueCombination(columns=("a", "b"))
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(
+            CandidateColumn(name="a", description="a"),
+            CandidateColumn(name="b", description="b"),
+        ),
+        tests=(uc,),
+    )
+    result = _result(_decision(uc, test_anchor="model", decision="dropped", reason="always-passes"))
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    assert "tests" not in parsed["models"][0]
+
+
+def test_unique_combination_does_not_appear_in_proposed_test_files() -> None:
+    """``unique_combination`` ships as a YAML block, NOT as a standalone
+    ``tests/*.sql`` file — only ``custom_sql`` flows to
+    :func:`emit_proposed_test_files`.
+    """
+    uc = CandidateTestUniqueCombination(columns=("a", "b"))
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(
+            CandidateColumn(name="a", description="a"),
+            CandidateColumn(name="b", description="b"),
+        ),
+        tests=(uc,),
+    )
+    result = _result(_decision(uc, test_anchor="model"))
+
+    assert emit_proposed_test_files(candidate, result) == ()

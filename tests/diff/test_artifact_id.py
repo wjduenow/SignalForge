@@ -40,6 +40,7 @@ from signalforge.draft.models import (
     CandidateTestRelationships,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 from signalforge.grade.engine import (
     _artifact_id_for as _grade_artifact_id_for,
@@ -372,6 +373,132 @@ def test_row_count_between_distinct_where_distinct_hash() -> None:
     rcb_no_where = CandidateTestRowCountBetween(minimum=100, maximum=1000)
     rcb_with_where = CandidateTestRowCountBetween(minimum=100, maximum=1000, where="x > 1")
     assert _model_test_args_hash(rcb_no_where) != _model_test_args_hash(rcb_with_where)
+
+
+# ---------------------------------------------------------------------------
+# unique_combination variant (US-006 of #170) — args-hash domain
+# ---------------------------------------------------------------------------
+
+
+def test_unique_combination_columns_sorted_before_hashing() -> None:
+    """**Load-bearing DEC-011 pin.** Two ``unique_combination`` tests with
+    the SAME columns in different order hash identically — ``columns`` is
+    SORTED before canonical JSON serialisation.
+
+    Rationale: ``(a, b)`` and ``(b, a)`` describe the same GROUP BY
+    result-row identity (composite uniqueness is order-invariant); a
+    single artifact_id → single warehouse call → stable cache reuse.
+    Mirrors the ``accepted_values.values`` sort precedent in the same
+    module.
+    """
+    uc_ab = CandidateTestUniqueCombination(columns=("a", "b"))
+    uc_ba = CandidateTestUniqueCombination(columns=("b", "a"))
+    assert _model_test_args_hash(uc_ab) == _model_test_args_hash(uc_ba)
+
+
+def test_unique_combination_three_columns_permutation_same_hash() -> None:
+    """The sort invariant generalises beyond two columns — any permutation
+    of the same set hashes identically."""
+    uc1 = CandidateTestUniqueCombination(columns=("a", "b", "c"))
+    uc2 = CandidateTestUniqueCombination(columns=("c", "a", "b"))
+    uc3 = CandidateTestUniqueCombination(columns=("b", "c", "a"))
+    h1 = _model_test_args_hash(uc1)
+    h2 = _model_test_args_hash(uc2)
+    h3 = _model_test_args_hash(uc3)
+    assert h1 == h2 == h3
+
+
+def test_unique_combination_distinct_columns_distinct_hash() -> None:
+    """Different column sets rotate the hash. ``(a, b)`` and ``(a, b, c)``
+    describe different uniqueness constraints; they must NOT collide on
+    the artifact_id join."""
+    uc1 = CandidateTestUniqueCombination(columns=("a", "b"))
+    uc2 = CandidateTestUniqueCombination(columns=("a", "b", "c"))
+    h1 = _model_test_args_hash(uc1)
+    h2 = _model_test_args_hash(uc2)
+    assert h1 != h2
+    assert len(h1) == 8
+    assert all(c in "0123456789abcdef" for c in h1)
+
+
+def test_unique_combination_distinct_where_distinct_hash() -> None:
+    """Differing ``where`` (``None`` vs a non-empty clause) rotates the
+    hash. Same columns under different filters describe different
+    constraints; collision would silently lose signal in the join."""
+    uc_no_where = CandidateTestUniqueCombination(columns=("a", "b"))
+    uc_with_where = CandidateTestUniqueCombination(columns=("a", "b"), where="x > 1")
+    assert _model_test_args_hash(uc_no_where) != _model_test_args_hash(uc_with_where)
+
+
+def test_unique_combination_collision_distinct_columns_get_distinct_suffixes() -> None:
+    """Two model-level ``unique_combination`` tests with different
+    ``columns`` collide on ``test.type`` and get distinct 8-hex
+    ``_model_test_args_hash`` suffixes via :func:`compute_args_hashes`.
+
+    Without disambiguation, both would render as
+    ``test.model.unique_combination`` and the
+    ``(run_id, artifact_id, criterion_id)`` triple would collide in the
+    diff-side join.
+    """
+    uc1 = CandidateTestUniqueCombination(columns=("a", "b"))
+    uc2 = CandidateTestUniqueCombination(columns=("c", "d"))
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(CandidateColumn(name="a", description="x"),),
+        tests=(uc1, uc2),
+    )
+    hashes = compute_args_hashes(candidate)
+    h1 = hashes[id(uc1)]
+    h2 = hashes[id(uc2)]
+    assert h1 is not None
+    assert h2 is not None
+    assert h1 != h2
+    assert len(h1) == 8
+    assert len(h2) == 8
+    assert all(c in "0123456789abcdef" for c in h1)
+    assert all(c in "0123456789abcdef" for c in h2)
+
+    aid1 = artifact_id_for(scope="model", test=uc1, args_hash=h1)
+    aid2 = artifact_id_for(scope="model", test=uc2, args_hash=h2)
+    assert aid1 != aid2
+    assert aid1.startswith("test.model.unique_combination.")
+    assert aid2.startswith("test.model.unique_combination.")
+
+
+def test_unique_combination_exact_duplicate_gets_ordinal_suffix() -> None:
+    """Two ``unique_combination`` tests with identical ``columns`` + ``where``
+    produce the same base blake2b-4 hash; the second occurrence gets a
+    ``:1`` ordinal suffix via :func:`compute_args_hashes` so artifact_ids
+    stay globally unique even when a candidate carries semantically
+    identical tests."""
+    uc1 = CandidateTestUniqueCombination(columns=("a", "b"))
+    uc2 = CandidateTestUniqueCombination(columns=("a", "b"))
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(CandidateColumn(name="a", description="x"),),
+        tests=(uc1, uc2),
+    )
+    hashes = compute_args_hashes(candidate)
+    h1 = hashes[id(uc1)]
+    h2 = hashes[id(uc2)]
+    assert h1 is not None
+    assert h2 is not None
+    assert ":" not in h1
+    assert h2 == f"{h1}:1"
+
+
+def test_unique_combination_cross_stage_parity() -> None:
+    """The grade engine's hash + formatter agree byte-for-byte on the
+    ``unique_combination`` variant (defence-in-depth alongside the
+    function-identity test, which guarantees parity by construction
+    after issue #42)."""
+    uc = CandidateTestUniqueCombination(columns=("a", "b"))
+    assert _model_test_args_hash(uc) == _grade_model_test_args_hash(uc)
+    assert artifact_id_for(scope="model", test=uc) == (
+        _grade_artifact_id_for(scope="model", test=uc)
+    )
 
 
 # ---------------------------------------------------------------------------
