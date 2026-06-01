@@ -181,3 +181,39 @@ def test_model_level_row_count_between_with_none_column_does_not_raise() -> None
     )
     # Returns None; the absence of a raise is the assertion.
     assert validate_anchor_contract(candidate, _MODEL_COLUMNS) is None
+
+
+def test_model_level_unique_combination_with_none_column_does_not_raise() -> None:
+    """Issue #170 — ``unique_combination`` is model-level only and the
+    Pydantic model fixes ``column = None``. ``None not in model_columns``
+    would otherwise fire a spurious "references nonexistent column None"
+    violation, blocking the variant through ``prune-existing``. The
+    exemption mirrors the drafter-side anchor in
+    ``signalforge.draft.parser._validate_anchor_contract`` and the
+    ``row_count_between`` exemption above.
+    """
+    candidate = _candidate(
+        columns=[
+            {
+                "name": "id",
+                "description": "Primary key.",
+                "tests": [{"type": "not_null", "column": "id"}],
+            },
+        ],
+        tests=[
+            # `column` defaults to None on the Pydantic model — operators
+            # never provide it for this variant, and the discriminated-union
+            # exemption must catch the None case.
+            {
+                "type": "unique_combination",
+                "columns": ["id", "email"],
+            },
+            {
+                "type": "unique_combination",
+                "columns": ["id", "email", "region"],
+                "where": "region IS NOT NULL",
+            },
+        ],
+    )
+    # Returns None; the absence of a raise is the assertion.
+    assert validate_anchor_contract(candidate, _MODEL_COLUMNS) is None

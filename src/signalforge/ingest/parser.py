@@ -43,6 +43,7 @@ from signalforge.draft.models import (
     CandidateTestRelationships,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 from signalforge.ingest.models import SkippedTest
 from signalforge.manifest.errors import (
@@ -86,6 +87,13 @@ _CONFIG_KEYS: frozenset[str] = frozenset(
 # generic custom-or-generic skip below; only this one specific macro is
 # recognised as a first-class supported test.
 _ROW_COUNT_BETWEEN_NAME = "dbt_expectations.expect_table_row_count_to_be_between"
+
+# The dbt_utils macro name SignalForge promotes to the
+# `unique_combination` candidate variant (#170, DEC-002 / DEC-008). All
+# other `dbt_utils.*` macros fall through to the generic
+# custom-or-generic skip below; only this one specific macro is
+# recognised as a first-class supported test.
+_UNIQUE_COMBINATION_NAME = "dbt_utils.unique_combination_of_columns"
 
 # Matches ref('m') / ref("pkg", "m") / source('s', 't'); captures the quoted
 # positional args. Bounded — no nesting, no Jinja semantics.
@@ -221,6 +229,14 @@ def _parse_named_test(name: str, *, body: Any, column: str | None) -> CandidateT
         # custom-or-generic skip below; only this one specific macro is
         # promoted to a supported variant.
         return _parse_row_count_between(body=body, column=column)
+
+    if name == _UNIQUE_COMBINATION_NAME:
+        # `dbt_utils.unique_combination_of_columns` (#170, DEC-002 / DEC-008).
+        # The variant is model-level only — a column-scoped usage is not
+        # representable. Different sibling `dbt_utils.*` macros fall through
+        # to the namespaced custom-or-generic skip below; only this one
+        # specific macro is promoted to a supported variant.
+        return _parse_unique_combination(body=body, column=column)
 
     # A namespaced or project-defined test: dbt_utils.*, dbt_expectations.*,
     # any custom generic. Distinct from a bare unsupported string.
@@ -368,6 +384,147 @@ def _parse_row_count_between(*, body: Any, column: str | None) -> CandidateTest 
     return CandidateTestRowCountBetween(
         minimum=raw_min,
         maximum=raw_max,
+        where=raw_where,
+    )
+
+
+def _parse_unique_combination(*, body: Any, column: str | None) -> CandidateTest | SkippedTest:
+    """Map a ``dbt_utils.unique_combination_of_columns`` entry (#170).
+
+    Inbound mapping (DEC-002 / DEC-008): YAML ``combination_of_columns: list[str]``
+    → Pydantic ``columns: tuple[str, ...]``; optional ``where: str`` → ``where``.
+    The diff emitter (US-006) handles the OUTBOUND mapping back to the
+    macro shape. Don't push the dbt_utils name into the internal model —
+    the mapping seams are these two functions only.
+
+    Skip routes (DEC-008), all with ``reason="malformed-supported-test"``:
+    column-scoped usage (variant is model-level only); non-dict body;
+    missing ``combination_of_columns`` key; non-list value under the key;
+    empty list; ``len < 2`` (single-column is just ``unique``); non-string
+    items; duplicate items; non-empty non-string or whitespace-only
+    ``where``. Different sibling ``dbt_utils.*`` macros do not reach this
+    helper — they fall through to the generic custom-or-generic skip in
+    :func:`_parse_named_test`. The closed 3-value
+    :data:`~signalforge.ingest.models.SkipReason` is preserved.
+    """
+    if column is not None:
+        # The variant is model-level only (``column = None`` on the model).
+        # A column-scoped usage in YAML is not representable — route to
+        # malformed-supported-test with an explicit diagnostic rather than
+        # letting a Pydantic ValidationError escape ``read_schema``.
+        return SkippedTest(
+            test_name=_UNIQUE_COMBINATION_NAME,
+            column=column,
+            reason="malformed-supported-test",
+            detail=(
+                "unique_combination_of_columns is a model-level test; "
+                "column-scoped usage is not representable"
+            ),
+        )
+
+    # ``where`` is part of this macro's arguments, not a dbt-side test-config
+    # passthrough — so we cannot reuse ``_extract_args`` here (which would
+    # strip ``where`` via ``_CONFIG_KEYS``). Read the body directly: a non-
+    # dict body has no args; a body with an ``arguments:`` mapping pulls
+    # from there (dbt 1.8+ shape); else inline. Stripped config keys (per
+    # ``.claude/rules/ingest-layer.md`` § "dbt syntax tolerance") are
+    # tolerated alongside args because we only look up specific argument
+    # keys by name — anything else (severity / tags / name / …) is
+    # silently ignored.
+    if not isinstance(body, dict):
+        return SkippedTest(
+            test_name=_UNIQUE_COMBINATION_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail=(
+                "unique_combination_of_columns requires a 'combination_of_columns' list "
+                "of at least two distinct column names"
+            ),
+        )
+    nested = body.get("arguments")
+    source: dict[str, Any] = nested if isinstance(nested, dict) else body
+    raw_columns = source.get("combination_of_columns")
+    raw_where = source.get("where")
+
+    if raw_columns is None:
+        return SkippedTest(
+            test_name=_UNIQUE_COMBINATION_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail=(
+                "unique_combination_of_columns requires a 'combination_of_columns' list "
+                "of at least two distinct column names"
+            ),
+        )
+
+    # The YAML grammar carries `combination_of_columns` as a list of strings.
+    # A bare string (a common operator typo) is rejected loudly rather than
+    # silently coerced to a one-element list.
+    if not isinstance(raw_columns, list):
+        return SkippedTest(
+            test_name=_UNIQUE_COMBINATION_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail="combination_of_columns must be a list of column-name strings",
+        )
+
+    if len(raw_columns) == 0:
+        return SkippedTest(
+            test_name=_UNIQUE_COMBINATION_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail=(
+                "combination_of_columns must contain at least two entries "
+                "(got an empty list) — a single-column variant is just `unique`"
+            ),
+        )
+
+    if len(raw_columns) < 2:
+        return SkippedTest(
+            test_name=_UNIQUE_COMBINATION_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail=(
+                "combination_of_columns must contain at least two entries "
+                f"(got {len(raw_columns)}) — a single-column variant is just `unique`"
+            ),
+        )
+
+    # Every entry must be a string identifier. ``isinstance(True, int) is True``
+    # in Python — a bool would otherwise propagate to ``str(True) == "True"``
+    # and end up as a column name; reject up-front. Mirror the bool-as-int
+    # guard from ``_parse_row_count_between``.
+    for item in raw_columns:
+        if isinstance(item, bool) or not isinstance(item, str):
+            return SkippedTest(
+                test_name=_UNIQUE_COMBINATION_NAME,
+                column=None,
+                reason="malformed-supported-test",
+                detail="combination_of_columns entries must all be column-name strings",
+            )
+
+    if len(set(raw_columns)) != len(raw_columns):
+        return SkippedTest(
+            test_name=_UNIQUE_COMBINATION_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail=(
+                f"combination_of_columns must not contain duplicates (got {list(raw_columns)!r}) — "
+                "a duplicate column compiles to a uniqueness test that always "
+                "trivially has the same value in two positions"
+            ),
+        )
+
+    if raw_where is not None and (not isinstance(raw_where, str) or not raw_where.strip()):
+        return SkippedTest(
+            test_name=_UNIQUE_COMBINATION_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail="where must be a non-empty string when set",
+        )
+
+    return CandidateTestUniqueCombination(
+        columns=tuple(raw_columns),
         where=raw_where,
     )
 
