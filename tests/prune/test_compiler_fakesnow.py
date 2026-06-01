@@ -309,6 +309,14 @@ _ALL_SNOWFLAKE_FIXTURES = [
     "custom_sql.sql",
     "custom_sql_sample.sql",
     "custom_sql_fullscan.sql",
+    # #170 US-005a — unique_combination snapshots. The sqlglot Snowflake-
+    # dialect parse-guard is the load-bearing certification for these
+    # fixtures (mirrors the #121 lesson: snapshot equality certifies
+    # shape, not validity — a parser/executor in the loop is what
+    # catches reserved-keyword / quoting regressions).
+    "unique_combination_pair.sql",
+    "unique_combination_with_where.sql",
+    "unique_combination_three_columns.sql",
 ]
 
 

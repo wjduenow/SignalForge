@@ -30,6 +30,7 @@ from signalforge.draft.models import (
     CandidateTestRelationships,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 from signalforge.manifest.models import Column, Manifest, Model, Source
 from signalforge.prune.compiler import (
@@ -1715,3 +1716,160 @@ def test_compile_row_count_between_adapter_wrapped_failing_rows_contract() -> No
         # SQL here without a warehouse, but pinning the literal shape
         # above guarantees the inner SELECT runs the COUNT FIRST and
         # the outer WHERE filters the count row.
+
+
+# ---------------------------------------------------------------------------
+# US-005a (#170): unique_combination compiler arm + BigQuery & Snowflake
+# snapshots.
+#
+# The 7th first-class variant is a composite-grain GROUP BY ... HAVING
+# COUNT(*) > 1 over a tuple of ≥2 columns with optional ``where``. Each
+# column routes through ``validate_identifier`` + ``_fold_identifier`` /
+# ``_quote`` (DEC-014 defence-in-depth); the composed SQL routes through
+# ``validate_test_sql`` so a hostile ``where`` lands as
+# ``_InvalidIdentifier`` → ``kept-without-evidence`` (DEC-015).
+# ---------------------------------------------------------------------------
+
+
+def test_compile_unique_combination_pair_matches_snapshot() -> None:
+    """Two-column happy path emits the byte-exact BigQuery snapshot."""
+    expected = _read_fixture("unique_combination_pair.sql")
+    test = CandidateTestUniqueCombination(columns=("customer_id", "order_date"))
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_unique_combination_with_where_matches_snapshot() -> None:
+    """``where`` is interpolated verbatim into the composed statement; the
+    compose-then-validate pass catches any safety violations on the
+    resulting full SQL (DEC-015)."""
+    expected = _read_fixture("unique_combination_with_where.sql")
+    test = CandidateTestUniqueCombination(
+        columns=("customer_id", "order_date"),
+        where="status = 'placed'",
+    )
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_unique_combination_three_columns_matches_snapshot() -> None:
+    """Three-column tuple — cardinality scaling has no special-case in the
+    compiler arm (the ``", ".join`` over ``columns`` is the only emitter
+    surface)."""
+    expected = _read_fixture("unique_combination_three_columns.sql")
+    test = CandidateTestUniqueCombination(columns=("customer_id", "order_date", "region"))
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_unique_combination_snowflake_pair_matches_snapshot() -> None:
+    """Snowflake dialect: per-component double-quoted, UPPER-folded
+    qualified name + UPPER-folded column identifiers — pinned by the
+    byte-exact snapshot fixture."""
+    expected = _read_snowflake_fixture("unique_combination_pair.sql")
+    test = CandidateTestUniqueCombination(columns=("customer_id", "order_date"))
+    actual = _compile_test(test, _make_orders_table_ref(), SNOWFLAKE_DIALECT, _make_manifest())
+    assert actual == expected
+    assert isinstance(actual, str)
+    # Belt-and-braces: BigQuery quoting must not leak into the Snowflake path.
+    assert "`" not in actual
+
+
+def test_compile_unique_combination_snowflake_with_where_matches_snapshot() -> None:
+    """Snowflake dialect + ``where``: per-component quoting + UPPER fold on
+    the columns; ``where`` interpolated verbatim (no fold on
+    operator-supplied SQL — that would corrupt literals)."""
+    expected = _read_snowflake_fixture("unique_combination_with_where.sql")
+    test = CandidateTestUniqueCombination(
+        columns=("customer_id", "order_date"),
+        where="status = 'placed'",
+    )
+    actual = _compile_test(test, _make_orders_table_ref(), SNOWFLAKE_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_unique_combination_snowflake_three_columns_matches_snapshot() -> None:
+    """Snowflake dialect, three-column tuple: pinned by byte-exact snapshot.
+    Confirms the comma-join + per-column fold/quote scales beyond two."""
+    expected = _read_snowflake_fixture("unique_combination_three_columns.sql")
+    test = CandidateTestUniqueCombination(columns=("customer_id", "order_date", "region"))
+    actual = _compile_test(test, _make_orders_table_ref(), SNOWFLAKE_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_unique_combination_rejects_adversarial_column() -> None:
+    """DEC-014 — any malformed column identifier (whitespace, backtick,
+    semicolon, hyphen) routes via ``_InvalidIdentifier`` → engine routes
+    to ``kept-without-evidence``. Mirrors the per-column anchor guard but
+    fires at the compiler arm as defence-in-depth.
+    """
+    test = CandidateTestUniqueCombination(columns=("customer_id", "weird;name"))
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(actual, _InvalidIdentifier)
+    assert "weird;name" in actual.reason
+
+
+def test_compile_unique_combination_hostile_where_returns_invalid_identifier() -> None:
+    """A ``where`` containing a stray ``;`` (the classic injection shape)
+    composes into the full SELECT and trips ``validate_test_sql``'s no-`;`
+    check; the compiler returns ``_InvalidIdentifier`` so the engine
+    routes to ``kept-without-evidence`` (DEC-015, mirrors
+    ``row_count_between``)."""
+    test = CandidateTestUniqueCombination(
+        columns=("customer_id", "order_date"),
+        where="1=1; DROP TABLE users",
+    )
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(actual, _InvalidIdentifier)
+    assert "unique_combination" in actual.reason
+    assert "SQL safety" in actual.reason
+
+
+def test_compile_unique_combination_hostile_where_comment_returns_invalid_identifier() -> None:
+    """A ``where`` containing a ``--`` line comment also routes via
+    ``_InvalidIdentifier`` (DEC-015)."""
+    test = CandidateTestUniqueCombination(
+        columns=("customer_id", "order_date"),
+        where="1=1 -- everything",
+    )
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(actual, _InvalidIdentifier)
+
+
+def test_compile_unique_combination_hostile_where_unbalanced_parens_returns_invalid() -> None:
+    """An unbalanced paren in ``where`` trips ``validate_test_sql`` on the
+    composed statement (DEC-015)."""
+    test = CandidateTestUniqueCombination(
+        columns=("customer_id", "order_date"),
+        where="(x > 0",
+    )
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(actual, _InvalidIdentifier)
+
+
+def test_compile_unique_combination_composed_sql_passes_safety_validator() -> None:
+    """Belt-and-braces — the compiled SQL itself passes ``validate_test_sql``;
+    the warehouse adapter wraps it in an outer ``SELECT COUNT(*) AS failures
+    FROM (<sql>) AS t`` (failing-rows contract) and re-validates."""
+    test = CandidateTestUniqueCombination(
+        columns=("customer_id", "order_date"),
+        where="status = 'placed' AND total > 0",
+    )
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(actual, str)
+    validate_test_sql(actual)
+
+
+def test_compile_unique_combination_unique_among_dispatch_arms() -> None:
+    """The dispatcher (``_compile_test``) routes a ``unique_combination``
+    test to ``_compile_unique_combination``. A regression in the
+    isinstance chain (e.g. landing the arm AFTER the catch-all
+    NotImplementedError) would surface here as ``NotImplementedError``
+    rather than a string."""
+    test = CandidateTestUniqueCombination(columns=("customer_id", "order_date"))
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(actual, str)
+    # Composite-grain GROUP BY ... HAVING COUNT(*) > 1 — the failing-rows
+    # contract for this variant.
+    assert "GROUP BY" in actual
+    assert "HAVING COUNT(*) > 1" in actual
