@@ -5238,3 +5238,148 @@ def test_us011_defensive_arm_no_longer_fires_for_anomaly_variant(
     assert "US-011 pending" not in decision.why
     assert "two-query split not yet wired" not in decision.why
     fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# #171 US-017 — ``as_of`` reproducibility (unit determinism)
+# ---------------------------------------------------------------------------
+
+
+def test_as_of_reproducibility_byte_equal_compiled_sql(tmp_path: Path) -> None:
+    """#171 US-017 / DEC-001 — same input + same ``as_of`` produces
+    byte-equal :attr:`PruneEvent.compiled_sql` across runs; a different
+    ``as_of`` produces different SQL.
+
+    The :class:`row_count_anomaly_by_period` variant carves out the
+    Architectural Commitment #5 ("same input → same prune decision")
+    contract: the decision is *time-bound* by construction. The carve-out
+    is executed by threading an explicit ``as_of`` through CLI →
+    :func:`prune_tests` → compiled SQL → :attr:`PruneEvent.as_of`.
+    Reproducibility is restored at the ``(model, as_of)`` granularity:
+    same input + same ``as_of`` = same compiled SQL = same decision.
+
+    This unit test pins both halves of the contract:
+
+    1. **Determinism within an ``as_of``.** Two ``prune_tests`` calls
+       with ``as_of=date(2026, 5, 1)`` produce byte-equal
+       ``PruneEvent.compiled_sql``. The compiled SQL is the violation
+       query (per the engine's happy-path audit record) which embeds the
+       ``as_of`` literal via :attr:`Dialect.date_literal_template`.
+    2. **Variance across ``as_of``.** A third ``prune_tests`` call with
+       ``as_of=date(2026, 5, 2)`` produces a different
+       ``PruneEvent.compiled_sql`` — proves the ``as_of`` value
+       actually threads through to the compile step (vs. being
+       accidentally ignored / shadowed somewhere in the engine).
+
+    The fake adapter's expectation queue is consumed once per
+    ``prune_tests`` call, so each run uses a fresh fake adapter + a
+    fresh audit path. The canned stats (28 periods, MAD method) clear
+    the cold-start gate so the violation query actually runs and the
+    decision's ``compiled_sql`` field carries the violation SQL (the
+    cold-start path would record the stats SQL instead — a parallel
+    determinism contract but a different surface).
+    """
+    from datetime import date as _date
+
+    candidates = _make_anomaly_only_candidates()
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    def _run_once(audit_path: Path, as_of: _date) -> PruneEvent:
+        """Prime a fresh fake + adapter, run prune_tests, read back the
+        single PruneEvent from the audit JSONL.
+
+        Each call returns the typed event so the caller can read
+        ``compiled_sql`` (the violation SQL on the happy path) directly.
+        Fresh fake per call because :meth:`FakeBigQueryClient.expect_query`
+        consumes its expectations LIFO — sharing the fake across runs
+        would either drain mid-test or require re-priming inside a tight
+        loop.
+        """
+        fake = FakeBigQueryClient(project="fake_project")
+        # Stats query — return 28 periods (well above the default
+        # ``min_samples_per_bucket=3``) so the cold-start gate passes
+        # and the violation query runs. The exact stat values do not
+        # affect the violation SQL bytes (which is what the determinism
+        # contract pins) — they only feed the band check downstream.
+        fake.expect_query(
+            matching=r"^WITH history AS",
+            returns=[{"median": 100.0, "mad": 5.0, "n": 28}],
+        )
+        # Violation query — return zero failures (the decision routing
+        # doesn't matter for THIS contract; the load-bearing surface is
+        # ``compiled_sql`` bytes, which the engine records regardless of
+        # the always-passes / kept verdict).
+        fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+        adapter = _make_adapter(fake)
+
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+            as_of=as_of,
+        )
+        fake.assert_all_expectations_met()
+
+        # Read back the single PruneEvent via typed validation so the
+        # ``compiled_sql`` / ``as_of`` field assertions key on the
+        # production audit shape (not a hand-rolled dict).
+        raw = _read_audit_lines(audit_path)
+        assert len(raw) == 1, f"expected exactly one PruneEvent; got {len(raw)}"
+        return PruneEvent.model_validate(raw[0])
+
+    # --- Run 1 + Run 2 at the same ``as_of`` --------------------------
+    as_of_a = _date(2026, 5, 1)
+    event_run_1 = _run_once(tmp_path / "run1.jsonl", as_of_a)
+    event_run_2 = _run_once(tmp_path / "run2.jsonl", as_of_a)
+
+    # 1. Byte-equal compiled SQL across the two runs. Architectural
+    #    Commitment #5 restored at ``(model, as_of)`` granularity.
+    assert event_run_1.compiled_sql == event_run_2.compiled_sql, (
+        "PruneEvent.compiled_sql must be byte-equal across two runs with the "
+        "same ``as_of`` (same input + same ``as_of`` = same decision per "
+        f"DEC-001). Run 1: {event_run_1.compiled_sql!r}; "
+        f"Run 2: {event_run_2.compiled_sql!r}"
+    )
+
+    # 2. ``PruneEvent.as_of`` carries the supplied value verbatim (NOT
+    #    ``None``; NOT ``date.today()``). The audit field is the
+    #    operator-recovery surface — a missing/wrong value defeats the
+    #    reproducibility carve-out.
+    assert event_run_1.as_of == as_of_a
+    assert event_run_2.as_of == as_of_a
+
+    # 3. The compiled SQL embeds the ``as_of`` literal — sanity check
+    #    that the determinism is not vacuously true (e.g. the compiler
+    #    isn't producing a constant string). The ISO 8601 literal
+    #    appears via the dialect's ``date_literal_template`` (BigQuery
+    #    default: ``DATE('YYYY-MM-DD')``).
+    assert as_of_a.isoformat() in event_run_1.compiled_sql, (
+        f"expected the as_of literal {as_of_a.isoformat()!r} to appear in the "
+        f"compiled SQL; got {event_run_1.compiled_sql!r} — the date_literal_template "
+        "may have dropped the value or the compiler is ignoring as_of."
+    )
+
+    # --- Run 3 at a DIFFERENT ``as_of`` -------------------------------
+    as_of_b = _date(2026, 5, 2)
+    event_run_3 = _run_once(tmp_path / "run3.jsonl", as_of_b)
+
+    # 4. Different ``as_of`` → different compiled SQL. Proves the
+    #    threading is real: a refactor that silently dropped the kwarg
+    #    or shadowed it with ``date.today()`` would produce a stable
+    #    compiled SQL string here (the same as run 1 / 2) and this
+    #    assertion would fail.
+    assert event_run_3.compiled_sql != event_run_1.compiled_sql, (
+        "PruneEvent.compiled_sql must differ when ``as_of`` differs (proves the "
+        "threading from engine → compiler is intact; a regression that drops "
+        "the kwarg silently would shadow with ``date.today()`` and produce the "
+        f"same SQL for distinct as_of values). Both produced: "
+        f"{event_run_1.compiled_sql!r}"
+    )
+    assert event_run_3.as_of == as_of_b
+    assert as_of_b.isoformat() in event_run_3.compiled_sql
