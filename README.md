@@ -25,7 +25,7 @@ And you don't have to start from SignalForge's own drafts. Point it at a `schema
 
 ## What tests SignalForge generates
 
-SignalForge auto-generates seven test shapes. The full catalogue (with YAML examples, ingest signatures, rubric details, and the "what we do NOT generate today" boundary) lives in [`docs/drafter-catalogue.md`](docs/drafter-catalogue.md).
+SignalForge auto-generates eight test shapes. The full catalogue (with YAML examples, ingest signatures, rubric details, and the "what we do NOT generate today" boundary) lives in [`docs/drafter-catalogue.md`](docs/drafter-catalogue.md).
 
 | Variant | One-line semantics |
 | --- | --- |
@@ -36,8 +36,11 @@ SignalForge auto-generates seven test shapes. The full catalogue (with YAML exam
 | `custom_sql` | Free-form business-rule SELECT (catch-all) |
 | `row_count_between` | Row count is within bounds (model-level) |
 | `unique_combination` | Composite tuple of columns is unique (model-level) |
+| `row_count_anomaly_by_period` | Predicted row-count band per time-bucket from history (model-level; **first time-bound primitive** — pin via `--as-of YYYY-MM-DD` for reproducibility) |
 
-The four dbt generic tests (`not_null` / `unique` / `accepted_values` / `relationships`) ship as standard `schema.yml` entries. `custom_sql` ships as a singular `tests/*.sql` file (per business rule). `row_count_between` and `unique_combination` ship as `dbt-expectations` / `dbt-utils` YAML blocks under the model's `tests:` list. See [`docs/drafter-catalogue.md`](docs/drafter-catalogue.md) for example YAML, drafter heuristics, and the boundary of what SignalForge will and will not propose today.
+The four dbt generic tests (`not_null` / `unique` / `accepted_values` / `relationships`) ship as standard `schema.yml` entries. `custom_sql` and `row_count_anomaly_by_period` ship as singular `tests/*.sql` files (per business rule). `row_count_between` and `unique_combination` ship as `dbt-expectations` / `dbt-utils` YAML blocks under the model's `tests:` list. See [`docs/drafter-catalogue.md`](docs/drafter-catalogue.md) for example YAML, drafter heuristics, and the boundary of what SignalForge will and will not propose today.
+
+> **`row_count_anomaly_by_period` is the first time-bound primitive.** Every other variant satisfies "same SQL + same warehouse data → same prune decision" (Architectural Commitment #5). This one cannot: a per-period anomaly check evaluated on Monday and again on Tuesday may produce different decisions because the underlying band shifts as history accrues. Reproducibility is restored at the `(model, as_of)` granularity via the new `--as-of YYYY-MM-DD` flag on `generate` and `prune-existing`. See [`docs/drafter-catalogue.md`](docs/drafter-catalogue.md#row_count_anomaly_by_period) and [`docs/prune-ops.md` § `row_count_anomaly_by_period`](docs/prune-ops.md#row_count_anomaly_by_period).
 
 ## How it works
 

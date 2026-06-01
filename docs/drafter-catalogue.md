@@ -12,7 +12,7 @@ can't express. The "What we do NOT generate today" section names the shapes
 SignalForge explicitly does not propose — useful for evaluating whether the
 catalogue covers your project's patterns.
 
-## The seven first-class primitives
+## The eight first-class primitives
 
 | Variant | dbt equivalent | Scope | Structural slots | Semantics |
 | --- | --- | --- | --- | --- |
@@ -23,6 +23,7 @@ catalogue covers your project's patterns.
 | `custom_sql` | singular test (`tests/*.sql`) | column or model | `sql` | Free-form business-rule SELECT (catch-all) |
 | `row_count_between` | `dbt_expectations.expect_table_row_count_to_be_between` | model | `minimum`, `maximum`, optional `where` | Row count is within bounds |
 | `unique_combination` | `dbt_utils.unique_combination_of_columns` | model | `columns` (≥2), optional `where` | Composite tuple of columns is unique |
+| `row_count_anomaly_by_period` | singular test (`tests/*.sql`) | model | `date_column`, `method`, `seasonality`, `period`, `lookback_periods`, `threshold`, `min_samples_per_bucket`, optional `where` | Most-recent period's row count falls outside the band predicted from history |
 
 ### `not_null`
 
@@ -215,6 +216,80 @@ for `prune-existing` recognition; [`docs/grade-ops.md` § Row-count calibration]
 for grain-meaningfulness grading (the `no-redundant` criterion extends to
 `unique_combination` calibration too).
 
+### `row_count_anomaly_by_period`
+
+```sql
+-- drafted as tests/orders_daily__row_count_anomaly_by_period_a1b2c3d4.sql
+-- signalforge:generated a1b2c3d4
+-- method=mad seasonality=none period=day lookback_periods=28 threshold=3.0
+-- as_of=2026-05-01
+-- (full anomaly-band SELECT — see compiled SQL in .signalforge/prune.jsonl)
+select * from {{ this }}
+where date_trunc(loaded_at, day) = date '2026-05-01'
+  and abs(<row_count> - <median>) > 3.0 * <mad>
+```
+
+`row_count_anomaly_by_period` is a **model-level time-series anomaly check on
+the model's own row count per time-bucket**. The drafter predicts a row-count
+band from the model's `lookback_periods` (default `28`) of history and the
+prune engine flags the most-recent period when its `COUNT(*)` falls outside
+the band. Four statistical methods × two seasonality knobs ship in v0.7:
+
+| Field | Default | Choices |
+| --- | --- | --- |
+| `method` | `mad` | `mad` (median absolute deviation), `zscore` (μ ± kσ), `percentile` (band between two percentiles), `min_max` (raw bounds from history) |
+| `seasonality` | `none` | `none` (one band over all periods), `dow` (one band per day-of-week — for business-calendar grains) |
+| `period` | `day` | `hour`, `day`, `week` |
+| `lookback_periods` | `28` | any integer `>= 1` |
+| `threshold` | `3.0` | `> 0` (method-specific: standard deviations for `zscore`, MAD multiples for `mad`, percentile bounds for `percentile`; ignored for `min_max`) |
+| `min_samples_per_bucket` | `3` | any integer `>= 1` |
+| `date_column` | — | required; the column carrying the per-row timestamp the engine truncates by `period` |
+| `where` | `None` | optional SQL fragment narrowing the input rows |
+
+The drafter proposes this variant for **incremental fact tables** with a
+populated date partition column (`loaded_at`, `created_at`, `event_date`,
+`partition_date`); it proposes `seasonality="dow"` when the SQL suggests a
+business-calendar grain (weekday-only loads, business-day-aware rollups). It
+does not propose it for dimension tables, full-refresh models, or models
+without a recognisable date partition column.
+
+**Cold-start behaviour — first runs route to `kept-without-evidence`.** The
+prune engine runs the stats query first and inspects the period count; if
+fewer than `min_samples_per_bucket` historical periods are populated, the
+violation query is skipped entirely and the candidate is kept with structured
+`why="insufficient history: n/min periods"`. This is the conservative-bias
+contract (`prune-engine.md`) — we never silently drop a test we cannot
+positively evaluate. As history accumulates on subsequent runs, the same
+candidate transitions to `kept` (real anomaly) or `dropped`
+(`always-passes`).
+
+**Emission shape.** The drafter renders the variant as a singular
+`tests/<model>__row_count_anomaly_by_period__<args_hash>.sql` file (same shape
+as `custom_sql`) under `generate --write`. The header carries a
+`-- signalforge:generated <hash>` ownership marker; subsequent re-runs do not
+overwrite hand-authored files (`--force` overwrites a marked file only). No
+`schema.yml` block — the variant does not have a dbt-utils / dbt-expectations
+canonical macro today.
+
+**Time-bound reproducibility carve-out — `--as-of YYYY-MM-DD`.** Every other
+SignalForge primitive satisfies Architectural Commitment #5 (same SQL + same
+warehouse data → same prune decision). This one cannot: a per-period anomaly
+check inherently moves the window every day. The new `--as-of` flag on both
+`signalforge generate` and `signalforge prune-existing` pins the evaluation
+date so reproducibility is restored at `(model, as_of)` granularity. When
+omitted, the prune engine resolves to `date.today()` at prune time and emits
+one INFO log line naming the resolved value; the resolved date lands on
+every `PruneEvent.as_of` audit field for after-the-fact reproducibility. In a
+multi-model `--select` batch the same `--as-of` applies to every model
+(resolved once at the orchestrator).
+
+See [`docs/draft-ops.md` § Row-count anomaly tests](draft-ops.md#row-count-anomaly-tests-row_count_anomaly_by_period)
+for drafting; [`docs/prune-ops.md` § `row_count_anomaly_by_period`](prune-ops.md#row_count_anomaly_by_period)
+for the two-query split, cold-start routing, DOW degrade WARNING, and
+partition-filter cost mechanics; [`docs/cli-ops.md` § `--as-of`](cli-ops.md)
+for the flag reference; [`docs/grade-ops.md` § Row-count calibration](grade-ops.md#row-count-calibration)
+for the `no-redundant` criterion's anomaly-specific calibration prose.
+
 ## What we do NOT generate today
 
 SignalForge's catalogue is deliberately bounded — these shapes are tractable
@@ -237,9 +312,12 @@ rubric. The following classes of tests are NOT proposed today:
   tables (a `relationships` test catches referential integrity, not
   aggregate equivalence). Express these as `custom_sql` with the join in
   the SELECT body.
-- **Time-series anomaly detection.** No "consecutive nulls > N",
-  "period-over-period change > X%", or freshness-without-`dbt source freshness`
-  assertions. These need temporal context the drafter doesn't model.
+- **Time-series anomaly detection beyond row-count.** `row_count_anomaly_by_period`
+  catches "the most-recent period's row count is anomalous vs. history" — but
+  not "consecutive nulls > N", not "per-column mean has drifted",
+  not "the freshness lag exceeds N hours without `dbt source freshness`." These
+  require per-column or freshness-specific stats the drafter doesn't model
+  today.
 
 Hand-authored `custom_sql` (a singular `tests/*.sql` file) covers any of the
 above when the rule is checkable against a single SELECT. SignalForge's
@@ -268,4 +346,6 @@ tests.
   established `custom_sql`; [#169](https://github.com/wjduenow/SignalForge/issues/169)
   added `row_count_between`;
   [#170](https://github.com/wjduenow/SignalForge/issues/170) added
-  `unique_combination` and authored this catalogue.
+  `unique_combination` and authored this catalogue;
+  [#171](https://github.com/wjduenow/SignalForge/issues/171) added
+  `row_count_anomaly_by_period` and the `--as-of` reproducibility carve-out.
