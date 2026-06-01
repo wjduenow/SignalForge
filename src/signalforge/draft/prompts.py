@@ -79,20 +79,39 @@ _TEST_CATALOGUE_LINES: dict[str, str] = {
         '         "maximum": <int or null>, "where": "<SQL predicate>",\n'
         '         "rationale": "<1 sentence>"}'
     ),
+    "unique_combination": (
+        '        {"type": "unique_combination",\n'
+        '         "columns": ["<col1>", "<col2>"], "rationale": "<1 sentence>"},\n'
+        '        {"type": "unique_combination",\n'
+        '         "columns": ["<col1>", "<col2>"], "where": "<SQL predicate>",\n'
+        '         "rationale": "<1 sentence>"}'
+    ),
 }
 """Per-test-type catalogue lines for the system prompt (issue #54).
 
-The five entries (extended in issue #169 with ``row_count_between``) are
-emitted in this fixed order so the rendered prompt stays byte-stable
-when no exclusions apply. When :class:`DraftConfig` sets
-``exclude_tests``, the excluded entries are dropped before rendering
-and the surviving entries' trailing-comma placement is fixed up so the
-JSON example stays well-formed.
+The six entries (extended in issue #169 with ``row_count_between`` and
+in issue #170 with ``unique_combination``) are emitted in this fixed
+order so the rendered prompt stays byte-stable when no exclusions
+apply. When :class:`DraftConfig` sets ``exclude_tests``, the excluded
+entries are dropped before rendering and the surviving entries'
+trailing-comma placement is fixed up so the JSON example stays
+well-formed.
 
 The ``row_count_between`` entry (issue #169, DEC-012) illustrates BOTH
 the no-``where`` form (whole-table bound) and the with-``where`` form
 (filtered bound, e.g. a recent-data window) so the drafter has two
 shapes to mirror.
+
+The ``unique_combination`` entry (issue #170, DEC-002) similarly
+illustrates BOTH the no-``where`` form (whole-table composite
+uniqueness) and the with-``where`` form (filtered composite uniqueness,
+e.g. one row per ``(user_id, day)`` for active users only). Useful for
+composite-key patterns like ``(order_id, line_item_id)`` on an
+order-line table or ``(user_id, session_id)`` on a session-event table.
+Do NOT propose ``unique_combination`` over a primary key combined with
+any other column — that tuple is always unique by construction (the
+primary key alone guarantees it) and adds no signal beyond the existing
+single-column ``unique`` test.
 
 The ``custom_sql`` singular-test illustration (issue #116, DEC-001 /
 DEC-015) lives in :data:`_CUSTOM_SQL_CATALOGUE_LINE` rather than here.
@@ -130,6 +149,30 @@ and column profile where a clear, checkable invariant exists."""
 only when ``"custom_sql"`` is allowed (not in ``exclude_tests``). Inserted as
 a :meth:`str.format` *value* (not part of the format string), so its Jinja
 example braces are written single (``{{ this }}``) and render literally."""
+
+
+_UNIQUE_COMBINATION_SCOPE_INSTRUCTION: str = """\
+
+`unique_combination` tests assert that a tuple of two or more columns is
+unique across the model (optionally filtered by a `where` predicate).
+Propose this when the model's grain is a composite key — e.g.
+`(order_id, line_item_id)` on an order-line table, `(user_id, day)` on a
+daily activity rollup, or `(start_station_id, end_station_id, trip_date)`
+on a trip-pairs aggregate. Do NOT propose `unique_combination` over a
+primary key combined with any other column: that tuple is always unique
+by construction (the primary key alone guarantees it) and adds no signal
+beyond the existing single-column `unique` test. The `columns` array
+must contain at least two distinct column names from the manifest
+summary."""
+"""SCOPE-section instruction block for ``unique_combination`` (issue #170,
+DEC-002). Emitted only when ``"unique_combination"`` is allowed (not in
+``exclude_tests``). Inserted as a :meth:`str.format` *value* (not part of
+the format string), so any future literal braces would render verbatim.
+The cautionary "do NOT propose over `(pk, anything)`" sentence steers the
+drafter away from vacuously-unique tuples — the grader's `no-redundant`
+criterion (US-008 of #170) flags them in scoring, but catching them at
+the prompt level prevents the warehouse round-trip and a wasted slot in
+the candidate schema."""
 
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -200,7 +243,7 @@ forwarded from the manifest.
 ### SCOPE
 
 Propose only {allowed_scope} tests. dbt-utils / dbt-expectations macros
-are out of scope for this draft step.{custom_sql_scope}
+are out of scope for this draft step.{custom_sql_scope}{unique_combination_scope}
 """
 
 
@@ -255,10 +298,15 @@ def _render_system_prompt(exclude_tests: tuple[str, ...]) -> str:
         scope_phrase = f"{scope_phrase}, plus `custom_sql`"
 
     custom_sql_scope = _CUSTOM_SQL_SCOPE_INSTRUCTION if custom_sql_allowed else ""
+    unique_combination_allowed = "unique_combination" in allowed
+    unique_combination_scope = (
+        _UNIQUE_COMBINATION_SCOPE_INSTRUCTION if unique_combination_allowed else ""
+    )
     return _SYSTEM_PROMPT_TEMPLATE.format(
         test_catalogue=test_catalogue,
         allowed_scope=scope_phrase,
         custom_sql_scope=custom_sql_scope,
+        unique_combination_scope=unique_combination_scope,
     )
 
 

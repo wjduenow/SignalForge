@@ -77,13 +77,23 @@ class StrictCandidateTestRowCountBetween(BaseModel):
     rationale: str | None = None
 
 
+class StrictCandidateTestUniqueCombination(BaseModel):
+    model_config = _STRICT_BASE
+    type: Literal["unique_combination"] = "unique_combination"
+    column: None = None
+    columns: tuple[str, ...]
+    where: str | None = None
+    rationale: str | None = None
+
+
 _StrictCandidateTest = Annotated[
     StrictCandidateTestNotNull
     | StrictCandidateTestUnique
     | StrictCandidateTestAcceptedValues
     | StrictCandidateTestRelationships
     | StrictCandidateTestCustomSQL
-    | StrictCandidateTestRowCountBetween,
+    | StrictCandidateTestRowCountBetween
+    | StrictCandidateTestUniqueCombination,
     Field(discriminator="type"),
 ]
 

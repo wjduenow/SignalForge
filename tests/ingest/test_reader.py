@@ -113,10 +113,13 @@ def test_read_schema_happy_path_skipped_tests() -> None:
 
     by_name = {s.test_name: s for s in result.skipped}
 
-    # Namespaced custom generic on the status column.
-    assert "dbt_utils.unique_combination_of_columns" in by_name
-    assert by_name["dbt_utils.unique_combination_of_columns"].reason == "custom-or-generic-test"
-    assert by_name["dbt_utils.unique_combination_of_columns"].column == "status"
+    # Namespaced custom generic on the status column. (Pre-#170 this exercised
+    # ``dbt_utils.unique_combination_of_columns``; #170 promoted that macro to
+    # a first-class variant, so the fixture now uses a sibling dbt_utils macro
+    # to keep the namespaced-custom-skip behavioural pin.)
+    assert "dbt_utils.not_null_proportion" in by_name
+    assert by_name["dbt_utils.not_null_proportion"].reason == "custom-or-generic-test"
+    assert by_name["dbt_utils.not_null_proportion"].column == "status"
 
     # Bare-string unsupported test on the amount column.
     assert "positive" in by_name

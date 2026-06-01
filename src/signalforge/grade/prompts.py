@@ -53,9 +53,9 @@ from signalforge.grade.errors import GradeOutputError, GradePromptEnvelopeBreach
 
 if TYPE_CHECKING:
     from signalforge.draft.models import CandidateSchema
-    from signalforge.grade.rubric import Criterion, Rubric
     from signalforge.prune import PruneResult
 
+from signalforge.grade.rubric import DEFAULT_RUBRIC, Criterion, Rubric
 
 # ---------------------------------------------------------------------------
 # Template constants (DEC-008)
@@ -193,6 +193,38 @@ def criterion_prompt_hash(criterion: Criterion) -> str:
     """
     blob = criterion.id + "\x00" + criterion.criterion + "\x00" + _ENVELOPE_OPEN + _ENVELOPE_CLOSE
     return hashlib.blake2b(blob.encode("utf-8"), digest_size=8).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Module-level prompt-version snapshot (#170 DEC-012)
+# ---------------------------------------------------------------------------
+
+
+# Grade-side cache-stability snapshot, parallel to the drafter's
+# ``signalforge.draft.prompts._PROMPT_VERSION``. Established by #170 DEC-012
+# to make ``business-rule-tests.md`` § "Lockstep ``_PROMPT_VERSION`` rotation
+# when extending the catalogue (#169 DEC-012)" actually reflect reality —
+# pre-#170 the rule file claimed a grade-side snapshot existed but only the
+# dynamic per-event ``rubric_hash`` shipped.
+#
+# Recipe (mirrors the drafter shape verbatim): ``blake2b-8`` over
+# ``_SYSTEM_PROMPT + render_rubric_block(DEFAULT_RUBRIC) + envelope_tags``,
+# materialised at import time as the value :func:`prompt_version_template`
+# produces for :data:`DEFAULT_RUBRIC`. The two share one recipe — a custom
+# rubric still calls ``prompt_version_template(rubric)`` per-run; this
+# constant pins the snapshot for the default-rubric path so a snapshot test
+# can guard against silent template / criterion drift.
+#
+# Rotates when any of:
+#   * ``_SYSTEM_PROMPT`` text changes.
+#   * Any of the 4 default criterion texts in ``DEFAULT_RUBRIC`` changes.
+#   * The envelope tags change.
+#   * A 5th default criterion lands (a deliberate rubric extension).
+#
+# Pinned by :mod:`tests.grade.test_prompt_cache_stability` — that test is the
+# load-bearing regression gate; updating this constant without rotating the
+# pinned value there fails CI loudly.
+_PROMPT_VERSION: Final[str] = prompt_version_template(DEFAULT_RUBRIC)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +405,7 @@ def extract_artifact_text(
 
 
 __all__ = (
+    "_PROMPT_VERSION",
     "criterion_prompt_hash",
     "extract_artifact_text",
     "prompt_version_template",

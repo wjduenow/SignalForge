@@ -259,16 +259,21 @@ def test_prompt_version_template_pinned_to_golden_hex() -> None:
 
     * ``a35012b627b8ba6a`` — initial pin (#7, DEC-019). Constant since
       DEC-016 verbatim text shipped.
-    * ``5a70561088930c97`` — current. Rotated under #169 (DEC-009) when
-      the ``no-redundant`` criterion gained calibration prose for
-      numeric-bounded tests (``row_count_between``). The system prompt,
-      envelope tags, and rubric structure are unchanged; only the
-      ``no-redundant`` criterion text grew. The grader's 3-trigger
-      degrade taxonomy (DEC-011) stayed locked — vacuous bounds route
-      through a low criterion score → ``passed: bool`` threshold →
-      ``flagged`` tier, NOT a 4th degrade trigger.
+    * ``5a70561088930c97`` — rotated under #169 (DEC-009) when the
+      ``no-redundant`` criterion gained calibration prose for
+      numeric-bounded tests (``row_count_between``).
+    * ``4dae4421972e9c2d`` — current. Rotated under #170 (DEC-007) when
+      the ``no-redundant`` criterion gained sibling calibration prose
+      for composite-key tests (``unique_combination``): a vacuously
+      unique tuple of the shape ``(primary_key, anything)`` carries no
+      grain signal. The system prompt, envelope tags, and rubric
+      structure are unchanged; only the ``no-redundant`` criterion
+      text grew. The grader's 3-trigger degrade taxonomy (DEC-011)
+      stayed locked — a vacuous composite key routes through a low
+      criterion score → ``passed: bool`` threshold → ``flagged`` tier,
+      NOT a 4th degrade trigger.
     """
-    assert prompt_version_template(DEFAULT_RUBRIC) == "5a70561088930c97"
+    assert prompt_version_template(DEFAULT_RUBRIC) == "4dae4421972e9c2d"
 
 
 # ---------------------------------------------------------------------------
@@ -329,13 +334,19 @@ def test_criterion_prompt_hash_pinned_to_golden_hex() -> None:
       under #169 (DEC-009) when the criterion gained calibration prose
       for numeric-bounded tests (``row_count_between``). The other three
       criterion hashes are unchanged — only ``no-redundant`` was extended.
+    * ``no-redundant`` rotated ``60690cb4ef9246ee`` → ``7b96cfdfe63bc8bc``
+      under #170 (DEC-007) when the criterion gained sibling calibration
+      prose for composite-key tests (``unique_combination``): a vacuously
+      unique tuple of the shape ``(primary_key, anything)`` carries no
+      grain signal. The other three criterion hashes are unchanged — only
+      ``no-redundant`` was extended.
     """
     actual = {c.id: criterion_prompt_hash(c) for c in DEFAULT_RUBRIC}
     assert actual == {
         "clarity": "182ebed168a11076",
         "consistency": "4f739879138c19d6",
         "rationale": "d355e87f2381bcdf",
-        "no-redundant": "60690cb4ef9246ee",
+        "no-redundant": "7b96cfdfe63bc8bc",
     }
 
 

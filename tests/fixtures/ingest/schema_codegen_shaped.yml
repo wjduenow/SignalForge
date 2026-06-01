@@ -41,8 +41,8 @@ models:
           - accepted_values:
               values: ["placed", "shipped", "cancelled"]
           # Unsupported namespaced/custom generic — custom-or-generic-test.
-          - dbt_utils.unique_combination_of_columns:
-              combination_of_columns: [order_id, status]
+          - dbt_utils.not_null_proportion:
+              at_least: 0.95
 
       - name: customer_id
         description: "FK to customers."

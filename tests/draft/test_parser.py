@@ -31,6 +31,7 @@ from signalforge.draft.models import (
     CandidateTestRelationships,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 from signalforge.draft.parser import (
     _check_custom_sql_type_coherence,  # noqa: PLC2701  # private helper under test (#159 coverage)
@@ -1566,5 +1567,216 @@ def test_row_count_between_collect_all_with_other_violation() -> None:
     )
     assert any(
         "row_count_between where references nonexistent column 'phantom_col'" in v
+        for v in violations
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #170 — unique_combination anchor-contract arm (US-004)
+#
+# The 7th variant is model-level only (``column`` is hard-coded to ``None``
+# by the Pydantic model) and carries a tuple of >=2 column names plus an
+# optional ``where`` clause. The parser arm checks each ``columns[i]`` for
+# membership in ``model_columns`` and reuses the sqlglot WHERE-clause
+# helper for column-existence + type-coherence on ``where`` (DEC-014,
+# DEC-015, DEC-016). The ``exclude_tests`` dual-defence backstop also
+# applies (DEC-013).
+# ---------------------------------------------------------------------------
+
+
+def _unique_combination_candidate(
+    *,
+    column_names: tuple[str, ...],
+    columns: tuple[str, ...],
+    where: str | None = None,
+) -> CandidateSchema:
+    """Build a synthetic CandidateSchema carrying one model-level
+    ``unique_combination`` test."""
+    return CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=tuple(CandidateColumn(name=n, description="...", tests=()) for n in column_names),
+        tests=(
+            CandidateTestUniqueCombination(
+                columns=columns,
+                where=where,
+            ),
+        ),
+    )
+
+
+def test_unique_combination_valid_pair_no_where() -> None:
+    """A unique_combination over two real columns with no ``where`` is the
+    canonical model-level shape — no violations."""
+    candidate = _unique_combination_candidate(
+        column_names=("user_id", "day"),
+        columns=("user_id", "day"),
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"user_id", "day"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(user_id="INT64", day="DATE"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_unique_combination_valid_three_columns_with_where() -> None:
+    """A unique_combination over three real columns with a ``where`` that
+    references a real column of a coercible type passes."""
+    candidate = _unique_combination_candidate(
+        column_names=("order_id", "line_no", "tenant_id"),
+        columns=("order_id", "line_no", "tenant_id"),
+        where="tenant_id > 0",
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"order_id", "line_no", "tenant_id"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(order_id="INT64", line_no="INT64", tenant_id="INT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_unique_combination_hallucinated_column_in_tuple_rejected() -> None:
+    """A unique_combination tuple containing a column absent from the
+    model appends one violation per missing column. Collect-all: a single
+    missing entry produces a single violation that names the entry."""
+    candidate = _unique_combination_candidate(
+        column_names=("user_id", "day"),
+        columns=("user_id", "phantom_col"),
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id", "day"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64", day="DATE"),
+        )
+    assert any(
+        "unique_combination references nonexistent column 'phantom_col'" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_unique_combination_hallucinated_column_in_where_rejected() -> None:
+    """A ``where`` referencing a column that is not on the model appends
+    a violation (mirrors the row_count_between behaviour — sqlglot walks
+    the WHERE and flags bare-Column operands not in ``model_columns``)."""
+    candidate = _unique_combination_candidate(
+        column_names=("user_id", "day"),
+        columns=("user_id", "day"),
+        where="phantom_col > 1",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id", "day"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64", day="DATE"),
+        )
+    assert any(
+        "unique_combination where references nonexistent column 'phantom_col'" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_unique_combination_type_incoherent_where_rejected() -> None:
+    """A ``where`` that compares two columns of incompatible types is
+    rejected by the sqlglot type-coherence pass (DEC-015, reuse of the
+    #159 / #169 sqlglot machinery)."""
+    candidate = _unique_combination_candidate(
+        column_names=("user_id", "day", "name"),
+        columns=("user_id", "day"),
+        where="user_id = name",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id", "day", "name"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64", day="DATE", name="STRING"),
+        )
+    assert any(
+        "unique_combination where references column" in v
+        and "'user_id'" in v
+        and "'name'" in v
+        and "incompatible" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_unique_combination_excluded_type_rejected() -> None:
+    """``exclude_tests=("unique_combination",)`` rejects a drafted
+    unique_combination via the dual-defence backstop (DEC-013).
+
+    The prompt-builder filter is the primary defence; this parser-side
+    check catches an LLM that ignores the prompt."""
+    candidate = _unique_combination_candidate(
+        column_names=("user_id", "day"),
+        columns=("user_id", "day"),
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id", "day"}),
+            llm_result_meta=_meta(),
+            exclude_tests=frozenset({"unique_combination"}),
+        )
+    assert any(
+        "model-level" in v and "'unique_combination'" in v and "exclude_tests" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_unique_combination_collect_all_multi_violation() -> None:
+    """Collect-all preserved: a candidate with a hallucinated column in
+    the tuple AND a hallucinated column in the ``where`` AND an unrelated
+    CandidateColumn-level violation surfaces ALL violations in one
+    ``LLMOutputAnchorContractError`` (DEC-022 of #5)."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="hallucinated",
+                description="LLM made this up",
+                tests=(),
+            ),
+        ),
+        tests=(
+            CandidateTestUniqueCombination(
+                columns=("user_id", "phantom_tuple_col"),
+                where="phantom_where_col > 1",
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64"),
+        )
+    violations = excinfo.value.violations
+    assert any(
+        "CandidateColumn references nonexistent column 'hallucinated'" in v for v in violations
+    )
+    assert any(
+        "unique_combination references nonexistent column 'phantom_tuple_col'" in v
+        for v in violations
+    )
+    assert any(
+        "unique_combination where references nonexistent column 'phantom_where_col'" in v
         for v in violations
     )

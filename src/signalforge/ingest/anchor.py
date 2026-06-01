@@ -29,7 +29,7 @@ the consuming prune / grade stages).
 
 from __future__ import annotations
 
-from signalforge.draft.models import CandidateSchema
+from signalforge.draft.models import CandidateSchema, CandidateTestUniqueCombination
 from signalforge.ingest.errors import IngestAnchorContractError
 
 
@@ -55,9 +55,9 @@ def validate_anchor_contract(
       ``model_columns``.
     * Each model-level test's ``column`` must reference a real column in
       ``model_columns``. Model-level-only variants (``row_count_between``
-      — issue #169) whose Pydantic model fixes ``column = None`` are
-      exempt from this check — ``None`` is the canonical model-level
-      shape, not a missing column reference.
+      — issue #169; ``unique_combination`` — issue #170) whose Pydantic
+      model fixes ``column = None`` are exempt from this check — ``None``
+      is the canonical model-level shape, not a missing column reference.
     """
     violations: list[str] = []
 
@@ -86,6 +86,32 @@ def validate_anchor_contract(
         # the drafter-side anchor exemption in
         # ``signalforge.draft.parser._validate_anchor_contract``.
         if test.type == "row_count_between":
+            continue
+        # Issue #170 — ``unique_combination`` is the third model-level-only
+        # variant (after ``custom_sql`` and ``row_count_between``); its
+        # Pydantic model also fixes ``column = None``. The 6th dispatch site
+        # per ``.claude/rules/business-rule-tests.md`` § "The 6 production
+        # dispatch sites".
+        #
+        # CodeRabbit / QG Pass 1 finding C2 / QG Pass 2 informational #2:
+        # the bare ``continue`` skips the generic ``test.column not in
+        # model_columns`` check (since ``column=None``) but ALSO skips
+        # validating ``test.columns`` — externally-authored
+        # ``dbt_utils.unique_combination_of_columns`` blocks could carry
+        # nonexistent column names and pass this ingest path silently
+        # (the warehouse would later reject the SQL via the conservative-
+        # bias ``_InvalidIdentifier`` → ``kept-without-evidence`` route,
+        # but with a generic "identifier rejected" message rather than a
+        # precise per-column violation). Mirror the draft-parser path at
+        # ``signalforge.draft.parser._validate_anchor_contract`` —
+        # iterate ``test.columns`` and surface each missing column.
+        if isinstance(test, CandidateTestUniqueCombination):
+            for col in test.columns:
+                if col not in model_columns:
+                    violations.append(
+                        f"unique_combination references nonexistent column {col!r} "
+                        f"(available: {sorted(model_columns)})"
+                    )
             continue
         if test.column not in model_columns:
             violations.append(f"model-level test references nonexistent column {test.column!r}")

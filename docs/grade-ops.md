@@ -347,6 +347,39 @@ grade-side `_PROMPT_VERSION` and the grade-prompt cache-stability
 snapshot moves in lockstep (US-009 of #169). This is distinct from the
 drafter-side `_PROMPT_VERSION` — the two cache prefixes are independent.
 
+### Composite-key calibration (`unique_combination`)
+
+As of issue #170, the existing `no-redundant` criterion extends to the
+seventh test variant, `unique_combination` (see
+[`docs/draft-ops.md`](draft-ops.md#composite-uniqueness-unique_combination)
+and [`docs/drafter-catalogue.md`](drafter-catalogue.md)). The criterion
+text now scores whether a composite-key tuple is a **meaningful grain**
+(e.g. `(order_id, line_item_id)` on an order-line table) vs. a
+vacuously-unique shape like `(primary_key, anything)` — the latter is
+always unique by construction because the primary key alone guarantees
+it, so the test adds no signal beyond the existing single-column
+`unique` test.
+
+The routing is the same as `row_count_between` vacuous-bound
+calibration: a borderline-meaningful tuple that survived prune (because
+it caught real duplicates) is scored low (`0.0`–`0.2`), `passed` flips
+to `False`, and the diff renderer routes the row to **`flagged`** —
+the operator sees the test ships but the grain is suspect. The strictly
+vacuous shape (a tuple containing a known unique column) is caught by
+the prune layer as `always-passes` before reaching the grader; the
+calibration value applies to the borderline cases prune cannot dismiss.
+
+The criterion was extended rather than added as a fifth — keeping the
+rubric at four criteria avoids the ~25% per-artifact round-trip cost a
+new criterion would introduce. "Trivially satisfiable" already covered
+the conceptual territory; the extension makes it concrete for both the
+numeric-bound shape (`row_count_between`) AND the composite-key shape
+(`unique_combination`). Locked verbatim per DEC-007 of #170 (extending
+DEC-016 of #7); rotation history is recorded in
+`src/signalforge/grade/rubric.py`. The grade-side `_PROMPT_VERSION`
+rotated under #170 (US-008 + US-009) in lockstep with the criterion-text
+change.
+
 ## Audit JSONL schema
 
 > **Consumer guide.** For cross-stage joins (including grade JSONL ↔

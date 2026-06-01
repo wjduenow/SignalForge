@@ -33,6 +33,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 _BASE_CONFIG = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
 
+def _scope_repr(column: str | None) -> str:
+    """Render the scope segment for a redacted candidate-test ``__repr__``.
+
+    Returns ``column=<name>`` for column-scoped tests, ``<model-level>`` for
+    model-level tests (``column is None``). The column NAME is operationally
+    useful (which column does this test apply to?) and is not value-bearing;
+    only the LLM-emitted free-text fields (``sql`` / ``where`` /
+    ``rationale``) are redacted.
+
+    Centralises the scope-rendering convention across all candidate-test
+    ``__repr__`` overrides so a future variant inherits the same shape.
+    """
+    if column is None:
+        return "<model-level>"
+    return f"column={column!r}"
+
+
 class CandidateTestNotNull(BaseModel):
     """A ``not_null`` test on one column."""
 
@@ -157,6 +174,34 @@ class CandidateTestCustomSQL(BaseModel):
             raise ValueError("CandidateTestCustomSQL.sql must be non-empty")
         return v
 
+    def __repr__(self) -> str:
+        """Redacted repr — omits the LLM-emitted ``sql`` and ``rationale``
+        (DEC-013 of #170).
+
+        An accidental ``_LOGGER.warning("test: %s", t)`` would otherwise
+        dump the full LLM-authored singular-test SELECT into log sinks; the
+        body can be arbitrarily long, multi-line, and may quote upstream
+        column data via the model SQL it scans. Mirrors the redaction
+        precedent established on ``PruneDecision`` (prune DEC-022),
+        ``GradingResult`` (grade DEC-022), and ``DiffEntry`` (diff DEC-020).
+        Full content remains accessible via :meth:`model_dump` /
+        :meth:`model_dump_json` — only the casual debug-print path
+        (``repr()`` / ``%s``-interpolation) is redacted.
+        """
+        return f"CandidateTestCustomSQL(type='custom_sql', {_scope_repr(self.column)})"
+
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        """Redact via Pydantic's structured-repr hook.
+
+        DEC-013 of #170 + QG Pass 1 finding C1: ``__repr__`` redacts the
+        ``%s``-interpolation path; ``__rich_repr__`` / ``__pretty__``
+        (rich.print() / devtools / pprint debug tooling) reach through
+        ``__repr_args__`` and would otherwise still see the redacted
+        fields. Filtering here closes the leak across all three surfaces
+        with one override.
+        """
+        return [("type", self.type), ("column", self.column)]
+
 
 class CandidateTestRowCountBetween(BaseModel):
     """A model-level row-count-bounds test (#169, DEC-001).
@@ -242,6 +287,134 @@ class CandidateTestRowCountBetween(BaseModel):
             )
         return self
 
+    def __repr__(self) -> str:
+        """Redacted repr — omits the LLM-emitted ``where`` and ``rationale``
+        (DEC-013 of #170, retroactive).
+
+        The numeric bounds (``minimum`` / ``maximum``) stay visible: they're
+        not value-bearing and answering "what does this test assert?" at a
+        glance is operationally useful. The free-text ``where`` clause is a
+        SQL fragment the LLM authored and is exactly the kind of payload the
+        redaction exists to keep out of log sinks. Mirrors the precedent on
+        :class:`PruneDecision` / :class:`GradingResult` / :class:`DiffEntry`.
+        Full content remains accessible via :meth:`model_dump_json`.
+        """
+        return (
+            "CandidateTestRowCountBetween(type='row_count_between', "
+            "<model-level>, "
+            f"minimum={self.minimum!r}, maximum={self.maximum!r})"
+        )
+
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        """Redact via Pydantic's structured-repr hook (QG Pass 1 finding C1).
+
+        See :meth:`CandidateTestCustomSQL.__repr_args__` for rationale.
+        """
+        return [
+            ("type", self.type),
+            ("column", self.column),
+            ("minimum", self.minimum),
+            ("maximum", self.maximum),
+        ]
+
+
+class CandidateTestUniqueCombination(BaseModel):
+    """A model-level multi-column-uniqueness test (#170, DEC-001).
+
+    Asserts that the tuple ``(c1, c2, ...)`` is unique across the model
+    (optionally filtered by ``where``). The 7th first-class
+    :class:`CandidateTest` variant, and the third — after
+    :class:`CandidateTestCustomSQL` and :class:`CandidateTestRowCountBetween`
+    — to be **model-level only** (``column`` is hard-coded to ``None``).
+
+    The variant fills the gap between the single-column ``unique`` test and
+    the free-form ``custom_sql`` escape hatch: composite uniqueness is a
+    common business invariant (e.g. one row per ``(order_id, line_no)``,
+    one row per ``(user_id, day)``) that the original four built-ins
+    cannot express. Diff emission targets the ``dbt_utils.unique_combination_of_columns``
+    macro (DEC-002 of #170): ``{dbt_utils.unique_combination_of_columns:
+    {combination_of_columns: [c1, c2, ...]}}``.
+
+    Cardinality (DEC-016): ``len(columns) >= 2`` — a single-column variant
+    is just ``unique`` and carries no new signal; an empty-tuple variant
+    is structurally meaningless. The no-duplicates invariant (DEC-016)
+    rejects ``columns=("a", "a")`` and any other tuple with a repeated
+    entry: a duplicate column compiles to a uniqueness test that always
+    trivially has the same value in two positions; the LLM almost
+    certainly meant something else.
+
+    Per-column identifier shape validation is **deferred to the anchor-
+    contract arm** (DEC-014; lands in US-004): Pydantic carries raw
+    strings here, matching the ``accepted_values.values`` /
+    ``relationships.to`` / ``.field`` precedent set on the existing
+    variants. The compiler arm (US-005a) separately routes each
+    ``columns[i]`` through ``validate_identifier`` + ``_fold_identifier``
+    + ``_quote`` before quoting (defence-in-depth).
+    """
+
+    model_config = _BASE_CONFIG
+
+    type: Literal["unique_combination"] = "unique_combination"
+    column: None = None
+    columns: tuple[str, ...]
+    where: str | None = None
+    rationale: str | None = None
+
+    @field_validator("columns")
+    @classmethod
+    def _columns_min_two(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        if len(v) < 2:
+            raise ValueError(
+                "CandidateTestUniqueCombination.columns must contain at least "
+                f"two entries (got {len(v)}) — a single-column variant is just "
+                "`unique` and carries no new signal"
+            )
+        return v
+
+    @field_validator("where")
+    @classmethod
+    def _where_non_empty_when_set(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError(
+                "CandidateTestUniqueCombination.where must be non-empty after strip when set"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _columns_no_duplicates(self) -> CandidateTestUniqueCombination:
+        if len(set(self.columns)) != len(self.columns):
+            raise ValueError(
+                "CandidateTestUniqueCombination.columns must not contain "
+                f"duplicates (got {list(self.columns)!r}) — a duplicate column "
+                "compiles to a uniqueness test that always trivially has the "
+                "same value in two positions"
+            )
+        return self
+
+    def __repr__(self) -> str:
+        """Redacted repr — omits the LLM-emitted ``where`` and ``rationale``
+        (DEC-013 of #170).
+
+        The ``columns`` tuple stays visible: column NAMES are not
+        value-bearing and answering "which combination is asserted unique?"
+        is operationally useful. The free-text ``where`` clause is a SQL
+        fragment the LLM authored and is exactly the kind of payload the
+        redaction exists to keep out of log sinks. Mirrors the precedent on
+        :class:`PruneDecision` / :class:`GradingResult` / :class:`DiffEntry`.
+        Full content remains accessible via :meth:`model_dump_json`.
+        """
+        return (
+            "CandidateTestUniqueCombination(type='unique_combination', "
+            f"<model-level>, columns={self.columns!r})"
+        )
+
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        """Redact via Pydantic's structured-repr hook (QG Pass 1 finding C1).
+
+        See :meth:`CandidateTestCustomSQL.__repr_args__` for rationale.
+        """
+        return [("type", self.type), ("column", self.column), ("columns", self.columns)]
+
 
 CandidateTest = Annotated[
     CandidateTestNotNull
@@ -249,15 +422,17 @@ CandidateTest = Annotated[
     | CandidateTestAcceptedValues
     | CandidateTestRelationships
     | CandidateTestCustomSQL
-    | CandidateTestRowCountBetween,
+    | CandidateTestRowCountBetween
+    | CandidateTestUniqueCombination,
     Field(discriminator="type"),
 ]
-"""Discriminated union over the six test variants (DEC-003 / DEC-002 / #169 DEC-001).
+"""Discriminated union over the seven test variants (DEC-003 / DEC-002 /
+#169 DEC-001 / #170 DEC-001).
 
 The discriminator field is ``type``; its value space is the closed
-:class:`Literal` union of the six variant strings. Unknown ``type``
+:class:`Literal` union of the seven variant strings. Unknown ``type``
 values raise :class:`pydantic.ValidationError` at construction — adding
-a seventh test variant requires extending this union and the
+an eighth test variant requires extending this union and the
 ``Literal`` on each variant class. The drift detector (US-014) catches
 the case where a fixture grows a new test type without the model.
 """
@@ -324,4 +499,5 @@ __all__ = (
     "CandidateTestRelationships",
     "CandidateTestRowCountBetween",
     "CandidateTestUnique",
+    "CandidateTestUniqueCombination",
 )

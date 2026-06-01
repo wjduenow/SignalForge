@@ -312,6 +312,36 @@ projects ingesting many existing `expect_table_row_count_to_be_between`
 declarations via `prune-existing` — the per-test cost is small but
 N-many `COUNT(*)`s adds up.
 
+### `unique_combination` — same engine routing, GROUP BY shape (issue #170)
+
+The seventh test variant, `unique_combination` (see
+[`docs/draft-ops.md`](draft-ops.md#composite-uniqueness-unique_combination)
+and [`docs/drafter-catalogue.md`](drafter-catalogue.md)), is pruned
+through the same orchestrator and routes to the same five `DropReason`
+literals. The compiler emits a multi-column GROUP BY identical in shape
+to the single-column `unique` test:
+
+```sql
+SELECT <col1>, <col2>[, ...] FROM <table> [WHERE <where>]
+GROUP BY <col1>, <col2>[, ...]
+HAVING COUNT(*) > 1
+```
+
+The shuffle cost is the same as single-column `unique` — a GROUP BY
+over the same row count produces the same intermediate row count
+regardless of key cardinality (bounded by `maximum_bytes_billed`).
+
+**Sample-mode behaviour — engine routes past the materialised sample.**
+A sampled GROUP BY is semantically approximate: uniqueness violations
+in the full table may not surface in the sample (false-negative). The
+prune engine therefore routes `unique_combination` past the
+materialised-sample substitution to the **source table**, mirroring
+the `row_count_between` metadata-bypass pattern (DEC-006 of #170).
+This applies under both `sample_strategy="materialised"` and
+`sample_strategy="oneshot"`. Plan cost accordingly — a
+`unique_combination` candidate always full-scans the source (bounded
+by `maximum_bytes_billed`), never the sample.
+
 ## Expected drop rates
 
 **A high drop rate is the working state, not the failure state.** The

@@ -86,6 +86,7 @@ from signalforge.draft.models import (
     CandidateSchema,
     CandidateTest,
     CandidateTestRowCountBetween,
+    CandidateTestUniqueCombination,
 )
 from signalforge.manifest.models import Manifest, Model
 from signalforge.prune.audit import (
@@ -969,17 +970,23 @@ def prune_tests(
         compile_partition_filter = resolved_config.partition_filter
 
         # CodeRabbit #176 fix (Thread PRRT_kwDOSNbUmM6F_w2h): when every
-        # candidate is ``row_count_between``, the per-test override below
-        # routes all of them to ``source_table_ref`` regardless of
-        # scope/strategy. Skip the materialise_sample call AND the
-        # _resolve_sample_bucket call — both are wasted work in this case,
-        # and either failing on the adapter would spuriously route every
-        # test to ``kept-without-evidence`` even though they could have run
+        # candidate is ``row_count_between`` or ``unique_combination``,
+        # the per-test override below routes all of them to
+        # ``source_table_ref`` regardless of scope/strategy. Skip the
+        # materialise_sample call AND the _resolve_sample_bucket call —
+        # both are wasted work in this case, and either failing on the
+        # adapter would spuriously route every test to
+        # ``kept-without-evidence`` even though they could have run
         # directly against the source. Mirrors the empty-candidate
         # short-circuit (#105) at a lower-tier: same "no warehouse
-        # pre-work needed" reasoning, narrower trigger.
+        # pre-work needed" reasoning, narrower trigger. ``unique_combination``
+        # joins the bypass set in #170 US-005b / DEC-006 — composite
+        # uniqueness on a sample carries false-negative risk (a duplicate
+        # pair may straddle the sampled and unsampled rows) so always-source
+        # is the honest routing.
         all_bypass_to_source = bool(pairs) and all(
-            isinstance(test, CandidateTestRowCountBetween) for _, test in pairs
+            isinstance(test, (CandidateTestRowCountBetween, CandidateTestUniqueCombination))
+            for _, test in pairs
         )
 
         if all_bypass_to_source:
@@ -1102,20 +1109,23 @@ def prune_tests(
                 continue
 
             # Per-test table-ref override for ``row_count_between`` (#169
-            # US-007a QG fix; DEC-003 corrected). A COUNT(*) against a
-            # materialised sample returns the sample size, NOT the model's
-            # true row count — bounds checked against sample size are
-            # semantically meaningless. Route ``row_count_between`` past the
-            # materialised substitution to ``source_table_ref`` so the
-            # bounds verdict is correct at the default config
+            # US-007a QG fix; DEC-003 corrected) and ``unique_combination``
+            # (#170 US-005b / DEC-006). A COUNT(*) against a materialised
+            # sample returns the sample size, NOT the model's true row count
+            # — bounds checked against sample size are semantically
+            # meaningless. Composite uniqueness on a bucket-mod'd subset
+            # carries false-negative risk because a duplicate pair may
+            # straddle the sampled and unsampled rows. Route both variants
+            # past the materialised substitution to ``source_table_ref`` so
+            # the verdict is correct at the default config
             # (``scope=sample`` + ``sample_strategy=materialised``). The
-            # COUNT(*) against the source remains cheap (single aggregate
-            # scan, no row materialisation). All other variants continue to
+            # aggregate scan against the source remains bounded by
+            # ``maximum_bytes_billed``. All other variants continue to
             # consume the substituted ``compile_table_ref`` per the #22
             # materialised-sample contract.
             per_test_table_ref = (
                 source_table_ref
-                if isinstance(test, CandidateTestRowCountBetween)
+                if isinstance(test, (CandidateTestRowCountBetween, CandidateTestUniqueCombination))
                 else compile_table_ref
             )
 

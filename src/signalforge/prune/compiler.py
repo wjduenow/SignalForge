@@ -64,6 +64,7 @@ from signalforge.draft.models import (
     CandidateTestRelationships,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 from signalforge.manifest.errors import (
     AmbiguousRefError,
@@ -902,6 +903,86 @@ def _compile_row_count_between(
     return sql
 
 
+def _compile_unique_combination(
+    test: CandidateTestUniqueCombination,
+    table_ref: TableRef,
+    dialect: Dialect,
+) -> str | _InvalidIdentifier:
+    """Compile ``unique_combination(columns, where?)`` to a composite-grain
+    GROUP BY ... HAVING COUNT(*) > 1 (#170, DEC-014 / DEC-015).
+
+    Emits::
+
+        SELECT <quoted_cols> FROM <table_ref> [WHERE <where>]
+            GROUP BY <quoted_cols> HAVING COUNT(*) > 1
+
+    Each ``columns[i]`` is shape-validated via
+    :func:`signalforge.warehouse._sql_safety.validate_identifier`
+    (DEC-014 defence-in-depth — the anchor-contract arm already checks
+    column existence against the manifest model, but identifier shape is
+    a separate guard against backtick/whitespace/quote break-out) and
+    then folded + quoted per :attr:`Dialect.identifier_case` and
+    :attr:`Dialect.quote_char`. Any malformed column identifier routes
+    via :class:`_InvalidIdentifier` to ``kept-without-evidence`` —
+    the LLM may have proposed a useful tuple with a typo'd identifier
+    that the operator can repair, so we ship rather than drop (DEC-011 of
+    issue #6).
+
+    **DEC-015 compose-then-validate.** ``where`` is freeform LLM- or
+    operator-supplied SQL. The compiler composes the full SELECT THEN
+    routes the WHOLE statement through
+    :func:`signalforge.warehouse._sql_safety.validate_test_sql` — the
+    same reuse pattern :func:`_compile_row_count_between` follows (#169
+    DEC-005). A hostile ``where`` containing ``;`` / ``--`` / ``/* */``
+    / unbalanced parens fails the cheap-rejects scan on the composed SQL
+    and routes via :class:`_InvalidIdentifier` to
+    ``kept-without-evidence`` (#170 DEC-015).
+
+    **No automatic NULL-exclusion.** Unlike the single-column ``unique``
+    variant (DEC-023 — dbt-core convention), composite uniqueness does
+    NOT inject an ``IS NOT NULL`` filter. This matches the
+    ``dbt_utils.unique_combination_of_columns`` macro's default
+    behaviour — operators that want NULL filtering supply it via the
+    ``where`` field.
+
+    **Sample-mode is out of scope for the compiler.** The engine
+    (US-005b) routes ``unique_combination`` to the source table under
+    both ``materialised`` and ``oneshot`` sample strategies (composite
+    uniqueness on a bucket-mod'd subset has false-negative risk because
+    a duplicate pair may straddle the sampled and unsampled rows). The
+    compiler just consumes ``table_ref`` as-is; whether it resolves to
+    the source or to a materialised sample is the engine's call.
+    """
+    # DEC-014 — per-column identifier shape gate, defence-in-depth on top
+    # of the anchor-contract arm in ``signalforge.draft.parser``.
+    for col in test.columns:
+        try:
+            validate_identifier("CandidateTestUniqueCombination.columns", col)
+        except InvalidIdentifierError:
+            return _InvalidIdentifier(
+                reason=(f"candidate test references an invalid identifier shape: column={col!r}")
+            )
+    cols_sql = ", ".join(_quote(col, dialect) for col in test.columns)
+    table = _qualified_table_name(table_ref, dialect)
+    if test.where is None:
+        sql = f"SELECT {cols_sql} FROM {table} GROUP BY {cols_sql} HAVING COUNT(*) > 1"
+    else:
+        sql = (
+            f"SELECT {cols_sql} FROM {table} WHERE {test.where} "
+            f"GROUP BY {cols_sql} HAVING COUNT(*) > 1"
+        )
+    # DEC-015 — compose-then-validate. The composed statement (not just
+    # the ``where`` fragment) is what reaches the warehouse, so the safety
+    # check fires on the assembled SQL. Mirrors ``_compile_row_count_between``.
+    try:
+        validate_test_sql(sql)
+    except QuerySyntaxError:
+        return _InvalidIdentifier(
+            reason="unique_combination rejected by SQL safety check on composed SQL"
+        )
+    return sql
+
+
 def _compile_test(
     test: CandidateTest,
     table_ref: TableRef,
@@ -1023,8 +1104,21 @@ def _compile_test(
         # table>`` so the count still lands on a cheap sample without
         # double-sampling.
         return _compile_row_count_between(test, table_ref, dialect)
-    # The discriminated union is closed over the six variants above; an
-    # unreachable arm here means a seventh variant was added without a
+    if isinstance(test, CandidateTestUniqueCombination):
+        # unique_combination consumes ``table_ref`` as-is — sample-mode
+        # routing (engine-level source override under ``materialised`` /
+        # ``oneshot``) is the engine's responsibility (#170 US-005b).
+        # Composite uniqueness on a bucket-mod'd subset has false-negative
+        # risk because a duplicate pair may straddle the sampled and
+        # unsampled rows, so the engine always routes this variant to the
+        # source table. The compiler-level pin in
+        # ``test_compile_unique_combination_*`` snapshots the SQL shape;
+        # the engine-level pin in
+        # ``test_prune_tests_unique_combination_under_*`` is the load-bearing
+        # routing guarantee.
+        return _compile_unique_combination(test, table_ref, dialect)
+    # The discriminated union is closed over the seven variants above; an
+    # unreachable arm here means an eighth variant was added without a
     # compiler branch.
     raise NotImplementedError(  # pragma: no cover
         f"no compiler branch for candidate test variant {type(test).__name__}"

@@ -97,8 +97,9 @@ def test_valid_test_types_constant_matches_known_set() -> None:
     """Pin the canonical set so adding a new test type without updating
     VALID_TEST_TYPES (and the prompt catalogue) fails loud here. The four
     standard dbt schema tests, the ``custom_sql`` business-rule variant
-    (DEC-002), and the ``row_count_between`` model-level row-count guard
-    (DEC-001 of #169)."""
+    (DEC-002), the ``row_count_between`` model-level row-count guard
+    (DEC-001 of #169), and the ``unique_combination`` model-level
+    composite-uniqueness variant (DEC-001 of #170)."""
     assert (
         frozenset(
             {
@@ -108,6 +109,7 @@ def test_valid_test_types_constant_matches_known_set() -> None:
                 "relationships",
                 "custom_sql",
                 "row_count_between",
+                "unique_combination",
             }
         )
         == VALID_TEST_TYPES
@@ -133,28 +135,45 @@ def test_render_system_prompt_drops_excluded_from_catalogue() -> None:
 
 
 def test_render_system_prompt_updates_scope_line() -> None:
-    prompt = _render_system_prompt(("accepted_values", "relationships", "row_count_between"))
+    prompt = _render_system_prompt(
+        ("accepted_values", "relationships", "row_count_between", "unique_combination")
+    )
     # SCOPE line names only the surviving standard types; custom_sql (still
     # allowed) is appended via the "plus" clause.
     assert "Propose only `not_null` and `unique`, plus `custom_sql` tests" in prompt
     assert "accepted_values" not in prompt
     assert "relationships" not in prompt
     assert "row_count_between" not in prompt
+    assert "unique_combination" not in prompt
 
 
 def test_render_system_prompt_single_remaining_type_uses_bare_form() -> None:
     prompt = _render_system_prompt(
-        ("unique", "accepted_values", "relationships", "row_count_between")
+        (
+            "unique",
+            "accepted_values",
+            "relationships",
+            "row_count_between",
+            "unique_combination",
+        )
     )
     assert "Propose only `not_null`, plus `custom_sql` tests" in prompt
 
 
 def test_render_system_prompt_excluding_all_four_standard_keeps_custom_sql() -> None:
-    # Excluding the five standard types leaves custom_sql, which is enough
+    # Excluding the six standard types leaves custom_sql, which is enough
     # for the drafter to propose (issue #116 — custom_sql is a valid type;
-    # issue #169 — row_count_between joined the standard set).
+    # issue #169 — row_count_between joined the standard set;
+    # issue #170 — unique_combination joined the standard set).
     prompt = _render_system_prompt(
-        ("not_null", "unique", "accepted_values", "relationships", "row_count_between")
+        (
+            "not_null",
+            "unique",
+            "accepted_values",
+            "relationships",
+            "row_count_between",
+            "unique_combination",
+        )
     )
     assert "Propose only `custom_sql` tests" in prompt
     assert '"type": "custom_sql"' in prompt
@@ -170,6 +189,7 @@ def test_render_system_prompt_excluding_everything_raises() -> None:
                 "accepted_values",
                 "relationships",
                 "row_count_between",
+                "unique_combination",
                 "custom_sql",
             )
         )
