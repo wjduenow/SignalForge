@@ -271,6 +271,67 @@ silently lower the `pass_rate` of the criteria that did run
 successfully — but `aggregate_complete` flips to `False`, so the diff
 renderer flags the report as partial.
 
+## Row-count calibration
+
+The sixth test variant, `row_count_between` (issue #169; see
+[`docs/draft-ops.md`](draft-ops.md#row-count-tests-row_count_between)
+and [`docs/prune-ops.md`](prune-ops.md#row-count-cost-model)), carries
+two **numeric bounds** that an LLM can satisfy trivially. A drafted
+`row_count_between(minimum=0, maximum=None)` passes every Pydantic
+check (at least one bound is set), runs against the warehouse, and
+always drops as `always-passes` — the bound is so loose nothing can
+violate it. The prune layer cannot tell whether `minimum=0` is "the
+LLM thought hard and concluded zero is the floor" or "the LLM gave up
+and emitted the lowest valid number." That distinction is exactly what
+the grader is for.
+
+**Where the calibration lives.** As of #169, the existing
+`no-redundant` criterion in `DEFAULT_RUBRIC` carries language scoring
+whether a numeric bound is a meaningful guardrail vs. a vacuous one:
+
+> Are any tests redundant — semantically identical to another test,
+> already dropped by the prune layer as always-passing, or trivially
+> satisfiable? For tests carrying numeric bounds (e.g.
+> `row_count_between`), is each bound a meaningful guardrail
+> calibrated to the model's expected size, rather than a vacuous floor
+> or ceiling (`minimum=0` with no `maximum`, or a `maximum` so high it
+> cannot fire)?
+
+The criterion was extended rather than added as a fifth — a 5th
+criterion would have cost ~25% more LLM round-trips per artifact
+without adding load-bearing signal. "Trivially satisfiable" already
+covered the conceptual territory; the extension makes it concrete for
+the bound shape. Locked verbatim per DEC-016 of #7; rotation history
+is recorded in `src/signalforge/grade/rubric.py`.
+
+**Routing.** A vacuous bound is low-signal, not a degrade trigger. The
+judge scores the artifact normally, the score lands low (typically
+`0.0`–`0.2`), `passed` flips to `False`, and the diff renderer routes
+the row to **`flagged`** — the operator sees the test ships but the
+calibration is suspect. It does **not** route to `kept-uncertain`
+(that tier is for prune-side "could not evaluate" origins, not
+grade-side weakness) and it does **not** route through the conservative
+degrade path (that path is the DEC-015 sentinel for `score=None`).
+
+**The 3-trigger degrade taxonomy stays locked.** A vacuous bound is a
+real grade, not a degraded one. The three causes for `score=None,
+passed=False, reasoning="..."` are unchanged:
+
+1. `LLMError` retries exhausted (including a provider-specific safety-
+   filter / no-content response routed via `LLMResponseFormatError`).
+2. `GradeOutputError` (parser failure or anchor-contract failure).
+3. `total_budget_seconds` exceeded.
+
+A fourth trigger for "vacuous bound" would conflate "we could not
+evaluate" with "we evaluated and the result was weak" — two different
+operator-actions. The score-and-pass field already carries the weak
+verdict; adding a degrade slot would hide it.
+
+**`_PROMPT_VERSION` rotation.** The criterion-text change rotates the
+grade-side `_PROMPT_VERSION` and the grade-prompt cache-stability
+snapshot moves in lockstep (US-009 of #169). This is distinct from the
+drafter-side `_PROMPT_VERSION` — the two cache prefixes are independent.
+
 ## Audit JSONL schema
 
 > **Consumer guide.** For cross-stage joins (including grade JSONL ↔
