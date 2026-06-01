@@ -30,8 +30,12 @@ models:
           - accepted_values:
               values: ["Walk Up", "Local365", "24 Hour Walk Up Pass"]
           # Unsupported namespaced/custom generic — custom-or-generic-test.
-          - dbt_utils.unique_combination_of_columns:
-              combination_of_columns: [trip_id, subscriber_type]
+          # (Pre-#170 this was ``dbt_utils.unique_combination_of_columns`` —
+          # #170 promoted that macro to a first-class variant, so the fixture
+          # uses a sibling dbt_utils macro to keep the namespaced-custom-skip
+          # behavioural pin.)
+          - dbt_utils.not_null_proportion:
+              at_least: 0.95
 
       - name: start_station_id
         description: "FK to the start station."

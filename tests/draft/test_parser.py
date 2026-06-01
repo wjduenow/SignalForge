@@ -1636,9 +1636,7 @@ def test_unique_combination_valid_three_columns_with_where() -> None:
         raw,
         frozenset({"order_id", "line_no", "tenant_id"}),
         llm_result_meta=_meta(),
-        model_columns_by_type=_types_map(
-            order_id="INT64", line_no="INT64", tenant_id="INT64"
-        ),
+        model_columns_by_type=_types_map(order_id="INT64", line_no="INT64", tenant_id="INT64"),
     )
     assert isinstance(result, CandidateSchema)
 
@@ -1704,9 +1702,7 @@ def test_unique_combination_type_incoherent_where_rejected() -> None:
             raw,
             frozenset({"user_id", "day", "name"}),
             llm_result_meta=_meta(),
-            model_columns_by_type=_types_map(
-                user_id="INT64", day="DATE", name="STRING"
-            ),
+            model_columns_by_type=_types_map(user_id="INT64", day="DATE", name="STRING"),
         )
     assert any(
         "unique_combination where references column" in v

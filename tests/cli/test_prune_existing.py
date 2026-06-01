@@ -366,7 +366,11 @@ def test_skipped_verbose_adds_detail(tmp_path: Path, capsys: pytest.CaptureFixtu
     err = capsys.readouterr().err
     assert code == 0
     assert "Skipped 2 unsupported tests:" in err
-    assert "dbt_utils.unique_combination_of_columns" in err
+    # Pre-#170 this was ``dbt_utils.unique_combination_of_columns``; #170
+    # promoted that macro to a first-class variant, so the fixture now uses
+    # ``dbt_utils.not_null_proportion`` to keep the namespaced-custom-skip
+    # behavioural pin.
+    assert "dbt_utils.not_null_proportion" in err
     assert "positive" in err
     assert "reason=custom-or-generic-test" in err
     assert "reason=unsupported-test-type" in err

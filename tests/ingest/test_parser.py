@@ -20,6 +20,7 @@ from signalforge.draft.models import (
     CandidateTestRelationships,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 from signalforge.ingest.models import SkippedTest, SkipReason
 from signalforge.ingest.parser import parse_test_entry
@@ -150,14 +151,19 @@ def test_accepted_values_with_interleaved_config_keys() -> None:
 
 
 def test_dbt_utils_namespaced_test_is_custom_skip() -> None:
+    # Use a sibling dbt_utils macro that is NOT promoted to a first-class
+    # variant. ``unique_combination_of_columns`` was the original example
+    # before #170 promoted it to ``CandidateTestUniqueCombination``; pick
+    # another widely-used dbt_utils generic for the namespaced-custom-skip
+    # behavioural pin.
     result = parse_test_entry(
-        {"dbt_utils.unique_combination_of_columns": {"combination_of_columns": ["a", "b"]}},
-        column=None,
+        {"dbt_utils.not_null_proportion": {"at_least": 0.95}},
+        column="status",
     )
     assert isinstance(result, SkippedTest)
     assert result.reason == "custom-or-generic-test"
-    assert result.test_name == "dbt_utils.unique_combination_of_columns"
-    assert result.column is None
+    assert result.test_name == "dbt_utils.not_null_proportion"
+    assert result.column == "status"
 
 
 def test_dbt_expectations_namespaced_test_is_custom_skip() -> None:
@@ -546,3 +552,235 @@ def test_row_count_between_fixture_round_trips() -> None:
         ("skipped", "malformed-supported-test"),  # min > max
         ("skipped", "custom-or-generic-test"),  # sibling expect_table_row_count_to_equal
     ]
+
+
+# --- unique_combination (US-007 of #170) ---------------------------------
+
+_UC_NAME = "dbt_utils.unique_combination_of_columns"
+
+
+def test_unique_combination_inline_two_columns_maps_to_variant() -> None:
+    """Valid inline ``combination_of_columns`` with two entries maps to the
+    variant (DEC-008): YAML key ``combination_of_columns`` ↔ Pydantic
+    ``columns``. The variant is model-level only (``column = None``)."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["order_id", "line_item_id"]}},
+        column=None,
+    )
+    assert isinstance(result, CandidateTestUniqueCombination)
+    assert result.columns == ("order_id", "line_item_id")
+    assert result.where is None
+    assert result.column is None
+
+
+def test_unique_combination_with_where_carries_where_field() -> None:
+    """``where`` is a first-class arg for this variant (NOT stripped as a
+    generic test-config passthrough). The parser must carry it onto the
+    variant verbatim."""
+    result = parse_test_entry(
+        {
+            _UC_NAME: {
+                "combination_of_columns": ["order_id", "line_item_id"],
+                "where": "ordered_at >= '2024-01-01'",
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, CandidateTestUniqueCombination)
+    assert result.columns == ("order_id", "line_item_id")
+    assert result.where == "ordered_at >= '2024-01-01'"
+
+
+def test_unique_combination_three_columns_is_valid() -> None:
+    """A 3-tuple is a perfectly valid composite-uniqueness shape — e.g.
+    one row per ``(query_signature, query_type, query_date)``."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["query_signature", "query_type", "query_date"]}},
+        column=None,
+    )
+    assert isinstance(result, CandidateTestUniqueCombination)
+    assert result.columns == ("query_signature", "query_type", "query_date")
+
+
+def test_unique_combination_under_arguments_dbt_18() -> None:
+    """The dbt 1.8+ ``arguments:`` nested shape is recognised (mirrors
+    accepted_values / relationships / row_count_between precedent)."""
+    result = parse_test_entry(
+        {
+            _UC_NAME: {
+                "arguments": {
+                    "combination_of_columns": ["order_id", "line_item_id"],
+                    "where": "is_active",
+                }
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, CandidateTestUniqueCombination)
+    assert result.columns == ("order_id", "line_item_id")
+    assert result.where == "is_active"
+
+
+def test_unique_combination_missing_key_is_malformed() -> None:
+    """A body with no ``combination_of_columns`` key → malformed-supported-test
+    (the variant cannot be constructed without the column tuple)."""
+    result = parse_test_entry({_UC_NAME: {"where": "1=1"}}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == _UC_NAME
+    assert result.column is None
+    assert "combination_of_columns" in result.detail
+
+
+def test_unique_combination_single_column_is_malformed() -> None:
+    """A single-column ``combination_of_columns`` is just ``unique`` and
+    carries no new signal → malformed-supported-test (mirrors the
+    Pydantic-side cardinality invariant)."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["order_id"]}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == _UC_NAME
+
+
+def test_unique_combination_empty_list_is_malformed() -> None:
+    """An empty-list ``combination_of_columns`` is structurally meaningless
+    → malformed-supported-test."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": []}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_unique_combination_duplicate_columns_is_malformed() -> None:
+    """A tuple with a repeated entry → malformed-supported-test (mirrors the
+    Pydantic-side no-duplicates invariant). The LLM/operator almost
+    certainly meant something else."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["order_id", "order_id"]}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert "duplicate" in result.detail.lower()
+
+
+def test_unique_combination_non_string_items_is_malformed() -> None:
+    """Each entry in ``combination_of_columns`` must be a string identifier;
+    a non-string item (e.g. an int) → malformed-supported-test."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["order_id", 42]}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_unique_combination_non_list_value_is_malformed() -> None:
+    """``combination_of_columns`` must be a list — a scalar string under the
+    key (a common operator typo) → malformed-supported-test."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": "order_id"}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_unique_combination_column_scoped_is_malformed() -> None:
+    """The variant is model-level only — a column-scoped usage routes to a
+    structured skip with a descriptive ``detail`` rather than leaking a
+    Pydantic ValidationError."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["order_id", "line_item_id"]}},
+        column="order_id",
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == _UC_NAME
+    assert result.column == "order_id"
+    assert "model-level" in result.detail
+
+
+def test_unique_combination_non_string_where_is_malformed() -> None:
+    """``where`` must be a non-empty string when set."""
+    result = parse_test_entry(
+        {
+            _UC_NAME: {
+                "combination_of_columns": ["order_id", "line_item_id"],
+                "where": 42,
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_unique_combination_empty_string_where_is_malformed() -> None:
+    """A whitespace-only ``where`` is unhelpful (mirrors the Pydantic-side
+    invariant) → malformed-supported-test."""
+    result = parse_test_entry(
+        {
+            _UC_NAME: {
+                "combination_of_columns": ["order_id", "line_item_id"],
+                "where": "   ",
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_unique_combination_non_dict_body_is_malformed() -> None:
+    """A non-dict body has no args → no ``combination_of_columns`` →
+    malformed-supported-test."""
+    result = parse_test_entry({_UC_NAME: "not-a-mapping"}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == _UC_NAME
+
+
+def test_unique_combination_config_keys_are_ignored() -> None:
+    """dbt config keys interleaved with args (severity, tags, name,
+    error_if, warn_if, description) are stripped before the required-arg
+    check (DEC mirroring #169 + ``.claude/rules/ingest-layer.md`` §
+    "dbt syntax tolerance"). The valid args still produce the variant."""
+    result = parse_test_entry(
+        {
+            _UC_NAME: {
+                "combination_of_columns": ["order_id", "line_item_id"],
+                "severity": "warn",
+                "tags": ["uniqueness"],
+                "name": "orders_unique_combo",
+                "error_if": ">10",
+                "warn_if": ">0",
+                "config": {"store_failures": True},
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, CandidateTestUniqueCombination)
+    assert result.columns == ("order_id", "line_item_id")
+
+
+# Sibling macros stay in custom-or-generic-test (no behaviour change).
+
+
+def test_unique_combination_sibling_macro_is_custom_skip() -> None:
+    """A *different* dbt_utils macro (e.g. ``unique_combination_of_columns_quoted``,
+    a hypothetical sibling) is NOT promoted to the variant — it falls
+    through to the existing namespaced custom-or-generic skip. Only the
+    one specific macro name is recognised."""
+    result = parse_test_entry(
+        {"dbt_utils.unique_where_count": {"combination_of_columns": ["a", "b"]}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "custom-or-generic-test"
+    assert result.test_name == "dbt_utils.unique_where_count"
