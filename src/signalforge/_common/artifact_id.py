@@ -57,6 +57,7 @@ from signalforge.draft.models import (
     CandidateTestRelationships,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 
 
@@ -113,6 +114,22 @@ def model_test_args_hash(test: CandidateTest) -> str:
             "column": test.column,
             "minimum": test.minimum,
             "maximum": test.maximum,
+            "where": test.where,
+        }
+    elif isinstance(test, CandidateTestUniqueCombination):
+        # Identifying args are the column tuple + optional ``where``.
+        # ``columns`` is **SORTED** before serialisation (DEC-011 of
+        # #170, load-bearing): ``(a, b)`` and ``(b, a)`` describe the
+        # same GROUP BY result-row identity (composite uniqueness is
+        # order-invariant), so a single artifact_id → single warehouse
+        # call → stable cache reuse. Mirrors the
+        # ``accepted_values.values`` sort precedent above. ``column``
+        # is always ``None`` (model-level only) but included for
+        # shape-parity with the other arms.
+        payload = {
+            "type": test.type,
+            "column": test.column,
+            "columns": sorted(test.columns),
             "where": test.where,
         }
     else:  # pragma: no cover - exhaustive dispatch over the closed union

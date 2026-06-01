@@ -54,6 +54,7 @@ from signalforge.draft.models import (
     CandidateTestRelationships,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 from signalforge.prune import PruneResult
 
@@ -153,6 +154,19 @@ def _render_test(test: CandidateTest) -> Any:
     the emitted YAML stays minimal (DEC-002). THIS FUNCTION is the
     outbound mapping seam — the ingest parser owns the inverse inbound
     mapping (``min_value``/``max_value`` → ``minimum``/``maximum``).
+
+    A ``unique_combination`` test (issue #170, DEC-002) renders as a
+    ``dbt_utils.unique_combination_of_columns`` block. The Python-side
+    field ``columns`` maps OUTBOUND to the dbt-utils macro key
+    ``combination_of_columns``; the prefix-free internal name mirrors
+    the ``values`` / ``to`` / ``field`` precedent on the other variants
+    while keeping the macro naming confined to the emitter (the ingest
+    parser owns the inverse inbound mapping). Emission preserves the
+    order Pydantic carries — sorting is for the canonical-hash domain
+    only (DEC-011), NOT for YAML output, so the operator's review
+    surface reflects the LLM's declared column order. The optional
+    ``where`` field appears verbatim under the ``where`` key only when
+    set; ``None`` is omitted.
     """
     if isinstance(test, (CandidateTestNotNull, CandidateTestUnique)):
         return test.type
@@ -171,6 +185,11 @@ def _render_test(test: CandidateTest) -> Any:
         if test.where is not None:
             body["where"] = test.where
         return {"dbt_expectations.expect_table_row_count_to_be_between": body}
+    if isinstance(test, CandidateTestUniqueCombination):
+        uc_body: dict[str, Any] = {"combination_of_columns": list(test.columns)}
+        if test.where is not None:
+            uc_body["where"] = test.where
+        return {"dbt_utils.unique_combination_of_columns": uc_body}
     raise ValueError(  # pragma: no cover — exhaustive over the closed union
         f"Unknown CandidateTest variant: {type(test).__name__}"
     )
