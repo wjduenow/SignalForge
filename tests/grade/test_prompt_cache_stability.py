@@ -25,16 +25,20 @@ below — the constant in source is the source of truth, this docstring
 deliberately does not hard-code a hash so it can't drift. Latest known
 rotations:
 
-- ``4dae4421972e9c2d`` — current. Established by #170 (DEC-012) when
-  the grade-side ``_PROMPT_VERSION`` snapshot surface was added.
-  Coincides with the #170 (DEC-007) rotation of the ``no-redundant``
-  criterion (US-008) that grew sibling calibration prose for
-  composite-key tests (``unique_combination``). Two surfaces, one
-  commit-pair: US-008 extended the criterion text + rotated the
-  dynamic ``rubric_hash`` and ``prompt_version_template`` returns
-  (already pinned at ``tests/grade/test_prompts.py``); US-009
-  established this snapshot at the same value the live helper
-  returns for ``DEFAULT_RUBRIC`` today.
+- ``4dae4421972e9c2d`` — established by #170 (DEC-012) when the
+  grade-side ``_PROMPT_VERSION`` snapshot surface was added. Coincided
+  with the #170 (DEC-007) rotation of the ``no-redundant`` criterion
+  (US-008) that grew sibling calibration prose for composite-key tests
+  (``unique_combination``).
+- ``b1e609fae240ac1c`` — current. Rotated under #171 (DEC-004) when
+  the ``no-redundant`` criterion gained sibling calibration prose for
+  per-period anomaly tests (``row_count_anomaly_by_period``): the
+  judge scores whether the ``(method, seasonality, threshold)``
+  combination is tight enough to catch the failure mode (anomalously
+  small/empty period) but loose enough not to fire on legitimate
+  weekday/weekend or seasonal swings. The system prompt, envelope
+  tags, and rubric structure are unchanged; only the ``no-redundant``
+  criterion text grew.
 
 If this rotates again, update both :data:`_EXPECTED_PROMPT_VERSION` and
 :data:`_RUBRIC_BLOCK_GOLDEN` in lockstep — the rotation is the signal
@@ -50,7 +54,7 @@ import pytest
 from signalforge.grade.prompts import _PROMPT_VERSION, render_rubric_block
 from signalforge.grade.rubric import DEFAULT_RUBRIC
 
-_EXPECTED_PROMPT_VERSION: str = "4dae4421972e9c2d"
+_EXPECTED_PROMPT_VERSION: str = "b1e609fae240ac1c"
 
 
 # Captured once via ``render_rubric_block(DEFAULT_RUBRIC)``. Any byte-level
@@ -66,7 +70,7 @@ The judge will be asked to score against ONE of these criteria per call:
 clarity: Is the column description clear, specific, and actionable? Does it unambiguously explain the column's purpose and business meaning without jargon or vagueness?
 consistency: Are column names and descriptions consistent in terminology? Do related concepts use the same term throughout, and do synonyms or conflicting terminology appear?
 rationale: Does every test have a clear rationale explaining why it is needed? Are vague or missing rationales present?
-no-redundant: Are any tests redundant — semantically identical to another test, already dropped by the prune layer as always-passing, or trivially satisfiable? For tests carrying numeric bounds (e.g. `row_count_between`), is each bound a meaningful guardrail calibrated to the model's expected size, rather than a vacuous floor or ceiling (`minimum=0` with no `maximum`, or a `maximum` so high it cannot fire)? For composite-key tests (e.g. `unique_combination`), is the column tuple a meaningful grain (e.g. `(order_id, line_item_id)`), or vacuously unique because one member is already a primary key on its own? A tuple of the shape `(primary_key, anything)` is unique by construction and adds no signal.
+no-redundant: Are any tests redundant — semantically identical to another test, already dropped by the prune layer as always-passing, or trivially satisfiable? For tests carrying numeric bounds (e.g. `row_count_between`), is each bound a meaningful guardrail calibrated to the model's expected size, rather than a vacuous floor or ceiling (`minimum=0` with no `maximum`, or a `maximum` so high it cannot fire)? For composite-key tests (e.g. `unique_combination`), is the column tuple a meaningful grain (e.g. `(order_id, line_item_id)`), or vacuously unique because one member is already a primary key on its own? A tuple of the shape `(primary_key, anything)` is unique by construction and adds no signal. For per-period anomaly tests (e.g. `row_count_anomaly_by_period`), score CALIBRATION: is the `(method, seasonality, threshold)` combination tight enough to catch the failure mode (anomalously small/empty period) but loose enough not to fire on legitimate weekday/weekend or seasonal swings? `method="zscore"` with `threshold=3.0` on a weekday-heavy model without `seasonality="dow"` will likely fire every Saturday — that's a calibration failure.
 """
 
 

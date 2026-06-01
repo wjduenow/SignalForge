@@ -159,7 +159,15 @@ def test_default_rubric_criterion_text_matches_dec_016_verbatim() -> None:
         "meaningful grain (e.g. `(order_id, line_item_id)`), or "
         "vacuously unique because one member is already a primary "
         "key on its own? A tuple of the shape `(primary_key, "
-        "anything)` is unique by construction and adds no signal."
+        "anything)` is unique by construction and adds no signal. "
+        "For per-period anomaly tests (e.g. "
+        "`row_count_anomaly_by_period`), score CALIBRATION: is the "
+        "`(method, seasonality, threshold)` combination tight enough "
+        "to catch the failure mode (anomalously small/empty period) "
+        "but loose enough not to fire on legitimate weekday/weekend "
+        'or seasonal swings? `method="zscore"` with `threshold=3.0` '
+        'on a weekday-heavy model without `seasonality="dow"` will '
+        "likely fire every Saturday — that's a calibration failure."
     )
 
 
@@ -187,13 +195,21 @@ def test_default_rubric_is_a_tuple() -> None:
 # - ``22a0231690aca6ef`` — rotated under #169 (DEC-009) when the
 #   ``no-redundant`` criterion gained calibration prose for
 #   numeric-bounded tests (``row_count_between``).
-# - ``30a9fda975b6d45c`` — current. Rotated under #170 (DEC-007) when
+# - ``30a9fda975b6d45c`` — rotated under #170 (DEC-007) when
 #   the ``no-redundant`` criterion gained sibling calibration prose
 #   for composite-key tests (``unique_combination``): a vacuously
 #   unique tuple of the shape ``(primary_key, anything)`` carries no
 #   grain signal. The grader's 3-trigger degrade taxonomy (DEC-011)
 #   stayed locked; this is a prose extension, not a structural change.
-_DEFAULT_RUBRIC_GOLDEN_HASH = "30a9fda975b6d45c"
+# - ``a4e3ee92cf9ec36f`` — current. Rotated under #171 (DEC-004) when
+#   the ``no-redundant`` criterion gained sibling calibration prose
+#   for per-period anomaly tests (``row_count_anomaly_by_period``):
+#   the judge scores whether the ``(method, seasonality, threshold)``
+#   combination is tight enough to catch the failure mode but loose
+#   enough not to fire on legitimate weekday/weekend or seasonal
+#   swings. Same routing as the #169 / #170 extensions; the grader's
+#   3-trigger degrade taxonomy stays locked.
+_DEFAULT_RUBRIC_GOLDEN_HASH = "a4e3ee92cf9ec36f"
 
 
 def test_default_rubric_hash_is_stable() -> None:
@@ -340,6 +356,46 @@ def test_no_redundant_criterion_carries_row_count_between_calibration_prose() ->
     # The phrase "vacuous" appears in the prose to give the judge the
     # explicit vocabulary the rubric scores against.
     assert "vacuous" in text
+
+
+def test_no_redundant_criterion_carries_row_count_anomaly_calibration_prose() -> None:
+    """DEC-004 of #171 — the ``no-redundant`` criterion was further
+    extended (NOT a 5th criterion added — DEC-004 explicitly rejects a
+    5th to avoid the +25% LLM cost, mirroring #169 / #170) with
+    calibration prose teaching the judge to score weak anomaly-test
+    calibration low.
+
+    The prose must name:
+
+    * ``row_count_anomaly_by_period`` — the test type this lands for;
+      this is what a weakly-calibrated per-period anomaly test gets
+      matched against.
+    * ``method``, ``seasonality``, ``threshold`` — the three knobs the
+      operator (or LLM) sets; the calibration question is whether
+      their combination is tight enough to catch the failure mode but
+      loose enough not to fire on legitimate seasonal swings.
+    * ``CALIBRATION`` (or equivalent) — the load-bearing concept: the
+      judge is asked whether the configuration is well-calibrated, not
+      merely whether the test fires.
+
+    Load-bearing for the calibration intent: without this prose, the
+    judge has no signal to distinguish a healthy ``method="zscore",
+    seasonality="dow", threshold=3.0`` configuration (catches a
+    Saturday outage on a weekday-heavy model) from a borderline
+    ``method="zscore", seasonality=None, threshold=3.0`` one (which
+    would fire every Saturday on the same model — a calibration
+    failure). Both pass the parser; both can survive prune; the prose
+    teaches the judge to tell them apart.
+    """
+    by_id = {c.id: c.criterion for c in DEFAULT_RUBRIC}
+    text = by_id["no-redundant"]
+    assert "row_count_anomaly_by_period" in text
+    assert "method" in text
+    assert "seasonality" in text
+    assert "threshold" in text
+    # The word "CALIBRATION" appears in upper-case to give the judge
+    # the explicit vocabulary the rubric scores against.
+    assert "CALIBRATION" in text
 
 
 def test_no_redundant_criterion_preserves_original_redundancy_intent() -> None:
