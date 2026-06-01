@@ -64,6 +64,7 @@ VALID_TEST_TYPES: Final[frozenset[str]] = frozenset(
         "custom_sql",
         "row_count_between",
         "unique_combination",
+        "row_count_anomaly_by_period",
     }
 )
 """The test types the drafter can propose (mirrors the system prompt's
@@ -72,15 +73,18 @@ SCOPE section and the discriminated union in
 (``not_null``, ``unique``, ``accepted_values``, ``relationships``), the
 ``custom_sql`` business-rule escape hatch (DEC-002), the
 ``row_count_between`` model-level row-count guard (DEC-001 of #169),
-and the ``unique_combination`` model-level composite-uniqueness test
-(DEC-001 of #170) — seven variants in total. The
-:attr:`DraftConfig.exclude_tests` validator (issue #54) rejects anything
-outside this set so a typo like ``"not_nul"`` fails loud at config-load
-rather than silently passing the LLM call and showing up later as an
-anchor-contract violation; naming ``"custom_sql"`` suppresses the
-free-form business-rule variant from drafting, naming
-``"row_count_between"`` suppresses the row-count guard, and naming
-``"unique_combination"`` suppresses the composite-uniqueness test."""
+the ``unique_combination`` model-level composite-uniqueness test
+(DEC-001 of #170), and the ``row_count_anomaly_by_period`` model-level
+per-period anomaly test (DEC-007 of #171) — eight variants in total.
+The :attr:`DraftConfig.exclude_tests` validator (issue #54) rejects
+anything outside this set so a typo like ``"not_nul"`` fails loud at
+config-load rather than silently passing the LLM call and showing up
+later as an anchor-contract violation; naming ``"custom_sql"`` suppresses
+the free-form business-rule variant from drafting, naming
+``"row_count_between"`` suppresses the row-count guard, naming
+``"unique_combination"`` suppresses the composite-uniqueness test, and
+naming ``"row_count_anomaly_by_period"`` suppresses the per-period
+anomaly test."""
 
 
 class DraftConfig(BaseModel):
@@ -140,11 +144,11 @@ class DraftConfig(BaseModel):
     exclude_tests: tuple[str, ...] = ()
     """Test types to omit from drafting entirely (issue #54).
 
-    Each entry must be one of :data:`VALID_TEST_TYPES` — the seven
+    Each entry must be one of :data:`VALID_TEST_TYPES` — the eight
     drafter variants: ``"not_null"``, ``"unique"``, ``"accepted_values"``,
     ``"relationships"``, ``"custom_sql"``, ``"row_count_between"``,
-    ``"unique_combination"``; unknown values fail loud at config-load via
-    the field validator. When
+    ``"unique_combination"``, ``"row_count_anomaly_by_period"``; unknown
+    values fail loud at config-load via the field validator. When
     non-empty, the system prompt's test catalogue is filtered down to
     the remaining types AND the parser's anchor-contract validator
     rejects any candidate test of an excluded type (defence in depth —
