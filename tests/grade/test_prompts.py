@@ -254,8 +254,21 @@ def test_prompt_version_template_pinned_to_golden_hex() -> None:
     rubric block format. Edit any of those and this test breaks loudly
     so reviewers know reproducibility shifted (DEC-019). To intentionally
     rotate: update the constant below to the new hex.
+
+    Rotation history:
+
+    * ``a35012b627b8ba6a`` — initial pin (#7, DEC-019). Constant since
+      DEC-016 verbatim text shipped.
+    * ``5a70561088930c97`` — current. Rotated under #169 (DEC-009) when
+      the ``no-redundant`` criterion gained calibration prose for
+      numeric-bounded tests (``row_count_between``). The system prompt,
+      envelope tags, and rubric structure are unchanged; only the
+      ``no-redundant`` criterion text grew. The grader's 3-trigger
+      degrade taxonomy (DEC-011) stayed locked — vacuous bounds route
+      through a low criterion score → ``passed: bool`` threshold →
+      ``flagged`` tier, NOT a 4th degrade trigger.
     """
-    assert prompt_version_template(DEFAULT_RUBRIC) == "a35012b627b8ba6a"
+    assert prompt_version_template(DEFAULT_RUBRIC) == "5a70561088930c97"
 
 
 # ---------------------------------------------------------------------------
@@ -309,13 +322,20 @@ def test_criterion_prompt_hash_pinned_to_golden_hex() -> None:
     """Regression detector — pins all four ``DEFAULT_RUBRIC`` criterion
     hashes. Editing DEC-016 criterion text rotates these and breaks the
     test loudly.
+
+    Rotation history:
+
+    * ``no-redundant`` rotated ``f89695e3daf7d559`` → ``60690cb4ef9246ee``
+      under #169 (DEC-009) when the criterion gained calibration prose
+      for numeric-bounded tests (``row_count_between``). The other three
+      criterion hashes are unchanged — only ``no-redundant`` was extended.
     """
     actual = {c.id: criterion_prompt_hash(c) for c in DEFAULT_RUBRIC}
     assert actual == {
         "clarity": "182ebed168a11076",
         "consistency": "4f739879138c19d6",
         "rationale": "d355e87f2381bcdf",
-        "no-redundant": "f89695e3daf7d559",
+        "no-redundant": "60690cb4ef9246ee",
     }
 
 
