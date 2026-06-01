@@ -29,6 +29,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
 )
 from signalforge.draft.parser import (
@@ -1389,3 +1390,181 @@ def test_cardinality_gate_collect_all_with_other_violations() -> None:
         "CandidateColumn references nonexistent column 'hallucinated'" in v for v in violations
     )
     assert any("Expected" in v and "custom_sql" in v and "got 0" in v for v in violations)
+
+
+# ---------------------------------------------------------------------------
+# Issue #169 — row_count_between anchor-contract arm (US-004)
+#
+# The 6th variant is model-level only (``column`` is hard-coded to ``None``
+# by the Pydantic model) and carries an optional ``where`` clause. The
+# parser arm threads the existing ``model_columns_by_type`` and reuses
+# sqlglot through ``_check_row_count_between_where`` for column-existence
+# + type-coherence on the where clause (DEC-004, DEC-006). The
+# ``exclude_tests`` dual-defence backstop also applies (DEC-013).
+# ---------------------------------------------------------------------------
+
+
+def _row_count_between_candidate(
+    *,
+    column_names: tuple[str, ...],
+    minimum: int | None = 1,
+    maximum: int | None = 1000,
+    where: str | None = None,
+) -> CandidateSchema:
+    """Build a synthetic CandidateSchema carrying one model-level
+    ``row_count_between`` test."""
+    return CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=tuple(CandidateColumn(name=n, description="...", tests=()) for n in column_names),
+        tests=(
+            CandidateTestRowCountBetween(
+                minimum=minimum,
+                maximum=maximum,
+                where=where,
+            ),
+        ),
+    )
+
+
+def test_row_count_between_valid_no_where() -> None:
+    """A row_count_between with both bounds and no ``where`` is the
+    canonical model-level shape — no violations."""
+    candidate = _row_count_between_candidate(
+        column_names=("user_id", "amount"),
+        minimum=100,
+        maximum=10000,
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"user_id", "amount"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(user_id="INT64", amount="FLOAT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_row_count_between_valid_where_known_column() -> None:
+    """A ``where`` referencing a real column passes."""
+    candidate = _row_count_between_candidate(
+        column_names=("user_id", "amount"),
+        minimum=100,
+        where="user_id > 100",
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"user_id", "amount"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(user_id="INT64", amount="FLOAT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_row_count_between_where_unknown_column_rejected() -> None:
+    """A ``where`` referencing a column that is not on the model
+    appends a violation (the row_count_between equivalent of the
+    structural ``test references nonexistent column`` check)."""
+    candidate = _row_count_between_candidate(
+        column_names=("user_id",),
+        minimum=100,
+        where="phantom_col > 1",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64"),
+        )
+    assert any(
+        "row_count_between where references nonexistent column 'phantom_col'" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_between_where_subquery_skipped() -> None:
+    """A subquery in the WHERE silently skips per DEC-006
+    (skip-when-uncertain). The warehouse-side bytes cap is the safety
+    net; the parser does not try to reason inside subqueries."""
+    candidate = _row_count_between_candidate(
+        column_names=("user_id",),
+        minimum=100,
+        where="(SELECT 1 FROM foo) > 0",
+    )
+    raw = candidate.model_dump_json()
+    # No raise — ``foo`` is inside a subquery; we don't flag it.
+    result = parse_draft_response(
+        raw,
+        frozenset({"user_id"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(user_id="INT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_row_count_between_excluded_type_rejected() -> None:
+    """``exclude_tests=("row_count_between",)`` rejects a drafted
+    row_count_between via the dual-defence backstop (DEC-013).
+
+    The prompt-builder filter (US-003) is the primary defence; this
+    parser-side check catches an LLM that ignores the prompt."""
+    candidate = _row_count_between_candidate(
+        column_names=("user_id",),
+        minimum=100,
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            exclude_tests=frozenset({"row_count_between"}),
+        )
+    assert any(
+        "model-level" in v and "'row_count_between'" in v and "exclude_tests" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_between_collect_all_with_other_violation() -> None:
+    """Collect-all preserved: a candidate with an unknown-column
+    ``where`` AND another test type's violation (a hallucinated column
+    on a CandidateColumn) produces BOTH violations in one error."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="hallucinated",
+                description="LLM made this up",
+                tests=(),
+            ),
+        ),
+        tests=(
+            CandidateTestRowCountBetween(
+                minimum=100,
+                where="phantom_col > 1",
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64"),
+        )
+    violations = excinfo.value.violations
+    assert any(
+        "CandidateColumn references nonexistent column 'hallucinated'" in v for v in violations
+    )
+    assert any(
+        "row_count_between where references nonexistent column 'phantom_col'" in v
+        for v in violations
+    )

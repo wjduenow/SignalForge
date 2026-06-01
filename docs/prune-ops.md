@@ -47,7 +47,7 @@ Import from `signalforge.prune`. The 14 names exported by `__all__`:
 
 - **`PruneResult`** — Aggregate verdict for one model. Frozen Pydantic model with fields `prune_schema_version: Literal[1]`, `model_unique_id: str`, `decisions: tuple[PruneDecision, ...]`, `elapsed_ms: int`, `signalforge_version: str`. Computed properties: `kept_decisions`, `dropped_decisions`, `kept_count`, `dropped_count`, `total_tests` — all derived from `decisions` (DEC-003) so a `PruneResult` reconstructed from a JSONL log carries identical views to a freshly produced one.
 
-- **`PruneDecision`** — One verdict per candidate test. Carries `test_anchor: str` (`"column.<name>"` or `"model"`), `test: CandidateTest` (the typed discriminated union from the drafter — five variants as of issue #116, including `custom_sql`; NOT a loose dict — DEC-004; the grader and diff renderer reuse the drafter's per-variant display logic), `decision: Literal["kept", "dropped"]`, `reason: DropReason`, `failures: int`, `sampled_rows: int | None`, `scope: Scope`, `elapsed_ms: int`, `compiled_sql_hash: str` (16 hex chars; blake2b-8 per DEC-005), `compiled_sql: str`, `why: str`, `sample_failures: tuple[dict[str, Any], ...] | None`.
+- **`PruneDecision`** — One verdict per candidate test. Carries `test_anchor: str` (`"column.<name>"` or `"model"`), `test: CandidateTest` (the typed discriminated union from the drafter — six variants as of issue #169, including `custom_sql` (#116) and `row_count_between` (#169); NOT a loose dict — DEC-004; the grader and diff renderer reuse the drafter's per-variant display logic), `decision: Literal["kept", "dropped"]`, `reason: DropReason`, `failures: int`, `sampled_rows: int | None`, `scope: Scope`, `elapsed_ms: int`, `compiled_sql_hash: str` (16 hex chars; blake2b-8 per DEC-005), `compiled_sql: str`, `why: str`, `sample_failures: tuple[dict[str, Any], ...] | None`.
 
 ### Configuration
 
@@ -215,6 +215,102 @@ reviewer wants to see). The one categorical difference is the higher
 has more ways to be unevaluable (unsupported Jinja, unbuilt refs) than a
 generic schema test. That is the conservative-bias contract working as
 designed — an unevaluable business rule is shipped, never silently lost.
+
+## Row-count cost model
+
+The sixth test variant, `row_count_between` (issue #169; see
+[`docs/draft-ops.md`](draft-ops.md#row-count-tests-row_count_between)),
+is pruned through the same orchestrator and routes to the same five
+`DropReason` literals as the five other variants. There is **no new
+drop reason**; what differs is the SQL shape and the cost profile.
+
+**Compiled SQL.** The compiler emits a failing-rows CTE wrapping a
+single `COUNT(*)` (DEC-014):
+
+```sql
+SELECT n
+FROM (SELECT COUNT(*) AS n FROM <table> [WHERE <where>]) AS rc
+WHERE n < <minimum> OR n > <maximum>
+```
+
+The bound-violation predicate adapts to which bounds are set
+(`n < <min>`, `n > <max>`, or the conjunction). The adapter wraps the
+output in the standard `SELECT COUNT(*) AS failures FROM (<sql>) AS t`
+contract — zero rows from the inner SELECT (the bound holds) means
+`failures=0` → engine routes `always-passes` and the test drops; one
+row (the bound was violated) means `failures=1` → engine routes `kept`
+(or `failed-on-known-clean-data` on a trusted model). The
+CTE-then-WHERE shape is load-bearing: a bare `SELECT COUNT(*) FROM <table>`
+wrapped by the adapter would always emit `failures=1` regardless of the
+bounds, because the inner `COUNT(*)` always returns exactly one row.
+The CTE pushes the bound check into the inner SELECT so the outer
+`failures` count reflects the real verdict (US-007a corrected this
+shape after #169 first landed).
+
+**Sample-mode behaviour — engine routes past the materialised sample.**
+The compiled SQL is identical regardless of `prune.scope`. A sampled
+`COUNT(*)` is semantically wrong — a sample-bucket-mod'd subset can't
+be compared against the full-table bounds, and a materialised sample
+counted directly would return the **sample size** (typically 100K
+rows), not the model's true row count.
+
+`prune_tests` therefore overrides `table_ref` to the **source table**
+for every `row_count_between` candidate, regardless of
+`sample_strategy` (`materialised` or `oneshot`) and regardless of
+whether the rest of the run uses the sample. The
+[materialised-sample-substitution contract](#post-q4c-temp-table-materialised-sample-v02-issue-22)
+from issue #116 still applies to the other five test types (which
+read row-level data the sample faithfully represents); only
+`row_count_between` is the exception. When every candidate in a run
+is `row_count_between`, the engine also skips the
+`materialise_sample` / `get_row_count` pre-work entirely — there's no
+sample to set up, so adapter errors on that path can no longer route
+the bypassing tests to `kept-without-evidence`.
+
+**Cost guidance.** A `row_count_between` query is a single aggregate
+`COUNT(*)` on the source table — cheap even on petabyte tables on both
+BigQuery and Snowflake (a few seconds, scan billed on the bytes the
+analyzer touches; not a metadata-only operation but bounded by the
+size of the columns the aggregate references). A `where`-filtered
+`COUNT(*)` is **partition-aligned at best, full-scan at worst** — if
+the filter aligns with the partition column the scan reads only the
+matched partitions; if it doesn't, the warehouse reads the whole table
+to evaluate the predicate.
+The adapter's `maximum_bytes_billed` cap (default 100 MB; raise via the
+profile-level `maximum_bytes_billed` field if needed) plus
+`prune.total_budget_seconds` are the safety nets — a `row_count_between`
+query that exceeds the cap is rejected by the warehouse before
+execution and the test routes to `kept-without-evidence` per the
+conservative-bias contract (the `why` field carries the warehouse error
+class name).
+
+**Empty-table → `kept` (DEC-010).** An empty warehouse table evaluated
+against `minimum=100` produces `n=0`, which violates the bound, which
+emits one failing row, which routes to `kept`. **This is the intended
+behaviour, not a degenerate edge case**: catching "the table is empty
+when it shouldn't be" is exactly what the test exists to do — a
+broken upstream pipeline is real signal, and the bounded-cardinality
+assertion is the canonical way to surface it. There is no special-case
+in the engine; the routing follows the standard decision matrix. If
+you're reading a `kept` decision against an empty table and wondering
+whether the test "fired correctly," the answer is yes — the bound was
+violated and the diff is telling you the upstream is broken. An
+operator who wants "empty table is fine" semantics for a particular
+model should either not declare `row_count_between` on that model or
+add it to `exclude_tests` in `signalforge.yml`.
+
+In the [expected-drop-rate](#expected-drop-rates) framing below,
+`row_count_between` tests behave like the built-ins: a model whose
+warehouse rows fall comfortably within the bounds is `always-passes`
+(dropped, no signal); a model whose row count violates the bound is
+`kept` (real signal — exactly the case a reviewer wants to see). The
+one categorical difference is that a single `row_count_between`
+candidate exercises the **whole table** (or the whole `where`-filtered
+slice), not a per-column sample — so its cost is a `COUNT(*)` scan
+rather than the per-column sample CTE. Plan budget accordingly on
+projects ingesting many existing `expect_table_row_count_to_be_between`
+declarations via `prune-existing` — the per-test cost is small but
+N-many `COUNT(*)`s adds up.
 
 ## Expected drop rates
 
@@ -578,7 +674,7 @@ concerns are explicitly deferred:
 - **Multi-warehouse adapters.** Postgres, Databricks, Redshift adapters slot in behind `WarehouseAdapter` without prune changes once their adapters land. The prune compiler is fully dialect-driven (DEC-025), reading all warehouse-specific SQL from the `Dialect` value object, never branching on dialect `name`. **Snowflake compiler support landed in issue #121** (see § "Snowflake compiler dialect" above); its live warehouse harness is #124. A new vendor populates a `Dialect` and the compiler emits correct SQL with no compiler change.
 - **Confidence intervals on `always-passes`.** Surfacing "less than or equal to 3/N upper-bound failure rate at 95 percent confidence" (rule of three) on the decision record so reviewers can calibrate the always-pass verdict. Also covers great-expectations-style `mostly:` thresholds.
 - **Historical always-pass evidence.** Running candidate tests against multiple `run_results.json` snapshots to assert "never failed in last N runs." The Phase-1 plan considers this for the `failed-on-known-clean-data` evidence channel and defers to v0.2.
-- **dbt-utils test types.** `dbt_utils.unique_combination_of_columns`, `dbt_utils.accepted_range`, `dbt_utils.expression_is_true`, etc. The drafter's `CandidateTest` union has five variants — the four generic schema tests plus the `custom_sql` business-rule escape hatch (issue #116); the prune compiler compiles all five. The namespaced dbt-utils / dbt-expectations macros remain v0.2+ territory (a `custom_sql` test can express many of them by hand in the meantime).
+- **dbt-utils test types.** `dbt_utils.unique_combination_of_columns`, `dbt_utils.accepted_range`, `dbt_utils.expression_is_true`, etc. The drafter's `CandidateTest` union has six variants — the four generic schema tests plus the `custom_sql` business-rule escape hatch (issue #116) plus `row_count_between` (#169); the prune compiler compiles all six. **One `dbt_expectations` macro graduated in #169:** `dbt_expectations.expect_table_row_count_to_be_between` is recognised by `prune-existing` and promoted to the structured `row_count_between` variant (see `docs/ingest-ops.md` § "Recognition of `expect_table_row_count_to_be_between`"). Other namespaced dbt-utils / dbt-expectations macros remain v0.2+ territory (a `custom_sql` test can express many of them by hand in the meantime).
 - **`where:` test modifier and `severity: warn` / `mostly:`.** dbt-core supports a `where:` predicate on every test plus `severity` and `mostly` knobs; v0.1 prune does not consume any of these.
 - **`prune_decision_id`-keyed checkpoint / resumption.** Long-running prune runs that resume from disk after a crash. v0.2.
 - **LLM-generated rationale on `kept` decisions.** The grader (#7) produces rubric-scored rationale; prune writes only the structured drop reason plus failure count plus scope.

@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _BASE_CONFIG = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
@@ -158,20 +158,106 @@ class CandidateTestCustomSQL(BaseModel):
         return v
 
 
+class CandidateTestRowCountBetween(BaseModel):
+    """A model-level row-count-bounds test (#169, DEC-001).
+
+    Asserts that the model's ``COUNT(*)`` (optionally filtered by
+    ``where``) lies within ``[minimum, maximum]``. Either bound may be
+    ``None`` to express a half-open range, but at least one must be set —
+    a test with neither bound is vacuously satisfiable and carries no
+    signal.
+
+    This is the 6th first-class :class:`CandidateTest` variant, and the
+    second variant after :class:`CandidateTestCustomSQL` to be **model-level
+    only** (``column`` is hard-coded to ``None``). The diff emitter renders
+    kept artifacts in the ``dbt_expectations`` namespace (DEC-002):
+    ``{dbt_expectations.expect_table_row_count_to_be_between:
+    {min_value: N, max_value: M, where: "..."}}`` — operators without
+    ``dbt-expectations`` installed will see a clear ``dbt parse`` error.
+
+    Sample-mode behaviour (DEC-003, corrected post-US-007a + post-QG): the
+    prune compiler always emits a CTE-wrapped failing-rows SELECT of the
+    form ``SELECT n FROM (SELECT COUNT(*) AS n FROM <table_ref>
+    [WHERE <where>]) AS rc WHERE <bound-violation-predicate>`` regardless
+    of ``prune.scope`` — a sampled ``COUNT(*)`` is semantically wrong. The
+    prune engine's per-test loop **routes ``row_count_between`` past the
+    materialised-sample substitution back to the source table** so the
+    bounds verdict is correct at the default config (a COUNT(*) against a
+    materialised sample returns the sample size, not the model's real row
+    count). The COUNT(*) against the source is a single aggregate scan —
+    cheap even on petabyte tables.
+
+    Field naming (DEC-008): the Python-side fields are ``minimum`` /
+    ``maximum`` (matching the prefix-free precedent set by ``values``,
+    ``to``, ``field`` on existing variants). The ingest parser maps
+    ``min_value`` / ``max_value`` from dbt-expectations YAML inbound; the
+    diff emitter maps ``minimum`` / ``maximum`` → ``min_value`` /
+    ``max_value`` outbound.
+    """
+
+    model_config = _BASE_CONFIG
+
+    type: Literal["row_count_between"] = "row_count_between"
+    column: None = None
+    minimum: int | None = None
+    maximum: int | None = None
+    where: str | None = None
+    rationale: str | None = None
+
+    @field_validator("minimum")
+    @classmethod
+    def _minimum_non_negative(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError("CandidateTestRowCountBetween.minimum must be >= 0 when set")
+        return v
+
+    @field_validator("maximum")
+    @classmethod
+    def _maximum_non_negative(cls, v: int | None) -> int | None:
+        if v is not None and v < 0:
+            raise ValueError("CandidateTestRowCountBetween.maximum must be >= 0 when set")
+        return v
+
+    @field_validator("where")
+    @classmethod
+    def _where_non_empty_when_set(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError(
+                "CandidateTestRowCountBetween.where must be non-empty after strip when set"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _bounds_consistent(self) -> CandidateTestRowCountBetween:
+        if self.minimum is None and self.maximum is None:
+            raise ValueError(
+                "CandidateTestRowCountBetween requires at least one of "
+                "(minimum, maximum) to be set — an unbounded row-count "
+                "test carries no signal"
+            )
+        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+            raise ValueError(
+                "CandidateTestRowCountBetween.minimum "
+                f"({self.minimum}) must be <= maximum ({self.maximum})"
+            )
+        return self
+
+
 CandidateTest = Annotated[
     CandidateTestNotNull
     | CandidateTestUnique
     | CandidateTestAcceptedValues
     | CandidateTestRelationships
-    | CandidateTestCustomSQL,
+    | CandidateTestCustomSQL
+    | CandidateTestRowCountBetween,
     Field(discriminator="type"),
 ]
-"""Discriminated union over the five test variants (DEC-003 / DEC-002).
+"""Discriminated union over the six test variants (DEC-003 / DEC-002 / #169 DEC-001).
 
 The discriminator field is ``type``; its value space is the closed
-:class:`Literal` union of the five variant strings. Unknown ``type``
+:class:`Literal` union of the six variant strings. Unknown ``type``
 values raise :class:`pydantic.ValidationError` at construction — adding
-a sixth test variant requires extending this union and the
+a seventh test variant requires extending this union and the
 ``Literal`` on each variant class. The drift detector (US-014) catches
 the case where a fixture grows a new test type without the model.
 """
@@ -236,5 +322,6 @@ __all__ = (
     "CandidateTestCustomSQL",
     "CandidateTestNotNull",
     "CandidateTestRelationships",
+    "CandidateTestRowCountBetween",
     "CandidateTestUnique",
 )

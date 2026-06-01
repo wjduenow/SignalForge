@@ -36,8 +36,13 @@ Plus a fifth, sourced from a different file: an operator's hand-authored
 business-rule candidates (issue #116; see
 [Singular `tests/*.sql` tests](#singular-testssql-tests)).
 
+Plus a sixth, the **one recognised dbt-expectations macro**: hand-authored
+`dbt_expectations.expect_table_row_count_to_be_between` declarations are
+promoted to the `row_count_between` structured variant (issue #169 AC-5;
+see [Recognition of `expect_table_row_count_to_be_between`](#recognition-of-expect_table_row_count_to_be_between)).
+
 Every *generic* test the schema.yml carries that is not one of the four —
-`dbt_utils.*`, `dbt_expectations.*`, custom generics, anything
+other `dbt_utils.*`, other `dbt_expectations.*`, custom generics, anything
 namespaced — is **skipped and recorded**, never silently dropped (see
 [Supported vs skipped](#supported-vs-skipped-tests)).
 
@@ -139,7 +144,7 @@ values:
 | `SkipReason` | Triggered by |
 |---|---|
 | `"unsupported-test-type"` | a bare-string test that isn't `not_null` / `unique` (e.g. `- positive`) |
-| `"custom-or-generic-test"` | a namespaced or project-defined test (`dbt_utils.*`, `dbt_expectations.*`, any custom generic), or a malformed test-entry shape |
+| `"custom-or-generic-test"` | a namespaced or project-defined test (`dbt_utils.*`, `dbt_expectations.*` other than the recognised `expect_table_row_count_to_be_between` — see § ["Recognition of expect_table_row_count_to_be_between"](#recognition-of-expect_table_row_count_to_be_between), any custom generic), or a malformed test-entry shape |
 | `"malformed-supported-test"` | a supported type whose required args are missing or empty (`accepted_values` with no `values`; `relationships` missing `to` or `field`) |
 
 A skip is never a failure — the run continues. The skip records exist so an
@@ -260,6 +265,67 @@ and an unreadable file or canonicalisation failure raises
     `--tests-dir`) *alongside* the schema.yml in one run and prunes both
     — see the
     [CLI reference](cli-ops.md#singular-testssql-business-rule-tests-us-014).
+
+## Recognition of `expect_table_row_count_to_be_between`
+
+As of issue #169, the parser **promotes**
+`dbt_expectations.expect_table_row_count_to_be_between` from a generic
+`SkippedTest(reason="custom-or-generic-test")` to the typed
+`CandidateTestRowCountBetween` variant — the same variant the drafter
+produces (see
+[`docs/draft-ops.md`](draft-ops.md#row-count-tests-row_count_between)).
+This closes AC-5 of #169: `prune-existing` against a hand-authored
+`schema.yml` that declares the dbt-expectations macro now prunes the
+declaration through the warehouse alongside drafted candidates, instead
+of skipping it as "we don't know how to evaluate this." Operators
+running `prune-existing` against an existing dbt-expectations corpus
+get the same kept / dropped / flagged signal SignalForge produces for
+its own drafts.
+
+**Inbound mapping** (DEC-008 of #169). The macro's body fields map to
+the variant's Pydantic field names:
+
+| `expect_table_row_count_to_be_between` field | `CandidateTestRowCountBetween` field |
+|---|---|
+| `min_value` | `minimum` |
+| `max_value` | `maximum` |
+| `where` | `where` |
+
+The mapping is inverted by the diff emitter on the outbound path
+(`minimum` → `min_value`, see
+[`docs/diff-ops.md`](diff-ops.md#row-count-yaml-emission)), so an
+ingested declaration round-trips to the same dbt-expectations YAML on
+re-emit.
+
+**Skip-recorded shapes.** The parser routes the macro to
+`SkippedTest(reason="malformed-supported-test")` — the closest fit
+under the closed 3-value `SkipReason` literal — when:
+
+- both `min_value` AND `max_value` are missing (an unbounded row-count
+  assertion would always pass — no signal);
+- either bound is a non-integer (string, float, list, dict);
+- either bound is negative;
+- `min_value > max_value` (the constraint is unsatisfiable);
+- `where` is set but isn't a string;
+- the macro is declared **column-scoped** rather than model-level (a
+  `COUNT(*)` is table-level by construction — a `column:` slot on the
+  variant doesn't make sense).
+
+The `SkipReason` literal stays closed at three values; recognising the
+macro is a parser-arm change, not a literal change (DEC-013 of #116
+generalised — `SkipReason` is the closed surface; adding a recognised
+shape never grows it).
+
+**Other `dbt_expectations.*` macros are unchanged.** The promotion is
+narrow — exactly
+`dbt_expectations.expect_table_row_count_to_be_between` matches. Every
+other macro in the `dbt_expectations` namespace (e.g.
+`expect_table_row_count_to_equal`, `expect_column_values_to_be_between`,
+`expect_column_distinct_count_to_be_in_set`) continues to skip-record
+as `SkipReason="custom-or-generic-test"`. Extending recognition to
+other `dbt_expectations` shapes is a follow-up (tracked separately
+under #154 for prune+grade-only adapters that consume the compiled
+test SQL rather than rebuilding to a typed variant).
 
 ## Safety posture
 

@@ -28,6 +28,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
 )
 from signalforge.manifest.models import Column, Manifest, Model, Source
@@ -1420,3 +1421,297 @@ def test_snowflake_sample_fixtures_use_hash_never_farm_fingerprint(fixture_name:
     # The HASH(*)-in-predicate form (rejected live by Snowflake) must be gone.
     assert "MOD(ABS(HASH(*)), 10) < 1" not in text
     assert "FARM_FINGERPRINT" not in text
+
+
+# ---------------------------------------------------------------------------
+# US-007 (#169): row_count_between compiler arm + BigQuery & Snowflake snapshots.
+#
+# The 6th first-class variant is fundamentally a COUNT(*) check rather than a
+# failing-rows SELECT, so the compiler emits ``SELECT COUNT(*) FROM <table_ref>
+# [WHERE <where>]`` regardless of ``prune.scope`` (DEC-003). The composed SQL
+# is fed through the existing ``validate_test_sql`` (DEC-005) so a hostile
+# ``where`` (containing ``;`` / ``--`` / unbalanced parens) routes to
+# ``_InvalidIdentifier`` → ``kept-without-evidence`` (DEC-011).
+# ---------------------------------------------------------------------------
+
+
+def test_compile_row_count_between_no_where_matches_snapshot() -> None:
+    """No-`where` happy path emits the byte-exact BigQuery snapshot."""
+    expected = _read_fixture("row_count_between.sql")
+    test = CandidateTestRowCountBetween(minimum=1, maximum=1_000_000)
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_row_count_between_with_where_matches_snapshot() -> None:
+    """With-`where` happy path emits the byte-exact BigQuery snapshot.
+
+    The ``where`` is interpolated verbatim into the composed statement;
+    the compose-then-validate pass catches any safety violations on the
+    resulting full SQL (DEC-005)."""
+    expected = _read_fixture("row_count_between_where.sql")
+    test = CandidateTestRowCountBetween(
+        minimum=1, maximum=1_000_000, where="event_date >= '2024-01-01'"
+    )
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_row_count_between_only_minimum_matches_snapshot() -> None:
+    """Only-`minimum` (open upper bound) emits the same COUNT(*) SQL —
+    the half-open range is interpreted by the engine, not the compiler."""
+    expected = _read_fixture("row_count_between_only_min.sql")
+    test = CandidateTestRowCountBetween(minimum=1)
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_row_count_between_only_maximum_matches_snapshot() -> None:
+    """Only-`maximum` (open lower bound) emits the same COUNT(*) SQL —
+    the half-open range is interpreted by the engine, not the compiler."""
+    expected = _read_fixture("row_count_between_only_max.sql")
+    test = CandidateTestRowCountBetween(maximum=1_000_000)
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_row_count_between_hostile_where_returns_invalid_identifier() -> None:
+    """A `where` containing a stray ``;`` (the classic injection shape)
+    composes to ``SELECT COUNT(*) FROM <table> WHERE 1=1; DROP TABLE users``
+    which trips ``validate_test_sql``'s no-`;` check; the compiler returns
+    ``_InvalidIdentifier`` so the engine routes to ``kept-without-evidence``
+    (DEC-005, DEC-011)."""
+    test = CandidateTestRowCountBetween(minimum=1, where="1=1; DROP TABLE users")
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(actual, _InvalidIdentifier)
+    assert "row_count_between" in actual.reason
+    assert "SQL safety" in actual.reason
+
+
+def test_compile_row_count_between_hostile_where_comment_returns_invalid_identifier() -> None:
+    """A `where` containing a ``--`` line comment also routes via
+    ``_InvalidIdentifier`` (DEC-005)."""
+    test = CandidateTestRowCountBetween(minimum=1, where="1=1 -- everything")
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(actual, _InvalidIdentifier)
+
+
+def test_compile_row_count_between_hostile_where_unbalanced_parens_returns_invalid() -> None:
+    """An unbalanced paren in `where` trips ``validate_test_sql`` on the
+    composed statement (DEC-005)."""
+    test = CandidateTestRowCountBetween(minimum=1, where="(x > 0")
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(actual, _InvalidIdentifier)
+
+
+def test_compile_row_count_between_snowflake_no_where_matches_snapshot() -> None:
+    """Snowflake dialect: per-component double-quoted, UPPER-folded
+    qualified name — pinned by the byte-exact snapshot fixture."""
+    expected = _read_snowflake_fixture("row_count_between.sql")
+    test = CandidateTestRowCountBetween(minimum=1, maximum=1_000_000)
+    actual = _compile_test(test, _make_orders_table_ref(), SNOWFLAKE_DIALECT, _make_manifest())
+    assert actual == expected
+    assert isinstance(actual, str)
+    # Belt-and-braces: BigQuery quoting must not leak into the Snowflake path.
+    assert "`" not in actual
+
+
+def test_compile_row_count_between_snowflake_with_where_matches_snapshot() -> None:
+    """Snowflake dialect + `where`: per-component quoting on the table,
+    `where` interpolated verbatim (no fold on operator-supplied SQL)."""
+    expected = _read_snowflake_fixture("row_count_between_where.sql")
+    test = CandidateTestRowCountBetween(
+        minimum=1, maximum=1_000_000, where="event_date >= '2024-01-01'"
+    )
+    actual = _compile_test(test, _make_orders_table_ref(), SNOWFLAKE_DIALECT, _make_manifest())
+    assert actual == expected
+
+
+def test_compile_row_count_between_ignores_scope_sample() -> None:
+    """DEC-003 — under ``scope='sample'`` the compiled SQL is byte-identical
+    to the ``scope='full'`` path. A sampled ``COUNT(*)`` cannot be compared
+    against full-table bounds, so the compiler ignores ``sample_size`` /
+    ``sample_bucket`` for this variant."""
+    test = CandidateTestRowCountBetween(minimum=1, maximum=1_000_000)
+    full = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    sample = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert full == sample
+    assert isinstance(sample, str)
+    # No deterministic-sample CTE wraps the COUNT(*) — that would be wrong.
+    assert "WITH sample" not in sample
+    assert "FARM_FINGERPRINT" not in sample
+
+
+def test_compile_row_count_between_ignores_partition_filter() -> None:
+    """DEC-003 — a ``partition_filter`` does NOT inject an extra WHERE on
+    the compiled COUNT(*). The variant's own ``where`` field is the only
+    filter source; partition_filter is a built-in-variant concept for
+    failing-rows tests."""
+    test = CandidateTestRowCountBetween(minimum=1, maximum=1_000_000)
+    pf = PartitionFilter(column="event_date", op=">=", value="2024-01-01")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        scope="full",
+        partition_filter=pf,
+    )
+    assert actual == _read_fixture("row_count_between.sql")
+    assert isinstance(actual, str)
+    # The partition filter must NOT have leaked into the SQL — the only
+    # ``WHERE`` clause is the CTE-wrapper's bound-violation predicate
+    # (US-007a: ``WHERE n < <min> OR n > <max>``); no ``event_date`` /
+    # ``partition`` substring appears.
+    assert "event_date" not in actual
+    assert "partition" not in actual.lower()
+
+
+def test_compile_row_count_between_materialised_sample_references_temp_table() -> None:
+    """Compiler-level invariant: when the caller passes ``table_ref=<temp>``,
+    the compiled SQL references the temp table, NOT the source.
+
+    NOTE — this test pins compiler behaviour in isolation. **In the real
+    pipeline ``prune.engine.prune_tests`` never actually passes a
+    materialised temp ref for ``row_count_between``** — the engine's
+    per-test override routes the variant to ``source_table_ref`` because
+    a COUNT(*) against a sample returns the sample size, not the model's
+    true row count (see
+    ``test_prune_tests_row_count_between_under_materialised_references_source_not_temp_table``
+    in ``tests/prune/test_engine.py``). This test still has value as a
+    compiler-contract pin: it confirms ``_compile_row_count_between``
+    reads the qualified name from ``table_ref`` rather than the model's
+    source table directly, so if a future caller DID pass a temp ref the
+    compiler would honor it. Originally written to mirror the #116 QG
+    bug shape for ``custom_sql``; the engine-level invariant has since
+    shifted but the compiler-level shape stays useful as
+    defence-in-depth."""
+    # The orchestrator materialises a temp sample with a deterministic
+    # ``_SESSION._sf_sample_<run_id>`` qualified name (see issue #22's
+    # ``materialise_sample`` contract).
+    temp_ref = TableRef(project=None, dataset="_SESSION", name="_sf_sample_abc123def4567890")
+    test = CandidateTestRowCountBetween(minimum=1, maximum=1_000_000)
+    actual = _compile_test(
+        test,
+        temp_ref,
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        scope="full",
+    )
+    assert isinstance(actual, str)
+    # Compiled SQL references the temp table, never the source.
+    assert "_SESSION._sf_sample_abc123def4567890" in actual
+    assert "orders" not in actual
+    assert "fake_project.dataset.orders" not in actual
+
+
+def test_compile_row_count_between_unique_among_dispatch_arms() -> None:
+    """The dispatcher (`_compile_test`) routes a ``row_count_between`` test
+    to ``_compile_row_count_between``. A regression in the isinstance
+    chain (e.g. landing the arm AFTER the catch-all NotImplementedError)
+    would surface here as ``NotImplementedError`` rather than a string."""
+    test = CandidateTestRowCountBetween(minimum=1)
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(actual, str)
+    # US-007a: the failing-rows CTE shape wraps the COUNT(*) so the
+    # adapter's outer COUNT(*) reflects bound violations.
+    assert actual.startswith("SELECT n FROM (SELECT COUNT(*) AS n FROM ")
+
+
+def test_compile_row_count_between_composed_sql_passes_safety_validator() -> None:
+    """Belt-and-braces — the compiled SQL itself (not just the wrapped
+    form) passes ``validate_test_sql``; the adapter does not re-wrap this
+    variant in another COUNT(*)."""
+    test = CandidateTestRowCountBetween(minimum=1, where="status = 'placed' AND total > 0")
+    actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
+    assert isinstance(actual, str)
+    # Round-trips through the cheap-rejects validator.
+    validate_test_sql(actual)
+
+
+def test_compile_row_count_between_adapter_wrapped_failing_rows_contract() -> None:
+    """US-007a (#169 tt8.15) — the failing-rows contract.
+
+    The warehouse adapters wrap every compiler output as
+    ``SELECT COUNT(*) AS failures FROM (<sql>) AS t``. For
+    ``row_count_between`` to interact correctly with that wrap, the
+    compiled SQL must return ZERO rows when bounds are satisfied and at
+    least one row when bounds are violated — same contract as the four
+    built-in failing-rows tests.
+
+    This test pins the shape via literal-string assertions on the
+    compiled SQL: the inner CTE evaluates the COUNT(*) of the model into
+    column ``n``, and the outer WHERE clause filters on the
+    bound-violation predicate. When the bound holds, no row makes it
+    past the WHERE → outer ``failures=0`` → engine routes
+    ``always-passes``. When the bound is violated, the one CTE row
+    passes the WHERE → outer ``failures=1`` → engine routes ``kept``.
+
+    The pre-US-007a shape (``SELECT COUNT(*) FROM <table>``) wrapped to
+    ``SELECT COUNT(*) AS failures FROM (SELECT COUNT(*) FROM <table>) AS t``
+    where the inner returns one row (the count), the outer ``COUNT(*)``
+    over a one-row result is always 1, so ``failures=1`` regardless of
+    bounds and the engine routed every real ``row_count_between`` to
+    ``kept`` without ever checking the bounds. The CTE+WHERE shape
+    fixes the interaction.
+    """
+    # Both bounds set → predicate is ``n < <min> OR n > <max>``.
+    both = _compile_test(
+        CandidateTestRowCountBetween(minimum=10, maximum=100),
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+    )
+    assert isinstance(both, str)
+    # Inner CTE: COUNT(*) aliased as ``n`` against the model's table.
+    assert "SELECT COUNT(*) AS n FROM `fake_project.dataset.orders`" in both
+    # Outer SELECT pulls ``n`` from the CTE alias ``rc``.
+    assert "SELECT n FROM (" in both
+    assert ") AS rc WHERE " in both
+    # Bound-violation predicate is uniform: both literal bound values
+    # appear with the right comparison operator.
+    assert "n < 10 OR n > 100" in both
+
+    # Only-minimum → predicate is ``n < <min>`` alone.
+    only_min = _compile_test(
+        CandidateTestRowCountBetween(minimum=10),
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+    )
+    assert isinstance(only_min, str)
+    assert only_min.endswith(") AS rc WHERE n < 10")
+    # No spurious upper-bound clause.
+    assert " OR n > " not in only_min
+
+    # Only-maximum → predicate is ``n > <max>`` alone.
+    only_max = _compile_test(
+        CandidateTestRowCountBetween(maximum=100),
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+    )
+    assert isinstance(only_max, str)
+    assert only_max.endswith(") AS rc WHERE n > 100")
+    # No spurious lower-bound clause.
+    assert "n < " not in only_max
+
+    # All three compiled outputs round-trip through the cheap-rejects
+    # validator (belt-and-braces with the adapter's pre-execute check).
+    for sql in (both, only_min, only_max):
+        validate_test_sql(sql)
+        # Belt-and-braces: when the inner CTE row's ``n`` satisfies the
+        # bound, the outer WHERE filters it out, so the wrapped adapter
+        # query (SELECT COUNT(*) AS failures FROM (<sql>) AS t) returns
+        # failures=0 → engine routes always-passes. We can't execute the
+        # SQL here without a warehouse, but pinning the literal shape
+        # above guarantees the inner SELECT runs the COUNT FIRST and
+        # the outer WHERE filters the count row.

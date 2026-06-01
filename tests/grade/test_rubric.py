@@ -149,7 +149,12 @@ def test_default_rubric_criterion_text_matches_dec_016_verbatim() -> None:
     )
     assert by_id["no-redundant"] == (
         "Are any tests redundant — semantically identical to another "
-        "test, or already dropped by the prune layer as always-passing?"
+        "test, already dropped by the prune layer as always-passing, "
+        "or trivially satisfiable? For tests carrying numeric bounds "
+        "(e.g. `row_count_between`), is each bound a meaningful "
+        "guardrail calibrated to the model's expected size, rather "
+        "than a vacuous floor or ceiling (`minimum=0` with no `maximum`, "
+        "or a `maximum` so high it cannot fire)?"
     )
 
 
@@ -171,7 +176,15 @@ def test_default_rubric_is_a_tuple() -> None:
 # text. Any drift in DEC-016 criterion text or in the canonical-form
 # computation breaks this test loudly. Re-pinning is a deliberate
 # operation — bump ``audit_schema_version`` first.
-_DEFAULT_RUBRIC_GOLDEN_HASH = "280aa6db7fde2b24"
+#
+# Rotation history:
+# - ``280aa6db7fde2b24`` — initial pin (#7, DEC-016 verbatim).
+# - ``22a0231690aca6ef`` — current. Rotated under #169 (DEC-009) when
+#   the ``no-redundant`` criterion gained calibration prose for
+#   numeric-bounded tests (``row_count_between``). The grader's
+#   3-trigger degrade taxonomy (DEC-011) stayed locked; this is a
+#   prose extension, not a structural change.
+_DEFAULT_RUBRIC_GOLDEN_HASH = "22a0231690aca6ef"
 
 
 def test_default_rubric_hash_is_stable() -> None:
@@ -276,3 +289,204 @@ def test_validate_rubric_error_carries_remediation() -> None:
     with pytest.raises(GradeRubricError) as excinfo:
         validate_rubric(())
     assert "↳ Remediation:" in str(excinfo.value)
+
+
+# ----- DEC-009 of #169: no-redundant calibration prose for vacuous bounds -----
+
+
+def test_no_redundant_criterion_carries_row_count_between_calibration_prose() -> None:
+    """DEC-009 of #169 — the ``no-redundant`` criterion was extended (NOT a
+    5th criterion added — DEC-009 explicitly rejects a 5th to avoid the
+    +25% LLM cost) with calibration prose teaching the judge to score
+    vacuous bounds low.
+
+    The prose must name:
+
+    * ``row_count_between`` — the test type this lands for; this is what
+      a vacuous-bound row-count test gets matched against.
+    * ``minimum=0`` and "no ``maximum``" / "vacuous" — the canonical
+      vacuous-bound shape (Pydantic-valid at-least-one-bound, but
+      semantically always-true) the judge must score down.
+    * ``trivially satisfiable`` (or equivalent) — the load-bearing
+      concept: the judge is asked whether the bound is a meaningful
+      guardrail or a no-op.
+
+    Load-bearing for the calibration intent: without this prose, the
+    judge has no signal to distinguish a healthy ``minimum=100,
+    maximum=10000`` bound from a borderline ``minimum=1, maximum=None``
+    one (which only catches the empty-table case). Both pass the parser
+    and both can survive prune (when the bound is violated, e.g. against
+    an empty table). The fully-vacuous ``minimum=0, maximum=None`` shape
+    the prose names IS dropped by the prune layer as ``always-passes``
+    (the failing-rows CTE's ``WHERE n < 0`` predicate matches nothing,
+    so ``failures=0``); the prose still names that shape because it
+    teaches the judge to identify the same SHAPE of trivially-satisfiable
+    bound across the borderline cases that DO reach the grader.
+    """
+    by_id = {c.id: c.criterion for c in DEFAULT_RUBRIC}
+    text = by_id["no-redundant"]
+    assert "row_count_between" in text
+    assert "minimum=0" in text
+    assert "trivially satisfiable" in text
+    # The phrase "vacuous" appears in the prose to give the judge the
+    # explicit vocabulary the rubric scores against.
+    assert "vacuous" in text
+
+
+def test_no_redundant_criterion_preserves_original_redundancy_intent() -> None:
+    """The DEC-009 extension is additive — the criterion's original
+    redundancy / always-pass language stays in place. A future operator
+    reading the rubric should still see that semantically-identical
+    duplicates and prune-dropped always-pass tests are graded down here.
+    """
+    by_id = {c.id: c.criterion for c in DEFAULT_RUBRIC}
+    text = by_id["no-redundant"]
+    # Original redundancy framing — preserved verbatim.
+    assert "semantically identical" in text
+    assert "always-passing" in text
+
+
+def test_default_rubric_keeps_exactly_four_criteria_after_dec_009() -> None:
+    """DEC-009 of #169 explicitly forbids growing to a 5th criterion
+    (the +25% LLM cost on every grade run is the load-bearing reason).
+    The calibration prose lives inside the existing ``no-redundant``
+    criterion; this test pins that the rubric stays at four.
+    """
+    assert len(DEFAULT_RUBRIC) == 4
+
+
+# ----- DEC-011 of #169: 3-trigger degrade taxonomy stays locked -----
+
+
+def test_low_calibration_bound_routes_to_flagged_not_kept_uncertain_when_grading_fails() -> None:
+    """DEC-009 of #169 — a borderline-calibrated ``row_count_between``
+    test that survives the prune layer (positive prune evidence:
+    ``reason="kept"``, NOT ``"kept-without-evidence"``) but earns a low
+    ``no-redundant`` score from the judge MUST tier as ``flagged``, NOT
+    ``kept-uncertain``.
+
+    The contract (``diff-renderer.md`` § "Tier classification" + DEC-009
+    of #169): ``kept-uncertain`` is reserved for prune-layer
+    couldn't-evaluate (budget exhausted / identifier rejected /
+    warehouse raised). A bound the warehouse successfully evaluated —
+    and the judge then scored down for weak calibration — belongs in
+    ``flagged`` so the reviewer's attention is drawn to the calibration
+    problem, not the (non-existent) evaluation problem.
+
+    The scenario this pins is a borderline-calibrated bound like
+    ``minimum=1, maximum=None`` that survives prune because it actually
+    caught a real failure (e.g. an empty table → ``failures=1``).
+    A fully-vacuous ``minimum=0, maximum=None`` would have been dropped
+    by prune as ``always-passes`` and never reached the grader. The
+    fixture uses ``failures=1`` to match the only reachable kept state.
+
+    Drives ``signalforge.diff.engine._tier_for_kept`` directly with the
+    three load-bearing inputs. The function is internal (``_``-prefixed)
+    but is the single tier-classification seam — this is the cleanest
+    pinning surface for the DEC-009 contract.
+    """
+    from signalforge.diff.engine import _tier_for_kept  # noqa: PLC0415
+    from signalforge.draft.models import (  # noqa: PLC0415
+        CandidateTestRowCountBetween,
+    )
+    from signalforge.prune.models import PruneDecision  # noqa: PLC0415
+
+    # Sanity: the candidate-test variant exists in this branch (US-001
+    # of #169 shipped it). Without it, the calibration prose names a
+    # type the codebase doesn't know — fail loud here so the dependency
+    # surfaces clearly.
+    assert CandidateTestRowCountBetween is not None
+
+    # Positive prune evidence — warehouse ran the COUNT(*), the bound
+    # was VIOLATED (the test caught a real failure on an empty table or
+    # an unexpectedly out-of-range count). reason="kept" implies
+    # failures > 0 in the real prune matrix; fixture matches.
+    kept_decision = PruneDecision(
+        test_anchor="model",
+        test=CandidateTestRowCountBetween(minimum=1, maximum=None),
+        decision="kept",
+        reason="kept",
+        failures=1,
+        sampled_rows=None,
+        scope="full",
+        elapsed_ms=12,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="SELECT COUNT(*) FROM `p.d.t`",
+        why="ran against warehouse; row count violated bound",
+    )
+
+    # Judge scored the calibration criterion low → passed=False.
+    tier = _tier_for_kept(kept_decision, score=0.2, passed=False)
+    assert tier == "flagged"
+    assert tier != "kept-uncertain"
+
+
+def test_healthy_bound_routes_to_kept_when_grading_passes() -> None:
+    """Mirror of the low-calibration test: a well-calibrated bound
+    (``minimum=100, maximum=10000``) that survives the prune layer and
+    earns a high ``no-redundant`` score from the judge ships as
+    ``kept`` — the v0.1 happy path. Pins that the calibration prose
+    rewards specificity rather than penalising every row-count test.
+
+    The fixture uses ``failures=1`` because ``reason="kept"`` implies
+    the warehouse returned at least one failing row in the real prune
+    matrix (otherwise ``failures=0`` would route to ``always-passes``
+    and the test would never reach the grader).
+    """
+    from signalforge.diff.engine import _tier_for_kept  # noqa: PLC0415
+    from signalforge.draft.models import (  # noqa: PLC0415
+        CandidateTestRowCountBetween,
+    )
+    from signalforge.prune.models import PruneDecision  # noqa: PLC0415
+
+    kept_decision = PruneDecision(
+        test_anchor="model",
+        test=CandidateTestRowCountBetween(minimum=100, maximum=10000),
+        decision="kept",
+        reason="kept",
+        failures=1,
+        sampled_rows=None,
+        scope="full",
+        elapsed_ms=12,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="SELECT COUNT(*) FROM `p.d.t`",
+        why="ran against warehouse; row count violated bound",
+    )
+
+    tier = _tier_for_kept(kept_decision, score=0.9, passed=True)
+    assert tier == "kept"
+
+
+def test_grade_degrade_taxonomy_stays_at_three_triggers() -> None:
+    """DEC-011 of #169 locks the grader's degrade taxonomy at exactly
+    three triggers (``grade-layer.md`` § "Conservative score-and-degrade
+    taxonomy"):
+
+    1. ``LLMError`` retries exhausted → ``call failed: <ClassName>``
+    2. ``GradeOutputError`` (parser / anchor-contract failure) →
+       ``call failed: GradeOutputError``
+    3. ``total_budget_seconds`` exceeded → ``grade budget exceeded …``
+
+    A borderline-calibrated ``row_count_between`` test that survived
+    prune is NOT a 4th trigger. Instead the calibration prose in
+    ``no-redundant`` (DEC-009) scores it low → existing ``passed: bool``
+    threshold → ships as ``flagged`` (NOT ``kept-uncertain``, which is
+    reserved for prune couldn't-evaluate). A fully-vacuous
+    ``minimum=0, maximum=None`` test would already be dropped by prune
+    as ``always-passes`` and never reach the grader at all — neither a
+    degrade nor a flag.
+
+    This test asserts the three degrade-path message shapes are still
+    present in :mod:`signalforge.grade.engine`. A 4th trigger would
+    surface as a new ``reasoning=`` string; the AST scan + this string
+    scan together guard the taxonomy.
+    """
+    from signalforge.grade import engine as grade_engine  # noqa: PLC0415
+
+    src = (
+        grade_engine.__file__ and __import__("pathlib").Path(grade_engine.__file__).read_text()
+    ) or ""
+    # Trigger 1: LLMError retries exhausted (formatted via _format_degrade_reasoning).
+    assert "call failed: " in src
+    # Trigger 3: total budget exceeded (formatted in the budget branch).
+    assert "grade budget exceeded" in src

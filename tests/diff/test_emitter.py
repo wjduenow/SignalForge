@@ -553,3 +553,171 @@ def test_emit_proposed_test_files_path_is_slug_safe_for_hostile_model_name() -> 
     # No traversal token, no extra separator below tests/.
     assert ".." not in path
     assert path.count("/") == 1
+
+
+# ---------------------------------------------------------------------------
+# row_count_between variant (US-010 of #169) — dbt-expectations YAML shape
+# ---------------------------------------------------------------------------
+
+from signalforge.draft.models import CandidateTestRowCountBetween  # noqa: E402
+
+
+def test_row_count_between_renders_dbt_expectations_block_without_where() -> None:
+    """No-where YAML shape: only ``min_value`` and ``max_value`` appear
+    under the ``dbt_expectations.expect_table_row_count_to_be_between``
+    key — null fields are omitted (DEC-002).
+
+    Field-name mapping outbound (DEC-008): Python-side ``minimum`` /
+    ``maximum`` map to the dbt-expectations macro names ``min_value`` /
+    ``max_value``.
+    """
+    rcb = CandidateTestRowCountBetween(minimum=100, maximum=10000)
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK."),),
+        tests=(rcb,),
+    )
+    result = _result(_decision(rcb, test_anchor="model"))
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    model_tests = parsed["models"][0]["tests"]
+    assert model_tests == [
+        {
+            "dbt_expectations.expect_table_row_count_to_be_between": {
+                "min_value": 100,
+                "max_value": 10000,
+            }
+        }
+    ]
+
+
+def test_row_count_between_includes_where_when_set() -> None:
+    """With-where YAML shape: the ``where`` field is rendered verbatim
+    under the macro block when non-null. ``yaml.safe_dump`` handles the
+    string quoting.
+    """
+    rcb = CandidateTestRowCountBetween(
+        minimum=100,
+        maximum=10000,
+        where="event_date >= '2024-01-01'",
+    )
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK."),),
+        tests=(rcb,),
+    )
+    result = _result(_decision(rcb, test_anchor="model"))
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    [block] = parsed["models"][0]["tests"]
+    body = block["dbt_expectations.expect_table_row_count_to_be_between"]
+    assert body == {
+        "min_value": 100,
+        "max_value": 10000,
+        "where": "event_date >= '2024-01-01'",
+    }
+
+
+def test_row_count_between_only_minimum_omits_max_value() -> None:
+    """A test with only ``minimum`` set emits only ``min_value`` — the
+    ``None``-valued ``max_value`` is dropped from the YAML shape so the
+    block is minimal (DEC-002).
+    """
+    rcb = CandidateTestRowCountBetween(minimum=100)
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK."),),
+        tests=(rcb,),
+    )
+    result = _result(_decision(rcb, test_anchor="model"))
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    [block] = parsed["models"][0]["tests"]
+    body = block["dbt_expectations.expect_table_row_count_to_be_between"]
+    assert body == {"min_value": 100}
+    assert "max_value" not in body
+    assert "where" not in body
+
+
+def test_row_count_between_only_maximum_omits_min_value() -> None:
+    """A test with only ``maximum`` set emits only ``max_value``."""
+    rcb = CandidateTestRowCountBetween(maximum=10000)
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK."),),
+        tests=(rcb,),
+    )
+    result = _result(_decision(rcb, test_anchor="model"))
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    [block] = parsed["models"][0]["tests"]
+    body = block["dbt_expectations.expect_table_row_count_to_be_between"]
+    assert body == {"max_value": 10000}
+    assert "min_value" not in body
+
+
+def test_row_count_between_hostile_where_is_yaml_safe() -> None:
+    """A ``where`` clause containing multi-line content, embedded quotes,
+    and YAML metacharacters round-trips through ``yaml.safe_load`` to
+    the identical string — ``yaml.safe_dump`` picks whichever scalar
+    style preserves it. The point is the bytes are safe / round-trip;
+    NOT a specific quoting style.
+    """
+    hostile = (
+        "event_date >= '2024-01-01'\nAND notes LIKE '%\"quoted\"%'\n"
+        "AND id != 'x: y'  # not a yaml key"
+    )
+    rcb = CandidateTestRowCountBetween(minimum=1, maximum=10, where=hostile)
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK."),),
+        tests=(rcb,),
+    )
+    result = _result(_decision(rcb, test_anchor="model"))
+
+    out = emit_proposed_yaml(candidate, result)
+    parsed = yaml.safe_load(out)
+    [block] = parsed["models"][0]["tests"]
+    body = block["dbt_expectations.expect_table_row_count_to_be_between"]
+    assert body["where"] == hostile
+
+
+def test_row_count_between_dropped_decision_filtered_out() -> None:
+    """A dropped ``row_count_between`` is filtered before rendering —
+    the model has no ``tests:`` key in the emitted YAML.
+    """
+    rcb = CandidateTestRowCountBetween(minimum=100, maximum=10000)
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK."),),
+        tests=(rcb,),
+    )
+    result = _result(
+        _decision(rcb, test_anchor="model", decision="dropped", reason="always-passes")
+    )
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    assert "tests" not in parsed["models"][0]
+
+
+def test_row_count_between_does_not_appear_in_proposed_test_files() -> None:
+    """``row_count_between`` ships as a YAML block, NOT as a standalone
+    ``tests/*.sql`` file — only ``custom_sql`` flows to
+    :func:`emit_proposed_test_files` (DEC-002 of #169).
+    """
+    rcb = CandidateTestRowCountBetween(minimum=100, maximum=10000)
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="id", description="PK."),),
+        tests=(rcb,),
+    )
+    result = _result(_decision(rcb, test_anchor="model"))
+
+    assert emit_proposed_test_files(candidate, result) == ()

@@ -416,6 +416,125 @@ file in the diff (see
 [`docs/diff-ops.md`](diff-ops.md#sidecar-json-schema) and
 [`docs/cli-ops.md`](cli-ops.md#signalforge-generate-model)).
 
+## Row-count tests (`row_count_between`)
+
+The sixth test variant, `row_count_between` (issue #169), is a
+**model-level bounded-cardinality assertion**: the table's `COUNT(*)`
+(optionally narrowed by a `WHERE` filter) must lie within
+`[minimum, maximum]`. Either bound may be omitted (`None`); at least
+one must be set. It is the structured equivalent of
+`dbt_expectations.expect_table_row_count_to_be_between`, which a survey
+of the `intuit_airflow` project flagged as the single most-used dbt
+test type (~40% of declared tests). Without a first-class variant the
+drafter cannot reach this shape — `custom_sql` *could* express it, but
+as freeform LLM emission the grader has nothing structured to score and
+the diff has nothing typed to render.
+
+### What a `row_count_between` test is
+
+`CandidateTestRowCountBetween` carries:
+
+- **`minimum`** — `int | None`, must be non-negative when set.
+- **`maximum`** — `int | None`, must be non-negative and `>= minimum`
+  when both are set.
+- **`where`** — optional SQL predicate string. A bounded-window guard
+  (e.g. `"event_date >= '2024-01-01'"`) for "this table has between N
+  and M rows **in the recent window**" assertions.
+- **`rationale`** — optional one-line "why," surfaced in the diff.
+
+The Pydantic field names are `minimum` / `maximum` (matching the
+prefix-free precedent set by `values`, `to`, `field` on the other
+variants). The ingest parser maps inbound on `prune-existing`
+(`min_value` → `minimum`); the diff emitter maps outbound
+(`minimum` → `min_value`) into the `dbt_expectations` YAML shape — see
+[`docs/diff-ops.md`](diff-ops.md#row-count-yaml-emission) and
+[`docs/ingest-ops.md`](ingest-ops.md#recognition-of-expect_table_row_count_to_be_between).
+The variant is always model-level: there is no per-column `column:`
+field, because a `COUNT(*)` is a table-level fact.
+
+### When the drafter proposes it
+
+The system prompt's `_TEST_CATALOGUE_LINES` carries two JSON-shape
+illustrations for `row_count_between` — the no-`where` form (whole-table
+bound) and the with-`where` form (filtered bound) — so a cooperative LLM
+sees both shapes and picks the one that matches the model's intent. The
+drafter typically proposes `row_count_between` when:
+
+- The model SQL is a **bounded aggregation** (a `GROUP BY` with a date
+  window in the `WHERE` clause, or a pre-aggregated rollup) whose row
+  count is naturally bounded by upstream cardinality.
+- The model is a **daily / weekly partition** where a sudden empty day
+  is a real upstream-pipeline signal.
+- The model is a **monitoring-shaped report** (cost rollups, query-stats
+  summaries) where "we expected a row this week and got zero" is the
+  most actionable failure mode.
+
+Calibration is the LLM's responsibility: the prompt is permissive but
+the grader scores whether the bound is meaningful for the tests that
+actually survive prune. A bound like `minimum=1` on a daily rollup
+catches "upstream produced nothing today" — when the table IS empty
+the test surfaces as `kept` and reaches the grader, which scores the
+bound's calibration via the [`no-redundant` criterion](grade-ops.md#row-count-calibration).
+A fully vacuous bound like `minimum=0` with no `maximum` is
+**dropped by the prune layer as `always-passes`** before the grader
+sees it — the failing-rows CTE's `WHERE n < 0` predicate matches
+nothing, so `failures=0` routes to `always-passes`. Calibration
+scoring therefore applies to bounds the prune layer cannot dismiss on
+its own (borderline cases like a `minimum=1` that only catches empty
+tables, or a `maximum` so high it can't fire today but might rot).
+
+### Worked example
+
+The `intuit_airflow` survey that motivated #169 found a `weekly_query_cost`
+model — a `GROUP BY week + warehouse` rollup of Snowflake cost data —
+with an operator-declared `row_count_between(min=100)` annotation that
+the v0.4 drafter never proposed. As of #169 the same model now drafts
+the test as a structured candidate. The drafter emits roughly:
+
+```json
+{
+  "type": "row_count_between",
+  "minimum": 100,
+  "maximum": null,
+  "rationale": "weekly_query_cost rolls up per-warehouse cost over a week; fewer than 100 rows signals upstream Snowflake query-history loss"
+}
+```
+
+This candidate flows into the prune layer, which compiles it to a
+failing-rows CTE wrapping `COUNT(*)` and runs one cheap warehouse query
+— see [`docs/prune-ops.md`](prune-ops.md#row-count-cost-model). A
+warehouse with the expected ~250 rows/week returns zero failing rows →
+`always-passes` → dropped. A warehouse that returns 50 rows → one
+failing row → `kept` with a "row-count out of bounds" signal the
+reviewer can act on.
+
+The two paths to the same variant on a `prune-existing` run are
+documented in
+[`docs/ingest-ops.md`](ingest-ops.md#recognition-of-expect_table_row_count_to_be_between):
+a hand-authored `expect_table_row_count_to_be_between` in the operator's
+own `schema.yml` is promoted to the structured variant and pruned
+alongside drafted candidates, so the operator can grade existing
+declarations without re-drafting.
+
+### `exclude_tests` short-circuit
+
+Like the five other variants, `row_count_between` is a member of
+`VALID_TEST_TYPES` (US-002 of #169) and can be suppressed via
+`DraftConfig.exclude_tests`:
+
+```yaml
+llm:
+  exclude_tests: ["row_count_between"]
+```
+
+When `"row_count_between"` is excluded, `_render_system_prompt` drops
+the entry from the JSON-shape catalogue and from the `### SCOPE` line,
+so the LLM never proposes one; if it defies the prompt, the parser's
+anchor-contract check rejects the candidate (dual-defence — prompt
+filter + parser rejection). Use this when the model under draft has
+no meaningful row-count guarantee (e.g. a slowly-growing dim table
+where any positive count is fine).
+
 ## Cache behaviour
 
 Prompt caching is a **provider capability** (issue #135): the seam
@@ -724,11 +843,12 @@ Field-by-field:
 - **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — see
   [§7 Retry taxonomy](#retry-taxonomy).
 - **`exclude_tests`** — list of dbt test types the drafter must not
-  propose (issue #54; extended to `custom_sql` in US-021 of #116).
-  Each entry must be one of the five `VALID_TEST_TYPES` — `not_null`,
-  `unique`, `accepted_values`, `relationships`, `custom_sql`; an
-  unknown value fails loud at config-load. Default `[]` (all five
-  allowed). When non-empty the system prompt's test catalogue +
+  propose (issue #54; extended to `custom_sql` in US-021 of #116;
+  extended to `row_count_between` in #169). Each entry must be one of
+  the six `VALID_TEST_TYPES` — `not_null`, `unique`, `accepted_values`,
+  `relationships`, `custom_sql`, `row_count_between`; an unknown value
+  fails loud at config-load. Default `[]` (all six allowed). When
+  non-empty the system prompt's test catalogue +
   `### SCOPE` line drop the excluded types (including `custom_sql`'s
   JSON-shape illustration) AND the parser rejects any defiant LLM
   output via `LLMOutputAnchorContractError`. Excluding every type is

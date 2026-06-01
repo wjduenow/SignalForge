@@ -33,13 +33,19 @@ does not hard-code a hash so it can't drift. Latest known rotations:
   Operator-supplied business rules render into the DYNAMIC (non-cached)
   block, so the cached-block golden below is unchanged — only the
   system prompt (and therefore ``_PROMPT_VERSION``) rotated.
-- ``c9e7ee1f6f465933`` — current. Rotated under #117 review feedback
+- ``c9e7ee1f6f465933`` — rotated under #117 review feedback
   (CodeRabbit/Copilot) when ``custom_sql`` was made to participate in
   ``exclude_tests`` filtering: the SCOPE phrase now reads
   "Propose only ..., plus ``custom_sql`` tests" and both the catalogue
   line and the custom_sql instruction are omitted when ``custom_sql`` is
   excluded. Only the system prompt changed; the cached-block golden is
   unchanged.
+- ``77e9ee8a6ae7d875`` — current. Rotated under #169 (DEC-012) when
+  ``row_count_between`` was added to ``_TEST_CATALOGUE_LINES`` as a
+  6th first-class test primitive. The new catalogue entry illustrates
+  BOTH the no-``where`` and with-``where`` shapes so the drafter has
+  two forms to mirror. Only the system prompt changed; the cached-block
+  golden (manifest summary) is unchanged.
 
 If this rotates again, update both :data:`_EXPECTED_PROMPT_VERSION` and
 :data:`_CACHED_BLOCK_GOLDEN` in lockstep — the rotation is the signal
@@ -68,7 +74,7 @@ _FIXTURE_PATH = (
 )
 
 
-_EXPECTED_PROMPT_VERSION: str = "c9e7ee1f6f465933"
+_EXPECTED_PROMPT_VERSION: str = "77e9ee8a6ae7d875"
 
 
 # Captured once via ``render_prompt`` against the canonical fixture below.

@@ -146,3 +146,38 @@ def test_multiple_violations_all_collected_no_short_circuit() -> None:
         )
     # Exactly the four distinct violations above — no more, no fewer.
     assert len(violations) == len(expected_substrings)
+
+
+def test_model_level_row_count_between_with_none_column_does_not_raise() -> None:
+    """Issue #169 — ``row_count_between`` is model-level only and the
+    Pydantic model fixes ``column = None``. ``None not in model_columns``
+    would otherwise fire a spurious "references nonexistent column None"
+    violation, blocking the variant through ``prune-existing``. The
+    exemption mirrors the drafter-side anchor in
+    ``signalforge.draft.parser._validate_anchor_contract``.
+    """
+    candidate = _candidate(
+        columns=[
+            {
+                "name": "id",
+                "description": "Primary key.",
+                "tests": [{"type": "not_null", "column": "id"}],
+            },
+        ],
+        tests=[
+            # `column` defaults to None on the Pydantic model — operators
+            # never provide it for this variant, and the discriminated-union
+            # exemption must catch the None case.
+            {
+                "type": "row_count_between",
+                "minimum": 1,
+                "where": "1 = 0",
+            },
+            {
+                "type": "row_count_between",
+                "minimum": 0,
+            },
+        ],
+    )
+    # Returns None; the absence of a raise is the assertion.
+    assert validate_anchor_contract(candidate, _MODEL_COLUMNS) is None

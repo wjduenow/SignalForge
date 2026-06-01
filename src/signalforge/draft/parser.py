@@ -228,6 +228,137 @@ def _check_custom_sql_type_coherence(
     return tuple(violations)
 
 
+def _check_row_count_between_where(
+    where: str,
+    model_columns: frozenset[str],
+    model_columns_by_type: Mapping[str, str | None],
+    dialect_name: str,
+) -> tuple[str, ...]:
+    """Validate a ``row_count_between.where`` clause via sqlglot (#169, DEC-004/006).
+
+    Composes ``SELECT 1 FROM __sf_where_placeholder__ WHERE <where>`` so
+    sqlglot can parse the freestanding clause as part of a complete SELECT,
+    then walks the comparison nodes inside the WHERE looking for two
+    distinct violations:
+
+    * **Unknown column reference** — a bare :class:`sqlglot.exp.Column`
+      operand whose name is not in ``model_columns`` appends a violation.
+      This is the row_count_between equivalent of the structural
+      ``test references nonexistent column`` check that the other
+      variants get via ``test.column not in model_columns``.
+    * **Type incompatibility** — when BOTH sides of a comparison are
+      bare Columns and both types are known in ``model_columns_by_type``,
+      the existing :func:`_types_compatible` rule applies and a mismatch
+      appends a violation.
+
+    Skip-when-uncertain posture is preserved (DEC-006):
+
+    * sqlglot ``ParseError`` / other sqlglot error → silent skip (warehouse
+      adapter catches real-SQL breakage via ``kept-without-evidence``).
+    * Comparison nodes inside an ``exp.Subquery`` are skipped entirely —
+      subquery contents are by definition not part of the row-count
+      filter; an ``IN (SELECT ...)`` or ``(SELECT ...) > 0`` shape should
+      not flag inner column refs.
+    * Comparison operands that are not bare ``exp.Column`` (Cast,
+      SafeCast, Coalesce, function calls, literals, NULL, window
+      functions, subqueries themselves) → skip the operand check.
+    * Type that ``DataType.build`` cannot parse → skip the type check.
+
+    Conservative-bias matches the rule (manifest-readers.md /
+    llm-drafter.md): never raise out of this helper.
+    """
+    composed = f"SELECT 1 FROM __sf_where_placeholder__ WHERE {where}"
+    # Neutralise Jinja placeholders (rare in operator-supplied where
+    # clauses but possible via the ingest path with dbt-expectations
+    # macros).
+    sanitized = _JINJA_PLACEHOLDER_RE.sub(_JINJA_PLACEHOLDER_TOKEN, composed)
+    try:
+        parsed = sqlglot.parse_one(sanitized, dialect=dialect_name)
+    except sqlglot.errors.ParseError:
+        return ()
+    except sqlglot.errors.SqlglotError:
+        return ()
+
+    if parsed is None:
+        return ()
+
+    try:
+        annotated = annotate_types(parsed, dialect=dialect_name)
+    except Exception:  # noqa: BLE001 — sqlglot's annotator raises a wide surface
+        return ()
+
+    violations: list[str] = []
+    seen_unknown: set[str] = set()
+
+    def _inside_subquery(node: object) -> bool:
+        # ``node.parent`` is typed loosely by sqlglot; walk via getattr so
+        # we don't reach into the private ``Expression`` symbol.
+        parent = getattr(node, "parent", None)
+        while parent is not None:
+            if isinstance(parent, exp.Subquery):
+                return True
+            parent = getattr(parent, "parent", None)
+        return False
+
+    for node in annotated.walk():
+        if not isinstance(node, (exp.EQ, exp.NEQ, exp.GT, exp.LT, exp.GTE, exp.LTE)):
+            continue
+        # Skip comparisons inside a subquery — DEC-006 skip-when-uncertain.
+        if _inside_subquery(node):
+            continue
+        left = node.left
+        right = node.right
+
+        # Column-existence check on each bare-Column operand. We allow
+        # one bare Column even when the other side is a literal / cast /
+        # function call — that is the canonical ``user_id > 100`` shape.
+        for operand in (left, right):
+            if type(operand) is exp.Column:
+                col_name = operand.name
+                # Skip the synthetic Jinja placeholder identifier.
+                if col_name == _JINJA_PLACEHOLDER_TOKEN:
+                    continue
+                if col_name not in model_columns and col_name not in seen_unknown:
+                    seen_unknown.add(col_name)
+                    violations.append(
+                        f"row_count_between where references nonexistent column "
+                        f"{col_name!r} (available: {sorted(model_columns)})"
+                    )
+
+        # Type-coherence check — only fires when BOTH sides are bare
+        # Columns with known types.
+        if type(left) is not exp.Column or type(right) is not exp.Column:
+            continue
+        left_name = left.name
+        right_name = right.name
+        left_type_str = model_columns_by_type.get(left_name)
+        right_type_str = model_columns_by_type.get(right_name)
+        if left_type_str is None or right_type_str is None:
+            continue
+        try:
+            left_dtype = DataType.build(left_type_str, dialect=dialect_name).this
+            right_dtype = DataType.build(right_type_str, dialect=dialect_name).this
+        except Exception:  # noqa: BLE001 — opaque vendor-type strings; skip
+            continue
+        if _types_compatible(left_dtype, right_dtype):
+            continue
+        op_token = {
+            exp.EQ: "=",
+            exp.NEQ: "<>",
+            exp.GT: ">",
+            exp.LT: "<",
+            exp.GTE: ">=",
+            exp.LTE: "<=",
+        }.get(type(node), type(node).__name__.lower())
+        violations.append(
+            f"row_count_between where references column {left_name!r} ({left_type_str}) "
+            f"and {right_name!r} ({right_type_str}) in {op_token!r} comparison "
+            f"— types incompatible"
+        )
+
+    return tuple(violations)
+
+
 def _validate_anchor_contract(
     candidate: CandidateSchema,
     model_columns: frozenset[str],
@@ -364,6 +495,32 @@ def _validate_anchor_contract(
                 assert model_columns_by_type is not None  # narrow for pyright
                 violations.extend(
                     _check_custom_sql_type_coherence(test.sql, model_columns_by_type, dialect_name)
+                )
+        elif test.type == "row_count_between":
+            # Issue #169 — row_count_between is model-level only;
+            # ``column`` is always ``None`` (the Pydantic model enforces
+            # this), so we MUST special-case it ahead of the generic
+            # ``test.column not in model_columns`` check below.
+            #
+            # The ``where`` clause (when present) is validated via
+            # sqlglot for both column-existence AND type-coherence
+            # (DEC-004 / DEC-006). When the type-arm is inactive
+            # (``model_columns_by_type=None`` or all-None types) we
+            # still want the column-existence check, so we fall back to
+            # an empty type map. ``where`` rejected by sqlglot parsing
+            # routes silently (DEC-006); the warehouse adapter catches
+            # real-SQL breakage downstream.
+            if test.where is not None and test.where.strip():
+                types_map: Mapping[str, str | None] = (
+                    model_columns_by_type if model_columns_by_type is not None else {}
+                )
+                violations.extend(
+                    _check_row_count_between_where(
+                        test.where,
+                        model_columns,
+                        types_map,
+                        dialect_name,
+                    )
                 )
         elif test.column not in model_columns:
             violations.append(f"model-level test references nonexistent column {test.column!r}")

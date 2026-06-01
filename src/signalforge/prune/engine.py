@@ -82,7 +82,11 @@ from pathlib import Path
 
 from signalforge import __version__ as _SIGNALFORGE_VERSION
 from signalforge._common.path_safety import PathContainmentError, canonicalise_path
-from signalforge.draft.models import CandidateSchema, CandidateTest
+from signalforge.draft.models import (
+    CandidateSchema,
+    CandidateTest,
+    CandidateTestRowCountBetween,
+)
 from signalforge.manifest.models import Manifest, Model
 from signalforge.prune.audit import (
     _build_prune_event,
@@ -964,7 +968,29 @@ def prune_tests(
         sample_bucket: int | None
         compile_partition_filter = resolved_config.partition_filter
 
-        if resolved_config.sample_strategy == "materialised" and scope == "sample":
+        # CodeRabbit #176 fix (Thread PRRT_kwDOSNbUmM6F_w2h): when every
+        # candidate is ``row_count_between``, the per-test override below
+        # routes all of them to ``source_table_ref`` regardless of
+        # scope/strategy. Skip the materialise_sample call AND the
+        # _resolve_sample_bucket call — both are wasted work in this case,
+        # and either failing on the adapter would spuriously route every
+        # test to ``kept-without-evidence`` even though they could have run
+        # directly against the source. Mirrors the empty-candidate
+        # short-circuit (#105) at a lower-tier: same "no warehouse
+        # pre-work needed" reasoning, narrower trigger.
+        all_bypass_to_source = bool(pairs) and all(
+            isinstance(test, CandidateTestRowCountBetween) for _, test in pairs
+        )
+
+        if all_bypass_to_source:
+            compile_table_ref = source_table_ref
+            # ``row_count_between``'s compiler ignores scope / sample_size
+            # / sample_bucket / partition_filter; "full" is the natural
+            # value to thread through for any decision-level audit fields.
+            compile_scope = "full"
+            sample_bucket = None
+            compile_partition_filter = None
+        elif resolved_config.sample_strategy == "materialised" and scope == "sample":
             try:
                 materialised_ref = adapter.materialise_sample(
                     source_table_ref,
@@ -1075,12 +1101,30 @@ def prune_tests(
                 decisions.append(decision)
                 continue
 
+            # Per-test table-ref override for ``row_count_between`` (#169
+            # US-007a QG fix; DEC-003 corrected). A COUNT(*) against a
+            # materialised sample returns the sample size, NOT the model's
+            # true row count — bounds checked against sample size are
+            # semantically meaningless. Route ``row_count_between`` past the
+            # materialised substitution to ``source_table_ref`` so the
+            # bounds verdict is correct at the default config
+            # (``scope=sample`` + ``sample_strategy=materialised``). The
+            # COUNT(*) against the source remains cheap (single aggregate
+            # scan, no row materialisation). All other variants continue to
+            # consume the substituted ``compile_table_ref`` per the #22
+            # materialised-sample contract.
+            per_test_table_ref = (
+                source_table_ref
+                if isinstance(test, CandidateTestRowCountBetween)
+                else compile_table_ref
+            )
+
             # Compile the candidate test to failing-rows SQL. Returns
             # either a string (the SELECT), a ``_RequiresFutureData``
             # sentinel, or an ``_InvalidIdentifier`` sentinel.
             compile_result = _compile_test(
                 test,
-                compile_table_ref,
+                per_test_table_ref,
                 dialect,
                 manifest,
                 model=model,

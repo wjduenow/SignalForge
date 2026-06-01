@@ -429,6 +429,47 @@ Test fixtures exercise the escaping for: triple-backticks in
 description, `</details>`, `[evil](javascript:...)`, pipe in column
 name.
 
+### Row-count YAML emission
+
+The sixth test variant, `row_count_between` (issue #169; see
+[`docs/draft-ops.md`](draft-ops.md#row-count-tests-row_count_between)),
+ships as a model-level YAML block under the `dbt_expectations`
+namespace. The diff emitter's `_render_test` arm maps the Python-side
+fields `minimum` / `maximum` to the macro's `min_value` / `max_value`
+names; the optional `where` field appears verbatim. `None`-valued
+fields are omitted so the emitted YAML stays minimal:
+
+```yaml
+models:
+  - name: weekly_query_cost
+    tests:
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 100
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 50
+          max_value: 1000
+          where: "event_date >= current_date - 7"
+```
+
+There is **no `tests/*.sql` fallback** in v1 (DEC-002 of #169). The
+6th fail-closed test-file writer at `signalforge.diff._test_file_writer`
+stays `custom_sql`-only; `row_count_between` emits as YAML or not at
+all. Operators without `dbt-expectations` installed see the YAML in the
+diff, run `dbt parse`, and get a clear macro-not-found error — they
+either add `dbt-expectations` to their `packages.yml` and `dbt deps`,
+or remove the block from their `schema.yml`. SignalForge does not
+detect the package's presence in `packages.yml` and does not add it as
+a runtime dependency — `dbt-expectations` is industry-standard for the
+`expect_*` macro family, and a `packages.yml` inspection would add
+complexity for no clear win.
+
+The outbound mapping seam (`minimum` → `min_value`) is paired with the
+inverse inbound mapping in the ingest parser (`min_value` → `minimum`)
+so `prune-existing` against an externally-authored
+`expect_table_row_count_to_be_between` declaration round-trips to the
+same typed variant the drafter produces — see
+[`docs/ingest-ops.md`](ingest-ops.md#recognition-of-expect_table_row_count_to_be_between).
+
 ## Snapshot fixture matrix (DEC-017)
 
 Ten cases under `tests/fixtures/diff/`, regenerable via
