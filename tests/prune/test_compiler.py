@@ -1567,7 +1567,12 @@ def test_compile_row_count_between_ignores_partition_filter() -> None:
     )
     assert actual == _read_fixture("row_count_between.sql")
     assert isinstance(actual, str)
-    assert "WHERE" not in actual
+    # The partition filter must NOT have leaked into the SQL — the only
+    # ``WHERE`` clause is the CTE-wrapper's bound-violation predicate
+    # (US-007a: ``WHERE n < <min> OR n > <max>``); no ``event_date`` /
+    # ``partition`` substring appears.
+    assert "event_date" not in actual
+    assert "partition" not in actual.lower()
 
 
 def test_compile_row_count_between_materialised_sample_references_temp_table() -> None:
@@ -1607,7 +1612,9 @@ def test_compile_row_count_between_unique_among_dispatch_arms() -> None:
     test = CandidateTestRowCountBetween(minimum=1)
     actual = _compile_test(test, _make_orders_table_ref(), BIGQUERY_DIALECT, _make_manifest())
     assert isinstance(actual, str)
-    assert actual.startswith("SELECT COUNT(*) FROM ")
+    # US-007a: the failing-rows CTE shape wraps the COUNT(*) so the
+    # adapter's outer COUNT(*) reflects bound violations.
+    assert actual.startswith("SELECT n FROM (SELECT COUNT(*) AS n FROM ")
 
 
 def test_compile_row_count_between_composed_sql_passes_safety_validator() -> None:
@@ -1619,3 +1626,83 @@ def test_compile_row_count_between_composed_sql_passes_safety_validator() -> Non
     assert isinstance(actual, str)
     # Round-trips through the cheap-rejects validator.
     validate_test_sql(actual)
+
+
+def test_compile_row_count_between_adapter_wrapped_failing_rows_contract() -> None:
+    """US-007a (#169 tt8.15) — the failing-rows contract.
+
+    The warehouse adapters wrap every compiler output as
+    ``SELECT COUNT(*) AS failures FROM (<sql>) AS t``. For
+    ``row_count_between`` to interact correctly with that wrap, the
+    compiled SQL must return ZERO rows when bounds are satisfied and at
+    least one row when bounds are violated — same contract as the four
+    built-in failing-rows tests.
+
+    This test pins the shape via literal-string assertions on the
+    compiled SQL: the inner CTE evaluates the COUNT(*) of the model into
+    column ``n``, and the outer WHERE clause filters on the
+    bound-violation predicate. When the bound holds, no row makes it
+    past the WHERE → outer ``failures=0`` → engine routes
+    ``always-passes``. When the bound is violated, the one CTE row
+    passes the WHERE → outer ``failures=1`` → engine routes ``kept``.
+
+    The pre-US-007a shape (``SELECT COUNT(*) FROM <table>``) wrapped to
+    ``SELECT COUNT(*) AS failures FROM (SELECT COUNT(*) FROM <table>) AS t``
+    where the inner returns one row (the count), the outer ``COUNT(*)``
+    over a one-row result is always 1, so ``failures=1`` regardless of
+    bounds and the engine routed every real ``row_count_between`` to
+    ``kept`` without ever checking the bounds. The CTE+WHERE shape
+    fixes the interaction.
+    """
+    # Both bounds set → predicate is ``n < <min> OR n > <max>``.
+    both = _compile_test(
+        CandidateTestRowCountBetween(minimum=10, maximum=100),
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+    )
+    assert isinstance(both, str)
+    # Inner CTE: COUNT(*) aliased as ``n`` against the model's table.
+    assert "SELECT COUNT(*) AS n FROM `fake_project.dataset.orders`" in both
+    # Outer SELECT pulls ``n`` from the CTE alias ``rc``.
+    assert "SELECT n FROM (" in both
+    assert ") AS rc WHERE " in both
+    # Bound-violation predicate is uniform: both literal bound values
+    # appear with the right comparison operator.
+    assert "n < 10 OR n > 100" in both
+
+    # Only-minimum → predicate is ``n < <min>`` alone.
+    only_min = _compile_test(
+        CandidateTestRowCountBetween(minimum=10),
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+    )
+    assert isinstance(only_min, str)
+    assert only_min.endswith(") AS rc WHERE n < 10")
+    # No spurious upper-bound clause.
+    assert " OR n > " not in only_min
+
+    # Only-maximum → predicate is ``n > <max>`` alone.
+    only_max = _compile_test(
+        CandidateTestRowCountBetween(maximum=100),
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+    )
+    assert isinstance(only_max, str)
+    assert only_max.endswith(") AS rc WHERE n > 100")
+    # No spurious lower-bound clause.
+    assert "n < " not in only_max
+
+    # All three compiled outputs round-trip through the cheap-rejects
+    # validator (belt-and-braces with the adapter's pre-execute check).
+    for sql in (both, only_min, only_max):
+        validate_test_sql(sql)
+        # Belt-and-braces: when the inner CTE row's ``n`` satisfies the
+        # bound, the outer WHERE filters it out, so the wrapped adapter
+        # query (SELECT COUNT(*) AS failures FROM (<sql>) AS t) returns
+        # failures=0 → engine routes always-passes. We can't execute the
+        # SQL here without a warehouse, but pinning the literal shape
+        # above guarantees the inner SELECT runs the COUNT FIRST and
+        # the outer WHERE filters the count row.

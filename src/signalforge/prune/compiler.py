@@ -812,16 +812,36 @@ def _compile_row_count_between(
     dialect: Dialect,
 ) -> str | _InvalidIdentifier:
     """Compile ``row_count_between(minimum, maximum, where?)`` to a
-    ``SELECT COUNT(*) FROM <table_ref> [WHERE <where>]`` statement (#169 DEC-003).
+    failing-rows SELECT (#169 DEC-003, corrected by US-007a / tt8.15).
 
-    Unlike the four built-in failing-rows variants and ``custom_sql`` (which
-    return *rows* that the adapter then COUNT-wraps), ``row_count_between`` is
-    fundamentally a row-count check: the compiled SQL itself is the
-    ``COUNT(*)``. The prune engine (US-008) reads the single returned scalar
-    and compares it against ``minimum`` / ``maximum`` to derive the
-    decision. The adapter MUST NOT re-wrap with another ``COUNT(*)`` — the
-    engine's ``row_count_between`` arm is responsible for the right
-    interpretation (US-008).
+    Emits a CTE-wrapped failing-rows SELECT of the form::
+
+        SELECT n
+        FROM (SELECT COUNT(*) AS n FROM <table> [WHERE <where>]) AS rc
+        WHERE <bound-violation-predicate>
+
+    The bound-violation predicate is one of:
+
+    * ``n < <minimum>`` — only ``minimum`` is set.
+    * ``n > <maximum>`` — only ``maximum`` is set.
+    * ``n < <minimum> OR n > <maximum>`` — both set.
+
+    This is the **failing-rows contract the other 4 built-in tests follow**.
+    The adapter wraps every compiler output as
+    ``SELECT COUNT(*) AS failures FROM (<sql>) AS t`` (BigQueryAdapter /
+    SnowflakeAdapter): zero rows from the inner SELECT → ``failures=0`` →
+    engine routes ``always-passes``; one row → ``failures=1`` → engine
+    routes ``kept`` (or ``failed-on-known-clean-data`` on a trusted model).
+
+    **The previous shape (``SELECT COUNT(*) FROM <table> [WHERE <where>]``)
+    was a bug** (US-007a). Wrapped, that became
+    ``SELECT COUNT(*) AS failures FROM (SELECT COUNT(*) FROM <table>) AS t``
+    — the inner returns 1 row (the count), the outer ``COUNT(*)`` is
+    always 1, so ``failures`` was always 1 regardless of bounds. The engine
+    routed every real ``row_count_between`` to ``kept`` (or
+    ``failed-on-known-clean-data`` if trusted) without ever checking the
+    bounds. The CTE+WHERE shape pushes the bound check into the inner
+    SELECT so the outer COUNT(*) reflects the real verdict.
 
     **Sample-mode is deliberately bypassed (DEC-003).** The compiled SQL is
     identical regardless of ``prune.scope`` — a sampled ``COUNT(*)`` is
@@ -834,8 +854,7 @@ def _compile_row_count_between(
 
     **DEC-005 — compose-then-validate.** ``where`` is freeform LLM- or
     operator-supplied SQL (e.g. ``"event_date >= '2024-01-01'"``). We
-    compose the full ``SELECT COUNT(*) FROM <table> WHERE <where>``
-    statement THEN call the existing
+    compose the full failing-rows SELECT THEN call the existing
     :func:`signalforge.warehouse._sql_safety.validate_test_sql` on it. The
     composed-then-validated path catches every shape ``validate_test_sql``
     catches (stray ``;`` / ``--`` / ``/* */`` / unbalanced parens) without
@@ -851,9 +870,21 @@ def _compile_row_count_between(
     """
     table = _qualified_table_name(table_ref, dialect)
     if test.where is None:
-        sql = f"SELECT COUNT(*) FROM {table}"
+        inner = f"SELECT COUNT(*) AS n FROM {table}"
     else:
-        sql = f"SELECT COUNT(*) FROM {table} WHERE {test.where}"
+        inner = f"SELECT COUNT(*) AS n FROM {table} WHERE {test.where}"
+    # Three-clause bound-violation predicate: at least one of (minimum,
+    # maximum) is set (CandidateTestRowCountBetween validates this at
+    # construction time).
+    if test.minimum is not None and test.maximum is not None:
+        predicate = f"n < {test.minimum} OR n > {test.maximum}"
+    elif test.minimum is not None:
+        predicate = f"n < {test.minimum}"
+    else:
+        # test.maximum is not None — guaranteed by the model's
+        # _bounds_consistent validator.
+        predicate = f"n > {test.maximum}"
+    sql = f"SELECT n FROM ({inner}) AS rc WHERE {predicate}"
     try:
         validate_test_sql(sql)
     except QuerySyntaxError:
