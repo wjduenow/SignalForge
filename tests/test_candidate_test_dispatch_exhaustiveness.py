@@ -125,17 +125,18 @@ _EXPECTED_VARIANT_COUNT: int = 8
 #: merged, every set should be empty and every variant must round-trip
 #: every dispatch site.
 #:
-#: As of US-007 + US-008 (this merge): sites 1 (prune compiler), 2
-#: (``_common.artifact_id``), and 6 (``ingest.anchor``) are landed for
-#: ``CandidateTestRowCountAnomalyByPeriod`` — all three removed from
-#: their pending sets. Sites 3 (diff emitter) and 5 (drafter anchor)
-#: are still pending in sibling beads.
+#: As of US-006 + US-007 + US-008 (this merge): sites 1 (prune compiler),
+#: 2 (``_common.artifact_id``), 5 (drafter anchor), and 6
+#: (``ingest.anchor``) are landed for
+#: ``CandidateTestRowCountAnomalyByPeriod`` — all four removed from
+#: their pending sets. Site 3 (diff emitter) is still pending in
+#: sibling bead US-014.
 _VARIANTS_PENDING_DISPATCH_ARMS: dict[int, frozenset[type]] = {
     1: frozenset(),  # US-008 — landed
     2: frozenset(),  # US-004 — landed
     3: frozenset({CandidateTestRowCountAnomalyByPeriod}),  # US-014 (diff emitter)
     4: frozenset(),  # N/A — variant has no external dbt-macro form
-    5: frozenset({CandidateTestRowCountAnomalyByPeriod}),  # US-006 (draft anchor)
+    5: frozenset(),  # US-006 — landed
     6: frozenset(),  # US-007 — landed
 }
 
@@ -590,7 +591,10 @@ def test_site_5_draft_anchor_dispatches_every_variant(variant_cls: type) -> None
     signals that the variant fell through to the generic arm.
     """
     test = _make_instance(variant_cls)
-    model_columns = frozenset({"customer_id", "order_id"})
+    # ``ordered_at`` is needed for ``CandidateTestRowCountAnomalyByPeriod``'s
+    # ``date_column`` field-existence check (US-006); the column-scoped
+    # variants ignore it.
+    model_columns = frozenset({"customer_id", "order_id", "ordered_at"})
 
     if test.column is not None:
         # Column-scoped variant: file under a CandidateColumn so the
