@@ -217,3 +217,52 @@ def test_model_level_unique_combination_with_none_column_does_not_raise() -> Non
     )
     # Returns None; the absence of a raise is the assertion.
     assert validate_anchor_contract(candidate, _MODEL_COLUMNS) is None
+
+
+def test_model_level_unique_combination_with_hallucinated_column_raises_per_column() -> None:
+    """CodeRabbit PR-180 finding (triangulated with QG Pass 1 C2 + Pass 2 #2
+    + US-010 worker docstring) — the ingest anchor must validate each
+    ``unique_combination.columns[i]`` against the model, mirroring the
+    draft-parser side at
+    ``signalforge.draft.parser._validate_anchor_contract``. Before this
+    fix, a hand-authored ``dbt_utils.unique_combination_of_columns`` block
+    referencing a nonexistent column passed the ingest anchor silently
+    (the warehouse later rejected the SQL via the conservative-bias
+    ``kept-without-evidence`` route, but with a generic "identifier
+    rejected" message rather than a precise per-column violation).
+
+    Asserts the collect-all contract — multiple hallucinated columns
+    surface as multiple distinct violations in one error.
+    """
+    candidate = _candidate(
+        columns=[
+            {
+                "name": "id",
+                "description": "Primary key.",
+                "tests": [{"type": "not_null", "column": "id"}],
+            },
+        ],
+        tests=[
+            {
+                "type": "unique_combination",
+                # Two hallucinated columns; one real (``id``).
+                "columns": ["id", "nonexistent_a", "nonexistent_b"],
+            },
+        ],
+    )
+    with pytest.raises(IngestAnchorContractError) as excinfo:
+        validate_anchor_contract(candidate, _MODEL_COLUMNS)
+    violations = excinfo.value.violations
+    # Collect-all: both hallucinated columns surface, real ``id`` does not.
+    assert len(violations) == 2
+    assert any(
+        "unique_combination references nonexistent column 'nonexistent_a'" in v for v in violations
+    )
+    assert any(
+        "unique_combination references nonexistent column 'nonexistent_b'" in v for v in violations
+    )
+    # The real column ``id`` MUST NOT appear as a violation HEADER. (The
+    # "available: [...]" suffix legitimately lists every model column,
+    # including ``id``, so a naive substring search yields a false
+    # positive — pin the header shape instead.)
+    assert not any("unique_combination references nonexistent column 'id'" in v for v in violations)

@@ -170,7 +170,7 @@ Decisions consolidated from Phase 1 scoping (S1–S4), Phase 2 architecture revi
 | DEC | Decision | Rationale |
 |---|---|---|
 | **DEC-001** | **Variant name = `unique_combination`** (vs. `composite_unique`). | Grep parity with the dbt-utils macro it most directly replaces. Phase 1 P3 implicit confirmation. |
-| **DEC-002** | **`where: str | None` shipped in v1** (Phase 1 S1). | Holds the epic #179 +10 pp / 15-of-143 coverage projection. Inherits #169's sqlglot type-coherence reuse pattern verbatim. |
+| **DEC-002** | **`where: str \| None` shipped in v1** (Phase 1 S1). | Holds the epic #179 +10 pp / 15-of-143 coverage projection. Inherits #169's sqlglot type-coherence reuse pattern verbatim. |
 | **DEC-003** | **Catalogue SSOT lives in new `docs/drafter-catalogue.md`** (Phase 1 S2). | Matches the `.claude/rules/` (architecture) vs. `docs/*-ops.md` (operator examples) split. Linked from README + `business-rule-tests.md` + `draft-ops.md`. |
 | **DEC-004** | **Docs story bundled into #170** (Phase 1 S3). | A 7th primitive without its evaluation surface ships product but not the story. One PR closes the loop. |
 | **DEC-005** | **Engineer new fixture `stg_bikeshare_station_pairs.sql`** with natural composite-key uniqueness (Phase 1 S4). | Pinnable e2e AC: drafter emits structured `unique_combination` against the new fixture instead of freeform `custom_sql`. |
@@ -570,7 +570,7 @@ Decisions consolidated from Phase 1 scoping (S1–S4), Phase 2 architecture revi
 
 ### Story dependency graph
 
-```
+```text
 US-001 ──┬── US-002
          ├── US-003
          ├── US-004 ── US-005a ── US-005b

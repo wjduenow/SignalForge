@@ -208,7 +208,7 @@ therefore overrides the table reference to the **source table** for every
 pattern.
 
 See [`docs/draft-ops.md` § Composite uniqueness](draft-ops.md#composite-uniqueness-unique_combination)
-for drafting; [`docs/prune-ops.md` § Row-count cost model](prune-ops.md#row-count-cost-model)
+for drafting; [`docs/prune-ops.md` § `unique_combination`](prune-ops.md#unique_combination--same-engine-routing-group-by-shape-issue-170)
 for the engine routing (same source-vs-temp pattern as `row_count_between`);
 [`docs/ingest-ops.md` § Recognition of `dbt_utils.unique_combination_of_columns`](ingest-ops.md#recognition-of-dbt_utilsunique_combination_of_columns)
 for `prune-existing` recognition; [`docs/grade-ops.md` § Row-count calibration](grade-ops.md#row-count-calibration)

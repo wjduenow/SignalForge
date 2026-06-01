@@ -614,7 +614,7 @@ ships natural composite uniqueness. The drafter emits roughly:
 
 This candidate flows into the prune layer, which compiles it to
 `SELECT order_id, line_item_id FROM <table> GROUP BY order_id, line_item_id HAVING COUNT(*) > 1`
-and runs one warehouse query — see [`docs/prune-ops.md`](prune-ops.md#row-count-cost-model)
+and runs one warehouse query — see [`docs/prune-ops.md` § `unique_combination`](prune-ops.md#unique_combination--same-engine-routing-group-by-shape-issue-170)
 for the engine routing (sample-mode bypassed to source — composite
 uniqueness on a sample is semantically approximate). A warehouse where
 the grain holds returns zero failing rows → `always-passes` → dropped.
