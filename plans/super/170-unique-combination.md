@@ -9,7 +9,7 @@
 | Sequencing dependency | #169 — `row_count_between` (shipped 2026-05-31, commit `2fdb91e`) |
 | Sibling | #154 — prune+grade adapter for existing dbt-expectations tests (ingest seam — coordinate, don't merge) |
 | Branch / worktree | `feature/170-unique-combination` at `/home/wesd/Projects/worktrees/SignalForge/170-unique-combination` |
-| Phase | **published** (Phases 1–4 complete; awaiting PR review) |
+| Phase | **devolved** (all phases complete; beads created on `feature/170-unique-combination`) |
 | Sessions | 1 (2026-05-31) |
 
 ## Phase 1 — Discovery
@@ -589,7 +589,7 @@ US-001..US-009 ── US-013 (docs SSOT)
 US-001..US-013 ── US-014 (QG) ── US-015 (P&M)
 ```
 
-**Story count:** 16 implementation + QG + P&M = 18 beads total.
+**Story count:** 14 implementation + QG + P&M = 16 stories. With epic, 17 beads total.
 
 ### Rules compliance check (pre-Phase-5 gate)
 
@@ -601,8 +601,34 @@ Plan committed on `feature/170-unique-combination`, pushed to origin, draft PR o
 
 ## Phase 6 — Approved
 
-*(pending)*
+User approved the plan on 2026-06-01 ("approved, devolve to beads"). Proceeded directly to Phase 7.
 
 ## Phase 7 — Devolve (Beads Manifest)
 
-*(pending)*
+Worktree: `/home/wesd/Projects/worktrees/SignalForge/170-unique-combination`
+Branch: `feature/170-unique-combination`
+Plan PR: https://github.com/wjduenow/SignalForge/pull/180
+
+### Beads manifest
+
+| Story | Bead ID | Deps | Title |
+|---|---|---|---|
+| Epic | `bd_1-scaffolding-0tq` | — | #170: unique_combination 7th test primitive |
+| US-001 | `bd_1-scaffolding-0tq.1` | — | CandidateTestUniqueCombination variant model + plumbing |
+| US-002 | `bd_1-scaffolding-0tq.2` | US-001 | Custom `__repr__` redaction (mixin + retroactive) |
+| US-003 | `bd_1-scaffolding-0tq.3` | US-001 | Drafter prompt catalogue + `_PROMPT_VERSION` rotation |
+| US-004 | `bd_1-scaffolding-0tq.4` | US-001 | Draft parser anchor-contract arm + collect-all matrix |
+| US-005a | `bd_1-scaffolding-0tq.5` | US-001, US-004 | Prune compiler arm + BQ/Snowflake snapshots |
+| US-005b | `bd_1-scaffolding-0tq.6` | US-005a | Engine source override + behavioural routing pin |
+| US-006 | `bd_1-scaffolding-0tq.7` | US-001 | `_common.artifact_id` arm (SORTED) + diff emitter arm |
+| US-007 | `bd_1-scaffolding-0tq.8` | US-001 | Ingest parser arm + ingest anchor exemption |
+| US-008 | `bd_1-scaffolding-0tq.9` | US-001 | Grade rubric `no-redundant` extension |
+| US-009 | `bd_1-scaffolding-0tq.10` | US-008 | Grade-side `_PROMPT_VERSION` snapshot surface |
+| US-010 | `bd_1-scaffolding-0tq.11` | US-001, US-004, US-005a, US-005b, US-006, US-007 | Mechanic exhaustiveness gate (6-site routing test) |
+| US-011 | `bd_1-scaffolding-0tq.12` | — | Engineered fixture + hand-crafted manifest seed |
+| US-012 | `bd_1-scaffolding-0tq.13` | US-001…US-011 | Gated e2e (drafter emits structured `unique_combination`) |
+| US-013 | `bd_1-scaffolding-0tq.14` | US-001…US-009 | Docs SSOT + README + ops + CHANGELOG + mkdocs nav |
+| US-014 | `bd_1-scaffolding-0tq.15` | US-001…US-013 | Quality Gate (4 reviewer angles + CodeRabbit) |
+| US-015 | `bd_1-scaffolding-0tq.16` | US-014 | Patterns & Memory |
+
+**Ready-to-start beads** (`bd ready` confirms): US-001 (`...0tq.1`) and US-011 (`...0tq.12`). All other beads are blocked by their dependencies.
