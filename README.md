@@ -21,6 +21,7 @@ And you don't have to start from SignalForge's own drafts. Point it at a `schema
 - **Generates documentation** — column-level descriptions and model-level overviews — graded by an LLM-as-judge against a configurable rubric.
 - **Reports what was kept and what was dropped**, with a one-line "why" per artifact. No black-box generation.
 - **Prunes tests you already have.** Point it at an existing `schema.yml` — from dbt-codegen, dbt Copilot, DinoAI, datapilot, or hand-written — and the warehouse tells you which of *those* tests add no signal. Same prune step, no LLM call (`signalforge prune-existing`).
+- **Drives end-to-end from Claude Code.** Run `signalforge install-skill` once in your dbt project and Claude recognises requests like "draft tests for `dim_customers`" or "prune my existing `schema.yml`," picks the right subcommand + flags, and explains the kept / kept-uncertain / dropped / flagged diff back. Deep dive: [Claude Code skill](docs/skills.md).
 
 ## How it works
 
@@ -50,6 +51,24 @@ There's a second entry point that skips the LLM entirely. If you already have a 
 ```
 
 No draft, no grade, no LLM call — just "which of these tests earn their place?" Tests SignalForge can't evaluate (custom / dbt-expectations / namespaced generics) are reported as skipped, never silently dropped.
+
+## Claude Code
+
+SignalForge ships a bundled [Claude Code](https://docs.claude.com/en/docs/claude-code) skill so Claude can drive the `signalforge` CLI end-to-end against your dbt project. Install it once from your project root:
+
+```bash
+signalforge install-skill
+```
+
+This drops the skill into `<project>/.claude/skills/signalforge/`. With it in place, a Claude Code session opened against the project recognises requests in plain English:
+
+- "Draft tests for `dim_customers` and explain what got dropped."
+- "Prune the `schema.yml` I already have at `models/staging/schema.yml`."
+- "Run the demo so I can see what SignalForge actually does."
+
+Claude picks the right subcommand and flags (`generate --write` vs `prune-existing --schema` vs `init-demo` vs `lint`), runs the pipeline, and explains the kept / kept-uncertain / dropped / flagged diff back to you — including the per-artifact "why" for each decision. The skill is shipped inside the `signalforge-dbt` wheel and stays in lockstep with the live CLI via a parity test, so a future subcommand or flag change updates the skill in the same commit.
+
+Full reference: [Claude Code skill](docs/skills.md) — covers the install path and overwrite policy, the 7-step workflow the skill teaches, the zero-credential demo and gated live-e2e flows, the parity gate, and the optional clauditor self-grade.
 
 ## Supported warehouses
 
@@ -113,9 +132,9 @@ without adding it to a project environment.
 **Working from a clone (contributing)?** Install the dev toolchain with
 `uv sync --dev` — see [CONTRIBUTING.md](CONTRIBUTING.md) for the full workflow.
 
-Run `signalforge install-skill` to drop the [Claude Code skill](docs/skills.md)
-into your project's `.claude/skills/signalforge/` and let Claude drive
-SignalForge end-to-end.
+**Driving SignalForge from Claude Code?** Per [§ Claude Code](#claude-code)
+above, run `signalforge install-skill` from your dbt project root to drop the
+bundled skill into `.claude/skills/signalforge/`.
 
 ### 2. Authenticate to BigQuery and your LLM provider
 

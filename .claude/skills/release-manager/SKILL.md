@@ -3,7 +3,7 @@ name: release-manager
 description: Cut a signalforge-dbt release. Test releases publish to TestPyPI via a prerelease GitHub Release; full releases publish to PyPI via a non-prerelease GitHub Release.
 compatibility: "Requires: gh CLI, git, uv (build + validation), uvx (for twine), pip (clean-room TestPyPI install test). Must be run from the SignalForge repo root."
 metadata:
-  signalforge-version: "0.1.0"
+  signalforge-version: "0.5.0"
 disable-model-invocation: true
 allowed-tools: Bash(git *), Bash(gh *), Bash(uv *), Bash(uvx *), Bash(grep *), Bash(cat *), Bash(sleep *), Bash(pip *), Bash(python *), Bash(curl *), Bash(awk *), Bash(rm *), Bash(date *), Read, Edit, Write
 ---
@@ -39,7 +39,7 @@ Run these checks and STOP if any fail — report the problem clearly and do not 
 **Branch check (differs by release type):**
 
 - **Test release**: `git branch --show-current` must return `dev`. Test releases tag `dev` HEAD and publish to TestPyPI. If the user is on another branch, STOP and ask them to `git checkout dev` (and ensure the rc commit is on `dev`) first.
-- **Full release**: `git branch --show-current` must return `main`. Full releases tag `main` HEAD and publish to PyPI.
+- **Full release**: normally `git branch --show-current` returns `main`. But when **dev is ahead of main with the release content** (common — main was last released as v(N-1), dev carries v(N) work), starting on `main` produces an empty release branch with no v(N) content. Detect via `git log --oneline origin/main..origin/dev`: any output → dev-ahead case. Proceed from `dev` instead, and document the deviation in the pre-flight summary. Step 3 ("Open release PR") covers the dev-ahead branching shape (base `release/X.Y.Z` on dev OR on main + cherry-pick of the post-release-N-1 commits — see Step 3 § "Dev-ahead-of-main shape").
 
 **Checks for both modes:**
 
@@ -53,16 +53,25 @@ Run these checks and STOP if any fail — report the problem clearly and do not 
    uv sync --dev && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest
    ```
 4. **CHANGELOG `[Unreleased]` is current**. Read `CHANGELOG.md` and show the user the current `[Unreleased]` section. Ask: "Does this cover everything shipping in this release?" Pause for confirmation — for **full** releases the `[Unreleased]` content gets promoted to `[X.Y.Z]` and used as the GitHub Release body. Empty / stale `[Unreleased]` means an empty / stale release page. If the user wants to edit it, stop here, let them edit, then re-run pre-flight.
+5. **Stale-`[Unreleased]` carryover guard** (full releases only — load-bearing, see Step 9). Compare `[Unreleased]` against the existing `[X.(Y-1).0]` section. If they are byte-identical, the previous release's backmerge didn't clear `[Unreleased]` — promoting it now would publish v(N-1)'s release notes verbatim as v(N), and the release PR will conflict at every CHANGELOG line on merge into main. Detect with:
+   ```bash
+   awk '/^## \[Unreleased\]/{p=1; next} /^## \[/{p=0} p' CHANGELOG.md > /tmp/sf-unreleased.txt
+   awk -v ver="$(grep '^## \[0\.' CHANGELOG.md | sed -n 2p | sed -E 's/^## \[([^]]+)\].*/\1/')" \
+       '$0 ~ "^## \\["ver"\\] "{p=1; next} /^## \[/{p=0} p' CHANGELOG.md > /tmp/sf-prev.txt
+   diff -q /tmp/sf-unreleased.txt /tmp/sf-prev.txt
+   ```
+   If `diff` reports "identical" (no output), STOP and surface the issue: dev's `[Unreleased]` is a stale duplicate of the previous release. The user must either edit `[Unreleased]` to reflect what's actually new in v(N) (drop the v(N-1)-duplicate bullets) OR confirm the release truly contains nothing new and a separate decision is needed. Don't proceed until resolved.
 
 **Report a pre-flight summary** — always, even when every check passes:
 
 ```
 Pre-flight checks:
-- Branch (test→dev | full→main): PASS|FAIL
+- Branch (test→dev | full→main, or dev-ahead-of-main deviation): PASS|FAIL
 - Clean working tree: PASS|FAIL
 - Up to date with origin: PASS|FAIL
 - ruff check / format / pyright / pytest: PASS|FAIL
 - CHANGELOG [Unreleased] reviewed: PASS|FAIL
+- CHANGELOG [Unreleased] not a stale duplicate of previous release (full only): PASS|FAIL
 ```
 
 Then continue to "Determine version" (on all-PASS) or STOP with the failing check highlighted.
@@ -184,6 +193,18 @@ Report: TestPyPI URL `https://test.pypi.org/project/signalforge-dbt/{release_ver
 
 Edit `src/signalforge/__init__.py`: set `__version__ = "{release_version}"`.
 
+**Bump skill metadata in lockstep.** The bundled Claude Code skill carries the version stamp in two places that mirror `__version__`. Grep + edit both so the shipped wheel's skill metadata matches the release:
+
+```bash
+grep -rln 'signalforge-version\|"version":' src/signalforge/skills/ 2>/dev/null
+```
+
+Expected hits (as of v0.5.0):
+- `src/signalforge/skills/signalforge/SKILL.md` — frontmatter `  signalforge-version: "{old}"` → `"{release_version}"`
+- `src/signalforge/skills/signalforge/assets/SKILL.eval.json` — `"version": "{old}"` → `"{release_version}"`
+
+A new bundled skill in v0.X may add more — the grep is the source of truth. Bumping these in lockstep is what keeps the wheel's `--version` reading and `SKILL.md`'s self-reported version honest.
+
 ### Step 1b — Promote CHANGELOG `[Unreleased]` to `[{release_version}]`
 
 Edit `CHANGELOG.md` so this release has its own dated section the GitHub Release body can quote verbatim:
@@ -213,19 +234,46 @@ Both artifacts must show `PASSED`. STOP and report if either fails.
 
 ### Step 3 — Open release PR
 
-Push the version bump and the CHANGELOG promotion together on a release branch, then open a PR — direct push to `main` is blocked by branch protection.
+Push the version bump, the CHANGELOG promotion, AND the skill-metadata bumps from Step 1 together on a release branch, then open a PR — direct push to `main` is blocked by branch protection.
+
+**Two branching shapes depending on whether dev is ahead of main:**
+
+**(a) Normal case (main has the release content)** — branch from main:
 
 ```bash
 git checkout -b release/{release_version}
-git add src/signalforge/__init__.py CHANGELOG.md
+git add src/signalforge/__init__.py CHANGELOG.md src/signalforge/skills/
 git commit -m "chore: release {release_version}"
 git push -u origin release/{release_version}
+```
+
+**(b) Dev-ahead-of-main case** — branch from main + cherry-pick the post-v(N-1) commits from dev (or, when that's a single squash-merge commit, just cherry-pick it):
+
+```bash
+git checkout main && git pull origin main
+git checkout -b release/{release_version}
+# Find the dev commits not on main:
+git log --oneline origin/main..origin/dev
+# Cherry-pick the one(s) that add v(N) content (often a single squash-merge):
+git cherry-pick <sha>
+# Then bump version + promote CHANGELOG + bump skill metadata as in Step 1:
+# (edit src/signalforge/__init__.py, CHANGELOG.md, and the skill metadata files)
+git add src/signalforge/__init__.py CHANGELOG.md src/signalforge/skills/
+git commit -m "chore: release {release_version}"
+git push -u origin release/{release_version}
+```
+
+Verify the cherry-pick reproduces dev's tree: `git diff release/{release_version} origin/dev --stat` should show only `CHANGELOG.md` + `src/signalforge/__init__.py` + the skill metadata files (i.e. only your release-prep edits). If more files differ, dev has work the cherry-pick missed — extend the cherry-pick or rebuild the branch.
+
+**Common to both shapes — open the PR:**
+
+```bash
 gh pr create --base main --head release/{release_version} \
   --title "chore: release {release_version}" \
   --body "Cuts v{release_version} to PyPI. Pre-flight passed (ruff/pyright/pytest); \`uv build\` + \`uvx twine check\` PASSED on wheel and sdist. CHANGELOG promoted from \`[Unreleased]\`."
 ```
 
-STOP and ask the user to merge the PR via GitHub. Once merged, continue.
+STOP and ask the user to merge the PR via GitHub. Expect codecov + CodeRabbit comments on this main-targeting PR — both run on PRs into main, neither on PRs into dev. Once merged, continue.
 
 ### Step 4 — Pull main, tag, push tag
 
@@ -274,40 +322,55 @@ curl -sf "https://pypi.org/pypi/signalforge-dbt/{release_version}/json" \
 
 Confirm `{release_version}` appears.
 
-### Step 8 — Open next-dev bump PR (target dev)
+### Steps 8 + 9 — Combined dev PR (next-dev bump + backmerge + CHANGELOG cleanup)
 
-Edit `src/signalforge/__init__.py`: set `__version__ = "{next_dev_version}"`.
+After the release publishes, dev needs three things and they fit naturally in one PR:
+
+1. **Bump `__version__`** to `{next_dev_version}` (e.g. release `0.5.0` → next dev `0.6.0.dev0`).
+2. **Bump skill metadata** in lockstep — same files as Step 1 (`SKILL.md` frontmatter + `assets/SKILL.eval.json`), now to `{next_dev_version}`.
+3. **Backmerge main → dev** so dev = main (v{release_version}) + future work, and **clear dev's stale `[Unreleased]` carryover** via `git checkout --theirs CHANGELOG.md` (load-bearing — see below).
 
 ```bash
 git checkout dev
 git pull origin dev
-git checkout -b chore/begin-{next_dev_version}
-git add src/signalforge/__init__.py
-git commit -m "chore: begin {next_dev_version}"
-git push -u origin chore/begin-{next_dev_version}
-gh pr create --base dev --head chore/begin-{next_dev_version} \
-  --title "chore: begin {next_dev_version}" \
-  --body "Bumps version to {next_dev_version} after the v{release_version} release."
+git checkout -b chore/post-{release_version}-bump-and-backmerge
+git merge origin/main --no-edit
+```
+
+The merge will conflict on `src/signalforge/__init__.py` (dev has `{release_version}.dev0`, main has `{release_version}`), the skill metadata files (same shape), and `CHANGELOG.md` (dev's stale `[Unreleased]` vs main's promoted-and-cleared shape). Resolve as follows:
+
+```bash
+# __init__.py — write the next-dev value (not ours, not theirs)
+cat > src/signalforge/__init__.py <<EOF
+"""SignalForge: LLM-drafted, warehouse-pruned dbt artifacts."""
+
+__version__ = "{next_dev_version}"
+EOF
+
+# Skill metadata — same treatment (find the conflict markers, write next-dev value)
+# Each file has one or two lines with conflict markers around the version string
+
+# CHANGELOG.md — LOAD-BEARING: take main's version verbatim
+git checkout --theirs CHANGELOG.md
+```
+
+**Why `git checkout --theirs CHANGELOG.md` is load-bearing:** main's post-release CHANGELOG has the empty `[Unreleased]` "Nothing yet" placeholder + correct descending-version order. Dev's version still carries the previous release's `[Unreleased]` content (because the prior cycle's backmerge didn't clear it) AND a duplicate `[X.(Y-1).0]` section from its own promotion. Trying to hand-merge yields a mess. Taking main's CHANGELOG resets dev to the clean shape, which is exactly what prevents the **stale-`[Unreleased]` carryover trap** the pre-flight item 5 guards against next release.
+
+```bash
+git add -A
+# Re-run canonical validation to confirm the resolution is consistent:
+uv sync --dev && uv run ruff check . && uv run ruff format --check . && uv run pyright && uv run pytest
+
+git commit -m "chore: begin {next_dev_version} + backmerge main into dev (post-{release_version})"
+git push -u origin chore/post-{release_version}-bump-and-backmerge
+gh pr create --base dev --head chore/post-{release_version}-bump-and-backmerge \
+  --title "chore: begin {next_dev_version} + backmerge main into dev (post-{release_version})" \
+  --body "Combined post-release housekeeping: bump __version__ + skill metadata to {next_dev_version}, backmerge v{release_version} content from main, clear dev's stale [Unreleased] CHANGELOG carryover by taking main's post-release shape verbatim."
 ```
 
 Ask the user to merge.
 
-### Step 9 — Backmerge main → dev
-
-After both PRs are merged, sync `dev` with the new `main` so the next release starts from the bumped version:
-
-```bash
-git checkout dev
-git pull origin dev
-git checkout -b chore/sync-main-into-dev
-git merge origin/main
-git push -u origin chore/sync-main-into-dev
-gh pr create --base dev --head chore/sync-main-into-dev \
-  --title "chore: sync main into dev after {release_version} release" \
-  --body "Brings the release commits back to dev."
-```
-
-If `dev` allows direct push and the merge fast-forwards cleanly, you may instead `git push origin dev` directly after the local merge — check repo rules first.
+**Why combined, not separate:** the older separate-PR shape (one PR for the version bump, one PR for the backmerge) works when dev is NOT ahead of main, but loses signal in the common case where dev IS ahead — the two PRs touch the same files, the second's conflict resolution depends on the first being merged first, and the CHANGELOG cleanup naturally belongs with the backmerge. One PR is more honest about what's happening.
 
 ---
 
@@ -317,5 +380,5 @@ Report a summary including:
 
 - Release type and version
 - PyPI or TestPyPI URL
-- For full releases: confirm the next-dev bump PR (Step 8) and the backmerge PR (Step 9) are open or merged
+- For full releases: confirm the combined Steps 8 + 9 dev PR (next-dev bump + backmerge + CHANGELOG cleanup) is open or merged
 - If a stash was created during pre-flight, `git stash pop` and confirm the file came back cleanly
