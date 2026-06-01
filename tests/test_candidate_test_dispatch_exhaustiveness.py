@@ -48,10 +48,16 @@ in a scaffolding bead (US-003) that explicitly does NOT extend the six
 dispatch arms — those land in their own beads (US-004/005/006/007/008
 + the diff-emitter arm). Until those land, the per-site routing tests
 would crash on the new variant; :data:`_VARIANTS_PENDING_DISPATCH_ARMS`
-holds the in-flight set, and the per-site parametrize iterates
-:data:`_VARIANTS_WITH_DISPATCH_ARMS` (the complement). The cardinality
-+ factory-coverage + macro-yaml-coverage tests still iterate the FULL
-:data:`_VARIANTS` set so the tripwire stays loud.
+is a **per-site dict** (site number → frozenset of pending variants),
+and each per-site parametrize iterates the matching ``_VARIANTS_FOR_SITE_N``
+constant (computed once at import via :func:`_variants_for_site`).
+Per-site granularity lets a single dispatch-arm bead land (e.g. site
+2 in #171 US-004) without blocking the other sites' beads — once
+US-004 merges, site 2's pending set is empty and the variant flows
+through site 2's parametrize, while sites 1/3/5/6 stay exempted
+until their own beads land. The cardinality + factory-coverage +
+macro-yaml-coverage tests still iterate the FULL :data:`_VARIANTS`
+set so the tripwire stays loud.
 """
 
 from __future__ import annotations
@@ -100,20 +106,49 @@ from signalforge.warehouse.models import BIGQUERY_DIALECT, TableRef
 #: adding the next variant to acknowledge the 6-site dispatch obligation.
 _EXPECTED_VARIANT_COUNT: int = 8
 
-#: Variants pending dispatch-arm work in their own beads. #171's US-003
-#: lands the variant class + union + drift mirror + fixture + factory
-#: arm, but the six per-site dispatch arms land in separate beads
-#: (US-004 site 2, US-005 site 5 prompt-side, US-006 site 5, US-007
-#: site 6, US-008 site 1, US-014 site 3). Until those land, the per-site
-#: routing tests would crash on the new variant; this set excludes them
-#: from the per-site parametrize while keeping the cardinality tripwire
-#: + factory-coverage + macro-yaml-coverage tests loud.
+#: Variants pending dispatch-arm work in their own beads, keyed by
+#: production dispatch site number (1–6 per
+#: ``.claude/rules/business-rule-tests.md`` § "The 6 production dispatch
+#: sites"). #171's US-003 lands the variant class + union + drift
+#: mirror + fixture + factory arm, but the six per-site dispatch arms
+#: land in separate beads (US-004 site 2, US-006 site 5, US-007 site
+#: 6, US-008 site 1, US-014 site 3; site 4 is N/A — no external macro
+#: form). Until each per-site arm lands, that site's routing test
+#: would crash on the new variant; the per-site dict excludes the
+#: variant from THAT site's parametrize only, so once a dispatch-arm
+#: bead lands the matching entry is removed (leaving the variant
+#: exercised on that site) while the still-pending sites keep their
+#: exemption.
 #:
-#: Each entry MUST be removed in lockstep with the matching dispatch-arm
-#: bead landing — i.e. once US-004/005/006/007/008/014 are merged, this
-#: set should be empty again and every variant must round-trip every
-#: dispatch site.
-_VARIANTS_PENDING_DISPATCH_ARMS: frozenset[type] = frozenset({CandidateTestRowCountAnomalyByPeriod})
+#: Each per-site set MUST shrink in lockstep with the matching
+#: dispatch-arm bead landing — i.e. once US-004/006/007/008/014 are
+#: merged, every set should be empty and every variant must round-trip
+#: every dispatch site.
+#:
+#: As of US-004 (this bead): site 2 (``_common.artifact_id``) IS
+#: implemented for ``CandidateTestRowCountAnomalyByPeriod`` — removed
+#: from site 2's set. Sites 1, 3, 5, 6 are still pending in sibling
+#: beads.
+_VARIANTS_PENDING_DISPATCH_ARMS: dict[int, frozenset[type]] = {
+    1: frozenset({CandidateTestRowCountAnomalyByPeriod}),  # US-008 (compiler)
+    2: frozenset(),  # US-004 — landed
+    3: frozenset({CandidateTestRowCountAnomalyByPeriod}),  # US-014 (diff emitter)
+    4: frozenset(),  # N/A — variant has no external dbt-macro form
+    5: frozenset({CandidateTestRowCountAnomalyByPeriod}),  # US-006 (draft anchor)
+    6: frozenset({CandidateTestRowCountAnomalyByPeriod}),  # US-007 (ingest anchor)
+}
+
+
+def _variants_for_site(site_num: int) -> tuple[type, ...]:
+    """Return the per-site parametrize set for the given dispatch site.
+
+    Filters :data:`_VARIANTS` by removing variants listed in that
+    site's :data:`_VARIANTS_PENDING_DISPATCH_ARMS` entry. Once every
+    pending arm has landed, the per-site sets are empty and this
+    function returns :data:`_VARIANTS` verbatim for every site.
+    """
+    pending = _VARIANTS_PENDING_DISPATCH_ARMS.get(site_num, frozenset())
+    return tuple(v for v in _VARIANTS if v not in pending)
 
 
 def _candidate_test_variants() -> tuple[type, ...]:
@@ -138,13 +173,17 @@ def _candidate_test_variants() -> tuple[type, ...]:
 # Cached at import time so the parametrize IDs are stable.
 _VARIANTS: tuple[type, ...] = _candidate_test_variants()
 
-#: Variants whose dispatch arms ARE landed — the parametrize set for
-#: per-site routing tests. Equals :data:`_VARIANTS` once
-#: :data:`_VARIANTS_PENDING_DISPATCH_ARMS` is emptied (every dispatch
-#: bead has landed).
-_VARIANTS_WITH_DISPATCH_ARMS: tuple[type, ...] = tuple(
-    v for v in _VARIANTS if v not in _VARIANTS_PENDING_DISPATCH_ARMS
-)
+#: Per-site parametrize sets. Each site's tuple equals :data:`_VARIANTS`
+#: once that site's entry in :data:`_VARIANTS_PENDING_DISPATCH_ARMS`
+#: is empty. Held as module-level constants (not recomputed inside the
+#: parametrize decorator) so the parametrize IDs are stable across
+#: collection.
+_VARIANTS_FOR_SITE_1: tuple[type, ...] = _variants_for_site(1)
+_VARIANTS_FOR_SITE_2: tuple[type, ...] = _variants_for_site(2)
+_VARIANTS_FOR_SITE_3: tuple[type, ...] = _variants_for_site(3)
+_VARIANTS_FOR_SITE_4: tuple[type, ...] = _variants_for_site(4)
+_VARIANTS_FOR_SITE_5: tuple[type, ...] = _variants_for_site(5)
+_VARIANTS_FOR_SITE_6: tuple[type, ...] = _variants_for_site(6)
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +419,7 @@ def test_external_macro_yaml_covers_every_variant() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("variant_cls", _VARIANTS_WITH_DISPATCH_ARMS, ids=lambda v: v.__name__)
+@pytest.mark.parametrize("variant_cls", _VARIANTS_FOR_SITE_1, ids=lambda v: v.__name__)
 def test_site_1_prune_compiler_dispatches_every_variant(variant_cls: type) -> None:
     """:func:`signalforge.prune.compiler._compile_test` must have an
     arm for every variant. A missing arm hits the closing
@@ -419,7 +458,7 @@ def test_site_1_prune_compiler_dispatches_every_variant(variant_cls: type) -> No
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("variant_cls", _VARIANTS_WITH_DISPATCH_ARMS, ids=lambda v: v.__name__)
+@pytest.mark.parametrize("variant_cls", _VARIANTS_FOR_SITE_2, ids=lambda v: v.__name__)
 def test_site_2_artifact_id_hash_dispatches_every_variant(variant_cls: type) -> None:
     """:func:`signalforge._common.artifact_id.model_test_args_hash` must
     have an arm for every variant. A missing arm hits the explicit
@@ -452,7 +491,7 @@ def test_site_2_artifact_id_hash_dispatches_every_variant(variant_cls: type) -> 
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("variant_cls", _VARIANTS_WITH_DISPATCH_ARMS, ids=lambda v: v.__name__)
+@pytest.mark.parametrize("variant_cls", _VARIANTS_FOR_SITE_3, ids=lambda v: v.__name__)
 def test_site_3_diff_emitter_dispatches_every_variant(variant_cls: type) -> None:
     """:func:`signalforge.diff._emitter._render_test` must have an arm
     for every variant. A missing arm hits the explicit ``ValueError``
@@ -483,7 +522,7 @@ def test_site_3_diff_emitter_dispatches_every_variant(variant_cls: type) -> None
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("variant_cls", _VARIANTS_WITH_DISPATCH_ARMS, ids=lambda v: v.__name__)
+@pytest.mark.parametrize("variant_cls", _VARIANTS_FOR_SITE_4, ids=lambda v: v.__name__)
 def test_site_4_ingest_parser_dispatches_external_macro_variants(
     variant_cls: type,
 ) -> None:
@@ -535,7 +574,7 @@ def test_site_4_ingest_parser_dispatches_external_macro_variants(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("variant_cls", _VARIANTS_WITH_DISPATCH_ARMS, ids=lambda v: v.__name__)
+@pytest.mark.parametrize("variant_cls", _VARIANTS_FOR_SITE_5, ids=lambda v: v.__name__)
 def test_site_5_draft_anchor_dispatches_every_variant(variant_cls: type) -> None:
     """:func:`signalforge.draft.parser._validate_anchor_contract` must
     have a dispatch arm for every variant — model-level-only variants
@@ -633,7 +672,7 @@ def test_site_5_draft_anchor_raises_on_real_violation_for_unique_combination() -
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("variant_cls", _VARIANTS_WITH_DISPATCH_ARMS, ids=lambda v: v.__name__)
+@pytest.mark.parametrize("variant_cls", _VARIANTS_FOR_SITE_6, ids=lambda v: v.__name__)
 def test_site_6_ingest_anchor_dispatches_every_variant(variant_cls: type) -> None:
     """:func:`signalforge.ingest.anchor.validate_anchor_contract` must
     have an exemption arm for every model-level-only variant — the
@@ -741,16 +780,17 @@ def test_every_variant_is_exercised_on_every_in_scope_dispatch_site() -> None:
     even run.
     """
     assert len(_VARIANTS) == _EXPECTED_VARIANT_COUNT
-    # Sites 1, 2, 3, 5, 6 run on every variant whose dispatch arms have
-    # landed (_VARIANTS_WITH_DISPATCH_ARMS); site 4 skips for variants
-    # without external macro recognition. The cross-product varies with
-    # the size of :data:`_VARIANTS_PENDING_DISPATCH_ARMS` (#171 US-003
-    # adds one pending variant pending US-004/005/006/007/008 + the
-    # diff-emitter arm). We don't pin that exact number (the parametrize
-    # collection mechanics are pytest's job) — what we pin is that every
-    # variant in the FULL union has a factory arm AND an
-    # _EXTERNAL_MACRO_YAML entry, so no variant is silently skipped from
-    # the cross-coverage tracking.
+    # Sites 1, 2, 3, 5, 6 run on every variant whose dispatch arm for
+    # THAT site has landed (per-site filter via _VARIANTS_FOR_SITE_N
+    # backed by :data:`_VARIANTS_PENDING_DISPATCH_ARMS`); site 4 skips
+    # for variants without external macro recognition. The cross-product
+    # varies with the per-site pending sets (#171 US-003 lands one
+    # pending variant; US-004 empties site 2's set; sibling beads
+    # empty the other sites' sets as they merge). We don't pin that
+    # exact number (the parametrize collection mechanics are pytest's
+    # job) — what we pin is that every variant in the FULL union has a
+    # factory arm AND an _EXTERNAL_MACRO_YAML entry, so no variant is
+    # silently skipped from the cross-coverage tracking.
     factory_covered = {v for v in _VARIANTS if _make_instance(v) is not None}
     assert factory_covered == set(_VARIANTS), (
         f"_make_instance does not cover every variant. Missing: {set(_VARIANTS) - factory_covered}"

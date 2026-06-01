@@ -55,6 +55,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountAnomalyByPeriod,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
     CandidateTestUniqueCombination,
@@ -114,6 +115,36 @@ def model_test_args_hash(test: CandidateTest) -> str:
             "column": test.column,
             "minimum": test.minimum,
             "maximum": test.maximum,
+            "where": test.where,
+        }
+    elif isinstance(test, CandidateTestRowCountAnomalyByPeriod):
+        # Identifying args are the eight scalar/literal fields that
+        # parameterise the anomaly recipe: ``(method, seasonality,
+        # period, lookback_periods, threshold, min_samples_per_bucket,
+        # date_column, where)``. ``column`` is hard-coded to ``None``
+        # (model-level only) but included for shape-parity with the
+        # other arms. ``rationale`` is the drafter-emitted prose
+        # justification (mirrors the precedent on every other variant)
+        # and is NOT identifying — two tests differing only by
+        # ``rationale`` describe the same constraint and collide
+        # deterministically.
+        #
+        # All scalar args (no tuples); no sort needed. ``unique_combination``
+        # sorts its ``columns`` tuple (#170 DEC-011) because
+        # ``(a, b)`` and ``(b, a)`` describe the same composite
+        # uniqueness constraint (GROUP BY result-row identity is
+        # order-invariant); this variant has only scalars + literals,
+        # so sorting is N/A.
+        payload = {
+            "type": test.type,
+            "column": test.column,
+            "method": test.method,
+            "seasonality": test.seasonality,
+            "period": test.period,
+            "lookback_periods": test.lookback_periods,
+            "threshold": test.threshold,
+            "min_samples_per_bucket": test.min_samples_per_bucket,
+            "date_column": test.date_column,
             "where": test.where,
         }
     elif isinstance(test, CandidateTestUniqueCombination):
