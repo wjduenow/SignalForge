@@ -52,6 +52,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
 )
 from signalforge.prune import PruneResult
@@ -142,6 +143,16 @@ def _render_test(test: CandidateTest) -> Any:
     The column / model renderers drop any test that renders to
     :data:`_SKIP`, so ``custom_sql`` never lands in the proposed YAML and
     this function never crashes on the fifth variant.
+
+    A ``row_count_between`` test (issue #169, DEC-002) renders as a
+    ``dbt_expectations.expect_table_row_count_to_be_between`` block. The
+    Python-side fields ``minimum`` / ``maximum`` are mapped OUTBOUND here
+    to the dbt-expectations macro names ``min_value`` / ``max_value``
+    (DEC-008). The optional ``where`` field appears verbatim under the
+    ``where`` key only when set; ``None``-valued fields are omitted so
+    the emitted YAML stays minimal (DEC-002). THIS FUNCTION is the
+    outbound mapping seam — the ingest parser owns the inverse inbound
+    mapping (``min_value``/``max_value`` → ``minimum``/``maximum``).
     """
     if isinstance(test, (CandidateTestNotNull, CandidateTestUnique)):
         return test.type
@@ -151,6 +162,15 @@ def _render_test(test: CandidateTest) -> Any:
         return {test.type: {"to": test.to, "field": test.field}}
     if isinstance(test, CandidateTestCustomSQL):
         return _SKIP
+    if isinstance(test, CandidateTestRowCountBetween):
+        body: dict[str, Any] = {}
+        if test.minimum is not None:
+            body["min_value"] = test.minimum
+        if test.maximum is not None:
+            body["max_value"] = test.maximum
+        if test.where is not None:
+            body["where"] = test.where
+        return {"dbt_expectations.expect_table_row_count_to_be_between": body}
     raise ValueError(  # pragma: no cover — exhaustive over the closed union
         f"Unknown CandidateTest variant: {type(test).__name__}"
     )

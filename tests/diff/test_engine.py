@@ -2037,3 +2037,58 @@ def test_end_to_end_kept_test_why_threads_rationale(project_dir: Path) -> None:
     dropped_rows = [e for e in report.entries if e.tier == "dropped"]
     assert len(dropped_rows) == 1
     assert dropped_rows[0].why == "ran on 1k sample, 0 failing rows"
+
+
+# ---------------------------------------------------------------------------
+# row_count_between tier classification (#169 US-010)
+# ---------------------------------------------------------------------------
+
+
+def test_kept_row_count_between_lands_in_kept_tier(project_dir: Path) -> None:
+    """A kept ``row_count_between`` decision flows through the generic
+    tier classifier as ``tier="kept"`` — no per-variant arm needed.
+
+    The variant is model-level only (``column=None`` / ``test_anchor="model"``).
+    Together with the emitter's ``dbt_expectations.expect_table_row_count_to_be_between``
+    YAML block, this closes the diff-layer surface for #169.
+    """
+    from signalforge.draft.models import CandidateTestRowCountBetween
+
+    model = _make_model()
+    rcb = CandidateTestRowCountBetween(minimum=100, maximum=10000)
+    candidate = CandidateSchema(
+        name="orders",
+        description="orders fact table",
+        columns=(CandidateColumn(name="order_id", description="surrogate key"),),
+        tests=(rcb,),
+    )
+    decision = PruneDecision(
+        test_anchor="model",
+        test=rcb,
+        decision="kept",
+        reason="kept",
+        failures=42,
+        sampled_rows=1000,
+        scope="full",
+        elapsed_ms=10,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="select count(*) from orders",
+        why="ran COUNT(*), 42 rows outside [100, 10000]",
+    )
+    prune_result = _make_prune_result(decisions=(decision,))
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+
+    rcb_rows = [e for e in report.entries if e.test_type == "row_count_between"]
+    assert len(rcb_rows) == 1
+    assert rcb_rows[0].tier == "kept"
+    # The variant lands in the proposed YAML under the dbt_expectations namespace
+    # (DEC-002 of #169) — NOT in proposed_test_files (custom_sql-only per DEC-002).
+    assert "dbt_expectations.expect_table_row_count_to_be_between" in report.proposed_yaml
+    assert report.proposed_test_files == ()
