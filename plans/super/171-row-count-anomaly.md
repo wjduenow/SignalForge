@@ -10,7 +10,7 @@
 | Sibling | #154 — prune+grade adapter for existing dbt-expectations tests (no overlap — no dbt-ext macro exists for this shape) |
 | Branch / worktree | `feature/171-row-count-anomaly` at `/home/wesd/Projects/worktrees/SignalForge/171-row-count-anomaly` |
 | Closest precedents | #170 (`unique_combination` — 3rd variant addition, 17 DECs, the freshest end-to-end template); #169 (`row_count_between` — the metadata-aggregate Direction-2 bypass precedent + `_PROMPT_VERSION` rotation contract). #171 is the **4th instance** of the variant-extension pattern. |
-| Phase | **detailing** (awaiting user approval to publish PR) |
+| Phase | **devolved** (epic + 19 beads created; PR #181 published as draft) |
 | Sessions | 1 (2026-06-01) |
 
 ## Phase 1 — Discovery
@@ -844,9 +844,39 @@ Update `MEMORY.md` index.
 
 ## Beads Manifest
 
-*(pending — will fill on devolve)*
+Devolved 2026-06-01. PR #181 (draft) — https://github.com/wjduenow/SignalForge/pull/181.
+Worktree: `/home/wesd/Projects/worktrees/SignalForge/171-row-count-anomaly`.
 
-Estimated: 1 epic + 19 stories (US-001 … US-017 implementation + US-018 Quality Gate + US-019 Patterns & Memory) = **20 beads**.
+**Epic:** `bd_1-scaffolding-1r7` — #171: row_count_anomaly_by_period epic
+
+| Story | Bead ID | Depends on | Ready? |
+|---|---|---|---|
+| US-001 — AnomalyTestStats typed shape | `.1` | — | ✅ ready |
+| US-002 — Dialect 5 new SQL-fragment fields | `.2` | — | ✅ ready |
+| US-003 — Variant class + union + drift + fixture | `.3` | — | ✅ ready |
+| US-015 — Grade rubric `no-redundant` + `_PROMPT_VERSION` | `.4` | — | ✅ ready |
+| US-004 — `_common.artifact_id` arm | `.5` | `.3` | blocked |
+| US-005 — Drafter prompts + `_PROMPT_VERSION` | `.6` | `.3` | blocked |
+| US-006 — Drafter parser anchor arm | `.7` | `.3` | blocked |
+| US-007 — Ingest anchor exemption | `.8` | `.3` | blocked |
+| US-008 — Prune compiler (8 SQL shapes) | `.9` | `.2, .3` | blocked |
+| US-009 — Engine `as_of` threading | `.10` | `.3` | blocked |
+| US-012 — `PruneEvent`/`Decision` + audit v2→v3 | `.11` | `.1` | blocked |
+| US-010 — Engine `_test_requires_source_table` + DEC-010 | `.12` | `.3, .9` | blocked |
+| US-011 — Engine two-query split + cold-start + DOW degrade | `.13` | `.1, .9, .10, .11, .12` | blocked |
+| US-013 — CLI `--as-of` flag | `.14` | `.10` | blocked |
+| US-014 — Diff renderer `_SKIP` arm | `.15` | `.3, .5, .9` | blocked |
+| US-016 — Docs sweep | `.16` | `.3, .12, .13, .14, .15` | blocked |
+| US-017 — E2E gated + unit determinism | `.17` | `.10, .11, .12, .13, .14` | blocked |
+| US-018 — Quality Gate × 4 + CodeRabbit | `.18` | `.16, .17` | blocked |
+| US-019 — Patterns & Memory | `.19` | `.18` | blocked |
+
+**20 beads total** (1 epic + 19 stories). Initial ready set: 4 beads (`.1`, `.2`, `.3`, `.4`).
+
+**Serialisation reminders for Ralph (per `ralph-serialize-shared-registry-beads` memory):**
+- `.6` (US-005) + `.4` (US-015) both edit `_PROMPT_VERSION` cache-stability goldens — do NOT run concurrently.
+- `.12` (US-010) + `.13` (US-011) both edit `signalforge.prune.engine` — do NOT run concurrently.
+- `.11` (US-012) before `.13` (US-011) is wired via the dep graph (US-011 waits on `.11`).
 
 Story-count expectation calibration: #169 shipped 15 DECs, #170 shipped 17 DECs. #171 has 13 DECs locked in design but a larger implementation surface (new CLI flag, audit-schema bump, cross-stage typed state, 4 × 2 SQL shapes, stricter-bypass behaviour change affecting 2 prior variants, 2-query split) — 19 implementation stories is the right scale.
 
