@@ -212,7 +212,9 @@ semantics suggest a business-calendar grain (weekday vs. weekend
 traffic differs systematically). The default `method="mad"` (median
 absolute deviation) is robust to occasional outliers in the lookback
 history; switch to `zscore` only when you want sensitivity to those
-outliers, to `percentile` for a Tukey-style IQR band, or to `min_max`
+outliers, to `percentile` for a percentile-band (`threshold` is the
+half-band width in percentile points: e.g. `threshold=5.0` →
+`[p5, p95]`), or to `min_max`
 to catch any excursion beyond the historical envelope (no margin;
 `threshold` is ignored for `min_max`). Default `threshold=3.0` and
 `min_samples_per_bucket=3` are sensible starting points; raise

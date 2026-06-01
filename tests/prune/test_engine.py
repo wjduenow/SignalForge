@@ -4010,6 +4010,10 @@ def test_as_of_none_with_anomaly_candidate_resolves_to_today_and_logs(
     candidates = _make_anomaly_candidates()
     config = PruneConfig(scope="full", capture_failure_rows=0)
 
+    # Capture today() BEFORE prune_tests; combined with the post-call
+    # capture below, this brackets the engine's resolution moment within
+    # [before, after] and avoids midnight flakiness (per #171 CR feedback).
+    today_before = _date.today()
     with caplog.at_level("INFO", logger="signalforge.prune.engine"):
         prune_tests(
             model,
@@ -4022,25 +4026,34 @@ def test_as_of_none_with_anomaly_candidate_resolves_to_today_and_logs(
             # as_of NOT supplied → engine resolves to date.today()
         )
 
+    # Capture today() AFTER prune_tests has returned: this brackets the
+    # resolution moment within [before, after] and avoids a midnight flake
+    # (per #171 CodeRabbit finding) when the test runs across midnight.
+    today_after = _date.today()
+    # The "today" the engine resolved must be one of {today_before, today_after}
+    # — same value unless we crossed midnight mid-call. Both branches accept.
+    valid_today = {today_before, today_after}
+    valid_today_iso = {d.isoformat() for d in valid_today}
+
     # Exactly one INFO line names the resolved as_of.
     info_records = [r for r in caplog.records if "anomaly: as_of resolved" in r.getMessage()]
     assert len(info_records) == 1, (
         f"expected exactly one INFO line; got {len(info_records)}: "
         f"{[r.getMessage() for r in info_records]}"
     )
-    # The line embeds the resolved date as ISO-8601; matches today().
-    today_iso = _date.today().isoformat()
-    assert today_iso in info_records[0].getMessage()
+    # The line embeds the resolved date as ISO-8601; matches today (within
+    # the [before, after] window).
+    assert any(iso in info_records[0].getMessage() for iso in valid_today_iso)
     # Lazy-format JSON pattern: the message stays the literal template
     # and the JSON payload rides on args.
     assert info_records[0].msg == "anomaly: as_of resolved: %s"
     payload = json.loads(info_records[0].args[0])  # type: ignore[index]
-    assert payload["as_of"] == today_iso
+    assert payload["as_of"] in valid_today_iso
     assert payload["model_unique_id"] == model.unique_id
 
     # The threaded value reached the compiler stub as date.today() — the
     # engine→compiler plumbing carries ``as_of``, not just the log line.
-    assert captured["as_of"] == _date.today()
+    assert captured["as_of"] in valid_today
 
 
 def test_as_of_none_no_anomaly_candidate_emits_no_log(
@@ -4922,7 +4935,12 @@ def test_us011_dow_thin_per_bucket_recompiles_non_seasonal_emits_warning(
     payload = json.loads(degrade_records[0].args[0])  # type: ignore[index]
     assert payload["min_samples_per_bucket"] == 3
     # The thin bucket's count appears in the per_dow_counts breakdown.
-    assert payload["per_dow_counts"]["3"] == 1
+    # The fake adapter returned raw BigQuery DAYOFWEEK value `3` (Tuesday
+    # under the Sun=1 convention); the engine normalises via
+    # ``_normalize_dow_to_posix`` so dict keys land in POSIX space
+    # (Mon=0..Sun=6). BQ raw=3 (Tue) → POSIX 1 (per #171 CodeRabbit
+    # finding #10 — cross-dialect key consistency).
+    assert payload["per_dow_counts"]["1"] == 1
 
     # The engine proceeded — the violation query ran and the decision
     # reflects always-passes (0 failures).

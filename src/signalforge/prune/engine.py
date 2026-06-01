@@ -123,7 +123,7 @@ from signalforge.prune.stats import (
 )
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import WarehouseError
-from signalforge.warehouse.models import TableRef, TestResult
+from signalforge.warehouse.models import Dialect, TableRef, TestResult
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -306,9 +306,34 @@ def _why_prune_disabled() -> str:
     return "prune disabled in signalforge.yml"
 
 
+def _normalize_dow_to_posix(raw_dow: int, dialect: Dialect) -> int:
+    """Normalise a dialect-emitted DOW integer to the POSIX convention used
+    by Python's ``date.weekday()`` (Monday=0, …, Sunday=6).
+
+    Dialects emit different conventions: BigQuery's ``EXTRACT(DAYOFWEEK FROM
+    d)`` returns ``1..7`` with Sunday=1; Snowflake's ``EXTRACT(DOW FROM d)``
+    returns ``0..6`` with Sunday=0 (depending on session ``WEEK_START``;
+    SignalForge assumes the default Sunday-anchored convention). The
+    ``per_dow`` mapping on :class:`AnomalyTestStats` is documented as POSIX
+    so consumers can `dict.get(date.weekday())` directly — without this
+    normalisation step the key space differs across dialects (#171 CodeRabbit
+    finding #10).
+
+    Recipe: ``(raw_dow - dialect.dow_sunday_index - 1) % 7``. Verifies on
+    both dialects:
+
+    * BQ (sunday_index=1): raw=1 (Sun) → ``(1 - 1 - 1) % 7 = 6`` ✓;
+      raw=2 (Mon) → ``0`` ✓.
+    * Snowflake (sunday_index=0): raw=0 (Sun) → ``(0 - 0 - 1) % 7 = 6`` ✓;
+      raw=1 (Mon) → ``0`` ✓.
+    """
+    return (raw_dow - dialect.dow_sunday_index - 1) % 7
+
+
 def _parse_anomaly_stats(
     rows: tuple[dict[str, object], ...],
     test: CandidateTestRowCountAnomalyByPeriod,
+    dialect: Dialect,
 ) -> AnomalyTestStats:
     """Parse the raw rows returned by ``adapter.run_stats_query`` into the
     typed :class:`AnomalyTestStats` discriminated-union member for
@@ -402,7 +427,7 @@ def _parse_anomaly_stats(
     # — the band with the most history is the most trustworthy headline).
     if method == "mad":
         per_dow_mad: dict[int, MadDowStats] = {
-            _int(row, "dow"): MadDowStats(
+            _normalize_dow_to_posix(_int(row, "dow"), dialect): MadDowStats(
                 median=_float(row, "median"),
                 mad=_float(row, "mad"),
                 n_periods=_int(row, "n"),
@@ -418,7 +443,7 @@ def _parse_anomaly_stats(
         )
     if method == "zscore":
         per_dow_z: dict[int, ZscoreDowStats] = {
-            _int(row, "dow"): ZscoreDowStats(
+            _normalize_dow_to_posix(_int(row, "dow"), dialect): ZscoreDowStats(
                 mu=_float(row, "mean"),
                 sigma=_float(row, "stddev"),
                 n_periods=_int(row, "n"),
@@ -434,7 +459,7 @@ def _parse_anomaly_stats(
         )
     if method == "percentile":
         per_dow_p: dict[int, PercentileDowStats] = {
-            _int(row, "dow"): PercentileDowStats(
+            _normalize_dow_to_posix(_int(row, "dow"), dialect): PercentileDowStats(
                 p_lo=_float(row, "p_lo"),
                 p_hi=_float(row, "p_hi"),
                 n_periods=_int(row, "n"),
@@ -450,7 +475,7 @@ def _parse_anomaly_stats(
         )
     # min_max
     per_dow_mm: dict[int, MinMaxDowStats] = {
-        _int(row, "dow"): MinMaxDowStats(
+        _normalize_dow_to_posix(_int(row, "dow"), dialect): MinMaxDowStats(
             minimum=_float(row, "min_cnt"),
             maximum=_float(row, "max_cnt"),
             n_periods=_int(row, "n"),
@@ -1661,7 +1686,7 @@ def prune_tests(
                     decisions.append(decision)
                     continue
 
-                stats = _parse_anomaly_stats(stats_rows, anomaly_test_active)
+                stats = _parse_anomaly_stats(stats_rows, anomaly_test_active, dialect)
 
                 # --- Step 2: DOW degrade (DEC-003). -----------------------
                 # When seasonality="dow" AND ANY per-DOW bucket is below
@@ -1755,7 +1780,7 @@ def prune_tests(
                             )
                             decisions.append(decision)
                             continue
-                        stats = _parse_anomaly_stats(stats_rows, anomaly_test_active)
+                        stats = _parse_anomaly_stats(stats_rows, anomaly_test_active, dialect)
                     # else: degrade compile produced a sentinel (very
                     # unlikely — the seasonality flip cannot change the
                     # identifier-shape outcome). Fall through with the

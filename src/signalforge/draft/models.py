@@ -445,8 +445,10 @@ class CandidateTestRowCountAnomalyByPeriod(BaseModel):
     * ``zscore`` — Standard z-score. Sensitive to outliers (which is
       sometimes what you want). ``threshold`` is the number of standard
       deviations.
-    * ``percentile`` — Tukey-style percentile band. ``threshold`` is the
-      IQR multiplier (default ``3.0``).
+    * ``percentile`` — Percentile band. ``threshold`` is the half-band
+      width in percentile points (default ``3.0`` → ``[p3, p97]``;
+      ``threshold=5.0`` → ``[p5, p95]``). Compiled as
+      ``p_lo = threshold / 100``, ``p_hi = 1 - p_lo``.
     * ``min_max`` — Bound by the literal min/max of the lookback window.
       ``threshold`` is **ignored** — any value (including ``0`` and
       negatives) is accepted but unused. Use when you want to catch any

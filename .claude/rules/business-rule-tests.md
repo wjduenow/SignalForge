@@ -139,7 +139,7 @@ Five durable conventions surfaced during #170's QG that the next variant-extensi
 
 ## #171 lessons worth carrying forward
 
-#171 (`row_count_anomaly_by_period`) is the **4th instance** of the variant-extension precedent — the pattern is now well-trodden mechanics. Six durable conventions surfaced during #171 that the next variant-extension should pre-empt:
+Issue #171 (`row_count_anomaly_by_period`) is the **4th instance** of the variant-extension precedent — the pattern is now well-trodden mechanics. Six durable conventions surfaced during #171 that the next variant-extension should pre-empt:
 
 1. **Time-bound primitives need an explicit reproducibility carve-out, not silent acceptance.** `row_count_anomaly_by_period` is the first primitive whose decision is time-bound (same SQL + same warehouse data + different evaluation day = potentially different pass/fail). #171 threads `--as-of YYYY-MM-DD` through CLI → `prune_tests` → compiled SQL → `PruneEvent.as_of` AND `PruneDecision.as_of`. Default-to-`date.today()` + INFO-log-the-resolved-value (DEC-001). Reproducibility restored at `(model, as_of)` granularity instead of `model` alone. The carve-out is documented openly in README / drafter-catalogue / prune-ops; don't hide it. **For any future time-bound primitive, follow this shape verbatim** — never let the corpus drift day-over-day for reasons unrelated to the model.
 

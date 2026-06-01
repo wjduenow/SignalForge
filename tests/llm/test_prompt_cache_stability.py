@@ -94,7 +94,7 @@ _FIXTURE_PATH = (
 )
 
 
-_EXPECTED_PROMPT_VERSION: str = "a4fea640b3b60f24"
+_EXPECTED_PROMPT_VERSION: str = "c11a73cc95b31614"
 
 
 # Captured once via ``render_prompt`` against the canonical fixture below.

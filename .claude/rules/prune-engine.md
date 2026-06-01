@@ -177,7 +177,7 @@ The compiler emits valid Snowflake SQL purely from `SNOWFLAKE_DIALECT` — see �
 
 ### Centralised bypass routing helper (issue #171)
 
-#171 introduced `_test_requires_source_table(test: CandidateTest, sample_strategy: str | None) -> bool` in `signalforge.prune.engine` as the single source of truth for "does this candidate variant require routing to the source table rather than a sampled/materialised temp?". Replaces inline isinstance checks at the two engine sites (`all_bypass_to_source` short-circuit + per-test `per_test_table_ref` override) — both now call the helper, eliminating the two-conditional drift class #170 QG Pass 3 caught.
+Issue #171 introduced `_test_requires_source_table(test: CandidateTest, sample_strategy: str | None) -> bool` in `signalforge.prune.engine` as the single source of truth for "does this candidate variant require routing to the source table rather than a sampled/materialised temp?". Replaces inline isinstance checks at the two engine sites (`all_bypass_to_source` short-circuit + per-test `per_test_table_ref` override) — both now call the helper, eliminating the two-conditional drift class #170 QG Pass 3 caught.
 
 **Updated routing table (DEC-009 + DEC-010 of #171):**
 
