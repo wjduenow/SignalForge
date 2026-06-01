@@ -171,6 +171,65 @@ class WarehouseAdapter(abc.ABC):
 
         raise EstimateNotSupportedError(adapter_name=type(self).__name__)
 
+    def run_stats_query(self, sql: str) -> tuple[dict[str, object], ...]:
+        """Execute a multi-row stats SELECT and return the result as a tuple
+        of row dicts (#171 US-011).
+
+        The vendor-neutral seam the prune engine uses for the
+        ``row_count_anomaly_by_period`` variant's stats query (DEC-008 of
+        issue #171). Distinct from :meth:`run_test_sql`:
+
+        * :meth:`run_test_sql` wraps the candidate in
+          ``SELECT COUNT(*) AS failures FROM (...) AS t`` and returns a
+          :class:`TestResult` carrying a single ``failure_count`` int. The
+          right shape for a failing-rows test where "did this test fail" is
+          the only signal.
+        * :meth:`run_stats_query` runs the SQL verbatim and returns every
+          row as a dict (column-name → cell value). The right shape for an
+          aggregate / window-style query whose result IS the per-decision
+          numerical state (the engine parses it into a typed
+          :class:`signalforge.prune.stats.AnomalyTestStats` via the
+          ``method`` discriminator).
+
+        Implementations are expected to subject the SQL to the same cheap
+        rejects as :meth:`run_test_sql` (no ``;``, no ``--`` comments,
+        balanced parens) via
+        :func:`signalforge.warehouse._sql_safety.validate_test_sql` before
+        handing it to the warehouse SDK. The compiler already runs the
+        same check at compose time (DEC-005 of #169 generalised), so the
+        adapter-level call is defence-in-depth.
+
+        Deliberately NOT decorated with ``@abstractmethod``: mirrors
+        :meth:`materialise_sample` (issue #22) /
+        :meth:`estimate_query_bytes` (issue #36) / :meth:`get_row_count`
+        (issue #140). The default raise IS the correct behaviour for an
+        adapter that has not grown the primitive yet;
+        :class:`StatsQueryNotSupportedError` is the typed signal the prune
+        engine catches as any other :class:`WarehouseError` and routes
+        through ``kept-without-evidence``, preserving the conservative-bias
+        contract (we never silently drop a test we cannot evaluate).
+
+        Args:
+            sql: A complete stats SELECT (potentially multi-row in the
+                ``seasonality="dow"`` shape). The query MUST return rows
+                whose column names match the per-method stats class fields
+                (``median``/``mad``/``n``; ``mean``/``stddev``/``n``;
+                ``p_lo``/``p_hi``/``n``; ``min_cnt``/``max_cnt``/``n`` —
+                plus ``dow`` when seasonal).
+
+        Returns:
+            A tuple of row dicts. Empty tuple is a valid result (no
+            history rows; the engine treats it as ``n_periods=0`` and
+            routes to cold-start).
+
+        Raises:
+            StatsQueryNotSupportedError: Always, in the default impl.
+                Concrete adapters override.
+        """
+        from signalforge.warehouse.errors import StatsQueryNotSupportedError
+
+        raise StatsQueryNotSupportedError(adapter_name=type(self).__name__)
+
     def get_row_count(self, table: TableRef) -> int | None:
         """Return the row count of ``table``, or ``None`` when unknown
         (issue #140).
