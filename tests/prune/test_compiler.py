@@ -1921,6 +1921,8 @@ def _make_anomaly_test(
     seasonality: str,
     date_column: str = "event_date",
     where: str | None = None,
+    threshold: float | None = None,
+    period: str = "day",
 ) -> CandidateTestRowCountAnomalyByPeriod:
     """Construct a row-count-anomaly test with default lookback/period.
 
@@ -1928,14 +1930,20 @@ def _make_anomaly_test(
     variant's default — for mad/zscore this is "3 deviations"; for
     percentile a 3.0 threshold would yield p_lo=0.03 / p_hi=0.97, but
     test cases here override to 5.0 to get the cleaner 0.05 / 0.95 in
-    snapshots).
+    snapshots). Explicit ``threshold`` kwarg wins over the per-method
+    default. ``period`` defaults to ``"day"``; pass ``"week"`` /
+    ``"hour"`` to exercise the period-truncation branch (#171 CR
+    finding #4).
     """
     kwargs: dict[str, object] = {
         "date_column": date_column,
         "method": method,
         "seasonality": seasonality,
+        "period": period,
     }
-    if method == "percentile":
+    if threshold is not None:
+        kwargs["threshold"] = threshold
+    elif method == "percentile":
         # threshold=5.0 → p_lo=0.05, p_hi=0.95 in the snapshot
         kwargs["threshold"] = 5.0
     if where is not None:
@@ -2302,3 +2310,141 @@ def test_compile_row_count_anomaly_resolves_date_column_via_dialect_fields() -> 
     # No BigQuery quoting / no Snowflake-default cast literal leaked.
     assert "`" not in stats
     assert "::DATE" not in stats
+
+
+# ---------------------------------------------------------------------------
+# #171 Copilot findings #8 / #9 — singular-test SQL emitter helper.
+# ---------------------------------------------------------------------------
+#
+# The engine-side ``_compile_anomaly_violation_query`` returns ``SELECT 1 FROM
+# table WHERE today-period`` — which returns ALL rows in today's period and
+# fails the dbt singular test on every non-empty day regardless of anomaly
+# status. ``_compile_anomaly_singular_test_sql`` (introduced in the closeout
+# pass) emits the FULL band-check SQL that returns 0 rows when in-band and
+# >=1 row only when out-of-band — the correct dbt singular-test contract.
+
+
+from signalforge.prune.compiler import _compile_anomaly_singular_test_sql  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "method,band_predicate_fragment",
+    [
+        ("mad", "ABS(0.6745 * (today.cnt - stats.median))"),
+        ("zscore", "ABS(today.cnt - stats.mean)"),
+        ("percentile", "today.cnt < stats.p_lo OR today.cnt > stats.p_hi"),
+        ("min_max", "today.cnt < stats.min_cnt OR today.cnt > stats.max_cnt"),
+    ],
+)
+def test_singular_test_sql_band_predicate_per_method_non_seasonal(
+    method: str, band_predicate_fragment: str
+) -> None:
+    """Each method emits its method-specific band-violation predicate as
+    part of the final SELECT's WHERE clause."""
+    test = _make_anomaly_test(method=method, seasonality="none")
+    sql = _compile_anomaly_singular_test_sql(
+        test, _make_orders_table_ref(), BIGQUERY_DIALECT, as_of=_ANOMALY_AS_OF
+    )
+    assert band_predicate_fragment in sql
+    # Cold-start gate is present.
+    assert f"stats.n >= {test.min_samples_per_bucket}" in sql
+    # Today CTE selects from the model.
+    assert "today AS (SELECT COUNT(*) AS cnt FROM" in sql
+    # Singular-test header projection: the 'row_count_anomaly_by_period'
+    # literal makes failures legible in dbt's test-failures viewer.
+    assert "'row_count_anomaly_by_period' AS signalforge_test" in sql
+
+
+@pytest.mark.parametrize("method", ["mad", "zscore", "percentile", "min_max"])
+def test_singular_test_sql_seasonal_joins_today_dow_against_stats(method: str) -> None:
+    """Seasonal singular-test SQL JOINs today's DOW against the per-DOW
+    stats so the band check fires only for today's DOW row."""
+    test = _make_anomaly_test(method=method, seasonality="dow")
+    sql = _compile_anomaly_singular_test_sql(
+        test, _make_orders_table_ref(), BIGQUERY_DIALECT, as_of=_ANOMALY_AS_OF
+    )
+    # Seasonal: today CTE also projects MAX(DOW) and the WHERE joins.
+    assert "MAX(EXTRACT(DAYOFWEEK FROM" in sql
+    assert "stats.dow = today.dow" in sql
+    assert "stats.dow AS dow" in sql
+
+
+def test_singular_test_sql_uses_period_truncated_as_of_for_week() -> None:
+    """For period=week, the as_of literal is wrapped in
+    ``DATE_TRUNC(<lit>, WEEK)`` so the today-window aligns to the natural
+    week boundary (per #171 CodeRabbit finding #4). For period=day, no wrap
+    (byte-equal regression with the historical day-period shape)."""
+    test_week = _make_anomaly_test(method="mad", seasonality="none", period="week")
+    sql_week = _compile_anomaly_singular_test_sql(
+        test_week, _make_orders_table_ref(), BIGQUERY_DIALECT, as_of=_ANOMALY_AS_OF
+    )
+    assert "DATE_TRUNC(DATE('2026-05-01'), WEEK)" in sql_week
+    # period=day stays unwrapped — no DATE_TRUNC around the literal.
+    test_day = _make_anomaly_test(method="mad", seasonality="none", period="day")
+    sql_day = _compile_anomaly_singular_test_sql(
+        test_day, _make_orders_table_ref(), BIGQUERY_DIALECT, as_of=_ANOMALY_AS_OF
+    )
+    assert "DATE_TRUNC(DATE('2026-05-01')" not in sql_day
+    assert "DATE('2026-05-01')" in sql_day
+
+
+def test_singular_test_sql_includes_where_in_both_history_and_today() -> None:
+    """A user-supplied ``where`` clause flows into BOTH the history CTE
+    (so the band is computed on the filtered universe) AND the today CTE
+    (so the test count reflects the same filter). Without this symmetry
+    the band check would compare today's filtered count against the band
+    derived from an unfiltered history."""
+    test = _make_anomaly_test(method="mad", seasonality="none", where="status = 'active'")
+    sql = _compile_anomaly_singular_test_sql(
+        test, _make_orders_table_ref(), BIGQUERY_DIALECT, as_of=_ANOMALY_AS_OF
+    )
+    # The history CTE WHERE clause references the user's predicate.
+    history_segment = sql.split("today AS")[0]
+    today_segment = sql.split("today AS")[1]
+    assert "status = 'active'" in history_segment
+    assert "status = 'active'" in today_segment
+
+
+def test_singular_test_sql_min_max_ignores_threshold() -> None:
+    """For method=min_max, threshold is documented as ignored; the band
+    predicate is purely ``today.cnt < stats.min_cnt OR today.cnt >
+    stats.max_cnt`` with no threshold scaling."""
+    # threshold value chosen NOT to appear by accident in the SQL.
+    test = _make_anomaly_test(method="min_max", seasonality="none", threshold=999.0)
+    sql = _compile_anomaly_singular_test_sql(
+        test, _make_orders_table_ref(), BIGQUERY_DIALECT, as_of=_ANOMALY_AS_OF
+    )
+    # Threshold value does NOT appear in the band predicate (it would only
+    # leak in if the compiler mistakenly multiplied through it).
+    assert "999.0" not in sql
+    assert "today.cnt < stats.min_cnt" in sql
+    assert "today.cnt > stats.max_cnt" in sql
+
+
+def test_singular_test_sql_percentile_uses_threshold_as_half_band_width() -> None:
+    """For method=percentile, threshold is the half-band width in
+    percentile points (e.g. threshold=5.0 → [p5, p95]) — per #171 Copilot
+    findings #6/#7 doc-truth alignment. ``threshold=10.0`` ⇒ p_lo=0.10,
+    p_hi=0.90."""
+    test = _make_anomaly_test(method="percentile", seasonality="none", threshold=10.0)
+    sql = _compile_anomaly_singular_test_sql(
+        test, _make_orders_table_ref(), BIGQUERY_DIALECT, as_of=_ANOMALY_AS_OF
+    )
+    # p_lo = 10.0 / 100 = 0.1; p_hi = 1 - 0.1 = 0.9.
+    assert "PERCENTILE_CONT(0.1) WITHIN GROUP (ORDER BY cnt)" in sql
+    assert "PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY cnt)" in sql
+
+
+def test_singular_test_sql_snowflake_dialect_uses_dialect_fragments() -> None:
+    """The singular-test SQL reads ALL date-arithmetic + percentile
+    fragments from :class:`Dialect` (DEC-011) — Snowflake emits the
+    cast-style date literal, the quoted-payload INTERVAL, the
+    swapped-arg DATE_TRUNC, and the bare DOW extraction without any
+    branch on ``dialect.name``."""
+    test = _make_anomaly_test(method="mad", seasonality="none")
+    sql = _compile_anomaly_singular_test_sql(
+        test, _make_orders_table_ref(), SNOWFLAKE_DIALECT, as_of=_ANOMALY_AS_OF
+    )
+    assert "'2026-05-01'::DATE" in sql
+    assert "INTERVAL '28 DAY'" in sql
+    assert "DATE_TRUNC('DAY'," in sql

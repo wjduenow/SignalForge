@@ -870,7 +870,10 @@ import pytest  # noqa: E402
 from signalforge.diff._emitter import _SKIP, _render_test  # noqa: E402
 from signalforge.draft.models import CandidateTestRowCountAnomalyByPeriod  # noqa: E402
 from signalforge.manifest.models import Model  # noqa: E402
-from signalforge.prune.compiler import _compile_anomaly_violation_query  # noqa: E402
+from signalforge.prune.compiler import (  # noqa: E402
+    _compile_anomaly_singular_test_sql,
+    _compile_anomaly_violation_query,
+)
 from signalforge.warehouse.models import BIGQUERY_DIALECT, TableRef  # noqa: E402
 
 
@@ -949,12 +952,14 @@ def test_emit_proposed_test_files_anomaly_basic_path_and_marker() -> None:
     assert proposed.sql.startswith(f"{_GENERATED_MARKER_PREFIX} {expected_hash}\n")
 
 
-def test_emit_proposed_test_files_anomaly_body_is_violation_query() -> None:
-    """The emitted SQL body is the violation query from
-    :func:`signalforge.prune.compiler._compile_anomaly_violation_query`
-    — NOT the stats query. The two-query split (Phase 1 B.7) keeps the
-    stats query at prune time; only the violation half ships as the
-    operator-runnable singular test.
+def test_emit_proposed_test_files_anomaly_body_is_singular_test_sql() -> None:
+    """The emitted SQL body is the FULL band-check SQL from
+    :func:`signalforge.prune.compiler._compile_anomaly_singular_test_sql`
+    — NOT the engine-side ``_compile_anomaly_violation_query`` (per #171
+    Copilot findings #8 / #9). The violation query alone returns ALL rows
+    in today's period (broken as a dbt singular test); the singular-test
+    SQL combines history + stats CTEs + a band-violation predicate so the
+    test returns 0 rows when in-band and >=1 row only when out-of-band.
     """
     test = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
     candidate = CandidateSchema(
@@ -969,18 +974,29 @@ def test_emit_proposed_test_files_anomaly_body_is_violation_query() -> None:
 
     files = emit_proposed_test_files(candidate, result, model=model, as_of=as_of)
 
-    expected_violation_sql = _compile_anomaly_violation_query(
+    expected_singular_sql = _compile_anomaly_singular_test_sql(
         test,
         TableRef.from_model(model),
         BIGQUERY_DIALECT,
         as_of=as_of,
     )
     # The body (after the header marker + blank line) is exactly the
-    # compiler's violation query plus the trailing newline _with_marker
+    # compiler's singular-test SQL plus the trailing newline _with_marker
     # appends.
     expected_hash = model_test_args_hash(test)
-    expected_body = f"{_GENERATED_MARKER_PREFIX} {expected_hash}\n\n{expected_violation_sql}\n"
+    expected_body = f"{_GENERATED_MARKER_PREFIX} {expected_hash}\n\n{expected_singular_sql}\n"
     assert files[0].sql == expected_body
+    # Defensive: the OLD violation-query shape must NOT appear in the
+    # emitted SQL (regression guard for #171 Copilot findings #8 / #9).
+    old_violation = _compile_anomaly_violation_query(
+        test, TableRef.from_model(model), BIGQUERY_DIALECT, as_of=as_of
+    )
+    assert old_violation not in files[0].sql, (
+        "emitter is shipping the engine-side violation query (returns ALL "
+        "rows in as_of period) as the dbt singular test — that's the bug "
+        "Copilot caught at #171 review (findings #8/#9). The emitted SQL "
+        "must use the band-check shape that returns 0 rows when in-band."
+    )
 
 
 def test_emit_proposed_test_files_anomaly_filename_uses_args_hash() -> None:
@@ -1063,10 +1079,10 @@ def test_emit_proposed_test_files_anomaly_uses_decision_as_of_when_kwarg_omitted
 
     files = emit_proposed_test_files(candidate, result, model=model)
 
-    expected_violation_sql = _compile_anomaly_violation_query(
+    expected_singular_sql = _compile_anomaly_singular_test_sql(
         test, TableRef.from_model(model), BIGQUERY_DIALECT, as_of=engine_as_of
     )
-    assert expected_violation_sql in files[0].sql
+    assert expected_singular_sql in files[0].sql
 
 
 def test_emit_proposed_test_files_anomaly_kwarg_overrides_decision_as_of() -> None:
@@ -1101,13 +1117,13 @@ def test_emit_proposed_test_files_anomaly_kwarg_overrides_decision_as_of() -> No
 
     files = emit_proposed_test_files(candidate, result, model=model, as_of=operator_as_of)
 
-    expected = _compile_anomaly_violation_query(
+    expected = _compile_anomaly_singular_test_sql(
         test, TableRef.from_model(model), BIGQUERY_DIALECT, as_of=operator_as_of
     )
     assert expected in files[0].sql
     # The engine's as_of must NOT appear (defensive — confirms the
     # kwarg actually wins).
-    engine_sql = _compile_anomaly_violation_query(
+    engine_sql = _compile_anomaly_singular_test_sql(
         test, TableRef.from_model(model), BIGQUERY_DIALECT, as_of=engine_as_of
     )
     assert engine_sql not in files[0].sql

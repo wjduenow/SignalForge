@@ -1026,6 +1026,33 @@ def _period_unit_keyword(period: str) -> str:
     return period.upper()
 
 
+def _render_as_of_literal(as_of: date, period: str, dialect: Dialect) -> str:
+    """Render the ``as_of`` literal, period-aligned for ``week`` / ``hour``.
+
+    Per #171 CodeRabbit finding #4: when ``period`` is ``week`` or ``hour``,
+    a raw ``as_of`` value (e.g. ``2026-05-15``, a Thursday) gives a
+    semantically muddled "current period" window: the violation query covers
+    ``[2026-05-15, 2026-05-22)``, which is neither a calendar week nor a
+    natural Mon–Sun span. Wrapping the literal in ``DATE_TRUNC(<lit>, <unit>)``
+    aligns it to the natural period boundary so the stats and violation
+    windows are consistent.
+
+    For ``period="day"`` the truncation is a no-op (a ``date`` literal is
+    already at day-boundary 00:00:00); we skip the wrap so existing snapshots
+    stay byte-equal. For ``period="hour"`` the truncation runs but **note**:
+    ``as_of`` is a ``date`` (not a ``datetime``), so ``DATE_TRUNC(<date>,
+    HOUR)`` is dialect-divergent (BigQuery rejects, Snowflake returns a
+    timestamp at midnight). Hour-period anomaly tests are a v0.x limitation
+    — document; the workaround for hourly cadence is `period="day"` with the
+    operator's choice of `as_of` reflecting their preferred hour boundary.
+    """
+    bare = dialect.date_literal_template.format(value=as_of.isoformat())
+    if period == "day":
+        return bare
+    unit = _period_unit_keyword(period)
+    return dialect.date_trunc_expr_template.format(date=bare, unit=unit)
+
+
 def _render_anomaly_stats_partition_filter(
     *,
     date_column_quoted: str,
@@ -1053,7 +1080,7 @@ def _render_anomaly_stats_partition_filter(
     form. The compiler NEVER branches on ``dialect.name`` — both surfaces
     are dialect templates.
     """
-    as_of_literal = dialect.date_literal_template.format(value=as_of.isoformat())
+    as_of_literal = _render_as_of_literal(as_of, period, dialect)
     unit = _period_unit_keyword(period)
     lookback_interval = dialect.interval_expr_template.format(n=lookback_periods, unit=unit)
     return (
@@ -1251,7 +1278,7 @@ def _compile_anomaly_violation_query(
     # ``as_of`` is a date at 00:00, which is the boundary by construction).
     # The DEC-012 partition-pruning shape inverts the upper bound vs. the
     # stats query: stats excludes today, violation IS today.
-    as_of_literal = dialect.date_literal_template.format(value=as_of.isoformat())
+    as_of_literal = _render_as_of_literal(as_of, test.period, dialect)
     unit = _period_unit_keyword(test.period)
     today_interval = dialect.interval_expr_template.format(n=1, unit=unit)
     today_only = (
@@ -1260,6 +1287,245 @@ def _compile_anomaly_violation_query(
     )
     where_clause = today_only if test.where is None else f"{today_only} AND {test.where}"
     return f"SELECT 1 FROM {table_sql} WHERE {where_clause}"
+
+
+def _render_anomaly_today_cte(
+    *,
+    date_column_quoted: str,
+    table_sql: str,
+    as_of: date,
+    period: str,
+    where: str | None,
+    dialect: Dialect,
+    include_dow: bool,
+) -> str:
+    """Render the ``today`` CTE used by the singular-test SQL emitter.
+
+    Returns one row containing the count (and, when ``include_dow`` is True,
+    today's DOW) of the period that contains ``as_of`` (the upper bound is
+    ``as_of + INTERVAL 1 <unit>`` so the window is half-open ``[as_of, …)``,
+    aligned to the natural period boundary by :func:`_render_as_of_literal`).
+
+    When ``where`` is non-None, the predicate appends so the today count
+    reflects the same filtered universe as the history CTE.
+    """
+    as_of_literal = _render_as_of_literal(as_of, period, dialect)
+    unit = _period_unit_keyword(period)
+    today_interval = dialect.interval_expr_template.format(n=1, unit=unit)
+    today_pred = (
+        f"{date_column_quoted} >= {as_of_literal} "
+        f"AND {date_column_quoted} < {as_of_literal} + {today_interval}"
+    )
+    where_pred = today_pred if where is None else f"{today_pred} AND {where}"
+    if include_dow:
+        dow_expr = dialect.extract_dow_expr_template.format(date=date_column_quoted)
+        select_list = f"COUNT(*) AS cnt, MAX({dow_expr}) AS dow"
+    else:
+        select_list = "COUNT(*) AS cnt"
+    return f"today AS (SELECT {select_list} FROM {table_sql} WHERE {where_pred})"
+
+
+def _render_anomaly_band_violation_predicate(
+    *,
+    method: str,
+    threshold: float,
+    seasonality: str,
+) -> str:
+    """Render the WHERE predicate that selects "today's count is outside the
+    historical band derived by the chosen method." Returns the SQL fragment
+    that follows ``stats.n >= <min_samples> AND ``.
+
+    Per-method predicates (the stats CTE exposes the relevant aggregates;
+    the today CTE exposes ``today.cnt``):
+
+    * ``mad`` — Iglewicz & Hoaglin modified z-score:
+      ``ABS(0.6745 * (today.cnt - stats.median)) > threshold * NULLIF(stats.mad, 0)``.
+      The ``NULLIF`` guards against the degenerate ``MAD=0`` case (every
+      historical period had identical count) — NULL-typed comparisons
+      yield NULL → predicate false → no anomaly row → test passes silently,
+      matching the conservative-bias contract.
+    * ``zscore`` — ``ABS(today.cnt - stats.mean) > threshold * NULLIF(stats.stddev, 0)``.
+    * ``percentile`` — ``today.cnt < stats.p_lo OR today.cnt > stats.p_hi``.
+      ``threshold`` is the percentile half-band width in points (see
+      ``CandidateTestRowCountAnomalyByPeriod`` docstring).
+    * ``min_max`` — ``today.cnt < stats.min_cnt OR today.cnt > stats.max_cnt``.
+      ``threshold`` is ignored for ``min_max``.
+    """
+    if method == "mad":
+        return f"ABS(0.6745 * (today.cnt - stats.median)) > {threshold} * NULLIF(stats.mad, 0)"
+    if method == "zscore":
+        return f"ABS(today.cnt - stats.mean) > {threshold} * NULLIF(stats.stddev, 0)"
+    if method == "percentile":
+        return "today.cnt < stats.p_lo OR today.cnt > stats.p_hi"
+    # min_max — threshold is ignored per the variant docstring.
+    return "today.cnt < stats.min_cnt OR today.cnt > stats.max_cnt"
+
+
+def _compile_anomaly_singular_test_sql(
+    test: CandidateTestRowCountAnomalyByPeriod,
+    table_ref: TableRef,
+    dialect: Dialect,
+    *,
+    as_of: date,
+) -> str:
+    """Render a STANDALONE dbt-singular-test SQL for the variant.
+
+    Distinct from :func:`_compile_anomaly_violation_query` (which is the
+    engine-side "rows in today's period" query, paired with the stats query
+    for the two-query split): this emits a SINGLE self-contained SQL that
+    returns ``0`` rows when today's count is within the historical band and
+    ``>= 1`` row when out-of-band — the dbt singular-test contract (#171
+    Copilot findings #8 + #9).
+
+    The shape combines the history CTE + the same per-method stats CTEs as
+    the engine's stats query + a fresh ``today`` CTE + a final SELECT
+    predicated on the band-violation check::
+
+        WITH history AS (...),
+             <per-method stats CTEs>,
+             today AS (SELECT COUNT(*) FROM <table> WHERE today-only)
+        SELECT 'row_count_anomaly_by_period' AS signalforge_test,
+               today.cnt AS today_cnt, <stats fields>
+        FROM today CROSS JOIN stats
+        WHERE stats.n >= <min_samples_per_bucket>
+          AND <method-specific band-violation predicate>
+
+    The ``signalforge_test`` literal projection makes the failing-rows
+    output legible in dbt's test-failures viewer.
+
+    When ``stats.n < min_samples_per_bucket`` (cold-start), the WHERE
+    short-circuits to 0 rows → the test passes silently. This matches the
+    engine-side conservative-bias contract (cold-start is "no signal,"
+    NOT "always-passes"); the operator sees a passing test until enough
+    history accumulates.
+
+    Seasonal (``seasonality="dow"``) variants project today's DOW from the
+    today CTE and JOIN against the per-DOW stats; the band-violation
+    predicate fires only for today's DOW row.
+
+    The hardcoded ``as_of`` value is baked into the emitted SQL — the test
+    answers "was the period containing ``as_of`` anomalous given the history
+    before ``as_of``?" This matches #171's reproducibility carve-out at
+    ``(model, as_of)`` granularity. Re-running ``signalforge generate
+    --as-of <date>`` with a different date emits a different test file.
+    """
+    date_column_quoted = _quote(test.date_column, dialect)
+    table_sql = _qualified_table_name(table_ref, dialect)
+    seasonal = test.seasonality == "dow"
+
+    history_cte = _render_anomaly_history_cte(
+        date_column_quoted=date_column_quoted,
+        table_sql=table_sql,
+        as_of=as_of,
+        lookback_periods=test.lookback_periods,
+        period=test.period,
+        seasonality=test.seasonality,
+        where=test.where,
+        dialect=dialect,
+    )
+    today_cte = _render_anomaly_today_cte(
+        date_column_quoted=date_column_quoted,
+        table_sql=table_sql,
+        as_of=as_of,
+        period=test.period,
+        where=test.where,
+        dialect=dialect,
+        include_dow=seasonal,
+    )
+    band_predicate = _render_anomaly_band_violation_predicate(
+        method=test.method,
+        threshold=test.threshold,
+        seasonality=test.seasonality,
+    )
+
+    # Per-method stats CTE + final SELECT projection of the stats fields
+    # the band-predicate references. Reuses the same percentile/mean/stddev/
+    # min/max SQL as ``_compile_anomaly_stats_query`` but condensed to a
+    # single ``stats`` CTE (no per-DOW JOIN gymnastics — seasonal singular
+    # tests filter ``stats`` by ``today.dow``).
+    dow_select_prefix = "stats.dow AS dow, " if seasonal else ""
+    dow_group_suffix = " GROUP BY dow" if seasonal else ""
+    dow_select = "dow, " if seasonal else ""
+    dow_join_pred = " AND stats.dow = today.dow" if seasonal else ""
+
+    if test.method == "mad":
+        median_expr = _percentile_expr(0.5, "cnt", dialect)
+        if seasonal:
+            medians_cte = (
+                f"medians AS (SELECT dow, {median_expr} AS median FROM history GROUP BY dow)"
+            )
+            mad_expr = _percentile_expr(0.5, "ABS(history.cnt - medians.median)", dialect)
+            mads_cte = (
+                "mads AS (SELECT history.dow AS dow, "
+                f"{mad_expr} AS mad "
+                "FROM history JOIN medians ON history.dow = medians.dow "
+                "GROUP BY history.dow)"
+            )
+            counts_cte = "counts AS (SELECT dow, COUNT(*) AS n FROM history GROUP BY dow)"
+            stats_cte = (
+                "stats AS (SELECT medians.dow AS dow, medians.median AS median, "
+                "mads.mad AS mad, counts.n AS n "
+                "FROM medians JOIN mads ON medians.dow = mads.dow "
+                "JOIN counts ON medians.dow = counts.dow)"
+            )
+            ctes = (
+                f"{history_cte}, {medians_cte}, {mads_cte}, {counts_cte}, {stats_cte}, {today_cte}"
+            )
+        else:
+            medians_cte = f"medians AS (SELECT {median_expr} AS median FROM history)"
+            mad_expr = _percentile_expr(0.5, "ABS(cnt - (SELECT median FROM medians))", dialect)
+            stats_cte = (
+                f"stats AS (SELECT (SELECT median FROM medians) AS median, "
+                f"{mad_expr} AS mad, COUNT(*) AS n FROM history)"
+            )
+            ctes = f"{history_cte}, {medians_cte}, {stats_cte}, {today_cte}"
+        select_fields = (
+            f"{dow_select_prefix}today.cnt AS today_cnt, "
+            "stats.median AS median, stats.mad AS mad, stats.n AS n"
+        )
+    elif test.method == "zscore":
+        stats_cte = (
+            f"stats AS (SELECT {dow_select}AVG(cnt) AS mean, "
+            f"STDDEV(cnt) AS stddev, COUNT(*) AS n FROM history{dow_group_suffix})"
+        )
+        ctes = f"{history_cte}, {stats_cte}, {today_cte}"
+        select_fields = (
+            f"{dow_select_prefix}today.cnt AS today_cnt, "
+            "stats.mean AS mean, stats.stddev AS stddev, stats.n AS n"
+        )
+    elif test.method == "percentile":
+        p_lo = test.threshold / 100.0
+        p_hi = 1.0 - p_lo
+        p_lo_expr = _percentile_expr(p_lo, "cnt", dialect)
+        p_hi_expr = _percentile_expr(p_hi, "cnt", dialect)
+        stats_cte = (
+            f"stats AS (SELECT {dow_select}{p_lo_expr} AS p_lo, "
+            f"{p_hi_expr} AS p_hi, COUNT(*) AS n FROM history{dow_group_suffix})"
+        )
+        ctes = f"{history_cte}, {stats_cte}, {today_cte}"
+        select_fields = (
+            f"{dow_select_prefix}today.cnt AS today_cnt, "
+            "stats.p_lo AS p_lo, stats.p_hi AS p_hi, stats.n AS n"
+        )
+    else:  # min_max
+        stats_cte = (
+            f"stats AS (SELECT {dow_select}MIN(cnt) AS min_cnt, "
+            f"MAX(cnt) AS max_cnt, COUNT(*) AS n FROM history{dow_group_suffix})"
+        )
+        ctes = f"{history_cte}, {stats_cte}, {today_cte}"
+        select_fields = (
+            f"{dow_select_prefix}today.cnt AS today_cnt, "
+            "stats.min_cnt AS min_cnt, stats.max_cnt AS max_cnt, stats.n AS n"
+        )
+
+    return (
+        f"WITH {ctes} "
+        f"SELECT 'row_count_anomaly_by_period' AS signalforge_test, "
+        f"{select_fields} "
+        f"FROM today CROSS JOIN stats "
+        f"WHERE stats.n >= {test.min_samples_per_bucket}{dow_join_pred} "
+        f"AND ({band_predicate})"
+    )
 
 
 def _compile_row_count_anomaly_by_period(

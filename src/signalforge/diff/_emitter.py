@@ -67,7 +67,7 @@ from signalforge.draft.models import (
 )
 from signalforge.manifest.models import Model
 from signalforge.prune import PruneResult
-from signalforge.prune.compiler import _compile_anomaly_violation_query
+from signalforge.prune.compiler import _compile_anomaly_singular_test_sql
 from signalforge.warehouse.models import BIGQUERY_DIALECT, Dialect, TableRef
 
 # Sentinel returned by :func:`_render_test` for a ``custom_sql`` test —
@@ -450,7 +450,16 @@ def emit_proposed_test_files(
                     else (decision.as_of if decision.as_of is not None else date.today())
                 )
             table_ref = TableRef.from_model(model)
-            sql_body = _compile_anomaly_violation_query(
+            # Per #171 Copilot findings #8 / #9 — the emitted singular-test
+            # SQL must return 0 rows when in-band and >=1 row only when
+            # the period's row count is outside the predicted band. The
+            # prior call to ``_compile_anomaly_violation_query`` emitted
+            # ``SELECT 1 FROM table WHERE today-period``, which returns ALL
+            # rows in the period and fires the dbt singular test on every
+            # non-empty day. ``_compile_anomaly_singular_test_sql`` returns
+            # the full band-check shape (stats CTEs + today CTE + WHERE
+            # predicate on the band violation).
+            sql_body = _compile_anomaly_singular_test_sql(
                 test, table_ref, dialect, as_of=resolved_as_of
             )
         else:
