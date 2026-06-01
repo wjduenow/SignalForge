@@ -125,17 +125,18 @@ _EXPECTED_VARIANT_COUNT: int = 8
 #: merged, every set should be empty and every variant must round-trip
 #: every dispatch site.
 #:
-#: As of US-008 (this merge): sites 1 (prune compiler) AND 2
-#: (``_common.artifact_id``) are landed for
-#: ``CandidateTestRowCountAnomalyByPeriod`` — both removed from their
-#: pending sets. Sites 3, 5, 6 are still pending in sibling beads.
+#: As of US-007 + US-008 (this merge): sites 1 (prune compiler), 2
+#: (``_common.artifact_id``), and 6 (``ingest.anchor``) are landed for
+#: ``CandidateTestRowCountAnomalyByPeriod`` — all three removed from
+#: their pending sets. Sites 3 (diff emitter) and 5 (drafter anchor)
+#: are still pending in sibling beads.
 _VARIANTS_PENDING_DISPATCH_ARMS: dict[int, frozenset[type]] = {
     1: frozenset(),  # US-008 — landed
     2: frozenset(),  # US-004 — landed
     3: frozenset({CandidateTestRowCountAnomalyByPeriod}),  # US-014 (diff emitter)
     4: frozenset(),  # N/A — variant has no external dbt-macro form
     5: frozenset({CandidateTestRowCountAnomalyByPeriod}),  # US-006 (draft anchor)
-    6: frozenset({CandidateTestRowCountAnomalyByPeriod}),  # US-007 (ingest anchor)
+    6: frozenset(),  # US-007 — landed
 }
 
 

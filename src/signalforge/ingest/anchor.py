@@ -55,7 +55,8 @@ def validate_anchor_contract(
       ``model_columns``.
     * Each model-level test's ``column`` must reference a real column in
       ``model_columns``. Model-level-only variants (``row_count_between``
-      — issue #169; ``unique_combination`` — issue #170) whose Pydantic
+      — issue #169; ``unique_combination`` — issue #170;
+      ``row_count_anomaly_by_period`` — issue #171) whose Pydantic
       model fixes ``column = None`` are exempt from this check — ``None``
       is the canonical model-level shape, not a missing column reference.
     """
@@ -86,6 +87,16 @@ def validate_anchor_contract(
         # the drafter-side anchor exemption in
         # ``signalforge.draft.parser._validate_anchor_contract``.
         if test.type == "row_count_between":
+            continue
+        # Issue #171 — ``row_count_anomaly_by_period`` is the fourth
+        # model-level-only variant (after ``custom_sql``,
+        # ``row_count_between``, and ``unique_combination``); its
+        # Pydantic model also fixes ``column = None``. Mirrors the
+        # ``row_count_between`` early-out above. The drafter parser
+        # (US-006 / ``signalforge.draft.parser._validate_anchor_contract``)
+        # remains the authority for ``date_column`` validation; the
+        # ingest anchor's job is column-of-test enforcement only.
+        if test.type == "row_count_anomaly_by_period":
             continue
         # Issue #170 — ``unique_combination`` is the third model-level-only
         # variant (after ``custom_sql`` and ``row_count_between``); its

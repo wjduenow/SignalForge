@@ -266,3 +266,91 @@ def test_model_level_unique_combination_with_hallucinated_column_raises_per_colu
     # including ``id``, so a naive substring search yields a false
     # positive — pin the header shape instead.)
     assert not any("unique_combination references nonexistent column 'id'" in v for v in violations)
+
+
+def test_model_level_row_count_anomaly_by_period_with_none_column_does_not_raise() -> None:
+    """Issue #171 — ``row_count_anomaly_by_period`` is the fourth
+    model-level-only variant (after ``custom_sql``, ``row_count_between``,
+    and ``unique_combination``). Its Pydantic model fixes ``column = None``;
+    ``None not in model_columns`` would otherwise fire a spurious
+    "references nonexistent column None" violation, blocking the variant
+    through ``prune-existing``. The exemption mirrors
+    ``row_count_between`` and ``unique_combination`` above.
+    """
+    candidate = _candidate(
+        columns=[
+            {
+                "name": "id",
+                "description": "Primary key.",
+                "tests": [{"type": "not_null", "column": "id"}],
+            },
+        ],
+        tests=[
+            # ``column`` defaults to None on the Pydantic model — operators
+            # never provide it for this variant. ``date_column`` MUST be a
+            # real string for the Pydantic model validator, but the ingest
+            # anchor does NOT validate it (US-007 contract: the drafter
+            # parser owns date_column shape; ingest only does
+            # column-of-test enforcement).
+            {
+                "type": "row_count_anomaly_by_period",
+                "date_column": "id",
+            },
+            {
+                "type": "row_count_anomaly_by_period",
+                "date_column": "region",
+                "period": "week",
+                "method": "zscore",
+                "where": "region IS NOT NULL",
+            },
+        ],
+    )
+    # Returns None; the absence of a raise is the assertion.
+    assert validate_anchor_contract(candidate, _MODEL_COLUMNS) is None
+
+
+def test_row_count_anomaly_by_period_hallucinated_date_column_not_caught_by_ingest_anchor() -> None:
+    """Pin the US-007 contract boundary — ``date_column`` validation is
+    NOT the ingest anchor's job. The ingest anchor enforces only
+    ``column``-of-test membership (the early-out exempts model-level-only
+    variants whose ``column=None``); it deliberately does NOT iterate
+    sibling fields like ``date_column`` or ``where``.
+
+    ``date_column`` shape (and any sqlglot type-coherence on ``where``)
+    is the drafter parser's responsibility
+    (``signalforge.draft.parser._validate_anchor_contract`` — US-006 in
+    a sibling worktree). Pinning the boundary here prevents a future
+    refactor from inadvertently double-validating ``date_column`` at
+    ingest, which would:
+
+    (a) duplicate the drafter-side enforcement (silent rule drift), and
+    (b) re-introduce an unrelated cross-layer ``ingest → draft`` coupling
+        the layer separation deliberately avoids (per
+        ``signalforge.ingest.anchor`` module docstring, DEC-007).
+
+    The hallucinated ``date_column`` here would later route through the
+    warehouse via the conservative-bias ``_InvalidIdentifier`` →
+    ``kept-without-evidence`` path (or be caught upstream by the drafter
+    parser when the variant flows through ``draft_schema``); the ingest
+    anchor itself stays silent.
+    """
+    candidate = _candidate(
+        columns=[
+            {
+                "name": "id",
+                "description": "Primary key.",
+                "tests": [{"type": "not_null", "column": "id"}],
+            },
+        ],
+        tests=[
+            {
+                "type": "row_count_anomaly_by_period",
+                # Hallucinated column — NOT on the model. The ingest
+                # anchor must stay silent on this; the drafter parser
+                # (US-006) is the authority.
+                "date_column": "ghost_timestamp",
+            },
+        ],
+    )
+    # Returns None; the absence of a raise is the contract.
+    assert validate_anchor_contract(candidate, _MODEL_COLUMNS) is None
