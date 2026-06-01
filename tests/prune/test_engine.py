@@ -3941,3 +3941,234 @@ def test_drop_reason_literal_still_exactly_five_values() -> None:
         "kept",
         "kept-without-evidence",
     }
+
+
+# ---------------------------------------------------------------------------
+# #171 US-009 — ``as_of`` threading + variant detection + INFO log
+# ---------------------------------------------------------------------------
+
+
+def _make_anomaly_candidates() -> CandidateSchema:
+    """Build a CandidateSchema carrying ONE model-level
+    :class:`CandidateTestRowCountAnomalyByPeriod` (and no other tests).
+
+    Used by the US-009 ``as_of`` threading tests. The compiler arm for
+    this variant lands in US-008; under #171 US-009 the dispatcher hits
+    its closing ``NotImplementedError`` for the anomaly variant, so
+    every test here either stubs :func:`_compile_test` or only asserts
+    on behaviour that happens BEFORE compile (the INFO log fires right
+    after ``_iter_candidate_tests`` — well before the per-test loop).
+    """
+    from signalforge.draft.models import CandidateTestRowCountAnomalyByPeriod
+
+    return CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at"),),
+    )
+
+
+def test_as_of_none_with_anomaly_candidate_resolves_to_today_and_logs(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#171 US-009 / DEC-001 — when ``as_of=None`` AND at least one
+    candidate is the anomaly variant, the orchestrator resolves to
+    :meth:`datetime.date.today` AND emits ONE INFO log line.
+
+    Stubs :func:`_compile_test` so the dispatcher's still-unimplemented
+    anomaly arm (US-008's job) doesn't raise. The stub additionally
+    captures the threaded ``as_of`` kwarg so the per-test threading is
+    verified end-to-end (engine → compiler) in the same test.
+    """
+    from datetime import date as _date
+
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # The stub never issues a warehouse query, but the engine still
+    # enters ``with adapter:`` and calls ``_resolve_sample_bucket`` /
+    # ``materialise_sample`` when scope=sample. Pin scope=full so neither
+    # path needs an expectation, and the stub short-circuits the rest.
+    adapter = _make_adapter(fake)
+
+    captured: dict[str, Any] = {}
+
+    def _stub_compile(test: Any, table_ref: Any, dialect: Any, manifest: Any, **kwargs: Any) -> str:
+        captured["as_of"] = kwargs.get("as_of")
+        # Return a non-empty SQL so the engine continues to ``run_test_sql``.
+        return "SELECT 1"
+
+    monkeypatch.setattr(engine_module, "_compile_test", _stub_compile)
+    # The stub returns SQL, so ``run_test_sql`` runs — queue an
+    # always-passes result for it.
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _make_anomaly_candidates()
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    with caplog.at_level("INFO", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+            # as_of NOT supplied → engine resolves to date.today()
+        )
+
+    # Exactly one INFO line names the resolved as_of.
+    info_records = [r for r in caplog.records if "anomaly: as_of resolved" in r.getMessage()]
+    assert len(info_records) == 1, (
+        f"expected exactly one INFO line; got {len(info_records)}: "
+        f"{[r.getMessage() for r in info_records]}"
+    )
+    # The line embeds the resolved date as ISO-8601; matches today().
+    today_iso = _date.today().isoformat()
+    assert today_iso in info_records[0].getMessage()
+    # Lazy-format JSON pattern: the message stays the literal template
+    # and the JSON payload rides on args.
+    assert info_records[0].msg == "anomaly: as_of resolved: %s"
+    payload = json.loads(info_records[0].args[0])  # type: ignore[index]
+    assert payload["as_of"] == today_iso
+    assert payload["model_unique_id"] == model.unique_id
+
+    # The threaded value reached the compiler stub as date.today() — the
+    # engine→compiler plumbing carries ``as_of``, not just the log line.
+    assert captured["as_of"] == _date.today()
+
+
+def test_as_of_none_no_anomaly_candidate_emits_no_log(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#171 US-009 / DEC-001 — when ``as_of=None`` AND NO candidate is
+    the anomaly variant, the engine emits NO ``as_of resolved`` INFO
+    line (and never reads :meth:`datetime.date.today`). This is the
+    "zero impact on existing variants" guarantee.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    with caplog.at_level("INFO", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    matches = [r for r in caplog.records if "as_of resolved" in r.getMessage()]
+    assert matches == [], (
+        f"expected zero ``as_of resolved`` log lines on a no-anomaly run; "
+        f"got {[r.getMessage() for r in matches]}"
+    )
+    fake.assert_all_expectations_met()
+
+
+def test_as_of_supplied_uses_supplied_value(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#171 US-009 / DEC-001 — when the caller supplies ``as_of`` AND
+    an anomaly candidate is present, the engine uses the supplied value
+    verbatim (NOT :meth:`datetime.date.today`) and the INFO log surfaces
+    it. Same threading contract reaches :func:`_compile_test` with the
+    supplied value.
+    """
+    from datetime import date as _date
+
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    adapter = _make_adapter(fake)
+
+    captured: dict[str, Any] = {}
+
+    def _stub_compile(test: Any, table_ref: Any, dialect: Any, manifest: Any, **kwargs: Any) -> str:
+        captured["as_of"] = kwargs.get("as_of")
+        return "SELECT 1"
+
+    monkeypatch.setattr(engine_module, "_compile_test", _stub_compile)
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _make_anomaly_candidates()
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    supplied = _date(2026, 5, 1)
+    with caplog.at_level("INFO", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+            as_of=supplied,
+        )
+
+    info_records = [r for r in caplog.records if "anomaly: as_of resolved" in r.getMessage()]
+    assert len(info_records) == 1
+    # The resolved value is 2026-05-01, NOT today's date.
+    assert "2026-05-01" in info_records[0].getMessage()
+    payload = json.loads(info_records[0].args[0])  # type: ignore[index]
+    assert payload["as_of"] == "2026-05-01"
+    # The threaded value reached the compiler stub verbatim — the engine
+    # did NOT silently substitute date.today().
+    assert captured["as_of"] == supplied
+
+
+def test_as_of_supplied_no_anomaly_candidate_emits_no_log(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#171 US-009 / DEC-001 — even when the caller supplies ``as_of``,
+    the INFO log fires ONLY when an anomaly candidate is present. A
+    supplied-but-unused ``as_of`` on a no-anomaly run stays silent so
+    the log signal correlates with "this run consulted anomaly state".
+    """
+    from datetime import date as _date
+
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_test("id")
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    with caplog.at_level("INFO", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+            as_of=_date(2026, 5, 1),
+        )
+
+    matches = [r for r in caplog.records if "as_of resolved" in r.getMessage()]
+    assert matches == []
+    fake.assert_all_expectations_met()

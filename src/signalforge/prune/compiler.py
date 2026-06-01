@@ -994,6 +994,7 @@ def _compile_test(
     sample_size: int | None = None,
     sample_bucket: int | None = None,
     partition_filter: PartitionFilter | None = None,
+    as_of: date | None = None,
 ) -> str | _RequiresFutureData | _InvalidIdentifier:
     """Render a candidate test as a failing-rows SELECT.
 
