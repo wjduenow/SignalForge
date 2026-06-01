@@ -247,32 +247,35 @@ The CTE pushes the bound check into the inner SELECT so the outer
 `failures` count reflects the real verdict (US-007a corrected this
 shape after #169 first landed).
 
-**Sample-mode behaviour — deliberately bypassed.** The compiled SQL is
-identical regardless of `prune.scope`. A sampled `COUNT(*)` is
-semantically wrong — a bucket-mod'd subset cannot be compared against
-the full-table bounds, and a sampled "we got 50 rows when we expected
-500" finding tells the reviewer nothing about the warehouse. Two
-sub-cases worth naming:
+**Sample-mode behaviour — engine routes past the materialised sample.**
+The compiled SQL is identical regardless of `prune.scope`. A sampled
+`COUNT(*)` is semantically wrong — a sample-bucket-mod'd subset can't
+be compared against the full-table bounds, and a materialised sample
+counted directly would return the **sample size** (typically 100K
+rows), not the model's true row count.
 
-- Under `prune.scope="sample"` + `sample_strategy="materialised"` the
-  orchestrator passes `table_ref=<temp table>` (the materialised sample
-  itself). The `COUNT(*)` lands cheap against the temp table without
-  re-sampling — this is the
-  [materialised-sample-substitution contract](#post-q4c-temp-table-materialised-sample-v02-issue-22)
-  from issue #116, applied uniformly to any test that builds its own
-  `FROM`.
-- Under `prune.scope="sample"` + `sample_strategy="oneshot"` the
-  `COUNT(*)` runs against the **source table**. This is a deliberate
-  full-table scan: a sampled row-count is the wrong answer; the scan
-  is what the test exists to do.
+`prune_tests` therefore overrides `table_ref` to the **source table**
+for every `row_count_between` candidate, regardless of
+`sample_strategy` (`materialised` or `oneshot`) and regardless of
+whether the rest of the run uses the sample. The
+[materialised-sample-substitution contract](#post-q4c-temp-table-materialised-sample-v02-issue-22)
+from issue #116 still applies to the other five test types (which
+read row-level data the sample faithfully represents); only
+`row_count_between` is the exception. When every candidate in a run
+is `row_count_between`, the engine also skips the
+`materialise_sample` / `get_row_count` pre-work entirely — there's no
+sample to set up, so adapter errors on that path can no longer route
+the bypassing tests to `kept-without-evidence`.
 
-**Cost guidance.** A bare `COUNT(*)` on a partitioned warehouse is
-metadata-cheap on BigQuery (the analyzer reads partition statistics)
-and metadata-cheap on Snowflake for permanent tables (table metadata
-carries the row count). A `where`-filtered `COUNT(*)` is **partition-
-aligned at best, full-scan at worst** — if the filter aligns with the
-partition column the scan reads only the matched partitions; if it
-doesn't, the warehouse reads the whole table to evaluate the predicate.
+**Cost guidance.** A `row_count_between` query is a single aggregate
+`COUNT(*)` on the source table — cheap even on petabyte tables on both
+BigQuery and Snowflake (a few seconds, scan billed on the bytes the
+analyzer touches; not a metadata-only operation but bounded by the
+size of the columns the aggregate references). A `where`-filtered
+`COUNT(*)` is **partition-aligned at best, full-scan at worst** — if
+the filter aligns with the partition column the scan reads only the
+matched partitions; if it doesn't, the warehouse reads the whole table
+to evaluate the predicate.
 The adapter's `maximum_bytes_billed` cap (default 100 MB; raise via the
 profile-level `maximum_bytes_billed` field if needed) plus
 `prune.total_budget_seconds` are the safety nets — a `row_count_between`

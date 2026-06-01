@@ -401,7 +401,7 @@ Story order follows the natural data-flow direction so each story can be tested 
 - BigQuery dialect: backtick-quoted single qualified token.
 - Snowflake dialect: per-component double-quoted, UPPER-folded.
 - AST import-guard test confirms no new vendor SDK imports under `signalforge/prune/`.
-- Under `materialised+sample`, the engine passes `table_ref=<temp>`, so the compiled SQL references the temp table (NOT the source). Pinned by a dedicated assertion that the compiled SQL contains `_SESSION._sf_sample_*` when the engine path is materialised.
+- **Compiler-level invariant only:** if the caller passes `table_ref=<temp>`, the compiled SQL references the temp table (NOT the source). Pinned by a dedicated assertion that the compiled SQL contains `_SESSION._sf_sample_*`. **In the real pipeline DEC-003 (corrected) has the engine override `table_ref` to source for `row_count_between`** — see `test_prune_tests_row_count_between_under_materialised_references_source_not_temp_table` in `tests/prune/test_engine.py`. This compiler test stays useful as defence-in-depth (a future caller passing a temp ref would be honoured).
 
 **Acceptance criteria.** All snapshots match. Import guard green. Materialised-sample substitution pinned.
 
@@ -579,7 +579,7 @@ Story order follows the natural data-flow direction so each story can be tested 
 
 ### Story dependency graph
 
-```
+```text
 US-001 (models)
    ├─→ US-002 (config token)
    ├─→ US-003 (prompt + cache rotation)        (depends on US-001, US-002)
@@ -635,7 +635,7 @@ Different files; safe to parallelize, but if conflicts surface, serialize `.7` a
 
 ## Output
 
-```
+```text
 Plan devolved to beads.
 
 Epic: bd_1-scaffolding-tt8 (#169)

@@ -843,14 +843,22 @@ def _compile_row_count_between(
     bounds. The CTE+WHERE shape pushes the bound check into the inner
     SELECT so the outer COUNT(*) reflects the real verdict.
 
-    **Sample-mode is deliberately bypassed (DEC-003).** The compiled SQL is
-    identical regardless of ``prune.scope`` — a sampled ``COUNT(*)`` is
-    semantically wrong (a bucket-mod'd subset cannot be compared against the
-    full-table bounds). Under ``prune.scope="sample"`` +
-    ``sample_strategy="materialised"`` the orchestrator passes
-    ``table_ref=<temp table>`` (the materialised sample), so the count lands
-    cheap against the temp table without sampling its rows again — this is
-    the materialised-sample-substitution contract from issue #116.
+    **Sample-mode is deliberately bypassed (DEC-003, corrected post-QG).**
+    The compiled SQL is identical regardless of ``prune.scope`` — a sampled
+    ``COUNT(*)`` is semantically wrong (a bucket-mod'd subset cannot be
+    compared against the full-table bounds). **The engine routes
+    ``row_count_between`` past the materialised-sample substitution
+    entirely** — ``prune_tests`` overrides ``table_ref`` to the SOURCE
+    table for this variant in every scope/strategy combination because a
+    COUNT(*) against a materialised sample returns the SAMPLE SIZE
+    (typically 100K rows), not the model's true row count, and bounds
+    checked against sample size are meaningless. The COUNT(*) against the
+    source is a single aggregate scan — cheap even on petabyte tables —
+    so there's no cost argument for routing through the temp table. The
+    materialised-sample contract from #116 still applies to the other
+    five test types (``not_null`` / ``unique`` / ``accepted_values`` /
+    ``relationships`` / ``custom_sql``) which read row-level data the
+    sample faithfully represents.
 
     **DEC-005 — compose-then-validate.** ``where`` is freeform LLM- or
     operator-supplied SQL (e.g. ``"event_date >= '2024-01-01'"``). We

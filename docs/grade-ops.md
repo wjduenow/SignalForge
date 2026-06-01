@@ -280,10 +280,21 @@ two **numeric bounds** that an LLM can satisfy trivially. A drafted
 `row_count_between(minimum=0, maximum=None)` passes every Pydantic
 check (at least one bound is set), runs against the warehouse, and
 always drops as `always-passes` — the bound is so loose nothing can
-violate it. The prune layer cannot tell whether `minimum=0` is "the
-LLM thought hard and concluded zero is the floor" or "the LLM gave up
-and emitted the lowest valid number." That distinction is exactly what
-the grader is for.
+violate it. **The fully-vacuous case is therefore caught by prune,
+not the grader** — the failing-rows CTE's `WHERE n < 0` predicate
+matches nothing, `failures=0`, and the test routes to `always-passes`
+before any grade call.
+
+The grader's calibration value applies to bounds that survive prune
+because they were violated: a `minimum=1, maximum=None` on a model
+where the table happens to be empty (kept — caught the empty-table
+case), or a `minimum=10000, maximum=20000` on a 5K-row table (kept —
+real out-of-bounds signal). For those kept tests the prune layer can't
+distinguish "the LLM picked `minimum=1` thoughtfully because the
+rollup truly should have at least one row per day" from "the LLM
+picked the lowest valid non-vacuous number to satisfy
+at-least-one-bound." That distinction is what the calibration prose
+teaches the judge to score.
 
 **Where the calibration lives.** As of #169, the existing
 `no-redundant` criterion in `DEFAULT_RUBRIC` carries language scoring
@@ -304,14 +315,18 @@ covered the conceptual territory; the extension makes it concrete for
 the bound shape. Locked verbatim per DEC-016 of #7; rotation history
 is recorded in `src/signalforge/grade/rubric.py`.
 
-**Routing.** A vacuous bound is low-signal, not a degrade trigger. The
-judge scores the artifact normally, the score lands low (typically
-`0.0`–`0.2`), `passed` flips to `False`, and the diff renderer routes
-the row to **`flagged`** — the operator sees the test ships but the
-calibration is suspect. It does **not** route to `kept-uncertain`
-(that tier is for prune-side "could not evaluate" origins, not
-grade-side weakness) and it does **not** route through the conservative
-degrade path (that path is the DEC-015 sentinel for `score=None`).
+**Routing.** A borderline-calibrated bound that survived prune is
+low-signal, not a degrade trigger. The judge scores the artifact
+normally, the score lands low (typically `0.0`–`0.2`), `passed` flips
+to `False`, and the diff renderer routes the row to **`flagged`** —
+the operator sees the test ships but the calibration is suspect. It
+does **not** route to `kept-uncertain` (that tier is for prune-side
+"could not evaluate" origins, not grade-side weakness) and it does
+**not** route through the conservative degrade path (that path is the
+DEC-015 sentinel for `score=None`). Note: this routing applies to
+**kept** row_count_between tests where the bound was violated; a fully
+vacuous `minimum=0, maximum=None` would already be `always-passes` /
+`dropped` at the prune layer and never reach the grader.
 
 **The 3-trigger degrade taxonomy stays locked.** A vacuous bound is a
 real grade, not a degraded one. The three causes for `score=None,

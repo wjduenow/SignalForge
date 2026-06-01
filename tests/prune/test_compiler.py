@@ -1576,15 +1576,24 @@ def test_compile_row_count_between_ignores_partition_filter() -> None:
 
 
 def test_compile_row_count_between_materialised_sample_references_temp_table() -> None:
-    """The #116 QG bug shape: when the engine materialises a temp sample
-    and passes ``table_ref=<temp>``, the compiled SQL MUST reference the
-    temp table, NOT the source.
+    """Compiler-level invariant: when the caller passes ``table_ref=<temp>``,
+    the compiled SQL references the temp table, NOT the source.
 
-    This is automatic because ``_compile_row_count_between`` reads the
-    quoted qualified name from ``table_ref`` (it does not Jinja-resolve
-    ``{{ this }}`` — the variant has no SQL-template field), but we pin
-    the invariant anyway because it's exactly the failure mode #116's QG
-    caught for ``custom_sql``."""
+    NOTE — this test pins compiler behaviour in isolation. **In the real
+    pipeline ``prune.engine.prune_tests`` never actually passes a
+    materialised temp ref for ``row_count_between``** — the engine's
+    per-test override routes the variant to ``source_table_ref`` because
+    a COUNT(*) against a sample returns the sample size, not the model's
+    true row count (see
+    ``test_prune_tests_row_count_between_under_materialised_references_source_not_temp_table``
+    in ``tests/prune/test_engine.py``). This test still has value as a
+    compiler-contract pin: it confirms ``_compile_row_count_between``
+    reads the qualified name from ``table_ref`` rather than the model's
+    source table directly, so if a future caller DID pass a temp ref the
+    compiler would honor it. Originally written to mirror the #116 QG
+    bug shape for ``custom_sql``; the engine-level invariant has since
+    shifted but the compiler-level shape stays useful as
+    defence-in-depth."""
     # The orchestrator materialises a temp sample with a deterministic
     # ``_SESSION._sf_sample_<run_id>`` qualified name (see issue #22's
     # ``materialise_sample`` contract).

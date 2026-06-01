@@ -3593,36 +3593,40 @@ def test_prune_tests_row_count_between_empty_table_failing_count_is_kept(
 def test_prune_tests_row_count_between_under_materialised_references_source_not_temp_table(
     tmp_path: Path,
 ) -> None:
-    """QG-fix (post-US-007a): under ``sample_strategy="materialised"`` +
-    ``scope="sample"``, ``row_count_between``'s compiled SQL references the
-    SOURCE table, NOT the materialised temp table.
+    """QG-fix (post-US-007a) + CodeRabbit #176 Thread w2h: under
+    ``sample_strategy="materialised"`` + ``scope="sample"``, when the
+    only candidate is a ``row_count_between``, the engine short-circuits
+    the entire materialised pre-work (no ``materialise_sample`` call, no
+    session, no temp table) and compiles directly against the SOURCE
+    table.
 
-    The inverse of the ``custom_sql`` substitution contract (DEC-003
-    corrected). A ``COUNT(*)`` against a materialised sample returns the
-    sample size, not the model's true row count — bounds checked against
-    sample size are semantically meaningless. The engine's per-test
-    ``per_test_table_ref`` override routes ``row_count_between`` past the
-    materialised substitution back to ``source_table_ref`` so the bounds
-    verdict is correct at the default config.
+    Two load-bearing invariants:
+      * **Semantic correctness:** a COUNT(*) against a materialised sample
+        returns the sample size, not the model's true row count — bounds
+        checked against sample size are meaningless. The compiled SQL
+        must reference the source.
+      * **Failure-mode containment:** before the short-circuit, if all
+        candidates were ``row_count_between`` and ``materialise_sample``
+        raised, every test routed to ``kept-without-evidence`` even
+        though they could have run directly against source. The
+        short-circuit removes that failure mode entirely.
 
-    Mirrors
-    :func:`test_prune_tests_custom_sql_single_table_references_temp_table_under_materialised`
-    with the assertions inverted.
+    Pinned by asserting the fake adapter saw NO ``materialise_sample``
+    call (no ``expect_materialise_sample`` queued) AND the compiled SQL
+    references the source qualified name. A companion test
+    ``test_prune_tests_mixed_row_count_between_uses_per_test_override_when_materialised``
+    pins the other branch (mixed candidates: materialisation happens for
+    the non-bypassing tests, per-test override still routes
+    ``row_count_between`` to source).
     """
     audit_path = tmp_path / "prune.jsonl"
     fake = FakeBigQueryClient(project="fake_project")
-    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
-    materialised_ref = _make_materialised_ref()
-    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
-    fake.expect_materialise_sample(
-        source_ref,
-        sample_size=100_000,
-        returns=materialised_ref,
-    )
-    # The COUNT(*) is wrapped with the failing-rows-CTE shape (US-007a) and
-    # then re-wrapped by the adapter; we just assert the verdict + SQL shape.
+    # NO ``expect_get_table`` — the short-circuit skips the
+    # ``_resolve_sample_bucket`` lookup too (it'd otherwise call
+    # ``adapter.get_table``). NO ``expect_materialise_sample`` — the
+    # all-bypass short-circuit skips it. NO ``expect_abort_session`` —
+    # no session was opened.
     fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
-    fake.expect_abort_session(f"sess_{materialised_ref.name}")
     adapter = _make_adapter(fake)
 
     model = _make_orders_model()

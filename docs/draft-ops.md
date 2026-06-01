@@ -470,11 +470,18 @@ drafter typically proposes `row_count_between` when:
   most actionable failure mode.
 
 Calibration is the LLM's responsibility: the prompt is permissive but
-the grader scores whether the bound is meaningful — see
-[`docs/grade-ops.md`](grade-ops.md#row-count-calibration). A bound like
-`minimum=1` on a daily rollup catches "upstream produced nothing today";
-a bound like `minimum=0` with no `maximum` is vacuous and ships as
-`flagged` after the grader's calibration check.
+the grader scores whether the bound is meaningful for the tests that
+actually survive prune. A bound like `minimum=1` on a daily rollup
+catches "upstream produced nothing today" — when the table IS empty
+the test surfaces as `kept` and reaches the grader, which scores the
+bound's calibration via the [`no-redundant` criterion](grade-ops.md#row-count-calibration).
+A fully vacuous bound like `minimum=0` with no `maximum` is
+**dropped by the prune layer as `always-passes`** before the grader
+sees it — the failing-rows CTE's `WHERE n < 0` predicate matches
+nothing, so `failures=0` routes to `always-passes`. Calibration
+scoring therefore applies to bounds the prune layer cannot dismiss on
+its own (borderline cases like a `minimum=1` that only catches empty
+tables, or a `maximum` so high it can't fire today but might rot).
 
 ### Worked example
 

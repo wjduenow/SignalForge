@@ -313,10 +313,15 @@ def test_no_redundant_criterion_carries_row_count_between_calibration_prose() ->
 
     Load-bearing for the calibration intent: without this prose, the
     judge has no signal to distinguish a healthy ``minimum=100,
-    maximum=10000`` bound from a vacuous ``minimum=0, maximum=None`` —
-    both pass the parser, both run against the warehouse with the same
-    SQL shape, and the prune layer cannot drop the vacuous one because
-    ``COUNT(*) >= 0`` is always true.
+    maximum=10000`` bound from a borderline ``minimum=1, maximum=None``
+    one (which only catches the empty-table case). Both pass the parser
+    and both can survive prune (when the bound is violated, e.g. against
+    an empty table). The fully-vacuous ``minimum=0, maximum=None`` shape
+    the prose names IS dropped by the prune layer as ``always-passes``
+    (the failing-rows CTE's ``WHERE n < 0`` predicate matches nothing,
+    so ``failures=0``); the prose still names that shape because it
+    teaches the judge to identify the same SHAPE of trivially-satisfiable
+    bound across the borderline cases that DO reach the grader.
     """
     by_id = {c.id: c.criterion for c in DEFAULT_RUBRIC}
     text = by_id["no-redundant"]
@@ -353,19 +358,27 @@ def test_default_rubric_keeps_exactly_four_criteria_after_dec_009() -> None:
 # ----- DEC-011 of #169: 3-trigger degrade taxonomy stays locked -----
 
 
-def test_vacuous_bound_routes_to_flagged_not_kept_uncertain_when_grading_fails() -> None:
-    """DEC-009 of #169 — a vacuous-bound test that survives the prune
-    layer (positive prune evidence: ``reason="kept"``, NOT
-    ``"kept-without-evidence"``) but earns a low ``no-redundant`` score
-    from the judge MUST tier as ``flagged``, NOT ``kept-uncertain``.
+def test_low_calibration_bound_routes_to_flagged_not_kept_uncertain_when_grading_fails() -> None:
+    """DEC-009 of #169 — a borderline-calibrated ``row_count_between``
+    test that survives the prune layer (positive prune evidence:
+    ``reason="kept"``, NOT ``"kept-without-evidence"``) but earns a low
+    ``no-redundant`` score from the judge MUST tier as ``flagged``, NOT
+    ``kept-uncertain``.
 
     The contract (``diff-renderer.md`` § "Tier classification" + DEC-009
     of #169): ``kept-uncertain`` is reserved for prune-layer
     couldn't-evaluate (budget exhausted / identifier rejected /
-    warehouse raised). A vacuous-bound test that the warehouse
-    successfully evaluated — and the judge then scored down — belongs
-    in ``flagged`` so the reviewer's attention is drawn to the
-    calibration problem, not the (non-existent) evaluation problem.
+    warehouse raised). A bound the warehouse successfully evaluated —
+    and the judge then scored down for weak calibration — belongs in
+    ``flagged`` so the reviewer's attention is drawn to the calibration
+    problem, not the (non-existent) evaluation problem.
+
+    The scenario this pins is a borderline-calibrated bound like
+    ``minimum=1, maximum=None`` that survives prune because it actually
+    caught a real failure (e.g. an empty table → ``failures=1``).
+    A fully-vacuous ``minimum=0, maximum=None`` would have been dropped
+    by prune as ``always-passes`` and never reached the grader. The
+    fixture uses ``failures=1`` to match the only reachable kept state.
 
     Drives ``signalforge.diff.engine._tier_for_kept`` directly with the
     three load-bearing inputs. The function is internal (``_``-prefixed)
@@ -384,22 +397,22 @@ def test_vacuous_bound_routes_to_flagged_not_kept_uncertain_when_grading_fails()
     # surfaces clearly.
     assert CandidateTestRowCountBetween is not None
 
-    # Positive prune evidence — warehouse ran the COUNT(*), bound was
-    # satisfied. A vacuous bound (``minimum=0, maximum=None``) ALWAYS
-    # satisfies, so the prune-layer reason is ``kept``, not
-    # ``kept-without-evidence``.
+    # Positive prune evidence — warehouse ran the COUNT(*), the bound
+    # was VIOLATED (the test caught a real failure on an empty table or
+    # an unexpectedly out-of-range count). reason="kept" implies
+    # failures > 0 in the real prune matrix; fixture matches.
     kept_decision = PruneDecision(
         test_anchor="model",
-        test=CandidateTestRowCountBetween(minimum=0, maximum=None),
+        test=CandidateTestRowCountBetween(minimum=1, maximum=None),
         decision="kept",
         reason="kept",
-        failures=0,
+        failures=1,
         sampled_rows=None,
         scope="full",
         elapsed_ms=12,
         compiled_sql_hash="0" * 16,
         compiled_sql="SELECT COUNT(*) FROM `p.d.t`",
-        why="ran against warehouse; row count within bounds",
+        why="ran against warehouse; row count violated bound",
     )
 
     # Judge scored the calibration criterion low → passed=False.
@@ -409,11 +422,16 @@ def test_vacuous_bound_routes_to_flagged_not_kept_uncertain_when_grading_fails()
 
 
 def test_healthy_bound_routes_to_kept_when_grading_passes() -> None:
-    """Mirror of the vacuous-bound test: a calibrated bound
+    """Mirror of the low-calibration test: a well-calibrated bound
     (``minimum=100, maximum=10000``) that survives the prune layer and
     earns a high ``no-redundant`` score from the judge ships as
     ``kept`` — the v0.1 happy path. Pins that the calibration prose
     rewards specificity rather than penalising every row-count test.
+
+    The fixture uses ``failures=1`` because ``reason="kept"`` implies
+    the warehouse returned at least one failing row in the real prune
+    matrix (otherwise ``failures=0`` would route to ``always-passes``
+    and the test would never reach the grader).
     """
     from signalforge.diff.engine import _tier_for_kept  # noqa: PLC0415
     from signalforge.draft.models import (  # noqa: PLC0415
@@ -426,13 +444,13 @@ def test_healthy_bound_routes_to_kept_when_grading_passes() -> None:
         test=CandidateTestRowCountBetween(minimum=100, maximum=10000),
         decision="kept",
         reason="kept",
-        failures=0,
+        failures=1,
         sampled_rows=None,
         scope="full",
         elapsed_ms=12,
         compiled_sql_hash="0" * 16,
         compiled_sql="SELECT COUNT(*) FROM `p.d.t`",
-        why="ran against warehouse; row count within bounds",
+        why="ran against warehouse; row count violated bound",
     )
 
     tier = _tier_for_kept(kept_decision, score=0.9, passed=True)
@@ -449,11 +467,14 @@ def test_grade_degrade_taxonomy_stays_at_three_triggers() -> None:
        ``call failed: GradeOutputError``
     3. ``total_budget_seconds`` exceeded → ``grade budget exceeded …``
 
-    A vacuous-bound ``row_count_between`` test is NOT a 4th trigger.
-    Instead the calibration prose in ``no-redundant`` (DEC-009) scores
-    it low → existing ``passed: bool`` threshold → ships as
-    ``flagged`` (NOT ``kept-uncertain``, which is reserved for prune
-    couldn't-evaluate).
+    A borderline-calibrated ``row_count_between`` test that survived
+    prune is NOT a 4th trigger. Instead the calibration prose in
+    ``no-redundant`` (DEC-009) scores it low → existing ``passed: bool``
+    threshold → ships as ``flagged`` (NOT ``kept-uncertain``, which is
+    reserved for prune couldn't-evaluate). A fully-vacuous
+    ``minimum=0, maximum=None`` test would already be dropped by prune
+    as ``always-passes`` and never reach the grader at all — neither a
+    degrade nor a flag.
 
     This test asserts the three degrade-path message shapes are still
     present in :mod:`signalforge.grade.engine`. A 4th trigger would

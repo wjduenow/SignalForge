@@ -968,7 +968,29 @@ def prune_tests(
         sample_bucket: int | None
         compile_partition_filter = resolved_config.partition_filter
 
-        if resolved_config.sample_strategy == "materialised" and scope == "sample":
+        # CodeRabbit #176 fix (Thread PRRT_kwDOSNbUmM6F_w2h): when every
+        # candidate is ``row_count_between``, the per-test override below
+        # routes all of them to ``source_table_ref`` regardless of
+        # scope/strategy. Skip the materialise_sample call AND the
+        # _resolve_sample_bucket call — both are wasted work in this case,
+        # and either failing on the adapter would spuriously route every
+        # test to ``kept-without-evidence`` even though they could have run
+        # directly against the source. Mirrors the empty-candidate
+        # short-circuit (#105) at a lower-tier: same "no warehouse
+        # pre-work needed" reasoning, narrower trigger.
+        all_bypass_to_source = bool(pairs) and all(
+            isinstance(test, CandidateTestRowCountBetween) for _, test in pairs
+        )
+
+        if all_bypass_to_source:
+            compile_table_ref = source_table_ref
+            # ``row_count_between``'s compiler ignores scope / sample_size
+            # / sample_bucket / partition_filter; "full" is the natural
+            # value to thread through for any decision-level audit fields.
+            compile_scope = "full"
+            sample_bucket = None
+            compile_partition_filter = None
+        elif resolved_config.sample_strategy == "materialised" and scope == "sample":
             try:
                 materialised_ref = adapter.materialise_sample(
                     source_table_ref,
