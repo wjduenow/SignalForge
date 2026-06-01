@@ -23,6 +23,7 @@ from signalforge.warehouse.errors import (
 )
 from signalforge.warehouse.models import (
     BIGQUERY_DIALECT,
+    POSTGRES_DIALECT,
     SNOWFLAKE_DIALECT,
     ColumnStats,
     Dialect,
@@ -115,7 +116,8 @@ def test_bigquery_dialect_sql_fragment_field_defaults() -> None:
 @pytest.mark.unit
 def test_dialect_constructs_without_new_field_args() -> None:
     """Constructing a Dialect with ONLY the five original fields still
-    succeeds — the five issue-#121 fields carry BigQuery defaults (DEC-001).
+    succeeds — the issue-#121, #139, AND #171 fields all carry BigQuery
+    defaults (DEC-001 of #121; DEC-011 of #171).
 
     This guards every pre-#121 construction site (e.g. the prune compiler's
     dispatch-test custom dialect) so they stay valid unedited.
@@ -135,6 +137,103 @@ def test_dialect_constructs_without_new_field_args() -> None:
     assert d.sample_cte_alias == "sample"
     assert d.sample_hash_in_projection is False
     assert d.sample_hash_alias == "_sf_sample_hash"
+    # Issue #171 DEC-011 defaults — BigQuery-shaped.
+    assert d.date_trunc_expr_template == "DATE_TRUNC({date}, {unit})"
+    assert d.interval_expr_template == "INTERVAL {n} {unit}"
+    assert d.extract_dow_expr_template == "EXTRACT(DAYOFWEEK FROM {date})"
+    assert d.dow_sunday_index == 1
+    assert d.percentile_cont_expr_template == (
+        "PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})"
+    )
+
+
+@pytest.mark.unit
+def test_bigquery_dialect_171_fields() -> None:
+    """BIGQUERY_DIALECT carries the BigQuery-shaped values for the five
+    issue-#171 fields (DEC-011) — date arithmetic + percentile templates.
+
+    The compiler arm that consumes them lands in US-008; the dialect surface
+    is reserved in US-002. None of the seven pre-#171 variants read these
+    fields, so existing BigQuery snapshots stay byte-identical.
+    """
+    # DATE_TRUNC argument order on BigQuery is (date, unit) — the opposite
+    # of Snowflake's (unit, date).
+    assert BIGQUERY_DIALECT.date_trunc_expr_template == "DATE_TRUNC({date}, {unit})"
+    # BigQuery uses the bare ``INTERVAL n unit`` form (Snowflake quotes the
+    # whole interval).
+    assert BIGQUERY_DIALECT.interval_expr_template == "INTERVAL {n} {unit}"
+    # BigQuery's day-of-week part name is ``DAYOFWEEK`` (Snowflake uses ``DOW``).
+    assert BIGQUERY_DIALECT.extract_dow_expr_template == "EXTRACT(DAYOFWEEK FROM {date})"
+    # BigQuery's DAYOFWEEK returns 1..7 with Sunday=1 (Snowflake's DOW is 0..6).
+    assert BIGQUERY_DIALECT.dow_sunday_index == 1
+    assert BIGQUERY_DIALECT.percentile_cont_expr_template == (
+        "PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})"
+    )
+
+
+@pytest.mark.unit
+def test_snowflake_dialect_171_fields() -> None:
+    """SNOWFLAKE_DIALECT carries the Snowflake overrides for the five
+    issue-#171 fields (DEC-011): different DATE_TRUNC arg order, quoted
+    INTERVAL literal, DOW vs DAYOFWEEK, 0-based Sunday index.
+    """
+    # Snowflake DATE_TRUNC argument order is (unit, date) — opposite to BQ.
+    assert SNOWFLAKE_DIALECT.date_trunc_expr_template == "DATE_TRUNC('{unit}', {date})"
+    # Snowflake single-quotes the whole interval payload.
+    assert SNOWFLAKE_DIALECT.interval_expr_template == "INTERVAL '{n} {unit}'"
+    # Snowflake's day-of-week part name is ``DOW``.
+    assert SNOWFLAKE_DIALECT.extract_dow_expr_template == "EXTRACT(DOW FROM {date})"
+    # Snowflake's DOW returns 0..6 with Sunday=0 by default; conservative
+    # assumption — session WEEK_START parameter could shift this.
+    assert SNOWFLAKE_DIALECT.dow_sunday_index == 0
+    # PERCENTILE_CONT shape matches BigQuery exactly (parity field).
+    assert SNOWFLAKE_DIALECT.percentile_cont_expr_template == (
+        "PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})"
+    )
+
+
+@pytest.mark.unit
+def test_snowflake_date_trunc_diverges_from_bigquery() -> None:
+    """SNOWFLAKE_DIALECT and BIGQUERY_DIALECT DATE_TRUNC templates differ
+    in argument order — a regression that re-aligns them would silently
+    emit invalid SQL on one of the two warehouses (DEC-011 of #171).
+    """
+    assert SNOWFLAKE_DIALECT.date_trunc_expr_template != BIGQUERY_DIALECT.date_trunc_expr_template
+    assert SNOWFLAKE_DIALECT.interval_expr_template != BIGQUERY_DIALECT.interval_expr_template
+    assert SNOWFLAKE_DIALECT.extract_dow_expr_template != BIGQUERY_DIALECT.extract_dow_expr_template
+    assert SNOWFLAKE_DIALECT.dow_sunday_index != BIGQUERY_DIALECT.dow_sunday_index
+
+
+@pytest.mark.unit
+def test_postgres_dialect_171_fields_inherit_bq_defaults() -> None:
+    """POSTGRES_DIALECT inherits BigQuery defaults for the five issue-#171
+    fields — corrected when the Postgres adapter's ops land (DEC-011 of #171,
+    mirroring the issue-#121 deferral; see issue #53/118 family).
+
+    The #53 Postgres stub raises NotImplementedError from every op method so
+    the prune compiler is never invoked for a Postgres profile; shipping
+    knowingly-wrong-but-untested fragments now would be misleading.
+    """
+    assert POSTGRES_DIALECT.date_trunc_expr_template == BIGQUERY_DIALECT.date_trunc_expr_template
+    assert POSTGRES_DIALECT.interval_expr_template == BIGQUERY_DIALECT.interval_expr_template
+    assert POSTGRES_DIALECT.extract_dow_expr_template == BIGQUERY_DIALECT.extract_dow_expr_template
+    assert POSTGRES_DIALECT.dow_sunday_index == BIGQUERY_DIALECT.dow_sunday_index
+    assert (
+        POSTGRES_DIALECT.percentile_cont_expr_template
+        == BIGQUERY_DIALECT.percentile_cont_expr_template
+    )
+
+
+@pytest.mark.unit
+def test_all_three_dialect_constants_instantiate_cleanly() -> None:
+    """Every shipped Dialect constant constructs and is the expected type.
+
+    Guards against a refactor that adds a required-without-default field —
+    the existing construction sites would otherwise raise at import time.
+    """
+    assert isinstance(BIGQUERY_DIALECT, Dialect)
+    assert isinstance(SNOWFLAKE_DIALECT, Dialect)
+    assert isinstance(POSTGRES_DIALECT, Dialect)
 
 
 @pytest.mark.unit
