@@ -175,6 +175,44 @@ The compiler emits valid Snowflake SQL purely from `SNOWFLAKE_DIALECT` — see �
 - **`HASH()` reproducibility caveat.** BigQuery's `FARM_FINGERPRINT` is cross-time stable; Snowflake's `HASH()` is deterministic only *within a Snowflake release*. Sufficient for within-run prune determinism (Architectural Commitment #5); documented in `docs/prune-ops.md`.
 - **Validation tiers (DEC-005).** Byte-exact Snowflake snapshot fixtures (`tests/fixtures/prune/compiled_sql/snowflake/`) are the authoritative shape gate. A gated `@pytest.mark.snowflake` suite (`tests/prune/test_compiler_fakesnow.py`, run `uv run pytest -m snowflake --no-cov`) executes the four built-ins through `fakesnow` (rule-semantic assertions, never `HASH()` value-equality) AND parses every fixture through `sqlglot`'s Snowflake dialect. Real-Snowflake `HASH(*)` semantics + case-folding + sampling are deferred to #124's live harness. The sqlglot parse-guard is the one that caught the `sample` reserved-word bug — keep a parser/executor in the loop for any new dialect.
 
+### Centralised bypass routing helper (issue #171)
+
+#171 introduced `_test_requires_source_table(test: CandidateTest, sample_strategy: str | None) -> bool` in `signalforge.prune.engine` as the single source of truth for "does this candidate variant require routing to the source table rather than a sampled/materialised temp?". Replaces inline isinstance checks at the two engine sites (`all_bypass_to_source` short-circuit + per-test `per_test_table_ref` override) — both now call the helper, eliminating the two-conditional drift class #170 QG Pass 3 caught.
+
+**Updated routing table (DEC-009 + DEC-010 of #171):**
+
+| Variant | `sample_strategy="materialised"` | `sample_strategy="oneshot"` | `sample_strategy=None` (full scope) |
+|---|---|---|---|
+| `CandidateTestRowCountAnomalyByPeriod` | True (ANY sample) | True (ANY sample) | False |
+| `CandidateTestRowCountBetween` | True | **True (DEC-010 — bumped from materialised-only)** | False |
+| `CandidateTestUniqueCombination` | True | **True (DEC-010 — bumped from materialised-only)** | False |
+| All row-level variants (NotNull, Unique, AcceptedValues, Relationships, CustomSQL) | False | False | False |
+
+**DEC-010 behavior change:** #171 tightened the bypass condition for `row_count_between` + `unique_combination` to ALSO fire under `sample_strategy="oneshot"` (was: `materialised` only). A `COUNT(*)` on a hash-mod'd sample of a date-partitioned table is semantically meaningless; a duplicate-key check on a sample is approximate. CHANGELOG `[Unreleased]` § Changed documents the behavior change. Pinned by mixed-candidate tests in `tests/prune/test_engine.py` per the #170 QG Pass 3 + #171 US-010 contract.
+
+**Adding a new metadata-aggregate variant:** add an `isinstance` arm to `_test_requires_source_table` (returns True under whatever sample-strategy set is semantically incompatible with sampling — usually ANY for full-table aggregates). Update the routing table here. Both engine sites pick it up automatically.
+
+### Cross-stage `AnomalyTestStats` flow (issue #171)
+
+`signalforge.prune.stats.AnomalyTestStats` is a method-tagged Pydantic discriminated union (`Annotated[MadStats | ZscoreStats | PercentileStats | MinMaxStats, Field(discriminator="method")]`) carrying per-test numerical state from the prune step. Lands on BOTH `PruneDecision.stats` (in-memory consumer access) AND `PruneEvent.stats` (audit-of-record).
+
+**For any future primitive needing prune→grade numerical state**: extend `AnomalyTestStats` to a sibling typed shape (e.g. `DistributionStats` for a value-range variant), tagged on the same discriminator field, with paired `Strict*` drift mirror + fixture row. Reuse the seam — never reach for free-form `dict[str, Any]`.
+
+### Two-query split (issue #171)
+
+`row_count_anomaly_by_period` introduced the **two-query split** pattern: the compiler returns `(stats_sql, violation_sql)` tuple; engine runs Query 1 first, parses into `AnomalyTestStats`, checks the cold-start gate (`stats.n_periods < test.min_samples_per_bucket`). On cold-start: emit `kept-without-evidence` with structured `why="insufficient history: <n>/<min> periods"` and **SKIP Query 2** (no warehouse call). Otherwise run Query 2 via standard `run_test_sql`. DOW degrade (when `seasonality="dow"` + thin per-DOW bucket): recompute stats query without DOW, emit one WARNING line via lazy-format JSON, proceed non-seasonal.
+
+**DropReason stays 5-valued.** Cold-start, DOW degrade, stats-query warehouse failure all route through `kept-without-evidence` per the conservative-bias routing template. Never grow the enum.
+
+### `_PRUNE_AUDIT_SCHEMA_VERSION` history
+
+- `1 → 2` (issue #55): `config_hash` recipe migrated from `SHA-256[:16]` to `blake2b-8`.
+- `2 → 3` (issue #171, DEC-013): added `as_of: date | None = None` + `stats: AnomalyTestStats | None = None` fields. `audit_schema_version: int` (not `Literal`) preserves v2 replay; `@field_serializer("as_of")` returns `.isoformat()` (no precedent for `date` in `_common.timestamp` — that helper is `datetime`-only per issue #56).
+
+### `WarehouseAdapter.run_stats_query` graceful degrade (issue #171)
+
+New ABC method on `WarehouseAdapter`: `run_stats_query(sql: str) -> tuple[dict[str, object], ...]`. Default raises `StatsQueryNotSupportedError(WarehouseError)` (tier 3 in `_EXCEPTION_TO_EXIT_CODE`). BigQuery overrides; Snowflake + Postgres stubs inherit the degrade. Engine catches as any `WarehouseError` and routes to `kept-without-evidence` per the conservative-bias contract. Mirrors `materialise_sample` / `estimate_query_bytes` precedent verbatim.
+
 ## Reference
 
-`plans/super/6-prune-engine.md` — DEC-001 … DEC-028. `plans/super/22-temp-table-sample.md` — v0.2 materialised-sample additions. `plans/super/35-prune-enabled-doc-reframe.md` — operator-disable additions. `plans/super/51-kept-rate-warn-doc.md` — kept-rate WARNING + drop-rate doc. `plans/super/55-normalise-hash-recipe.md` — hash recipe normalisation. `plans/super/121-prune-snowflake-dialect.md` — Snowflake compiler dialect (DEC-001…008). `src/signalforge/prune/` — current implementation. `docs/prune-ops.md` — operational reference. `tests/prune/test_drift_detector.py` — schema-drift gate. `tests/prune/test_compiler_import_guard.py` — `prune/` SDK-import confinement (DEC-008 of #121). `tests/prune/test_compiler_fakesnow.py` — gated `@pytest.mark.snowflake` fakesnow/sqlglot validation. `tests/test_audit_completeness.py` — AST-scan suite. `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate. `tests/fixtures/prune/prune_event_v1.jsonl` — committed audit fixture.
+`plans/super/6-prune-engine.md` — DEC-001 … DEC-028. `plans/super/22-temp-table-sample.md` — v0.2 materialised-sample additions. `plans/super/35-prune-enabled-doc-reframe.md` — operator-disable additions. `plans/super/51-kept-rate-warn-doc.md` — kept-rate WARNING + drop-rate doc. `plans/super/55-normalise-hash-recipe.md` — hash recipe normalisation. `plans/super/121-prune-snowflake-dialect.md` — Snowflake compiler dialect (DEC-001…008). `plans/super/171-row-count-anomaly.md` — `_test_requires_source_table` helper (DEC-009), DEC-010 stricter-bypass behavior change, two-query split + cold-start (DEC-008), `AnomalyTestStats` (DEC-005), `--as-of` reproducibility carve-out (DEC-001), `_PRUNE_AUDIT_SCHEMA_VERSION: 2 → 3` + serializer (DEC-013), `StatsQueryNotSupportedError` ABC graceful degrade. `src/signalforge/prune/` — current implementation. `docs/prune-ops.md` — operational reference. `tests/prune/test_drift_detector.py` — schema-drift gate. `tests/prune/test_compiler_import_guard.py` — `prune/` SDK-import confinement (DEC-008 of #121). `tests/prune/test_compiler_fakesnow.py` — gated `@pytest.mark.snowflake` fakesnow/sqlglot validation. `tests/test_audit_completeness.py` — AST-scan suite. `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate. `tests/fixtures/prune/prune_event_v1.jsonl` — committed audit fixture (v3 as of #171).
