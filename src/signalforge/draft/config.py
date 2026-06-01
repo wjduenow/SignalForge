@@ -56,21 +56,31 @@ from signalforge.draft.errors import DraftConfigInvalidError, DraftConfigNotFoun
 _DEFAULT_CONFIG_FILENAME = "signalforge.yml"
 
 VALID_TEST_TYPES: Final[frozenset[str]] = frozenset(
-    {"not_null", "unique", "accepted_values", "relationships", "custom_sql", "row_count_between"}
+    {
+        "not_null",
+        "unique",
+        "accepted_values",
+        "relationships",
+        "custom_sql",
+        "row_count_between",
+        "unique_combination",
+    }
 )
 """The test types the drafter can propose (mirrors the system prompt's
 SCOPE section and the discriminated union in
 :mod:`signalforge.draft.models`). The four standard dbt schema tests
 (``not_null``, ``unique``, ``accepted_values``, ``relationships``), the
-``custom_sql`` business-rule escape hatch (DEC-002), and the
-``row_count_between`` model-level row-count guard (DEC-001 of #169) —
-six variants in total. The
+``custom_sql`` business-rule escape hatch (DEC-002), the
+``row_count_between`` model-level row-count guard (DEC-001 of #169),
+and the ``unique_combination`` model-level composite-uniqueness test
+(DEC-001 of #170) — seven variants in total. The
 :attr:`DraftConfig.exclude_tests` validator (issue #54) rejects anything
 outside this set so a typo like ``"not_nul"`` fails loud at config-load
 rather than silently passing the LLM call and showing up later as an
 anchor-contract violation; naming ``"custom_sql"`` suppresses the
-free-form business-rule variant from drafting, and naming
-``"row_count_between"`` suppresses the row-count guard."""
+free-form business-rule variant from drafting, naming
+``"row_count_between"`` suppresses the row-count guard, and naming
+``"unique_combination"`` suppresses the composite-uniqueness test."""
 
 
 class DraftConfig(BaseModel):
@@ -130,10 +140,11 @@ class DraftConfig(BaseModel):
     exclude_tests: tuple[str, ...] = ()
     """Test types to omit from drafting entirely (issue #54).
 
-    Each entry must be one of :data:`VALID_TEST_TYPES` — the six
+    Each entry must be one of :data:`VALID_TEST_TYPES` — the seven
     drafter variants: ``"not_null"``, ``"unique"``, ``"accepted_values"``,
-    ``"relationships"``, ``"custom_sql"``, ``"row_count_between"``;
-    unknown values fail loud at config-load via the field validator. When
+    ``"relationships"``, ``"custom_sql"``, ``"row_count_between"``,
+    ``"unique_combination"``; unknown values fail loud at config-load via
+    the field validator. When
     non-empty, the system prompt's test catalogue is filtered down to
     the remaining types AND the parser's anchor-contract validator
     rejects any candidate test of an excluded type (defence in depth —
