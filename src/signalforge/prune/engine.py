@@ -82,7 +82,11 @@ from pathlib import Path
 
 from signalforge import __version__ as _SIGNALFORGE_VERSION
 from signalforge._common.path_safety import PathContainmentError, canonicalise_path
-from signalforge.draft.models import CandidateSchema, CandidateTest
+from signalforge.draft.models import (
+    CandidateSchema,
+    CandidateTest,
+    CandidateTestRowCountBetween,
+)
 from signalforge.manifest.models import Manifest, Model
 from signalforge.prune.audit import (
     _build_prune_event,
@@ -1075,12 +1079,30 @@ def prune_tests(
                 decisions.append(decision)
                 continue
 
+            # Per-test table-ref override for ``row_count_between`` (#169
+            # US-007a QG fix; DEC-003 corrected). A COUNT(*) against a
+            # materialised sample returns the sample size, NOT the model's
+            # true row count — bounds checked against sample size are
+            # semantically meaningless. Route ``row_count_between`` past the
+            # materialised substitution to ``source_table_ref`` so the
+            # bounds verdict is correct at the default config
+            # (``scope=sample`` + ``sample_strategy=materialised``). The
+            # COUNT(*) against the source remains cheap (single aggregate
+            # scan, no row materialisation). All other variants continue to
+            # consume the substituted ``compile_table_ref`` per the #22
+            # materialised-sample contract.
+            per_test_table_ref = (
+                source_table_ref
+                if isinstance(test, CandidateTestRowCountBetween)
+                else compile_table_ref
+            )
+
             # Compile the candidate test to failing-rows SQL. Returns
             # either a string (the SELECT), a ``_RequiresFutureData``
             # sentinel, or an ``_InvalidIdentifier`` sentinel.
             compile_result = _compile_test(
                 test,
-                compile_table_ref,
+                per_test_table_ref,
                 dialect,
                 manifest,
                 model=model,

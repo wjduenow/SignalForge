@@ -3590,6 +3590,72 @@ def test_prune_tests_row_count_between_empty_table_failing_count_is_kept(
     fake.assert_all_expectations_met()
 
 
+def test_prune_tests_row_count_between_under_materialised_references_source_not_temp_table(
+    tmp_path: Path,
+) -> None:
+    """QG-fix (post-US-007a): under ``sample_strategy="materialised"`` +
+    ``scope="sample"``, ``row_count_between``'s compiled SQL references the
+    SOURCE table, NOT the materialised temp table.
+
+    The inverse of the ``custom_sql`` substitution contract (DEC-003
+    corrected). A ``COUNT(*)`` against a materialised sample returns the
+    sample size, not the model's true row count — bounds checked against
+    sample size are semantically meaningless. The engine's per-test
+    ``per_test_table_ref`` override routes ``row_count_between`` past the
+    materialised substitution back to ``source_table_ref`` so the bounds
+    verdict is correct at the default config.
+
+    Mirrors
+    :func:`test_prune_tests_custom_sql_single_table_references_temp_table_under_materialised`
+    with the assertions inverted.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    # The COUNT(*) is wrapped with the failing-rows-CTE shape (US-007a) and
+    # then re-wrapped by the adapter; we just assert the verdict + SQL shape.
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_row_count_test(minimum=100, maximum=10_000)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_between"
+    # row_count_between MUST reference the SOURCE production table — a
+    # COUNT(*) against the materialised sample would return the sample
+    # size (100_000), not the model's true row count.
+    assert "fake_project.dataset.orders" in decision.compiled_sql
+    # The temp table MUST NOT appear; the per-test override routed past it.
+    assert "_SESSION._sf_sample_" not in decision.compiled_sql
+    fake.assert_all_expectations_met()
+
+
 def test_drop_reason_literal_still_exactly_five_values() -> None:
     """DEC-011 of #169 — closed-set lockdown.
 

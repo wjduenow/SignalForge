@@ -836,11 +836,12 @@ Field-by-field:
 - **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — see
   [§7 Retry taxonomy](#retry-taxonomy).
 - **`exclude_tests`** — list of dbt test types the drafter must not
-  propose (issue #54; extended to `custom_sql` in US-021 of #116).
-  Each entry must be one of the five `VALID_TEST_TYPES` — `not_null`,
-  `unique`, `accepted_values`, `relationships`, `custom_sql`; an
-  unknown value fails loud at config-load. Default `[]` (all five
-  allowed). When non-empty the system prompt's test catalogue +
+  propose (issue #54; extended to `custom_sql` in US-021 of #116;
+  extended to `row_count_between` in #169). Each entry must be one of
+  the six `VALID_TEST_TYPES` — `not_null`, `unique`, `accepted_values`,
+  `relationships`, `custom_sql`, `row_count_between`; an unknown value
+  fails loud at config-load. Default `[]` (all six allowed). When
+  non-empty the system prompt's test catalogue +
   `### SCOPE` line drop the excluded types (including `custom_sql`'s
   JSON-shape illustration) AND the parser rejects any defiant LLM
   output via `LLMOutputAnchorContractError`. Excluding every type is

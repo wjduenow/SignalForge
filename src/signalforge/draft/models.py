@@ -175,11 +175,17 @@ class CandidateTestRowCountBetween(BaseModel):
     {min_value: N, max_value: M, where: "..."}}`` — operators without
     ``dbt-expectations`` installed will see a clear ``dbt parse`` error.
 
-    Sample-mode behaviour (DEC-003): the prune compiler always emits
-    ``SELECT COUNT(*) FROM <table_ref> [WHERE <where>]`` regardless of
-    ``prune.scope`` — a sampled ``COUNT(*)`` is semantically wrong. Under
-    ``prune.scope="sample"`` + ``sample_strategy="materialised"`` the
-    ``table_ref`` is the temp table, so the count remains cheap.
+    Sample-mode behaviour (DEC-003, corrected post-US-007a + post-QG): the
+    prune compiler always emits a CTE-wrapped failing-rows SELECT of the
+    form ``SELECT n FROM (SELECT COUNT(*) AS n FROM <table_ref>
+    [WHERE <where>]) AS rc WHERE <bound-violation-predicate>`` regardless
+    of ``prune.scope`` — a sampled ``COUNT(*)`` is semantically wrong. The
+    prune engine's per-test loop **routes ``row_count_between`` past the
+    materialised-sample substitution back to the source table** so the
+    bounds verdict is correct at the default config (a COUNT(*) against a
+    materialised sample returns the sample size, not the model's real row
+    count). The COUNT(*) against the source is a single aggregate scan —
+    cheap even on petabyte tables.
 
     Field naming (DEC-008): the Python-side fields are ``minimum`` /
     ``maximum`` (matching the prefix-free precedent set by ``values``,

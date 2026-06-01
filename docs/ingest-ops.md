@@ -36,8 +36,13 @@ Plus a fifth, sourced from a different file: an operator's hand-authored
 business-rule candidates (issue #116; see
 [Singular `tests/*.sql` tests](#singular-testssql-tests)).
 
+Plus a sixth, the **one recognised dbt-expectations macro**: hand-authored
+`dbt_expectations.expect_table_row_count_to_be_between` declarations are
+promoted to the `row_count_between` structured variant (issue #169 AC-5;
+see [Recognition of `expect_table_row_count_to_be_between`](#recognition-of-expect_table_row_count_to_be_between)).
+
 Every *generic* test the schema.yml carries that is not one of the four —
-`dbt_utils.*`, `dbt_expectations.*`, custom generics, anything
+other `dbt_utils.*`, other `dbt_expectations.*`, custom generics, anything
 namespaced — is **skipped and recorded**, never silently dropped (see
 [Supported vs skipped](#supported-vs-skipped-tests)).
 
