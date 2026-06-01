@@ -41,6 +41,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
 )
 from signalforge.ingest.models import SkippedTest
@@ -78,6 +79,13 @@ _CONFIG_KEYS: frozenset[str] = frozenset(
         "limit",
     }
 )
+
+# The dbt-expectations macro name SignalForge promotes to the
+# `row_count_between` candidate variant (#169, DEC-007 / DEC-008). All
+# other `dbt_expectations.*` / `dbt_utils.*` macros fall through to the
+# generic custom-or-generic skip below; only this one specific macro is
+# recognised as a first-class supported test.
+_ROW_COUNT_BETWEEN_NAME = "dbt_expectations.expect_table_row_count_to_be_between"
 
 # Matches ref('m') / ref("pkg", "m") / source('s', 't'); captures the quoted
 # positional args. Bounded — no nesting, no Jinja semantics.
@@ -205,6 +213,15 @@ def _parse_named_test(name: str, *, body: Any, column: str | None) -> CandidateT
             return _model_level_supported_skip(name)
         return _parse_relationships(body=body, column=column)
 
+    if name == _ROW_COUNT_BETWEEN_NAME:
+        # `dbt_expectations.expect_table_row_count_to_be_between` (#169,
+        # DEC-007). The variant is model-level only — a column-scoped usage
+        # is not representable (DEC-008). Different sibling macros (e.g.
+        # `expect_table_row_count_to_equal`) fall through to the namespaced
+        # custom-or-generic skip below; only this one specific macro is
+        # promoted to a supported variant.
+        return _parse_row_count_between(body=body, column=column)
+
     # A namespaced or project-defined test: dbt_utils.*, dbt_expectations.*,
     # any custom generic. Distinct from a bare unsupported string.
     if isinstance(body, dict) or "." in name:
@@ -235,6 +252,123 @@ def _parse_accepted_values(*, body: Any, column: str | None) -> CandidateTest | 
     return CandidateTestAcceptedValues(
         column=column if column is not None else "",
         values=tuple(str(v) for v in raw_values),
+    )
+
+
+def _parse_row_count_between(*, body: Any, column: str | None) -> CandidateTest | SkippedTest:
+    """Map a ``dbt_expectations.expect_table_row_count_to_be_between`` entry.
+
+    Inbound mapping (DEC-008): ``min_value`` → ``minimum``, ``max_value``
+    → ``maximum``, ``where`` → ``where``. The diff emitter (US-010)
+    handles the OUTBOUND mapping.
+
+    Skip routes (DEC-007), all with ``reason="malformed-supported-test"``:
+    column-scoped usage (variant is model-level only); both bounds
+    missing/None; either bound non-int or negative; ``minimum > maximum``;
+    ``where`` set to a non-string. Recognition of a *different* sibling
+    macro (e.g. ``expect_table_row_count_to_equal``) does not reach this
+    helper — it falls through to the generic custom-or-generic skip in
+    :func:`_parse_named_test`. The closed 3-value
+    :data:`~signalforge.ingest.models.SkipReason` is preserved (DEC-011).
+    """
+    if column is not None:
+        # The variant is model-level only (``column = None`` on the model).
+        # A column-scoped usage in YAML is not representable — route to
+        # malformed-supported-test with an explicit diagnostic rather than
+        # letting a Pydantic ValidationError escape ``read_schema``.
+        return SkippedTest(
+            test_name=_ROW_COUNT_BETWEEN_NAME,
+            column=column,
+            reason="malformed-supported-test",
+            detail=(
+                "expect_table_row_count_to_be_between is a model-level test; "
+                "column-scoped usage is not representable"
+            ),
+        )
+
+    # ``where`` is part of this macro's arguments, not a dbt-side test-config
+    # passthrough — so we cannot reuse ``_extract_args`` here (which would
+    # strip ``where`` via ``_CONFIG_KEYS``). Read the body directly: a non-
+    # dict body has no args; a body with an ``arguments:`` mapping pulls
+    # from there (dbt 1.8+ shape); else inline.
+    if not isinstance(body, dict):
+        return SkippedTest(
+            test_name=_ROW_COUNT_BETWEEN_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail=(
+                "expect_table_row_count_to_be_between requires at least one "
+                "of (min_value, max_value)"
+            ),
+        )
+    nested = body.get("arguments")
+    source: dict[str, Any] = nested if isinstance(nested, dict) else body
+    raw_min = source.get("min_value")
+    raw_max = source.get("max_value")
+    raw_where = source.get("where")
+
+    # At least one bound must be set — an unbounded row-count test carries no
+    # signal. (Mirrors the model-level invariant on CandidateTestRowCountBetween.)
+    if raw_min is None and raw_max is None:
+        return SkippedTest(
+            test_name=_ROW_COUNT_BETWEEN_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail=(
+                "expect_table_row_count_to_be_between requires at least one "
+                "of (min_value, max_value)"
+            ),
+        )
+
+    # Strict int check: ``isinstance(True, int) is True`` would otherwise
+    # silently coerce a bool to 0/1, which is not what the operator wrote.
+    if raw_min is not None and (isinstance(raw_min, bool) or not isinstance(raw_min, int)):
+        return SkippedTest(
+            test_name=_ROW_COUNT_BETWEEN_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail="min_value must be a non-negative integer",
+        )
+    if raw_max is not None and (isinstance(raw_max, bool) or not isinstance(raw_max, int)):
+        return SkippedTest(
+            test_name=_ROW_COUNT_BETWEEN_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail="max_value must be a non-negative integer",
+        )
+    if raw_min is not None and raw_min < 0:
+        return SkippedTest(
+            test_name=_ROW_COUNT_BETWEEN_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail="min_value must be a non-negative integer",
+        )
+    if raw_max is not None and raw_max < 0:
+        return SkippedTest(
+            test_name=_ROW_COUNT_BETWEEN_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail="max_value must be a non-negative integer",
+        )
+    if raw_min is not None and raw_max is not None and raw_min > raw_max:
+        return SkippedTest(
+            test_name=_ROW_COUNT_BETWEEN_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail=(f"min_value ({raw_min}) must be <= max_value ({raw_max})"),
+        )
+    if raw_where is not None and (not isinstance(raw_where, str) or not raw_where.strip()):
+        return SkippedTest(
+            test_name=_ROW_COUNT_BETWEEN_NAME,
+            column=None,
+            reason="malformed-supported-test",
+            detail="where must be a non-empty string when set",
+        )
+
+    return CandidateTestRowCountBetween(
+        minimum=raw_min,
+        maximum=raw_max,
+        where=raw_where,
     )
 
 
