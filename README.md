@@ -23,6 +23,22 @@ And you don't have to start from SignalForge's own drafts. Point it at a `schema
 - **Prunes tests you already have.** Point it at an existing `schema.yml` — from dbt-codegen, dbt Copilot, DinoAI, datapilot, or hand-written — and the warehouse tells you which of *those* tests add no signal. Same prune step, no LLM call (`signalforge prune-existing`).
 - **Drives end-to-end from Claude Code.** Run `signalforge install-skill` once in your dbt project and Claude recognises requests like "draft tests for `dim_customers`" or "prune my existing `schema.yml`," picks the right subcommand + flags, and explains the kept / kept-uncertain / dropped / flagged diff back. Deep dive: [Claude Code skill](docs/skills.md).
 
+## What tests SignalForge generates
+
+SignalForge auto-generates seven test shapes. The full catalogue (with YAML examples, ingest signatures, rubric details, and the "what we do NOT generate today" boundary) lives in [`docs/drafter-catalogue.md`](docs/drafter-catalogue.md).
+
+| Variant | One-line semantics |
+| --- | --- |
+| `not_null` | Column has no NULL rows |
+| `unique` | Column has no duplicate values |
+| `accepted_values` | Column values are all in a declared set |
+| `relationships` | Every value matches a row in a parent table |
+| `custom_sql` | Free-form business-rule SELECT (catch-all) |
+| `row_count_between` | Row count is within bounds (model-level) |
+| `unique_combination` | Composite tuple of columns is unique (model-level) |
+
+The four dbt generic tests (`not_null` / `unique` / `accepted_values` / `relationships`) ship as standard `schema.yml` entries. `custom_sql` ships as a singular `tests/*.sql` file (per business rule). `row_count_between` and `unique_combination` ship as `dbt-expectations` / `dbt-utils` YAML blocks under the model's `tests:` list. See [`docs/drafter-catalogue.md`](docs/drafter-catalogue.md) for example YAML, drafter heuristics, and the boundary of what SignalForge will and will not propose today.
+
 ## How it works
 
 ```

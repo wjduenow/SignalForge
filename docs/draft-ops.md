@@ -535,6 +535,110 @@ filter + parser rejection). Use this when the model under draft has
 no meaningful row-count guarantee (e.g. a slowly-growing dim table
 where any positive count is fine).
 
+## Composite uniqueness (`unique_combination`)
+
+The seventh test variant, `unique_combination` (issue #170), is a
+**model-level composite-key uniqueness assertion**: the tuple
+`(columns[0], columns[1], ...)` must be unique across the model
+(optionally narrowed by a `where` filter). It is the structured
+equivalent of `dbt_utils.unique_combination_of_columns`, which the
+`intuit_airflow` survey flagged as covering ~10.5% of declared tests
+(15 of 143). Without a first-class variant the drafter could express it
+only as freeform `custom_sql` (`GROUP BY a, b HAVING COUNT(*) > 1`),
+which gives the grader no structured calibration and the diff no typed
+emission shape.
+
+### What a `unique_combination` test is
+
+`CandidateTestUniqueCombination` carries:
+
+- **`columns`** — `tuple[str, ...]`, **at least two columns**
+  (single-column uniqueness is the existing `unique` test type). The
+  Pydantic field validators reject `len < 2` and duplicate column names
+  at deserialise time.
+- **`where`** — optional SQL predicate string. Narrows the composite-key
+  scope (e.g. `"is_active = true"` for "every active row has a unique
+  `(user_id, day)`").
+- **`rationale`** — optional one-line "why," surfaced in the diff.
+
+The Pydantic field name is `columns`; the ingest parser maps inbound on
+`prune-existing` (`combination_of_columns` → `columns`), and the diff
+emitter maps outbound (`columns` → `combination_of_columns`) into the
+`dbt_utils` YAML shape. The variant is always model-level: there is no
+per-column `column:` field, because composite uniqueness is a
+table-level property.
+
+### When the drafter proposes it
+
+The system prompt's `_TEST_CATALOGUE_LINES` carries two JSON-shape
+illustrations for `unique_combination` — the no-`where` form
+(whole-table composite uniqueness) and the with-`where` form (filtered
+composite uniqueness) — so a cooperative LLM sees both shapes and picks
+the one that matches the model's intent. The drafter typically proposes
+`unique_combination` when:
+
+- The model is an **aggregate or rollup** whose natural grain is a
+  composite key — `(order_id, line_item_id)` on an order-line table,
+  `(user_id, day)` on a daily activity rollup, `(start_station_id,
+  end_station_id, trip_date)` on a trip-pairs aggregate.
+- The model has a **multi-column `GROUP BY`** whose result rows should
+  be unique by construction.
+- A `where` filter narrows the uniqueness to a sub-population (e.g.
+  "exactly one record per `(user_id, day)` for active users only").
+
+The system prompt carries a cautionary block (`_UNIQUE_COMBINATION_SCOPE_INSTRUCTION`)
+steering the drafter away from vacuously-unique tuples. A drafted
+`unique_combination(columns=[primary_key, anything])` is always unique
+by construction — the primary key alone guarantees it. The grade rubric's
+`no-redundant` criterion scores these low (and the prune engine catches
+the strict cases as `always-passes`), but the prompt-level steer is the
+primary defence — cheaper than relying on the grader to flag them.
+
+### Worked example
+
+A `fct_order_line_items` model with grain `(order_id, line_item_id)`
+ships natural composite uniqueness. The drafter emits roughly:
+
+```json
+{
+  "type": "unique_combination",
+  "columns": ["order_id", "line_item_id"],
+  "rationale": "fct_order_line_items has one row per order-line; the tuple (order_id, line_item_id) is the natural grain"
+}
+```
+
+This candidate flows into the prune layer, which compiles it to
+`SELECT order_id, line_item_id FROM <table> GROUP BY order_id, line_item_id HAVING COUNT(*) > 1`
+and runs one warehouse query — see [`docs/prune-ops.md`](prune-ops.md#row-count-cost-model)
+for the engine routing (sample-mode bypassed to source — composite
+uniqueness on a sample is semantically approximate). A warehouse where
+the grain holds returns zero failing rows → `always-passes` → dropped.
+A warehouse with a duplicate `(order_id, line_item_id)` returns the
+duplicate rows → `kept` with a real grain-violation signal.
+
+The same variant on a `prune-existing` run flows through the ingest
+parser — see [`docs/ingest-ops.md` § Recognition of `dbt_utils.unique_combination_of_columns`](ingest-ops.md#recognition-of-dbt_utilsunique_combination_of_columns)
+for the inbound mapping. A hand-authored `dbt_utils.unique_combination_of_columns`
+in the operator's own `schema.yml` is promoted to the structured variant
+and pruned alongside drafted candidates, so the operator can grade
+existing declarations without re-drafting.
+
+### `exclude_tests` short-circuit
+
+Like the six other variants, `unique_combination` is a member of
+`VALID_TEST_TYPES` and can be suppressed via `DraftConfig.exclude_tests`:
+
+```yaml
+llm:
+  exclude_tests: ["unique_combination"]
+```
+
+When `"unique_combination"` is excluded, the drafter prompt drops the
+catalogue entry AND the cautionary SCOPE instruction block, so the LLM
+never proposes one; if it defies the prompt, the parser's anchor-contract
+check rejects the candidate (dual-defence — prompt filter + parser
+rejection).
+
 ## Cache behaviour
 
 Prompt caching is a **provider capability** (issue #135): the seam
