@@ -416,6 +416,134 @@ class CandidateTestUniqueCombination(BaseModel):
         return [("type", self.type), ("column", self.column), ("columns", self.columns)]
 
 
+class CandidateTestRowCountAnomalyByPeriod(BaseModel):
+    """A model-level per-period row-count-anomaly test (#171, DEC-007).
+
+    Buckets the model's rows by ``date_column`` truncated to ``period``
+    (``hour`` / ``day`` / ``week``), then asserts each bucket's row count
+    against an anomaly band derived from the previous ``lookback_periods``
+    buckets via the selected statistical ``method`` (``mad`` /
+    ``zscore`` / ``percentile`` / ``min_max``). The 8th first-class
+    :class:`CandidateTest` variant, and the fourth — after
+    :class:`CandidateTestCustomSQL`, :class:`CandidateTestRowCountBetween`,
+    and :class:`CandidateTestUniqueCombination` — to be **model-level
+    only** (``column`` is hard-coded to ``None``).
+
+    The variant catches the volume-anomaly class of pipeline failure that
+    a static :class:`CandidateTestRowCountBetween` band cannot: an
+    incremental fact table whose daily load suddenly drops to 1% or
+    spikes to 10× the rolling baseline. ``seasonality="dow"`` opt-in
+    compares each weekday only to other instances of the same weekday in
+    the lookback window — the right shape for a business-calendar grain
+    where Mondays and Saturdays are systematically different.
+
+    Method semantics (DEC-007):
+
+    * ``mad`` — Median Absolute Deviation. Robust against outliers.
+      ``threshold`` is the number of MAD multiples (default ``3.0``) that
+      bound the band: ``[median - threshold * MAD, median + threshold * MAD]``.
+    * ``zscore`` — Standard z-score. Sensitive to outliers (which is
+      sometimes what you want). ``threshold`` is the number of standard
+      deviations.
+    * ``percentile`` — Tukey-style percentile band. ``threshold`` is the
+      IQR multiplier (default ``3.0``).
+    * ``min_max`` — Bound by the literal min/max of the lookback window.
+      ``threshold`` is **ignored** — any value (including ``0`` and
+      negatives) is accepted but unused. Use when you want to catch any
+      excursion beyond the historical envelope, no margin.
+
+    ``min_samples_per_bucket`` (default ``3``) is the floor on observed
+    samples per seasonality bucket before the test will score that
+    bucket; under-sampled buckets degrade silently (``kept-without-evidence``).
+
+    Per-field shape validation (defence in depth) is deferred to the
+    anchor-contract arm (US-006) and the compile arm (US-008): Pydantic
+    carries raw strings here, matching the precedent set on the existing
+    variants. ``where`` is a SQL fragment whose type-coherence is
+    validated by ``_check_custom_sql_type_coherence`` (#159) at parse
+    time.
+    """
+
+    model_config = _BASE_CONFIG
+
+    type: Literal["row_count_anomaly_by_period"] = "row_count_anomaly_by_period"
+    column: None = None
+    date_column: str
+    period: Literal["hour", "day", "week"] = "day"
+    lookback_periods: int = 28
+    method: Literal["mad", "zscore", "percentile", "min_max"] = "mad"
+    seasonality: Literal["none", "dow"] = "none"
+    threshold: float = 3.0
+    min_samples_per_bucket: int = 3
+    where: str | None = None
+    rationale: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_fields(self) -> CandidateTestRowCountAnomalyByPeriod:
+        if not self.date_column.strip():
+            raise ValueError("CandidateTestRowCountAnomalyByPeriod.date_column must be non-empty")
+        if self.lookback_periods < 1:
+            raise ValueError(
+                "CandidateTestRowCountAnomalyByPeriod.lookback_periods must be >= 1 "
+                f"(got {self.lookback_periods})"
+            )
+        if self.min_samples_per_bucket < 1:
+            raise ValueError(
+                "CandidateTestRowCountAnomalyByPeriod.min_samples_per_bucket must be >= 1 "
+                f"(got {self.min_samples_per_bucket})"
+            )
+        # `min_max` ignores threshold (DEC-007) — accept any value
+        # including 0 and negatives; the compile arm will not consume it.
+        if self.method != "min_max" and self.threshold <= 0:
+            raise ValueError(
+                "CandidateTestRowCountAnomalyByPeriod.threshold must be > 0 for "
+                f"method={self.method!r} (got {self.threshold!r}); `min_max` is the "
+                "only method that ignores `threshold`"
+            )
+        if self.where is not None and not self.where.strip():
+            raise ValueError(
+                "CandidateTestRowCountAnomalyByPeriod.where must be non-empty after strip when set"
+            )
+        return self
+
+    def __repr__(self) -> str:
+        """Redacted repr — shows only ``(type, column, method, seasonality)``;
+        omits the LLM-emitted ``where`` and ``rationale`` (DEC-013 of #170).
+
+        ``method`` and ``seasonality`` are operationally useful (which
+        anomaly recipe is this?) and not value-bearing. ``date_column`` /
+        ``period`` / ``lookback_periods`` / ``threshold`` /
+        ``min_samples_per_bucket`` are also non-secret but omitted from
+        the casual debug-print path to keep the repr compact; full
+        content remains accessible via :meth:`model_dump_json`.
+
+        Mirrors the precedent on :class:`CandidateTestCustomSQL` /
+        :class:`CandidateTestRowCountBetween` /
+        :class:`CandidateTestUniqueCombination`.
+        """
+        return (
+            "CandidateTestRowCountAnomalyByPeriod("
+            f"type='row_count_anomaly_by_period', <model-level>, "
+            f"method={self.method!r}, seasonality={self.seasonality!r})"
+        )
+
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        """Redact via Pydantic's structured-repr hook (QG Pass 1 finding C1).
+
+        See :meth:`CandidateTestCustomSQL.__repr_args__` for rationale.
+        ``rich.print()`` / ``devtools.pretty()`` / ``pprint`` reach through
+        ``__repr_args__`` rather than ``repr()``, so the override here
+        closes the redaction across all structured-debug surfaces in
+        lockstep with ``__repr__``.
+        """
+        return [
+            ("type", self.type),
+            ("column", self.column),
+            ("method", self.method),
+            ("seasonality", self.seasonality),
+        ]
+
+
 CandidateTest = Annotated[
     CandidateTestNotNull
     | CandidateTestUnique
@@ -423,16 +551,17 @@ CandidateTest = Annotated[
     | CandidateTestRelationships
     | CandidateTestCustomSQL
     | CandidateTestRowCountBetween
-    | CandidateTestUniqueCombination,
+    | CandidateTestUniqueCombination
+    | CandidateTestRowCountAnomalyByPeriod,
     Field(discriminator="type"),
 ]
-"""Discriminated union over the seven test variants (DEC-003 / DEC-002 /
-#169 DEC-001 / #170 DEC-001).
+"""Discriminated union over the eight test variants (DEC-003 / DEC-002 /
+#169 DEC-001 / #170 DEC-001 / #171 DEC-007).
 
 The discriminator field is ``type``; its value space is the closed
-:class:`Literal` union of the seven variant strings. Unknown ``type``
+:class:`Literal` union of the eight variant strings. Unknown ``type``
 values raise :class:`pydantic.ValidationError` at construction — adding
-an eighth test variant requires extending this union and the
+a ninth test variant requires extending this union and the
 ``Literal`` on each variant class. The drift detector (US-014) catches
 the case where a fixture grows a new test type without the model.
 """
@@ -497,6 +626,7 @@ __all__ = (
     "CandidateTestCustomSQL",
     "CandidateTestNotNull",
     "CandidateTestRelationships",
+    "CandidateTestRowCountAnomalyByPeriod",
     "CandidateTestRowCountBetween",
     "CandidateTestUnique",
     "CandidateTestUniqueCombination",

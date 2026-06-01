@@ -98,8 +98,10 @@ def test_valid_test_types_constant_matches_known_set() -> None:
     VALID_TEST_TYPES (and the prompt catalogue) fails loud here. The four
     standard dbt schema tests, the ``custom_sql`` business-rule variant
     (DEC-002), the ``row_count_between`` model-level row-count guard
-    (DEC-001 of #169), and the ``unique_combination`` model-level
-    composite-uniqueness variant (DEC-001 of #170)."""
+    (DEC-001 of #169), the ``unique_combination`` model-level
+    composite-uniqueness variant (DEC-001 of #170), and the
+    ``row_count_anomaly_by_period`` model-level per-period anomaly
+    variant (DEC-007 of #171)."""
     assert (
         frozenset(
             {
@@ -110,6 +112,7 @@ def test_valid_test_types_constant_matches_known_set() -> None:
                 "custom_sql",
                 "row_count_between",
                 "unique_combination",
+                "row_count_anomaly_by_period",
             }
         )
         == VALID_TEST_TYPES
