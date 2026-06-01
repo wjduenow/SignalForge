@@ -381,3 +381,60 @@ models:
     av = [t for t in status.tests if isinstance(t, CandidateTestAcceptedValues)]
     assert len(av) == 1
     assert tuple(sorted(av[0].values)) == ("placed", "shipped")
+
+
+def test_row_count_between_distinct_bounds_do_not_dedupe() -> None:
+    """Issue #169 — ``row_count_between`` is model-level (``column=None``),
+    so its dedupe key was previously ``(type, column)`` and two distinct
+    bound configurations silently collapsed to one candidate. The dedupe
+    arm extends the key to ``(type, column, minimum, maximum, where)`` so
+    two different bound configs survive as separate candidates (without
+    this, engineered-determinism e2e tests like
+    ``test_e2e_row_count_between`` see only one prune decision instead of
+    two).
+    """
+    from signalforge.draft.models import CandidateTestRowCountBetween
+
+    yaml_text = """
+version: 2
+models:
+  - name: orders
+    tests:
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 1
+          where: "1 = 0"
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 0
+"""
+    result = read_schema(yaml_text, _make_orders_model())
+    rcb = [t for t in result.candidate.tests if isinstance(t, CandidateTestRowCountBetween)]
+    assert len(rcb) == 2
+    # Each entry survives with its distinct bound/where config.
+    assert {(t.minimum, t.maximum, t.where) for t in rcb} == {(1, None, "1 = 0"), (0, None, None)}
+
+
+def test_row_count_between_identical_entries_still_dedupe() -> None:
+    """Two ``row_count_between`` entries with byte-identical ``(minimum,
+    maximum, where)`` still collapse to one — the dedupe key has only been
+    EXTENDED with the bound args, not disabled. Mirrors the
+    ``accepted_values`` cross-key dedupe precedent (DEC-008).
+    """
+    from signalforge.draft.models import CandidateTestRowCountBetween
+
+    yaml_text = """
+version: 2
+models:
+  - name: orders
+    tests:
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 1
+          max_value: 1000
+    data_tests:
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 1
+          max_value: 1000
+"""
+    result = read_schema(yaml_text, _make_orders_model())
+    rcb = [t for t in result.candidate.tests if isinstance(t, CandidateTestRowCountBetween)]
+    assert len(rcb) == 1
+    assert (rcb[0].minimum, rcb[0].maximum, rcb[0].where) == (1, 1000, None)
