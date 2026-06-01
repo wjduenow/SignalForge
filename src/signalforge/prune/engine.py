@@ -1177,6 +1177,37 @@ def prune_tests(
                 decisions.append(decision)
                 continue
 
+            if isinstance(compile_result, tuple):
+                # #171 US-008 compiler arm — ``row_count_anomaly_by_period``
+                # compiles into ``(stats_sql, violation_sql)`` per DEC-008.
+                # US-011 lands the engine-side two-query handling (cold-start
+                # gate on ``stats.n_periods``, then violation run). Until
+                # then, route the tuple to ``kept-without-evidence`` so a
+                # candidate that reaches this engine path doesn't crash at
+                # the ``run_test_sql(str)`` boundary. The compiler tests
+                # in ``tests/prune/test_compiler.py`` cover the SQL shape;
+                # the engine-side decision-matrix tests land in US-011.
+                decision = _decide_kept_without_evidence_invalid_identifier(
+                    test=test,
+                    test_anchor=test_anchor,
+                    sentinel=_InvalidIdentifier(
+                        reason=(
+                            "row_count_anomaly_by_period two-query split not yet "
+                            "wired in the engine (#171 US-011 pending)"
+                        )
+                    ),
+                    elapsed_ms=0,
+                    scope=scope,
+                )
+                _write_audit_or_abort(
+                    decision,
+                    model_unique_id=model.unique_id,
+                    config_hash=config_hash,
+                    audit_path=resolved_audit_path,
+                )
+                decisions.append(decision)
+                continue
+
             compiled_sql: str = compile_result
             compiled_sql_hash = _build_compiled_sql_hash_or_empty(compiled_sql)
 

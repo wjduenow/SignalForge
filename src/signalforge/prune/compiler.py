@@ -62,6 +62,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountAnomalyByPeriod,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
     CandidateTestUniqueCombination,
@@ -983,6 +984,335 @@ def _compile_unique_combination(
     return sql
 
 
+# ---------------------------------------------------------------------------
+# Issue #171 — row_count_anomaly_by_period (#171 US-008, DEC-008 + DEC-011 +
+# DEC-012). The 8th first-class variant compiles into TWO SQL strings per
+# DEC-008: a per-method stats query (one row of stats; per-DOW when
+# ``seasonality="dow"``) AND a violation query (rows in today's period — the
+# adapter's COUNT(*) wrap yields today's row count, which the engine then
+# compares against the band derived from the stats query in US-011). Every
+# emitted query carries the DEC-012 partition-pruning WHERE clause so a
+# 28-period lookback on a 1B-row daily-partitioned table scans only the
+# touched partitions (~30× scan reduction) rather than the full table.
+#
+# Dialect-driven (DEC-011): every date-arithmetic / percentile SQL fragment
+# is read from :class:`Dialect` (``date_trunc_expr_template``,
+# ``interval_expr_template``, ``extract_dow_expr_template``,
+# ``dow_sunday_index``, ``percentile_cont_expr_template``). The compiler
+# NEVER branches on ``dialect.name`` — the
+# :mod:`tests.prune.test_compiler_import_guard` AST gate is the regression
+# fence for any future arm that reaches for a vendor SDK.
+#
+# Conservative-bias routing (DEC-005 of #169 generalised): a ``where`` clause
+# composed into the full SELECT that trips
+# :func:`signalforge.warehouse._sql_safety.validate_test_sql` (stray ``;`` /
+# ``--`` / ``/* */`` / unbalanced parens) returns ``_InvalidIdentifier`` →
+# engine routes to ``kept-without-evidence`` (mirrors ``custom_sql`` /
+# ``row_count_between`` / ``unique_combination``).
+# ---------------------------------------------------------------------------
+
+
+def _period_unit_keyword(period: str) -> str:
+    """Translate a ``CandidateTestRowCountAnomalyByPeriod.period`` value to
+    the SQL keyword both dialects accept inside ``DATE_TRUNC`` / ``INTERVAL``.
+
+    All three valid values (``hour`` / ``day`` / ``week``) map to their
+    uppercase form (``HOUR`` / ``DAY`` / ``WEEK``) — these are the standard
+    SQL keywords BigQuery, Snowflake, and Postgres all accept. The translation
+    is dialect-neutral; per-dialect framing (e.g. Snowflake's single-quoting
+    of the unit inside ``DATE_TRUNC``) happens at the
+    :attr:`Dialect.date_trunc_expr_template` substitution site.
+    """
+    return period.upper()
+
+
+def _render_anomaly_stats_partition_filter(
+    *,
+    date_column_quoted: str,
+    as_of: date,
+    lookback_periods: int,
+    period: str,
+    dialect: Dialect,
+) -> str:
+    """Render the load-bearing DEC-012 partition-pruning WHERE fragment
+    for the stats (history) query.
+
+    Returns a SQL fragment of the shape::
+
+        <date_column> >= <as_of_literal> - INTERVAL <lookback> <unit>
+        AND <date_column> < <as_of_literal>
+
+    The stats query is history-only — it excludes the current period
+    (the violation query covers today separately).
+
+    The ``<as_of_literal>`` is rendered via
+    :attr:`Dialect.date_literal_template` so BigQuery emits ``DATE('…')`` and
+    Snowflake emits ``'…'::DATE``. The interval is rendered via
+    :attr:`Dialect.interval_expr_template` so BigQuery emits bare
+    ``INTERVAL 28 DAY`` and Snowflake emits the quoted ``INTERVAL '28 DAY'``
+    form. The compiler NEVER branches on ``dialect.name`` — both surfaces
+    are dialect templates.
+    """
+    as_of_literal = dialect.date_literal_template.format(value=as_of.isoformat())
+    unit = _period_unit_keyword(period)
+    lookback_interval = dialect.interval_expr_template.format(n=lookback_periods, unit=unit)
+    return (
+        f"{date_column_quoted} >= {as_of_literal} - {lookback_interval} "
+        f"AND {date_column_quoted} < {as_of_literal}"
+    )
+
+
+def _render_anomaly_history_cte(
+    *,
+    date_column_quoted: str,
+    table_sql: str,
+    as_of: date,
+    lookback_periods: int,
+    period: str,
+    seasonality: str,
+    where: str | None,
+    dialect: Dialect,
+) -> str:
+    """Render the ``history`` CTE common to all four methods.
+
+    Two shapes, switched by ``seasonality``:
+
+    * ``seasonality="none"`` — ``SELECT DATE_TRUNC(<date>, <unit>) AS period,
+      COUNT(*) AS cnt FROM <table> WHERE <partition_filter> [AND <where>]
+      GROUP BY period``.
+    * ``seasonality="dow"`` — additionally projects + groups by
+      ``EXTRACT(DAYOFWEEK FROM <date>) AS dow``.
+
+    ``date_column_quoted`` is already dialect-folded + quoted; ``table_sql``
+    is the dialect-correct qualified table expression.
+    """
+    trunc_expr = dialect.date_trunc_expr_template.format(
+        date=date_column_quoted, unit=_period_unit_keyword(period)
+    )
+    partition_pred = _render_anomaly_stats_partition_filter(
+        date_column_quoted=date_column_quoted,
+        as_of=as_of,
+        lookback_periods=lookback_periods,
+        period=period,
+        dialect=dialect,
+    )
+    where_clause = partition_pred if where is None else f"{partition_pred} AND {where}"
+
+    if seasonality == "dow":
+        dow_expr = dialect.extract_dow_expr_template.format(date=date_column_quoted)
+        select_list = f"{trunc_expr} AS period, {dow_expr} AS dow, COUNT(*) AS cnt"
+        group_by = "period, dow"
+    else:
+        select_list = f"{trunc_expr} AS period, COUNT(*) AS cnt"
+        group_by = "period"
+
+    return (
+        f"history AS (SELECT {select_list} FROM {table_sql} "
+        f"WHERE {where_clause} GROUP BY {group_by})"
+    )
+
+
+def _percentile_expr(p: float, order_expr: str, dialect: Dialect) -> str:
+    """Render a ``PERCENTILE_CONT`` call from the dialect template."""
+    return dialect.percentile_cont_expr_template.format(p=p, expr=order_expr)
+
+
+def _compile_anomaly_stats_query(
+    test: CandidateTestRowCountAnomalyByPeriod,
+    table_ref: TableRef,
+    dialect: Dialect,
+    *,
+    as_of: date,
+) -> str:
+    """Render the stats query for a ``row_count_anomaly_by_period`` test.
+
+    Per-method per-seasonality output shapes (one CTE structure per method,
+    shared ``history`` CTE):
+
+    * ``mad``    → SELECT median, mad, n
+    * ``zscore`` → SELECT mean, stddev, n
+    * ``percentile`` → SELECT p_lo, p_hi, n (``p_lo = threshold / 100``;
+      ``p_hi = 1 - p_lo``)
+    * ``min_max`` → SELECT min_cnt, max_cnt, n
+
+    Under ``seasonality="dow"`` the SELECT carries an additional ``dow``
+    column and the per-method aggregates run per ``dow`` (the engine matches
+    today's DOW against the historical per-DOW band in US-011).
+
+    The compiler emits the SQL dictated by :class:`Dialect` (DEC-011) —
+    NEVER branches on ``dialect.name``.
+    """
+    date_column_quoted = _quote(test.date_column, dialect)
+    table_sql = _qualified_table_name(table_ref, dialect)
+    history_cte = _render_anomaly_history_cte(
+        date_column_quoted=date_column_quoted,
+        table_sql=table_sql,
+        as_of=as_of,
+        lookback_periods=test.lookback_periods,
+        period=test.period,
+        seasonality=test.seasonality,
+        where=test.where,
+        dialect=dialect,
+    )
+
+    seasonality_dow = test.seasonality == "dow"
+    dow_select = "dow, " if seasonality_dow else ""
+    dow_group_suffix = " GROUP BY dow" if seasonality_dow else ""
+
+    if test.method == "mad":
+        median_expr = _percentile_expr(0.5, "cnt", dialect)
+        if seasonality_dow:
+            # Per-DOW: medians (per dow), mads (per dow), counts (per dow).
+            medians_cte = (
+                f"medians AS (SELECT dow, {median_expr} AS median FROM history GROUP BY dow)"
+            )
+            abs_dev_expr = "ABS(history.cnt - medians.median)"
+            mad_expr = _percentile_expr(0.5, abs_dev_expr, dialect)
+            mads_cte = (
+                "mads AS (SELECT history.dow AS dow, "
+                f"{mad_expr} AS mad "
+                "FROM history JOIN medians ON history.dow = medians.dow "
+                "GROUP BY history.dow)"
+            )
+            counts_cte = "counts AS (SELECT dow, COUNT(*) AS n FROM history GROUP BY dow)"
+            final = (
+                "SELECT medians.dow AS dow, medians.median AS median, mads.mad AS mad, "
+                "counts.n AS n FROM medians "
+                "JOIN mads ON medians.dow = mads.dow "
+                "JOIN counts ON medians.dow = counts.dow"
+            )
+            return f"WITH {history_cte}, {medians_cte}, {mads_cte}, {counts_cte} {final}"
+        # seasonality="none"
+        medians_cte = f"medians AS (SELECT {median_expr} AS median FROM history)"
+        abs_dev_expr = "ABS(cnt - (SELECT median FROM medians))"
+        mad_expr = _percentile_expr(0.5, abs_dev_expr, dialect)
+        final = (
+            f"SELECT (SELECT median FROM medians) AS median, "
+            f"{mad_expr} AS mad, "
+            f"COUNT(*) AS n FROM history"
+        )
+        return f"WITH {history_cte}, {medians_cte} {final}"
+
+    if test.method == "zscore":
+        if seasonality_dow:
+            final = (
+                "SELECT dow, AVG(cnt) AS mean, STDDEV(cnt) AS stddev, COUNT(*) AS n "
+                "FROM history GROUP BY dow"
+            )
+            return f"WITH {history_cte} {final}"
+        final = "SELECT AVG(cnt) AS mean, STDDEV(cnt) AS stddev, COUNT(*) AS n FROM history"
+        return f"WITH {history_cte} {final}"
+
+    if test.method == "percentile":
+        p_lo = test.threshold / 100.0
+        p_hi = 1.0 - p_lo
+        p_lo_expr = _percentile_expr(p_lo, "cnt", dialect)
+        p_hi_expr = _percentile_expr(p_hi, "cnt", dialect)
+        final = (
+            f"SELECT {dow_select}{p_lo_expr} AS p_lo, {p_hi_expr} AS p_hi, COUNT(*) AS n "
+            f"FROM history{dow_group_suffix}"
+        )
+        return f"WITH {history_cte} {final}"
+
+    # test.method == "min_max" (the discriminated literal is closed at the
+    # variant level — Pydantic rejects any other value at construction time).
+    final = (
+        f"SELECT {dow_select}MIN(cnt) AS min_cnt, MAX(cnt) AS max_cnt, COUNT(*) AS n "
+        f"FROM history{dow_group_suffix}"
+    )
+    return f"WITH {history_cte} {final}"
+
+
+def _compile_anomaly_violation_query(
+    test: CandidateTestRowCountAnomalyByPeriod,
+    table_ref: TableRef,
+    dialect: Dialect,
+    *,
+    as_of: date,
+) -> str:
+    """Render the violation query for a ``row_count_anomaly_by_period`` test.
+
+    Returns ``SELECT 1 FROM <table> WHERE <date> >= <as_of> AND <date> <
+    <as_of> + INTERVAL 1 <period> [AND <where>]``. The adapter wraps it as
+    ``SELECT COUNT(*) AS failures FROM (<query>) AS t``, which yields the
+    count of rows in TODAY's period — the engine (US-011) compares that
+    count against the band derived from the stats query.
+
+    The ``SELECT 1`` projection (instead of ``SELECT *``) is deliberate:
+    the outer ``COUNT(*)`` only needs row existence, and ``1`` keeps the
+    inner shape trivial (no column-name escaping required, no risk of
+    duplicate-column-alias errors on Snowflake).
+    """
+    date_column_quoted = _quote(test.date_column, dialect)
+    table_sql = _qualified_table_name(table_ref, dialect)
+    # The violation query is bounded to today's period only. The bound
+    # ``[as_of, as_of + INTERVAL 1 <unit>)`` is the period that contains
+    # ``as_of`` (assuming ``as_of`` lands on a period boundary — daily
+    # ``as_of`` is a date at 00:00, which is the boundary by construction).
+    # The DEC-012 partition-pruning shape inverts the upper bound vs. the
+    # stats query: stats excludes today, violation IS today.
+    as_of_literal = dialect.date_literal_template.format(value=as_of.isoformat())
+    unit = _period_unit_keyword(test.period)
+    today_interval = dialect.interval_expr_template.format(n=1, unit=unit)
+    today_only = (
+        f"{date_column_quoted} >= {as_of_literal} "
+        f"AND {date_column_quoted} < {as_of_literal} + {today_interval}"
+    )
+    where_clause = today_only if test.where is None else f"{today_only} AND {test.where}"
+    return f"SELECT 1 FROM {table_sql} WHERE {where_clause}"
+
+
+def _compile_row_count_anomaly_by_period(
+    test: CandidateTestRowCountAnomalyByPeriod,
+    table_ref: TableRef,
+    dialect: Dialect,
+    *,
+    as_of: date,
+) -> tuple[str, str] | _InvalidIdentifier:
+    """Compile a ``row_count_anomaly_by_period`` test to the
+    ``(stats_sql, violation_sql)`` tuple per DEC-008.
+
+    Returns the tuple on success; returns :class:`_InvalidIdentifier` when:
+
+    * ``test.date_column`` fails the SQL-identifier shape check (DEC-013
+      defence-in-depth — the anchor-contract arm validates membership but
+      not regex shape).
+    * The composed stats or violation SQL trips
+      :func:`signalforge.warehouse._sql_safety.validate_test_sql` on a hostile
+      ``where`` (stray ``;`` / ``--`` / unbalanced parens).
+
+    The dispatcher treats the tuple as a positive compile result; the
+    engine (US-011) handles the two-query split (cold-start gate on
+    ``stats.n_periods``, then violation-query run).
+    """
+    try:
+        validate_identifier("CandidateTestRowCountAnomalyByPeriod.date_column", test.date_column)
+    except InvalidIdentifierError:
+        return _InvalidIdentifier(
+            reason=(
+                "candidate test references an invalid identifier shape: "
+                f"date_column={test.date_column!r}"
+            )
+        )
+
+    stats_sql = _compile_anomaly_stats_query(test, table_ref, dialect, as_of=as_of)
+    violation_sql = _compile_anomaly_violation_query(test, table_ref, dialect, as_of=as_of)
+
+    # Compose-then-validate (DEC-005 of #169 generalised): a hostile ``where``
+    # surfaces on the assembled SQL via the cheap-rejects scan. Re-using
+    # ``validate_test_sql`` keeps the surface in lockstep with the other
+    # variants' compose-then-validate seams. Either query's rejection routes
+    # the whole test to ``kept-without-evidence``.
+    try:
+        validate_test_sql(stats_sql)
+        validate_test_sql(violation_sql)
+    except QuerySyntaxError:
+        return _InvalidIdentifier(
+            reason=("row_count_anomaly_by_period rejected by SQL safety check on composed SQL")
+        )
+    return (stats_sql, violation_sql)
+
+
 def _compile_test(
     test: CandidateTest,
     table_ref: TableRef,
@@ -994,7 +1324,8 @@ def _compile_test(
     sample_size: int | None = None,
     sample_bucket: int | None = None,
     partition_filter: PartitionFilter | None = None,
-) -> str | _RequiresFutureData | _InvalidIdentifier:
+    as_of: date | None = None,
+) -> str | _RequiresFutureData | _InvalidIdentifier | tuple[str, str]:
     """Render a candidate test as a failing-rows SELECT.
 
     The returned string is a SELECT whose rows are violations: zero rows
@@ -1117,8 +1448,28 @@ def _compile_test(
         # ``test_prune_tests_unique_combination_under_*`` is the load-bearing
         # routing guarantee.
         return _compile_unique_combination(test, table_ref, dialect)
-    # The discriminated union is closed over the seven variants above; an
-    # unreachable arm here means an eighth variant was added without a
+    if isinstance(test, CandidateTestRowCountAnomalyByPeriod):
+        # row_count_anomaly_by_period compiles into TWO SQL strings (stats +
+        # violation) per DEC-008 (#171 US-008). The engine (US-011) handles
+        # the two-query split: run the stats query first, gate on
+        # ``stats.n_periods >= min_samples_per_bucket``, then run the
+        # violation query. ``as_of`` defaults to ``date.today()`` at the
+        # engine-orchestrator boundary (US-009) when the caller omits it;
+        # for compiler-level callers (tests) ``as_of`` is required. Like
+        # ``row_count_between`` / ``unique_combination``, this variant
+        # bypasses sample-mode routing — a sampled history window would
+        # under-count periods and produce false bounds.
+        if as_of is None:
+            return _InvalidIdentifier(
+                reason=(
+                    "row_count_anomaly_by_period requires as_of; the engine "
+                    "must resolve as_of to date.today() (or operator-supplied) "
+                    "before calling _compile_test"
+                )
+            )
+        return _compile_row_count_anomaly_by_period(test, table_ref, dialect, as_of=as_of)
+    # The discriminated union is closed over the eight variants above; an
+    # unreachable arm here means a ninth variant was added without a
     # compiler branch.
     raise NotImplementedError(  # pragma: no cover
         f"no compiler branch for candidate test variant {type(test).__name__}"

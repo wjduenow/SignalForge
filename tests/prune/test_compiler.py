@@ -19,6 +19,7 @@ returns a sentinel rather than raising). The hash test pins DEC-005
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountAnomalyByPeriod,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
     CandidateTestUniqueCombination,
@@ -53,6 +55,8 @@ from signalforge.warehouse.models import (
 
 _FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "prune" / "compiled_sql"
 _SNOWFLAKE_FIXTURES_DIR = _FIXTURES_DIR / "snowflake"
+_ANOMALY_BQ_FIXTURES_DIR = _FIXTURES_DIR / "anomaly" / "bigquery"
+_ANOMALY_SF_FIXTURES_DIR = _FIXTURES_DIR / "anomaly" / "snowflake"
 
 
 def _read_fixture(name: str) -> str:
@@ -63,6 +67,16 @@ def _read_fixture(name: str) -> str:
 def _read_snowflake_fixture(name: str) -> str:
     """Read a Snowflake snapshot fixture file as raw text (no normalisation)."""
     return (_SNOWFLAKE_FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+
+def _read_anomaly_bq_fixture(name: str) -> str:
+    """Read a row-count-anomaly BigQuery snapshot fixture."""
+    return (_ANOMALY_BQ_FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+
+def _read_anomaly_sf_fixture(name: str) -> str:
+    """Read a row-count-anomaly Snowflake snapshot fixture."""
+    return (_ANOMALY_SF_FIXTURES_DIR / name).read_text(encoding="utf-8")
 
 
 def _make_orders_table_ref() -> TableRef:
@@ -1873,3 +1887,418 @@ def test_compile_unique_combination_unique_among_dispatch_arms() -> None:
     # contract for this variant.
     assert "GROUP BY" in actual
     assert "HAVING COUNT(*) > 1" in actual
+
+
+# ---------------------------------------------------------------------------
+# US-008 (#171): row_count_anomaly_by_period compiler arm + 4 methods × 2
+# seasonality = 8 SQL shapes × 2 dialects, plus partition-filter floor +
+# bad-where + dispatcher-returns-tuple-only-for-this-variant.
+#
+# The 8th first-class variant is the FIRST that compiles into TWO SQL
+# strings per DEC-008: a per-method stats query (returns the per-method
+# stats; per-DOW row when ``seasonality="dow"``) AND a violation query
+# (rows in TODAY's period — adapter's COUNT-wrap yields today's count
+# which the engine compares against the band in US-011). The dispatcher
+# returns the ``(stats_sql, violation_sql)`` tuple ONLY for this variant.
+#
+# Every emitted shape carries the DEC-012 partition-pruning WHERE clause
+# (lookback-aware on the stats side; today-only on the violation side) so
+# a 28-period lookback on a 1B-row daily-partitioned table scans ~30×
+# fewer partitions than a full table scan. The snapshot fixtures pin
+# this directly; the partition_filter floor test asserts the pattern
+# explicitly so a regression that drops the WHERE is caught even if the
+# snapshot is regenerated.
+# ---------------------------------------------------------------------------
+
+# A fixed ``as_of`` for fixture stability — all eight shapes share this
+# value so the literal ``DATE('2026-05-01')`` appears in every fixture.
+_ANOMALY_AS_OF = date(2026, 5, 1)
+
+
+def _make_anomaly_test(
+    *,
+    method: str,
+    seasonality: str,
+    date_column: str = "event_date",
+    where: str | None = None,
+) -> CandidateTestRowCountAnomalyByPeriod:
+    """Construct a row-count-anomaly test with default lookback/period.
+
+    ``threshold`` defaults to ``3.0`` for mad/zscore/percentile (the
+    variant's default — for mad/zscore this is "3 deviations"; for
+    percentile a 3.0 threshold would yield p_lo=0.03 / p_hi=0.97, but
+    test cases here override to 5.0 to get the cleaner 0.05 / 0.95 in
+    snapshots).
+    """
+    kwargs: dict[str, object] = {
+        "date_column": date_column,
+        "method": method,
+        "seasonality": seasonality,
+    }
+    if method == "percentile":
+        # threshold=5.0 → p_lo=0.05, p_hi=0.95 in the snapshot
+        kwargs["threshold"] = 5.0
+    if where is not None:
+        kwargs["where"] = where
+    return CandidateTestRowCountAnomalyByPeriod(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("method", ["mad", "zscore", "percentile", "min_max"])
+@pytest.mark.parametrize("seasonality", ["none", "dow"])
+def test_compile_row_count_anomaly_bq_stats_matches_snapshot(method: str, seasonality: str) -> None:
+    """4 methods × 2 seasonality = 8 BigQuery stats-query snapshots."""
+    test = _make_anomaly_test(method=method, seasonality=seasonality)
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, tuple)
+    stats_sql, _ = result
+    expected = _read_anomaly_bq_fixture(f"{method}_{seasonality}_stats.sql")
+    assert stats_sql == expected
+
+
+@pytest.mark.parametrize("method", ["mad", "zscore", "percentile", "min_max"])
+@pytest.mark.parametrize("seasonality", ["none", "dow"])
+def test_compile_row_count_anomaly_bq_violation_matches_snapshot(
+    method: str, seasonality: str
+) -> None:
+    """8 BigQuery violation-query snapshots (shape is method-invariant —
+    every variant of the test queries today's period the same way — but
+    the snapshot is pinned per (method, seasonality) for completeness)."""
+    test = _make_anomaly_test(method=method, seasonality=seasonality)
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, tuple)
+    _, violation_sql = result
+    expected = _read_anomaly_bq_fixture(f"{method}_{seasonality}_violation.sql")
+    assert violation_sql == expected
+
+
+@pytest.mark.parametrize("method", ["mad", "zscore", "percentile", "min_max"])
+@pytest.mark.parametrize("seasonality", ["none", "dow"])
+def test_compile_row_count_anomaly_snowflake_stats_matches_snapshot(
+    method: str, seasonality: str
+) -> None:
+    """8 Snowflake stats-query snapshots — UPPER-folded per-component-quoted
+    identifiers, ``DATE_TRUNC('DAY', …)`` argument-order, ``'…'::DATE``
+    cast literals, and ``INTERVAL '28 DAY'`` quoted-payload form — every
+    one read from :class:`Dialect` (DEC-011), not hard-coded."""
+    test = _make_anomaly_test(method=method, seasonality=seasonality)
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, tuple)
+    stats_sql, _ = result
+    expected = _read_anomaly_sf_fixture(f"{method}_{seasonality}_stats.sql")
+    assert stats_sql == expected
+    # Belt-and-braces: BigQuery quoting must not leak into the Snowflake
+    # path. ``ABS(FARM_FINGERPRINT(...))`` / backtick / ``DATE(...)``
+    # function form would each fail real-Snowflake parse.
+    assert "`" not in stats_sql
+    assert "FARM_FINGERPRINT" not in stats_sql
+
+
+@pytest.mark.parametrize("method", ["mad", "zscore", "percentile", "min_max"])
+@pytest.mark.parametrize("seasonality", ["none", "dow"])
+def test_compile_row_count_anomaly_snowflake_violation_matches_snapshot(
+    method: str, seasonality: str
+) -> None:
+    """8 Snowflake violation-query snapshots."""
+    test = _make_anomaly_test(method=method, seasonality=seasonality)
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, tuple)
+    _, violation_sql = result
+    expected = _read_anomaly_sf_fixture(f"{method}_{seasonality}_violation.sql")
+    assert violation_sql == expected
+    assert "`" not in violation_sql
+
+
+# DEC-012 partition-filter floor — load-bearing across every emitted
+# shape. A regression that drops the WHERE clause would let a 28-period
+# lookback scan the entire 1B-row table.
+
+
+@pytest.mark.parametrize("method", ["mad", "zscore", "percentile", "min_max"])
+@pytest.mark.parametrize("seasonality", ["none", "dow"])
+@pytest.mark.parametrize(
+    ("dialect", "date_col_quoted"),
+    [(BIGQUERY_DIALECT, "`event_date`"), (SNOWFLAKE_DIALECT, '"EVENT_DATE"')],
+    ids=["bigquery", "snowflake"],
+)
+def test_row_count_anomaly_partition_filter_present_in_stats_query(
+    method: str, seasonality: str, dialect: Dialect, date_col_quoted: str
+) -> None:
+    """DEC-012 — every stats-query shape MUST include the lookback-aware
+    partition WHERE: ``<date_column> >= <as_of> - INTERVAL <N> <unit>``
+    AND ``<date_column> < <as_of>``. Pinned as a SHAPE assertion (not
+    just snapshot equality) so a regression that drops the WHERE during a
+    refactor surfaces against this test even if the operator
+    regenerates the snapshot.
+    """
+    test = _make_anomaly_test(method=method, seasonality=seasonality)
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        dialect,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, tuple)
+    stats_sql, _ = result
+    assert f"{date_col_quoted} >=" in stats_sql, (
+        "DEC-012 partition filter (lookback floor) missing from stats query"
+    )
+    assert f"{date_col_quoted} <" in stats_sql, (
+        "DEC-012 partition filter (today-exclusive ceiling) missing from stats query"
+    )
+
+
+@pytest.mark.parametrize("method", ["mad", "zscore", "percentile", "min_max"])
+@pytest.mark.parametrize("seasonality", ["none", "dow"])
+@pytest.mark.parametrize(
+    ("dialect", "date_col_quoted"),
+    [(BIGQUERY_DIALECT, "`event_date`"), (SNOWFLAKE_DIALECT, '"EVENT_DATE"')],
+    ids=["bigquery", "snowflake"],
+)
+def test_row_count_anomaly_partition_filter_present_in_violation_query(
+    method: str, seasonality: str, dialect: Dialect, date_col_quoted: str
+) -> None:
+    """DEC-012 — every violation-query shape MUST include today's bracket:
+    ``<date_column> >= <as_of>`` AND ``<date_column> < <as_of> +
+    INTERVAL 1 <unit>``. Without it the engine compares today's count to
+    a band derived from the wrong window."""
+    test = _make_anomaly_test(method=method, seasonality=seasonality)
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        dialect,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, tuple)
+    _, violation_sql = result
+    assert f"{date_col_quoted} >=" in violation_sql
+    assert f"{date_col_quoted} <" in violation_sql
+
+
+# Identifier-shape + hostile-where rejects route via _InvalidIdentifier.
+
+
+def test_compile_row_count_anomaly_hostile_where_returns_invalid_identifier() -> None:
+    """A ``where`` containing a stray ``;`` (the classic injection shape)
+    composes into the stats SELECT and trips ``validate_test_sql``'s
+    no-`;` check; the compiler returns ``_InvalidIdentifier`` so the
+    engine routes to ``kept-without-evidence`` (mirrors
+    ``row_count_between`` / ``unique_combination``)."""
+    test = _make_anomaly_test(method="mad", seasonality="none", where="1=1; DROP TABLE users")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(actual, _InvalidIdentifier)
+    assert "row_count_anomaly_by_period" in actual.reason
+    assert "SQL safety" in actual.reason
+
+
+def test_compile_row_count_anomaly_hostile_where_comment_returns_invalid_identifier() -> None:
+    """A ``where`` containing a ``--`` line comment also routes via
+    ``_InvalidIdentifier`` on the composed-then-validate seam."""
+    test = _make_anomaly_test(method="zscore", seasonality="dow", where="1=1 -- everything")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(actual, _InvalidIdentifier)
+
+
+def test_compile_row_count_anomaly_hostile_where_unbalanced_parens_returns_invalid() -> None:
+    """An unbalanced paren in ``where`` trips ``validate_test_sql`` on the
+    composed statement (compose-then-validate seam)."""
+    test = _make_anomaly_test(method="percentile", seasonality="none", where="(x > 0")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(actual, _InvalidIdentifier)
+
+
+def test_compile_row_count_anomaly_invalid_date_column_returns_invalid_identifier() -> None:
+    """A ``date_column`` that fails the SQL-identifier shape check routes
+    via ``_InvalidIdentifier`` — DEC-013 defence-in-depth above the
+    anchor-contract column-membership gate.
+
+    Pydantic's anchor-contract arm (US-006) will gate on membership in
+    the manifest's columns, but identifier *shape* (no whitespace,
+    backtick, hyphen, semicolon) is a separate check the compiler runs
+    just before quoting.
+    """
+    # Pydantic accepts the field at construction (it validates non-empty
+    # but not regex shape); the compiler is the second gate.
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="bad name with spaces")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(actual, _InvalidIdentifier)
+    assert "date_column" in actual.reason
+
+
+def test_compile_row_count_anomaly_dispatcher_returns_tuple_only_for_this_variant() -> None:
+    """The dispatcher (``_compile_test``) returns a 2-tuple
+    ``(stats_sql, violation_sql)`` ONLY for
+    ``CandidateTestRowCountAnomalyByPeriod``. Every other variant
+    returns a single ``str`` (or a sentinel). A regression that returned
+    the tuple for a different variant would silently break the engine's
+    arity contract.
+    """
+    table_ref = _make_orders_table_ref()
+    manifest = _make_manifest()
+
+    # The new variant — must be a tuple.
+    anomaly = _make_anomaly_test(method="mad", seasonality="none")
+    anomaly_result = _compile_test(
+        anomaly, table_ref, BIGQUERY_DIALECT, manifest, as_of=_ANOMALY_AS_OF
+    )
+    assert isinstance(anomaly_result, tuple)
+    assert len(anomaly_result) == 2
+    stats, violation = anomaly_result
+    assert isinstance(stats, str)
+    assert isinstance(violation, str)
+
+    # Every other variant — must NOT be a tuple (str or sentinel).
+    others: list[object] = [
+        CandidateTestNotNull(column="customer_id"),
+        CandidateTestUnique(column="customer_id"),
+        CandidateTestAcceptedValues(column="status", values=("a", "b")),
+        CandidateTestRelationships(column="customer_id", to="customers", field="id"),
+        CandidateTestCustomSQL(column=None, sql="SELECT 1 WHERE 1=0"),
+        CandidateTestRowCountBetween(minimum=1, maximum=1_000_000),
+        CandidateTestUniqueCombination(columns=("customer_id", "order_id")),
+    ]
+    for test in others:
+        # The orders fixture lacks ``order_id``; manifests with it for the
+        # unique_combination case are built elsewhere — but the dispatcher
+        # routing only checks the type, so even if the compile arm later
+        # rejects (returns _InvalidIdentifier), the result will never be a
+        # tuple.
+        result = _compile_test(test, table_ref, BIGQUERY_DIALECT, manifest, as_of=_ANOMALY_AS_OF)  # type: ignore[arg-type]
+        assert not isinstance(result, tuple), (
+            f"{type(test).__name__} returned a tuple — only "
+            "CandidateTestRowCountAnomalyByPeriod should return (stats_sql, violation_sql)"
+        )
+
+
+def test_compile_row_count_anomaly_table_ref_is_the_this_resolution() -> None:
+    """The compiler emits the qualified ``table_ref`` directly as the
+    ``FROM`` clause — the engine's ``table_ref`` resolution IS the
+    ``{{ this }}`` resolution for this variant.
+
+    Mirrors how :func:`_compile_row_count_between` / :func:`_compile_unique_combination`
+    consume ``table_ref`` (Jinja-resolution happens upstream at the
+    engine boundary, not inside the compile arm). Where ``custom_sql``
+    routes through :func:`signalforge.manifest.template.resolve_template_refs`
+    because its ``test.sql`` body is itself Jinja, anomaly's only freeform
+    SQL is the optional ``where`` fragment which is interpolated verbatim
+    (mirrors the sibling metadata-aggregate variants — the consequence is
+    that ``where: "{{ this }}.event_date > X"`` would NOT be expanded;
+    that shape is intentionally not supported for this variant in v0.3).
+    """
+    # Pass a temp/materialised-shaped TableRef — the compiled SQL must
+    # reference it directly, with NO source-table reference leaking in.
+    temp_ref = TableRef(project=None, dataset="_SESSION", name="_sf_sample_abc123def4567890")
+    test = _make_anomaly_test(method="mad", seasonality="none")
+    result = _compile_test(
+        test,
+        temp_ref,
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, tuple)
+    stats, violation = result
+    # The temp table's qualified name appears in both queries.
+    assert "_SESSION._sf_sample_abc123def4567890" in stats
+    assert "_SESSION._sf_sample_abc123def4567890" in violation
+    # No source-table reference (``orders``) leaks in.
+    assert "orders" not in stats
+    assert "fake_project.dataset.orders" not in stats
+    assert "orders" not in violation
+
+
+def test_compile_row_count_anomaly_resolves_date_column_via_dialect_fields() -> None:
+    """DEC-011 — the compiler reads SQL fragments from :class:`Dialect`
+    rather than branching on ``dialect.name``. A custom Dialect with
+    distinct templates round-trips through ``_compile_test`` and the
+    resulting SQL reflects the custom templates verbatim.
+
+    This is the cheap dialect-driven gate; the AST import-guard at
+    :mod:`tests.prune.test_compiler_import_guard` enforces that no
+    warehouse-SDK import lives under ``prune/``.
+    """
+    # Mock Postgres-like dialect — quote_char='"', identifier_case='lower',
+    # SQL-standard ``TIMESTAMP '…'`` literal form, distinct DATE_TRUNC arg
+    # order, distinct INTERVAL shape, distinct DOW return.
+    pg_dialect = Dialect(
+        name="postgres-mock",
+        supports_tablesample=True,
+        supports_qualify=False,
+        quote_char='"',
+        identifier_case="lower",
+        date_trunc_expr_template="DATE_TRUNC('{unit}', {date})",
+        interval_expr_template="INTERVAL '{n} {unit}'",
+        extract_dow_expr_template="EXTRACT(DOW FROM {date})",
+        dow_sunday_index=0,
+        percentile_cont_expr_template="PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})",
+        date_literal_template="DATE '{value}'",
+    )
+    test = _make_anomaly_test(method="zscore", seasonality="none")
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        pg_dialect,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, tuple)
+    stats, violation = result
+    # Postgres-style DATE literal (no parens, just ``DATE 'YYYY-MM-DD'``).
+    assert "DATE '2026-05-01'" in stats
+    assert "DATE '2026-05-01'" in violation
+    # Snowflake-style ``DATE_TRUNC('DAY', col)`` ordering.
+    assert "DATE_TRUNC('DAY'," in stats
+    # Snowflake-style ``INTERVAL '28 DAY'`` quoted-payload form.
+    assert "INTERVAL '28 DAY'" in stats
+    # No BigQuery quoting / no Snowflake-default cast literal leaked.
+    assert "`" not in stats
+    assert "::DATE" not in stats
