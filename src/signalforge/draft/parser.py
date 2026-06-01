@@ -228,13 +228,22 @@ def _check_custom_sql_type_coherence(
     return tuple(violations)
 
 
-def _check_row_count_between_where(
+def _check_where_clause(
     where: str,
+    test_type: str,
     model_columns: frozenset[str],
     model_columns_by_type: Mapping[str, str | None],
     dialect_name: str,
 ) -> tuple[str, ...]:
-    """Validate a ``row_count_between.where`` clause via sqlglot (#169, DEC-004/006).
+    """Validate a model-level test's ``where`` clause via sqlglot.
+
+    Established by #169 (DEC-004 / DEC-006) for ``row_count_between``;
+    extended by #170 (DEC-015) for ``unique_combination`` — the same
+    machinery validates any model-level variant carrying a ``where``
+    fragment. ``test_type`` is the variant-name prefix used to disambiguate
+    violation messages (e.g. ``"row_count_between"`` / ``"unique_combination"``);
+    the rest of the message shape is shared across variants per the
+    "reuse, don't fork" lesson from #169 DEC-005.
 
     Composes ``SELECT 1 FROM __sf_where_placeholder__ WHERE <where>`` so
     sqlglot can parse the freestanding clause as part of a complete SELECT,
@@ -243,7 +252,7 @@ def _check_row_count_between_where(
 
     * **Unknown column reference** — a bare :class:`sqlglot.exp.Column`
       operand whose name is not in ``model_columns`` appends a violation.
-      This is the row_count_between equivalent of the structural
+      This is the where-bearing-variant equivalent of the structural
       ``test references nonexistent column`` check that the other
       variants get via ``test.column not in model_columns``.
     * **Type incompatibility** — when BOTH sides of a comparison are
@@ -321,7 +330,7 @@ def _check_row_count_between_where(
                 if col_name not in model_columns and col_name not in seen_unknown:
                     seen_unknown.add(col_name)
                     violations.append(
-                        f"row_count_between where references nonexistent column "
+                        f"{test_type} where references nonexistent column "
                         f"{col_name!r} (available: {sorted(model_columns)})"
                     )
 
@@ -351,7 +360,7 @@ def _check_row_count_between_where(
             exp.LTE: "<=",
         }.get(type(node), type(node).__name__.lower())
         violations.append(
-            f"row_count_between where references column {left_name!r} ({left_type_str}) "
+            f"{test_type} where references column {left_name!r} ({left_type_str}) "
             f"and {right_name!r} ({right_type_str}) in {op_token!r} comparison "
             f"— types incompatible"
         )
@@ -515,10 +524,48 @@ def _validate_anchor_contract(
                     model_columns_by_type if model_columns_by_type is not None else {}
                 )
                 violations.extend(
-                    _check_row_count_between_where(
+                    _check_where_clause(
                         test.where,
+                        "row_count_between",
                         model_columns,
                         types_map,
+                        dialect_name,
+                    )
+                )
+        elif test.type == "unique_combination":
+            # Issue #170 — unique_combination is model-level only
+            # (``column`` is ``None`` by the Pydantic model), so it MUST
+            # special-case ahead of the generic ``test.column not in
+            # model_columns`` fallthrough below.
+            #
+            # Per-column membership check: each entry in ``test.columns``
+            # must reference a real model column. Pydantic already
+            # enforces ``len(columns) >= 2`` and no-duplicates
+            # (DEC-016); we only check anchor membership here. A missing
+            # column appends one violation per missing entry — collect-all
+            # is the contract (DEC-022 of #5).
+            for col in test.columns:
+                if col not in model_columns:
+                    violations.append(
+                        f"unique_combination references nonexistent column {col!r} "
+                        f"(available: {sorted(model_columns)})"
+                    )
+            # ``where`` (when present) is validated via the same sqlglot
+            # helper #169 ships, parameterised by ``test_type`` for
+            # variant-accurate messaging (DEC-015 / DEC-005 of #169 —
+            # "reuse, don't fork"). When the type-arm is inactive we
+            # still want the column-existence check, so we fall back to
+            # an empty type map.
+            if test.where is not None and test.where.strip():
+                uc_types_map: Mapping[str, str | None] = (
+                    model_columns_by_type if model_columns_by_type is not None else {}
+                )
+                violations.extend(
+                    _check_where_clause(
+                        test.where,
+                        "unique_combination",
+                        model_columns,
+                        uc_types_map,
                         dialect_name,
                     )
                 )
