@@ -119,6 +119,14 @@ target-version = "py311"
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 ignore = []
 
+[tool.ruff.lint.per-file-ignores]
+# Cache-stability snapshots carry an inline rubric-block golden whose lines
+# inevitably exceed the 100-char limit (long single-line criterion texts
+# render together on the wire). Refactoring the golden to wrap would change
+# the bytes the test is pinning. Same shape as the drafter-side snapshot's
+# golden — see ``tests/llm/test_prompt_cache_stability.py``.
+"tests/grade/test_prompt_cache_stability.py" = ["E501"]
+
 [tool.ruff.format]
 
 [tool.pyright]
