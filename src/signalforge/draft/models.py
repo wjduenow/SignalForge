@@ -243,21 +243,97 @@ class CandidateTestRowCountBetween(BaseModel):
         return self
 
 
+class CandidateTestUniqueCombination(BaseModel):
+    """A model-level multi-column-uniqueness test (#170, DEC-001).
+
+    Asserts that the tuple ``(c1, c2, ...)`` is unique across the model
+    (optionally filtered by ``where``). The 7th first-class
+    :class:`CandidateTest` variant, and the third — after
+    :class:`CandidateTestCustomSQL` and :class:`CandidateTestRowCountBetween`
+    — to be **model-level only** (``column`` is hard-coded to ``None``).
+
+    The variant fills the gap between the single-column ``unique`` test and
+    the free-form ``custom_sql`` escape hatch: composite uniqueness is a
+    common business invariant (e.g. one row per ``(order_id, line_no)``,
+    one row per ``(user_id, day)``) that the original four built-ins
+    cannot express. Diff emission targets the ``dbt_utils.unique_combination_of_columns``
+    macro (DEC-002 of #170): ``{dbt_utils.unique_combination_of_columns:
+    {combination_of_columns: [c1, c2, ...]}}``.
+
+    Cardinality (DEC-016): ``len(columns) >= 2`` — a single-column variant
+    is just ``unique`` and carries no new signal; an empty-tuple variant
+    is structurally meaningless. The no-duplicates invariant (DEC-016)
+    rejects ``columns=("a", "a")`` and any other tuple with a repeated
+    entry: a duplicate column compiles to a uniqueness test that always
+    trivially has the same value in two positions; the LLM almost
+    certainly meant something else.
+
+    Per-column identifier shape validation is **deferred to the anchor-
+    contract arm** (DEC-014; lands in US-004): Pydantic carries raw
+    strings here, matching the ``accepted_values.values`` /
+    ``relationships.to`` / ``.field`` precedent set on the existing
+    variants. The compiler arm (US-005a) separately routes each
+    ``columns[i]`` through ``validate_identifier`` + ``_fold_identifier``
+    + ``_quote`` before quoting (defence-in-depth).
+    """
+
+    model_config = _BASE_CONFIG
+
+    type: Literal["unique_combination"] = "unique_combination"
+    column: None = None
+    columns: tuple[str, ...]
+    where: str | None = None
+    rationale: str | None = None
+
+    @field_validator("columns")
+    @classmethod
+    def _columns_min_two(cls, v: tuple[str, ...]) -> tuple[str, ...]:
+        if len(v) < 2:
+            raise ValueError(
+                "CandidateTestUniqueCombination.columns must contain at least "
+                f"two entries (got {len(v)}) — a single-column variant is just "
+                "`unique` and carries no new signal"
+            )
+        return v
+
+    @field_validator("where")
+    @classmethod
+    def _where_non_empty_when_set(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError(
+                "CandidateTestUniqueCombination.where must be non-empty after strip when set"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def _columns_no_duplicates(self) -> CandidateTestUniqueCombination:
+        if len(set(self.columns)) != len(self.columns):
+            raise ValueError(
+                "CandidateTestUniqueCombination.columns must not contain "
+                f"duplicates (got {list(self.columns)!r}) — a duplicate column "
+                "compiles to a uniqueness test that always trivially has the "
+                "same value in two positions"
+            )
+        return self
+
+
 CandidateTest = Annotated[
     CandidateTestNotNull
     | CandidateTestUnique
     | CandidateTestAcceptedValues
     | CandidateTestRelationships
     | CandidateTestCustomSQL
-    | CandidateTestRowCountBetween,
+    | CandidateTestRowCountBetween
+    | CandidateTestUniqueCombination,
     Field(discriminator="type"),
 ]
-"""Discriminated union over the six test variants (DEC-003 / DEC-002 / #169 DEC-001).
+"""Discriminated union over the seven test variants (DEC-003 / DEC-002 /
+#169 DEC-001 / #170 DEC-001).
 
 The discriminator field is ``type``; its value space is the closed
-:class:`Literal` union of the six variant strings. Unknown ``type``
+:class:`Literal` union of the seven variant strings. Unknown ``type``
 values raise :class:`pydantic.ValidationError` at construction — adding
-a seventh test variant requires extending this union and the
+an eighth test variant requires extending this union and the
 ``Literal`` on each variant class. The drift detector (US-014) catches
 the case where a fixture grows a new test type without the model.
 """
@@ -324,4 +400,5 @@ __all__ = (
     "CandidateTestRelationships",
     "CandidateTestRowCountBetween",
     "CandidateTestUnique",
+    "CandidateTestUniqueCombination",
 )

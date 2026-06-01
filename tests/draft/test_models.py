@@ -23,6 +23,7 @@ from signalforge.draft.models import (
     CandidateTestRelationships,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 
 _FIXTURE_PATH = (
@@ -292,3 +293,138 @@ def test_candidate_test_round_trip_via_fixture_includes_all_four_types() -> None
         seen_types.add(t["type"])
 
     assert seen_types == {"not_null", "unique", "accepted_values", "relationships"}
+
+
+# ---------------------------------------------------------------------------
+# CandidateTestUniqueCombination (#170, DEC-001 / DEC-002 / DEC-014 / DEC-016)
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_test_unique_combination_accepts_two_columns() -> None:
+    """Happy path: minimum cardinality (2 columns), no ``where``."""
+    test = CandidateTestUniqueCombination(columns=("order_id", "customer_id"))
+    assert test.type == "unique_combination"
+    assert test.column is None
+    assert test.columns == ("order_id", "customer_id")
+    assert test.where is None
+    assert test.rationale is None
+
+
+def test_candidate_test_unique_combination_accepts_three_columns_with_where() -> None:
+    """Happy path: three columns plus a ``where`` filter and rationale."""
+    test = CandidateTestUniqueCombination(
+        columns=("order_id", "customer_id", "ordered_at"),
+        where="ordered_at >= '2024-01-01'",
+        rationale="Composite uniqueness per loaded date window.",
+    )
+    assert test.columns == ("order_id", "customer_id", "ordered_at")
+    assert test.where == "ordered_at >= '2024-01-01'"
+    assert test.rationale == "Composite uniqueness per loaded date window."
+
+
+def test_candidate_test_unique_combination_rejects_single_column() -> None:
+    """``len(columns) >= 2`` (DEC-016) — a single-column variant is just
+    ``unique`` and carries no new signal."""
+    with pytest.raises(ValidationError):
+        CandidateTestUniqueCombination(columns=("order_id",))
+
+
+def test_candidate_test_unique_combination_rejects_empty_columns() -> None:
+    """``len(columns) >= 2`` (DEC-016) — zero columns is structurally
+    meaningless."""
+    with pytest.raises(ValidationError):
+        CandidateTestUniqueCombination(columns=())
+
+
+def test_candidate_test_unique_combination_rejects_duplicate_columns() -> None:
+    """No-duplicates invariant (DEC-016) — a duplicate column would compile
+    to a uniqueness test that always trivially has the same value in two
+    positions; the LLM almost certainly meant something else."""
+    with pytest.raises(ValidationError):
+        CandidateTestUniqueCombination(columns=("order_id", "order_id"))
+
+
+def test_candidate_test_unique_combination_rejects_duplicate_among_three() -> None:
+    """No-duplicates fires even when only two of three columns clash."""
+    with pytest.raises(ValidationError):
+        CandidateTestUniqueCombination(
+            columns=("order_id", "customer_id", "order_id"),
+        )
+
+
+def test_candidate_test_unique_combination_column_must_be_none() -> None:
+    """``column`` is hard-coded to ``None`` (model-level only); a non-``None``
+    value fails type-validation."""
+    with pytest.raises(ValidationError):
+        CandidateTestUniqueCombination(
+            column="any_column",  # type: ignore[arg-type]
+            columns=("a", "b"),
+        )
+
+
+def test_candidate_test_unique_combination_rejects_empty_where() -> None:
+    """Empty ``where`` after strip is non-signal — fail loud (mirrors
+    ``CandidateTestRowCountBetween._where_non_empty_when_set``)."""
+    with pytest.raises(ValidationError):
+        CandidateTestUniqueCombination(columns=("a", "b"), where="")
+
+
+def test_candidate_test_unique_combination_rejects_whitespace_only_where() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestUniqueCombination(columns=("a", "b"), where="   \t\n  ")
+
+
+def test_candidate_test_unique_combination_accepts_raw_identifier_strings() -> None:
+    """Per-column identifier shape validation is deferred to the anchor-
+    contract arm (DEC-014); Pydantic accepts raw strings here. A "weird"
+    identifier like ``"col with space"`` passes Pydantic without complaint —
+    US-004 will reject it at parse-time."""
+    test = CandidateTestUniqueCombination(columns=("col with space", "another bad name"))
+    assert test.columns == ("col with space", "another bad name")
+
+
+def test_candidate_test_unique_combination_is_frozen() -> None:
+    test = CandidateTestUniqueCombination(columns=("a", "b"))
+    with pytest.raises(ValidationError):
+        test.columns = ("a", "c")  # type: ignore[misc]
+
+
+def test_candidate_test_unique_combination_round_trip_byte_stable() -> None:
+    """``model_validate_json`` ∘ ``model_dump_json`` is a no-op on a
+    populated variant — required for fixture-driven drift detection."""
+    test = CandidateTestUniqueCombination(
+        columns=("order_id", "customer_id"),
+        where="ordered_at >= '2024-01-01'",
+        rationale="Composite uniqueness per window.",
+    )
+    raw = test.model_dump_json()
+    reparsed = CandidateTestUniqueCombination.model_validate_json(raw)
+    assert reparsed == test
+
+
+def test_candidate_test_unique_combination_in_discriminated_union() -> None:
+    """The variant resolves correctly through the discriminated union."""
+    adapter: TypeAdapter[CandidateTest] = TypeAdapter(CandidateTest)
+    parsed = adapter.validate_python(
+        {
+            "type": "unique_combination",
+            "column": None,
+            "columns": ["order_id", "customer_id"],
+            "where": None,
+        }
+    )
+    assert isinstance(parsed, CandidateTestUniqueCombination)
+    assert parsed.columns == ("order_id", "customer_id")
+
+
+def test_candidate_test_unique_combination_extra_ignored() -> None:
+    """``extra="ignore"`` is inherited from ``_BASE_CONFIG`` — an unknown
+    field is silently dropped (forward-compat with future LLM emissions)."""
+    test = CandidateTestUniqueCombination.model_validate(
+        {
+            "type": "unique_combination",
+            "columns": ["a", "b"],
+            "phantom_field": "x",
+        }
+    )
+    assert not hasattr(test, "phantom_field")
