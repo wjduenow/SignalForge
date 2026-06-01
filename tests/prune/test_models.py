@@ -11,6 +11,8 @@ US-010.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 from pydantic import ValidationError
 
@@ -20,6 +22,7 @@ from signalforge.draft.models import (
     CandidateTestNotNull,
 )
 from signalforge.prune.models import PruneDecision, PruneResult
+from signalforge.prune.stats import MadStats
 
 
 def _make_decision(
@@ -174,3 +177,88 @@ def test_prune_result_repr_redacts_sql_and_sample_failures() -> None:
     assert "leaked-pii-value" not in rendered
     assert "compiled_sql" not in rendered
     assert "sample_failures" not in rendered
+
+
+def test_prune_decision_repr_redacts_as_of_and_stats() -> None:
+    """Issue #171 DEC-006: :class:`PruneDecision.__repr__` does NOT show
+    ``as_of`` or ``stats`` (or any of their values).
+
+    Pydantic v2's default repr would interpolate every field, including
+    the per-decision anomaly stats (potentially carrying per-DOW
+    breakdowns). The custom ``__repr__`` collapses to the top-level
+    identity + verdict shape; both new fields stay accessible via
+    :meth:`pydantic.BaseModel.model_dump` /
+    :meth:`pydantic.BaseModel.model_dump_json` but are absent from the
+    casual debug-print path.
+    """
+    decision = PruneDecision(
+        test_anchor="column.email",
+        test=CandidateTestNotNull(column="email"),
+        decision="kept",
+        reason="kept",
+        failures=3,
+        sampled_rows=100,
+        scope="sample",
+        elapsed_ms=42,
+        compiled_sql_hash="abc123",
+        compiled_sql="SELECT 1",
+        why="3 failures",
+        as_of=date(2026, 5, 1),
+        stats=MadStats(median=12500.0, mad=850.0, n_periods=28),
+    )
+    rendered = repr(decision)
+    # Allowed top-level identity / verdict shape:
+    assert "column.email" in rendered
+    assert "kept" in rendered
+    # Forbidden — the new fields and their values are redacted.
+    assert "as_of" not in rendered
+    assert "2026-05-01" not in rendered
+    assert "stats" not in rendered
+    assert "12500" not in rendered  # MadStats.median value
+    assert "850" not in rendered  # MadStats.mad value
+    assert "MadStats" not in rendered  # class name leak
+    assert "n_periods" not in rendered  # MadStats field name leak
+
+
+def test_prune_decision_repr_args_redacts_as_of_and_stats() -> None:
+    """Per memory ``pydantic-v2-repr-args-redaction-required`` + #170
+    DEC-013: ``__repr__`` alone leaks ``rich.print()`` /
+    ``devtools.pretty()`` / ``pprint`` paths which reach through
+    ``__repr_args__``. The structured-repr hook must redact
+    ``compiled_sql``, ``sample_failures``, ``as_of``, ``stats``
+    independently.
+    """
+    decision = PruneDecision(
+        test_anchor="column.email",
+        test=CandidateTestNotNull(column="email"),
+        decision="kept",
+        reason="kept",
+        failures=3,
+        sampled_rows=100,
+        scope="sample",
+        elapsed_ms=42,
+        compiled_sql_hash="abc123",
+        compiled_sql="SELECT secret_column FROM internal_table WHERE 1=1",
+        why="3 failures",
+        sample_failures=({"secret_column": "leaked-pii-value"},),
+        as_of=date(2026, 5, 1),
+        stats=MadStats(median=12500.0, mad=850.0, n_periods=28),
+    )
+    args = decision.__repr_args__()
+    arg_names = {name for name, _ in args}
+    # Allowed identity / verdict fields are present.
+    assert "test_anchor" in arg_names
+    assert "decision" in arg_names
+    assert "reason" in arg_names
+    # Forbidden — every sensitive / verbose field is filtered.
+    assert "compiled_sql" not in arg_names
+    assert "sample_failures" not in arg_names
+    assert "as_of" not in arg_names
+    assert "stats" not in arg_names
+    # And no value leakage in the rendered tuples either.
+    rendered_values = [repr(value) for _, value in args]
+    rendered_blob = " ".join(rendered_values)
+    assert "secret_column" not in rendered_blob
+    assert "leaked-pii-value" not in rendered_blob
+    assert "2026-05-01" not in rendered_blob
+    assert "12500" not in rendered_blob

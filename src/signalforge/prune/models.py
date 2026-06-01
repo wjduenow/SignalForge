@@ -44,11 +44,13 @@ verdict logic all live in sibling modules under
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, computed_field
+from pydantic import BaseModel, ConfigDict, computed_field, field_serializer
 
 from signalforge.draft import CandidateTest
+from signalforge.prune.stats import AnomalyTestStats
 
 DropReason = Literal[
     "always-passes",
@@ -107,6 +109,86 @@ class PruneDecision(BaseModel):
     compiled_sql: str
     why: str
     sample_failures: tuple[dict[str, Any], ...] | None = None
+    as_of: date | None = None
+    """Evaluation date for time-bound prune decisions (issue #171, DEC-006).
+
+    Threaded through from ``prune_tests(as_of=...)`` for the
+    ``row_count_anomaly_by_period`` variant (the first SignalForge primitive
+    whose decision is inherently time-bound). ``None`` for every other test
+    variant — they are time-invariant by Architectural Commitment #5. When
+    set, serialises as ``YYYY-MM-DD`` ISO 8601 string via the
+    ``@field_serializer`` below (not via :func:`signalforge._common.timestamp.iso8601_z`
+    — that helper is :class:`datetime`-only per safety-layer.md issue #56)."""
+    stats: AnomalyTestStats | None = None
+    """Per-decision numerical state from the anomaly-stats query (issue
+    #171, DEC-006). Populated only for the ``row_count_anomaly_by_period``
+    variant; ``None`` for every other test type. The discriminated-union
+    serialisation (DEC-005 of #171, the ``method`` discriminator) is
+    handled natively by Pydantic v2 — emits the discriminator field as part
+    of the dict on ``model_dump`` / ``model_dump_json``."""
+
+    @field_serializer("as_of")
+    def _serialize_as_of(self, value: date | None) -> str | None:
+        """Render ``as_of`` as ``YYYY-MM-DD`` ISO 8601 string.
+
+        Mirrors :class:`signalforge.prune.audit.PruneEvent`'s same serializer
+        exactly. The :mod:`signalforge._common.timestamp` helper
+        (``iso8601_z``) is deliberately :class:`datetime`-only per
+        safety-layer.md issue #56 — :class:`date` has no time-of-day
+        component and the canonical timestamp shape (``...Z`` suffix) does
+        not apply. Pydantic v2's native :class:`date` JSON serialisation
+        already emits ``YYYY-MM-DD``, but the explicit serializer documents
+        the contract and keeps both the audit-event and read-back models
+        rendering identically.
+        """
+        return value.isoformat() if value is not None else None
+
+    def __repr__(self) -> str:
+        """Redacted repr — omits ``compiled_sql``, ``sample_failures``,
+        ``stats``, and ``as_of`` (DEC-022 / issue #171 DEC-006).
+
+        Pydantic v2's default ``__repr__`` interpolates every field. The
+        per-decision compiled SQL (potentially multi-line, may quote
+        upstream column data via the model SQL it scans), sampled-failure
+        rows (which may contain PII), per-decision numerical stats (the
+        anomaly variant's lookback bands are not load-bearing in casual
+        logs and may carry per-period DOW breakdowns), and the time-bound
+        ``as_of`` (operator-visible via the audit JSONL where it matters)
+        are all elided. Mirrors :class:`PruneResult.__repr__` (DEC-022)
+        and :class:`signalforge.draft.models.CandidateTestCustomSQL.__repr__`
+        (DEC-013 of #170). Full content stays accessible via
+        :meth:`pydantic.BaseModel.model_dump` /
+        :meth:`pydantic.BaseModel.model_dump_json` — only the casual
+        debug-print path is redacted.
+        """
+        return (
+            f"PruneDecision(test_anchor={self.test_anchor!r}, "
+            f"decision={self.decision!r}, "
+            f"reason={self.reason!r}, "
+            f"failures={self.failures}, "
+            f"scope={self.scope!r}, "
+            f"elapsed_ms={self.elapsed_ms})"
+        )
+
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        """Redact via Pydantic's structured-repr hook.
+
+        Per memory ``pydantic-v2-repr-args-redaction-required`` + DEC-013
+        of #170: ``__repr__`` redacts the ``%s``-interpolation path, but
+        ``rich.print()`` / ``devtools.pretty()`` / ``pprint`` reach through
+        ``__repr_args__`` and would otherwise still see ``compiled_sql``,
+        ``sample_failures``, ``stats``, ``as_of``. Filtering here closes
+        the leak across all three structured-debug surfaces with one
+        override.
+        """
+        return [
+            ("test_anchor", self.test_anchor),
+            ("decision", self.decision),
+            ("reason", self.reason),
+            ("failures", self.failures),
+            ("scope", self.scope),
+            ("elapsed_ms", self.elapsed_ms),
+        ]
 
 
 class PruneResult(BaseModel):

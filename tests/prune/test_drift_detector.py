@@ -27,7 +27,7 @@ model with a one-off ``extra="forbid"`` mirror).
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -38,6 +38,7 @@ from signalforge.draft.models import CandidateTest
 from signalforge.prune.audit import PruneEvent
 from signalforge.prune.models import DropReason, PruneDecision, PruneResult, Scope
 from signalforge.prune.stats import (
+    AnomalyTestStats,
     MadDowStats,
     MadStats,
     MinMaxDowStats,
@@ -79,6 +80,8 @@ class StrictPruneDecision(BaseModel):
     compiled_sql: str
     why: str
     sample_failures: tuple[dict[str, Any], ...] | None = None
+    as_of: date | None = None
+    stats: AnomalyTestStats | None = None
 
 
 class StrictPruneResult(BaseModel):
@@ -131,6 +134,8 @@ class StrictPruneEvent(BaseModel):
     compiled_sql: str
     why: str
     sample_failures: tuple[dict[str, Any], ...] | None = None
+    as_of: date | None = None
+    stats: AnomalyTestStats | None = None
 
 
 # --- Fixture validation ----------------------------------------------------
@@ -193,10 +198,14 @@ def test_strict_prune_event_validates_jsonl_fixture() -> None:
 
 
 def test_prune_event_fixture_audit_schema_version_is_current() -> None:
-    """Issue #55 bumped audit_schema_version 1 → 2 when ``config_hash``
-    migrated from ``SHA-256[:16]`` to ``blake2b(digest_size=8)``. Pin the
-    fixture so a future bump without updating the sample lines breaks
-    the test loudly. Mirrors safety's analogous pin.
+    """Pin the fixture's ``audit_schema_version`` to the current constant
+    so a future bump without updating the sample lines breaks the test
+    loudly. Mirrors safety's analogous pin.
+
+    Issue #55 bumped 1 → 2 when ``config_hash`` migrated from
+    ``SHA-256[:16]`` to ``blake2b(digest_size=8)``. Issue #171 bumped
+    2 → 3 when ``as_of`` (time-bound evaluation date) and ``stats``
+    (anomaly per-decision numerical state) landed.
     """
     from signalforge.prune.audit import _PRUNE_AUDIT_SCHEMA_VERSION
 
@@ -223,8 +232,40 @@ def test_prune_event_round_trips_legacy_schema_version_1() -> None:
     first_line = fixture_path.read_text(encoding="utf-8").splitlines()[0]
     payload = json.loads(first_line)
     payload["audit_schema_version"] = 1
+    # Drop the v3-only fields too — a true v1 record never had them.
+    payload.pop("as_of", None)
+    payload.pop("stats", None)
     event = PruneEvent.model_validate(payload)
     assert event.audit_schema_version == 1
+    # The new optional fields default to ``None`` on replay.
+    assert event.as_of is None
+    assert event.stats is None
+
+
+def test_prune_event_round_trips_legacy_schema_version_2_as_v3() -> None:
+    """A v2 ``prune.jsonl`` record (missing ``as_of`` / ``stats``) must
+    still validate cleanly against the current v3 :class:`PruneEvent`.
+
+    Issue #171 DEC-013: the schema bump 2 → 3 added two optional fields
+    with ``None`` defaults, so v2 records replay as v3 with both new
+    fields ``None``. This is the load-bearing inline-v2-dict-replays-as-v3
+    regression test required by US-012's acceptance criteria — it
+    verifies the ``int`` (not ``Literal``) typing on
+    :attr:`PruneEvent.audit_schema_version` preserves replay across the
+    2 → 3 bump (matching the same guarantee #55 provided for the 1 → 2
+    bump above).
+    """
+    fixture_path = _FIXTURES_DIR / "prune_event_v1.jsonl"
+    first_line = fixture_path.read_text(encoding="utf-8").splitlines()[0]
+    payload = json.loads(first_line)
+    payload["audit_schema_version"] = 2
+    # A genuine v2 record never had these fields — drop to simulate.
+    payload.pop("as_of", None)
+    payload.pop("stats", None)
+    event = PruneEvent.model_validate(payload)
+    assert event.audit_schema_version == 2
+    assert event.as_of is None
+    assert event.stats is None
 
 
 # --- Field-set parity ------------------------------------------------------
