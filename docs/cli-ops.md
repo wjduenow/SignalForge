@@ -243,6 +243,16 @@ Runtime knob flags:
   tables). Per-run override; the config-file value is the
   durable default. (DEC-011 of issue #22; see
   `docs/prune-ops.md` cost model section.)
+- `--as-of YYYY-MM-DD` — Evaluation date for time-bound
+  anomaly tests (issue #171 / DEC-001). When omitted, the
+  prune engine resolves to `date.today()` at prune time and
+  stamps the resolved value on every `PruneEvent.as_of`
+  audit record for after-the-fact reproducibility. The same
+  value applies to every model in a multi-model `--select`
+  batch (resolved once at the orchestrator). Strict ISO
+  parsing via `date.fromisoformat`; a bad format like
+  `not-a-date` raises argparse's usage error → exit 2
+  (tier 2, input-validation).
 
 Observability flags:
 
@@ -537,6 +547,7 @@ Flag reference:
 | `--tests-dir PATH` | no | `<project_dir>/tests` | Override the singular-test directory enumerated for model-level `tests/*.sql` files (US-014). Each `.sql` referencing this model is pruned alongside the schema.yml tests; unrelated files are ignored. The **default** directory is optional — when absent only the schema.yml tests are pruned; an **explicit** `--tests-dir` pointing at a missing directory fails loud (`IngestSchemaNotFoundError`). |
 | `--scope {sample,full}` | no | from config | Override `prune.scope`. Applied via `PruneConfig.model_validate` so validators re-run (DEC-002). |
 | `--sample-strategy {oneshot,materialised}` | no | from config | Override `prune.sample_strategy`. Applied via `PruneConfig.model_validate` (DEC-002). |
+| `--as-of YYYY-MM-DD` | no | resolves to `date.today()` at prune time | Evaluation date for time-bound anomaly tests (issue #171 / DEC-001). Threaded to `prune_tests` as the `as_of` kwarg; the resolved value lands on every `PruneEvent.as_of` audit record. Strict ISO parsing via `date.fromisoformat`; a bad format → argparse usage error (exit 2, tier 2 input-validation). |
 | `--format {ansi,markdown,json}` | no | `ansi` | Select the diff renderer. ANSI: coloured terminal output. Markdown: GitHub-friendly report. JSON: stdout receives the JSON sidecar's contents. |
 | `--dry-run` | no | off | Run ingest → prune → diff and print the diff to stdout, suppressing the default-on `.signalforge/diff.json` sidecar. The fail-closed `.signalforge/prune.jsonl` audit is **still written** (every prune run leaves a durable receipt — the cross-stage fail-closed invariant; mirrors `generate`). There is **no `--write`** (read-only w.r.t. your `schema.yml`). |
 | `--quiet` | no | off | Suppress per-stage stderr progress lines and the skipped-test report, and raise the log level to `WARNING`. Mutually exclusive with `--verbose`. |
