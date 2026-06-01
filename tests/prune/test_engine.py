@@ -4529,14 +4529,15 @@ def test_mixed_per_test_override_routes_row_count_anomaly_to_source_under_onesho
     row_count_between mixed-candidate test above; certifies the helper's
     third arm reaches the per-test override under ``oneshot``.
 
-    The anomaly variant's compiler arm returns a TUPLE (US-008
-    ``(stats_sql, violation_sql)``); the engine's tuple branch in
-    ``prune_tests`` (currently US-010-pending — routes to
-    ``kept-without-evidence``) doesn't execute SQL, so the load-bearing
-    assertion is on the ``test.type`` reaching the per-test branch at
-    all (which proves the routing arm fired) rather than the compiled
-    SQL shape (which lives behind the to-be-implemented two-query split
-    in US-011).
+    Updated for US-011: the anomaly variant's compiler arm returns a
+    TUPLE (``(stats_sql, violation_sql)``); the engine now runs BOTH the
+    stats query AND the violation query in sequence. The load-bearing
+    routing assertion remains on the per-test branch firing (proved by
+    the anomaly decision landing in ``decisions``) AND the per-test
+    override sending the anomaly variant to the SOURCE table (not the
+    sampled compile ref) — which now manifests as the stats query
+    referencing the source qualified name rather than a wrapped sample
+    CTE.
     """
     from signalforge.draft.models import CandidateTestRowCountAnomalyByPeriod
 
@@ -4546,10 +4547,17 @@ def test_mixed_per_test_override_routes_row_count_anomaly_to_source_under_onesho
     # Mixed → ``all_bypass_to_source`` does NOT fire → ``_resolve_sample_bucket``
     # runs (one ``expect_get_table``).
     fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
-    # Only ONE warehouse query — for the ``not_null`` test. The anomaly
-    # compiler arm returns a tuple; the engine routes the tuple to
-    # ``kept-without-evidence`` without issuing a warehouse call (US-011
-    # pending). No ``expect_abort_session`` — oneshot doesn't open one.
+    # First: the ``not_null`` test (always-passes via sample-wrap CTE).
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    # US-011: the anomaly variant compiles to (stats_sql, violation_sql).
+    # The stats query (mad, non-seasonal default) lands first — return
+    # enough periods to clear the cold-start gate (default
+    # min_samples_per_bucket=3). Then the violation query — wrapped in
+    # COUNT(*) — fires with zero failures (always-passes).
+    fake.expect_query(
+        matching=r"^WITH history AS",
+        returns=[{"median": 100.0, "mad": 5.0, "n": 28}],
+    )
     fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
     adapter = _make_adapter(fake)
 
@@ -4599,21 +4607,23 @@ def test_mixed_per_test_override_routes_row_count_anomaly_to_source_under_onesho
     assert "fake_project.dataset.orders" in not_null_sql
     assert "WITH sample AS" in not_null_sql
 
-    # The anomaly variant's tuple compile result is routed to
-    # ``kept-without-evidence`` per the US-011-pending stub; the
-    # compiled_sql may be empty (the engine never reached
-    # ``run_test_sql``). The load-bearing claim is that the per-test
-    # branch fired at all — the test ended up in ``decisions`` — which
-    # proves the per-test override (where the helper is consulted) did
-    # not crash, and the engine continued past the bypass dispatch for
-    # the bypassing variant.
+    # US-011: the anomaly variant runs through the two-query path.
+    # Stats returns 28 periods (clears the cold-start gate), violation
+    # returns 0 failures → always-passes → dropped. The compiled SQL on
+    # the decision is the violation SQL — the engine records that as the
+    # "outcome-bearing" SQL. The per-test override sent the variant to
+    # the SOURCE table; the stats query (issued internally) AND the
+    # violation query both reference ``fake_project.dataset.orders``.
     anomaly_decision = by_type["row_count_anomaly_by_period"]
-    # US-011-pending: the tuple branch routes to ``kept-without-evidence``
-    # via ``_decide_kept_without_evidence_invalid_identifier``. Pinning
-    # the decision shape here AND the routing arm proves the helper's
-    # third arm reached the per-test branch.
-    assert anomaly_decision.decision == "kept"
-    assert anomaly_decision.reason == "kept-without-evidence"
+    assert anomaly_decision.decision == "dropped"
+    assert anomaly_decision.reason == "always-passes"
+    # The decision's stats are populated from the parsed stats-query
+    # result — proves the discriminated-union dispatch reached MAD.
+    assert anomaly_decision.stats is not None
+    assert anomaly_decision.stats.method == "mad"
+    assert anomaly_decision.stats.n_periods == 28
+    # Violation SQL references the source table (per-test override fired).
+    assert "fake_project.dataset.orders" in anomaly_decision.compiled_sql
 
     fake.assert_all_expectations_met()
 
@@ -4628,20 +4638,26 @@ def test_prune_tests_all_anomaly_under_oneshot_short_circuits_no_warehouse_prewo
 
     Belt-and-braces with the unit test of the helper above; here we pin
     the engine actually CONSULTS the helper at the short-circuit site.
-    The anomaly variant's compile result is the US-011-pending tuple
-    that routes to ``kept-without-evidence`` — but the short-circuit
-    avoids the warehouse pre-work either way, which is the load-bearing
-    contract for THIS site.
+    Updated for US-011: the anomaly variant's compile result is a
+    ``(stats_sql, violation_sql)`` tuple; the engine runs both queries
+    against the SOURCE table (no temp table, no sample CTE) because the
+    bypass routed past the substitution. The short-circuit avoids
+    ``get_row_count`` / ``materialise_sample`` either way, which is the
+    load-bearing contract for THIS site.
     """
     from signalforge.draft.models import CandidateTestRowCountAnomalyByPeriod
 
     audit_path = tmp_path / "prune.jsonl"
     fake = FakeBigQueryClient(project="fake_project")
     # NO ``expect_get_table`` — short-circuit skips ``_resolve_sample_bucket``.
-    # NO ``expect_materialise_sample``. NO ``expect_query`` either: the
-    # US-011-pending tuple-branch routes the anomaly test to
-    # ``kept-without-evidence`` WITHOUT issuing a warehouse query.
-    # NO ``expect_abort_session``.
+    # NO ``expect_materialise_sample``. NO ``expect_abort_session``.
+    # Two queries: stats (28 periods → clears cold-start) then violation
+    # (0 failures → always-passes → dropped).
+    fake.expect_query(
+        matching=r"^WITH history AS",
+        returns=[{"median": 100.0, "mad": 5.0, "n": 28}],
+    )
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
     adapter = _make_adapter(fake)
 
     model = _make_orders_model()
@@ -4672,7 +4688,553 @@ def test_prune_tests_all_anomaly_under_oneshot_short_circuits_no_warehouse_prewo
     assert result.total_tests == 1
     decision = result.decisions[0]
     assert decision.test.type == "row_count_anomaly_by_period"
-    # US-011-pending stub: tuple compile result → kept-without-evidence.
+    # US-011: two-query path runs end-to-end → always-passes drop.
+    assert decision.decision == "dropped"
+    assert decision.reason == "always-passes"
+    # Stats populated on the decision (audit-of-record per DEC-006).
+    assert decision.stats is not None
+    assert decision.stats.method == "mad"
+    assert decision.stats.n_periods == 28
+    fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# #171 US-011 — two-query split + cold-start routing + DOW degrade.
+#
+# These tests pin the engine-side handling of the
+# ``(stats_sql, violation_sql)`` tuple the compiler returns for
+# ``row_count_anomaly_by_period``:
+#
+#   * Happy path: stats clears cold-start gate → violation runs → standard
+#     decision routing; ``stats`` populated on PruneDecision AND PruneEvent.
+#   * Cold-start: ``stats.n_periods < min_samples_per_bucket`` →
+#     ``kept-without-evidence`` with structured ``why``; Query 2 SKIPPED
+#     (no warehouse call). Pinned by the fake adapter's
+#     ``assert_all_expectations_met`` (no unmet violation-query
+#     expectation queued).
+#   * DOW degrade: seasonality="dow" + any thin per-DOW bucket →
+#     recompute stats query without DOW + ONE WARNING line + proceed.
+#   * Adapter ``run_stats_query`` raises ``StatsQueryNotSupportedError``
+#     → routes to ``kept-without-evidence`` via the standard
+#     ``WarehouseError`` catch surface (Postgres / future no-anomaly
+#     adapter contract).
+# ---------------------------------------------------------------------------
+
+
+def _make_anomaly_only_candidates(
+    *,
+    date_column: str = "ordered_at",
+    method: str = "mad",
+    seasonality: str = "none",
+    min_samples_per_bucket: int = 3,
+) -> CandidateSchema:
+    """Build a CandidateSchema carrying one model-level
+    ``row_count_anomaly_by_period`` test (and no other tests).
+    """
+    from signalforge.draft.models import CandidateTestRowCountAnomalyByPeriod
+
+    return CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestRowCountAnomalyByPeriod(
+                date_column=date_column,
+                method=method,  # type: ignore[arg-type]
+                seasonality=seasonality,  # type: ignore[arg-type]
+                min_samples_per_bucket=min_samples_per_bucket,
+            ),
+        ),
+    )
+
+
+def test_us011_two_query_happy_path_runs_both_queries_and_populates_stats(
+    tmp_path: Path,
+) -> None:
+    """US-011 happy path — the anomaly stats query clears the
+    cold-start gate, the violation query runs, the decision carries
+    ``stats`` (parsed into the typed :class:`MadStats` discriminated-
+    union member via :func:`_parse_anomaly_stats`).
+
+    Pins the load-bearing two-query order: stats first (matched against
+    ``^WITH history AS``), violation second (the ``SELECT COUNT(*)``
+    wrap around the violation SQL). Both queries reach
+    :meth:`adapter.run_stats_query` and :meth:`adapter.run_test_sql`
+    respectively; the fake's ``assert_all_expectations_met`` proves no
+    third query fired (no spurious extra warehouse work).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(
+        matching=r"^WITH history AS",
+        returns=[{"median": 50.0, "mad": 2.0, "n": 14}],
+    )
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _make_anomaly_only_candidates()
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 1
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_anomaly_by_period"
+    # Violation returned 0 failures → always-passes drop.
+    assert decision.decision == "dropped"
+    assert decision.reason == "always-passes"
+    # ``stats`` populated via discriminated-union dispatch on ``method``.
+    assert decision.stats is not None
+    assert decision.stats.method == "mad"
+    assert decision.stats.n_periods == 14
+    # The two queries hit (fake raises on unconsumed expectations).
+    fake.assert_all_expectations_met()
+
+
+def test_us011_cold_start_skips_violation_query_and_routes_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """US-011 cold-start gate — ``stats.n_periods <
+    test.min_samples_per_bucket`` routes to ``kept-without-evidence``
+    AND skips the violation query entirely (NO warehouse call for
+    Query 2).
+
+    The load-bearing assertion is that the fake adapter has NO violation-
+    query expectation queued; ``assert_all_expectations_met`` would
+    catch a spurious extra call.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Stats returns 1 period — below the default min_samples_per_bucket=3.
+    fake.expect_query(
+        matching=r"^WITH history AS",
+        returns=[{"median": 100.0, "mad": 5.0, "n": 1}],
+    )
+    # Intentionally NO ``expect_query(SELECT COUNT(*))`` — the cold-start
+    # gate must skip the violation query entirely. If the engine
+    # erroneously issues it the fake raises "unexpected query".
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _make_anomaly_only_candidates()
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 1
+    decision = result.decisions[0]
     assert decision.decision == "kept"
     assert decision.reason == "kept-without-evidence"
+    # Structured ``why`` names the observed/required period counts so a
+    # reviewer reading the diff sees the missing history at a glance.
+    assert "insufficient history" in decision.why
+    assert "1/3" in decision.why
+    # ``stats`` carries the partial state (n_periods=1).
+    assert decision.stats is not None
+    assert decision.stats.method == "mad"
+    assert decision.stats.n_periods == 1
+    fake.assert_all_expectations_met()
+
+
+def test_us011_dow_thin_per_bucket_recompiles_non_seasonal_emits_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """US-011 DOW degrade (DEC-003) — seasonality="dow" + at least one
+    per-DOW bucket below ``min_samples_per_bucket`` triggers a
+    recompile of the stats query WITHOUT DOW partitioning. Exactly
+    ONE WARNING line is emitted; the engine proceeds with the non-
+    seasonal stats and runs the violation query as normal.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # First stats query (seasonal) — returns per-DOW rows where DOW=3
+    # has only 1 period (below default floor=3) → triggers degrade.
+    seasonal_rows = [
+        {"dow": 0, "median": 100.0, "mad": 5.0, "n": 4},
+        {"dow": 1, "median": 105.0, "mad": 4.0, "n": 4},
+        {"dow": 2, "median": 110.0, "mad": 6.0, "n": 4},
+        {"dow": 3, "median": 90.0, "mad": 3.0, "n": 1},  # THIN
+        {"dow": 4, "median": 120.0, "mad": 5.0, "n": 4},
+        {"dow": 5, "median": 80.0, "mad": 2.0, "n": 4},
+        {"dow": 6, "median": 95.0, "mad": 3.0, "n": 4},
+    ]
+    # Second stats query (degraded non-seasonal) — returns one row with
+    # the aggregate baseline.
+    non_seasonal_rows = [{"median": 100.0, "mad": 5.0, "n": 25}]
+    # Engine issues two stats queries (seasonal then non-seasonal) plus
+    # the violation query. The seasonal stats SQL has ``GROUP BY period,
+    # dow``; the non-seasonal has ``GROUP BY period``. Distinguish via
+    # the GROUP BY shape so the fake queues the right return.
+    fake.expect_query(matching=r"GROUP BY period, dow", returns=seasonal_rows)
+    fake.expect_query(matching=r"GROUP BY period\)", returns=non_seasonal_rows)
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _make_anomaly_only_candidates(seasonality="dow")
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    # Exactly ONE DOW-degrade WARNING.
+    degrade_records = [
+        r for r in caplog.records if "DOW degraded to non-seasonal" in r.getMessage()
+    ]
+    assert len(degrade_records) == 1, (
+        f"expected exactly one DOW-degrade WARNING; got {len(degrade_records)}: "
+        f"{[r.getMessage() for r in degrade_records]}"
+    )
+    # Lazy-format JSON contract (DEC-017): the template uses %s, the
+    # JSON payload rides on args.
+    assert degrade_records[0].msg == (
+        "anomaly: DOW degraded to non-seasonal due to thin per-DOW history: %s"
+    )
+    payload = json.loads(degrade_records[0].args[0])  # type: ignore[index]
+    assert payload["min_samples_per_bucket"] == 3
+    # The thin bucket's count appears in the per_dow_counts breakdown.
+    assert payload["per_dow_counts"]["3"] == 1
+
+    # The engine proceeded — the violation query ran and the decision
+    # reflects always-passes (0 failures).
+    decision = result.decisions[0]
+    assert decision.decision == "dropped"
+    assert decision.reason == "always-passes"
+    # ``stats`` reflects the DEGRADED non-seasonal stats (n_periods=25),
+    # NOT the seasonal aggregate.
+    assert decision.stats is not None
+    assert decision.stats.method == "mad"
+    assert decision.stats.n_periods == 25
+    assert decision.stats.per_dow is None
+
+    fake.assert_all_expectations_met()
+
+
+def test_us011_dow_healthy_buckets_use_seasonal_stats_no_degrade(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """US-011 DOW healthy path — every per-DOW bucket meets the floor →
+    NO degrade WARNING fires, the engine proceeds with the seasonal
+    stats, ``per_dow`` is populated.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Every per-DOW bucket >= min_samples_per_bucket=3.
+    seasonal_rows = [{"dow": d, "median": 100.0 + d, "mad": 5.0, "n": 4} for d in range(7)]
+    fake.expect_query(matching=r"GROUP BY period, dow", returns=seasonal_rows)
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _make_anomaly_only_candidates(seasonality="dow")
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    # NO degrade warnings — every per-DOW bucket cleared the floor.
+    degrade = [r for r in caplog.records if "DOW degraded" in r.getMessage()]
+    assert degrade == [], f"expected no degrade WARNINGs; got {[r.getMessage() for r in degrade]}"
+
+    decision = result.decisions[0]
+    assert decision.decision == "dropped"
+    assert decision.stats is not None
+    assert decision.stats.method == "mad"
+    assert decision.stats.per_dow is not None
+    assert set(decision.stats.per_dow) == set(range(7))
+    # Aggregate top-level n_periods is the sum across DOWs.
+    assert decision.stats.n_periods == 28
+
+    fake.assert_all_expectations_met()
+
+
+def test_us011_stats_populated_on_prune_event_audit(tmp_path: Path) -> None:
+    """US-011 / DEC-013 — :attr:`PruneEvent.stats` is the audit-of-record;
+    the engine writes ``stats`` durably on every anomaly decision (the
+    cold-start path, kept, and dropped routings).
+
+    Reads the JSONL audit back and verifies the ``stats`` field is
+    present with the discriminator (``method``) and ``n_periods``. The
+    happy-path drop is sufficient as a representative — the cold-start
+    audit pin and the routing-matrix coverage live in their own tests.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(
+        matching=r"^WITH history AS",
+        returns=[{"mean": 50.0, "stddev": 3.0, "n": 21}],
+    )
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _make_anomaly_only_candidates(method="zscore")
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    audit_lines = audit_path.read_text(encoding="utf-8").splitlines()
+    assert len(audit_lines) == 1
+    record = json.loads(audit_lines[0])
+    assert record["test"]["type"] == "row_count_anomaly_by_period"
+    assert record["stats"] is not None
+    assert record["stats"]["method"] == "zscore"
+    assert record["stats"]["mu"] == 50.0
+    assert record["stats"]["sigma"] == 3.0
+    assert record["stats"]["n_periods"] == 21
+
+    fake.assert_all_expectations_met()
+
+
+def test_us011_stats_populated_on_cold_start_audit(tmp_path: Path) -> None:
+    """US-011 — cold-start path also persists ``stats`` to the JSONL
+    audit (the partial state is the load-bearing audit signal: a
+    reviewer needs to see what little history WAS observed).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(
+        matching=r"^WITH history AS",
+        returns=[{"median": 100.0, "mad": 5.0, "n": 2}],
+    )
+    # NO violation query expectation — cold-start skips it.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _make_anomaly_only_candidates(min_samples_per_bucket=5)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    audit_lines = audit_path.read_text(encoding="utf-8").splitlines()
+    assert len(audit_lines) == 1
+    record = json.loads(audit_lines[0])
+    assert record["reason"] == "kept-without-evidence"
+    assert record["stats"] is not None
+    assert record["stats"]["method"] == "mad"
+    assert record["stats"]["n_periods"] == 2
+    assert "insufficient history" in record["why"]
+    fake.assert_all_expectations_met()
+
+
+def test_us011_stats_query_warehouse_error_routes_kept_without_evidence(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """US-011 — when ``adapter.run_stats_query`` raises a
+    :class:`WarehouseError`, the engine routes the anomaly test to
+    ``kept-without-evidence`` (skips the violation query entirely).
+    The standard ``WarehouseError`` catch surface + ``kept-without-
+    evidence`` WARNING fire — same shape as the violation-query failure
+    path, but distinguished by the ``phase`` log field.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(
+        matching=r"^WITH history AS",
+        returns=TableNotFoundError(table="fake_project.dataset.orders"),
+    )
+    # NO violation-query expectation — the stats-query failure short-
+    # circuits the loop body.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _make_anomaly_only_candidates()
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    decision = result.decisions[0]
+    assert decision.decision == "kept"
+    assert decision.reason == "kept-without-evidence"
+    assert "TableNotFoundError" in decision.why
+    # The ``phase`` log field distinguishes stats vs violation failures.
+    matches = [r for r in caplog.records if "kept-without-evidence" in r.getMessage()]
+    assert len(matches) == 1
+    payload = json.loads(matches[0].args[0])  # type: ignore[index]
+    assert payload["phase"] == "anomaly_stats_query"
+    fake.assert_all_expectations_met()
+
+
+def test_us011_adapter_without_run_stats_query_routes_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """US-011 — when the active adapter has not grown a
+    ``run_stats_query`` override (e.g. a Postgres stub), the ABC
+    default raise of :class:`StatsQueryNotSupportedError` flows through
+    the standard ``WarehouseError`` catch surface and routes the
+    anomaly test to ``kept-without-evidence``. Conservative-bias
+    contract: an anomaly variant against an adapter that cannot evaluate
+    it is KEPT (with a structured ``why``), never silently dropped.
+    """
+    from signalforge.warehouse.errors import StatsQueryNotSupportedError
+    from signalforge.warehouse.models import (
+        BIGQUERY_DIALECT,
+    )
+    from signalforge.warehouse.models import (
+        TestResult as _TestResult,
+    )
+
+    class _NoStatsAdapter(WarehouseAdapter):
+        """Inherits the ABC default ``run_stats_query`` raise; supplies
+        the minimum surface ``prune_tests`` consumes (dialect + context
+        manager + ``run_test_sql``)."""
+
+        def __enter__(self) -> WarehouseAdapter:
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+        def dialect(self) -> Dialect:
+            return BIGQUERY_DIALECT
+
+        def sample_rows(
+            self,
+            table: TableRef,
+            n: int,
+            *,
+            partition_filter: PartitionFilter | None = None,
+        ) -> list[dict[str, object]]:
+            raise NotImplementedError
+
+        def column_stats(self, table: TableRef, column: str) -> ColumnStats:
+            raise NotImplementedError
+
+        def run_test_sql(self, sql: str, *, capture_failures: int = 0) -> _TestResult:
+            # Never called on this path — the stats-query failure short-
+            # circuits before the violation query.
+            raise AssertionError("run_test_sql should not be called after a stats-query failure")
+
+    adapter = _NoStatsAdapter()
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _make_anomaly_only_candidates()
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+    audit_path = tmp_path / "prune.jsonl"
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.decision == "kept"
+    assert decision.reason == "kept-without-evidence"
+    assert "StatsQueryNotSupportedError" in decision.why
+    # The typed error name is also what an end-to-end CLI surface keys on.
+    assert StatsQueryNotSupportedError.__name__ in decision.why
+
+
+def test_us011_defensive_arm_no_longer_fires_for_anomaly_variant(
+    tmp_path: Path,
+) -> None:
+    """US-011 — the pre-US-011 defensive arm ('two-query split not yet
+    wired') is REPLACED. A successful two-query run never produces a
+    ``kept-without-evidence`` reason whose ``why`` mentions
+    ``"#171 US-011 pending"``. Guards against an accidental revert that
+    re-introduces the defensive route on the happy path.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(
+        matching=r"^WITH history AS",
+        returns=[{"median": 100.0, "mad": 5.0, "n": 14}],
+    )
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _make_anomaly_only_candidates()
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    # Real two-query handling → always-passes drop, NOT the stub.
+    assert decision.reason == "always-passes"
+    assert "US-011 pending" not in decision.why
+    assert "two-query split not yet wired" not in decision.why
     fake.assert_all_expectations_met()

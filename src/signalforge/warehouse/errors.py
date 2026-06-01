@@ -576,6 +576,45 @@ class MaterialisationNotSupportedError(WarehouseError):
         super().__init__(message, remediation=remediation)
 
 
+class StatsQueryNotSupportedError(WarehouseError):
+    """The :class:`WarehouseAdapter` ABC default impl of ``run_stats_query``
+    raises this; concrete adapters override the method to provide a real
+    implementation (#171 US-011).
+
+    ``run_stats_query`` is the vendor-neutral seam the prune layer uses to
+    execute the per-method anomaly stats query for the
+    ``row_count_anomaly_by_period`` variant. The query returns one (or per-DOW
+    many) rows of statistical numbers, NOT a failing-rows count — so
+    :meth:`run_test_sql`'s ``SELECT COUNT(*) FROM (...) AS t`` wrap is the
+    wrong shape. v0.3 ships the BigQuery override; non-BigQuery adapters
+    (Snowflake, Postgres) inherit the default raise until each grows its own
+    override.
+
+    Mirrors :class:`MaterialisationNotSupportedError` /
+    :class:`EstimateNotSupportedError` / :class:`RowCountNotSupportedError`:
+    the default raise IS the correct behaviour for an adapter that has not
+    grown the primitive yet — the prune engine catches this as any other
+    :class:`WarehouseError` and routes the anomaly test to
+    ``kept-without-evidence``, preserving the conservative-bias contract
+    (we never silently drop a test we cannot evaluate).
+
+    Tier-3 in the CLI exit-code taxonomy via inheritance from
+    :class:`WarehouseError`.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Use a warehouse adapter with run_stats_query support (BigQuery in "
+        "v0.3), drop the row_count_anomaly_by_period candidate from your "
+        "drafted schema, or wait for this adapter to grow a run_stats_query "
+        "override."
+    )
+
+    def __init__(self, adapter_name: str, *, remediation: str | None = None) -> None:
+        self.adapter_name = adapter_name
+        message = f"Adapter {_format_value(adapter_name)} does not support stats-query execution."
+        super().__init__(message, remediation=remediation)
+
+
 class RowCountNotSupportedError(WarehouseError):
     """The :class:`WarehouseAdapter` ABC default impl of ``get_row_count``
     raises this; concrete adapters override the method to provide a real
@@ -629,6 +668,7 @@ __all__ = [
     "RowCountNotSupportedError",
     "SamplingError",
     "SamplingRequiresPartitionFilterError",
+    "StatsQueryNotSupportedError",
     "TableNotFoundError",
     "UnknownTableSizeError",
     "UnsupportedAuthMethodError",

@@ -186,6 +186,7 @@ from signalforge.warehouse import (
     RowCountNotSupportedError,
     SamplingError,
     SamplingRequiresPartitionFilterError,
+    StatsQueryNotSupportedError,
     TableNotFoundError,
     UnknownTableSizeError,
     UnsupportedAuthMethodError,
@@ -484,6 +485,12 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # its own ``prune.scope: full`` remediation. External-dep tier, like
     # the sibling ``*NotSupportedError`` adapter-capability signals.
     RowCountNotSupportedError: 3,
+    # Stats-query seam (issue #171 / US-011): the active adapter does not
+    # support the ``run_stats_query`` primitive the prune engine uses for
+    # the ``row_count_anomaly_by_period`` variant (any non-BigQuery
+    # adapter in v0.3). External-dep tier, like the sibling
+    # ``*NotSupportedError`` adapter-capability signals.
+    StatsQueryNotSupportedError: 3,
     # Audit-write durability across every fail-closed seam — when any of
     # these fire the disk hand-off didn't happen, which is an external-dep
     # state we couldn't recover.
