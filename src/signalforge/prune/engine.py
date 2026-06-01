@@ -255,6 +255,81 @@ def _validate_trusted_models(config: PruneConfig, manifest: Manifest) -> None:
             raise PruneTrustedModelNotFoundError(unique_id=unique_id)
 
 
+def _test_requires_source_table(
+    test: CandidateTest,
+    sample_strategy: str | None,
+) -> bool:
+    """Return ``True`` when ``test`` is a metadata-aggregate variant that
+    MUST be evaluated against the source production table (never a
+    sampled / materialised temp table) under the given sample strategy.
+
+    Per #171 DEC-009 / DEC-010 — the single source of truth for the
+    per-variant bypass routing the engine consults at BOTH the
+    ``all_bypass_to_source`` short-circuit AND the per-test
+    ``per_test_table_ref`` override. Centralises the rule so a future
+    metadata-aggregate variant lands in ONE place, and the two engine
+    sites can never drift out of lockstep.
+
+    Behaviour matrix (DEC-010):
+
+      +-----------------------------------------+-----------------+----------+-----------+
+      | Variant                                 | ``materialised``| ``oneshot``| ``None``  |
+      +-----------------------------------------+-----------------+----------+-----------+
+      | :class:`CandidateTestRowCountAnomaly`   | True            | True     | False     |
+      | :class:`CandidateTestRowCountBetween`   | True            | True     | False     |
+      | :class:`CandidateTestUniqueCombination` | True            | True     | False     |
+      | every other variant                     | False           | False    | False     |
+      +-----------------------------------------+-----------------+----------+-----------+
+
+    Rationale:
+      * **row_count_between / row_count_anomaly_by_period** —
+        ``COUNT(*)`` against a sampled table returns the sample size,
+        not the model's true row count. Any bound / anomaly check is
+        meaningless on a sampled COUNT.
+      * **unique_combination** — composite uniqueness on a bucket-mod'd
+        subset has false-negative risk; a duplicate pair may straddle
+        the sampled and unsampled rows, so a sample-mode verdict carries
+        false-negative risk.
+
+    ``sample_strategy=None`` represents "no sampling at all" (the
+    engine's prune ``scope="full"`` path, where ``compile_table_ref``
+    already resolves to the source). In that case there is no temp
+    table to bypass and the helper returns ``False`` for every variant
+    — the per-test override becomes a no-op, preserving byte-equal
+    routing on the scope=full code path.
+
+    **DEC-010 codification (behaviour change for #169 + #170 under
+    ``oneshot``).** Pre-#171, the inline ``isinstance`` checks at both
+    engine sites fired regardless of strategy — semantically correct for
+    the ``materialised`` path, structurally aligned (but never explicitly
+    pinned by a sample_strategy-gated test) for the ``oneshot`` path.
+    Centralising the rule here makes the ``oneshot`` bypass an explicit
+    contract rather than emergent behaviour; a future change to the
+    per-test override that accidentally narrowed the gate would now
+    fail loud against the unit tests of THIS helper.
+
+    Adding a future metadata-aggregate variant: extend the
+    ``isinstance(...)`` tuple here AND add a row to the matrix
+    docstring above. No other engine edit is required — both sites
+    consult the helper. The compiler-arm + ``_common.artifact_id`` +
+    diff-emitter + ingest dispatch sites still need their own arm
+    (see ``.claude/rules/business-rule-tests.md`` § "The 6 production
+    dispatch sites") — this helper covers the prune-engine arm only.
+    """
+    if sample_strategy is None:
+        # ``scope="full"`` — no sampling; ``compile_table_ref`` already
+        # resolves to source. No bypass needed.
+        return False
+    return isinstance(
+        test,
+        (
+            CandidateTestRowCountAnomalyByPeriod,
+            CandidateTestRowCountBetween,
+            CandidateTestUniqueCombination,
+        ),
+    )
+
+
 def _iter_candidate_tests(
     candidates: CandidateSchema,
 ) -> list[tuple[str, CandidateTest]]:
@@ -1015,23 +1090,28 @@ def prune_tests(
         compile_partition_filter = resolved_config.partition_filter
 
         # CodeRabbit #176 fix (Thread PRRT_kwDOSNbUmM6F_w2h): when every
-        # candidate is ``row_count_between`` or ``unique_combination``,
+        # candidate is a metadata-aggregate variant (``row_count_between``
+        # / ``unique_combination`` / ``row_count_anomaly_by_period``),
         # the per-test override below routes all of them to
-        # ``source_table_ref`` regardless of scope/strategy. Skip the
-        # materialise_sample call AND the _resolve_sample_bucket call —
-        # both are wasted work in this case, and either failing on the
-        # adapter would spuriously route every test to
-        # ``kept-without-evidence`` even though they could have run
-        # directly against the source. Mirrors the empty-candidate
-        # short-circuit (#105) at a lower-tier: same "no warehouse
-        # pre-work needed" reasoning, narrower trigger. ``unique_combination``
-        # joins the bypass set in #170 US-005b / DEC-006 — composite
-        # uniqueness on a sample carries false-negative risk (a duplicate
-        # pair may straddle the sampled and unsampled rows) so always-source
-        # is the honest routing.
+        # ``source_table_ref``. Skip the ``materialise_sample`` call AND
+        # the ``_resolve_sample_bucket`` call — both are wasted work in
+        # this case, and either failing on the adapter would spuriously
+        # route every test to ``kept-without-evidence`` even though they
+        # could have run directly against the source. Mirrors the
+        # empty-candidate short-circuit (#105) at a lower-tier: same
+        # "no warehouse pre-work needed" reasoning, narrower trigger.
+        #
+        # The bypass predicate is centralised in
+        # :func:`_test_requires_source_table` (#171 DEC-009 / DEC-010) so
+        # this site and the per-test ``per_test_table_ref`` override
+        # below stay in lockstep. Under ``scope="full"`` the helper
+        # receives ``sample_strategy=None`` and returns ``False`` for
+        # every variant — the short-circuit is dormant on the full path
+        # (compile_table_ref already resolves to source), preserving the
+        # ``else`` branch's byte-equal routing.
+        bypass_strategy: str | None = resolved_config.sample_strategy if scope == "sample" else None
         all_bypass_to_source = bool(pairs) and all(
-            isinstance(test, (CandidateTestRowCountBetween, CandidateTestUniqueCombination))
-            for _, test in pairs
+            _test_requires_source_table(test, bypass_strategy) for _, test in pairs
         )
 
         if all_bypass_to_source:
@@ -1153,24 +1233,38 @@ def prune_tests(
                 decisions.append(decision)
                 continue
 
-            # Per-test table-ref override for ``row_count_between`` (#169
-            # US-007a QG fix; DEC-003 corrected) and ``unique_combination``
-            # (#170 US-005b / DEC-006). A COUNT(*) against a materialised
-            # sample returns the sample size, NOT the model's true row count
-            # — bounds checked against sample size are semantically
-            # meaningless. Composite uniqueness on a bucket-mod'd subset
-            # carries false-negative risk because a duplicate pair may
-            # straddle the sampled and unsampled rows. Route both variants
-            # past the materialised substitution to ``source_table_ref`` so
-            # the verdict is correct at the default config
-            # (``scope=sample`` + ``sample_strategy=materialised``). The
-            # aggregate scan against the source remains bounded by
-            # ``maximum_bytes_billed``. All other variants continue to
-            # consume the substituted ``compile_table_ref`` per the #22
-            # materialised-sample contract.
+            # Per-test table-ref override for metadata-aggregate variants
+            # (``row_count_between`` — #169 US-007a QG fix / DEC-003
+            # corrected; ``unique_combination`` — #170 US-005b / DEC-006;
+            # ``row_count_anomaly_by_period`` — #171 DEC-010). A COUNT(*)
+            # / MAX / aggregate against a sampled or materialised temp
+            # returns figures derived from the sample, NOT the model's
+            # true row count — any bound / anomaly verdict is meaningless.
+            # Composite uniqueness on a bucket-mod'd subset has
+            # false-negative risk because a duplicate pair may straddle
+            # the sampled and unsampled rows. Route every metadata-
+            # aggregate variant past the substitution to
+            # ``source_table_ref`` so the verdict is correct at the
+            # default config (``scope=sample`` +
+            # ``sample_strategy=materialised``) AND under
+            # ``sample_strategy=oneshot``. The aggregate scan against the
+            # source remains bounded by ``maximum_bytes_billed``. All
+            # other variants continue to consume the substituted
+            # ``compile_table_ref`` per the #22 materialised-sample
+            # contract.
+            #
+            # The predicate lives in :func:`_test_requires_source_table`
+            # (#171 DEC-009 / DEC-010) — single source of truth shared
+            # with the ``all_bypass_to_source`` short-circuit above. The
+            # two sites must agree at runtime; the helper guarantees
+            # they cannot drift. Under ``scope="full"`` the helper
+            # receives ``sample_strategy=None`` and returns ``False`` for
+            # every variant: the override becomes a no-op and
+            # ``per_test_table_ref = compile_table_ref = source_table_ref``
+            # (byte-equal pre-#171 routing on the full path).
             per_test_table_ref = (
                 source_table_ref
-                if isinstance(test, (CandidateTestRowCountBetween, CandidateTestUniqueCombination))
+                if _test_requires_source_table(test, bypass_strategy)
                 else compile_table_ref
             )
 
