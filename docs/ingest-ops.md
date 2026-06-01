@@ -327,6 +327,64 @@ other `dbt_expectations` shapes is a follow-up (tracked separately
 under #154 for prune+grade-only adapters that consume the compiled
 test SQL rather than rebuilding to a typed variant).
 
+## Recognition of `dbt_utils.unique_combination_of_columns`
+
+As of issue #170, the parser **promotes**
+`dbt_utils.unique_combination_of_columns` from a generic
+`SkippedTest(reason="custom-or-generic-test")` to the typed
+`CandidateTestUniqueCombination` variant — the same variant the drafter
+produces (see
+[`docs/draft-ops.md`](draft-ops.md#composite-uniqueness-unique_combination)).
+This closes the second leg of the structured-ingest story #169 started
+with `expect_table_row_count_to_be_between`: `prune-existing` against
+a hand-authored `schema.yml` that declares the dbt-utils macro now
+prunes the declaration through the warehouse alongside drafted
+candidates, instead of skipping it as "we don't know how to evaluate
+this." Operators running `prune-existing` against an existing
+`dbt_utils.unique_combination_of_columns` corpus get the same kept /
+dropped / flagged signal SignalForge produces for its own drafts.
+
+**Inbound mapping** (DEC-008 of #170). The macro's body fields map to
+the variant's Pydantic field names:
+
+| `unique_combination_of_columns` field | `CandidateTestUniqueCombination` field |
+|---|---|
+| `combination_of_columns` | `columns` |
+| `where` | `where` |
+
+The mapping is inverted by the diff emitter on the outbound path
+(`columns` → `combination_of_columns`), so an ingested declaration
+round-trips to the same dbt-utils YAML on re-emit. Match the
+`expect_table_row_count_to_be_between` precedent above: prefix-free
+Pydantic field names, naming-seam translation in two functions, one
+each side of ingest+diff.
+
+**Skip-recorded shapes.** The parser routes the macro to
+`SkippedTest(reason="malformed-supported-test")` — the closest fit
+under the closed 3-value `SkipReason` literal — when:
+
+- `combination_of_columns` is missing or not a list;
+- the list is empty or has fewer than 2 entries (single-column
+  uniqueness is the existing `unique` test type, not this variant);
+- any list item is not a string;
+- the list contains duplicate column names;
+- `where` is set but isn't a string;
+- the macro is declared **column-scoped** rather than model-level
+  (composite uniqueness is a table-level property; a `column:` slot on
+  the variant doesn't make sense).
+
+The `SkipReason` literal stays closed at three values — recognising the
+macro is a parser-arm change, not a literal change (DEC-013 of #116
+generalised).
+
+**Other `dbt_utils.*` macros are unchanged.** The promotion is narrow
+— exactly `dbt_utils.unique_combination_of_columns` matches. Every
+other macro in the `dbt_utils` namespace (`expression_is_true`,
+`relationships_where`, `recency`, etc.) continues to skip-record as
+`SkipReason="custom-or-generic-test"`. Extending recognition to other
+`dbt_utils` shapes is the same follow-up tracked for `dbt_expectations`
+under #154.
+
 ## Safety posture
 
 Two attack surfaces, both mitigated before any parse:
