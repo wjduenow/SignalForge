@@ -1318,8 +1318,18 @@ def _render_anomaly_today_cte(
     )
     where_pred = today_pred if where is None else f"{today_pred} AND {where}"
     if include_dow:
-        dow_expr = dialect.extract_dow_expr_template.format(date=date_column_quoted)
-        select_list = f"COUNT(*) AS cnt, MAX({dow_expr}) AS dow"
+        # #171 CodeRabbit finding #13 (zero-row seasonal bug): derive ``dow``
+        # from the anchored ``as_of`` LITERAL — NOT from the filtered table
+        # rows. Why: when today's period is empty, ``COUNT(*)`` is ``0`` but
+        # ``MAX(EXTRACT(DOW FROM <col>))`` is ``NULL`` (no rows to extract
+        # from). The downstream ``stats.dow = today.dow`` JOIN then drops
+        # every stats row (NULL-comparison) and the test silently passes —
+        # even though a zero-count period IS itself a meaningful anomaly to
+        # surface (catastrophic load failure). Anchoring the DOW computation
+        # on the ``as_of`` literal makes it a compile-time constant; the
+        # band check fires correctly when the period contains zero rows.
+        dow_expr = dialect.extract_dow_expr_template.format(date=as_of_literal)
+        select_list = f"COUNT(*) AS cnt, {dow_expr} AS dow"
     else:
         select_list = "COUNT(*) AS cnt"
     return f"today AS (SELECT {select_list} FROM {table_sql} WHERE {where_pred})"
@@ -1558,6 +1568,22 @@ def _compile_row_count_anomaly_by_period(
             reason=(
                 "candidate test references an invalid identifier shape: "
                 f"date_column={test.date_column!r}"
+            )
+        )
+
+    # #171 CodeRabbit finding #12: ``period="hour"`` with a ``date``-typed
+    # ``as_of`` emits ``DATE_TRUNC(DATE '<...>', HOUR)`` which is INVALID
+    # on BigQuery (DATE_TRUNC of DATE only accepts year/month/week/day
+    # granularity; HOUR requires DATETIME/TIMESTAMP). Snowflake accepts but
+    # returns TIMESTAMP semantics that diverge from the day-anchored as_of.
+    # Route to ``kept-without-evidence`` per the conservative-bias contract
+    # until a future ticket lets ``as_of`` be a ``datetime``.
+    if test.period == "hour":
+        return _InvalidIdentifier(
+            reason=(
+                "row_count_anomaly_by_period with period='hour' requires a "
+                "datetime-typed as_of which is not yet supported "
+                "(v0.x ships day/week only — see docs/prune-ops.md)"
             )
         )
 

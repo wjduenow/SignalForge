@@ -2358,15 +2358,62 @@ def test_singular_test_sql_band_predicate_per_method_non_seasonal(
 @pytest.mark.parametrize("method", ["mad", "zscore", "percentile", "min_max"])
 def test_singular_test_sql_seasonal_joins_today_dow_against_stats(method: str) -> None:
     """Seasonal singular-test SQL JOINs today's DOW against the per-DOW
-    stats so the band check fires only for today's DOW row."""
+    stats so the band check fires only for today's DOW row. Per #171
+    CodeRabbit finding #13, the today CTE derives ``dow`` from the
+    anchored ``as_of`` literal (NOT from the filtered rows via
+    ``MAX(EXTRACT(...))``) so the zero-row anomaly case still surfaces:
+    when today's period is empty, the band check on the cnt=0 row
+    still fires against the per-DOW band rather than dropping out at
+    the NULL-dow JOIN."""
     test = _make_anomaly_test(method=method, seasonality="dow")
     sql = _compile_anomaly_singular_test_sql(
         test, _make_orders_table_ref(), BIGQUERY_DIALECT, as_of=_ANOMALY_AS_OF
     )
-    # Seasonal: today CTE also projects MAX(DOW) and the WHERE joins.
-    assert "MAX(EXTRACT(DAYOFWEEK FROM" in sql
+    # The DOW is derived from the as_of LITERAL, not from MAX over the
+    # filtered rows (the bug CodeRabbit caught at #13).
+    assert "MAX(EXTRACT(" not in sql, (
+        "today CTE must NOT derive dow via MAX(EXTRACT(...FROM <col>)) — "
+        "MAX is NULL on a zero-row period and the downstream "
+        "stats.dow = today.dow JOIN then silently drops the anomaly. "
+        "Derive dow from the anchored as_of literal instead (#171 CR finding #13)."
+    )
+    # Anchored DOW expression: EXTRACT applied to the as_of literal.
+    # For period=day on BigQuery this renders as EXTRACT(DAYOFWEEK FROM DATE('2026-05-01')).
+    assert "EXTRACT(DAYOFWEEK FROM DATE('2026-05-01'))" in sql
     assert "stats.dow = today.dow" in sql
     assert "stats.dow AS dow" in sql
+
+
+def test_singular_test_sql_seasonal_dow_is_stable_for_empty_today_period() -> None:
+    """Regression for #171 CodeRabbit finding #13: when today's period
+    contains zero rows, the today CTE's ``dow`` must still be the
+    anchored DOW (from ``as_of``), NOT NULL. The pre-fix shape used
+    ``MAX(EXTRACT(... FROM date_column))`` which is NULL on an empty
+    period → JOIN failure → silent pass even when zero rows IS the
+    anomaly (catastrophic load failure). This test verifies the
+    compiled SQL has NO column reference inside the EXTRACT — it's
+    derived purely from the anchored literal, making it a compile-time
+    constant per emitted SQL."""
+    test = _make_anomaly_test(method="mad", seasonality="dow")
+    sql = _compile_anomaly_singular_test_sql(
+        test, _make_orders_table_ref(), BIGQUERY_DIALECT, as_of=_ANOMALY_AS_OF
+    )
+    # Isolate the today CTE's SELECT-list (between "today AS (SELECT "
+    # and the first " FROM " that closes the projection). Counting on
+    # ``)`` doesn't work because ``COUNT(*)`` has its own paren.
+    after_today = sql.split("today AS (SELECT ", 1)[1]
+    today_select = after_today.split(" FROM ", 1)[0]
+    assert "EXTRACT(" in today_select, (
+        "expected today CTE SELECT to project an EXTRACT of the as_of literal; "
+        f"got: {today_select!r}"
+    )
+    # The date_column ``event_date`` must NOT appear in the SELECT list
+    # (it would yield NULL on a zero-row period). It DOES appear in the
+    # WHERE clause downstream — that's fine; we only check the SELECT.
+    assert "event_date" not in today_select, (
+        "today CTE SELECT must NOT reference the date_column "
+        f"(would yield NULL on a zero-row period); got: {today_select!r}"
+    )
 
 
 def test_singular_test_sql_uses_period_truncated_as_of_for_week() -> None:
@@ -2448,3 +2495,25 @@ def test_singular_test_sql_snowflake_dialect_uses_dialect_fragments() -> None:
     assert "'2026-05-01'::DATE" in sql
     assert "INTERVAL '28 DAY'" in sql
     assert "DATE_TRUNC('DAY'," in sql
+
+
+def test_compile_row_count_anomaly_period_hour_returns_invalid_identifier() -> None:
+    """Per #171 CodeRabbit finding #12: BigQuery rejects
+    ``DATE_TRUNC(DATE '...', HOUR)`` (DATE_TRUNC of DATE only accepts
+    year/month/week/day; HOUR requires DATETIME/TIMESTAMP). With a
+    ``date``-typed ``as_of`` the period=hour case cannot emit valid
+    SQL; route through ``_InvalidIdentifier`` → ``kept-without-evidence``
+    per the conservative-bias contract. v0.x ships day/week only.
+    """
+    test = _make_anomaly_test(method="mad", seasonality="none", period="hour")
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, _InvalidIdentifier), (
+        f"expected _InvalidIdentifier for period='hour'; got {type(result).__name__}"
+    )
+    assert "period='hour'" in result.reason

@@ -68,6 +68,8 @@ from signalforge.draft.models import (
 from signalforge.manifest.models import Model
 from signalforge.prune import PruneResult
 from signalforge.prune.compiler import _compile_anomaly_singular_test_sql
+from signalforge.warehouse._sql_safety import validate_identifier, validate_test_sql
+from signalforge.warehouse.errors import InvalidIdentifierError, QuerySyntaxError
 from signalforge.warehouse.models import BIGQUERY_DIALECT, Dialect, TableRef
 
 # Sentinel returned by :func:`_render_test` for a ``custom_sql`` test —
@@ -459,9 +461,33 @@ def emit_proposed_test_files(
             # non-empty day. ``_compile_anomaly_singular_test_sql`` returns
             # the full band-check shape (stats CTEs + today CTE + WHERE
             # predicate on the band violation).
+            #
+            # Per #171 CodeRabbit finding #11 — this emission path bypasses
+            # the engine-side ``_compile_row_count_anomaly_by_period``
+            # dispatcher and therefore skips its safety checks. Re-run the
+            # SAME ``validate_identifier`` + ``validate_test_sql`` gates
+            # here so a hostile ``where`` clause or malformed ``date_column``
+            # cannot land in operator-shipped dbt SQL. On failure: skip
+            # emission silently (the test still landed as kept in the
+            # PruneResult — the engine's compile arm separately wraps the
+            # failure via ``_InvalidIdentifier`` → kept-without-evidence).
+            # Skipping at the emitter is the right call: a kept-uncertain
+            # test should not auto-write to the operator's repo with
+            # unsafe SQL.
+            try:
+                validate_identifier(
+                    "CandidateTestRowCountAnomalyByPeriod.date_column",
+                    test.date_column,
+                )
+            except InvalidIdentifierError:
+                continue
             sql_body = _compile_anomaly_singular_test_sql(
                 test, table_ref, dialect, as_of=resolved_as_of
             )
+            try:
+                validate_test_sql(sql_body)
+            except QuerySyntaxError:
+                continue
         else:
             continue
         args_hash = _shared_args_hash(test)

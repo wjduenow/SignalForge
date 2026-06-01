@@ -1237,3 +1237,42 @@ def test_emit_proposed_test_files_anomaly_alongside_custom_sql() -> None:
     custom_hash = model_test_args_hash(custom)
     assert f"tests/orders__row_count_anomaly_by_period_{anomaly_hash}.sql" in paths
     assert f"tests/orders__custom_sql_{custom_hash}.sql" in paths
+
+
+def test_emit_proposed_test_files_anomaly_skips_hostile_where_clause() -> None:
+    """Per #171 CodeRabbit finding #11: the emitter must re-run the
+    compiler's safety checks (``validate_identifier`` + ``validate_test_sql``)
+    before writing the singular-test SQL to disk. Without this, a kept
+    anomaly decision whose ``where`` clause was crafted to break out of
+    the SELECT context (stray ``;``, ``--`` comment-out, unbalanced parens)
+    could land in operator-shipped dbt SQL. Skipping at the emitter is the
+    right call: the engine separately routes the case to
+    kept-without-evidence via _InvalidIdentifier; the emitter just refuses
+    to write the broken SQL.
+
+    Defensive test — a ``where`` containing a stray ``;`` is the smallest
+    payload that trips ``validate_test_sql``. Real-world adversarial input
+    would be more elaborate; the gate's job is to refuse anything that
+    fails the same checks the engine ran.
+    """
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="ordered_at",
+        where="status = 'a'; DROP TABLE orders --",
+    )
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="when"),),
+        tests=(test,),
+    )
+    result = _result(_decision(test, test_anchor="model"))
+    model = _orders_model_for_anomaly()
+
+    files = emit_proposed_test_files(candidate, result, model=model, as_of=date(2026, 5, 30))
+
+    # The hostile-where test was kept in the prune result but the emitter
+    # MUST refuse to write its SQL to disk (validate_test_sql trips).
+    assert files == (), (
+        "emitter should skip emission when validate_test_sql rejects the "
+        "compiled SQL (hostile where clause)"
+    )
