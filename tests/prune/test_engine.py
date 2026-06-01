@@ -3807,6 +3807,116 @@ def test_prune_tests_unique_combination_under_scope_full_references_source(
     fake.assert_all_expectations_met()
 
 
+def test_prune_tests_mixed_candidates_per_test_override_routes_unique_combination_to_source(
+    tmp_path: Path,
+) -> None:
+    """#170 US-005b / QG Pass 3 finding — when a candidate list contains a
+    MIX of variants (one bypassing, one not), the engine's
+    ``all_bypass_to_source`` short-circuit at ``engine.py`` MUST NOT fire,
+    and the per-test ``per_test_table_ref`` override must route each test
+    individually. This pins the second of the two-conditional pattern
+    US-005b discovered.
+
+    Without this test, dropping ``CandidateTestUniqueCombination`` from the
+    per-test override (engine.py ``per_test_table_ref`` arm) while leaving
+    it in ``all_bypass_to_source`` would PASS the single-variant pin above
+    silently (because the short-circuit catches the all-``unique_combination``
+    case before the per-test branch fires). The mixed candidate exercises
+    the per-test arm directly — the two sites are conceptually independent
+    and need independent coverage.
+
+    Mixed shape: one column-scoped ``not_null`` on ``id`` (does NOT bypass —
+    routes to the materialised sample temp table) plus one model-level
+    ``unique_combination(columns=("id", "customer_id"))`` (bypasses — routes
+    to the source). Two compile queries, two distinct routings, one fake
+    expectation pair each.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    # NOT bypassed: ``not_null`` requires the sample to be materialised.
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    # Two per-test compile queries — order is candidate iteration order:
+    # column-scoped ``not_null`` first (against sample), then model-level
+    # ``unique_combination`` (against source).
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    # The engine builds the abort-session id from its own deterministic
+    # `_sf_sample_*` hash (not the fake's returned ref), so use the fake's
+    # session-id-from-returns convention rather than pinning a specific
+    # hex string — the load-bearing claim is that abort_session fires,
+    # not which specific session id.
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    # Construct the mixed candidate schema manually — column-scoped not_null
+    # PLUS model-level unique_combination on the same CandidateSchema.
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(CandidateTestUniqueCombination(columns=("id", "customer_id")),),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 2
+    # Find each decision by test type so the assertion does not rely on
+    # iteration order (which is an implementation detail of the engine's
+    # per-test loop).
+    by_type = {d.test.type: d for d in result.decisions}
+    assert {"not_null", "unique_combination"} <= set(by_type)
+
+    not_null_sql = by_type["not_null"].compiled_sql
+    uc_sql = by_type["unique_combination"].compiled_sql
+
+    # ``not_null`` routes to the MATERIALISED SAMPLE temp table — does NOT
+    # bypass. The compiled SQL references the temp table by the
+    # ``_SESSION._sf_sample_<run_id>`` shape; the specific run_id is the
+    # engine's deterministic hash (independent of the fake's returns), so
+    # pin the prefix that proves the temp routing, not the suffix.
+    assert "_SESSION._sf_sample_" in not_null_sql
+    # And the source table MUST NOT appear at table-position in the
+    # not_null SQL — otherwise the engine routed it past the substitution.
+    assert "fake_project.dataset.orders" not in not_null_sql
+
+    # ``unique_combination`` routes to the SOURCE table (per-test override).
+    # The compiled SQL must reference the source qualified name AND NOT
+    # the temp table — load-bearing regression detector for the per-test arm.
+    assert "fake_project.dataset.orders" in uc_sql
+    assert "_SESSION._sf_sample_" not in uc_sql
+
+    fake.assert_all_expectations_met()
+
+
 def test_drop_reason_literal_still_exactly_five_values() -> None:
     """DEC-011 of #169 — closed-set lockdown.
 

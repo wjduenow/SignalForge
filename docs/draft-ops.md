@@ -285,19 +285,24 @@ collapse to nothing, so an empty `meta` value emits no section.
 As of #163, each rule renders inside a numbered envelope rather than a
 bare bullet:
 
-```text
-## BUSINESS RULES
+<!-- Indented (not fenced) code block: a literal ATX `##` inside a
+mkdocs-rendered fence is still parsed as a heading by mkdocs's anchor
+generator, which silently breaks every H2 anchor downstream of this
+block (verified: 14 of 20 H2s in this doc went un-rendered before the
+indented-block switch — covers row_count_between and unique_combination
+inbound cross-doc links). The indented form defeats the heading scan. -->
 
-Operator-supplied business rules for this model. Draft one custom_sql
-test per rule below, using the rule ID as a reference:
+    ## BUSINESS RULES
 
-<BUSINESS_RULE id="1">
-  (model) total_amount must never be negative
-</BUSINESS_RULE>
-<BUSINESS_RULE id="2">
-  (column discount_pct) discount_pct stays between 0 and 100 inclusive
-</BUSINESS_RULE>
-```
+    Operator-supplied business rules for this model. Draft one custom_sql
+    test per rule below, using the rule ID as a reference:
+
+    <BUSINESS_RULE id="1">
+      (model) total_amount must never be negative
+    </BUSINESS_RULE>
+    <BUSINESS_RULE id="2">
+      (column discount_pct) discount_pct stays between 0 and 100 inclusive
+    </BUSINESS_RULE>
 
 IDs start at 1; bodies are indented 2 spaces and carry the existing
 `(model)` / `(column X)` scope prefix. The envelope gives the LLM

@@ -574,3 +574,65 @@ def test_candidate_test_repr_redaction_holds_under_ansi_injection() -> None:
     assert "EVIL_ANSI" not in rendered
     assert "EVIL_RAT" not in rendered
     assert "\x1b" not in rendered
+
+
+def test_candidate_test_repr_args_redacted_for_rich_pretty_hooks() -> None:
+    """QG Pass 1 finding C1: Pydantic v2's ``__rich_repr__()`` /
+    ``__pretty__()`` reach through ``__repr_args__()`` rather than ``repr()``,
+    so a custom ``__repr__`` alone leaves the redacted fields visible to
+    ``rich.print()`` / ``devtools.pretty()`` / structured-debug tooling.
+    DEC-013's "closes the latent log-hygiene gap" intent requires the
+    structured hook to be filtered too. Pinned across all three redacting
+    variants (CustomSQL / RowCountBetween / UniqueCombination)."""
+
+    # CandidateTestCustomSQL — redacts sql + rationale via __repr_args__
+    sql_test = CandidateTestCustomSQL(
+        sql="SELECT SECRET_SQL FROM t",
+        column="x",
+        rationale="SECRET_CUSTOMSQL_RAT",
+    )
+    sql_args = list(sql_test.__repr_args__())
+    sql_args_str = repr(sql_args)
+    assert "SECRET_SQL" not in sql_args_str
+    assert "SECRET_CUSTOMSQL_RAT" not in sql_args_str
+    safe_fields = {name for name, _ in sql_args}
+    assert "sql" not in safe_fields
+    assert "rationale" not in safe_fields
+    assert "type" in safe_fields
+    assert "column" in safe_fields
+
+    # CandidateTestRowCountBetween — redacts where + rationale
+    rcb_test = CandidateTestRowCountBetween(
+        minimum=1,
+        maximum=10,
+        where="SECRET_RCB_WHERE",
+        rationale="SECRET_RCB_RAT",
+    )
+    rcb_args = list(rcb_test.__repr_args__())
+    rcb_args_str = repr(rcb_args)
+    assert "SECRET_RCB_WHERE" not in rcb_args_str
+    assert "SECRET_RCB_RAT" not in rcb_args_str
+    rcb_safe = {name for name, _ in rcb_args}
+    assert "where" not in rcb_safe
+    assert "rationale" not in rcb_safe
+    assert {"type", "column", "minimum", "maximum"} <= rcb_safe
+
+    # CandidateTestUniqueCombination — redacts where + rationale; columns visible
+    uc_test = CandidateTestUniqueCombination(
+        columns=("a", "b"),
+        where="SECRET_UC_WHERE",
+        rationale="SECRET_UC_RAT",
+    )
+    uc_args = list(uc_test.__repr_args__())
+    uc_args_str = repr(uc_args)
+    assert "SECRET_UC_WHERE" not in uc_args_str
+    assert "SECRET_UC_RAT" not in uc_args_str
+    uc_safe = {name for name, _ in uc_args}
+    assert "where" not in uc_safe
+    assert "rationale" not in uc_safe
+    assert {"type", "column", "columns"} <= uc_safe
+
+    # And model_dump_json() still carries the secrets (serialisation unchanged)
+    assert "SECRET_SQL" in sql_test.model_dump_json()
+    assert "SECRET_RCB_WHERE" in rcb_test.model_dump_json()
+    assert "SECRET_UC_WHERE" in uc_test.model_dump_json()

@@ -140,6 +140,17 @@ window), daily/weekly rollups where a sudden empty day is a real signal,
 and monitoring-shaped reports. The prune engine evaluates via a failing-rows
 CTE wrapping a single `COUNT(*)` — cheap even on petabyte tables.
 
+**Sample-mode behaviour — engine routes past the materialised sample.** A
+`COUNT(*)` against a sampled relation returns the *sample size*, not the
+model's true row count, so a sample-mode verdict would be semantically
+wrong by construction. The prune engine's per-test loop routes
+`row_count_between` past the materialised-sample substitution back to the
+source table under both `prune.scope="sample"` strategies (`materialised`
+or `oneshot`). The same source-vs-temp pattern applies to
+`unique_combination` below (issue #170 extended both conditionals in
+lockstep). See [`docs/prune-ops.md` § `row_count_between`](prune-ops.md#row_count_between)
+for the engine routing.
+
 See [`docs/draft-ops.md` § Row-count tests](draft-ops.md#row-count-tests-row_count_between)
 for drafting; [`docs/prune-ops.md` § Row-count cost model](prune-ops.md#row-count-cost-model)
 for evaluation; [`docs/ingest-ops.md` § Recognition of `expect_table_row_count_to_be_between`](ingest-ops.md#recognition-of-expect_table_row_count_to_be_between)

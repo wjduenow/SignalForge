@@ -190,6 +190,18 @@ class CandidateTestCustomSQL(BaseModel):
         """
         return f"CandidateTestCustomSQL(type='custom_sql', {_scope_repr(self.column)})"
 
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        """Redact via Pydantic's structured-repr hook.
+
+        DEC-013 of #170 + QG Pass 1 finding C1: ``__repr__`` redacts the
+        ``%s``-interpolation path; ``__rich_repr__`` / ``__pretty__``
+        (rich.print() / devtools / pprint debug tooling) reach through
+        ``__repr_args__`` and would otherwise still see the redacted
+        fields. Filtering here closes the leak across all three surfaces
+        with one override.
+        """
+        return [("type", self.type), ("column", self.column)]
+
 
 class CandidateTestRowCountBetween(BaseModel):
     """A model-level row-count-bounds test (#169, DEC-001).
@@ -293,6 +305,18 @@ class CandidateTestRowCountBetween(BaseModel):
             f"minimum={self.minimum!r}, maximum={self.maximum!r})"
         )
 
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        """Redact via Pydantic's structured-repr hook (QG Pass 1 finding C1).
+
+        See :meth:`CandidateTestCustomSQL.__repr_args__` for rationale.
+        """
+        return [
+            ("type", self.type),
+            ("column", self.column),
+            ("minimum", self.minimum),
+            ("maximum", self.maximum),
+        ]
+
 
 class CandidateTestUniqueCombination(BaseModel):
     """A model-level multi-column-uniqueness test (#170, DEC-001).
@@ -383,6 +407,13 @@ class CandidateTestUniqueCombination(BaseModel):
             "CandidateTestUniqueCombination(type='unique_combination', "
             f"<model-level>, columns={self.columns!r})"
         )
+
+    def __repr_args__(self) -> list[tuple[str | None, Any]]:
+        """Redact via Pydantic's structured-repr hook (QG Pass 1 finding C1).
+
+        See :meth:`CandidateTestCustomSQL.__repr_args__` for rationale.
+        """
+        return [("type", self.type), ("column", self.column), ("columns", self.columns)]
 
 
 CandidateTest = Annotated[
