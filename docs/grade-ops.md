@@ -293,7 +293,7 @@ real out-of-bounds signal). For those kept tests the prune layer can't
 distinguish "the LLM picked `minimum=1` thoughtfully because the
 rollup truly should have at least one row per day" from "the LLM
 picked the lowest valid non-vacuous number to satisfy
-at-least-one-bound." That distinction is what the calibration prose
+at least one bound." That distinction is what the calibration prose
 teaches the judge to score.
 
 **Where the calibration lives.** As of #169, the existing
