@@ -102,9 +102,36 @@ class Dialect:
       the projection-subquery shape (emitted unquoted; Snowflake folds it
       consistently in both the projection and the ``EXCLUDE`` clause).
 
+    Five further fields (issue #171, DEC-011) describe **date arithmetic** and
+    **percentile** SQL forms for the v0.3 row-count-anomaly variant. Reserved
+    here at the dialect surface; the compiler arm that reads them lands in
+    US-008. None of the seven pre-#171 variants consume these fields, so
+    BigQuery snapshots remain byte-identical.
+
+    * ``date_trunc_expr_template`` — ``str.format(date=..., unit=...)`` template
+      for ``DATE_TRUNC``. **Argument order differs between dialects:** BigQuery
+      is ``DATE_TRUNC(date, unit)``; Snowflake is ``DATE_TRUNC('unit', date)``
+      (unit first, single-quoted literal). Format-named substitution sidesteps
+      the positional difference.
+    * ``interval_expr_template`` — ``str.format(n=..., unit=...)`` template for
+      an interval literal. BigQuery: ``INTERVAL n unit`` (bare). Snowflake:
+      ``INTERVAL 'n unit'`` (the whole interval is single-quoted).
+    * ``extract_dow_expr_template`` — ``str.format(date=...)`` template for the
+      day-of-week extraction. BigQuery uses the ``DAYOFWEEK`` part name;
+      Snowflake uses ``DOW``. Function shape is otherwise the same.
+    * ``dow_sunday_index`` — the integer the day-of-week extraction returns
+      for Sunday. BigQuery's ``DAYOFWEEK`` returns ``1`` for Sunday (1..7);
+      Snowflake's ``DOW`` returns ``0`` for Sunday (0..6) by default (the
+      session ``WEEK_START`` parameter can change Snowflake's basis; ``0`` is
+      the conservative default assumption).
+    * ``percentile_cont_expr_template`` — ``str.format(p=..., expr=...)``
+      template for ``PERCENTILE_CONT``. BigQuery and Snowflake share the
+      ``PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY expr)`` form; the field
+      exists for dialect parity and to anchor future Postgres variation.
+
     The defaults reproduce BigQuery's SQL byte-for-byte so every existing
     construction site stays valid unedited (DEC-001 of issue #121; DEC-001 of
-    issue #139).
+    issue #139; DEC-011 of issue #171).
     """
 
     name: str
@@ -119,6 +146,14 @@ class Dialect:
     sample_cte_alias: str = "sample"
     sample_hash_in_projection: bool = False
     sample_hash_alias: str = "_sf_sample_hash"
+    # Issue #171 DEC-011 — date arithmetic + percentile SQL forms for the
+    # row-count-anomaly variant. Reserved at the dialect surface in US-002;
+    # the compiler arm that reads them lands in US-008.
+    date_trunc_expr_template: str = "DATE_TRUNC({date}, {unit})"
+    interval_expr_template: str = "INTERVAL {n} {unit}"
+    extract_dow_expr_template: str = "EXTRACT(DAYOFWEEK FROM {date})"
+    dow_sunday_index: int = 1
+    percentile_cont_expr_template: str = "PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})"
 
 
 BIGQUERY_DIALECT = Dialect(
@@ -149,15 +184,21 @@ POSTGRES_DIALECT = Dialect(
 
 The five issue-#121 SQL-fragment fields (``sample_row_hash_expr``,
 ``timestamp_literal_template``, ``date_literal_template``,
-``quote_qualified_per_component``, ``sample_cte_alias``) keep their
-**BigQuery defaults** here because the Postgres adapter's warehouse ops are
-not implemented yet (the #53 stub raises ``NotImplementedError`` from every
-op method), so the prune compiler is never invoked for a Postgres profile.
-Most of these defaults are wrong for Postgres and will be corrected when the
-Postgres adapter's warehouse ops land (DEC-007 of issue #121): Postgres needs
+``quote_qualified_per_component``, ``sample_cte_alias``) AND the five
+issue-#171 fields (``date_trunc_expr_template``, ``interval_expr_template``,
+``extract_dow_expr_template``, ``dow_sunday_index``,
+``percentile_cont_expr_template``) keep their **BigQuery defaults** here
+because the Postgres adapter's warehouse ops are not implemented yet (the
+#53 stub raises ``NotImplementedError`` from every op method), so the prune
+compiler is never invoked for a Postgres profile. Most of these defaults are
+wrong for Postgres and will be corrected when the Postgres adapter's
+warehouse ops land (DEC-007 of issue #121; corrected in the Postgres-ops PR
+in the issue #53/118 family): Postgres needs
 ``quote_qualified_per_component=True`` (it quotes ``"schema"."table"`` per
-component) and the SQL-standard ``TIMESTAMP '...'`` / ``DATE '...'`` literal
-forms rather than BigQuery's ``TIMESTAMP(...)`` / ``DATE(...)`` function form.
+component), the SQL-standard ``TIMESTAMP '...'`` / ``DATE '...'`` literal
+forms rather than BigQuery's ``TIMESTAMP(...)`` / ``DATE(...)`` function
+form, and Postgres-specific date arithmetic (``EXTRACT(DOW FROM ...)``
+returning 0..6 with Sunday=0, ``INTERVAL '1 day'`` string-literal form).
 (``sample_cte_alias="sample"`` happens to be Postgres-correct already —
 ``SAMPLE`` is not reserved in Postgres, only ``TABLESAMPLE`` is.) Shipping
 knowingly-wrong-but-untested fragments now would be misleading.
@@ -180,6 +221,15 @@ SNOWFLAKE_DIALECT = Dialect(
     date_literal_template="'{value}'::DATE",
     quote_qualified_per_component=True,
     sample_hash_in_projection=True,
+    # Issue #171 DEC-011 — Snowflake overrides for the row-count-anomaly variant.
+    date_trunc_expr_template="DATE_TRUNC('{unit}', {date})",
+    interval_expr_template="INTERVAL '{n} {unit}'",
+    extract_dow_expr_template="EXTRACT(DOW FROM {date})",
+    # Snowflake's DOW returns 0..6 (0=Sun) by default; the session WEEK_START
+    # parameter can shift the basis, so 0 is the conservative assumption.
+    dow_sunday_index=0,
+    # PERCENTILE_CONT shape matches BigQuery — kept for parity / future Postgres.
+    percentile_cont_expr_template="PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})",
 )
 """Snowflake-flavoured :class:`Dialect` for the v0.2 adapter (issue #119, DEC-004).
 
@@ -207,6 +257,20 @@ SNOWFLAKE_DIALECT = Dialect(
   SELECT projection, so the deterministic-sample SELECT computes the hash in
   an inner projection and references the ``sample_hash_alias`` column in the
   outer clauses (issue #139, DEC-001/DEC-004).
+* ``date_trunc_expr_template="DATE_TRUNC('{unit}', {date})"`` — Snowflake's
+  argument order is ``(unit, date)`` with the unit as a single-quoted literal,
+  the **opposite** of BigQuery's ``(date, unit)``. Named substitution
+  (``str.format(date=..., unit=...)``) sidesteps the positional difference.
+* ``interval_expr_template="INTERVAL '{n} {unit}'"`` — the whole
+  ``n unit`` payload is single-quoted on Snowflake (vs. BigQuery's bare form).
+* ``extract_dow_expr_template="EXTRACT(DOW FROM {date})"`` — Snowflake's
+  day-of-week part name is ``DOW`` (BigQuery uses ``DAYOFWEEK``).
+* ``dow_sunday_index=0`` — Snowflake's ``DOW`` returns ``0`` for Sunday by
+  default (the session ``WEEK_START`` parameter can change the basis; ``0`` is
+  the conservative assumption). BigQuery's ``DAYOFWEEK`` returns ``1``.
+* ``percentile_cont_expr_template`` — same shape as BigQuery
+  (``PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY expr)``); the field exists
+  for parity and to anchor future Postgres variation.
 
 Lives alongside :data:`BIGQUERY_DIALECT` / :data:`POSTGRES_DIALECT` per
 DEC-003 so every dialect-aware consumer imports each flavour from one place
