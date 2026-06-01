@@ -390,6 +390,109 @@ def test_custom_sql_survives_when_only_standard_types_excluded() -> None:
 
 
 # ---------------------------------------------------------------------------
+# row_count_anomaly_by_period catalogue (issue #171, DEC-007)
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_advertises_row_count_anomaly_by_period_test_type() -> None:
+    """The JSON-shape illustration carries a ``row_count_anomaly_by_period``
+    entry (issue #171, DEC-007). The drafter reads this as an example shape."""
+    assert '"type": "row_count_anomaly_by_period"' in _SYSTEM_PROMPT
+
+
+def test_system_prompt_row_count_anomaly_illustrates_three_forms() -> None:
+    """DEC-007 (US-005) requires the catalogue entry illustrate three forms:
+    a bare-default call, a ``seasonality="dow"`` business-calendar form,
+    and an explicit ``method`` + ``threshold`` override form. Three
+    occurrences of the type literal — one per illustrated form."""
+    assert _SYSTEM_PROMPT.count('"type": "row_count_anomaly_by_period"') == 3
+    # The dow-seasonality form names ``seasonality``.
+    assert '"seasonality": "dow"' in _SYSTEM_PROMPT
+    # The override form names ``method`` and ``threshold``.
+    assert '"method": "percentile"' in _SYSTEM_PROMPT
+    assert '"threshold": 5.0' in _SYSTEM_PROMPT
+    # All three forms reference ``date_column``.
+    assert '"date_column"' in _SYSTEM_PROMPT
+
+
+def test_system_prompt_scope_teaches_incremental_fact_table_heuristic() -> None:
+    """US-005 prose: propose this variant when the projection includes
+    ``loaded_at`` / ``created_at`` / ``event_date`` / ``partition_date``
+    (incremental fact tables). Note the literal phrase ``incremental fact``
+    may be split across a newline (``incremental fact\\ntable``) by the
+    Python source-literal line wrap; search collapsed-whitespace text."""
+    collapsed = " ".join(_SYSTEM_PROMPT.split())
+    assert "incremental fact table" in collapsed
+    assert "loaded_at" in _SYSTEM_PROMPT
+    assert "created_at" in _SYSTEM_PROMPT
+    assert "event_date" in _SYSTEM_PROMPT
+    assert "partition_date" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_scope_teaches_dow_seasonality_heuristic() -> None:
+    """US-005 prose: propose ``seasonality="dow"`` when the SQL semantics
+    suggest a business-calendar grain."""
+    assert 'seasonality="dow"' in _SYSTEM_PROMPT
+    assert "business-calendar grain" in _SYSTEM_PROMPT
+
+
+def test_system_prompt_scope_documents_method_defaults() -> None:
+    """US-005 prose: default method is ``mad`` (robust to outlier history),
+    default threshold is ``3.0``, default ``lookback_periods=28``, default
+    ``min_samples_per_bucket=3``. Calibration prose helps the LLM pick when
+    to override the defaults. ``median absolute deviation`` may split across
+    a newline (``median\\nabsolute deviation``); search collapsed text."""
+    collapsed = " ".join(_SYSTEM_PROMPT.split())
+    assert '`method="mad"`' in _SYSTEM_PROMPT
+    assert "median absolute deviation" in collapsed
+    assert "threshold=3.0" in _SYSTEM_PROMPT
+    assert "lookback_periods" in _SYSTEM_PROMPT
+    assert "min_samples_per_bucket=3" in _SYSTEM_PROMPT
+
+
+def test_render_system_prompt_includes_row_count_anomaly_when_not_excluded() -> None:
+    """Default render (no exclusions) includes the
+    ``row_count_anomaly_by_period`` catalogue line (issue #171, DEC-007)."""
+    from signalforge.draft.prompts import _render_system_prompt
+
+    rendered = _render_system_prompt(())
+    assert '"type": "row_count_anomaly_by_period"' in rendered
+
+
+def test_render_system_prompt_excludes_row_count_anomaly_when_in_exclude_tests() -> None:
+    """``exclude_tests=("row_count_anomaly_by_period",)`` drops the
+    catalogue line AND removes ``row_count_anomaly_by_period`` from the
+    SCOPE phrase AND the ``_ROW_COUNT_ANOMALY_SCOPE_INSTRUCTION`` block
+    (issue #171, DEC-007; mirrors the ``exclude_tests`` filter contract
+    from #54 / #169 / #170)."""
+    from signalforge.draft.prompts import _render_system_prompt
+
+    rendered = _render_system_prompt(("row_count_anomaly_by_period",))
+    assert '"type": "row_count_anomaly_by_period"' not in rendered
+    # The SCOPE phrase no longer names row_count_anomaly_by_period.
+    assert "`row_count_anomaly_by_period`" not in rendered
+    # The dedicated SCOPE-instruction block is also gone (collapsed-whitespace
+    # match to absorb the source-literal line wraps).
+    collapsed = " ".join(rendered.split())
+    assert "incremental fact table" not in collapsed
+    assert "median absolute deviation" not in collapsed
+    # Other types still present.
+    assert '"type": "not_null"' in rendered
+    assert '"type": "row_count_between"' in rendered
+
+
+def test_render_system_prompt_keeps_row_count_anomaly_when_other_types_excluded() -> None:
+    """Excluding other types but NOT ``row_count_anomaly_by_period`` keeps
+    the catalogue line AND the SCOPE instruction (issue #171, DEC-007)."""
+    from signalforge.draft.prompts import _render_system_prompt
+
+    rendered = _render_system_prompt(("not_null", "unique"))
+    assert '"type": "row_count_anomaly_by_period"' in rendered
+    collapsed = " ".join(rendered.split())
+    assert "incremental fact table" in collapsed
+
+
+# ---------------------------------------------------------------------------
 # Business-rule meta reading (issue #116, DEC-001)
 # ---------------------------------------------------------------------------
 
