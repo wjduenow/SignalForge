@@ -40,12 +40,21 @@ does not hard-code a hash so it can't drift. Latest known rotations:
   line and the custom_sql instruction are omitted when ``custom_sql`` is
   excluded. Only the system prompt changed; the cached-block golden is
   unchanged.
-- ``77e9ee8a6ae7d875`` — current. Rotated under #169 (DEC-012) when
+- ``77e9ee8a6ae7d875`` — rotated under #169 (DEC-012) when
   ``row_count_between`` was added to ``_TEST_CATALOGUE_LINES`` as a
   6th first-class test primitive. The new catalogue entry illustrates
   BOTH the no-``where`` and with-``where`` shapes so the drafter has
   two forms to mirror. Only the system prompt changed; the cached-block
   golden (manifest summary) is unchanged.
+- ``389c8aa970df86cc`` — current. Rotated under #170 (DEC-002, US-003)
+  when ``unique_combination`` was added to ``_TEST_CATALOGUE_LINES`` as
+  the 7th first-class test primitive. The new catalogue entry illustrates
+  BOTH the no-``where`` and with-``where`` shapes (composite uniqueness
+  whole-table vs. filtered). A new ``_UNIQUE_COMBINATION_SCOPE_INSTRUCTION``
+  block was added to the SCOPE section with cautionary prose steering the
+  drafter away from vacuously-unique tuples like ``(pk, anything)``.
+  Only the system prompt changed; the cached-block golden (manifest
+  summary) is unchanged.
 
 If this rotates again, update both :data:`_EXPECTED_PROMPT_VERSION` and
 :data:`_CACHED_BLOCK_GOLDEN` in lockstep — the rotation is the signal
@@ -74,7 +83,7 @@ _FIXTURE_PATH = (
 )
 
 
-_EXPECTED_PROMPT_VERSION: str = "77e9ee8a6ae7d875"
+_EXPECTED_PROMPT_VERSION: str = "389c8aa970df86cc"
 
 
 # Captured once via ``render_prompt`` against the canonical fixture below.
