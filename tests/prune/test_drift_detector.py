@@ -29,14 +29,24 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import pytest
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from signalforge.draft.models import CandidateTest
 from signalforge.prune.audit import PruneEvent
 from signalforge.prune.models import DropReason, PruneDecision, PruneResult, Scope
+from signalforge.prune.stats import (
+    MadDowStats,
+    MadStats,
+    MinMaxDowStats,
+    MinMaxStats,
+    PercentileDowStats,
+    PercentileStats,
+    ZscoreDowStats,
+    ZscoreStats,
+)
 
 _STRICT = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
 _FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "prune"
@@ -298,3 +308,187 @@ def test_strict_prune_event_rejects_unknown_field() -> None:
     payload["future_field_that_should_not_exist"] = "boom"
     with pytest.raises(ValidationError):
         StrictPruneEvent.model_validate(payload)
+
+
+# --- Anomaly stats drift mirrors (issue #171, US-001) ---------------------
+#
+# Pair each ``extra="ignore"`` production stats class with an ``extra="forbid"``
+# strict mirror, validated against :file:`anomaly_stats_v1.json`. Adding a
+# field to any production stats class without updating the strict mirror OR
+# the fixture breaks the test loudly. Mirrors the prune-decision /
+# prune-event drift gates above.
+
+
+class StrictMadDowStats(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`MadDowStats`."""
+
+    model_config = _STRICT
+
+    median: float
+    mad: float
+    n_periods: int
+
+
+class StrictZscoreDowStats(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`ZscoreDowStats`."""
+
+    model_config = _STRICT
+
+    mu: float
+    sigma: float
+    n_periods: int
+
+
+class StrictPercentileDowStats(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`PercentileDowStats`."""
+
+    model_config = _STRICT
+
+    p_lo: float
+    p_hi: float
+    n_periods: int
+
+
+class StrictMinMaxDowStats(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`MinMaxDowStats`."""
+
+    model_config = _STRICT
+
+    minimum: float
+    maximum: float
+    n_periods: int
+
+
+class StrictMadStats(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`MadStats`."""
+
+    model_config = _STRICT
+
+    method: Literal["mad"] = "mad"
+    median: float
+    mad: float
+    n_periods: int
+    per_dow: dict[int, StrictMadDowStats] | None = None
+
+
+class StrictZscoreStats(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`ZscoreStats`."""
+
+    model_config = _STRICT
+
+    method: Literal["zscore"] = "zscore"
+    mu: float
+    sigma: float
+    n_periods: int
+    per_dow: dict[int, StrictZscoreDowStats] | None = None
+
+
+class StrictPercentileStats(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`PercentileStats`."""
+
+    model_config = _STRICT
+
+    method: Literal["percentile"] = "percentile"
+    p_lo: float
+    p_hi: float
+    n_periods: int
+    per_dow: dict[int, StrictPercentileDowStats] | None = None
+
+
+class StrictMinMaxStats(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`MinMaxStats`."""
+
+    model_config = _STRICT
+
+    method: Literal["min_max"] = "min_max"
+    minimum: float
+    maximum: float
+    n_periods: int
+    per_dow: dict[int, StrictMinMaxDowStats] | None = None
+
+
+StrictAnomalyTestStats = Annotated[
+    StrictMadStats | StrictZscoreStats | StrictPercentileStats | StrictMinMaxStats,
+    Field(discriminator="method"),
+]
+_STRICT_ANOMALY_ADAPTER = TypeAdapter(StrictAnomalyTestStats)
+
+
+def test_strict_anomaly_stats_validates_fixture() -> None:
+    """Every row in :file:`anomaly_stats_v1.json` validates against the
+    strict union (``extra="forbid"`` on every class).
+    """
+    fixture_path = _FIXTURES_DIR / "anomaly_stats_v1.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    assert isinstance(payload, list) and payload, f"expected non-empty JSON array at {fixture_path}"
+    seen_methods: set[str] = set()
+    for entry in payload:
+        validated = _STRICT_ANOMALY_ADAPTER.validate_python(entry)
+        seen_methods.add(validated.method)
+    assert seen_methods == {"mad", "zscore", "percentile", "min_max"}, (
+        f"anomaly_stats_v1.json must cover every method; got {seen_methods}"
+    )
+
+
+def test_strict_anomaly_stats_rejects_unknown_field() -> None:
+    """Sanity floor: a fixture row with an extra unknown field raises
+    :class:`ValidationError`. Confirms ``extra="forbid"`` is wired up
+    across the anomaly-stats drift surface.
+    """
+    fixture_path = _FIXTURES_DIR / "anomaly_stats_v1.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    first = dict(payload[0])
+    first["future_field_that_should_not_exist"] = "boom"
+    with pytest.raises(ValidationError):
+        _STRICT_ANOMALY_ADAPTER.validate_python(first)
+
+
+def test_strict_anomaly_stats_rejects_unknown_per_dow_field() -> None:
+    """Sanity floor: a per-DOW entry with an extra field is rejected.
+    Confirms the nested ``extra="forbid"`` mirror gates the DOW dict too.
+    """
+    fixture_path = _FIXTURES_DIR / "anomaly_stats_v1.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    seasonal = next(entry for entry in payload if entry.get("per_dow"))
+    # Mutate a per-DOW entry to carry a phantom field.
+    seasonal = dict(seasonal)
+    seasonal["per_dow"] = {
+        key: {**value, "future_field": "boom"} for key, value in seasonal["per_dow"].items()
+    }
+    with pytest.raises(ValidationError):
+        _STRICT_ANOMALY_ADAPTER.validate_python(seasonal)
+
+
+@pytest.mark.parametrize(
+    "prod_cls, strict_cls",
+    [
+        (MadStats, StrictMadStats),
+        (ZscoreStats, StrictZscoreStats),
+        (PercentileStats, StrictPercentileStats),
+        (MinMaxStats, StrictMinMaxStats),
+        (MadDowStats, StrictMadDowStats),
+        (ZscoreDowStats, StrictZscoreDowStats),
+        (PercentileDowStats, StrictPercentileDowStats),
+        (MinMaxDowStats, StrictMinMaxDowStats),
+    ],
+)
+def test_anomaly_stats_field_set_parity(
+    prod_cls: type[BaseModel], strict_cls: type[BaseModel]
+) -> None:
+    """Each strict mirror's ``model_fields`` exactly matches its production
+    counterpart. Adding a field to one without the other breaks loudly.
+    """
+    strict_fields = set(strict_cls.model_fields.keys())
+    prod_fields = set(prod_cls.model_fields.keys())
+    missing_in_strict = prod_fields - strict_fields
+    extra_in_strict = strict_fields - prod_fields
+    assert not missing_in_strict, (
+        f"{strict_cls.__name__} is missing fields present in "
+        f"{prod_cls.__name__}: {missing_in_strict}. Update the strict mirror "
+        f"to match."
+    )
+    assert not extra_in_strict, (
+        f"{strict_cls.__name__} has fields absent from "
+        f"{prod_cls.__name__}: {extra_in_strict}. Remove from the strict "
+        f"mirror or add to production."
+    )
