@@ -154,7 +154,12 @@ def test_default_rubric_criterion_text_matches_dec_016_verbatim() -> None:
         "(e.g. `row_count_between`), is each bound a meaningful "
         "guardrail calibrated to the model's expected size, rather "
         "than a vacuous floor or ceiling (`minimum=0` with no `maximum`, "
-        "or a `maximum` so high it cannot fire)?"
+        "or a `maximum` so high it cannot fire)? For composite-key "
+        "tests (e.g. `unique_combination`), is the column tuple a "
+        "meaningful grain (e.g. `(order_id, line_item_id)`), or "
+        "vacuously unique because one member is already a primary "
+        "key on its own? A tuple of the shape `(primary_key, "
+        "anything)` is unique by construction and adds no signal."
     )
 
 
@@ -179,12 +184,16 @@ def test_default_rubric_is_a_tuple() -> None:
 #
 # Rotation history:
 # - ``280aa6db7fde2b24`` — initial pin (#7, DEC-016 verbatim).
-# - ``22a0231690aca6ef`` — current. Rotated under #169 (DEC-009) when
-#   the ``no-redundant`` criterion gained calibration prose for
-#   numeric-bounded tests (``row_count_between``). The grader's
-#   3-trigger degrade taxonomy (DEC-011) stayed locked; this is a
-#   prose extension, not a structural change.
-_DEFAULT_RUBRIC_GOLDEN_HASH = "22a0231690aca6ef"
+# - ``22a0231690aca6ef`` — rotated under #169 (DEC-009) when the
+#   ``no-redundant`` criterion gained calibration prose for
+#   numeric-bounded tests (``row_count_between``).
+# - ``30a9fda975b6d45c`` — current. Rotated under #170 (DEC-007) when
+#   the ``no-redundant`` criterion gained sibling calibration prose
+#   for composite-key tests (``unique_combination``): a vacuously
+#   unique tuple of the shape ``(primary_key, anything)`` carries no
+#   grain signal. The grader's 3-trigger degrade taxonomy (DEC-011)
+#   stayed locked; this is a prose extension, not a structural change.
+_DEFAULT_RUBRIC_GOLDEN_HASH = "30a9fda975b6d45c"
 
 
 def test_default_rubric_hash_is_stable() -> None:
