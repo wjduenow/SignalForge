@@ -219,12 +219,23 @@ def _test_dedupe_key(test: CandidateTest) -> tuple[Any, ...]:
 
     Keyed by ``(type, column, sorted-args)`` so an identical test appearing
     under both ``tests:`` and ``data_tests:`` collapses to one entry.
+
+    Each parameterised variant extends the key with its discriminating
+    args so two ``row_count_between`` / ``accepted_values`` /
+    ``relationships`` entries with the SAME ``(type, column)`` but
+    DIFFERENT args (bounds / values / target) survive as distinct
+    candidates rather than collapsing to one (#169 — row_count_between
+    is model-level only, so ``column`` is always ``None``; without the
+    bound-aware key two row_count_between entries on the same model
+    silently merged).
     """
     if test.type == "accepted_values":
         # Sort so two identical value sets in different order dedupe (DEC-008).
         return (test.type, test.column, tuple(sorted(test.values)))
     if test.type == "relationships":
         return (test.type, test.column, test.to, test.field)
+    if test.type == "row_count_between":
+        return (test.type, test.column, test.minimum, test.maximum, test.where)
     return (test.type, test.column)
 
 

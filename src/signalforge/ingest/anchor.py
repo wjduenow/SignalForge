@@ -54,7 +54,10 @@ def validate_anchor_contract(
     * Each per-column test's ``column`` must reference a real column in
       ``model_columns``.
     * Each model-level test's ``column`` must reference a real column in
-      ``model_columns``.
+      ``model_columns``. Model-level-only variants (``row_count_between``
+      — issue #169) whose Pydantic model fixes ``column = None`` are
+      exempt from this check — ``None`` is the canonical model-level
+      shape, not a missing column reference.
     """
     violations: list[str] = []
 
@@ -76,6 +79,14 @@ def validate_anchor_contract(
                 )
 
     for test in candidate.tests:
+        # Issue #169 — ``row_count_between`` is model-level only; its
+        # Pydantic model fixes ``column = None``. ``None not in model_columns``
+        # would otherwise fire a spurious "references nonexistent column None"
+        # violation, blocking the variant through ``prune-existing``. Mirrors
+        # the drafter-side anchor exemption in
+        # ``signalforge.draft.parser._validate_anchor_contract``.
+        if test.type == "row_count_between":
+            continue
         if test.column not in model_columns:
             violations.append(f"model-level test references nonexistent column {test.column!r}")
 
