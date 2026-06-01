@@ -115,6 +115,8 @@ Where `<model>` is a file path or unique_id from Section 1. The safety posture m
 
 The `.signalforge/` directory under the project carries durable audit JSONLs for every stage (safety, llm_responses, prune, grade) plus per-run sidecars (`grade.json`, `diff.json`). These are append-only; they survive crashes mid-run.
 
+The drafter proposes six structured test types: `not_null`, `unique`, `accepted_values`, `relationships`, `custom_sql` (a singular failing-rows SELECT for business rules the four built-ins can't express), and `row_count_between` (a model-level bounded-cardinality assertion for daily/weekly rollups and monitoring tables — emits as a `dbt_expectations.expect_table_row_count_to_be_between` YAML block, so the operator needs `dbt-expectations` in their `packages.yml` to run the kept tests). Suppress any of them via `llm.exclude_tests: ["row_count_between", "custom_sql", ...]` in `signalforge.yml` when the model under draft has no meaningful guarantee of that shape.
+
 ## 4. Grade tests you already have
 
 If the user has **existing dbt tests** authored by dbt-codegen, dbt Copilot, DinoAI, or a human, SignalForge can grade them without re-drafting. This path makes **no LLM call** — it runs the ingest → prune → diff pipeline against externally-authored `schema.yml`:

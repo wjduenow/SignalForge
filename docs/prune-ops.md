@@ -216,6 +216,99 @@ has more ways to be unevaluable (unsupported Jinja, unbuilt refs) than a
 generic schema test. That is the conservative-bias contract working as
 designed — an unevaluable business rule is shipped, never silently lost.
 
+## Row-count cost model
+
+The sixth test variant, `row_count_between` (issue #169; see
+[`docs/draft-ops.md`](draft-ops.md#row-count-tests-row_count_between)),
+is pruned through the same orchestrator and routes to the same five
+`DropReason` literals as the five other variants. There is **no new
+drop reason**; what differs is the SQL shape and the cost profile.
+
+**Compiled SQL.** The compiler emits a failing-rows CTE wrapping a
+single `COUNT(*)` (DEC-014):
+
+```sql
+SELECT n
+FROM (SELECT COUNT(*) AS n FROM <table> [WHERE <where>]) AS rc
+WHERE n < <minimum> OR n > <maximum>
+```
+
+The bound-violation predicate adapts to which bounds are set
+(`n < <min>`, `n > <max>`, or the conjunction). The adapter wraps the
+output in the standard `SELECT COUNT(*) AS failures FROM (<sql>) AS t`
+contract — zero rows from the inner SELECT (the bound holds) means
+`failures=0` → engine routes `always-passes` and the test drops; one
+row (the bound was violated) means `failures=1` → engine routes `kept`
+(or `failed-on-known-clean-data` on a trusted model). The
+CTE-then-WHERE shape is load-bearing: a bare `SELECT COUNT(*) FROM <table>`
+wrapped by the adapter would always emit `failures=1` regardless of the
+bounds, because the inner `COUNT(*)` always returns exactly one row.
+The CTE pushes the bound check into the inner SELECT so the outer
+`failures` count reflects the real verdict (US-007a corrected this
+shape after #169 first landed).
+
+**Sample-mode behaviour — deliberately bypassed.** The compiled SQL is
+identical regardless of `prune.scope`. A sampled `COUNT(*)` is
+semantically wrong — a bucket-mod'd subset cannot be compared against
+the full-table bounds, and a sampled "we got 50 rows when we expected
+500" finding tells the reviewer nothing about the warehouse. Two
+sub-cases worth naming:
+
+- Under `prune.scope="sample"` + `sample_strategy="materialised"` the
+  orchestrator passes `table_ref=<temp table>` (the materialised sample
+  itself). The `COUNT(*)` lands cheap against the temp table without
+  re-sampling — this is the
+  [materialised-sample-substitution contract](#post-q4c-temp-table-materialised-sample-v02-issue-22)
+  from issue #116, applied uniformly to any test that builds its own
+  `FROM`.
+- Under `prune.scope="sample"` + `sample_strategy="oneshot"` the
+  `COUNT(*)` runs against the **source table**. This is a deliberate
+  full-table scan: a sampled row-count is the wrong answer; the scan
+  is what the test exists to do.
+
+**Cost guidance.** A bare `COUNT(*)` on a partitioned warehouse is
+metadata-cheap on BigQuery (the analyzer reads partition statistics)
+and metadata-cheap on Snowflake for permanent tables (table metadata
+carries the row count). A `where`-filtered `COUNT(*)` is **partition-
+aligned at best, full-scan at worst** — if the filter aligns with the
+partition column the scan reads only the matched partitions; if it
+doesn't, the warehouse reads the whole table to evaluate the predicate.
+The adapter's `maximum_bytes_billed` cap (default 100 MB; raise via the
+profile-level `maximum_bytes_billed` field if needed) plus
+`prune.total_budget_seconds` are the safety nets — a `row_count_between`
+query that exceeds the cap is rejected by the warehouse before
+execution and the test routes to `kept-without-evidence` per the
+conservative-bias contract (the `why` field carries the warehouse error
+class name).
+
+**Empty-table → `kept` (DEC-010).** An empty warehouse table evaluated
+against `minimum=100` produces `n=0`, which violates the bound, which
+emits one failing row, which routes to `kept`. **This is the intended
+behaviour, not a degenerate edge case**: catching "the table is empty
+when it shouldn't be" is exactly what the test exists to do — a
+broken upstream pipeline is real signal, and the bounded-cardinality
+assertion is the canonical way to surface it. There is no special-case
+in the engine; the routing follows the standard decision matrix. If
+you're reading a `kept` decision against an empty table and wondering
+whether the test "fired correctly," the answer is yes — the bound was
+violated and the diff is telling you the upstream is broken. An
+operator who wants "empty table is fine" semantics for a particular
+model should either not declare `row_count_between` on that model or
+add it to `exclude_tests` in `signalforge.yml`.
+
+In the [expected-drop-rate](#expected-drop-rates) framing below,
+`row_count_between` tests behave like the built-ins: a model whose
+warehouse rows fall comfortably within the bounds is `always-passes`
+(dropped, no signal); a model whose row count violates the bound is
+`kept` (real signal — exactly the case a reviewer wants to see). The
+one categorical difference is that a single `row_count_between`
+candidate exercises the **whole table** (or the whole `where`-filtered
+slice), not a per-column sample — so its cost is a `COUNT(*)` scan
+rather than the per-column sample CTE. Plan budget accordingly on
+projects ingesting many existing `expect_table_row_count_to_be_between`
+declarations via `prune-existing` — the per-test cost is small but
+N-many `COUNT(*)`s adds up.
+
 ## Expected drop rates
 
 **A high drop rate is the working state, not the failure state.** The
