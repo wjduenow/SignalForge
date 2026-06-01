@@ -169,6 +169,16 @@ Rubric: TypeAlias = tuple[Criterion, ...]
 #   the existing ``passed: bool`` threshold → ships as ``flagged``. No
 #   5th criterion (DEC-007 picked Option A — extend the existing
 #   criterion — for the same +25% LLM-cost reason as #169).
+# - #171 (DEC-004) — ``no-redundant`` extended with calibration prose
+#   for per-period anomaly tests (``row_count_anomaly_by_period``): is
+#   the ``(method, seasonality, threshold)`` combination tight enough
+#   to catch the failure mode (anomalously small/empty period) but
+#   loose enough not to fire on legitimate weekday/weekend or seasonal
+#   swings? Same routing as the #169 / #170 extensions: low score →
+#   fails the existing ``passed: bool`` threshold → ships as
+#   ``flagged``. No 5th criterion (DEC-004 picked Option A — extend
+#   the existing criterion — for the same +25% LLM-cost reason as
+#   #169 / #170).
 DEFAULT_RUBRIC: Final[Rubric] = (
     Criterion(
         id="clarity",
@@ -207,7 +217,15 @@ DEFAULT_RUBRIC: Final[Rubric] = (
             "meaningful grain (e.g. `(order_id, line_item_id)`), or "
             "vacuously unique because one member is already a primary "
             "key on its own? A tuple of the shape `(primary_key, "
-            "anything)` is unique by construction and adds no signal."
+            "anything)` is unique by construction and adds no signal. "
+            "For per-period anomaly tests (e.g. "
+            "`row_count_anomaly_by_period`), score CALIBRATION: is the "
+            "`(method, seasonality, threshold)` combination tight enough "
+            "to catch the failure mode (anomalously small/empty period) "
+            "but loose enough not to fire on legitimate weekday/weekend "
+            'or seasonal swings? `method="zscore"` with `threshold=3.0` '
+            'on a weekday-heavy model without `seasonality="dow"` will '
+            "likely fire every Saturday — that's a calibration failure."
         ),
     ),
 )
