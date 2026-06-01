@@ -125,16 +125,18 @@ _EXPECTED_VARIANT_COUNT: int = 8
 #: merged, every set should be empty and every variant must round-trip
 #: every dispatch site.
 #:
-#: As of US-006 + US-007 + US-008 (this merge): sites 1 (prune compiler),
-#: 2 (``_common.artifact_id``), 5 (drafter anchor), and 6
-#: (``ingest.anchor``) are landed for
-#: ``CandidateTestRowCountAnomalyByPeriod`` — all four removed from
-#: their pending sets. Site 3 (diff emitter) is still pending in
-#: sibling bead US-014.
+#: As of US-014 (this merge): ALL 6 dispatch sites are landed for
+#: ``CandidateTestRowCountAnomalyByPeriod`` (US-004 site 2, US-006 site
+#: 5, US-007 site 6, US-008 site 1, US-014 site 3; site 4 is N/A — no
+#: external dbt-macro form). Every per-site frozenset is now empty and
+#: the variant rounds through every dispatch site's parametrize. This
+#: dict stays as a scaffold for the NEXT variant addition (post-#171),
+#: which will re-populate per-site sets while its own dispatch-arm
+#: beads land in parallel.
 _VARIANTS_PENDING_DISPATCH_ARMS: dict[int, frozenset[type]] = {
     1: frozenset(),  # US-008 — landed
     2: frozenset(),  # US-004 — landed
-    3: frozenset({CandidateTestRowCountAnomalyByPeriod}),  # US-014 (diff emitter)
+    3: frozenset(),  # US-014 — landed
     4: frozenset(),  # N/A — variant has no external dbt-macro form
     5: frozenset(),  # US-006 — landed
     6: frozenset(),  # US-007 — landed

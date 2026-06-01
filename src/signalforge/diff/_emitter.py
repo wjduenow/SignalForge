@@ -7,14 +7,21 @@ the filter; column declaration order is preserved from the candidate;
 tests inside each column are sorted by ``(test_type, args_hash)`` so the
 emitted bytes are stable across runs with the same input.
 
-Singular ``custom_sql`` business-rule tests (DEC-002 of #116) are NOT
+Singular business-rule tests (DEC-002 of #116; DEC-007 of #171) are NOT
 schema.yml blocks — dbt models them as standalone ``.sql`` files under
-``tests/``. The YAML emitter (:func:`emit_proposed_yaml`) therefore
-**skips** every ``custom_sql`` test: :func:`_render_test` returns the
-``_SKIP`` sentinel and the column / model renderers drop it. The
-companion :func:`emit_proposed_test_files` surfaces every KEPT
-``custom_sql`` test as a :class:`signalforge.diff.models.ProposedTestFile`
-carrying a safe relative path (via
+``tests/``. Two variants flow through this contract:
+
+* ``custom_sql`` (#116) — operator-or-LLM-authored singular SQL.
+* ``row_count_anomaly_by_period`` (#171, US-014) — the violation query
+  compiled by
+  :func:`signalforge.prune.compiler._compile_anomaly_violation_query`.
+
+The YAML emitter (:func:`emit_proposed_yaml`) therefore **skips** both:
+:func:`_render_test` returns the ``_SKIP`` sentinel and the column /
+model renderers drop it. The companion :func:`emit_proposed_test_files`
+surfaces every KEPT singular test as a
+:class:`signalforge.diff.models.ProposedTestFile` carrying a safe
+relative path (via
 :func:`signalforge.diff._test_file_writer.anchor_to_filename`) and the
 SQL body with the ``-- signalforge:generated <hash>`` header marker.
 
@@ -39,6 +46,7 @@ them; the load-back is the load-bearing assertion.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Final
 
 import yaml
@@ -52,11 +60,15 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountAnomalyByPeriod,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
     CandidateTestUniqueCombination,
 )
+from signalforge.manifest.models import Model
 from signalforge.prune import PruneResult
+from signalforge.prune.compiler import _compile_anomaly_violation_query
+from signalforge.warehouse.models import BIGQUERY_DIALECT, Dialect, TableRef
 
 # Sentinel returned by :func:`_render_test` for a ``custom_sql`` test —
 # singular business-rule tests are NOT schema.yml blocks (DEC-002 of
@@ -145,6 +157,14 @@ def _render_test(test: CandidateTest) -> Any:
     :data:`_SKIP`, so ``custom_sql`` never lands in the proposed YAML and
     this function never crashes on the fifth variant.
 
+    A ``row_count_anomaly_by_period`` test (issue #171, US-014) also
+    returns :data:`_SKIP` — there is no dbt-macro YAML form for the
+    statistical anomaly band (locked in Phase 1 B.7 of the plan), so it
+    ships as a singular ``tests/*.sql`` file carrying the violation query
+    compiled by
+    :func:`signalforge.prune.compiler._compile_anomaly_violation_query`.
+    The companion :func:`emit_proposed_test_files` surfaces the file.
+
     A ``row_count_between`` test (issue #169, DEC-002) renders as a
     ``dbt_expectations.expect_table_row_count_to_be_between`` block. The
     Python-side fields ``minimum`` / ``maximum`` are mapped OUTBOUND here
@@ -175,6 +195,14 @@ def _render_test(test: CandidateTest) -> Any:
     if isinstance(test, CandidateTestRelationships):
         return {test.type: {"to": test.to, "field": test.field}}
     if isinstance(test, CandidateTestCustomSQL):
+        return _SKIP
+    if isinstance(test, CandidateTestRowCountAnomalyByPeriod):
+        # #171 US-014 — ``row_count_anomaly_by_period`` ships as a singular
+        # ``tests/*.sql`` file (the violation query from
+        # :func:`signalforge.prune.compiler._compile_anomaly_violation_query`),
+        # NOT a YAML block. Mirrors the ``custom_sql`` arm above. The
+        # companion :func:`emit_proposed_test_files` surfaces the SQL file;
+        # the YAML emitter drops every test that renders to :data:`_SKIP`.
         return _SKIP
     if isinstance(test, CandidateTestRowCountBetween):
         body: dict[str, Any] = {}
@@ -296,24 +324,40 @@ def emit_proposed_yaml(candidate: CandidateSchema, prune_result: PruneResult) ->
 def emit_proposed_test_files(
     candidate: CandidateSchema,
     prune_result: PruneResult,
+    *,
+    model: Model | None = None,
+    dialect: Dialect = BIGQUERY_DIALECT,
+    as_of: date | None = None,
 ) -> tuple[ProposedTestFile, ...]:
-    """Render the KEPT ``custom_sql`` tests as standalone ``.sql`` proposals.
+    """Render the KEPT singular-SQL tests as standalone ``.sql`` proposals.
 
-    Singular ``custom_sql`` business-rule tests (DEC-002 of #116) are NOT
+    Singular business-rule tests (DEC-002 of #116; DEC-007 of #171) are NOT
     schema.yml blocks — dbt models them as standalone ``.sql`` files under
-    ``tests/``. This function walks ``prune_result.kept_decisions``,
-    selects the ``custom_sql`` ones, and emits one
-    :class:`signalforge.diff.models.ProposedTestFile` per kept test:
+    ``tests/``. Two variants flow through this function as of #171 US-014:
+
+    * ``custom_sql`` (#116) — :attr:`~signalforge.draft.models.CandidateTestCustomSQL.sql`
+      is operator-or-LLM-authored and ships verbatim (typically with
+      ``{{ this }}`` / ``{{ ref() }}`` Jinja).
+    * ``row_count_anomaly_by_period`` (#171, US-014) — the SQL is the
+      violation query compiled by
+      :func:`signalforge.prune.compiler._compile_anomaly_violation_query`
+      against ``TableRef.from_model(model)`` and ``dialect``, bound to the
+      ``as_of`` evaluation date (defaults to :func:`date.today`). The
+      operator's dbt project runs this on every build; the stats query is
+      computed at prune time only (the two-query split — see ``plans/super/
+      171-row-count-anomaly.md`` § US-014 + Phase 1 B.7).
+
+    Every proposed file carries:
 
     * :attr:`~signalforge.diff.models.ProposedTestFile.path` —
       ``tests/<model>__<descriptor>_<hash>.sql`` built via
       :func:`signalforge.diff._test_file_writer.anchor_to_filename`. The
-      ``descriptor`` is ``<column>_custom_sql`` for a column-scoped test
-      and ``custom_sql`` for a model-level one; the ``<hash>`` is the
+      ``descriptor`` is ``<column>_<test_type>`` for a column-scoped test
+      and ``<test_type>`` for a model-level one; the ``<hash>`` is the
       shared 8-hex args-hash (reuses
       :func:`signalforge._common.artifact_id.model_test_args_hash`, NOT a
-      re-derivation) so two custom_sql tests on the same column with
-      different SQL never collide on a filename.
+      re-derivation) so two tests in the same scope with different args
+      never collide on a filename.
     * :attr:`~signalforge.diff.models.ProposedTestFile.sql` — the SQL body
       with the ``-- signalforge:generated <hash>`` header marker prepended
       via :func:`signalforge.diff._test_file_writer._with_marker`, so the
@@ -325,23 +369,92 @@ def emit_proposed_test_files(
     "ship only kept" contract). The result is ordered by
     ``prune_result.kept_decisions`` order, then deduped by ``path`` so two
     decisions that resolve to the same filename collapse to one proposal
-    (defensive — distinct SQL produces distinct hashes, so a collision
+    (defensive — distinct args produce distinct hashes, so a collision
     means duplicate decisions).
+
+    Args:
+        candidate: the kept-test source from the LLM drafter.
+        prune_result: the prune layer's decisions (only ``kept_decisions``
+            are consumed).
+        model: optional manifest :class:`Model` — required only to emit
+            ``row_count_anomaly_by_period`` SQL (the violation query
+            references ``TableRef.from_model(model)``). When ``None`` and
+            an anomaly test is kept, the engine raises ``ValueError`` at
+            emit time so the caller cannot silently ship a no-op file.
+            ``custom_sql``-only call sites can omit it.
+        dialect: optional :class:`Dialect` — drives quoting + date/interval
+            templates for the anomaly violation query. Defaults to
+            :data:`BIGQUERY_DIALECT` for v0.x (BigQuery is the v0.1
+            warehouse). A v0.3 multi-warehouse callsite must source this
+            from the adapter's :meth:`signalforge.warehouse.WarehouseAdapter.dialect`.
+        as_of: optional evaluation date for the anomaly violation query.
+            ``None`` defaults to :func:`date.today` — the operator can
+            re-run ``signalforge generate --as-of <date>`` to bake in a
+            different date. Threading the date through (rather than a
+            templated ``{{ var('signalforge_as_of') }}`` placeholder) keeps
+            the singular test file self-contained and matches the engine's
+            ``as_of`` resolution shape (US-009).
+
+    Raises:
+        ValueError: a kept ``row_count_anomaly_by_period`` decision was
+            found but ``model`` was ``None`` — the violation query cannot
+            be compiled without :class:`TableRef.from_model`. Caller must
+            pass ``model`` when anomaly tests can land on the candidate.
     """
     out: list[ProposedTestFile] = []
     seen_paths: set[str] = set()
+    resolved_as_of: date | None = None
     for decision in prune_result.kept_decisions:
         test = decision.test
-        if not isinstance(test, CandidateTestCustomSQL):
-            continue
-        anchor = decision.test_anchor
-        if anchor.startswith("column."):
-            column = anchor[len("column.") :]
-            descriptor = f"{column}_custom_sql"
+        descriptor: str
+        sql_body: str
+        if isinstance(test, CandidateTestCustomSQL):
+            anchor = decision.test_anchor
+            if anchor.startswith("column."):
+                column = anchor[len("column.") :]
+                descriptor = f"{column}_custom_sql"
+            else:
+                # Model-level (the literal "model" anchor, plus any
+                # forward-compatible sentinel) — no column in the descriptor.
+                descriptor = "custom_sql"
+            sql_body = test.sql
+        elif isinstance(test, CandidateTestRowCountAnomalyByPeriod):
+            # #171 US-014. ``row_count_anomaly_by_period`` is model-level-only
+            # (``column = None`` by the Pydantic schema), so the descriptor
+            # is always the bare test type. The SQL is the violation query
+            # compiled fresh — the prune engine's per-decision
+            # ``compiled_sql`` currently routes the (stats, violation) tuple
+            # to ``kept-without-evidence`` per US-008's temporary engine
+            # routing and stores ``compiled_sql=""`` (US-011 will land the
+            # two-query handling and populate the field). For now we
+            # recompile to get the bytes the dbt singular test will run.
+            if model is None:
+                raise ValueError(
+                    "emit_proposed_test_files cannot emit a "
+                    "row_count_anomaly_by_period test without `model` — the "
+                    "violation query references TableRef.from_model(model). "
+                    "Pass `model=...` when anomaly tests can land on the "
+                    "candidate."
+                )
+            descriptor = "row_count_anomaly_by_period"
+            if resolved_as_of is None:
+                # Resolve once per call. Prefer the decision's `as_of` (set
+                # by US-009 of the engine) when available so the emitted
+                # file matches the date the engine evaluated against;
+                # otherwise resolve to today's date so the generated test
+                # runs against the current period when the operator next
+                # invokes dbt. The kwarg overrides both.
+                resolved_as_of = (
+                    as_of
+                    if as_of is not None
+                    else (decision.as_of if decision.as_of is not None else date.today())
+                )
+            table_ref = TableRef.from_model(model)
+            sql_body = _compile_anomaly_violation_query(
+                test, table_ref, dialect, as_of=resolved_as_of
+            )
         else:
-            # Model-level (the literal "model" anchor, plus any
-            # forward-compatible sentinel) — no column in the descriptor.
-            descriptor = "custom_sql"
+            continue
         args_hash = _shared_args_hash(test)
         path = anchor_to_filename(
             model_name=candidate.name,
@@ -354,7 +467,7 @@ def emit_proposed_test_files(
         out.append(
             ProposedTestFile(
                 path=path,
-                sql=_with_marker(test.sql, args_hash=args_hash),
+                sql=_with_marker(sql_body, args_hash=args_hash),
             )
         )
     return tuple(out)

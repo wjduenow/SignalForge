@@ -857,3 +857,367 @@ def test_unique_combination_does_not_appear_in_proposed_test_files() -> None:
     result = _result(_decision(uc, test_anchor="model"))
 
     assert emit_proposed_test_files(candidate, result) == ()
+
+
+# ---------------------------------------------------------------------------
+# row_count_anomaly_by_period variant (US-014 of #171) — singular .sql file
+# ---------------------------------------------------------------------------
+
+from datetime import date  # noqa: E402
+
+import pytest  # noqa: E402
+
+from signalforge.diff._emitter import _SKIP, _render_test  # noqa: E402
+from signalforge.draft.models import CandidateTestRowCountAnomalyByPeriod  # noqa: E402
+from signalforge.manifest.models import Model  # noqa: E402
+from signalforge.prune.compiler import _compile_anomaly_violation_query  # noqa: E402
+from signalforge.warehouse.models import BIGQUERY_DIALECT, TableRef  # noqa: E402
+
+
+def _orders_model_for_anomaly() -> Model:
+    """Minimal manifest :class:`Model` for the anomaly violation query.
+
+    Carries ``database`` + ``schema_`` so ``TableRef.from_model(model)``
+    resolves to a fully-qualified ``project.dataset.table`` triple — the
+    compiler's :func:`_qualified_table_name` requires both.
+    """
+    from signalforge.manifest.models import Column
+
+    return Model(
+        unique_id="model.proj.orders",
+        name="orders",
+        resource_type="model",
+        package_name="proj",
+        original_file_path="models/orders.sql",
+        path="orders.sql",
+        database="fake_project",
+        schema="dataset",  # type: ignore[call-arg]
+        columns={"ordered_at": Column(name="ordered_at")},
+        raw_code="select 1",
+    )
+
+
+def test_row_count_anomaly_by_period_render_test_returns_skip() -> None:
+    """``_render_test`` returns :data:`_SKIP` for the anomaly variant —
+    singular ``tests/*.sql`` file emission, NOT a YAML block (Phase 1 B.7
+    of #171 locks: no dbt-macro form exists for this primitive).
+    Mirrors ``custom_sql``.
+    """
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
+    assert _render_test(test) is _SKIP
+
+
+def test_row_count_anomaly_by_period_skipped_from_schema_yml() -> None:
+    """An anomaly test does NOT appear in the proposed ``schema.yml`` —
+    the YAML emitter drops every test that renders to :data:`_SKIP`.
+    """
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="when"),),
+        tests=(test,),
+    )
+    result = _result(_decision(test, test_anchor="model"))
+
+    parsed = yaml.safe_load(emit_proposed_yaml(candidate, result))
+    assert "tests" not in parsed["models"][0]
+
+
+def test_emit_proposed_test_files_anomaly_basic_path_and_marker() -> None:
+    """A kept anomaly test yields one proposed ``.sql`` file under the
+    ``tests/<model>__row_count_anomaly_by_period_<hash>.sql`` shape, with
+    the ``-- signalforge:generated <hash>`` header marker.
+    """
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="when"),),
+        tests=(test,),
+    )
+    result = _result(_decision(test, test_anchor="model"))
+    model = _orders_model_for_anomaly()
+    as_of = date(2026, 5, 30)
+
+    files = emit_proposed_test_files(candidate, result, model=model, as_of=as_of)
+
+    assert len(files) == 1
+    proposed = files[0]
+    expected_hash = model_test_args_hash(test)
+    assert proposed.path == f"tests/orders__row_count_anomaly_by_period_{expected_hash}.sql"
+    assert proposed.sql.startswith(f"{_GENERATED_MARKER_PREFIX} {expected_hash}\n")
+
+
+def test_emit_proposed_test_files_anomaly_body_is_violation_query() -> None:
+    """The emitted SQL body is the violation query from
+    :func:`signalforge.prune.compiler._compile_anomaly_violation_query`
+    — NOT the stats query. The two-query split (Phase 1 B.7) keeps the
+    stats query at prune time; only the violation half ships as the
+    operator-runnable singular test.
+    """
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="when"),),
+        tests=(test,),
+    )
+    result = _result(_decision(test, test_anchor="model"))
+    model = _orders_model_for_anomaly()
+    as_of = date(2026, 5, 30)
+
+    files = emit_proposed_test_files(candidate, result, model=model, as_of=as_of)
+
+    expected_violation_sql = _compile_anomaly_violation_query(
+        test,
+        TableRef.from_model(model),
+        BIGQUERY_DIALECT,
+        as_of=as_of,
+    )
+    # The body (after the header marker + blank line) is exactly the
+    # compiler's violation query plus the trailing newline _with_marker
+    # appends.
+    expected_hash = model_test_args_hash(test)
+    expected_body = f"{_GENERATED_MARKER_PREFIX} {expected_hash}\n\n{expected_violation_sql}\n"
+    assert files[0].sql == expected_body
+
+
+def test_emit_proposed_test_files_anomaly_filename_uses_args_hash() -> None:
+    """The filename's hash suffix is the shared
+    :func:`signalforge._common.artifact_id.model_test_args_hash` — two
+    anomaly tests with different args produce different filenames; two
+    with identical args dedupe.
+    """
+    test_a = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
+    test_b = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at", period="week")
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="when"),),
+        tests=(test_a, test_b),
+    )
+    result = _result(
+        _decision(test_a, test_anchor="model"),
+        _decision(test_b, test_anchor="model"),
+    )
+    model = _orders_model_for_anomaly()
+
+    files = emit_proposed_test_files(candidate, result, model=model, as_of=date(2026, 5, 30))
+
+    assert len(files) == 2
+    hash_a = model_test_args_hash(test_a)
+    hash_b = model_test_args_hash(test_b)
+    assert hash_a != hash_b
+    paths = {f.path for f in files}
+    assert f"tests/orders__row_count_anomaly_by_period_{hash_a}.sql" in paths
+    assert f"tests/orders__row_count_anomaly_by_period_{hash_b}.sql" in paths
+
+
+def test_emit_proposed_test_files_anomaly_excludes_dropped() -> None:
+    """A DROPPED anomaly test produces no proposed ``.sql`` file."""
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="when"),),
+        tests=(test,),
+    )
+    result = _result(
+        _decision(test, test_anchor="model", decision="dropped", reason="always-passes")
+    )
+    model = _orders_model_for_anomaly()
+
+    assert emit_proposed_test_files(candidate, result, model=model, as_of=date(2026, 5, 30)) == ()
+
+
+def test_emit_proposed_test_files_anomaly_uses_decision_as_of_when_kwarg_omitted() -> None:
+    """When the orchestrator omits ``as_of``, the emitter prefers
+    ``decision.as_of`` (set by the engine's US-009 resolution) so the
+    generated file matches the date the engine evaluated against.
+    """
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="when"),),
+        tests=(test,),
+    )
+    engine_as_of = date(2026, 4, 1)
+    decision = PruneDecision(
+        test_anchor="model",
+        test=test,
+        decision="kept",
+        reason="kept",
+        failures=0,
+        sampled_rows=1000,
+        scope="full",
+        elapsed_ms=42,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="",
+        why="synthetic",
+        as_of=engine_as_of,
+    )
+    result = _result(decision)
+    model = _orders_model_for_anomaly()
+
+    files = emit_proposed_test_files(candidate, result, model=model)
+
+    expected_violation_sql = _compile_anomaly_violation_query(
+        test, TableRef.from_model(model), BIGQUERY_DIALECT, as_of=engine_as_of
+    )
+    assert expected_violation_sql in files[0].sql
+
+
+def test_emit_proposed_test_files_anomaly_kwarg_overrides_decision_as_of() -> None:
+    """The ``as_of`` kwarg wins over ``decision.as_of`` — operator can
+    re-generate against a different evaluation date.
+    """
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="when"),),
+        tests=(test,),
+    )
+    engine_as_of = date(2026, 4, 1)
+    operator_as_of = date(2025, 1, 15)
+    decision = PruneDecision(
+        test_anchor="model",
+        test=test,
+        decision="kept",
+        reason="kept",
+        failures=0,
+        sampled_rows=1000,
+        scope="full",
+        elapsed_ms=42,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="",
+        why="synthetic",
+        as_of=engine_as_of,
+    )
+    result = _result(decision)
+    model = _orders_model_for_anomaly()
+
+    files = emit_proposed_test_files(candidate, result, model=model, as_of=operator_as_of)
+
+    expected = _compile_anomaly_violation_query(
+        test, TableRef.from_model(model), BIGQUERY_DIALECT, as_of=operator_as_of
+    )
+    assert expected in files[0].sql
+    # The engine's as_of must NOT appear (defensive — confirms the
+    # kwarg actually wins).
+    engine_sql = _compile_anomaly_violation_query(
+        test, TableRef.from_model(model), BIGQUERY_DIALECT, as_of=engine_as_of
+    )
+    assert engine_sql not in files[0].sql
+
+
+def test_emit_proposed_test_files_anomaly_raises_without_model() -> None:
+    """An anomaly kept decision without a ``model`` kwarg fails loud —
+    the violation query cannot be compiled without
+    :meth:`TableRef.from_model`. Fail-loud is the right shape here: a
+    silent skip would surface the test in the YAML/diff table but
+    produce no on-disk file, which the operator would discover only on
+    the next ``dbt test`` run.
+    """
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="when"),),
+        tests=(test,),
+    )
+    result = _result(_decision(test, test_anchor="model"))
+
+    with pytest.raises(ValueError, match="row_count_anomaly_by_period"):
+        emit_proposed_test_files(candidate, result)
+
+
+def test_emit_proposed_test_files_anomaly_matches_snapshot_fixture() -> None:
+    """Pin the happy-path emission against
+    ``tests/fixtures/diff/proposed_test_files/anomaly/`` so a regression
+    on the violation-query bytes (compiler change, dialect default
+    change, marker shape change) fails loud against the fixture.
+
+    Single-fixture canary: when the contents drift, regenerate by
+    re-running this test's setup with ``--force-regen`` or by inspecting
+    ``files[0].sql`` against the fixture text.
+    """
+    from pathlib import Path as _Path
+
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="ordered_at",
+        period="day",
+        lookback_periods=28,
+        method="mad",
+        threshold=3.0,
+        rationale="Detect daily order-volume anomalies in the rolling 28-day window.",
+    )
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="when"),),
+        tests=(test,),
+    )
+    decision = PruneDecision(
+        test_anchor="model",
+        test=test,
+        decision="kept",
+        reason="kept",
+        failures=0,
+        sampled_rows=1000,
+        scope="full",
+        elapsed_ms=42,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="",
+        why="detected anomalous daily count",
+        as_of=date(2026, 5, 30),
+    )
+    result = _result(decision)
+    model = _orders_model_for_anomaly()
+
+    files = emit_proposed_test_files(candidate, result, model=model, as_of=date(2026, 5, 30))
+    assert len(files) == 1
+    proposed = files[0]
+    fixture_path = (
+        _Path(__file__).parent.parent
+        / "fixtures"
+        / "diff"
+        / "proposed_test_files"
+        / "anomaly"
+        / "orders__row_count_anomaly_by_period_8e4d6245.sql"
+    )
+    assert fixture_path.exists(), f"fixture missing at {fixture_path}"
+    assert proposed.path == f"tests/{fixture_path.name}"
+    assert proposed.sql == fixture_path.read_text(encoding="utf-8")
+
+
+def test_emit_proposed_test_files_anomaly_alongside_custom_sql() -> None:
+    """Both singular-SQL variants can land in the same call — emission
+    order follows ``prune_result.kept_decisions`` order and both ship as
+    proposed files (no dedupe across variants because the hash domains
+    are disjoint).
+    """
+    anomaly = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
+    custom = CandidateTestCustomSQL(sql="select 1 where false", column=None)
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="when"),),
+        tests=(anomaly, custom),
+    )
+    result = _result(
+        _decision(anomaly, test_anchor="model"),
+        _decision(custom, test_anchor="model"),
+    )
+    model = _orders_model_for_anomaly()
+
+    files = emit_proposed_test_files(candidate, result, model=model, as_of=date(2026, 5, 30))
+
+    assert len(files) == 2
+    paths = [f.path for f in files]
+    anomaly_hash = model_test_args_hash(anomaly)
+    custom_hash = model_test_args_hash(custom)
+    assert f"tests/orders__row_count_anomaly_by_period_{anomaly_hash}.sql" in paths
+    assert f"tests/orders__custom_sql_{custom_hash}.sql" in paths
