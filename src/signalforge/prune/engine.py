@@ -78,6 +78,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import date
 from pathlib import Path
 
 from signalforge import __version__ as _SIGNALFORGE_VERSION
@@ -85,6 +86,7 @@ from signalforge._common.path_safety import PathContainmentError, canonicalise_p
 from signalforge.draft.models import (
     CandidateSchema,
     CandidateTest,
+    CandidateTestRowCountAnomalyByPeriod,
     CandidateTestRowCountBetween,
     CandidateTestUniqueCombination,
 )
@@ -663,6 +665,7 @@ def prune_tests(
     config: PruneConfig | None = None,
     audit_path: Path | None = None,
     project_dir: Path | None = None,
+    as_of: date | None = None,
 ) -> PruneResult:
     """Drop always-pass and known-clean-fail candidate tests.
 
@@ -767,6 +770,21 @@ def prune_tests(
             project-relative resolution so the prune audit lands in the
             right place regardless of which sub-directory the CLI
             invokes from.
+        as_of: optional reference date for the
+            :class:`CandidateTestRowCountAnomalyByPeriod` variant (#171
+            DEC-001). When ``None`` AND any candidate is an anomaly
+            variant, resolves to :meth:`datetime.date.today`; otherwise
+            uses the supplied value verbatim. A single INFO log line
+            ("anomaly: as_of resolved") fires at resolution time —
+            **only** when an anomaly candidate is present, so runs
+            without anomaly variants stay log-silent. The resolved
+            value threads into :func:`_compile_test` via a kwarg;
+            variants that do not consume ``as_of`` ignore it. The
+            two-query split, the source-table bypass helper, the
+            cold-start routing, and the
+            :class:`AnomalyTestStats` wiring all land in US-010 /
+            US-011 / US-012; US-009 (this seam) is the minimal
+            threading layer.
 
     Returns:
         A :class:`PruneResult` carrying every per-test
@@ -842,6 +860,33 @@ def prune_tests(
     pairs = _iter_candidate_tests(candidates)
     decisions: list[PruneDecision] = []
     start_ms = _now_monotonic_ms()
+
+    # US-009 of issue #171 — ``as_of`` resolution for the
+    # ``row_count_anomaly_by_period`` variant (DEC-001). Resolve to
+    # ``date.today()`` ONLY when the caller didn't supply one AND at
+    # least one candidate is an anomaly variant — runs without anomaly
+    # candidates stay log-silent and pay zero per-call cost. The INFO
+    # line uses lazy-format JSON per the layer-wide DEC-017 logger
+    # gate; never f-string-interpolate. The resolved value threads
+    # into :func:`_compile_test` via the ``as_of`` kwarg below;
+    # variants that don't consume it (the other seven) ignore the
+    # kwarg. The two-query split / cold-start routing / source-table
+    # bypass helper land in US-010 / US-011.
+    has_anomaly_candidate = any(
+        isinstance(test, CandidateTestRowCountAnomalyByPeriod) for _, test in pairs
+    )
+    if has_anomaly_candidate:
+        if as_of is None:
+            as_of = date.today()
+        # One INFO line per resolution path (default OR caller-supplied)
+        # so the audit trail records what reference date the anomaly
+        # tests used. Fires only when an anomaly candidate is present —
+        # runs without anomaly variants stay log-silent (zero impact on
+        # the existing variants per the AC's clean-degrade contract).
+        _LOGGER.info(
+            "anomaly: as_of resolved: %s",
+            json.dumps({"as_of": as_of.isoformat(), "model_unique_id": model.unique_id}),
+        )
 
     # DEC-001/DEC-002/DEC-003/DEC-007 of issue #35 — operator-chosen
     # disable short-circuit. Fires AFTER audit-path symlink-hardening
@@ -1132,6 +1177,13 @@ def prune_tests(
             # Compile the candidate test to failing-rows SQL. Returns
             # either a string (the SELECT), a ``_RequiresFutureData``
             # sentinel, or an ``_InvalidIdentifier`` sentinel.
+            #
+            # ``as_of`` threads through for the
+            # ``row_count_anomaly_by_period`` variant (#171 US-009 /
+            # DEC-001); the other seven variants ignore it. The compiler
+            # arm itself lands in US-008; at US-009 the kwarg is passed
+            # so US-008's arm consumes it without further plumbing
+            # changes when it merges.
             compile_result = _compile_test(
                 test,
                 per_test_table_ref,
@@ -1142,6 +1194,7 @@ def prune_tests(
                 sample_size=(resolved_config.sample_size if compile_scope == "sample" else None),
                 sample_bucket=sample_bucket,
                 partition_filter=compile_partition_filter,
+                as_of=as_of,
             )
             if isinstance(compile_result, _RequiresFutureData):
                 decision = _decide_requires_future_data(
