@@ -4172,3 +4172,507 @@ def test_as_of_supplied_no_anomaly_candidate_emits_no_log(
     matches = [r for r in caplog.records if "as_of resolved" in r.getMessage()]
     assert matches == []
     fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# #171 US-010 / DEC-009 / DEC-010 — ``_test_requires_source_table`` helper
+#
+# The helper centralises the per-variant bypass-routing predicate that BOTH
+# engine sites (``all_bypass_to_source`` short-circuit AND per-test
+# ``per_test_table_ref`` override) consult, so the two sites can never drift
+# out of lockstep. Unit-tested below across the full variant × sample_strategy
+# matrix; the behaviour-pin tests further down certify the engine actually
+# threads the helper to both arms.
+# ---------------------------------------------------------------------------
+
+
+def _bypass_variants() -> list[Any]:
+    """Construct one instance of each metadata-aggregate variant the helper
+    must route to source.
+    """
+    from signalforge.draft.models import (
+        CandidateTestRowCountAnomalyByPeriod,
+        CandidateTestRowCountBetween,
+        CandidateTestUniqueCombination,
+    )
+
+    return [
+        CandidateTestRowCountBetween(minimum=1, maximum=1_000),
+        CandidateTestUniqueCombination(columns=("a", "b")),
+        CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at"),
+    ]
+
+
+def _non_bypass_variants() -> list[Any]:
+    """Construct one instance of each non-bypassing (row-level) variant.
+
+    Every variant whose compiled SQL is a row-level failing-rows SELECT
+    is fine to evaluate on a sampled / materialised temp; ONLY the
+    metadata-aggregate variants need the source override.
+    """
+    from signalforge.draft.models import (
+        CandidateTestAcceptedValues,
+        CandidateTestCustomSQL,
+        CandidateTestNotNull,
+        CandidateTestRelationships,
+        CandidateTestUnique,
+    )
+
+    return [
+        CandidateTestNotNull(column="id"),
+        CandidateTestUnique(column="id"),
+        CandidateTestAcceptedValues(column="status", values=("a", "b")),
+        CandidateTestRelationships(column="customer_id", to="ref('customers')", field="id"),
+        CandidateTestCustomSQL(sql="SELECT 1 FROM {{ this }} WHERE id IS NULL"),
+    ]
+
+
+@pytest.mark.parametrize("sample_strategy", ["materialised", "oneshot"])
+def test_test_requires_source_table_routes_metadata_aggregates_to_source_under_sampling(
+    sample_strategy: str,
+) -> None:
+    """#171 DEC-010 — every metadata-aggregate variant
+    (``row_count_between``, ``unique_combination``,
+    ``row_count_anomaly_by_period``) must route to the source table under
+    BOTH ``sample_strategy="materialised"`` and
+    ``sample_strategy="oneshot"``. This is the DEC-010 codification: the
+    bypass is no longer materialised-only.
+
+    Pins the full bypass-variant set in one parametrize so a future
+    variant added to the helper grows the test surface automatically
+    via ``_bypass_variants``.
+    """
+    from signalforge.prune.engine import _test_requires_source_table
+
+    for test in _bypass_variants():
+        assert _test_requires_source_table(test, sample_strategy) is True, (
+            f"{type(test).__name__} must require source under sample_strategy={sample_strategy!r}"
+        )
+
+
+@pytest.mark.parametrize("sample_strategy", ["materialised", "oneshot"])
+def test_test_requires_source_table_leaves_row_level_variants_on_compile_ref(
+    sample_strategy: str,
+) -> None:
+    """#171 DEC-010 — every non-metadata-aggregate variant
+    (``not_null``, ``unique``, ``accepted_values``, ``relationships``,
+    ``custom_sql``) MUST NOT bypass to source under sampling — they
+    consume the substituted ``compile_table_ref`` (sampled temp under
+    ``materialised`` / source under ``oneshot``) per the #22
+    materialised-sample contract.
+    """
+    from signalforge.prune.engine import _test_requires_source_table
+
+    for test in _non_bypass_variants():
+        name = type(test).__name__
+        assert _test_requires_source_table(test, sample_strategy) is False, (
+            f"{name} must NOT bypass to source under sample_strategy={sample_strategy!r}"
+        )
+
+
+def test_test_requires_source_table_full_scope_never_bypasses() -> None:
+    """#171 DEC-010 — when prune scope is ``full`` (no sampling at all),
+    the helper receives ``sample_strategy=None`` and MUST return ``False``
+    for EVERY variant. There is no temp table to bypass on the no-sample
+    path; ``compile_table_ref`` already resolves to source, so the
+    override is a no-op. Pinned so a future refactor that accidentally
+    returns ``True`` here would surface (and would silently route
+    full-scope runs into the unnecessary bypass branch).
+    """
+    from signalforge.prune.engine import _test_requires_source_table
+
+    for test in [*_bypass_variants(), *_non_bypass_variants()]:
+        assert _test_requires_source_table(test, None) is False, (
+            f"{type(test).__name__} must return False under sample_strategy=None"
+        )
+
+
+# ---------------------------------------------------------------------------
+# #171 DEC-010 — engine-routing pins for the helper at both sites
+#
+# Behavioural pins that the two engine sites actually consult the helper.
+# Compiler snapshots alone certify SQL shape; only these tests certify the
+# engine hands the compiler the right ``TableRef``. Mirror the
+# ``test_prune_tests_unique_combination_under_*`` precedent shape (#170
+# US-005b) — these are the routing pins, not the SQL-shape pins.
+# ---------------------------------------------------------------------------
+
+
+def test_prune_tests_row_count_between_under_oneshot_sample_now_bypasses_to_source(
+    tmp_path: Path,
+) -> None:
+    """#171 DEC-010 codification — under ``scope="sample"`` +
+    ``sample_strategy="oneshot"``, when the only candidate is a
+    ``row_count_between``, the engine's ``all_bypass_to_source``
+    short-circuit fires and the test compiles directly against the
+    SOURCE table — NO ``get_row_count`` lookup, NO sample CTE wrapping,
+    NO temp table.
+
+    Pre-#171 the inline isinstance check was unconditional on
+    sample_strategy, so this behaviour already worked in practice for
+    the all-bypass case. #171 makes it an EXPLICIT contract via
+    :func:`_test_requires_source_table` — a future tightening of the
+    helper that accidentally dropped the ``oneshot`` arm would fail
+    loud here.
+
+    Mirrors the precedent test
+    ``test_prune_tests_row_count_between_under_materialised_references_source_not_temp_table``
+    but flips ``sample_strategy`` to ``"oneshot"`` so the new
+    contract surface is independently pinned.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # NO ``expect_get_table`` — the short-circuit skips
+    # ``_resolve_sample_bucket`` (which would otherwise call
+    # ``adapter.get_row_count``). NO ``expect_materialise_sample`` —
+    # ``oneshot`` strategy never materialises in the first place. NO
+    # ``expect_abort_session`` — no session opened.
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_row_count_test(minimum=100, maximum=10_000)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="oneshot",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_between"
+    # The compiled SQL MUST reference the source production table — a
+    # sampled COUNT would return the sample size, not the model's true
+    # row count.
+    assert "fake_project.dataset.orders" in decision.compiled_sql
+    # The deterministic-sample CTE prefix MUST NOT appear — the helper's
+    # ``oneshot`` arm prevented the sample wrapping.
+    assert "_SESSION._sf_sample_" not in decision.compiled_sql
+    # And no oneshot deterministic-sample CTE either (the compiler would
+    # wrap source in a ``WITH sample AS (SELECT ... MOD(..., bucket) <
+    # 1)`` CTE if scope="sample" + sample_bucket were threaded through).
+    assert "WITH sample AS" not in decision.compiled_sql
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_unique_combination_under_oneshot_sample_short_circuit_pinned(
+    tmp_path: Path,
+) -> None:
+    """#171 DEC-010 sibling pin — same shape as the
+    ``row_count_between`` oneshot pin above, for the
+    ``unique_combination`` variant. The parametrised existing
+    ``test_prune_tests_unique_combination_under_materialised_references_source_not_temp_table``
+    already covers oneshot; this is a dedicated repetition focused on
+    pinning the SHORT-CIRCUIT path (no warehouse pre-work) — a future
+    change to ``all_bypass_to_source`` that accidentally gated on
+    ``materialised`` only would fail here.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # NO ``expect_get_table`` / ``expect_materialise_sample`` /
+    # ``expect_abort_session`` — short-circuit skips them all.
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_unique_combination_test(columns=("id", "customer_id"))
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="oneshot",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "unique_combination"
+    assert "fake_project.dataset.orders" in decision.compiled_sql
+    assert "_SESSION._sf_sample_" not in decision.compiled_sql
+    fake.assert_all_expectations_met()
+
+
+def test_mixed_per_test_override_routes_row_count_between_to_source_under_oneshot(
+    tmp_path: Path,
+) -> None:
+    """#171 DEC-010 — load-bearing two-conditional pattern (per memory
+    ``prune-engine-two-conditional-routing-pattern``). When a candidate
+    list MIXES one bypassing variant (``row_count_between``) and one
+    row-level variant (``not_null``) under ``scope=sample`` +
+    ``sample_strategy=oneshot``, the engine's ``all_bypass_to_source``
+    short-circuit MUST NOT fire (mixed list fails the
+    ``all(_test_requires_source_table(...))`` predicate), and the
+    per-test ``per_test_table_ref`` override must route each test
+    individually — ``not_null`` consumes the substituted
+    ``compile_table_ref`` (source under oneshot, with a sample CTE
+    wrapping), ``row_count_between`` routes past to source directly
+    (no sample CTE).
+
+    Mirrors
+    ``test_prune_tests_mixed_candidates_per_test_override_routes_unique_combination_to_source``
+    (#170 QG Pass 3) but for the ``oneshot`` strategy where the previous
+    behaviour was a no-op (compile_table_ref already equalled source)
+    and the routing-difference signal lives in scope/sample_bucket
+    threading, not in the TableRef itself. The load-bearing claim:
+    ``row_count_between``'s compiled SQL contains NO sample CTE (the
+    helper's bypass result causes the engine to thread compile_scope =
+    "full" / sample_bucket=None for THIS test), while ``not_null``'s
+    compiled SQL DOES wrap source in the deterministic-sample CTE.
+
+    Without this pin, a regression that dropped the per-test arm's call
+    to the helper (relying only on the short-circuit) would PASS the
+    single-variant pin above silently (the short-circuit catches the
+    all-bypass case) but break the mixed-candidate case where the per-
+    test branch is the only arm that fires.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    # Mixed → short-circuit does NOT fire → engine falls into the oneshot
+    # else-branch → ``_resolve_sample_bucket`` runs → ``get_row_count``
+    # query.
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    # Two per-test compile queries; order is candidate iteration order
+    # (column-scoped ``not_null`` first, then model-level
+    # ``row_count_between``).
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    # NO ``expect_abort_session`` — oneshot never opens a session.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(CandidateTestRowCountBetween(minimum=100, maximum=10_000),),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="oneshot",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 2
+    by_type = {d.test.type: d for d in result.decisions}
+    assert {"not_null", "row_count_between"} <= set(by_type)
+
+    not_null_sql = by_type["not_null"].compiled_sql
+    rcb_sql = by_type["row_count_between"].compiled_sql
+
+    # ``not_null`` is NOT a bypass variant — under oneshot it consumes
+    # the substituted compile_table_ref (= source, since oneshot does not
+    # materialise) AND the compiler wraps it in the deterministic-sample
+    # CTE. The wrap is the routing signal that proves the per-test
+    # override did NOT incorrectly bypass.
+    assert "fake_project.dataset.orders" in not_null_sql
+    assert "WITH sample AS" in not_null_sql, (
+        f"not_null under scope=sample + oneshot must be sample-CTE-wrapped; got: {not_null_sql!r}"
+    )
+
+    # ``row_count_between`` is a bypass variant — the per-test override
+    # routes it past the sample wrapping; compiled SQL hits the source
+    # directly with NO sample CTE.
+    assert "fake_project.dataset.orders" in rcb_sql
+    assert "WITH sample AS" not in rcb_sql, (
+        f"row_count_between under oneshot must bypass sample wrapping; got: {rcb_sql!r}"
+    )
+    # And it MUST NOT reference the (never-created) temp table either.
+    assert "_SESSION._sf_sample_" not in rcb_sql
+
+    fake.assert_all_expectations_met()
+
+
+def test_mixed_per_test_override_routes_row_count_anomaly_to_source_under_oneshot(
+    tmp_path: Path,
+) -> None:
+    """#171 DEC-010 — sibling pin for the third metadata-aggregate
+    variant (``row_count_anomaly_by_period``). Same shape as the
+    row_count_between mixed-candidate test above; certifies the helper's
+    third arm reaches the per-test override under ``oneshot``.
+
+    The anomaly variant's compiler arm returns a TUPLE (US-008
+    ``(stats_sql, violation_sql)``); the engine's tuple branch in
+    ``prune_tests`` (currently US-010-pending — routes to
+    ``kept-without-evidence``) doesn't execute SQL, so the load-bearing
+    assertion is on the ``test.type`` reaching the per-test branch at
+    all (which proves the routing arm fired) rather than the compiled
+    SQL shape (which lives behind the to-be-implemented two-query split
+    in US-011).
+    """
+    from signalforge.draft.models import CandidateTestRowCountAnomalyByPeriod
+
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    # Mixed → ``all_bypass_to_source`` does NOT fire → ``_resolve_sample_bucket``
+    # runs (one ``expect_get_table``).
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    # Only ONE warehouse query — for the ``not_null`` test. The anomaly
+    # compiler arm returns a tuple; the engine routes the tuple to
+    # ``kept-without-evidence`` without issuing a warehouse call (US-011
+    # pending). No ``expect_abort_session`` — oneshot doesn't open one.
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at"),),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="oneshot",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    # Both tests reached a decision — the engine did NOT crash on the
+    # tuple compile result. Specific routing of the tuple lands in US-011.
+    assert result.total_tests == 2
+    by_type = {d.test.type: d for d in result.decisions}
+    assert {"not_null", "row_count_anomaly_by_period"} <= set(by_type)
+
+    # ``not_null`` is NOT a bypass variant — under oneshot it consumes
+    # the substituted compile_table_ref (=source) AND the compiler wraps
+    # it in the deterministic-sample CTE. The wrap is the routing signal
+    # that proves the per-test override did NOT bypass for the row-level
+    # variant.
+    not_null_sql = by_type["not_null"].compiled_sql
+    assert "fake_project.dataset.orders" in not_null_sql
+    assert "WITH sample AS" in not_null_sql
+
+    # The anomaly variant's tuple compile result is routed to
+    # ``kept-without-evidence`` per the US-011-pending stub; the
+    # compiled_sql may be empty (the engine never reached
+    # ``run_test_sql``). The load-bearing claim is that the per-test
+    # branch fired at all — the test ended up in ``decisions`` — which
+    # proves the per-test override (where the helper is consulted) did
+    # not crash, and the engine continued past the bypass dispatch for
+    # the bypassing variant.
+    anomaly_decision = by_type["row_count_anomaly_by_period"]
+    # US-011-pending: the tuple branch routes to ``kept-without-evidence``
+    # via ``_decide_kept_without_evidence_invalid_identifier``. Pinning
+    # the decision shape here AND the routing arm proves the helper's
+    # third arm reached the per-test branch.
+    assert anomaly_decision.decision == "kept"
+    assert anomaly_decision.reason == "kept-without-evidence"
+
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_all_anomaly_under_oneshot_short_circuits_no_warehouse_prework(
+    tmp_path: Path,
+) -> None:
+    """#171 DEC-010 — when every candidate is the anomaly variant under
+    ``scope=sample`` + ``sample_strategy=oneshot``, the
+    ``all_bypass_to_source`` short-circuit fires: NO ``get_row_count``
+    call, NO ``materialise_sample`` call, NO session.
+
+    Belt-and-braces with the unit test of the helper above; here we pin
+    the engine actually CONSULTS the helper at the short-circuit site.
+    The anomaly variant's compile result is the US-011-pending tuple
+    that routes to ``kept-without-evidence`` — but the short-circuit
+    avoids the warehouse pre-work either way, which is the load-bearing
+    contract for THIS site.
+    """
+    from signalforge.draft.models import CandidateTestRowCountAnomalyByPeriod
+
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # NO ``expect_get_table`` — short-circuit skips ``_resolve_sample_bucket``.
+    # NO ``expect_materialise_sample``. NO ``expect_query`` either: the
+    # US-011-pending tuple-branch routes the anomaly test to
+    # ``kept-without-evidence`` WITHOUT issuing a warehouse query.
+    # NO ``expect_abort_session``.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at"),),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="oneshot",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 1
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_anomaly_by_period"
+    # US-011-pending stub: tuple compile result → kept-without-evidence.
+    assert decision.decision == "kept"
+    assert decision.reason == "kept-without-evidence"
+    fake.assert_all_expectations_met()
