@@ -428,3 +428,149 @@ def test_candidate_test_unique_combination_extra_ignored() -> None:
         }
     )
     assert not hasattr(test, "phantom_field")
+
+
+# --- Custom __repr__ redaction (US-002, DEC-013) --------------------------
+# Three text-bearing candidate variants — ``where`` / ``sql`` /
+# ``rationale`` — get a redacted ``__repr__`` that omits the LLM-emitted
+# text. Mirrors ``DiffEntry``/``DiffReport``/``GradingResult`` redaction
+# established by prune DEC-022 / grade DEC-022 / diff DEC-020. Only
+# ``__repr__`` is overridden; Pydantic ``__str__`` / serialisation paths
+# (``model_dump_json``) still carry the text fields.
+
+
+def test_candidate_test_custom_sql_repr_omits_sql_and_rationale() -> None:
+    """:meth:`CandidateTestCustomSQL.__repr__` does NOT leak ``sql`` or
+    ``rationale`` (DEC-013). An accidental ``_LOGGER.warning("test: %s", t)``
+    would otherwise dump the full LLM-authored SELECT body into log sinks."""
+    test = CandidateTestCustomSQL(
+        sql="SELECT SECRET_SQL_BODY FROM t",
+        column=None,
+        rationale="SECRET_RATIONALE_TEXT",
+    )
+    rendered = repr(test)
+    assert "SECRET_SQL_BODY" not in rendered, (
+        "CandidateTestCustomSQL.__repr__ must omit the LLM-emitted sql body (DEC-013)"
+    )
+    assert "SECRET_RATIONALE_TEXT" not in rendered, (
+        "CandidateTestCustomSQL.__repr__ must omit the LLM-emitted rationale (DEC-013)"
+    )
+    # The identifying surface is still visible.
+    assert "custom_sql" in rendered
+    assert "model-level" in rendered or "model" in rendered
+
+
+def test_candidate_test_custom_sql_repr_with_column_scope() -> None:
+    """Column-scoped ``custom_sql`` exposes the column NAME (operationally
+    useful, not value-bearing) while still hiding the sql body."""
+    test = CandidateTestCustomSQL(
+        sql="SELECT SECRET FROM t",
+        column="user_id",
+        rationale="SECRET_RAT",
+    )
+    rendered = repr(test)
+    assert "SECRET" not in rendered
+    assert "user_id" in rendered
+
+
+def test_candidate_test_custom_sql_model_dump_json_still_carries_text() -> None:
+    """:meth:`model_dump_json` (serialisation path) is UNCHANGED — only
+    ``__repr__`` redacts. Pydantic ``__str__`` is reserved for serialisation
+    (DEC-013); overriding it would corrupt the audit-log JSON round-trip."""
+    test = CandidateTestCustomSQL(
+        sql="SELECT SECRET_SQL_BODY FROM t",
+        column=None,
+        rationale="SECRET_RATIONALE_TEXT",
+    )
+    dumped = test.model_dump_json()
+    assert "SECRET_SQL_BODY" in dumped
+    assert "SECRET_RATIONALE_TEXT" in dumped
+
+
+def test_candidate_test_row_count_between_repr_omits_where_and_rationale() -> None:
+    """:meth:`CandidateTestRowCountBetween.__repr__` does NOT leak ``where``
+    or ``rationale`` (DEC-013, retroactive). The numeric bounds stay visible
+    (not value-bearing, operationally useful)."""
+    test = CandidateTestRowCountBetween(
+        minimum=1,
+        maximum=100,
+        where="SECRET_WHERE_FRAGMENT = 'foo'",
+        rationale="SECRET_RATIONALE_TEXT",
+    )
+    rendered = repr(test)
+    assert "SECRET_WHERE_FRAGMENT" not in rendered, (
+        "CandidateTestRowCountBetween.__repr__ must omit the LLM-emitted where (DEC-013)"
+    )
+    assert "SECRET_RATIONALE_TEXT" not in rendered, (
+        "CandidateTestRowCountBetween.__repr__ must omit the LLM-emitted rationale (DEC-013)"
+    )
+    # The numeric bounds + type stay visible (operationally useful).
+    assert "row_count_between" in rendered
+    assert "1" in rendered
+    assert "100" in rendered
+
+
+def test_candidate_test_row_count_between_model_dump_json_still_carries_text() -> None:
+    """:meth:`model_dump_json` is unchanged — serialisation still carries
+    ``where`` / ``rationale``."""
+    test = CandidateTestRowCountBetween(
+        minimum=1,
+        maximum=100,
+        where="SECRET_WHERE_FRAGMENT = 'foo'",
+        rationale="SECRET_RATIONALE_TEXT",
+    )
+    dumped = test.model_dump_json()
+    assert "SECRET_WHERE_FRAGMENT" in dumped
+    assert "SECRET_RATIONALE_TEXT" in dumped
+
+
+def test_candidate_test_unique_combination_repr_omits_where_and_rationale() -> None:
+    """:meth:`CandidateTestUniqueCombination.__repr__` does NOT leak ``where``
+    or ``rationale`` (DEC-013). The ``columns`` tuple stays visible — column
+    NAMES are not value-bearing."""
+    test = CandidateTestUniqueCombination(
+        columns=("order_id", "customer_id"),
+        where="SECRET_WHERE_FRAGMENT = 'bar'",
+        rationale="SECRET_RATIONALE_TEXT",
+    )
+    rendered = repr(test)
+    assert "SECRET_WHERE_FRAGMENT" not in rendered, (
+        "CandidateTestUniqueCombination.__repr__ must omit the LLM-emitted where (DEC-013)"
+    )
+    assert "SECRET_RATIONALE_TEXT" not in rendered, (
+        "CandidateTestUniqueCombination.__repr__ must omit the LLM-emitted rationale (DEC-013)"
+    )
+    # The columns tuple + type stay visible.
+    assert "unique_combination" in rendered
+    assert "order_id" in rendered
+    assert "customer_id" in rendered
+
+
+def test_candidate_test_unique_combination_model_dump_json_still_carries_text() -> None:
+    """:meth:`model_dump_json` is unchanged — serialisation still carries
+    ``where`` / ``rationale``."""
+    test = CandidateTestUniqueCombination(
+        columns=("order_id", "customer_id"),
+        where="SECRET_WHERE_FRAGMENT = 'bar'",
+        rationale="SECRET_RATIONALE_TEXT",
+    )
+    dumped = test.model_dump_json()
+    assert "SECRET_WHERE_FRAGMENT" in dumped
+    assert "SECRET_RATIONALE_TEXT" in dumped
+
+
+def test_candidate_test_repr_redaction_holds_under_ansi_injection() -> None:
+    """The redacted repr does not interpret ANSI escapes / control chars
+    embedded in the LLM-emitted text fields — defence-in-depth so a hostile
+    payload like ``where="\\x1b[31mEVIL\\x1b[0m"`` cannot leak into a log
+    viewer via ``repr()``. (The strip happens implicitly: ``repr()`` does
+    not include the field, so the bytes never appear regardless of content.)"""
+    test = CandidateTestUniqueCombination(
+        columns=("a", "b"),
+        where="\x1b[31mEVIL_ANSI\x1b[0m",
+        rationale="\x1b[33mEVIL_RAT\x1b[0m",
+    )
+    rendered = repr(test)
+    assert "EVIL_ANSI" not in rendered
+    assert "EVIL_RAT" not in rendered
+    assert "\x1b" not in rendered

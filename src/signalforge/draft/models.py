@@ -33,6 +33,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 _BASE_CONFIG = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
 
+def _scope_repr(column: str | None) -> str:
+    """Render the scope segment for a redacted candidate-test ``__repr__``.
+
+    Returns ``column=<name>`` for column-scoped tests, ``<model-level>`` for
+    model-level tests (``column is None``). The column NAME is operationally
+    useful (which column does this test apply to?) and is not value-bearing;
+    only the LLM-emitted free-text fields (``sql`` / ``where`` /
+    ``rationale``) are redacted.
+
+    Centralises the scope-rendering convention across all candidate-test
+    ``__repr__`` overrides so a future variant inherits the same shape.
+    """
+    if column is None:
+        return "<model-level>"
+    return f"column={column!r}"
+
+
 class CandidateTestNotNull(BaseModel):
     """A ``not_null`` test on one column."""
 
@@ -157,6 +174,22 @@ class CandidateTestCustomSQL(BaseModel):
             raise ValueError("CandidateTestCustomSQL.sql must be non-empty")
         return v
 
+    def __repr__(self) -> str:
+        """Redacted repr — omits the LLM-emitted ``sql`` and ``rationale``
+        (DEC-013 of #170).
+
+        An accidental ``_LOGGER.warning("test: %s", t)`` would otherwise
+        dump the full LLM-authored singular-test SELECT into log sinks; the
+        body can be arbitrarily long, multi-line, and may quote upstream
+        column data via the model SQL it scans. Mirrors the redaction
+        precedent established on ``PruneDecision`` (prune DEC-022),
+        ``GradingResult`` (grade DEC-022), and ``DiffEntry`` (diff DEC-020).
+        Full content remains accessible via :meth:`model_dump` /
+        :meth:`model_dump_json` — only the casual debug-print path
+        (``repr()`` / ``%s``-interpolation) is redacted.
+        """
+        return f"CandidateTestCustomSQL(type='custom_sql', {_scope_repr(self.column)})"
+
 
 class CandidateTestRowCountBetween(BaseModel):
     """A model-level row-count-bounds test (#169, DEC-001).
@@ -242,6 +275,24 @@ class CandidateTestRowCountBetween(BaseModel):
             )
         return self
 
+    def __repr__(self) -> str:
+        """Redacted repr — omits the LLM-emitted ``where`` and ``rationale``
+        (DEC-013 of #170, retroactive).
+
+        The numeric bounds (``minimum`` / ``maximum``) stay visible: they're
+        not value-bearing and answering "what does this test assert?" at a
+        glance is operationally useful. The free-text ``where`` clause is a
+        SQL fragment the LLM authored and is exactly the kind of payload the
+        redaction exists to keep out of log sinks. Mirrors the precedent on
+        :class:`PruneDecision` / :class:`GradingResult` / :class:`DiffEntry`.
+        Full content remains accessible via :meth:`model_dump_json`.
+        """
+        return (
+            "CandidateTestRowCountBetween(type='row_count_between', "
+            "<model-level>, "
+            f"minimum={self.minimum!r}, maximum={self.maximum!r})"
+        )
+
 
 class CandidateTestUniqueCombination(BaseModel):
     """A model-level multi-column-uniqueness test (#170, DEC-001).
@@ -315,6 +366,23 @@ class CandidateTestUniqueCombination(BaseModel):
                 "same value in two positions"
             )
         return self
+
+    def __repr__(self) -> str:
+        """Redacted repr — omits the LLM-emitted ``where`` and ``rationale``
+        (DEC-013 of #170).
+
+        The ``columns`` tuple stays visible: column NAMES are not
+        value-bearing and answering "which combination is asserted unique?"
+        is operationally useful. The free-text ``where`` clause is a SQL
+        fragment the LLM authored and is exactly the kind of payload the
+        redaction exists to keep out of log sinks. Mirrors the precedent on
+        :class:`PruneDecision` / :class:`GradingResult` / :class:`DiffEntry`.
+        Full content remains accessible via :meth:`model_dump_json`.
+        """
+        return (
+            "CandidateTestUniqueCombination(type='unique_combination', "
+            f"<model-level>, columns={self.columns!r})"
+        )
 
 
 CandidateTest = Annotated[
