@@ -1,1 +1,1 @@
-SELECT COUNT(*) FROM `fake_project.dataset.orders`
+SELECT n FROM (SELECT COUNT(*) AS n FROM `fake_project.dataset.orders`) AS rc WHERE n < 1
