@@ -68,6 +68,8 @@ Every `GradeEvent` carries five 16-hex blake2b-8 fingerprints:
 
 The four default criterion texts (DEC-016) are locked verbatim and tested for stability via a pinned golden hash. Changing the text is a reproducibility break — bump `audit_schema_version` if it happens.
 
+**Grade-side `_PROMPT_VERSION` snapshot surface (#170 DEC-012).** Issue #170 closed an asymmetry that had drifted into `business-rule-tests.md`: the rule file historically claimed "two `_PROMPT_VERSION` constants in the pipeline, each with its own cache-stability snapshot" — but only the drafter side had a snapshot. The grade side carried `rubric_hash` / `prompt_version_template` / `criterion_prompt_hash` dynamically per-event but had no module-level constant and no pinning test. #170 added `signalforge.grade.prompts._PROMPT_VERSION` (typed `Final[str]`, computed at import via `prompt_version_template(DEFAULT_RUBRIC)`) plus `tests/grade/test_prompt_cache_stability.py` mirroring the drafter snapshot shape — pins both the `_PROMPT_VERSION` hex AND a rendered rubric-block golden with `difflib.unified_diff` on mismatch. **Rotation policy: rotate the snapshot when the grade `_SYSTEM_PROMPT` text changes OR any of the four `DEFAULT_RUBRIC` criterion texts change.** Mirrors the drafter-side `_TEST_CATALOGUE_LINES` rotation contract (`llm-drafter.md`). A new variant's grade-rubric extension (e.g. #170's `no-redundant` extension for grain-meaningfulness) rotates the constant value naturally; pre-existing pinned tests fail loud and the new value is computed and pinned in the same commit (`tests/grade/test_rubric.py` + `tests/grade/test_prompts.py` rotate alongside).
+
 ## `_artifact_id_for` canonical dotted-path format (DEC-009, issue #42 hoist)
 
 Six shapes the formatter emits:
