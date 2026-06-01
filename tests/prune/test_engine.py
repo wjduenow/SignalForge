@@ -39,6 +39,7 @@ from signalforge.draft.models import (
     CandidateTestNotNull,
     CandidateTestRelationships,
     CandidateTestRowCountBetween,
+    CandidateTestUniqueCombination,
 )
 from signalforge.manifest.models import Column, Manifest, Model
 from signalforge.prune import engine as engine_module
@@ -3656,6 +3657,152 @@ def test_prune_tests_row_count_between_under_materialised_references_source_not_
     # size (100_000), not the model's true row count.
     assert "fake_project.dataset.orders" in decision.compiled_sql
     # The temp table MUST NOT appear; the per-test override routed past it.
+    assert "_SESSION._sf_sample_" not in decision.compiled_sql
+    fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# unique_combination sample-mode routing (#170 US-005b)
+#
+# DEC-006 of #170 — composite uniqueness on a sample is semantically
+# approximate (false-negative risk: a duplicate pair may straddle the sampled
+# and unsampled rows, so the sample looks unique while the full table has
+# duplicates). The engine routes ``unique_combination`` to the SOURCE table
+# under both ``sample_strategy="materialised"`` and ``sample_strategy="oneshot"``
+# when ``scope="sample"`` — mirroring the #169 US-007a metadata-bypass pattern
+# that ``row_count_between`` follows.
+#
+# These tests are the BEHAVIOURAL routing pin (load-bearing per
+# ``.claude/rules/business-rule-tests.md`` § "Pin the engine-routing test, not
+# just the compiler snapshot"). The snapshot suite (US-005a) certifies SQL
+# shape; only this matrix certifies that the engine actually hands the
+# compiler the source ``TableRef`` rather than a substituted temp table.
+# ---------------------------------------------------------------------------
+
+
+def _candidates_with_one_unique_combination_test(
+    *,
+    columns: tuple[str, ...] = ("id", "customer_id"),
+    where: str | None = None,
+) -> CandidateSchema:
+    """Build a CandidateSchema carrying a single model-level
+    ``unique_combination`` test. The variant is model-level only
+    (``column=None`` by Pydantic invariant, DEC-001 of #170) and requires
+    ``len(columns) >= 2`` (DEC-016).
+    """
+    return CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestUniqueCombination(
+                columns=columns,
+                where=where,
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize("sample_strategy", ["materialised", "oneshot"])
+def test_prune_tests_unique_combination_under_materialised_references_source_not_temp_table(
+    tmp_path: Path,
+    sample_strategy: str,
+) -> None:
+    """#170 US-005b / DEC-006 — under ``scope="sample"`` and EITHER
+    ``sample_strategy="materialised"`` or ``sample_strategy="oneshot"``,
+    when the only candidate is a ``unique_combination``, the engine
+    short-circuits all sample pre-work (no ``materialise_sample``, no
+    ``get_row_count`` bucket lookup, no session, no temp table) and
+    compiles directly against the SOURCE table.
+
+    Two load-bearing invariants:
+      * **Semantic correctness:** composite uniqueness on a sample is
+        semantically approximate — a duplicate pair may straddle the
+        sampled and unsampled rows, so a sample-mode verdict carries
+        false-negative risk. The compiled SQL must reference the source.
+      * **Failure-mode containment:** before the short-circuit, if all
+        candidates were ``unique_combination`` and ``materialise_sample``
+        raised, every test routed to ``kept-without-evidence`` even
+        though they could have run directly against source. The
+        short-circuit removes that failure mode entirely.
+
+    Mirrors the precedent test
+    ``test_prune_tests_row_count_between_under_materialised_references_source_not_temp_table``
+    for the 6th variant (``row_count_between``); this 7th variant
+    follows the SAME metadata-bypass routing (cross-review consensus in
+    #170's plan, Performance + Testing reviews converging on Option (iii)).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # NO ``expect_get_table`` — the all-bypass short-circuit skips the
+    # ``_resolve_sample_bucket`` lookup. NO ``expect_materialise_sample``
+    # — the short-circuit skips the CTAS too. NO ``expect_abort_session``
+    # — no session opened.
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_unique_combination_test(columns=("id", "customer_id"))
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy=sample_strategy,  # type: ignore[arg-type]
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "unique_combination"
+    # unique_combination MUST reference the SOURCE production table —
+    # composite uniqueness on a sample is semantically approximate.
+    assert "fake_project.dataset.orders" in decision.compiled_sql
+    # The temp table MUST NOT appear; the engine override routed past it.
+    assert "_SESSION._sf_sample_" not in decision.compiled_sql
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_unique_combination_under_scope_full_references_source(
+    tmp_path: Path,
+) -> None:
+    """Companion test — ``scope="full"`` already routes every variant to
+    the source table trivially (no sampling at all). Guards against an
+    accidental regression where extending the per-test override for
+    ``unique_combination`` somehow broke the no-sample path. Belt-and-
+    braces alongside the parametrised sample-mode pin above.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _candidates_with_one_unique_combination_test(columns=("id", "customer_id"))
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "unique_combination"
+    assert "fake_project.dataset.orders" in decision.compiled_sql
     assert "_SESSION._sf_sample_" not in decision.compiled_sql
     fake.assert_all_expectations_met()
 
