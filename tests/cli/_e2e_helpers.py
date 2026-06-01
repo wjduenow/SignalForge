@@ -20,6 +20,13 @@ Public surface:
   verbatim without coupling the e2e fixture to the ``init-demo`` parity
   tree (``tests/test_demo_fixture_parity.py``) — the rules are injected
   into the per-run ``tmp_path`` copy, never the committed fixture.
+* :func:`inject_model_anomaly_rules` — thin specialisation of
+  :func:`inject_model_business_rules` for the ``row_count_anomaly_by_period``
+  e2e (issue #171 / US-017). Same on-disk mutation surface
+  (``config.meta.signalforge.business_rules``); the helper exists to
+  keep the anomaly e2e self-documenting at the call site (the rule prose
+  steers the drafter toward the structured anomaly variant rather than
+  freeform ``custom_sql``).
 * :func:`apply_provider_override` — overlays per-test ``grade:`` block
   knobs (``provider`` / ``model`` / ``max_output_tokens``) onto a copied
   fixture's ``signalforge.yml`` (issue #155 / US-004 / DEC-012). The
@@ -186,6 +193,54 @@ def inject_model_business_rules(
     node_meta.setdefault("signalforge", {})["business_rules"] = rules_list
 
     manifest_path.write_text(json.dumps(manifest))
+
+
+def inject_model_anomaly_rules(
+    project_dir: Path,
+    model_unique_id: str,
+    rules: Sequence[str],
+) -> None:
+    """Inject anomaly-shaped business rules into a manifest model node.
+
+    Issue #171 / US-017. The ``row_count_anomaly_by_period`` variant is
+    model-level and time-bound: the drafter does NOT learn the variant
+    from a column's data type alone; it needs an operator hint that this
+    model has a per-period row-count baseline worth monitoring. The
+    canonical seam for that hint is the existing
+    ``meta.signalforge.business_rules`` surface (drafter precedent from
+    #116 / #163) — the variant catalogue + the drafter prompt steer
+    Sonnet 4.6 to propose a structured :class:`CandidateTestRowCountAnomalyByPeriod`
+    candidate rather than a freeform ``custom_sql`` ``GROUP BY``.
+
+    The helper is a thin specialisation of
+    :func:`inject_model_business_rules` — the mutation surface is
+    identical (``config.meta.signalforge.business_rules`` +
+    ``meta.signalforge.business_rules`` in lockstep), but exists as a
+    distinct name so the anomaly e2e reads self-documentingly at the
+    call site (mirrors the #169 ``inject_model_business_rules`` /
+    ``inject_model_anomaly_rules`` distinction in spirit — same on-disk
+    bytes, different intent).
+
+    Args:
+        project_dir: a copied project root (use
+            :func:`copy_fixture_to_tmp` first — NEVER call against a
+            committed fixture).
+        model_unique_id: the dbt ``unique_id`` of the model node to
+            patch (e.g. ``"model.signalforge_test_austin.stg_bikeshare_trips"``).
+        rules: the natural-language anomaly rules to inject. Each is a
+            prose business rule that should steer the drafter toward
+            proposing one or more structured
+            :class:`CandidateTestRowCountAnomalyByPeriod` candidates
+            against the named date column (mention the date column +
+            the per-period baseline explicitly so the drafter doesn't
+            fall back to ``custom_sql``).
+
+    Raises:
+        KeyError: if ``model_unique_id`` is not present in the
+            manifest's ``nodes`` map (a typo in the unique_id surfaces
+            loud rather than silently injecting nothing).
+    """
+    inject_model_business_rules(project_dir, model_unique_id, rules)
 
 
 def apply_provider_override(
