@@ -1,0 +1,1 @@
+WITH history AS (SELECT DATE_TRUNC(`event_date`, DAY) AS period, EXTRACT(DAYOFWEEK FROM `event_date`) AS dow, COUNT(*) AS cnt FROM `fake_project.dataset.orders` WHERE `event_date` >= DATE('2026-05-01') - INTERVAL 28 DAY AND `event_date` < DATE('2026-05-01') GROUP BY period, dow) SELECT dow, MIN(cnt) AS min_cnt, MAX(cnt) AS max_cnt, COUNT(*) AS n FROM history GROUP BY dow
