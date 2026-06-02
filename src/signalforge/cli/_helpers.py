@@ -126,6 +126,7 @@ from signalforge.llm.cost import (
     CostRollupMalformedRecordError,
     CostRollupUnknownModelError,
 )
+from signalforge.llm.errors import LLMProviderAsyncUnsupportedError
 from signalforge.manifest import (
     AmbiguousRefError,
     Manifest,
@@ -446,6 +447,13 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     LLMConnectionError: 3,
     LLMResponseFormatError: 3,
     LLMCacheTooLargeError: 3,
+    # Provider async-capability gate (issue #186 / US-002 / DEC-006): the
+    # configured LLM provider declares ``supports_async = False`` but the
+    # operator requested ``grade.max_concurrent_calls > 1``. Raised at
+    # ``grade_artifacts`` orchestrator entry **before** ``asyncio.run`` —
+    # an environment / configuration fact the operator must resolve
+    # (downgrade concurrency or pick another provider), so tier 3.
+    LLMProviderAsyncUnsupportedError: 3,
     # Warehouse connectivity / quota (auth, query syntax that came back
     # from a real query, billing limit).
     WarehouseError: 3,

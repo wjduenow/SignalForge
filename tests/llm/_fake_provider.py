@@ -124,6 +124,22 @@ class FakeNoCacheProvider(LLMProvider):
         """Build the tiny canned-response client (no SDK, no network)."""
         return FakeNoCacheClient(response_text=self._response_text)
 
+    def make_async_client(self) -> Any:
+        """Issue #186 US-002 — abstract-method stub.
+
+        The neutrality tests drive the sync path (``call_llm``); the async
+        path lands in US-006 with its own dual sync+async fake surface.
+        Raising :class:`NotImplementedError` satisfies the ABC's abstract
+        requirement (must be overridden in the concrete subclass) without
+        committing to a partial implementation; a future async neutrality
+        test extends :class:`FakeNoCacheClient` with the async methods and
+        updates this stub in lockstep. ``Any`` return type sidesteps the
+        strict ``_LLMAsyncClientProtocol`` override check.
+        """
+        raise NotImplementedError(
+            "FakeNoCacheProvider.make_async_client: US-006 of issue #186 will wire this."
+        )
+
     def build_create_kwargs(
         self,
         *,

@@ -98,6 +98,44 @@ class _LLMClientProtocol(Protocol):
     def messages(self) -> _LLMMessagesProtocol: ...
 
 
+@runtime_checkable
+class _LLMAsyncMessagesProtocol(Protocol):
+    """Async sibling of :class:`_LLMMessagesProtocol` (issue #186, US-002).
+
+    The ``.messages`` surface the async orchestrator (``call_llm_async``,
+    US-006) consumes. Duck-typed at exactly ``async create`` + ``async
+    count_tokens`` — both must be awaitable so the orchestrator can ``await``
+    each call. A vendor's real async SDK client (or a test fake exposing async
+    methods) satisfies it structurally; this keeps the orchestrator free of
+    any vendor-SDK import or type-checker suppression, mirroring the sync
+    sibling's DEC-012 confinement contract.
+
+    Issue #186 ships the protocol declarations only; the concrete vendor-side
+    async shims and the ``call_llm_async`` orchestrator land in US-003 / US-004
+    / US-005 / US-006.
+    """
+
+    async def create(self, **kwargs: Any) -> Any: ...
+
+    async def count_tokens(self, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
+class _LLMAsyncClientProtocol(Protocol):
+    """Async sibling of :class:`_LLMClientProtocol` (issue #186, US-002).
+
+    ``strategy.make_async_client()`` returns ``object``; the async orchestrator
+    (``call_llm_async``, US-006) narrows it to this protocol so the call sites
+    type-check without leaking a vendor async-SDK type into
+    ``signalforge.llm.client``. The DEC-012 SDK-ignore confinement applies to
+    the async path verbatim — every ``# pyright: ignore`` for an async SDK
+    surface lives in the per-vendor ``_<vendor>_client.py`` shim.
+    """
+
+    @property
+    def messages(self) -> _LLMAsyncMessagesProtocol: ...
+
+
 # Anthropic prompt-cache minimum block sizes per model family (DEC-009 /
 # DEC-024). Below these, a ``cache_control`` marker is silently a no-op:
 # the request still succeeds but the cache entry is never created, so the

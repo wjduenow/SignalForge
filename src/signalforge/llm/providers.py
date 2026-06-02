@@ -35,11 +35,14 @@ from __future__ import annotations
 
 import abc
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
 from signalforge.llm.errors import UnknownProviderError
+
+if TYPE_CHECKING:
+    from signalforge.llm.client import _LLMAsyncClientProtocol
 
 
 class ExceptionCategory(Enum):
@@ -122,12 +125,48 @@ class LLMProvider(abc.ABC):
     supports_prompt_caching: bool
     #: Whether the provider can count input tokens before sending (DEC-008).
     supports_token_count: bool
+    #: Whether the provider supports async dispatch (issue #186, US-002 / DEC-005).
+    #:
+    #: The default is ``True`` — every concrete provider that ships with v0.3
+    #: (Anthropic / OpenAI / Gemini) supports async (each vendor SDK exposes an
+    #: async client). A future provider lacking an async surface sets this to
+    #: ``False``; :func:`signalforge.grade.engine.grade_artifacts` then raises
+    #: :class:`signalforge.llm.errors.LLMProviderAsyncUnsupportedError` at
+    #: orchestrator entry when the operator requested ``grade.max_concurrent_calls
+    #: > 1`` (DEC-006), surfacing the capability gap to the operator rather than
+    #: silently clamping concurrency.
+    supports_async: ClassVar[bool] = True
 
     @abc.abstractmethod
     def make_client(self) -> object:
         """Build and return the real vendor SDK client.
 
         Called by the orchestrator when no client was injected for test use.
+        """
+
+    @abc.abstractmethod
+    def make_async_client(self) -> _LLMAsyncClientProtocol:
+        """Build and return the real vendor SDK *async* client
+        (issue #186, US-002 / DEC-005).
+
+        Called by the async orchestrator (``call_llm_async``, US-006) when no
+        async client was injected for test use. Implementations construct the
+        vendor's async client through the per-vendor ``_<vendor>_client.py``
+        shim so the DEC-012 SDK-ignore confinement holds for the async path
+        too.
+
+        A provider that does not ship an async client surface declares
+        :attr:`supports_async` ``= False`` and may raise
+        :class:`NotImplementedError` from this method — the grade engine
+        catches the capability gap at orchestrator entry (DEC-006) via
+        :class:`signalforge.llm.errors.LLMProviderAsyncUnsupportedError` and
+        never reaches this seam.
+
+        v0.3 ships the abstract declaration only; the concrete per-vendor
+        implementations land in US-003 (Anthropic) / US-004 (OpenAI) / US-005
+        (Gemini), with each shim adding its own async client constructor + AST
+        scan extension. The v0.3 concrete providers' temporary stubs raise
+        :class:`NotImplementedError` pointing at those tickets.
         """
 
     @abc.abstractmethod
@@ -328,6 +367,7 @@ class AnthropicProvider(LLMProvider):
     name = "anthropic"
     supports_prompt_caching = True
     supports_token_count = True
+    supports_async = True
 
     #: Stop-reason values that signal a fully-emitted, untruncated response
     #: (#155 DEC-006). ``tool_use`` is deliberately UNCLEAN in v0.3 — the
@@ -341,6 +381,20 @@ class AnthropicProvider(LLMProvider):
         from signalforge.llm._anthropic_client import _make_anthropic_client
 
         return _make_anthropic_client()
+
+    def make_async_client(self) -> _LLMAsyncClientProtocol:
+        """Temporary stub — US-003 of issue #186 wires the real async shim.
+
+        v0.3 ships the abstract method declaration on :class:`LLMProvider`
+        (this US-002); the per-vendor async shim (``_make_anthropic_async_client``
+        + ``AsyncAnthropic`` confinement via Scan 3b) lands in US-003. Raising
+        :class:`NotImplementedError` here keeps :class:`AnthropicProvider`
+        instantiable (the abstract method requirement is satisfied) without
+        committing to a partial implementation that would deceive callers.
+        """
+        raise NotImplementedError(
+            "AnthropicProvider.make_async_client: US-003 of issue #186 will implement this."
+        )
 
     def is_clean_completion(self, response: object) -> bool:
         """Return ``True`` iff ``response.stop_reason`` is in
@@ -613,6 +667,7 @@ class OpenAIProvider(LLMProvider):
     name = "openai"
     supports_prompt_caching = False
     supports_token_count = False
+    supports_async = True
 
     #: OpenAI finish-reason values that signal a fully-emitted, untruncated
     #: response (#155 DEC-005). ``length`` (max_tokens truncation),
@@ -626,6 +681,21 @@ class OpenAIProvider(LLMProvider):
         from signalforge.llm._openai_client import _make_openai_client
 
         return _make_openai_client()
+
+    def make_async_client(self) -> _LLMAsyncClientProtocol:
+        """Temporary stub — US-004 of issue #186 wires the real async shim.
+
+        v0.3 ships the abstract method declaration on :class:`LLMProvider`
+        (this US-002); the per-vendor async shim (``_make_openai_async_client``
+        + ``AsyncOpenAI`` confinement via Scan 9b + the
+        ``chat.completions.create`` façade) lands in US-004. Raising
+        :class:`NotImplementedError` here keeps :class:`OpenAIProvider`
+        instantiable (the abstract method requirement is satisfied) without
+        committing to a partial implementation that would deceive callers.
+        """
+        raise NotImplementedError(
+            "OpenAIProvider.make_async_client: US-004 of issue #186 will implement this."
+        )
 
     def is_clean_completion(self, response: object) -> bool:
         """Return ``True`` iff ``response.choices[0].finish_reason`` is in
@@ -933,6 +1003,7 @@ class GeminiProvider(LLMProvider):
     name = "gemini"
     supports_prompt_caching = False
     supports_token_count = False
+    supports_async = True
 
     #: Gemini finish-reason values (read as ``finish_reason.name`` —
     #: the SDK ships it as an enum) that signal a fully-emitted,
@@ -948,6 +1019,22 @@ class GeminiProvider(LLMProvider):
         from signalforge.llm._gemini_client import _make_gemini_client
 
         return _GeminiClientAdapter(_make_gemini_client())
+
+    def make_async_client(self) -> _LLMAsyncClientProtocol:
+        """Temporary stub — US-005 of issue #186 wires the real async adapter.
+
+        v0.3 ships the abstract method declaration on :class:`LLMProvider`
+        (this US-002); the per-vendor async adapter (``_GeminiAsyncMessagesAdapter``
+        forwarding to the SDK's ``.aio.models.generate_content`` namespace)
+        lands in US-005. Gemini's async surface is a namespace on the same
+        ``genai.Client``, not a separate class, so Scan 10 stays unchanged.
+        Raising :class:`NotImplementedError` here keeps :class:`GeminiProvider`
+        instantiable (the abstract method requirement is satisfied) without
+        committing to a partial implementation that would deceive callers.
+        """
+        raise NotImplementedError(
+            "GeminiProvider.make_async_client: US-005 of issue #186 will implement this."
+        )
 
     def is_clean_completion(self, response: object) -> bool:
         """Return ``True`` iff ``response.candidates[0].finish_reason.name``
