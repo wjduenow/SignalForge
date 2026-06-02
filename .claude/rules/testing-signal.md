@@ -54,6 +54,8 @@ A bare-name-only visitor is trivially bypassable and provides **false confidence
 
 Each new scan also needs a planted-violation regression test exercising all three patterns.
 
+**Total project AST scans: 12 as of #186** (was 10). Scan 3b (`anthropic.AsyncAnthropic` only in `_anthropic_client.py`) and Scan 9b (`openai.AsyncOpenAI` only in `_openai_client.py`) were added as siblings to the existing Scan 3 (Anthropic sync) and Scan 9 (OpenAI sync) per `llm-drafter.md` DEC-012's one-shim-per-vendor confinement rule. Gemini's async surface lives on the existing `genai.Client` via the `.aio` namespace, so Scan 10 was untouched — **the scan-count graduation rule is "one new scan per new vendor SDK class name to confine"**, not "one new scan per async-graduating vendor". When a v0.4 vendor lands whose async surface is a distinct class, add a sibling scan; if it's a namespace on an existing class, the existing scan still pins it. Per `signalforge-async-seam-confinement` memory.
+
 ## Source-scan gates: AST over per-line regex (issue #45)
 
 Source-scanning gates that enforce "no X in module Y" (the `_LOGGER` lazy-format gate; future similar tests) MUST be AST-based, never per-line regex. The historic logger gate used `re.search` per line and was trivially bypassable by splitting across lines:
@@ -151,6 +153,13 @@ When an assertion depends on what the LLM drafts (non-deterministic across runs)
 - **Materialised model (a real `dbt run` built the relation).** Only here does an engineered literal/`COALESCE` column physically exist on the queried relation, so `'literal' AS region` / `COALESCE(...) AS x` is a valid always-pass source.
 
 The austin BigQuery fixture (`tests/fixtures/dbt_project_austin`) and the TPCH Snowflake seed (`tests/fixtures/snowflake`) are both the source-as-model shape and both rely on **natural NOT NULL columns** — match that when adding a third warehouse's e2e. Do NOT copy a literal-column trick onto a source-as-model fixture.
+
+**Dispatch-order-agnostic assertions under asyncio (#186).** When a stage iterates `(criterion, artifact)` pairs (or any analogous Cartesian product) sequentially in v0.x and graduates to `asyncio.TaskGroup`-based concurrent dispatch in v0.(x+1), arrival order on disk becomes non-deterministic. Two patterns make tests order-agnostic:
+
+- **Sort-before-snapshot.** `tests/grade/_helpers.py::_sort_grade_events(lines)` sorts grade-audit JSONL records by `(artifact_id, criterion_id)` before comparison. Idempotent + stable for ties + defensive against missing keys. **Tests that snapshot the audit JSONL post-async must sort via this helper** rather than relying on iteration order. The orchestrator does NOT sort before writing — that would buffer and break per-decision fail-closed durability (DEC-015 of #186). The sort is purely a read-time concern; on-disk shape is unchanged.
+- **Pair-identity predicates on fake clients.** Instead of "fail the Nth call" (FIFO-dependent on dispatch order), use `expect_messages_create(matching=lambda kw: extract_pair_identity(kw) == ("column.X.description", "clarity"), returns=LLMRateLimitError(...))` so the injected failure targets a SPECIFIC `(artifact_id, criterion_id)` pair regardless of dispatch order. The dynamic block content carries the pair identity; parse it from `kw["messages"]`.
+
+When a v0.5 stage adopts asyncio (e.g. prune's eventual graduation per `prune-engine.md` DEC-028), copy both patterns. Snapshot tests fail loudly under arrival-order JSONL if the sort helper isn't used. Per `signalforge-asyncio-orchestrator-pattern` memory.
 
 ### Hand-crafted manifest seed when workers can't run live tooling
 
