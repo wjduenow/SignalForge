@@ -972,6 +972,73 @@ class _GeminiClientAdapter:
         return self._client.models
 
 
+class _GeminiAsyncMessagesAdapter:
+    """Async sibling of :class:`_GeminiMessagesAdapter` (#186 US-005).
+
+    Forwards the provider-neutral ``.messages.create(**kwargs)`` /
+    ``.messages.count_tokens(**kwargs)`` surface that the async orchestrator
+    (``call_llm_async``, US-006) consumes onto the Gemini SDK's native async
+    namespace — ``client.aio.models.generate_content(...)`` /
+    ``client.aio.models.count_tokens(...)``.
+
+    Gemini's async surface is a namespace (``.aio``) on the same
+    ``genai.Client``, NOT a separate constructor — so this adapter receives
+    the same bare client that the sync :class:`_GeminiClientAdapter` wraps,
+    and AST Scan 10 (which pins ``genai.Client(...)`` construction to
+    :mod:`signalforge.llm._gemini_client`) stays unchanged. No new vendor
+    constructor name is introduced (DEC-014 of #186 — Scan 10 untouched for
+    Gemini).
+
+    Both methods are ``async`` so the orchestrator can ``await`` them; the
+    underlying ``.aio.models.*`` coroutines from ``google-genai >= 0.5`` are
+    awaitable directly. The kwargs dict shape produced by
+    :meth:`GeminiProvider.build_create_kwargs` matches the sync path
+    verbatim (DEC-002 of #186) — no per-sync-vs-async branching in the
+    provider.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def create(self, **kwargs: Any) -> Any:
+        """Forward to the SDK's native async ``aio.models.generate_content``."""
+        return await self._client.aio.models.generate_content(**kwargs)
+
+    async def count_tokens(self, **kwargs: Any) -> Any:
+        """Forward to the SDK's native async ``aio.models.count_tokens``.
+
+        Unused on the ``call_llm_async`` happy path — :class:`GeminiProvider`
+        declares ``supports_token_count = False`` (DEC-003 of #137) so the
+        orchestrator skips the pre-send count gate on the async path too.
+        Kept on the async adapter for structural parity with the sync
+        sibling and so the façade satisfies the neutral async client
+        protocol.
+        """
+        return await self._client.aio.models.count_tokens(**kwargs)
+
+
+class _GeminiAsyncClientAdapter:
+    """Async sibling of :class:`_GeminiClientAdapter` (#186 US-005).
+
+    Wraps the SAME bare ``google.genai.Client`` the sync adapter wraps —
+    Gemini's async surface is a namespace on the existing client, not a
+    new constructor, so :meth:`GeminiProvider.make_async_client` reuses
+    :func:`signalforge.llm._gemini_client._make_gemini_client` verbatim
+    rather than introducing a separate factory. This keeps AST Scan 10
+    (``genai.Client(...)`` only in ``_gemini_client.py``) green by
+    construction — no new vendor constructor name exists.
+
+    Exposes :attr:`messages` (an :class:`_GeminiAsyncMessagesAdapter`)
+    so the async orchestrator's ``await client.messages.create(**kwargs)``
+    call type-checks against :class:`signalforge.llm.client._LLMAsyncClientProtocol`
+    and routes through the ``.aio.models`` SDK namespace at runtime.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self.messages = _GeminiAsyncMessagesAdapter(client)
+
+
 class GeminiProvider(LLMProvider):
     """Google Gemini strategy behind the generic LLM orchestrator (#137).
 
@@ -1021,20 +1088,31 @@ class GeminiProvider(LLMProvider):
         return _GeminiClientAdapter(_make_gemini_client())
 
     def make_async_client(self) -> _LLMAsyncClientProtocol:
-        """Temporary stub — US-005 of issue #186 wires the real async adapter.
+        """Build the real Gemini async client via the shim, wrapped in
+        the async ``.messages`` façade adapter (#186 US-005, DEC-001 / DEC-002).
 
-        v0.3 ships the abstract method declaration on :class:`LLMProvider`
-        (this US-002); the per-vendor async adapter (``_GeminiAsyncMessagesAdapter``
-        forwarding to the SDK's ``.aio.models.generate_content`` namespace)
-        lands in US-005. Gemini's async surface is a namespace on the same
-        ``genai.Client``, not a separate class, so Scan 10 stays unchanged.
-        Raising :class:`NotImplementedError` here keeps :class:`GeminiProvider`
-        instantiable (the abstract method requirement is satisfied) without
-        committing to a partial implementation that would deceive callers.
+        Gemini's async surface is a namespace (``.aio``) on the same
+        ``google.genai.Client`` the sync path uses — there is NO separate
+        ``AsyncGenAI`` constructor. So this method reuses
+        :func:`signalforge.llm._gemini_client._make_gemini_client` (the same
+        factory the sync :meth:`make_client` calls), wrapping the bare client
+        in :class:`_GeminiAsyncClientAdapter`. AST Scan 10 (which pins
+        ``genai.Client(...)`` construction to ``_gemini_client.py``) stays
+        green by construction — no new vendor constructor name exists, no
+        new AST scan is required (DEC-014 of #186 — Anthropic + OpenAI need
+        new Scan 3b / Scan 9b for their distinct ``AsyncAnthropic`` /
+        ``AsyncOpenAI`` classes; Gemini does not).
+
+        Returns an object structurally satisfying
+        :class:`signalforge.llm.client._LLMAsyncClientProtocol`. The
+        orchestrator (``call_llm_async``, US-006) narrows the ``object``
+        return type to that protocol so the call sites type-check without
+        leaking a vendor-SDK type into ``signalforge.llm.client`` (DEC-012
+        of #135 SDK-ignore confinement extended to the async path).
         """
-        raise NotImplementedError(
-            "GeminiProvider.make_async_client: US-005 of issue #186 will implement this."
-        )
+        from signalforge.llm._gemini_client import _make_gemini_client
+
+        return _GeminiAsyncClientAdapter(_make_gemini_client())
 
     def is_clean_completion(self, response: object) -> bool:
         """Return ``True`` iff ``response.candidates[0].finish_reason.name``
