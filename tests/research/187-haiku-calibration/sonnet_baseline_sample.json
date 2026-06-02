@@ -1,0 +1,61 @@
+{
+  "_provenance": "Curated Sonnet-baseline verdict sample for the #187 Haiku-calibration gate (US-005). NOT the raw #179 Phase-B grade.jsonl dump (which is not committed in this repo). Verdicts are hand-assigned plausible claude-sonnet-4-6 outcomes spanning the four DEFAULT_RUBRIC criteria (clarity, consistency, rationale, no-redundant). Engineered determinism per testing-signal.md: strong/specific artifacts pass; vague/thin/redundant artifacts fail. The artifact_id set is derived from tests/research/187-haiku-calibration/_substrate.build_candidate() via the grade engine's _stable_artifact_pairs; see docs/research/187-haiku-calibration.md for full provenance.",
+  "baseline_model": "claude-sonnet-4-6",
+  "rubric_criteria": ["clarity", "consistency", "rationale", "no-redundant"],
+  "verdicts": [
+    {"artifact_id": "column.customer_id.description", "criterion_id": "clarity", "baseline_passed": true},
+    {"artifact_id": "column.customer_id.description", "criterion_id": "consistency", "baseline_passed": true},
+    {"artifact_id": "column.customer_id.description", "criterion_id": "rationale", "baseline_passed": true},
+    {"artifact_id": "column.customer_id.description", "criterion_id": "no-redundant", "baseline_passed": true},
+
+    {"artifact_id": "column.email.description", "criterion_id": "clarity", "baseline_passed": true},
+    {"artifact_id": "column.email.description", "criterion_id": "consistency", "baseline_passed": true},
+    {"artifact_id": "column.email.description", "criterion_id": "rationale", "baseline_passed": true},
+    {"artifact_id": "column.email.description", "criterion_id": "no-redundant", "baseline_passed": true},
+
+    {"artifact_id": "column.status.description", "criterion_id": "clarity", "baseline_passed": false},
+    {"artifact_id": "column.status.description", "criterion_id": "consistency", "baseline_passed": true},
+    {"artifact_id": "column.status.description", "criterion_id": "rationale", "baseline_passed": false},
+    {"artifact_id": "column.status.description", "criterion_id": "no-redundant", "baseline_passed": true},
+
+    {"artifact_id": "column.customer_id.rationale", "criterion_id": "clarity", "baseline_passed": true},
+    {"artifact_id": "column.customer_id.rationale", "criterion_id": "consistency", "baseline_passed": true},
+    {"artifact_id": "column.customer_id.rationale", "criterion_id": "rationale", "baseline_passed": true},
+    {"artifact_id": "column.customer_id.rationale", "criterion_id": "no-redundant", "baseline_passed": true},
+
+    {"artifact_id": "column.email.rationale", "criterion_id": "clarity", "baseline_passed": false},
+    {"artifact_id": "column.email.rationale", "criterion_id": "consistency", "baseline_passed": true},
+    {"artifact_id": "column.email.rationale", "criterion_id": "rationale", "baseline_passed": false},
+    {"artifact_id": "column.email.rationale", "criterion_id": "no-redundant", "baseline_passed": true},
+
+    {"artifact_id": "column.status.rationale", "criterion_id": "clarity", "baseline_passed": false},
+    {"artifact_id": "column.status.rationale", "criterion_id": "consistency", "baseline_passed": true},
+    {"artifact_id": "column.status.rationale", "criterion_id": "rationale", "baseline_passed": false},
+    {"artifact_id": "column.status.rationale", "criterion_id": "no-redundant", "baseline_passed": false},
+
+    {"artifact_id": "model.description", "criterion_id": "clarity", "baseline_passed": true},
+    {"artifact_id": "model.description", "criterion_id": "consistency", "baseline_passed": true},
+    {"artifact_id": "model.description", "criterion_id": "rationale", "baseline_passed": true},
+    {"artifact_id": "model.description", "criterion_id": "no-redundant", "baseline_passed": true},
+
+    {"artifact_id": "model.rationale", "criterion_id": "clarity", "baseline_passed": true},
+    {"artifact_id": "model.rationale", "criterion_id": "consistency", "baseline_passed": true},
+    {"artifact_id": "model.rationale", "criterion_id": "rationale", "baseline_passed": true},
+    {"artifact_id": "model.rationale", "criterion_id": "no-redundant", "baseline_passed": true},
+
+    {"artifact_id": "test.column.customer_id.not_null", "criterion_id": "clarity", "baseline_passed": true},
+    {"artifact_id": "test.column.customer_id.not_null", "criterion_id": "consistency", "baseline_passed": true},
+    {"artifact_id": "test.column.customer_id.not_null", "criterion_id": "rationale", "baseline_passed": true},
+    {"artifact_id": "test.column.customer_id.not_null", "criterion_id": "no-redundant", "baseline_passed": true},
+
+    {"artifact_id": "test.column.customer_id.unique", "criterion_id": "clarity", "baseline_passed": true},
+    {"artifact_id": "test.column.customer_id.unique", "criterion_id": "consistency", "baseline_passed": true},
+    {"artifact_id": "test.column.customer_id.unique", "criterion_id": "rationale", "baseline_passed": true},
+    {"artifact_id": "test.column.customer_id.unique", "criterion_id": "no-redundant", "baseline_passed": true},
+
+    {"artifact_id": "test.column.status.accepted_values", "criterion_id": "clarity", "baseline_passed": true},
+    {"artifact_id": "test.column.status.accepted_values", "criterion_id": "consistency", "baseline_passed": true},
+    {"artifact_id": "test.column.status.accepted_values", "criterion_id": "rationale", "baseline_passed": true},
+    {"artifact_id": "test.column.status.accepted_values", "criterion_id": "no-redundant", "baseline_passed": true}
+  ]
+}
