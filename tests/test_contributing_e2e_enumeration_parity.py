@@ -68,12 +68,21 @@ _CALIBRATION_FRAMING = "calibration signal, not a billing guarantee"
 # ``@pytest.mark.snowflake`` (not ``e2e``) — it is the other-warehouse paid
 # pipeline test and belongs in the enumeration alongside the four
 # ``@pytest.mark.e2e``-marked siblings.
+#
+# Issue #186 / US-012 / DEC-020 added the three per-provider async smokes
+# (``test_e2e_<vendor>_async_smoke.py``) that exercise the concurrent
+# grade-dispatch path (``grade.max_concurrent_calls > 1``) against each
+# real provider; they enumerate alongside the sync siblings under the
+# same "Tests in the live e2e suite" subsection of CONTRIBUTING.md.
 _PAID_E2E_FILES = (
     "test_e2e_bigquery_smoke.py",
     "test_e2e_openai_smoke.py",
     "test_e2e_gemini_smoke.py",
     "test_e2e_snowflake_smoke.py",
     "test_e2e_business_rules.py",
+    "test_e2e_anthropic_async_smoke.py",
+    "test_e2e_openai_async_smoke.py",
+    "test_e2e_gemini_async_smoke.py",
 )
 
 # The recommended parallel invocation. Documented verbatim in CONTRIBUTING's
