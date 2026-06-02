@@ -138,6 +138,8 @@ Scan 8 (`_FAIL_CLOSED_WRITER_MODULES`) is preserved — the chunk loop lives ins
 
 Returns `Iterator[AuditEvent]`. Non-chunked rows pass through unchanged. Chunked rows accumulate by `audit_id`; when chunk count is reached, the helper merges all chunks' `redactions_by_reason` (key-wise concat, then re-sort the tuples for determinism) + `column_name_map` (dict update), takes metadata from the header, **clears the chunk-correlation triple to `None`** so the reassembled event round-trips through the non-chunked validator branch, and yields the result. End-of-stream incomplete groups surface a `WARNING` via the standard ANSI-safe lazy-format JSON logger and are skipped — never raise (read-back path is fail-soft, distinct from the fail-closed write path).
 
+The reader rejects adversarial / corrupt chunks where `chunk_index < 0` or `chunk_index >= chunk_count` with a one-line `audit chunk out-of-range` WARNING and skips the offending chunk. Without this guard the accumulator's length-only completion check could silently drop a genuine missing chunk on reassembly (the writer never produces out-of-range indices; the threat model is file corruption or external tampering). Pre-#185 v3 records (`redactions: tuple[RedactionRecord, ...]` shape) raise `pydantic.ValidationError` from `AuditEvent.model_validate` rather than skip — the drop-v3 design choice per DEC-005; documented in the reader's docstring.
+
 ### Empirical ceilings (operator-visible)
 
 Measured against the shipped `_chunk_event` implementation, NOT the plan's optimistic redactions-only estimates:
@@ -154,7 +156,9 @@ The plan's design-time single-line estimate at 170 columns (3,865 B) measured `r
 
 ### `AuditRecordTooLargeError` parametric remediation
 
-Signature: `__init__(self, size: int, limit: int, column_count: int | None = None, *, remediation: str | None = None)`. Default remediation is a three-sentence operator script: (1) names the column count + bytes over cap when `column_count is not None`; (2) suggests `meta.signalforge.skip_draft: true` on noise columns and clarifies it's distinct from PII opt-out; (3) explicitly closes the `safety.mode: aggregate-only` anti-pattern and points at the follow-up issue. Locked verbatim — pinned by `tests/safety/test_errors.py::test_audit_record_too_large_default_remediation_locked` (parametrized `None` + `170`).
+Signature: `__init__(self, size: int, limit: int, column_count: int | None = None, *, remediation: str | None = None)`. `column_count` is the exact redacted-column count derived from `len(event.column_name_map)` at the writer's raise site — every entry in any `redactions_by_reason` value list also appears in `column_name_map` by construction in `request.py`, so the map size is the single source of truth (early QG draft double-counted both surfaces and was corrected before merge).
+
+Default remediation is a three-sentence operator script: (1) names the column count + bytes over cap when `column_count is not None`; (2) suggests `meta.signalforge.skip_draft: true` on noise columns and clarifies it's distinct from PII opt-out; (3) explicitly closes the `safety.mode: aggregate-only` anti-pattern (the mode does NOT shrink the redactions surface) and points at the `columns_sent` roadmap in `docs/safety-ops.md`. Locked verbatim — pinned by `tests/safety/test_errors.py::test_audit_record_too_large_default_remediation_locked` (parametrized `None` + `170`).
 
 Stays CLI tier 3 in `_EXCEPTION_TO_EXIT_CODE` — error semantics post-#185 are "compression + chunking attempted, recovery exhausted" rather than "input shape problem," which aligns with the external-dependency tier.
 

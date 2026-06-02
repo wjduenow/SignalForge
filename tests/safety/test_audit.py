@@ -561,9 +561,11 @@ def test_audit_write_too_large_propagates_column_count_in_remediation(
 ) -> None:
     """DEC-007 (#185 US-004): when ``write()`` raises ``AuditRecordTooLargeError``
     because a chunk exceeds the cap, the error carries a non-None
-    ``column_count`` (derived from ``column_name_map`` size + summed
-    ``redactions_by_reason`` value-list lengths) and the rendered remediation
-    text includes the "Model has N columns" prefix.
+    ``column_count`` (== ``len(column_name_map)``, the exact redacted-column
+    count — every entry in any ``redactions_by_reason`` value list has a
+    corresponding ``column_name_map`` entry by construction in
+    ``request.py``) and the rendered remediation text includes the
+    "Model has N columns" prefix.
 
     Drives the writer with a tiny artificial cap so any non-trivial event
     over-caps a chunk; asserts the propagation path runs.
@@ -588,13 +590,13 @@ def test_audit_write_too_large_propagates_column_count_in_remediation(
         write(event, audit_path)
 
     err = excinfo.value
-    # Column count is the best-available estimate: column_name_map size +
-    # sum of redaction-list lengths. The fake event uses identical hashed
-    # names in both, so the estimate is len(map) + len(redaction list) ==
-    # 8 + 8 == 16.
+    # Column count == len(column_name_map). Every hashed name in any
+    # redactions_by_reason value list also appears in column_name_map by
+    # construction (request.py builds the two dicts in lockstep), so the
+    # map size IS the exact redacted-column count. 8 hashed names → 8.
     assert err.column_count is not None
     assert err.column_count > 0
-    assert err.column_count == 16
+    assert err.column_count == 8
 
     # The rendered remediation includes the "Model has N columns" prefix,
     # the skip_draft workaround, the explicit aggregate-only NOT-a-workaround
@@ -604,7 +606,7 @@ def test_audit_write_too_large_propagates_column_count_in_remediation(
     assert f"Model has {err.column_count} columns" in rendered
     assert "meta.signalforge.skip_draft: true" in rendered
     assert "safety.mode: aggregate-only does NOT shrink" in rendered
-    assert "issue #185 follow-up" in rendered
+    assert "columns_sent roadmap" in rendered
 
     # And the writer fail-closed contract held — no on-disk artefact.
     assert not audit_path.exists()
@@ -725,4 +727,135 @@ def test_audit_write_concurrent_threads_mix_small_and_chunked(
     assert partial_group_warnings == [], (
         f"expected zero partial-group WARNINGs, got {len(partial_group_warnings)}: "
         f"{[r.getMessage() for r in partial_group_warnings]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# QG Pass-3 patch-coverage backfill — uncovered branches in ``read_audit_events``
+# inside the #185 diff. Three small handcrafted-JSONL tests covering empty
+# lines, corrupt half-chunk-triple shapes, and out-of-range chunk_index.
+# ---------------------------------------------------------------------------
+
+
+def test_read_audit_events_tolerates_empty_lines(tmp_path: Path) -> None:
+    """Real-world JSONL files may have trailing blank lines from editor /
+    tool round-trips. The reader's ``if not line: continue`` branch tolerates
+    them; without this test the empty-line skip was unreached by the
+    test suite (Pass-3 H2 finding)."""
+    path = tmp_path / "audit.jsonl"
+    # Build a single non-chunked v4 record + two blank lines (one in the
+    # middle, one at end).
+    event = _make_v4_event()
+    line = json.dumps(event.model_dump(mode="json"), separators=(",", ":"))
+    path.write_text(line + "\n\n" + line + "\n\n", encoding="utf-8")
+
+    events = list(read_audit_events(path))
+    # Both real records survive; the two blank lines are silently skipped.
+    assert len(events) == 2
+
+
+def test_read_audit_events_skips_chunk_with_missing_audit_id(tmp_path: Path) -> None:
+    """A corrupt half-chunk-triple row (e.g. ``chunk_index`` set but
+    ``audit_id`` missing) is structurally invalid — the writer never
+    produces this shape. The reader silently skips it (Pass-3 H2 finding,
+    `audit.py` line 518 branch). Without this test the skip path is
+    unreached."""
+    path = tmp_path / "audit.jsonl"
+    good_event = _make_v4_event()
+    good_line = json.dumps(good_event.model_dump(mode="json"), separators=(",", ":"))
+    # A row that LOOKS chunked (carries chunk_index) but missing audit_id.
+    corrupt = json.dumps(
+        {
+            "chunk_index": 0,
+            "chunk_count": 2,
+            "redactions_by_reason": {},
+            "column_name_map": {},
+        },
+        separators=(",", ":"),
+    )
+    path.write_text(good_line + "\n" + corrupt + "\n", encoding="utf-8")
+
+    events = list(read_audit_events(path))
+    # Good record survives; the corrupt row is silently skipped (no raise).
+    assert len(events) == 1
+
+
+def test_read_audit_events_warns_and_skips_out_of_range_chunk_index(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An adversarial / corrupt chunk row carrying ``chunk_index`` ≥
+    ``chunk_count`` (or ``< 0``) is rejected with an audit chunk
+    ``out-of-range`` WARNING and the row is skipped — without this guard
+    the accumulator's length-only completion check could yield a
+    reassembled event with a genuine missing chunk silently dropped
+    (QG Pass-1 M4 finding)."""
+    path = tmp_path / "audit.jsonl"
+
+    audit_id = "ad12cafe34beef56"
+    # Valid header
+    header = json.dumps(
+        {
+            "timestamp": "2026-06-02T12:34:56.000000Z",
+            "model_unique_id": "model.test.wide",
+            "mode": "schema-only",
+            "columns_sent": ["col_x"],
+            "row_count": None,
+            "signalforge_version": "0.5.0.dev0",
+            "policy_hash": "abc123def456789a",
+            "audit_schema_version": 4,
+            "policy_flags": [],
+            "audit_id": audit_id,
+            "chunk_index": 0,
+            "chunk_count": 2,
+            "redactions_by_reason": {},
+            "column_name_map": {},
+        },
+        separators=(",", ":"),
+    )
+    # Valid continuation chunk_index=1
+    cont = json.dumps(
+        {
+            "audit_id": audit_id,
+            "chunk_index": 1,
+            "chunk_count": 2,
+            "redactions_by_reason": {"pattern_match": ["col_a3f29c61"]},
+            "column_name_map": {"col_a3f29c61": "ssn"},
+        },
+        separators=(",", ":"),
+    )
+    # Adversarial out-of-range chunk_index — would inflate the group's
+    # length-only completion check and silently drop a genuine chunk
+    # without the guard.
+    bad = json.dumps(
+        {
+            "audit_id": audit_id,
+            "chunk_index": 999,
+            "chunk_count": 2,
+            "redactions_by_reason": {"tag_pii_column": ["col_aaaaaaaa"]},
+            "column_name_map": {"col_aaaaaaaa": "BAD"},
+        },
+        separators=(",", ":"),
+    )
+    # Order: header, bad chunk first (would otherwise inflate group),
+    # then real continuation. With the guard the bad chunk is skipped +
+    # WARNING, and the group reassembles cleanly from header + cont.
+    path.write_text(header + "\n" + bad + "\n" + cont + "\n", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="signalforge.safety"):
+        events = list(read_audit_events(path))
+
+    assert len(events) == 1
+    # The good slice's payload is preserved; the bad chunk's "BAD" mapping
+    # never lands in the reassembled event.
+    assert events[0].column_name_map == {"col_a3f29c61": "ssn"}
+    out_of_range = [
+        r
+        for r in caplog.records
+        if r.name == "signalforge.safety"
+        and r.levelno >= logging.WARNING
+        and "audit chunk out-of-range" in r.getMessage()
+    ]
+    assert len(out_of_range) == 1, (
+        f"expected exactly one out-of-range WARNING, got {len(out_of_range)}"
     )

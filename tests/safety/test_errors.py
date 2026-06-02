@@ -236,8 +236,9 @@ _LOCKED_REMEDIATION_BASE = (
     "audit entirely; this is distinct from PII opt-out and is "
     "more effective for wide-table noise reduction. NOTE: "
     "safety.mode: aggregate-only does NOT shrink the redactions "
-    "tuple — do not use it as a workaround. For hyper-wide "
-    "tables that still over-cap, see issue #185 follow-up."
+    "surface — do not use it as a workaround. For hyper-wide "
+    "tables that still over-cap, see the columns_sent roadmap "
+    "in docs/safety-ops.md."
 )
 
 _LOCKED_REMEDIATION_WITH_170 = (

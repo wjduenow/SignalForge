@@ -359,6 +359,81 @@ def test_audit_event_chunk_count_lt_2_raises() -> None:
 
 
 # ---------------------------------------------------------------------------
+# QG Pass-3 patch-coverage backfill — uncovered rejection branches inside the
+# #185 diff. These backfill the 5 untested ``raise ValueError(...)`` arms in
+# ``AuditEvent``'s ``@model_validator`` so codecov patch coverage clears.
+# ---------------------------------------------------------------------------
+
+
+def test_audit_event_non_chunked_missing_metadata_raises() -> None:
+    """The non-chunked branch requires every metadata field (timestamp,
+    model_unique_id, mode, columns_sent, signalforge_version, policy_hash,
+    policy_flags) to be populated. Dropping any one fires the ``raise
+    ValueError(...)`` arm — pins the "metadata required" half of the
+    non-chunked branch (the "redaction maps must be present" half is
+    pinned separately by ``test_audit_event_non_chunked_with_none_redaction_maps_raises``)."""
+    with pytest.raises(ValidationError):
+        # timestamp absent — non-chunked branch requires it
+        _valid_audit_event(timestamp=None)
+    with pytest.raises(ValidationError):
+        # model_unique_id absent
+        _valid_audit_event(model_unique_id=None)
+    with pytest.raises(ValidationError):
+        # mode absent
+        _valid_audit_event(mode=None)
+
+
+def test_audit_event_chunk_index_negative_raises() -> None:
+    """``chunk_index < 0`` is structurally invalid (the writer never emits
+    negative indices). The validator branch fires only on
+    ``model_validate_json`` replay of corrupt audit JSONL — without the
+    test, a future "simplify the validator" refactor could silently
+    remove the guard and let replay-corruption pass through as a typed
+    event with negative chunk_index."""
+    with pytest.raises(ValidationError):
+        AuditEvent(
+            redactions_by_reason={"pattern_match": ("col_abc12345",)},
+            column_name_map={"col_abc12345": "real_col"},
+            audit_id="ad12cafe34beef56",
+            chunk_index=-1,
+            chunk_count=2,
+        )
+
+
+def test_audit_event_chunk_header_missing_metadata_raises() -> None:
+    """A chunk header (``chunk_index=0, chunk_count>=2``) must carry the
+    full metadata set (same requirement as non-chunked events). Dropping a
+    required metadata field on a header fires the validator's chunk-header
+    metadata-required arm."""
+    with pytest.raises(ValidationError):
+        _valid_chunk_header(timestamp=None)
+    with pytest.raises(ValidationError):
+        _valid_chunk_header(model_unique_id=None)
+
+
+def test_audit_event_chunk_header_with_none_redaction_maps_raises() -> None:
+    """A chunk header MUST carry ``redactions_by_reason={}`` and
+    ``column_name_map={}`` (empty dicts) — ``None`` is invalid (covered
+    elsewhere for non-empty rejection; this pins the None case, which is a
+    distinct validator arm)."""
+    with pytest.raises(ValidationError):
+        _valid_chunk_header(redactions_by_reason=None)
+    with pytest.raises(ValidationError):
+        _valid_chunk_header(column_name_map=None)
+
+
+def test_audit_event_chunk_continuation_with_none_redaction_maps_raises() -> None:
+    """A chunk continuation carries the slice of redactions for its chunk.
+    Both ``redactions_by_reason`` and ``column_name_map`` must be present
+    (may be empty dicts in the degenerate "fully-empty slice" case but not
+    ``None``)."""
+    with pytest.raises(ValidationError):
+        _valid_chunk_continuation(redactions_by_reason=None)
+    with pytest.raises(ValidationError):
+        _valid_chunk_continuation(column_name_map=None)
+
+
+# ---------------------------------------------------------------------------
 # v4 __repr__ — PII redaction (safety-layer DEC-022)
 # ---------------------------------------------------------------------------
 

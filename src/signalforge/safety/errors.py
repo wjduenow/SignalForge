@@ -201,8 +201,9 @@ class AuditRecordTooLargeError(SafetyError):
     ``meta.signalforge.skip_draft: true`` workaround (distinct from PII
     opt-out — see ``safety-layer.md`` DEC-003), explicitly closes the issue
     text's misleading ``safety.mode: aggregate-only`` hint (the aggregate-only
-    mode does NOT shrink the redactions tuple, so it cannot work around the
-    cap), and points at the follow-up issue for hyper-wide tables.
+    mode does NOT shrink the redactions surface, so it cannot work around
+    the cap), and points at the columns_sent roadmap (documented in
+    ``docs/safety-ops.md``) for hyper-wide tables.
     """
 
     default_remediation: ClassVar[str] = (
@@ -211,9 +212,9 @@ class AuditRecordTooLargeError(SafetyError):
         "meta.signalforge.skip_draft: true to omit them from the audit "
         "entirely; this is distinct from PII opt-out and is more effective "
         "for wide-table noise reduction. NOTE: safety.mode: aggregate-only "
-        "does NOT shrink the redactions tuple — do not use it as a "
-        "workaround. For hyper-wide tables that still over-cap, see issue "
-        "#185 follow-up."
+        "does NOT shrink the redactions surface — do not use it as a "
+        "workaround. For hyper-wide tables that still over-cap, see the "
+        "columns_sent roadmap in docs/safety-ops.md."
     )
 
     def __init__(
@@ -243,8 +244,9 @@ class AuditRecordTooLargeError(SafetyError):
                 f"audit entirely; this is distinct from PII opt-out and is "
                 f"more effective for wide-table noise reduction. NOTE: "
                 f"safety.mode: aggregate-only does NOT shrink the redactions "
-                f"tuple — do not use it as a workaround. For hyper-wide "
-                f"tables that still over-cap, see issue #185 follow-up."
+                f"surface — do not use it as a workaround. For hyper-wide "
+                f"tables that still over-cap, see the columns_sent roadmap "
+                f"in docs/safety-ops.md."
             )
             if column_count is not None:
                 over = size - limit

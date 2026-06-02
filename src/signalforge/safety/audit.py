@@ -381,13 +381,12 @@ def write(event: AuditEvent, audit_path: Path) -> None:
     # chunk leaves no on-disk artefact. Mirrors prune/draft/grade/diff.
     # US-004 of #185 (DEC-007): pass ``column_count`` so the default
     # remediation builds the three-sentence operator script naming the
-    # actual column count + byte overage. Best-available estimate: each
-    # entry in ``column_name_map`` is a redacted column, and each entry
-    # in any ``redactions_by_reason`` value list is also a redacted
-    # column — combine for a useful upper bound.
-    column_count = len(event.column_name_map or {}) + sum(
-        len(v) for v in (event.redactions_by_reason or {}).values()
-    )
+    # actual redacted-column count + byte overage. ``column_name_map`` is
+    # keyed once per redacted column (every entry in any
+    # ``redactions_by_reason`` value list also has a corresponding
+    # ``column_name_map`` entry by construction in ``request.py``), so its
+    # length IS the exact redacted-column count — single source of truth.
+    column_count = len(event.column_name_map or {})
     for chunk in chunks:
         if len(chunk) > _AUDIT_RECORD_LIMIT_BYTES:
             raise AuditRecordTooLargeError(
@@ -478,9 +477,24 @@ def read_audit_events(path: Path) -> Iterator[AuditEvent]:
 
     Partial groups (incomplete chunk sets at end-of-stream) surface as one
     WARNING per group via the standard ANSI-safe lazy-format JSON logger
-    and are SKIPPED — the reader does NOT raise. Raising would make the
-    helper unusable for the exact diagnostic scenario (mid-write crash,
-    truncation) it was added to support.
+    and are SKIPPED — the reader does NOT raise on partial-group conditions.
+    Raising would make the helper unusable for the exact diagnostic scenario
+    (mid-write crash, truncation) it was added to support.
+
+    Adversarial / corrupt chunk shapes — a chunk with ``chunk_index`` out of
+    range (``< 0`` or ``>= chunk_count``) — surface as one WARNING per
+    offending chunk and are SKIPPED. Without this guard the accumulator's
+    length-only completion check could yield a reassembled event with a
+    genuine chunk silently dropped (file corruption / external tampering;
+    the writer never produces out-of-range indices).
+
+    NB: this reader validates against the v4 :class:`AuditEvent` shape only.
+    Pre-#185 v3 records (`redactions: tuple[RedactionRecord, ...]` shape)
+    raise :class:`pydantic.ValidationError` from
+    :meth:`AuditEvent.model_validate` — by design per DEC-005 (library was
+    pre-1.0; no v3 corpus to migrate). Operators wanting to read v3 logs
+    should gate on ``audit_schema_version == 4`` or use an earlier
+    SignalForge release.
 
     Args:
         path: the audit JSONL file to read.
@@ -517,8 +531,27 @@ def read_audit_events(path: Path) -> Iterator[AuditEvent]:
                 # Shape violation but we don't raise. Skip.
                 continue
 
+            idx = int(chunk_index)
+            # Reject out-of-range chunk_index: ``< 0`` is structurally invalid
+            # (the writer never emits negative indices); ``>= chunk_count``
+            # would otherwise inflate the accumulator's length-only completion
+            # check and silently drop a genuine missing chunk on reassembly
+            # (Pass-1 QG finding on file corruption / tampering).
+            if idx < 0 or (chunk_count is not None and idx >= int(chunk_count)):
+                _LOGGER.warning(
+                    "audit chunk out-of-range: %s",
+                    json.dumps(
+                        {
+                            "audit_id": audit_id,
+                            "chunk_index": idx,
+                            "chunk_count": chunk_count,
+                        }
+                    ),
+                )
+                continue
+
             group = accumulated.setdefault(audit_id, {})
-            group[int(chunk_index)] = payload
+            group[idx] = payload
             if chunk_count is not None:
                 expected_counts[audit_id] = int(chunk_count)
 
