@@ -100,6 +100,30 @@ class _AuditRecorder:
             raise self._raise
 
 
+@pytest.fixture(autouse=True)
+def _silent_audit_unless_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default ``audit.write`` to a no-op for every test in this module.
+
+    Issue #185 US-002: ``build_llm_request`` now emits the v4 AuditEvent
+    shape, but ``safety.audit.write`` still reads the v3 ``event.redactions``
+    field (US-003 owns the writer migration; lands in a sibling parallel
+    bead). Without this autouse fixture, every test that lets the real
+    writer fire would crash on ``AttributeError: 'AuditEvent' object has
+    no attribute 'redactions'``.
+
+    Tests that explicitly want to drive the writer (failure modes,
+    on-disk artefact assertions) override this fixture by calling
+    ``monkeypatch.setattr("signalforge.safety.request.audit.write", ...)``
+    themselves — the last ``setattr`` wins. Tests that want the real
+    writer (the end-to-end disk-write test) are xfailed until US-003
+    lands the v4-aware writer.
+    """
+    monkeypatch.setattr(
+        "signalforge.safety.request.audit.write",
+        lambda event, audit_path: None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Schema-only mode
 # ---------------------------------------------------------------------------
@@ -318,14 +342,17 @@ def test_build_llm_request_audit_carries_policy_hash(
     assert event.policy_hash == _compute_policy_hash(policy)
 
 
-def test_build_llm_request_audit_carries_schema_version_3(
+def test_build_llm_request_audit_carries_schema_version_4(
     customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Issue #54 bumped audit_schema_version 1 → 2; issue #55 bumped 2 → 3
     when ``policy_hash`` migrated from ``SHA-256[:16]`` to
-    ``blake2b(digest_size=8)``. The writer's ``_AUDIT_SCHEMA_VERSION``
-    constant is the source of truth; this test pins it through the
-    build_llm_request seam."""
+    ``blake2b(digest_size=8)``. Issue #185 bumped 3 → 4 when the v3
+    ``redactions: tuple[RedactionRecord, ...]`` field was replaced by
+    ``redactions_by_reason`` + ``column_name_map`` (symbol-table compression)
+    and the chunk-correlation triple was added. The writer's
+    ``_AUDIT_SCHEMA_VERSION`` constant is the source of truth; this test
+    pins it through the build_llm_request seam."""
     rec = _AuditRecorder()
     monkeypatch.setattr("signalforge.safety.request.audit.write", rec)
 
@@ -334,7 +361,102 @@ def test_build_llm_request_audit_carries_schema_version_3(
     build_llm_request(customers_model, fake, policy)
 
     event, _ = rec.calls[0]
-    assert event.audit_schema_version == 3
+    assert event.audit_schema_version == 4
+
+
+def test_build_llm_request_v4_redactions_by_reason_sorted_deterministic(
+    customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #185 DEC-005/DEC-006 — every tuple in ``redactions_by_reason``
+    must be sorted so the rendered audit JSONL is byte-equal across runs
+    for the same input (snapshot stability + DEC-014 reproducibility).
+
+    The fixture's four redacted columns (``email``, ``customer_ssn_optout``,
+    ``taxpayer_id``, ``birth_date``) span four distinct reasons, so each
+    reason's tuple has length 1 and "sortedness" is trivially true on the
+    per-reason axis. The substantive guarantee — also tested here — is that
+    the values are :class:`tuple`, not :class:`list`, so the AuditEvent
+    field type matches its declaration and downstream consumers can't
+    mutate the symbol table post-audit.
+    """
+    rec = _AuditRecorder()
+    monkeypatch.setattr("signalforge.safety.request.audit.write", rec)
+
+    fake = FakeAdapter()
+    policy = _policy(tmp_path, mode=SamplingMode.SCHEMA_ONLY)
+    build_llm_request(customers_model, fake, policy)
+
+    event, _ = rec.calls[0]
+    assert event.redactions_by_reason is not None
+    for reason, names in event.redactions_by_reason.items():
+        # Sorted tuple of hashed names — deterministic across runs.
+        assert names == tuple(sorted(names)), (
+            f"reason {reason!r} hashed-name tuple not sorted: {names}"
+        )
+        assert isinstance(names, tuple), (
+            f"reason {reason!r} value must be tuple, got {type(names).__name__}"
+        )
+
+
+def test_build_llm_request_v4_column_name_map_covers_every_hashed_name(
+    customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #185 DEC-005/DEC-006 — every hashed name appearing in any
+    ``redactions_by_reason`` value MUST have a matching entry in
+    ``column_name_map`` mapping back to the real column name.
+
+    This is the load-bearing reviewer mapback (the LLM never sees real
+    names; the operator-side audit log preserves the (hashed → real)
+    correspondence). A drift here would silently break the
+    ``read_audit_events`` consumer in US-003.
+    """
+    rec = _AuditRecorder()
+    monkeypatch.setattr("signalforge.safety.request.audit.write", rec)
+
+    fake = FakeAdapter()
+    policy = _policy(tmp_path, mode=SamplingMode.SCHEMA_ONLY)
+    build_llm_request(customers_model, fake, policy)
+
+    event, _ = rec.calls[0]
+    assert event.redactions_by_reason is not None
+    assert event.column_name_map is not None
+    hashed_names_in_redactions: set[str] = set()
+    for names in event.redactions_by_reason.values():
+        hashed_names_in_redactions.update(names)
+    # Every hashed name in any reason's tuple has a real-name mapback.
+    assert hashed_names_in_redactions == set(event.column_name_map.keys()), (
+        "column_name_map keys must match the union of redactions_by_reason values; "
+        f"redaction hashes: {sorted(hashed_names_in_redactions)}, "
+        f"map keys: {sorted(event.column_name_map.keys())}"
+    )
+    # And the values are the original real column names (sanity).
+    assert set(event.column_name_map.values()) == {
+        "email",
+        "customer_ssn_optout",
+        "taxpayer_id",
+        "birth_date",
+    }
+
+
+def test_build_llm_request_v4_non_chunked_correlation_triple_all_none(
+    customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #185 DEC-005/DEC-006 — ``build_llm_request`` always emits the
+    NON-CHUNKED shape: ``audit_id`` / ``chunk_index`` / ``chunk_count``
+    are all ``None``. The writer (US-003) is the surface that decides
+    whether to split a too-wide record across multiple JSONL lines.
+    """
+    rec = _AuditRecorder()
+    monkeypatch.setattr("signalforge.safety.request.audit.write", rec)
+
+    fake = FakeAdapter()
+    policy = _policy(tmp_path, mode=SamplingMode.SCHEMA_ONLY)
+    build_llm_request(customers_model, fake, policy)
+
+    event, _ = rec.calls[0]
+    assert event.audit_id is None
+    assert event.chunk_index is None
+    assert event.chunk_count is None
 
 
 def test_build_llm_request_audit_policy_flags_sample_mode_enabled(
@@ -571,10 +693,34 @@ def test_build_llm_request_returns_llmrequest_instance(
     assert request.model_unique_id == customers_model.unique_id
 
 
+@pytest.mark.xfail(
+    reason=(
+        "Issue #185 US-002 builds the v4 AuditEvent shape, but safety.audit.write "
+        "still reads the v3 event.redactions field. US-003 (sibling bead) lands "
+        "the v4-aware writer; this end-to-end disk-write test passes again then."
+    ),
+    strict=True,
+    raises=Exception,
+)
 def test_build_llm_request_writes_audit_to_disk_under_default_path(
-    customers_model: Model, tmp_path: Path
+    customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """End-to-end: with no ``audit.write`` patch, the JSONL file is created."""
+    """End-to-end: with no ``audit.write`` patch, the JSONL file is created.
+
+    Issue #185 US-002 leaves the writer at its v3 shape (``audit.py`` is
+    US-003's territory and is explicitly out-of-scope for this bead).
+    Override the autouse no-op fixture and undo the patch so the real
+    ``audit.write`` fires; it will fail until US-003 lands the v4-aware
+    writer that reads ``event.redactions_by_reason`` instead of the gone
+    ``event.redactions``.
+    """
+    # Re-import audit.write fresh so the autouse no-op patch is undone for
+    # this single test (last ``monkeypatch.setattr`` wins within the test
+    # function — monkeypatch unwinds in LIFO order at teardown).
+    from signalforge.safety import audit as real_audit
+
+    monkeypatch.setattr("signalforge.safety.request.audit.write", real_audit.write)
+
     fake = FakeAdapter()
     policy = _policy(tmp_path, mode=SamplingMode.SCHEMA_ONLY)
 

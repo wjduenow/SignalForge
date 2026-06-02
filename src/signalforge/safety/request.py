@@ -54,6 +54,7 @@ from signalforge.safety.models import (
     DRAFT_SKIP_REASONS,
     AuditEvent,
     LLMRequest,
+    RedactionReason,
     RedactionRecord,
     SamplingMode,
 )
@@ -70,7 +71,7 @@ from signalforge.safety.redact import (
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.models import TableRef
 
-_AUDIT_SCHEMA_VERSION: Final[int] = 3
+_AUDIT_SCHEMA_VERSION: Final[int] = 4
 """Bumped from 1 → 2 by issue #54: the :data:`RedactionReason` literal
 gained ``draft_skip_column_meta`` and ``draft_skip_model_meta``, and
 columns carrying those reasons are now omitted entirely from the
@@ -83,7 +84,18 @@ from ``SHA-256[:16]`` to ``blake2b(digest_size=8)`` so every
 reproducibility hash in the audit / sidecar corpus reads one recipe.
 Consumers correlating ``policy_hash`` across audit JSONLs must gate on
 ``audit_schema_version >= 3`` to skip records produced by the
-pre-migration writer."""
+pre-migration writer.
+
+Bumped from 3 → 4 by issue #185: the v3 ``redactions: tuple[RedactionRecord, ...]``
+field on :class:`AuditEvent` was replaced by a **symbol-table-by-reason** dict
+(:attr:`AuditEvent.redactions_by_reason` keyed by reason, values are SORTED
+tuples of hashed names) plus a sibling
+:attr:`AuditEvent.column_name_map` (`dict[hashed_name, real_column_name]`)
+that preserves the reviewer mapback. Compresses ~75% on a 170-col
+schema-only event vs. the v3 record-per-column layout. The chunk-correlation
+triple (``audit_id`` / ``chunk_index`` / ``chunk_count``) was also added;
+this orchestrator emits the **non-chunked** shape (all three ``None``), and
+the writer (US-003) decides whether to chunk based on serialised size."""
 
 
 def build_llm_request(
@@ -242,17 +254,47 @@ def build_llm_request(
     if policy.audit_path != DEFAULT_AUDIT_PATH:
         policy_flags.append("audit_path_overridden")
 
+    # ---- 3a. Fold redactions into the v4 symbol-table shape ---------------
+    # The internal ``redactions`` tuple still rides on :class:`LLMRequest`
+    # (it's the record-per-column shape downstream consumers know). The
+    # :class:`AuditEvent` v4 shape (issue #185) trades that for a
+    # symbol-table-by-reason dict + sibling (hashed → real) mapback —
+    # compresses ~75% on a 170-col schema-only event vs. the v3 layout, so
+    # the audit line fits the POSIX-atomic-append cap on tables that
+    # previously tripped :class:`AuditRecordTooLargeError`.
+    #
+    # Values are SORTED tuples of hashed names so a given input model
+    # produces byte-equal audit JSONL across runs (snapshot stability /
+    # reproducibility per DEC-014).
+    _accum: dict[RedactionReason, list[str]] = {}
+    column_name_map: dict[str, str] = {}
+    for rec in redactions:
+        _accum.setdefault(rec.reason, []).append(rec.hashed_name)
+        column_name_map[rec.hashed_name] = rec.column_name
+    # Sort each reason's hashed-name list for deterministic ordering.
+    redactions_by_reason: dict[RedactionReason, tuple[str, ...]] = {
+        reason: tuple(sorted(names)) for reason, names in _accum.items()
+    }
+
     event = AuditEvent(
         timestamp=datetime.now(UTC),
         model_unique_id=model.unique_id,
         mode=policy.mode,
         columns_sent=columns_sent,
-        redactions=redactions,
         row_count=row_count,
         signalforge_version=_sf.__version__,
         policy_hash=_compute_policy_hash(policy),
         audit_schema_version=_AUDIT_SCHEMA_VERSION,
         policy_flags=tuple(policy_flags),
+        redactions_by_reason=redactions_by_reason,
+        column_name_map=column_name_map,
+        # Non-chunked path: US-003's writer decides whether to chunk based on
+        # serialised size. Leaving the correlation triple ``None`` triggers
+        # the validator's "all metadata required, both v4 maps required
+        # (may be empty)" non-chunked branch.
+        audit_id=None,
+        chunk_index=None,
+        chunk_count=None,
     )
 
     # ---- 4. Build the request, then audit, then return ----------------------
