@@ -72,6 +72,7 @@ import pytest
 
 from signalforge.cli import main
 from tests.cli._e2e_helpers import apply_provider_override, copy_fixture_to_tmp
+from tests.grade._helpers import _sort_grade_events
 
 pytestmark = [pytest.mark.e2e, pytest.mark.anthropic]
 
@@ -106,21 +107,6 @@ def _skip_reason() -> str | None:
             "(BigQuery billing project; bigquery-public-data is readable but billed to the runner)"
         )
     return None
-
-
-def _sort_grade_events(lines: list[dict]) -> list[dict]:
-    """Sort grade-event JSONL records by ``(artifact_id, criterion_id)``.
-
-    The orchestrator's per-decision fail-closed audit writer
-    (``signalforge.grade.audit``) appends in dispatch arrival order, so
-    under concurrent dispatch (``max_concurrent_calls > 1``) the JSONL
-    is non-deterministically ordered. Sorting at read time by the
-    pair-identity keys gives a stable comparison surface (mirrors the
-    helper US-011 will hoist to ``tests/grade/_helpers.py``; inlined
-    here to keep the three async smokes self-contained ahead of US-011
-    landing).
-    """
-    return sorted(lines, key=lambda r: (r["artifact_id"], r["criterion_id"]))
 
 
 def test_e2e_signalforge_generate_under_concurrent_dispatch_with_anthropic_grader(

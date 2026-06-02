@@ -173,19 +173,27 @@ def test_llm_cache_too_large_error_carries_block_size_and_cap() -> None:
 @pytest.mark.unit
 @pytest.mark.llm
 def test_llm_provider_async_unsupported_error_remediation_text() -> None:
-    """Issue #186 US-002 / DEC-006: the remediation text is locked verbatim
-    so the operator-facing message is consistent across versions and so a
-    silent rewrite would fail loud here rather than slip past review."""
+    """Issue #186 US-002 / DEC-006 (refined by QG Pass 1 Concern #2): the
+    remediation text is locked verbatim so the operator-facing message is
+    consistent across versions and so a silent rewrite would fail loud here
+    rather than slip past review.
+
+    Post-QG: ``cap=1`` is NOT an escape hatch on a sync-only provider —
+    the engine consumes ``call_llm_async`` exclusively, so the remediation
+    points at picking an async-capable provider rather than at clamping
+    the cap.
+    """
     from signalforge.llm.errors import LLMProviderAsyncUnsupportedError
 
     assert LLMProviderAsyncUnsupportedError.default_remediation == (
-        "Set 'grade.max_concurrent_calls: 1' in signalforge.yml or pick an async-capable provider."
+        "Pick an async-capable provider for grading "
+        "(Anthropic / OpenAI / Gemini all support async)."
     )
     # Rendered ``__str__`` includes both the message body and the
     # remediation line — the umbrella ``LLMError.__str__`` contract.
     rendered = str(LLMProviderAsyncUnsupportedError("provider X has no async"))
     assert "provider X has no async" in rendered
-    assert "grade.max_concurrent_calls: 1" in rendered
+    assert "async-capable provider" in rendered
 
 
 @pytest.mark.unit

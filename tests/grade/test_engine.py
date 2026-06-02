@@ -1530,11 +1530,13 @@ def test_grade_artifacts_sync_only_provider_with_parallel_cap_raises_typed_error
                 project_dir=project_dir,
             )
 
-        # The message names both the offending provider and the cap.
+        # The message names the offending provider. The remediation is
+        # locked by DEC-006 of #186 (refined by QG Pass 1 Concern #2):
+        # the engine consumes ``call_llm_async`` exclusively, so cap=1
+        # is NOT an escape hatch — the operator must pick an async-capable
+        # provider.
         assert "sync-only-test-provider-186-us008" in str(excinfo.value)
-        assert "max_concurrent_calls=5" in str(excinfo.value)
-        # The remediation is locked verbatim by DEC-006 of #186.
-        assert "grade.max_concurrent_calls: 1" in str(excinfo.value)
+        assert "async-capable provider" in str(excinfo.value)
         # Defence-in-depth: no LLM call was attempted.
         assert fake.create_calls == []
     finally:
@@ -1542,27 +1544,29 @@ def test_grade_artifacts_sync_only_provider_with_parallel_cap_raises_typed_error
         providers_module._REGISTRY.update(saved)
 
 
-def test_grade_artifacts_sync_only_provider_with_cap_one_does_not_raise(
+def test_grade_artifacts_sync_only_provider_with_cap_one_still_raises_typed_error(
     tmp_path: Path,
 ) -> None:
-    """The pair (``supports_async=False``, ``max_concurrent_calls=1``)
-    is the documented escape hatch — pin the negative direction so a
-    refactor that drops the ``> 1`` predicate (and hence rejects every
-    sync provider unconditionally) breaks loud.
+    """Sync-only provider + ``max_concurrent_calls=1`` STILL raises the
+    typed pre-flight error — ``cap=1`` is NOT an escape hatch (#186 QG
+    Pass 1 Concern #2 fix).
 
-    Asserts the GUARD does not fire, by verifying that
-    :class:`LLMProviderAsyncUnsupportedError` is NOT raised. We do NOT
-    drive the full grade pipeline because the canned ``FakeNoCacheClient``
-    runtime is mismatched with the ``FakeAnthropicClient`` test injection
-    seam used by every other engine test; the load-bearing assertion here
-    is purely "the typed pre-flight error was not raised".
+    The grade engine consumes ``call_llm_async`` exclusively post-#186.
+    A sync-only provider would surface ``LLMProviderAsyncUnsupportedError``
+    on every per-pair call, which the per-pair ``except`` wraps to
+    ``GradeLLMError`` — silently degrading every pair. That is worse than
+    failing loud at orchestrator entry, because the operator sees an
+    all-degraded report with no typed signal of the misconfiguration.
+
+    Fix: drop the ``> 1`` predicate from the entry guard. The pre-flight
+    raises ``LLMProviderAsyncUnsupportedError`` regardless of cap.
     """
     from signalforge.llm import providers as providers_module
     from signalforge.llm.errors import LLMProviderAsyncUnsupportedError
     from tests.llm._fake_provider import FakeNoCacheProvider
 
     class _SyncOnlyButSerial(FakeNoCacheProvider):
-        name = "sync-only-serial-test-provider-186-us008"
+        name = "sync-only-serial-test-provider-186-us008-cap1"
         supports_async = False
 
     saved = dict(providers_module._REGISTRY)
@@ -1586,16 +1590,11 @@ def test_grade_artifacts_sync_only_provider_with_cap_one_does_not_raise(
             max_retries_5xx=0,
             max_retries_conn=0,
             total_budget_seconds=60,
-            provider="sync-only-serial-test-provider-186-us008",
+            provider="sync-only-serial-test-provider-186-us008-cap1",
             max_concurrent_calls=1,
         )
 
-        # The guard must not raise ``LLMProviderAsyncUnsupportedError``.
-        # The grade pipeline may surface a different error downstream
-        # (FakeNoCacheClient vs FakeAnthropicClient runtime mismatch is
-        # not the contract under test); the load-bearing assertion is
-        # that the pre-flight guard let execution through.
-        try:
+        with pytest.raises(LLMProviderAsyncUnsupportedError):
             grade_artifacts(
                 model,
                 candidate,
@@ -1605,18 +1604,6 @@ def test_grade_artifacts_sync_only_provider_with_cap_one_does_not_raise(
                 client=fake,
                 project_dir=project_dir,
             )
-        except LLMProviderAsyncUnsupportedError:  # pragma: no cover - regression guard
-            pytest.fail(
-                "LLMProviderAsyncUnsupportedError raised with "
-                "max_concurrent_calls=1; the > 1 predicate has regressed."
-            )
-        except Exception:
-            # Any other exception is acceptable — the runtime mismatch
-            # between FakeNoCacheClient and FakeAnthropicClient is not
-            # the contract under test. The guard fired before the LLM
-            # call; downstream failures only confirm execution proceeded
-            # past it.
-            pass
     finally:
         providers_module._REGISTRY.clear()
         providers_module._REGISTRY.update(saved)
@@ -1799,24 +1786,23 @@ def test_grade_artifacts_concurrent_budget_warning_shape_locked(
     assert len(warns) == 1
     payload_json = warns[0].getMessage().split("grade budget exceeded: ", 1)[1]
     payload = json.loads(payload_json)
-    # JSON field set locked verbatim (DEC-018 of #186).
+    # JSON field set locked verbatim (DEC-018 of #186; refined by QG
+    # Pass 1+3 — ``cancelled_count`` was dropped as dead-code, every
+    # un-completed pair lands in ``degraded_count`` via the synthesis
+    # pass regardless of in-flight vs un-started status).
     assert set(payload.keys()) == {
         "run_id",
         "model_unique_id",
         "completed_count",
-        "cancelled_count",
         "degraded_count",
         "total_budget_seconds",
     }
     assert payload["model_unique_id"] == model.unique_id
     assert payload["total_budget_seconds"] == 1
-    # Every pair degraded (completed + cancelled + degraded == total).
+    # Every pair accounted for: completed + degraded == total.
     candidate_pairs = len(_stable_artifact_pairs(candidate))
     total_pairs = len(rubric) * candidate_pairs
-    assert (
-        payload["completed_count"] + payload["cancelled_count"] + payload["degraded_count"]
-        == total_pairs
-    )
+    assert payload["completed_count"] + payload["degraded_count"] == total_pairs
 
 
 def test_grade_artifacts_module_level_async_sleep_alias_present() -> None:
@@ -1905,19 +1891,25 @@ def test_grade_artifacts_hostile_coroutine_no_traceback(
     rendered = format_error_to_stderr(excinfo.value)  # type: ignore[arg-type]
     assert "Traceback" not in rendered, f"format_error_to_stderr leaked a traceback: {rendered!r}"
 
-    # If a multi-exception group reached the renderer, the US-010
-    # header is in the rendered output. This is the documented happy
-    # path for this test (2 criteria × ≥2 artifact pairs ⇒ ≥4
-    # concurrent failures), so we pin it.
-    if isinstance(excinfo.value, ExceptionGroup):
-        assert "concurrent failure" in rendered, (
-            f"ExceptionGroup branch did not render the US-010 header: {rendered!r}"
+    # Pin the multi-exception group branch unconditionally — this test
+    # is engineered so EVERY pair fails (2 criteria × ≥2 artifact pairs
+    # ⇒ ≥4 concurrent failures), so the engine's single-exception unwrap
+    # MUST NOT fire and the renderer MUST see an ExceptionGroup. A
+    # future regression that unwrapped multi-exception groups too would
+    # otherwise silently pass the conditional shape (QG Pass 3
+    # Concern #3 fix).
+    assert isinstance(excinfo.value, ExceptionGroup), (
+        f"hostile-coroutine fixture must surface a multi-exception group; "
+        f"got {type(excinfo.value).__name__}"
+    )
+    assert "concurrent failure" in rendered, (
+        f"ExceptionGroup branch did not render the US-010 header: {rendered!r}"
+    )
+    # Every inner exception is a ``KeyError`` from the hostile stub.
+    for inner in excinfo.value.exceptions:
+        assert isinstance(inner, KeyError), (
+            f"unexpected inner exception type: {type(inner).__name__}"
         )
-        # Every inner exception is a ``KeyError`` from the hostile stub.
-        for inner in excinfo.value.exceptions:
-            assert isinstance(inner, KeyError), (
-                f"unexpected inner exception type: {type(inner).__name__}"
-            )
 
     # Defence-in-depth: nothing the engine itself printed contains a
     # traceback either (the engine's WARNING / INFO lines route through

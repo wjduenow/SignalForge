@@ -113,7 +113,7 @@ def test_sort_grade_events_on_empty_list_returns_empty_list() -> None:
     """Trivial edge — ``_sort_grade_events([]) == []``.
 
     Pins that the helper does not assume a non-empty input. The async
-    core's ``cancelled_count + degraded_count == total_pairs`` budget
+    core's ``completed_count + degraded_count == total_pairs`` budget
     case with zero pairs would produce an empty JSONL; the helper
     must round-trip it.
     """

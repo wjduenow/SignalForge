@@ -595,10 +595,15 @@ async def _grade_artifacts_async_core(
     budget_state: dict[str, bool] = {"exceeded": False}
 
     # Per-pair category counters; populated as tasks finish.
+    # ``completed`` covers both happy-path scores AND LLM-layer per-pair
+    # degrades (DEC-015) — anything that ran to completion inside the
+    # coroutine, regardless of verdict. ``degraded`` is the synthesis-pass
+    # count of pairs that did NOT complete by budget-trip (whether they
+    # were in-flight or never started — the asyncio cancellation contract
+    # doesn't let us distinguish, per #186 QG Pass 1+3 triangulation).
     counters: dict[str, int] = {
         "completed": 0,  # scored (or LLM-layer-degraded — non-budget)
-        "cancelled": 0,  # in-flight at trip time → budget degrade
-        "degraded_pre": 0,  # un-started at trip time → budget degrade
+        "degraded": 0,  # synthesis pass: un-completed at trip time → budget degrade
     }
 
     total_budget_seconds = resolved_config.total_budget_seconds
@@ -625,7 +630,6 @@ async def _grade_artifacts_async_core(
                     timestamp=per_call_ts,
                     model_unique_id=model_unique_id,
                 )
-                counters["completed"] += 1
             except (
                 GradeLLMError,
                 GradeOutputError,
@@ -645,39 +649,43 @@ async def _grade_artifacts_async_core(
                     timestamp=per_call_ts,
                     model_unique_id=model_unique_id,
                 )
-                counters["completed"] += 1
-            except asyncio.CancelledError:
-                # Budget-vs-other attribution (DEC-008): if the
-                # orchestrator-scope flag is set, the timeout fired
-                # and this pair degrades. Otherwise re-raise — parent
-                # task is dying for an unrelated reason
-                # (KeyboardInterrupt / SystemExit), preserve that
-                # propagation.
-                if not budget_state["exceeded"]:
-                    raise
-                grading_result, event = _build_degraded(
-                    artifact_id=artifact_id,
-                    criterion=criterion,
-                    reasoning=(
-                        f"grade budget exceeded ({total_budget_seconds}s) before evaluation"
-                    ),
-                    config=resolved_config,
-                    rubric_hash=rubric_hash,
-                    template_hash=template_hash,
-                    crit_hash=crit_hash,
-                    run_id=run_id,
-                    timestamp=per_call_ts,
-                    model_unique_id=model_unique_id,
-                )
-                counters["cancelled"] += 1
+            # NOTE: deliberately NO ``except asyncio.CancelledError`` arm
+            # here. Pre-#186-QG the orchestrator's ``budget_state["exceeded"]``
+            # flag was set in ``except TimeoutError`` AFTER ``TaskGroup``'s
+            # ``__aexit__`` returned — but cancelled children's
+            # ``except CancelledError`` runs BEFORE that, so the flag was
+            # always ``False`` when checked here. The branch was dead code
+            # (QG Pass 1+3 triangulated). The synthesis pass below is now
+            # the single source of truth for "this pair was un-completed
+            # at trip time" — accurate by construction.
+
+            # In-memory slot assignment FIRST. Under the worst-case
+            # cancellation timing (timeout fires while the
+            # ``run_in_executor`` audit await is suspended), the executor
+            # thread keeps running and durably writes the audit record;
+            # without setting the slot first the coroutine raises
+            # ``CancelledError`` before line 691 runs, leaving the slot
+            # ``None`` — and the synthesis pass then writes a SECOND audit
+            # record for the same pair (QG Pass 1 BLOCKER). Setting the
+            # slot before the await closes the race: even if the await
+            # raises, the in-memory state is consistent with disk.
+            results_by_index[index] = grading_result
+            counters["completed"] += 1
 
             # Audit-write per pair (DEC-006 fail-closed; DEC-017
             # executor-wrap so the fsync doesn't block the loop). On
             # GradeAuditRecordTooLargeError / GradeAuditWriteError we
             # propagate; the run aborts.
+            #
+            # ``asyncio.shield`` ensures the audit-write completes even
+            # when the outer task is cancelled — the executor work is
+            # sync (cannot be killed mid-fsync); shielding lets it finish
+            # before the cancellation propagates back. The slot was set
+            # above so the synthesis pass will correctly skip this index.
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, _write_event_or_abort_kw, event, resolved_audit_path)
-            results_by_index[index] = grading_result
+            await asyncio.shield(
+                loop.run_in_executor(None, _write_event_or_abort_kw, event, resolved_audit_path)
+            )
 
     try:
         async with asyncio.timeout(total_budget_seconds):
@@ -737,9 +745,15 @@ async def _grade_artifacts_async_core(
         )
         _write_event_or_abort_kw(event, resolved_audit_path)
         results_by_index[index] = grading_result
-        counters["degraded_pre"] += 1
+        counters["degraded"] += 1
 
     # Emit ONE WARNING on budget trip, field set locked per DEC-018.
+    # NB: ``cancelled_count`` was dropped in #186 QG (Pass 1 + Pass 3
+    # triangulation) — the asyncio cancellation contract doesn't let
+    # the engine distinguish "in-flight at trip" from "un-started at
+    # trip", so the field was always 0 in practice and ``degraded_count``
+    # carries everything-not-completed. The simpler invariant
+    # ``completed_count + degraded_count == total_pairs`` holds.
     if budget_state["exceeded"]:
         _LOGGER.warning(
             "grade budget exceeded: %s",
@@ -748,8 +762,7 @@ async def _grade_artifacts_async_core(
                     "run_id": run_id,
                     "model_unique_id": model_unique_id,
                     "completed_count": counters["completed"],
-                    "cancelled_count": counters["cancelled"],
-                    "degraded_count": counters["degraded_pre"],
+                    "degraded_count": counters["degraded"],
                     "total_budget_seconds": total_budget_seconds,
                 }
             ),
@@ -965,12 +978,17 @@ def grade_artifacts(
     #          forthcoming ``asyncio.run`` to raise ``RuntimeError``;
     #          we surface a typed ``GradeNestedEventLoopError`` (CLI
     #          tier 1) with a remediation pointing at the v0.4 follow-up.
-    #       2. Sync-only provider + parallel cap — when the configured
-    #          provider has ``supports_async=False`` AND the operator
-    #          asked for ``max_concurrent_calls > 1`` we raise the
-    #          typed ``LLMProviderAsyncUnsupportedError`` (CLI tier 3)
-    #          rather than silently clamping to 1. Mirrors the project's
-    #          ``extra="forbid"`` fail-loud posture.
+    #       2. Sync-only provider — when the configured provider has
+    #          ``supports_async=False`` we raise the typed
+    #          ``LLMProviderAsyncUnsupportedError`` (CLI tier 3) regardless
+    #          of ``max_concurrent_calls``. The async sibling
+    #          ``call_llm_async`` is the only LLM seam the engine consumes
+    #          post-#186, so even ``max_concurrent_calls=1`` would fail
+    #          per-pair with ``GradeLLMError`` and silently degrade every
+    #          pair (QG Pass 1 Concern #2: ``cap=1`` is NOT an escape hatch
+    #          on a sync-only provider — there's no path forward without
+    #          async). Fail loud at entry. Mirrors the project's
+    #          ``extra="forbid"`` posture.
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -979,10 +997,11 @@ def grade_artifacts(
         raise GradeNestedEventLoopError(model_unique_id=model.unique_id)
 
     provider_strategy = provider_for(resolved_config.provider)
-    if not provider_strategy.supports_async and resolved_config.max_concurrent_calls > 1:
+    if not provider_strategy.supports_async:
         raise LLMProviderAsyncUnsupportedError(
             f"Provider {resolved_config.provider!r} does not support async dispatch, "
-            f"but grade.max_concurrent_calls={resolved_config.max_concurrent_calls} > 1."
+            f"required by the grade engine since #186. "
+            f"Pick an async-capable provider for grading."
         )
 
     # 4. Run-wide derived values.

@@ -32,7 +32,7 @@ def _sort_grade_events(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
     semaphore. This helper restores deterministic ordering for
     comparison without changing the on-disk shape.
 
-    **Contract.** Two properties pinned by ``test_grade_helpers.py``:
+    **Contract.** Two properties pinned by ``test_helpers.py``:
 
     * **Idempotent.** ``_sort_grade_events(_sort_grade_events(x)) ==
       _sort_grade_events(x)``. Calling twice is byte-equal to calling
