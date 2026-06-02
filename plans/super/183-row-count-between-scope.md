@@ -7,7 +7,7 @@
 - **Worktree:** `/Users/wesduenow/Projects/worktrees/SignalForge/183-row-count-between-scope`
 - **Base branch:** `dev` (0.6.0.dev0 line) — **NOT `main`**. See DEC-001.
 - **PR target:** `dev`
-- **Phase:** published (awaiting approval)
+- **Phase:** devolved
 - **Sessions:** 1 (2026-06-02)
 - **Closest precedents:** #171 (`_ROW_COUNT_ANOMALY_SCOPE_INSTRUCTION`), #170 (`_UNIQUE_COMBINATION_SCOPE_INSTRUCTION`)
 - **Parent epic:** #179 (test-primitive-expansion retest)
@@ -220,10 +220,14 @@ vacuous `minimum: 0` with no `maximum` adds no signal.
 
 ## Phase 7 — Beads Manifest
 
-*(populated on devolve)*
-
----
-
-## Phase 7 — Beads Manifest
-
-*(populated on devolve)*
+- **Epic:** `SignalForge-jvu` — #183: Add _ROW_COUNT_BETWEEN_SCOPE_INSTRUCTION
+- **Tasks:**
+  - `SignalForge-jvu.1` — US-001: scope-instruction block + plumbing + lockstep `_PROMPT_VERSION` (ready)
+  - `SignalForge-jvu.2` — US-002: backfill #170 unique_combination prose tests (blocked by .1)
+  - `SignalForge-jvu.3` — Quality Gate (blocked by .1, .2)
+  - `SignalForge-jvu.4` — Patterns & Memory (blocked by .3)
+- **Dependency chain:** .1 → .2 → .3 → .4 (Quality Gate also directly depends on .1).
+- **Ralph entry point:** `SignalForge-jvu.1` (only unblocked task).
+- **Worktree:** `/Users/wesduenow/Projects/worktrees/SignalForge/183-row-count-between-scope` (branch `feature/183-row-count-between-scope`, base `dev`).
+- **PR:** https://github.com/wjduenow/SignalForge/pull/191 (draft, base `dev`).
+- **Note:** `bd` (0.63.3) is dolt-backed; auto-push to the dolt remote warns ("no common ancestor") but the local task graph is intact. No `bd sync` subcommand in this version.
