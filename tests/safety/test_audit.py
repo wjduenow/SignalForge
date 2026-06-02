@@ -608,3 +608,121 @@ def test_audit_write_too_large_propagates_column_count_in_remediation(
 
     # And the writer fail-closed contract held — no on-disk artefact.
     assert not audit_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# US-007 of #185 — concurrent-write coverage spanning chunked + non-chunked
+# events. Extends test_audit_write_concurrent_threads_no_interleave (which
+# covers single-line events only) so the chunked emission path is exercised
+# under the same threading pressure. Pins (a) every emitted line stays under
+# the POSIX-atomic-append cap; (b) every logical event round-trips through
+# ``read_audit_events``; (c) per-event chunk groups stay correlatable under
+# arbitrary line-level interleaving — the reader's audit_id-keyed accumulator
+# is the contract this test verifies.
+# ---------------------------------------------------------------------------
+
+
+def test_audit_write_concurrent_threads_mix_small_and_chunked(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """10 threads × 50 events alternating small + 170-col chunked.
+
+    Verifies under concurrent writers:
+
+    (1) Every emitted line is ≤ ``_AUDIT_RECORD_LIMIT_BYTES`` (4000 B) — the
+        POSIX-atomic-append invariant the chunker exists to preserve.
+    (2) Every line parses as JSON (no torn writes from interleaved chunks).
+    (3) All 500 logical events round-trip through ``read_audit_events``
+        — the reader's ``audit_id``-keyed accumulator tolerates arbitrary
+        line-level interleaving between events.
+    (4) No partial-group WARNINGs fired — every chunk group landed fully.
+
+    Uses 170 columns for the chunked half (yields ~5 chunks per US-006's
+    empirical measurement against the actual ``_chunk_event`` thresholds);
+    single-line events otherwise. Per-event ``model_unique_id`` uniqueness
+    drives distinct ``audit_id`` per event (the correlation hash is
+    deterministic over ``(model_unique_id, timestamp, version)``).
+    """
+    audit_path = tmp_path / "audit.jsonl"
+    n_threads = 10
+    events_per_thread = 50
+    total_events = n_threads * events_per_thread  # 500
+
+    def _wide_event_unique(model_unique_id: str, col_count: int = 170) -> AuditEvent:
+        """Build a wide (chunkable) event with a distinct ``model_unique_id``
+        so its derived ``audit_id`` does not collide with sibling events.
+        """
+        hashed_names = tuple(f"col_{i:08x}" for i in range(col_count))
+        real_names = {
+            h: f"real_column_name_long_enough_to_inflate_{i:04d}"
+            for i, h in enumerate(hashed_names)
+        }
+        return _make_v4_event(
+            model_unique_id=model_unique_id,
+            redactions_by_reason={"pattern_match": hashed_names},
+            column_name_map=real_names,
+        )
+
+    def writer(thread_idx: int) -> None:
+        for i in range(events_per_thread):
+            uid = f"thread.{thread_idx}.row.{i}"
+            if i % 2 == 0:
+                # Even: small single-line event.
+                event = _make_v4_event(model_unique_id=uid)
+            else:
+                # Odd: wide event that chunks into ~5 lines.
+                event = _wide_event_unique(uid, col_count=170)
+            write(event, audit_path)
+
+    with (
+        caplog.at_level(logging.WARNING, logger="signalforge.safety"),
+        ThreadPoolExecutor(max_workers=n_threads) as ex,
+    ):
+        list(ex.map(writer, range(n_threads)))
+
+    # (1) Every emitted line is within the POSIX-atomic-append cap. Read raw
+    # bytes (not text) so we measure the on-disk envelope, mirroring what the
+    # kernel atomicity guarantee operates on.
+    raw = audit_path.read_bytes()
+    raw_lines = raw.splitlines(keepends=True)
+    assert all(line.endswith(b"\n") for line in raw_lines), "torn line: missing newline"
+    for idx, line in enumerate(raw_lines):
+        assert len(line) <= 4000, f"line {idx} is {len(line)} bytes > 4000 cap"
+
+    # (2) Every line parses as JSON — no interleaved-byte corruption.
+    text_lines = audit_path.read_text(encoding="utf-8").splitlines()
+    for idx, line in enumerate(text_lines):
+        try:
+            json.loads(line)
+        except json.JSONDecodeError as exc:  # pragma: no cover - diagnostic
+            pytest.fail(f"line {idx} failed JSON parse: {exc}; line={line!r}")
+
+    # (3) Every logical event round-trips through the reader.
+    # ``read_audit_events`` accumulates chunked groups by audit_id and yields
+    # them once complete, so arbitrary line interleaving is acceptable.
+    events = list(read_audit_events(audit_path))
+    assert len(events) == total_events, (
+        f"expected {total_events} reassembled events, got {len(events)}"
+    )
+
+    # All model_unique_ids accounted for — no event was dropped.
+    expected_ids = {
+        f"thread.{t}.row.{i}" for t in range(n_threads) for i in range(events_per_thread)
+    }
+    actual_ids = {e.model_unique_id for e in events}
+    assert actual_ids == expected_ids
+
+    # (4) No partial-group WARNINGs were emitted — every chunk group landed
+    # in full (the reader logs once per incomplete group at end-of-stream).
+    partial_group_warnings = [
+        r
+        for r in caplog.records
+        if r.name == "signalforge.safety"
+        and r.levelno >= logging.WARNING
+        and "audit chunk group incomplete" in r.getMessage()
+    ]
+    assert partial_group_warnings == [], (
+        f"expected zero partial-group WARNINGs, got {len(partial_group_warnings)}: "
+        f"{[r.getMessage() for r in partial_group_warnings]}"
+    )
