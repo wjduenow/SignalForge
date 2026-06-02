@@ -13,7 +13,7 @@
 
 [#179 retest](docs/research/179-test-primitive-expansion-retest.md) ran `signalforge generate` against the `intuit_airflow` substrate (Airflow + dbt 1.8 + Snowflake) and hit a hard failure on `raw/datashare_googlead.sql` (170 columns):
 
-```
+```text
 datashare_googlead   row_count_between   generate-failed
 ERROR: Audit record size 4519 exceeds atomic-append limit 4000.
   ↳ Remediation: Audit records must stay under 4000 bytes for atomic concurrent appends;

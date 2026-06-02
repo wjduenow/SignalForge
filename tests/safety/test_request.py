@@ -104,19 +104,18 @@ class _AuditRecorder:
 def _silent_audit_unless_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default ``audit.write`` to a no-op for every test in this module.
 
-    Issue #185 US-002: ``build_llm_request`` now emits the v4 AuditEvent
-    shape, but ``safety.audit.write`` still reads the v3 ``event.redactions``
-    field (US-003 owns the writer migration; lands in a sibling parallel
-    bead). Without this autouse fixture, every test that lets the real
-    writer fire would crash on ``AttributeError: 'AuditEvent' object has
-    no attribute 'redactions'``.
+    Most tests in this file only care about the ``LLMRequest`` /
+    ``AuditEvent`` value-object shape produced by ``build_llm_request``,
+    not the on-disk side-effect of writing the audit JSONL. Defaulting the
+    writer to a no-op keeps these tests isolated from a real disk write
+    (no ``tmp_path`` artefact, no concurrent-test interference, no
+    filesystem permission edge cases).
 
     Tests that explicitly want to drive the writer (failure modes,
-    on-disk artefact assertions) override this fixture by calling
+    on-disk artefact assertions, the end-to-end disk-write
+    integration test) override this fixture by calling
     ``monkeypatch.setattr("signalforge.safety.request.audit.write", ...)``
-    themselves — the last ``setattr`` wins. Tests that want the real
-    writer (the end-to-end disk-write test) are xfailed until US-003
-    lands the v4-aware writer.
+    themselves — the last ``setattr`` wins.
     """
     monkeypatch.setattr(
         "signalforge.safety.request.audit.write",

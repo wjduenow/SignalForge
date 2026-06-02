@@ -319,9 +319,9 @@ Two changes:
 2. **Chunked records.** When the serialised event exceeds the 4000 B
    cap, the writer splits it across multiple JSONL lines correlated
    by three new fields:
-   - `audit_id: str | None` — 16-hex `blake2b` correlation key
-     (deterministic per source event:
-     `blake2b(model_unique_id + timestamp.isoformat() + signalforge_version, digest_size=8)`).
+   - `audit_id: str | None` — 16-hex `blake2b-8` correlation key
+     (deterministic per source event; NUL-byte separators prevent
+     field-concatenation collisions): `blake2b(model_unique_id + b"\x00" + timestamp.isoformat() + b"\x00" + signalforge_version, digest_size=8).hexdigest()`.
    - `chunk_index: int | None` — 0 for the header chunk, ≥ 1 for
      continuations.
    - `chunk_count: int | None` — total chunks for this event; ≥ 2
@@ -421,7 +421,7 @@ the operator sees a three-sentence remediation. The exact wording is
 `column_count=170` (a real wide-table model), the rendered
 `↳ Remediation:` line reads:
 
-```
+```text
 Model has 170 columns; after compression and chunking the audit record is still 135 bytes over the 4000 B atomic-append limit. Audit records must stay under 4000 bytes for atomic concurrent appends. Mark non-critical columns with meta.signalforge.skip_draft: true to omit them from the audit entirely; this is distinct from PII opt-out and is more effective for wide-table noise reduction. NOTE: safety.mode: aggregate-only does NOT shrink the redactions surface — do not use it as a workaround. For hyper-wide tables that still over-cap, see the columns_sent roadmap in docs/safety-ops.md.
 ```
 
@@ -500,10 +500,11 @@ logging.getLogger("signalforge.safety").setLevel(logging.DEBUG)
 Levels:
 
 - **INFO** — One line per `audit.write` (the JSON-encoded summary:
-  `unique_id`, `mode`, `columns_sent` count, `column_name_map` size,
-  `audit_schema_version`, and the chunk-correlation triple when
-  chunked). The per-write summary names the v4 `column_name_map`
-  size rather than the gone v3 `redactions` field.
+  `unique_id` (model unique_id), `mode`, `columns_sent` (count),
+  `redacted` (total redacted-column count summed across
+  `redactions_by_reason` values), `audit_schema_version`, and
+  `chunk_count` (the number of JSONL lines this logical event produced;
+  1 for non-chunked, ≥ 2 for chunked).
 - **WARNING** — Sample-mode-enabled (one per policy construction); the
   empty-redaction `redact: replace: []` warning; the
   suspicious-unmatched-column heuristic (one per offending column).

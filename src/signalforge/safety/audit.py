@@ -86,9 +86,14 @@ def _serialise_payload(payload: dict[str, Any]) -> bytes:
 def _compute_audit_id(event: AuditEvent) -> str:
     """Deterministic 16-hex blake2b-8 over (model_unique_id, timestamp, version).
 
-    Same event → same ``audit_id`` across runs, so re-running the same
-    pipeline produces correlatable audit records. NUL-separator prevents
-    field-concatenation collisions (e.g. a model id ending in the
+    The same ``AuditEvent`` *value* — same model id, same timestamp, same
+    SignalForge version — always chunks to the same ``audit_id``. This is
+    the narrow guarantee chunked reassembly depends on: every continuation
+    chunk for one logical event carries the same ``audit_id`` so the
+    reader can correlate them. ``timestamp`` is part of the hash input, so
+    *re-running* the pipeline (which produces a fresh ``timestamp``) will
+    correctly mint a different ``audit_id`` for the new run. NUL-separator
+    prevents field-concatenation collisions (e.g. a model id ending in the
     timestamp prefix).
     """
     # Non-chunked-shape inputs only; the v4 validator guarantees these are
@@ -222,7 +227,12 @@ def _greedy_pack_continuations(
             # caused chunk-boundary duplicates).
             tentative_redactions = {k: list(v) for k, v in current_redactions.items()}
             tentative_redactions.setdefault(reason, []).append(names[idx])
-            tentative_map = {**current_map, names[idx]: column_name_map.get(names[idx], "")}
+            # Direct index, not ``.get(..., "")`` — every hashed name in
+            # ``redactions_by_reason`` MUST have a matching entry in
+            # ``column_name_map`` by construction in ``request.py``. A
+            # silent empty-string fallback would corrupt the reviewer
+            # mapback contract; KeyError fails loud (Copilot review #192).
+            tentative_map = {**current_map, names[idx]: column_name_map[names[idx]]}
 
             # Build a tentative payload to measure its serialised size.
             tentative_payload = _build_continuation_payload(
@@ -254,9 +264,10 @@ def _greedy_pack_continuations(
 
             # Single-name-over-cap path: emit the lone entry as a chunk
             # so the writer's pre-open check has something concrete to
-            # measure and reject.
+            # measure and reject. Same direct-index discipline as above —
+            # missing mapback entry fails loud, never silently empty.
             current_redactions = {reason: [names[idx]]}
-            current_map = {names[idx]: column_name_map.get(names[idx], "")}
+            current_map = {names[idx]: column_name_map[names[idx]]}
             _flush()
             next_provisional_index = len(continuations) + 1
             idx += 1
