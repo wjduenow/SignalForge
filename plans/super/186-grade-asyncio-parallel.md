@@ -4,7 +4,7 @@
 > - **Ticket:** [#186](https://github.com/wjduenow/SignalForge/issues/186) — `grade: parallelise per-(artifact × criterion) calls via asyncio.gather (deferred-to-v0.2 graduation)`
 > - **Branch:** `feature/186-grade-asyncio` (off `origin/dev`)
 > - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/186-grade-asyncio`
-> - **Phase:** detailing (Phase 3 complete — story breakdown ready for review)
+> - **Phase:** published (PR [#190](https://github.com/wjduenow/SignalForge/pull/190) draft — awaiting approval)
 > - **Plan started:** 2026-06-01
 
 ## Background
