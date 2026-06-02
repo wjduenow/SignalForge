@@ -194,22 +194,68 @@ class AuditRecordTooLargeError(SafetyError):
     POSIX guarantees ``write(2)`` is atomic only for payloads up to ``PIPE_BUF``
     bytes (typically 4 KiB on Linux). The audit writer enforces a size cap
     to keep concurrent appends from interleaving partial records.
+
+    Issue #185 / DEC-007 extended this error with a ``column_count`` field so
+    the default remediation can build a three-sentence operator script that
+    names the column count (when known), points at the
+    ``meta.signalforge.skip_draft: true`` workaround (distinct from PII
+    opt-out — see ``safety-layer.md`` DEC-003), explicitly closes the issue
+    text's misleading ``safety.mode: aggregate-only`` hint (the aggregate-only
+    mode does NOT shrink the redactions tuple, so it cannot work around the
+    cap), and points at the follow-up issue for hyper-wide tables.
     """
 
     default_remediation: ClassVar[str] = (
         "Audit records must stay under the configured byte limit for atomic "
-        "concurrent appends; reduce columns_sent or redactions count."
+        "concurrent appends. Mark non-critical columns with "
+        "meta.signalforge.skip_draft: true to omit them from the audit "
+        "entirely; this is distinct from PII opt-out and is more effective "
+        "for wide-table noise reduction. NOTE: safety.mode: aggregate-only "
+        "does NOT shrink the redactions tuple — do not use it as a "
+        "workaround. For hyper-wide tables that still over-cap, see issue "
+        "#185 follow-up."
     )
 
-    def __init__(self, size: int, limit: int, *, remediation: str | None = None) -> None:
+    def __init__(
+        self,
+        size: int,
+        limit: int,
+        column_count: int | None = None,
+        *,
+        remediation: str | None = None,
+    ) -> None:
         self.size = size
         self.limit = limit
+        self.column_count = column_count
         message = f"Audit record size {size} exceeds atomic-append limit {limit}."
         if remediation is None:
-            remediation = (
+            # Build the locked three-sentence operator script. When the
+            # column_count is known, prepend a sentence naming it plus the
+            # exact byte overage. Otherwise emit the base text. The exact
+            # wording is pinned by the stability test
+            # ``test_audit_record_too_large_default_remediation_locked``
+            # in ``tests/safety/test_errors.py`` — adjust both surfaces
+            # in lockstep.
+            base = (
                 f"Audit records must stay under {limit} bytes for atomic "
-                "concurrent appends; reduce columns_sent or redactions count."
+                f"concurrent appends. Mark non-critical columns with "
+                f"meta.signalforge.skip_draft: true to omit them from the "
+                f"audit entirely; this is distinct from PII opt-out and is "
+                f"more effective for wide-table noise reduction. NOTE: "
+                f"safety.mode: aggregate-only does NOT shrink the redactions "
+                f"tuple — do not use it as a workaround. For hyper-wide "
+                f"tables that still over-cap, see issue #185 follow-up."
             )
+            if column_count is not None:
+                over = size - limit
+                prefix = (
+                    f"Model has {column_count} columns; after compression "
+                    f"and chunking the audit record is still {over} bytes "
+                    f"over the {limit} B atomic-append limit. "
+                )
+                remediation = prefix + base
+            else:
+                remediation = base
         super().__init__(message, remediation=remediation)
 
 

@@ -379,9 +379,22 @@ def write(event: AuditEvent, audit_path: Path) -> None:
 
     # Pre-open size check on EVERY chunk so a single pathologically-large
     # chunk leaves no on-disk artefact. Mirrors prune/draft/grade/diff.
+    # US-004 of #185 (DEC-007): pass ``column_count`` so the default
+    # remediation builds the three-sentence operator script naming the
+    # actual column count + byte overage. Best-available estimate: each
+    # entry in ``column_name_map`` is a redacted column, and each entry
+    # in any ``redactions_by_reason`` value list is also a redacted
+    # column — combine for a useful upper bound.
+    column_count = len(event.column_name_map or {}) + sum(
+        len(v) for v in (event.redactions_by_reason or {}).values()
+    )
     for chunk in chunks:
         if len(chunk) > _AUDIT_RECORD_LIMIT_BYTES:
-            raise AuditRecordTooLargeError(size=len(chunk), limit=_AUDIT_RECORD_LIMIT_BYTES)
+            raise AuditRecordTooLargeError(
+                size=len(chunk),
+                limit=_AUDIT_RECORD_LIMIT_BYTES,
+                column_count=column_count,
+            )
 
     # Ensure parent dir exists with private permissions. ``mode=0o700`` is the
     # umask-respecting permission used at *creation* time; an existing dir is

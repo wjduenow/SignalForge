@@ -548,3 +548,63 @@ def test_read_audit_events_warns_on_partial_group(
         r for r in caplog.records if r.name == "signalforge.safety" and r.levelno >= logging.WARNING
     ]
     assert len(warnings_emitted) >= 1, "expected a partial-group WARNING"
+
+
+# ---------------------------------------------------------------------------
+# US-004 of #185 — column_count propagation through the writer raise site
+# ---------------------------------------------------------------------------
+
+
+def test_audit_write_too_large_propagates_column_count_in_remediation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEC-007 (#185 US-004): when ``write()`` raises ``AuditRecordTooLargeError``
+    because a chunk exceeds the cap, the error carries a non-None
+    ``column_count`` (derived from ``column_name_map`` size + summed
+    ``redactions_by_reason`` value-list lengths) and the rendered remediation
+    text includes the "Model has N columns" prefix.
+
+    Drives the writer with a tiny artificial cap so any non-trivial event
+    over-caps a chunk; asserts the propagation path runs.
+    """
+    # Force a tiny cap so even a small event over-caps a chunk → triggers
+    # the pre-open size check + the typed raise with column_count.
+    monkeypatch.setattr("signalforge.safety.audit._AUDIT_RECORD_LIMIT_BYTES", 200)
+    audit_path = tmp_path / "audit.jsonl"
+
+    # An event with a handful of redacted columns; under a 200-byte cap the
+    # serialised single-chunk form well exceeds the limit, and even after
+    # chunking individual chunks remain oversized — exactly the
+    # pre-open-raise path US-004 targets.
+    hashed_names = tuple(f"col_{i:08x}" for i in range(8))
+    real_names = {h: f"real_column_name_{i:04d}" for i, h in enumerate(hashed_names)}
+    event = _make_v4_event(
+        redactions_by_reason={"pattern_match": hashed_names},
+        column_name_map=real_names,
+    )
+
+    with pytest.raises(AuditRecordTooLargeError) as excinfo:
+        write(event, audit_path)
+
+    err = excinfo.value
+    # Column count is the best-available estimate: column_name_map size +
+    # sum of redaction-list lengths. The fake event uses identical hashed
+    # names in both, so the estimate is len(map) + len(redaction list) ==
+    # 8 + 8 == 16.
+    assert err.column_count is not None
+    assert err.column_count > 0
+    assert err.column_count == 16
+
+    # The rendered remediation includes the "Model has N columns" prefix,
+    # the skip_draft workaround, the explicit aggregate-only NOT-a-workaround
+    # clarification, and the follow-up issue pointer — the three-sentence
+    # operator script.
+    rendered = err.remediation
+    assert f"Model has {err.column_count} columns" in rendered
+    assert "meta.signalforge.skip_draft: true" in rendered
+    assert "safety.mode: aggregate-only does NOT shrink" in rendered
+    assert "issue #185 follow-up" in rendered
+
+    # And the writer fail-closed contract held — no on-disk artefact.
+    assert not audit_path.exists()
