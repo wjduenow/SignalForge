@@ -468,8 +468,7 @@ block (`_ROW_COUNT_BETWEEN_SCOPE_INSTRUCTION`, added in #183 to complete
 the #169 DEC-012 worked example) that teaches the bounded-aggregation
 heuristic below plus the `minimum`/`maximum`/`where` calibration guidance —
 the prompt-level steer that drives the drafter to propose the test in the
-first place. The
-drafter typically proposes `row_count_between` when:
+first place. The drafter typically proposes `row_count_between` when:
 
 - The model SQL is a **bounded aggregation** (a `GROUP BY` with a date
   window in the `WHERE` clause, or a pre-aggregated rollup) whose row
