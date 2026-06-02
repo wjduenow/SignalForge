@@ -4,7 +4,7 @@
 > - **Ticket:** [#186](https://github.com/wjduenow/SignalForge/issues/186) — `grade: parallelise per-(artifact × criterion) calls via asyncio.gather (deferred-to-v0.2 graduation)`
 > - **Branch:** `feature/186-grade-asyncio` (off `origin/dev`)
 > - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/186-grade-asyncio`
-> - **Phase:** published (PR [#190](https://github.com/wjduenow/SignalForge/pull/190) draft — awaiting approval)
+> - **Phase:** devolved (beads tree under `bd_1-scaffolding-v8j`; PR [#190](https://github.com/wjduenow/SignalForge/pull/190))
 > - **Plan started:** 2026-06-01
 
 ## Background
@@ -632,9 +632,47 @@ US-014 ──> US-015 (Patterns & Memory)
 - US-006 + US-007 + US-008 (after the three shim stories, the LLM orchestrator can land in parallel with the fake surface and grade config) — caution per memory `ralph-serialize-shared-registry-beads`: US-002 + US-008 both touch `_EXCEPTION_TO_EXIT_CODE`; serialize at least the registration edits.
 - US-010 + US-011 + US-012 (after US-009, three independent stories on the testing/CLI surface)
 
-## Beads Manifest (Phase 7 — pending)
+## Beads Manifest (Phase 7)
 
-(Epic + task IDs.)
+- **Epic:** `bd_1-scaffolding-v8j` — `#186: grade-layer asyncio refactor`
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/186-grade-asyncio`
+- **Branch:** `feature/186-grade-asyncio`
+- **PR:** [#190](https://github.com/wjduenow/SignalForge/pull/190) (draft, base `dev`)
+
+### Task tree
+
+| ID | Story | Deps | Priority |
+|---|---|---|---|
+| `bd_1-scaffolding-v8j.1` | US-001 — `pytest-asyncio` dev-dep + asyncio marker + `_async_sleep` alias | — | P2 |
+| `bd_1-scaffolding-v8j.2` | US-002 — `LLMProvider` ABC additions + `LLMProviderAsyncUnsupportedError` | — | P2 |
+| `bd_1-scaffolding-v8j.3` | US-003 — Anthropic async shim + AST Scan 3b | v8j.2 | P2 |
+| `bd_1-scaffolding-v8j.4` | US-004 — OpenAI async shim + AST Scan 9b | v8j.2 | P2 |
+| `bd_1-scaffolding-v8j.5` | US-005 — Gemini async adapter (`.aio` passthrough) | v8j.2 | P2 |
+| `bd_1-scaffolding-v8j.6` | US-006 — `call_llm_async` | v8j.1, v8j.3, v8j.4, v8j.5 | P2 |
+| `bd_1-scaffolding-v8j.7` | US-007 — Fake clients gain dual sync+async surface | v8j.1 | P2 |
+| `bd_1-scaffolding-v8j.8` | US-008 — `GradeConfig.max_concurrent_calls` + `GradeNestedEventLoopError` + entry guards | v8j.2 | P2 |
+| `bd_1-scaffolding-v8j.9` | US-009 — Grade engine asyncio refactor (TaskGroup + Semaphore + budget timeout) | v8j.6, v8j.7, v8j.8 | P2 |
+| `bd_1-scaffolding-v8j.10` | US-010 — `ExceptionGroup` renderer in `format_error_to_stderr` | v8j.9 | P2 |
+| `bd_1-scaffolding-v8j.11` | US-011 — JSONL sort helper + retry-isolation test + budget-cancellation test | v8j.7, v8j.9 | P2 |
+| `bd_1-scaffolding-v8j.12` | US-012 — Three per-provider live async smoke tests | v8j.7, v8j.9 | P2 |
+| `bd_1-scaffolding-v8j.13` | US-013 — Docs + rule files + CHANGELOG | v8j.1…v8j.12 | P2 |
+| `bd_1-scaffolding-v8j.14` | US-014 — Quality Gate (4× code-review + CodeRabbit + matrix-floor validation) | v8j.1…v8j.13 | P2 |
+| `bd_1-scaffolding-v8j.15` | US-015 — Patterns & Memory | v8j.14 | P3 |
+
+### Currently ready (no blockers)
+
+- `bd_1-scaffolding-v8j.1` (US-001)
+- `bd_1-scaffolding-v8j.2` (US-002)
+
+These two are independent — Ralph can claim both in parallel. After US-002 closes, US-003 / US-004 / US-005 unblock (three parallel per-vendor stories).
+
+### Ralph kickoff
+
+```bash
+cd /home/wesd/Projects/worktrees/SignalForge/186-grade-asyncio
+bd ready              # confirms v8j.1 + v8j.2 are claimable
+# /ralph-run        # drives the bead tree under v8j to completion
+```
 
 ## References
 
