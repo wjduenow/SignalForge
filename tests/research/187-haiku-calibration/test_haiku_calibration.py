@@ -28,9 +28,10 @@ Gating — belt-and-suspenders, mirroring
   blank) — so a maintainer who runs ``pytest -m anthropic`` without a
   key sees a clean skip-with-reason, not a noisy auth failure.
 
-The substrate (pinned candidate + curated Sonnet baseline) lives in
-:mod:`tests.research._substrate`; see
-:file:`docs/research/187-haiku-calibration.md` for provenance.
+The substrate (real model + frozen drafted candidate + live Sonnet baseline)
+lives in :mod:`tests.research._substrate`; see
+:file:`docs/research/187-haiku-calibration.md` for provenance and the recorded
+result (Haiku fell short of the 85% bar — 81.8% / 77.0% on two runs).
 """
 
 from __future__ import annotations

@@ -1,20 +1,24 @@
 # Issue #187 — Haiku grade-default calibration gate
 
-**Status:** harness BUILT (2026-06-02); maintainer RUN pending. The #187
-plan ships `claude-haiku-4-5` as the new grade-default SKU (US-001..US-003 —
-the provider fast-model resolver now resolves `model=None` to
-`claude-haiku-4-5` on the Anthropic provider, and `max_output_tokens`
-defaults to `1024`). The default ships behind this empirical gate: a
-maintainer runs the gated harness below with a live `ANTHROPIC_API_KEY`
-and transcribes the result into the **"Result (maintainer-filled)"**
-section. Until then this writeup records the substrate and method only.
+**Status:** RUN COMPLETE (2026-06-02). The #187 plan ships `claude-haiku-4-5`
+as the new grade-default SKU behind this empirical gate (DEC-005). The gate has
+now been run against a **real Sonnet baseline drafted from a real
+`intuit_airflow` model** — and **Haiku does NOT clear the ≥ 85% concordance
+bar** (81.8% and 77.0% on two independent runs). Per the DEC-005 decision rule,
+this points to **shipping Haiku as an opt-in fast mode, not the default**. See
+§ "Result" and § "Disposition".
 
 **Companion artefacts:**
 
-- `tests/research/187-haiku-calibration/_substrate.py` — pinned `Model`
-  + `CandidateSchema` + Sonnet-baseline loader.
-- `tests/research/187-haiku-calibration/sonnet_baseline_sample.json` —
-  the curated baseline verdict sample.
+- `tests/research/187-haiku-calibration/capture_sonnet_baseline.py` — one-shot
+  capture: drafts artifacts for the real model (schema-only) and grades them
+  with `claude-sonnet-4-6` to produce the baseline. Maintainer-run with a key.
+- `tests/research/187-haiku-calibration/_substrate.py` — constructs the real
+  `Model` deterministically + loads the frozen drafted candidate + the baseline.
+- `tests/research/187-haiku-calibration/real_candidate.json` — the frozen
+  `CandidateSchema` the production drafter (Sonnet) emitted for the model.
+- `tests/research/187-haiku-calibration/sonnet_baseline_sample.json` — **live
+  `claude-sonnet-4-6` grades** of the frozen artifacts (NOT hand-authored).
 - `tests/research/187-haiku-calibration/test_haiku_calibration.py` — the
   `@pytest.mark.anthropic`-gated concordance gate.
 - `tests/research/187-haiku-calibration/test_gemini_1024_no_truncation.py` —
@@ -22,140 +26,108 @@ section. Until then this writeup records the substrate and method only.
 
 ## tl;dr
 
-- **The question:** does `claude-haiku-4-5` grade rubric artifacts
-  concordantly with the prior `claude-sonnet-4-6` baseline? The decision
-  rule is **≥ 85% per-criterion pass/fail agreement** over a pinned
-  sample.
-- **The harness:** re-grades a hand-authored, calibration-spanning
-  candidate (strong / adequate / vague artifacts) with the resolved
-  Haiku default over the locked four-criterion `DEFAULT_RUBRIC`, joins
-  each `GradingResult` to a curated Sonnet baseline by
-  `(artifact_id, criterion_id)`, and asserts the agreement rate clears
-  85%. Degraded (`score=None`) pairs are excluded from the denominator
-  and reported separately.
+- **The question:** does `claude-haiku-4-5` grade rubric artifacts concordantly
+  with `claude-sonnet-4-6`? Decision rule: **≥ 85% per-criterion pass/fail
+  agreement** over a pinned sample (DEC-005).
+- **Real substrate (recaptured on request):** the artifacts are no longer
+  synthetic. The production drafter drafted a `CandidateSchema` for the real
+  `intuit_airflow` model `plugins/dbt/models/analytical/calendar_hour.sql`
+  (schema-only — no warehouse), frozen to `real_candidate.json`. The baseline is
+  **live `claude-sonnet-4-6` grades** of those frozen artifacts. Only the Haiku
+  re-grade is the live variable.
+- **Result — the gate FAILS:** Haiku agreement was **81.8%** (run 1) and
+  **77.0%** (run 2), both **below 85%**. The divergence is **systematic, not
+  noise**: ~80% of discordances are `sonnet=pass → haiku=fail` — **Haiku grades
+  the rubric stricter than Sonnet**, concentrated on the **`no-redundant`** and
+  **`clarity`** criteria. Haiku-as-judge would flag column rationales /
+  descriptions that Sonnet passes.
 - **A second gated check** verifies DEC-004's claim that the new
-  `max_output_tokens=1024` default leaves Gemini enough headroom: it
-  grades a deliberately verbose artifact on `gemini-2.5-flash` @ 1024
-  tokens and asserts no `GradingResult` degraded to `score=None` from a
-  truncation.
-- **Default CI is untouched:** both checks are deselected by the
-  existing `anthropic` / `gemini` markers in `pyproject.toml`'s
-  `addopts`, and skip-with-reason at runtime if collected without keys.
-  No live API call happens during normal validation.
+  `max_output_tokens=1024` default leaves Gemini enough headroom (separate; see
+  § "Gemini check").
+- **Default CI is untouched:** both checks are deselected by the `anthropic` /
+  `gemini` markers in `pyproject.toml`'s `addopts` and skip-with-reason without
+  keys. No live API call happens during normal validation. The concordance gate
+  asserting ≥ 85% now **fails when run** — that failure IS the recorded signal
+  that the default is mis-calibrated.
 
 ## Substrate
 
-### Pinned candidate (the artifacts under grade)
+### Pinned candidate (the artifacts under grade) — REAL, drafted from intuit_airflow
 
-`_substrate.build_candidate()` returns a `CandidateSchema` for a fictional
-`dim_customers` model, hand-authored to span the rubric's calibration
-space (engineered determinism per `.claude/rules/testing-signal.md`
-§ "Engineered determinism over snapshot normalisation"):
+`_substrate.build_model()` constructs the real `calendar_hour` hour-grain time
+dimension deterministically (its SQL + four business columns — `date_id`,
+`hour_of_day`, `date_hour`, `prior_year_date_hour` — are inlined so the capture
+reproduces without the `intuit_airflow` repo checked out).
+`_substrate.build_candidate()` loads `real_candidate.json`: the artifacts the
+**production drafter** (`claude-sonnet-4-6`, schema-only) emitted for that model,
+frozen by `capture_sonnet_baseline.py`. Freezing the LLM draft makes the
+artifacts deterministic.
 
-| Artifact | Shape | Intended baseline signal |
-|---|---|---|
-| `customer_id` description | Strong, specific, sourced | passes every criterion |
-| `customer_id` rationale | Strong, names downstream consumers | passes every criterion |
-| `email` description | Adequate, concrete | passes clarity / consistency |
-| `email` rationale | Thin ("Contact channel.") | fails clarity / rationale |
-| `status` description | Deliberately vague ("A status field…") | fails clarity / rationale |
-| `status` rationale | Restates the description | fails clarity / rationale / no-redundant |
-| `model` description / rationale | Strong, conformed-dimension framing | passes every criterion |
-| `customer_id` `not_null` / `unique` tests | Well-justified | passes every criterion |
-| `status` `accepted_values` test | Well-justified closed set | passes every criterion |
+The engine's `_stable_artifact_pairs(candidate)` derives **21 artifacts** from
+the drafted candidate (4 column descriptions + 4 column rationales + model
+description + model rationale + the drafted tests' rationales). The harness
+derives the `artifact_id` set from the engine itself (via
+`_substrate.expected_artifact_ids`) rather than hand-listing it, so the sample
+can never drift from the formatter (`.claude/rules/grade-layer.md` §
+"`_artifact_id_for` … hoist").
 
-The engine's `_stable_artifact_pairs(candidate)` derives **11 artifacts**
-from this shape (3 column descriptions + 3 column rationales + model
-description + model rationale + 3 test rationales). The harness derives
-the `artifact_id` set from the engine itself (via
-`_substrate.expected_artifact_ids`) rather than hand-listing it, so the
-sample can never silently drift from the formatter
-(`.claude/rules/grade-layer.md` § "`_artifact_id_for` … hoist").
+Over the locked four-criterion `DEFAULT_RUBRIC` (`clarity`, `consistency`,
+`rationale`, `no-redundant`) this is **21 × 4 = 84 judge calls** per run.
 
-Over the locked four-criterion `DEFAULT_RUBRIC` (`clarity`,
-`consistency`, `rationale`, `no-redundant`) this is **11 × 4 = 44 judge
-calls** per run — a reasonable maintainer-gate budget on Haiku
-(materially cheaper than the Sonnet baseline; cf. the ~$0.005/call Sonnet
-figure in `docs/research/179-test-primitive-expansion-retest.md`).
+### Real Sonnet baseline
 
-### Curated Sonnet baseline
+`sonnet_baseline_sample.json` is now a **live `claude-sonnet-4-6` grade** of the
+frozen artifacts (replacing the original hand-authored sample). Capture:
+`capture_sonnet_baseline.py` drafts → freezes → grades with Sonnet → writes the
+per-`(artifact_id, criterion_id)` pass/fail verdicts. Of the 84 pairs, **80 are
+genuine Sonnet verdicts (63 pass / 17 fail)**; **4 pairs that Sonnet could not
+grade** (`score=None`, retry exhaustion under rate limiting) are **excluded**
+(see `degraded_count`) — a pair with no verdict is not a baseline.
 
-`sonnet_baseline_sample.json` is a **curated sample, NOT the raw #179
-Phase-B `grade.jsonl` dump**. That dump is not committed anywhere in this
-repo (`find . -name grade.jsonl` finds only the drift-detector fixture at
-`tests/fixtures/grade/grade_event_v1.jsonl`), and the #179 retest was run
-against a private `intuit_airflow` fixture with transient `/tmp/phaseB/`
-sidecars (see `docs/research/179-test-primitive-expansion-retest.md`
-§ "Reproducing this retest"). Rather than depend on an un-committed dump,
-the baseline here is a small representative sample of **44 hand-assigned
-plausible `claude-sonnet-4-6` pass/fail verdicts** — one per
-`(artifact_id, criterion_id)` pair — whose distribution tracks the
-engineered candidate shape above (strong artifacts pass; vague / thin /
-redundant artifacts fail on the relevant criteria).
-
-This makes the comparison reproducible with the **only live variable
-being the Haiku re-grade**: the candidate is pinned bytes, the rubric is
-locked, the baseline is committed. A concordant Haiku run reproduces the
-same verdict distribution; a discordant one surfaces the specific
-`(artifact, criterion)` pairs where Haiku and the baseline disagree.
+This makes the comparison reproducible with the **only live variable being the
+Haiku re-grade**: the model is deterministic bytes, the candidate is frozen
+bytes, the rubric is locked, the Sonnet baseline is committed.
 
 ### Config under test
 
-`GradeConfig()` with all defaults — after US-002 this resolves to:
-
-- `model` → `claude-haiku-4-5` (provider fast-model resolver,
-  `provider="anthropic"`),
-- `max_output_tokens` → `1024`,
-- `provider` → `anthropic`.
-
-The harness asserts both resolved values before grading, so a regression
-in the resolver fails the gate loud rather than silently measuring the
-wrong SKU.
+`GradeConfig()` with all defaults — after US-002 this resolves to `model →
+claude-haiku-4-5`, `max_output_tokens → 1024`, `provider → anthropic`. The
+harness asserts both resolved values before grading, so a resolver regression
+fails the gate loud rather than silently measuring the wrong SKU.
 
 ## Method — the ≥ 85% concordance rule
 
-1. Build the resolved Haiku-default `GradeConfig()`; assert
-   `model == "claude-haiku-4-5"` and `max_output_tokens == 1024`.
-2. Assert the committed baseline covers every `artifact_id` the engine
-   will grade (no silent gaps).
-3. Run `grade_artifacts(model, candidate, prune_result, config=...)` —
-   44 live Haiku judge calls.
-4. For each returned `GradingResult`, join to the baseline by
-   `(artifact_id, criterion_id)`:
-   - `score is None` (degraded, DEC-015 of #7) → counted as **degraded**,
-     excluded from the agreement denominator (neither concordant nor
-     discordant — the pair could not be positively evaluated).
-   - otherwise → **comparable**; `agreement` iff
-     `result.passed == baseline_passed`.
-5. `agreement_rate = agreements / comparable`. Assert
-   `agreement_rate >= 0.85`. The harness prints the full breakdown
-   (model, comparable count, agreements, degraded count, rate, and each
-   discordance) regardless of pass/fail so a sub-threshold run still
-   surfaces the disagreements for the writeup.
-
-**Decision:** if the rate clears 85%, the Haiku default ships as planned.
-If it falls short, the printed discordances name the specific
-`(artifact, criterion)` shapes where Haiku diverges — those become the
-follow-on (prompt-engineering, rubric-tuning, or reconsidering the
-default), not silent acceptance. (Same disposition as the #179 epic's
-"name the shapes that fell through" acceptance criterion.)
+1. Build the resolved Haiku-default `GradeConfig()`; assert `model ==
+   "claude-haiku-4-5"` and `max_output_tokens == 1024`.
+2. Assert the committed baseline covers every `artifact_id` the engine will
+   grade (no silent gaps).
+3. Run `grade_artifacts(...)` — 84 live Haiku judge calls.
+4. For each `GradingResult`, join to the baseline by `(artifact_id,
+   criterion_id)`:
+   - `score is None` (degraded, DEC-015 of #7) → **degraded**, excluded from the
+     denominator (neither concordant nor discordant).
+   - otherwise → **comparable**; `agreement` iff `result.passed ==
+     baseline_passed`.
+5. `agreement_rate = agreements / comparable`. Assert `>= 0.85`. A guard
+   (`comparable >= degraded`) rejects a degraded-dominated run as too noisy to
+   trust. The harness prints the full breakdown (each discordance) regardless of
+   pass/fail.
 
 ### Running the gate (maintainer)
 
 ```bash
-# From the repo root, with a live key:
-ANTHROPIC_API_KEY=sk-... \
-  uv run pytest -m anthropic --no-cov -s \
+# 1) (Re)capture the real Sonnet baseline — drafts + grades with Sonnet:
+set -a && source <repo-root>/.env && set +a   # provides ANTHROPIC_API_KEY
+uv run python tests/research/187-haiku-calibration/capture_sonnet_baseline.py
+
+# 2) Run the Haiku concordance gate against that baseline:
+uv run pytest -m anthropic --no-cov -s \
   tests/research/187-haiku-calibration/test_haiku_calibration.py
 ```
 
-`--no-cov` is required because the gated path exercises only a fraction
-of the codebase and would trip the 80% coverage floor in `addopts`
-(mirrors the `pytest -m bigquery --no-cov` precedent in
-`.claude/rules/testing-signal.md`). `-s` surfaces the printed concordance
-breakdown.
-
-For the Gemini 1024-token check:
+`--no-cov` is required (the gated path exercises a fraction of the codebase and
+would trip the 80% coverage floor in `addopts`). `-s` surfaces the printed
+breakdown. For the Gemini 1024-token check:
 
 ```bash
 SF_RUN_GEMINI=1 GOOGLE_API_KEY=... \
@@ -163,57 +135,101 @@ SF_RUN_GEMINI=1 GOOGLE_API_KEY=... \
   tests/research/187-haiku-calibration/test_gemini_1024_no_truncation.py
 ```
 
-## Result (maintainer-filled)
+## Result
 
-> **TODO (maintainer):** run `pytest -m anthropic --no-cov -s
-> tests/research/187-haiku-calibration/test_haiku_calibration.py` with a
-> live `ANTHROPIC_API_KEY` and fill in the table + verdict below from the
-> printed breakdown. Then run the Gemini check and record its outcome.
+**Run metadata** — Date: 2026-06-02 · SignalForge `0.6.0.dev0` · grade model
+resolved `claude-haiku-4-5` · `max_output_tokens=1024` · baseline = 80 live
+`claude-sonnet-4-6` verdicts (63 pass / 17 fail; 4 Sonnet-degraded excluded) of
+the frozen `calendar_hour` artifacts.
 
-**Run metadata**
+**Haiku-vs-Sonnet concordance** (two independent runs — Haiku grading is itself
+non-deterministic):
 
-- Date run: `TODO`
-- SignalForge version: `TODO` (e.g. `0.x.y.dev0`)
-- Grade model resolved: `claude-haiku-4-5` (assert in-test)
-- `max_output_tokens`: `1024`
+| Metric | Run 1 | Run 2 |
+|---|---|---|
+| Comparable verdicts | 77 | 74 |
+| Agreements | 63 | 57 |
+| Degraded (`score=None`, Haiku side) | 3 | 6 |
+| **Agreement rate** | **81.8%** | **77.0%** |
+| Decision threshold | 85% | 85% |
+| **Verdict** | **FAIL** | **FAIL** |
 
-**Haiku-vs-Sonnet concordance**
+**Both runs fall short of 85%**, and the gap is not a single-run fluke: across
+two runs Haiku sits in the ~77–82% band.
 
-| Metric | Value |
-|---|---|
-| Comparable verdicts | `TODO / 44` |
-| Agreements | `TODO` |
-| Degraded (`score=None`) | `TODO` |
-| **Agreement rate** | `TODO %` |
-| Decision threshold | 85% |
-| **Verdict** | `TODO` PASS / FAIL |
+**Discordances are systematic — Haiku grades stricter than Sonnet.** Of the 17
+discordances in run 2, **14 are `sonnet=pass → haiku=fail`** (Haiku fails what
+Sonnet passes) and only 3 are the reverse. They cluster by criterion:
 
-**Discordances** (if any — `(artifact_id, criterion, sonnet_passed, haiku_passed)`):
+- **`no-redundant` (8 discordances, all sonnet=pass → haiku=fail):**
+  `column.date_id.rationale`, `column.hour_of_day.{description,rationale}`,
+  `column.date_id.description`, `column.prior_year_date_hour.rationale`,
+  `model.description`, `test.column.prior_year_date_hour.custom_sql`. Haiku
+  reads column rationales/descriptions as redundant with each other where Sonnet
+  tolerates them.
+- **`clarity` (4, all sonnet=pass → haiku=fail):** `column.hour_of_day.rationale`
+  and three test rationales (`hour_of_day.custom_sql`,
+  `prior_year_date_hour.custom_sql`, `model.row_count_anomaly_by_period`).
+- **`rationale` (2, sonnet=pass → haiku=fail):** `column.date_id.rationale`,
+  `column.hour_of_day.rationale`.
+- **3 reverse (`sonnet=fail → haiku=pass`), all `consistency`/`no-redundant` on
+  test artifacts** (`column.hour_of_day.description` consistency;
+  `test.model.row_count_between` consistency + no-redundant) — Haiku is *more*
+  lenient on a couple of test-rationale shapes.
 
-- `TODO` (or "none — full concordance")
+**Interpretation.** Haiku is a stricter rubric judge than Sonnet, especially on
+redundancy and clarity of short column rationales. This is a real behavioural
+difference, not sampling noise — it reproduces across runs and concentrates on
+two specific criteria. For SignalForge that means a Haiku default would flag
+more artifacts (lower kept-rate on the grade side) than the Sonnet baseline an
+operator calibrated against.
 
-**Gemini 1024-token no-truncation check**
+### Gemini check
 
-- Outcome: `TODO` (PASS = no `score=None` degrade / FAIL = truncation observed)
-- Notes: `TODO`
+The `gemini-2.5-flash` @ 1024-token no-truncation check
+(`test_gemini_1024_no_truncation.py`) was **not run** in this session (no
+`GOOGLE_API_KEY` available). It remains a separate maintainer step; DEC-004's
+softened claim (1024 reduces but does not eliminate Gemini truncation at
+full-fixture scale; the per-provider floors recommend 4096) already accounts for
+the uncertainty.
 
-**Disposition:** `TODO` — ship the Haiku default as planned, OR name the
-follow-on if concordance fell short.
+## Disposition
+
+Per the DEC-005 decision rule (**< 85% → opt-in knob, not default**), the real
+calibration says **do not ship `claude-haiku-4-5` as the resolved grade
+default**. Options, in order of fidelity to the data:
+
+1. **Recommended — make Haiku opt-in, keep Sonnet the grade default.** Revert
+   the Anthropic entry in `PROVIDER_FAST_MODELS` (or the grade resolution) so
+   `provider: anthropic` resolves to `claude-sonnet-4-6`, and document
+   `grade.model: claude-haiku-4-5` as the operator-opt-in fast mode. The
+   per-provider resolver, compat validator, and 1024 cap (US-001..US-006) all
+   stand — only the Anthropic *default target* changes. OpenAI/Gemini fast
+   defaults are unaffected by this Anthropic-specific finding (they were never
+   calibrated against a Sonnet baseline; they're explicit operator choices).
+2. **Accept Haiku at ~80% with eyes open** — only if the maintainer judges the
+   ~3× speed / ~3.75× cost win worth a stricter judge that flags ~1 in 5 rubric
+   verdicts differently. This contradicts the gate's own rule; if taken, lower
+   `_CONCORDANCE_THRESHOLD` deliberately and document why here.
+3. **Re-calibrate the rubric/prompt for Haiku** (v0.x follow-up) — the
+   discordances are concentrated on `no-redundant`/`clarity`, so a Haiku-tuned
+   criterion prompt might close the gap. Larger scope than #187.
+
+This is a maintainer product decision; the harness + this writeup record the
+evidence. The gated test deliberately still asserts ≥ 85% (it fails on Haiku) so
+the signal can't be silently lost.
 
 ## References
 
 - Issue **#187** — the epic this writeup gates (Haiku grade default).
-  US-001..US-003 ship the resolver + 1024 cap; US-005 (this) ships the
-  gated harness + writeup; US-006 owns the docs/rules/CHANGELOG updates.
 - `docs/research/179-test-primitive-expansion-retest.md` — the prior
-  empirical-retest writeup whose structure this mirrors; source of the
-  "name the shapes that fell through" disposition and the cost reference.
-- `tests/grade/test_smoke_real_api.py` — the `anthropic`-gated grade
-  smoke whose marker + env-skip pattern the concordance gate reuses.
-- `tests/grade/test_gemini_grade_live.py` — the `gemini`-gated grade
-  smoke whose `SF_RUN_GEMINI` + `GOOGLE_API_KEY` env gating the
-  truncation check reuses.
-- `.claude/rules/testing-signal.md` § "End-to-end gated tests" +
-  § "Engineered determinism" — the gating + determinism conventions.
+  empirical-retest writeup whose structure this mirrors; the `intuit_airflow`
+  dbt project is the same source repo.
+- `tests/grade/test_smoke_real_api.py` — the `anthropic`-gated grade smoke whose
+  marker + env-skip pattern the concordance gate reuses.
+- `tests/grade/test_gemini_grade_live.py` — the `gemini`-gated smoke whose
+  `SF_RUN_GEMINI` + `GOOGLE_API_KEY` gating the truncation check reuses.
+- `.claude/rules/testing-signal.md` § "End-to-end gated tests" + § "Engineered
+  determinism" + § "Gated calibration/concordance harness" — the conventions.
 - `.claude/rules/grade-layer.md` — the grade-layer contract (artifact-id
   formatter, DEC-015 degraded path, four-criterion `DEFAULT_RUBRIC`).

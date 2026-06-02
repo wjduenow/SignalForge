@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "name": "calendar_hour",
+  "description": "A calendar dimension at hourly granularity, produced by cross-joining calendar dates with 24 sequential hours (0–23). Each row represents one hour within a given date, along with the corresponding timestamp from the prior year.",
+  "rationale": "Tests focus on structural integrity of this bounded dimension: uniqueness of the composite grain, completeness of all 24 hours per date, and non-nullability of every derived timestamp column.",
+  "columns": [
+    {
+      "name": "date_hour",
+      "description": "The exact timestamp for the start of the hour, derived by adding hour_of_day hours to the date_id. This is the primary key of the model, uniquely identifying each hour slot.",
+      "rationale": "date_hour is the natural primary key of this hourly calendar and must be unique and non-null.",
+      "tests": [
+        {
+          "type": "not_null",
+          "column": "date_hour",
+          "rationale": "Every row must have a valid timestamp; a null here would indicate a broken join or bad input date."
+        },
+        {
+          "type": "unique",
+          "column": "date_hour",
+          "rationale": "Each calendar hour must appear exactly once; duplicates would indicate a cross-join or date-dimension defect."
+        }
+      ],
+      "meta": null
+    },
+    {
+      "name": "date_id",
+      "description": "The calendar date to which this hour belongs, sourced from the upstream calendar_date model. Acts as the date-level grouping key.",
+      "rationale": "date_id must be non-null and should always produce exactly 24 hour rows per date, making it a key grain-validation anchor.",
+      "tests": [
+        {
+          "type": "not_null",
+          "column": "date_id",
+          "rationale": "A null date_id would mean the hour cannot be attributed to any calendar day, breaking downstream joins."
+        }
+      ],
+      "meta": null
+    },
+    {
+      "name": "hour_of_day",
+      "description": "An integer (0–23) representing the hour within the day, generated via a Snowflake sequence. Each date should have exactly one row for each of the 24 hours.",
+      "rationale": "hour_of_day drives the hourly fan-out and must be non-null; its 0–23 range and exactly-24-per-date invariant are the core structural checks.",
+      "tests": [
+        {
+          "type": "not_null",
+          "column": "hour_of_day",
+          "rationale": "A null hour_of_day would indicate a generator failure and produce an unattributable row."
+        },
+        {
+          "type": "custom_sql",
+          "sql": "SELECT date_id FROM {{ this }} GROUP BY date_id HAVING COUNT(*) <> 24",
+          "column": "hour_of_day",
+          "rationale": "Every date must have exactly 24 hour rows; any deviation signals a cross-join or generator defect."
+        },
+        {
+          "type": "custom_sql",
+          "sql": "SELECT * FROM {{ this }} WHERE hour_of_day < 0 OR hour_of_day > 23",
+          "column": "hour_of_day",
+          "rationale": "hour_of_day must be within the valid 0–23 range; values outside this window indicate a broken sequence generator."
+        }
+      ],
+      "meta": null
+    },
+    {
+      "name": "prior_year_date_hour",
+      "description": "The timestamp corresponding to the same hour in the prior calendar year, used for year-over-year comparisons. Derived by offsetting the prior year calendar date by hour_of_day hours.",
+      "rationale": "prior_year_date_hour must be non-null and should always fall exactly one year before date_hour, making structural drift detectable via a simple gap check.",
+      "tests": [
+        {
+          "type": "not_null",
+          "column": "prior_year_date_hour",
+          "rationale": "A null prior-year timestamp would silently break any year-over-year aggregation that joins on this column."
+        },
+        {
+          "type": "custom_sql",
+          "sql": "SELECT * FROM {{ this }} WHERE DATEDIFF('day', prior_year_date_hour, date_hour) NOT BETWEEN 364 AND 366",
+          "column": "prior_year_date_hour",
+          "rationale": "The prior_year_date_hour should always be approximately 365 days before date_hour; values outside this band indicate a mapping error in the upstream calendar_date model."
+        }
+      ],
+      "meta": null
+    }
+  ],
+  "tests": [
+    {
+      "type": "unique_combination",
+      "column": null,
+      "columns": [
+        "date_id",
+        "hour_of_day"
+      ],
+      "where": null,
+      "rationale": "The grain of this model is one row per (date, hour) combination; duplicate pairs would indicate a defect in the cross-join or upstream date fan-out."
+    },
+    {
+      "type": "row_count_between",
+      "column": null,
+      "minimum": 24,
+      "maximum": null,
+      "where": null,
+      "rationale": "The model covers all dates after 2018-01-31 with 24 rows each, so there must be at least 24 rows; an empty result would indicate a total pipeline failure."
+    },
+    {
+      "type": "row_count_anomaly_by_period",
+      "column": null,
+      "date_column": "date_hour",
+      "period": "day",
+      "lookback_periods": 28,
+      "method": "mad",
+      "seasonality": "none",
+      "threshold": 3.0,
+      "min_samples_per_bucket": 3,
+      "where": null,
+      "rationale": "This incremental-style hourly dimension should load exactly 24 rows per calendar day; anomaly detection on date_hour will catch gaps or duplications introduced by upstream calendar_date changes."
+    }
+  ]
+}
