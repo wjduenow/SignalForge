@@ -14,6 +14,12 @@ Covers:
 * No direct ``anthropic.Anthropic(`` construction outside
   ``_anthropic_client.py`` in :mod:`signalforge.llm`. Mirrors the safety AST
   scan precedent at the regex level; full AST scan is US-014's job.
+
+Issue #186 (US-003) extends this file with parallel coverage of the
+async shim: :func:`_make_anthropic_async_client`,
+:class:`AsyncAnthropicClientProtocol`, and the no-direct-``AsyncAnthropic``-
+construction regex floor. The AST sibling is Scan 3b in
+``tests/test_audit_completeness.py``.
 """
 
 from __future__ import annotations
@@ -24,9 +30,13 @@ from pathlib import Path
 import pytest
 
 from signalforge.llm import AnthropicClientProtocol
-from signalforge.llm._anthropic_client import _make_anthropic_client
+from signalforge.llm._anthropic_client import (
+    AsyncAnthropicClientProtocol,
+    _make_anthropic_async_client,
+    _make_anthropic_client,
+)
 
-from ._fake import _StubAnthropicClient
+from ._fake import FakeAnthropicClient, _StubAnthropicClient
 
 pytestmark = pytest.mark.llm
 
@@ -134,4 +144,82 @@ def test_anthropic_client_construction_only_in_shim() -> None:
         "Found `anthropic.Anthropic(` construction outside _anthropic_client.py — "
         "DEC-012 requires the SDK be instantiated only via "
         "_make_anthropic_client. Offenders: " + ", ".join(f"{p}:{n}" for p, n, _ in offenders)
+    )
+
+
+# ----- Issue #186 (US-003) — async shim coverage ------------------------
+
+
+def test_make_anthropic_async_client_returns_protocol_satisfying_object() -> None:
+    """The async factory returns something with a ``messages`` attribute
+    whose ``create`` / ``count_tokens`` are coroutines (issue #186, US-003).
+
+    Pass a fake api_key so the SDK doesn't try to read the env var; we
+    do not actually invoke any network call.
+    """
+    client = _make_anthropic_async_client(api_key="test-key-not-real")
+    assert hasattr(client, "messages")
+    assert hasattr(client.messages, "create")
+    assert hasattr(client.messages, "count_tokens")
+
+
+def test_fake_satisfies_async_anthropic_client_protocol() -> None:
+    """The shared :class:`FakeAnthropicClient` (US-007) satisfies
+    :class:`AsyncAnthropicClientProtocol` structurally via its ``.aio``
+    namespace — one fake drives sync (``call_llm``) AND async
+    (``call_llm_async``) paths interchangeably (DEC-012 of #186).
+
+    ``AsyncAnthropicClientProtocol`` is ``@runtime_checkable``; the
+    ``aio`` namespace exposes ``messages.create`` / ``messages.count_tokens``
+    as awaitables, satisfying the protocol's structural shape.
+    """
+    fake = FakeAnthropicClient()
+    aio = fake.aio
+    # The async surface lives at ``client.aio`` (mirrors Gemini's
+    # ``client.aio.models``). ``isinstance`` over the runtime-checkable
+    # protocol confirms structural conformance.
+    assert isinstance(aio, AsyncAnthropicClientProtocol)
+    assert hasattr(aio.messages, "create")
+    assert hasattr(aio.messages, "count_tokens")
+
+
+def test_async_anthropic_provider_make_async_client_returns_async_client() -> None:
+    """:meth:`AnthropicProvider.make_async_client` delegates to
+    :func:`_make_anthropic_async_client` and returns an object exposing
+    the async ``messages.create`` / ``messages.count_tokens`` surface
+    (issue #186, US-003).
+
+    The orchestrator narrows the returned ``object`` to
+    :class:`signalforge.llm.client._LLMAsyncClientProtocol`; the
+    structural duck-typed match against ``messages.create`` /
+    ``messages.count_tokens`` is what makes the call-site type-check
+    without leaking a vendor SDK type into the seam.
+    """
+    from signalforge.llm.providers import AnthropicProvider
+
+    provider = AnthropicProvider()
+    client = provider.make_async_client()
+    assert hasattr(client, "messages")
+    assert hasattr(client.messages, "create")
+    assert hasattr(client.messages, "count_tokens")
+
+
+def test_no_async_anthropic_construction_outside_shim() -> None:
+    """No direct ``anthropic.AsyncAnthropic(`` construction outside the
+    shim (issue #186, US-003). Lightweight regex version; the AST sibling
+    is Scan 3b in ``tests/test_audit_completeness.py``.
+
+    Mirrors :func:`test_anthropic_client_construction_only_in_shim` for
+    the async constructor.
+    """
+    offenders: list[tuple[Path, int, str]] = []
+    needle = "anthropic.AsyncAnthropic("
+    for path in _llm_py_files_excluding_client():
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if needle in line:
+                offenders.append((path, lineno, line))
+    assert offenders == [], (
+        "Found `anthropic.AsyncAnthropic(` construction outside _anthropic_client.py — "
+        "DEC-014 of #186 requires the async SDK be instantiated only via "
+        "_make_anthropic_async_client. Offenders: " + ", ".join(f"{p}:{n}" for p, n, _ in offenders)
     )

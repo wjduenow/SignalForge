@@ -383,18 +383,27 @@ class AnthropicProvider(LLMProvider):
         return _make_anthropic_client()
 
     def make_async_client(self) -> _LLMAsyncClientProtocol:
-        """Temporary stub — US-003 of issue #186 wires the real async shim.
+        """Construct the real Anthropic async SDK client via the shim
+        (issue #186, US-003 / DEC-002 / DEC-014).
 
-        v0.3 ships the abstract method declaration on :class:`LLMProvider`
-        (this US-002); the per-vendor async shim (``_make_anthropic_async_client``
-        + ``AsyncAnthropic`` confinement via Scan 3b) lands in US-003. Raising
-        :class:`NotImplementedError` here keeps :class:`AnthropicProvider`
-        instantiable (the abstract method requirement is satisfied) without
-        committing to a partial implementation that would deceive callers.
+        The async path stays confined to
+        :mod:`signalforge.llm._anthropic_client` — every
+        ``# pyright: ignore`` / ``# type: ignore`` for the SDK's async
+        constructor lives in that shim. AST Scan 3b in
+        ``tests/test_audit_completeness.py`` pins async-SDK construction
+        there, mirroring Scan 3 for the sync constructor.
+
+        The returned client satisfies
+        :class:`signalforge.llm._anthropic_client.AsyncAnthropicClientProtocol`
+        structurally — the async orchestrator
+        :func:`signalforge.llm.client.call_llm_async` (US-006) narrows it
+        to :class:`signalforge.llm.client._LLMAsyncClientProtocol`,
+        which is duck-typed at the same ``messages.create`` /
+        ``messages.count_tokens`` surface.
         """
-        raise NotImplementedError(
-            "AnthropicProvider.make_async_client: US-003 of issue #186 will implement this."
-        )
+        from signalforge.llm._anthropic_client import _make_anthropic_async_client
+
+        return _make_anthropic_async_client()
 
     def is_clean_completion(self, response: object) -> bool:
         """Return ``True`` iff ``response.stop_reason`` is in
