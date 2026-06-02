@@ -455,6 +455,83 @@ def test_render_system_prompt_keeps_row_count_between_scope_when_other_types_exc
 
 
 # ---------------------------------------------------------------------------
+# unique_combination SCOPE-instruction prose (issue #183 US-002, #170 parity)
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_scope_teaches_composite_key_grain_heuristic() -> None:
+    """#170 prose: propose ``unique_combination`` when the model's grain is a
+    composite key, illustrated by a worked example like
+    ``(order_id, line_item_id)``. The ``composite key`` phrase may split
+    across a newline by the Python source-literal line wrap; search
+    collapsed-whitespace text."""
+    collapsed = " ".join(_SYSTEM_PROMPT.split())
+    assert "composite key" in collapsed
+    # Worked grain examples drawn verbatim from the constant.
+    assert "`(order_id, line_item_id)`" in _SYSTEM_PROMPT
+    assert "(user_id, day)" in collapsed
+    # The columns array must carry at least two distinct names.
+    assert "at least two distinct column names" in collapsed
+
+
+def test_system_prompt_scope_documents_anti_vacuous_tuple_warning() -> None:
+    """#170 prose: do NOT propose ``unique_combination`` over a primary key
+    combined with any other column — that tuple is always unique by
+    construction and adds no signal. Phrases wrap across newlines in the
+    source literal; search collapsed-whitespace text."""
+    collapsed = " ".join(_SYSTEM_PROMPT.split())
+    assert (
+        "Do NOT propose `unique_combination` over a primary key combined "
+        "with any other column" in collapsed
+    )
+    assert "always unique by construction" in collapsed
+    assert "adds no signal" in collapsed
+
+
+def test_render_system_prompt_includes_unique_combination_scope_when_not_excluded() -> None:
+    """Default render (no exclusions) includes the
+    ``_UNIQUE_COMBINATION_SCOPE_INSTRUCTION`` block (issue #170)."""
+    from signalforge.draft.prompts import _render_system_prompt
+
+    rendered = _render_system_prompt(())
+    collapsed = " ".join(rendered.split())
+    assert "composite key" in collapsed
+    assert "always unique by construction" in collapsed
+
+
+def test_render_system_prompt_excludes_unique_combination_scope_when_in_exclude_tests() -> None:
+    """``exclude_tests=("unique_combination",)`` drops the catalogue line
+    AND removes ``unique_combination`` from the SCOPE phrase AND the
+    ``_UNIQUE_COMBINATION_SCOPE_INSTRUCTION`` block (issue #170; mirrors the
+    ``exclude_tests`` filter contract from #54 / #169 / #171 / #183 US-001)."""
+    from signalforge.draft.prompts import _render_system_prompt
+
+    rendered = _render_system_prompt(("unique_combination",))
+    assert '"type": "unique_combination"' not in rendered
+    # The SCOPE phrase no longer names unique_combination.
+    assert "`unique_combination`" not in rendered
+    # The dedicated SCOPE-instruction block is also gone (collapsed-whitespace
+    # match to absorb the source-literal line wraps).
+    collapsed = " ".join(rendered.split())
+    assert "composite key" not in collapsed
+    assert "always unique by construction" not in collapsed
+    # Other types still present.
+    assert '"type": "not_null"' in rendered
+    assert '"type": "row_count_between"' in rendered
+
+
+def test_render_system_prompt_keeps_unique_combination_scope_when_other_types_excluded() -> None:
+    """Excluding other types but NOT ``unique_combination`` keeps the
+    catalogue line AND the SCOPE instruction (issue #170)."""
+    from signalforge.draft.prompts import _render_system_prompt
+
+    rendered = _render_system_prompt(("not_null", "row_count_between"))
+    assert '"type": "unique_combination"' in rendered
+    collapsed = " ".join(rendered.split())
+    assert "composite key" in collapsed
+
+
+# ---------------------------------------------------------------------------
 # row_count_anomaly_by_period catalogue (issue #171, DEC-007)
 # ---------------------------------------------------------------------------
 
