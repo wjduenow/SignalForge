@@ -7,7 +7,8 @@
 - **Base branch:** `dev` (0.6.0.dev0). PRs target `dev`.
 - **Worktree:** `../worktrees/SignalForge/187-fast-grade-defaults`
 - **Branch:** `feature/187-fast-grade-defaults`
-- **Phase:** detailing (awaiting PR review / approval)
+- **Phase:** published (awaiting approval)
+- **PR:** [#193](https://github.com/wjduenow/SignalForge/pull/193) (draft, base `dev`)
 - **Sessions:** 1 (2026-06-02)
 
 ---
