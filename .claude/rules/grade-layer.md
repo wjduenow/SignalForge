@@ -65,7 +65,7 @@ For 4 default criteria × ~12 artifacts per typical model = ~48 calls per `grade
 
 The cached prompt block is the rubric criterion list (constant per run); the dynamic block is the per-pair `<ARTIFACT>...</ARTIFACT>` envelope. Anthropic prompt-cache TTL defaults to `"1h"` for the grader (vs. drafter's `"5m"`).
 
-**Tolerant JSON extraction (issue #144).** `parse_grade_response` routes the response through `signalforge._common.json_payload.extract_json_payload` (after `_strip_code_fence`) so a judge that narrates a prose preamble before the `{` still parses. The judge model (`claude-sonnet-4-6`) does NOT support an assistant-turn prefill (API 400), so the parser is the only JSON-only guardrail. Same decode rule as the drafter — decode at the first structural char (`{` or `[`) only, return unchanged on failure — see `llm-drafter.md` § "Tolerant JSON extraction"; a no-JSON response still routes to `GradeOutputError(violation_type="json_parse")` and the conservative degrade.
+**Tolerant JSON extraction (issue #144).** `parse_grade_response` routes the response through `signalforge._common.json_payload.extract_json_payload` (after `_strip_code_fence`) so a judge that narrates a prose preamble before the `{` still parses. The Anthropic judge models (the `claude-haiku-4-5` default per #187, or an explicit `claude-sonnet-4-6`) do NOT support an assistant-turn prefill (API 400), so the parser is the only JSON-only guardrail. Same decode rule as the drafter — decode at the first structural char (`{` or `[`) only, return unchanged on failure — see `llm-drafter.md` § "Tolerant JSON extraction"; a no-JSON response still routes to `GradeOutputError(violation_type="json_parse")` and the conservative degrade.
 
 ## Reproducibility hash fields on every GradeEvent (DEC-010, DEC-019)
 
@@ -131,6 +131,15 @@ Every `extra="ignore"` production model — `GradingResult`, `GradingReport`, `G
 ## `signalforge.yml` top-level namespace: `grade:` (DEC-029)
 
 The grade-stage block is `{ grade: { model, cache_ttl, max_output_tokens, max_retries_*, total_budget_seconds, min_pass_rate, min_mean_score, fail_on_below_threshold, rubric? } }`. Sibling top-level keys are reserved and silently ignored by the grade loader. `GradeConfig` uses `extra="forbid"`; `_GradeConfigFile` uses `extra="ignore"` at the top level. Mirrors the other layers' top-level-namespace pattern verbatim.
+
+## Locked defaults: per-provider fast model + 1024 output cap (DEC-026, #187)
+
+`GradeConfig`'s locked defaults (DEC-023..DEC-027) carry two #187 changes:
+
+- **`model` default is now a per-provider sentinel.** The field defaults to `None`; a `mode="before"` model-validator (`_resolve_model_default`) resolves the sentinel at config-load to the calling provider's fast model from `signalforge.llm.providers.PROVIDER_FAST_MODELS` — `anthropic` → `claude-haiku-4-5`, `openai` → `gpt-4o-mini`, `gemini` → `gemini-2.5-flash`. (Pre-#187 the default was the bare `claude-sonnet-4-6` literal regardless of provider.) An explicit `model:` is honoured verbatim; after construction the field is always a concrete non-empty string, never `None`. The resolver runs `before` because `GradeConfig` is `frozen=True` and a `mode="after"` mutation would raise. A provider NOT in the fast-model table is left un-injected so the `provider` field-validator surfaces `UnknownProviderError` rather than a masking `KeyError`.
+- **`max_output_tokens` default raised 256 → 1024** so a verbose one-line `gemini-2.5-flash` grade JSON is not truncated (a truncation would surface as the wrong typed degrade — `GradeOutputError` instead of `GradeLLMError`). Still a cap, not a target; the expected JSON is ~150 tokens, so the larger ceiling costs nothing on the happy path.
+
+**Model↔provider compat validator (DEC-006 of #187).** A `mode="after"` validator (`_validate_model_provider_compat`) reads `signalforge.llm.providers.PROVIDER_SKU_PREFIXES` (`anthropic` → `claude-`, `openai` → `gpt-`, `gemini` → `gemini-`) and fails loud at config-load when `provider` is a known-prefix provider AND the resolved/explicit `model` carries a *different* known provider's SKU prefix (e.g. `provider: openai` with a `claude-` model). Two cases are deliberately left alone: a model whose prefix matches no known provider (forward-compat for future SKUs) and a registry-valid provider outside the prefix table (custom/plugin providers may use any model name). Both `PROVIDER_FAST_MODELS` and `PROVIDER_SKU_PREFIXES` are the single source of truth — no hardcoded SKUs or prefixes in the grade config module. Every fast-model value is an exact key in `signalforge.llm.pricing.PRICES`, so the `--estimate` path never raises on the resolved default.
 
 ## Schema-version surfaces
 
