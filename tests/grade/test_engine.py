@@ -546,6 +546,18 @@ def test_grade_artifacts_one_criterion_retry_exhausted_does_not_fail_whole_repor
 ) -> None:
     """A single LLM-layer failure on one ``(artifact, criterion)`` pair
     leaves every other pair scored. The failed pair degrades.
+
+    **Order-agnostic under concurrent dispatch.** Per DEC-015 of #186,
+    the async core dispatches every pair in parallel (throttled by
+    ``max_concurrent_calls``). The fake's FIFO queue + ``matching=lambda
+    _kw: True`` predicates mean the FIRST call to arrive at the fake
+    (whichever coroutine wins the race) consumes the
+    :class:`LLMRateLimitError` expectation; the remaining 7 consume
+    successful payloads. The assertion is **count-based** (one degraded,
+    seven scored) — invariant to which specific pair degrades — so the
+    test is deterministic regardless of dispatch order. This is the
+    pair-identity contract DEC-015 lands at the operator-visible level:
+    "a single bad pair never aborts siblings."
     """
     project_dir = _project(tmp_path)
     model = _make_model()
@@ -562,12 +574,11 @@ def test_grade_artifacts_one_criterion_retry_exhausted_does_not_fail_whole_repor
     artifact_pairs = _stable_artifact_pairs(candidate)
     assert len(artifact_pairs) == 4
 
-    # Build the standard expectations BUT swap the FIRST messages.create
-    # to raise an LLMRateLimitError instead of returning a payload. The
-    # first call corresponds to (criterion=clarity, artifact=order_id
-    # description).
+    # Enqueue one rate-limit-raising expectation FIRST; FIFO matching
+    # means whichever coroutine arrives at the fake first consumes it
+    # (the specific pair is non-deterministic under concurrency — the
+    # test's count-based assertion below is invariant).
     fake = FakeAnthropicClient()
-    # Enqueue: count_tokens for call 1, then create -> raises LLMRateLimitError.
     from tests.llm._fake import FakeCountTokensResponse
 
     fake.expect_count_tokens(
@@ -626,7 +637,11 @@ def test_grade_artifacts_one_criterion_retry_exhausted_does_not_fail_whole_repor
     )
 
     fake.assert_all_expectations_met()
-    # 8 results total; the first one degraded, the remaining 7 scored.
+    # 8 results total; exactly one degraded (the pair that won the
+    # dispatch race and consumed the rate-limit expectation), the
+    # remaining 7 scored. Which specific pair degrades is dispatch-
+    # order-dependent; the count + the degrade-reasoning shape are
+    # what the contract pins.
     assert len(report.results) == 8
     degraded = [r for r in report.results if r.score is None]
     assert len(degraded) == 1
