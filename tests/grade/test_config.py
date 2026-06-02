@@ -187,9 +187,13 @@ def test_grade_config_defaults_match_dec_023_to_027() -> None:
     """Regression guard: every locked default must match the plan. A
     drift here is a behaviour change masquerading as a refactor."""
     cfg = GradeConfig()
-    assert cfg.model == "claude-sonnet-4-6"
+    # #187 US-002 / DEC-004: ``model`` now defaults to the sentinel that
+    # resolves to the calling provider's fast model. With the default
+    # provider (``anthropic``) that is ``claude-haiku-4-5``.
+    assert cfg.model == "claude-haiku-4-5"
     assert cfg.cache_ttl == "1h"
-    assert cfg.max_output_tokens == 256
+    # #187 DEC-004: raised from 256 to avoid one-line gemini-flash truncation.
+    assert cfg.max_output_tokens == 1024
     assert cfg.max_retries_429 == 3
     assert cfg.max_retries_5xx == 1
     assert cfg.max_retries_conn == 1
@@ -267,6 +271,126 @@ def test_load_grade_config_unknown_provider_fails_loud(tmp_path: Path) -> None:
     with pytest.raises(UnknownProviderError) as excinfo:
         load_grade_config(tmp_path)
     assert "anthropic" in str(excinfo.value)
+
+
+# ----- Per-provider fast-model resolution (#187 US-002 / DEC-004) -----
+
+
+def test_grade_config_model_resolves_anthropic_fast_default() -> None:
+    """The sentinel ``model=None`` (default) resolves to the anthropic
+    fast model via :data:`PROVIDER_FAST_MODELS`."""
+    assert GradeConfig().model == "claude-haiku-4-5"
+
+
+def test_grade_config_model_resolves_openai_fast_default() -> None:
+    """With ``provider="openai"`` and no explicit model, resolution
+    yields the openai fast model."""
+    assert GradeConfig(provider="openai").model == "gpt-4o-mini"
+
+
+def test_grade_config_model_resolves_gemini_fast_default() -> None:
+    """With ``provider="gemini"`` and no explicit model, resolution
+    yields the gemini fast model."""
+    assert GradeConfig(provider="gemini").model == "gemini-2.5-flash"
+
+
+def test_grade_config_explicit_model_is_honoured_over_default() -> None:
+    """An explicit ``model:`` always wins over the per-provider default."""
+    assert GradeConfig(model="claude-sonnet-4-6").model == "claude-sonnet-4-6"
+
+
+def test_grade_config_resolved_model_is_never_none() -> None:
+    """After construction on the happy path, ``model`` is a concrete
+    string — the sentinel never leaks out."""
+    cfg = GradeConfig()
+    assert isinstance(cfg.model, str)
+    assert cfg.model.strip() != ""
+
+
+def test_grade_config_unknown_provider_not_masked_by_resolution() -> None:
+    """An unknown provider must still raise the typed provider error —
+    the model-resolution before-validator declines to inject (the
+    provider isn't in the fast-model table) so the provider
+    field-validator surfaces :class:`UnknownProviderError` rather than a
+    masked ``KeyError`` (#187 US-002 / DEC-004)."""
+    from signalforge.llm.errors import UnknownProviderError
+
+    with pytest.raises(UnknownProviderError) as excinfo:
+        GradeConfig(provider="bogus")
+    assert excinfo.value.name == "bogus"
+
+
+# ----- Model<->provider compatibility validator (#187 US-002 / DEC-006) -----
+
+
+def test_grade_config_provider_model_mismatch_rejected() -> None:
+    """A ``claude-`` model under ``provider="openai"`` is an operator
+    mistake — reject at config-load via the SKU-prefix compat check."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(provider="openai", model="claude-sonnet-4-6")
+
+
+def test_grade_config_provider_model_match_accepted() -> None:
+    """A ``gpt-`` model under ``provider="openai"`` passes the compat
+    check (the prefix matches the provider)."""
+    cfg = GradeConfig(provider="openai", model="gpt-4o")
+    assert cfg.provider == "openai"
+    assert cfg.model == "gpt-4o"
+
+
+def test_grade_config_whitespace_model_still_rejected() -> None:
+    """A whitespace-only explicit model must still trip the non-empty
+    guard — the sentinel resolution does not relax that defence."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(model="   ")
+
+
+def test_grade_config_max_output_tokens_default_is_1024() -> None:
+    """#187 DEC-004: the per-criterion cap default is raised to 1024."""
+    assert GradeConfig().max_output_tokens == 1024
+
+
+# ----- load_grade_config fast-model resolution + compat (#187 US-002) -----
+
+
+def test_load_grade_config_block_without_model_resolves_fast_model(
+    tmp_path: Path,
+) -> None:
+    """A ``grade:`` block that omits ``model:`` resolves the provider's
+    fast model at load time."""
+    (tmp_path / "signalforge.yml").write_text(
+        "grade:\n  provider: openai\n",
+        encoding="utf-8",
+    )
+    cfg = load_grade_config(tmp_path)
+    assert cfg.provider == "openai"
+    assert cfg.model == "gpt-4o-mini"
+
+
+def test_load_grade_config_block_with_model_honours_it(tmp_path: Path) -> None:
+    """An explicit ``model:`` in the ``grade:`` block is honoured."""
+    (tmp_path / "signalforge.yml").write_text(
+        "grade:\n  model: claude-sonnet-4-6\n",
+        encoding="utf-8",
+    )
+    cfg = load_grade_config(tmp_path)
+    assert cfg.model == "claude-sonnet-4-6"
+
+
+def test_load_grade_config_provider_model_mismatch_raises(tmp_path: Path) -> None:
+    """A mismatched provider/model in ``signalforge.yml`` surfaces as
+    :class:`GradeConfigError` at the loader boundary (the underlying
+    ``ValidationError`` is wrapped)."""
+    (tmp_path / "signalforge.yml").write_text(
+        "grade:\n  provider: openai\n  model: claude-sonnet-4-6\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GradeConfigError):
+        load_grade_config(tmp_path)
 
 
 # ----- Numeric validators -----

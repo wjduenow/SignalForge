@@ -360,6 +360,10 @@ def _count_grade_criterion_tokens(
     per criterion. See CHANGELOG.
     """
     dynamic_block = render_grade_dynamic_block(artifact_id, artifact_text, criterion)
+    # ``grade_config.model`` is invariantly concrete post-construction (#187
+    # US-002: the sentinel ``None`` resolves to the provider's fast model at
+    # config-load). Narrow the static ``str | None``.
+    assert grade_config.model is not None
     return provider_for(grade_config.provider).estimate_input_tokens(
         grade_config.model, dynamic_block, system=system_and_rubric, client=client
     )
@@ -488,6 +492,10 @@ def estimate(
     ) * pricing_draft.output_per_mtok
 
     # ---- Grader cost projection -----------------------------------
+    # ``grade_config.model`` is invariantly concrete post-construction (#187
+    # US-002: the sentinel ``None`` resolves to the provider's fast model at
+    # config-load). Narrow the static ``str | None`` once for this block.
+    assert grade_config.model is not None
     pricing_grade = _pricing.lookup(grade_config.model)
     rubric = grade_config.rubric or DEFAULT_RUBRIC
     column_count = len(model.columns_list)
