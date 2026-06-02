@@ -7,7 +7,8 @@
 - **Worktree:** `/Users/wesduenow/Projects/worktrees/SignalForge/183-row-count-between-scope`
 - **Base branch:** `dev` (0.6.0.dev0 line) — **NOT `main`**. See DEC-001.
 - **PR target:** `dev`
-- **Phase:** devolved
+- **Phase:** complete
+- **Status:** Complete — implementation merged to branch; PR [#191](https://github.com/wjduenow/SignalForge/pull/191) open against `dev` (awaiting review). Merged: _pending_.
 - **Sessions:** 1 (2026-06-02)
 - **Closest precedents:** #171 (`_ROW_COUNT_ANOMALY_SCOPE_INSTRUCTION`), #170 (`_UNIQUE_COMBINATION_SCOPE_INSTRUCTION`)
 - **Parent epic:** #179 (test-primitive-expansion retest)
