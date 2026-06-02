@@ -1810,3 +1810,102 @@ def test_grade_artifacts_module_level_async_sleep_alias_present() -> None:
     (DEC-011 of #186).
     """
     assert engine_module._async_sleep is asyncio.sleep
+
+
+# ---------------------------------------------------------------------------
+# Defence-in-depth — ExceptionGroup never leaks a traceback (US-010 / DEC-007)
+# ---------------------------------------------------------------------------
+
+
+def test_grade_artifacts_hostile_coroutine_no_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A hostile coroutine that raises a non-grade-typed exception
+    (e.g. ``KeyError`` from buggy worker code) MUST surface as a clean
+    multi-bullet stderr write — never a leaked Python traceback.
+
+    This is US-010's defence-in-depth pin: the engine's per-coroutine
+    ``try/except`` catches only ``GradeLLMError`` / ``GradeOutputError`` /
+    ``GradePromptEnvelopeBreachError`` / ``CancelledError``; a stray
+    ``KeyError`` propagates to ``TaskGroup`` and bubbles as part of a
+    ``BaseExceptionGroup``. The engine's inner unwrap re-raises
+    single-exception groups as the inner typed exception, so we drive
+    *every* pair to fail to force a multi-exception group that bubbles
+    to the CLI layer. The CLI's ``format_error_to_stderr`` then
+    renders the group through the US-010 ``ExceptionGroup`` branch,
+    which never includes a traceback.
+
+    Mirrors the project's ``"Traceback" not in capsys.readouterr().err``
+    invariant pinned across every CLI test (DEC-016 floor —
+    ``cli-layer.md`` § "No traceback ever leaks").
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    # No ``expect_grade_responses`` queue — the hostile stub never
+    # reaches the fake. If a refactor breaks the monkey-patch, the
+    # fake would raise on the first unmatched call and we'd see
+    # ``AssertionError`` instead of the expected ``ExceptionGroup``.
+
+    async def _hostile_grade_one(**_kw: Any) -> tuple:
+        """Worker raises an arbitrary non-grade-typed exception.
+
+        ``KeyError`` is deliberately outside the engine's catch list
+        (``GradeLLMError`` / ``GradeOutputError`` /
+        ``GradePromptEnvelopeBreachError`` / ``CancelledError``), so
+        every task escapes the per-coroutine ``try/except`` and lands
+        in the ``TaskGroup``'s ``BaseExceptionGroup``.
+        """
+        raise KeyError("hostile worker — simulates a buggy refactor")
+
+    monkeypatch.setattr(engine_module, "_grade_one_async", _hostile_grade_one)
+
+    # Drive the engine; it must raise *something*. With 2 criteria × N
+    # artifacts > 1 pairs all failing, the inner unwrap's
+    # ``len(group.exceptions) == 1`` branch does NOT fire and the
+    # multi-exception group bubbles unchanged.
+    with pytest.raises(BaseException) as excinfo:
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=_config_no_audit_in_path(),
+            client=fake,
+            project_dir=project_dir,
+        )
+
+    # The raised exception is either an ``ExceptionGroup`` (multi-pair
+    # failure — the documented US-010 path) or a bare ``KeyError`` (if
+    # only one pair was scheduled and the single-exception unwrap
+    # fired). Either way, routing through ``format_error_to_stderr``
+    # MUST NOT carry a traceback — the US-010 invariant is a property of
+    # the renderer, not of which branch fires.
+    from signalforge.cli._helpers import format_error_to_stderr
+
+    rendered = format_error_to_stderr(excinfo.value)  # type: ignore[arg-type]
+    assert "Traceback" not in rendered, f"format_error_to_stderr leaked a traceback: {rendered!r}"
+
+    # If a multi-exception group reached the renderer, the US-010
+    # header is in the rendered output. This is the documented happy
+    # path for this test (2 criteria × ≥2 artifact pairs ⇒ ≥4
+    # concurrent failures), so we pin it.
+    if isinstance(excinfo.value, ExceptionGroup):
+        assert "concurrent failure" in rendered, (
+            f"ExceptionGroup branch did not render the US-010 header: {rendered!r}"
+        )
+        # Every inner exception is a ``KeyError`` from the hostile stub.
+        for inner in excinfo.value.exceptions:
+            assert isinstance(inner, KeyError), (
+                f"unexpected inner exception type: {type(inner).__name__}"
+            )
+
+    # Defence-in-depth: nothing the engine itself printed contains a
+    # traceback either (the engine's WARNING / INFO lines route through
+    # lazy-format JSON loggers — pinned by the grep gate).
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err, f"engine leaked a traceback to stderr: {captured.err!r}"

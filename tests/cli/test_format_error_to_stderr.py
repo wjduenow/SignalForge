@@ -262,3 +262,143 @@ def test_safe_excepthook_passes_keyboard_interrupt_through(capsys: object) -> No
         "KeyboardInterrupt must NOT write to stderr via print_stderr — the "
         f"default hook owns it. Got stderr={captured.err!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ExceptionGroup renderer — US-010 of #186 / DEC-007 (defence-in-depth)
+# ---------------------------------------------------------------------------
+
+
+def test_exception_group_renders_as_multi_bullet() -> None:
+    """Multi-exception ``ExceptionGroup`` renders as the existing
+    multi-bullet stderr shape: header naming the concurrent-failure
+    count + ``  - <Class>: <repr(msg)>`` bullets, one per inner
+    exception. No ``Traceback`` ever leaks.
+
+    Belt-and-braces defence (US-010 / DEC-007 of #186) for the grade
+    asyncio orchestrator: the engine's inner ``BaseExceptionGroup``
+    unwrap (``engine.py``) re-raises single-exception groups as the
+    inner typed exception so callers can pattern-match; multi-exception
+    groups bubble unchanged to ``cmd_<name>``'s single ``try / except
+    Exception`` boundary, which routes through this renderer. A hostile
+    non-grade-typed exception (``KeyError`` from buggy worker code)
+    would otherwise leak a default ``[ExceptionGroup: …]`` repr plus a
+    traceback — that's the failure mode this branch closes.
+    """
+    inner_a = KeyError("missing artifact id")
+    inner_b = ValueError("budget config malformed")
+    inner_c = RuntimeError("worker crashed")
+    group = ExceptionGroup("concurrent failures", [inner_a, inner_b, inner_c])
+
+    rendered = format_error_to_stderr(group)
+
+    lines = rendered.split("\n")
+    # Header + 3 bullets = 4 lines exactly.
+    assert len(lines) == 4, f"expected header + 3 bullets; got {rendered!r}"
+
+    # Header names the concurrent-failure count.
+    assert lines[0] == "ERROR: Grade orchestrator encountered 3 concurrent failures:", (
+        f"header drift: {lines[0]!r}"
+    )
+
+    # Each bullet identifies the exception class + a repr-quoted message.
+    # KeyError's ``str()`` quotes its argument, so the inner repr quotes
+    # the already-quoted form — that's the defence-in-depth: the bullet
+    # text never contains raw control bytes.
+    assert lines[1].startswith("  - KeyError: "), f"bullet 0 drift: {lines[1]!r}"
+    assert "missing artifact id" in lines[1]
+    assert lines[2] == "  - ValueError: 'budget config malformed'", f"bullet 1 drift: {lines[2]!r}"
+    assert lines[3] == "  - RuntimeError: 'worker crashed'", f"bullet 2 drift: {lines[3]!r}"
+
+    # The defence-in-depth invariant: never leak a traceback.
+    assert "Traceback" not in rendered, f"traceback leaked: {rendered!r}"
+
+
+def test_exception_group_caps_at_10_bullets_with_overflow() -> None:
+    """A group with more than 10 inner exceptions caps at 10 bullets
+    and appends a ``  ... and K more`` overflow line. Mirrors the
+    failure-list cap pattern from :func:`format_batch_summary`
+    (``_FAILURE_LIST_CAP`` precedent) — the operator gets the first N
+    failures named instead of a runaway list.
+    """
+    inners: list[Exception] = [ValueError(f"failure number {i}") for i in range(12)]
+    group = ExceptionGroup("concurrent failures", inners)
+
+    rendered = format_error_to_stderr(group)
+    lines = rendered.split("\n")
+
+    # Header + 10 capped bullets + 1 overflow line = 12 lines.
+    assert len(lines) == 12, f"expected header + 10 + overflow; got {rendered!r}"
+
+    # Header names the *true* count (12), not the capped count (10).
+    assert lines[0] == "ERROR: Grade orchestrator encountered 12 concurrent failures:", (
+        f"header drift: {lines[0]!r}"
+    )
+
+    # First 10 bullets present in order.
+    for i in range(10):
+        assert lines[1 + i].startswith("  - ValueError: "), f"bullet {i} drift: {lines[1 + i]!r}"
+        assert f"failure number {i}" in lines[1 + i], f"bullet {i} content drift: {lines[1 + i]!r}"
+
+    # Overflow line — locked text, ``K = 12 - 10 = 2``.
+    assert lines[-1] == "  ... and 2 more", f"overflow drift: {lines[-1]!r}"
+
+
+def test_exception_group_repr_quotes_ansi_and_control_bytes_in_messages() -> None:
+    """Inner-exception messages route through :func:`repr` so ANSI CSI
+    bytes and other control characters cannot inject terminal-control
+    sequences when the renderer's output reaches the
+    :func:`print_stderr` sink. Defence-in-depth — ``print_stderr``
+    also strips ANSI at the sink (#60), but the repr-quote here is the
+    layer that survives a hypothetical sink-bypass.
+
+    The repr-quote escapes ``\\x1b`` to the literal four-character
+    sequence ``\\x1b`` (backslash + ``x`` + ``1`` + ``b``), so the
+    bullet body cannot carry a raw escape byte.
+    """
+    inner = RuntimeError("\x1b[31mEVIL\x1b[0m")
+    group = ExceptionGroup("concurrent failures", [inner])
+
+    rendered = format_error_to_stderr(group)
+
+    # No raw CSI byte survives the renderer.
+    assert "\x1b[" not in rendered, f"raw ANSI CSI byte leaked through the renderer: {rendered!r}"
+    # The repr-quote replaces the escape byte with the literal escape
+    # sequence ``\\x1b`` — so the four-char form IS present in the
+    # rendered text. That's the defence: it's now an inert quoted
+    # string, not a live escape.
+    assert "\\x1b" in rendered, (
+        f"expected repr-escaped form of the ANSI byte in the bullet: {rendered!r}"
+    )
+    # No traceback leak.
+    assert "Traceback" not in rendered, f"traceback leaked: {rendered!r}"
+
+
+def test_exception_group_single_inner_renders_singular_header() -> None:
+    """A 1-exception group (rare — the engine's inner unwrap re-raises
+    these as the inner typed exception, so this path is only reached
+    if a future refactor changes the unwrap shape) renders the header
+    with singular grammar (``1 concurrent failure:``, no trailing
+    ``s``). Pins the singular/plural grammar against drift.
+    """
+    inner = KeyError("solo")
+    group = ExceptionGroup("solo group", [inner])
+
+    rendered = format_error_to_stderr(group)
+    lines = rendered.split("\n")
+
+    assert len(lines) == 2, f"expected header + 1 bullet; got {rendered!r}"
+    assert lines[0] == "ERROR: Grade orchestrator encountered 1 concurrent failure:", (
+        f"singular-grammar drift: {lines[0]!r}"
+    )
+    assert lines[1].startswith("  - KeyError: "), f"bullet drift: {lines[1]!r}"
+
+
+def test_non_group_exceptions_render_unchanged() -> None:
+    """Non-``ExceptionGroup`` exceptions MUST render through the
+    existing single-line ``ERROR: <message>`` shape. Pins that the
+    new ``ExceptionGroup`` branch does NOT shadow the default arm.
+    """
+    exc = RuntimeError("boom")
+    rendered = format_error_to_stderr(exc)
+    assert rendered == "ERROR: boom", f"single-line shape drifted: {rendered!r}"
