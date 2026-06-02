@@ -692,19 +692,31 @@ class OpenAIProvider(LLMProvider):
         return _make_openai_client()
 
     def make_async_client(self) -> _LLMAsyncClientProtocol:
-        """Temporary stub — US-004 of issue #186 wires the real async shim.
+        """Construct the real OpenAI async SDK client via the shim
+        (issue #186, US-004 / DEC-002 / DEC-014).
 
-        v0.3 ships the abstract method declaration on :class:`LLMProvider`
-        (this US-002); the per-vendor async shim (``_make_openai_async_client``
-        + ``AsyncOpenAI`` confinement via Scan 9b + the
-        ``chat.completions.create`` façade) lands in US-004. Raising
-        :class:`NotImplementedError` here keeps :class:`OpenAIProvider`
-        instantiable (the abstract method requirement is satisfied) without
-        committing to a partial implementation that would deceive callers.
+        The async path stays confined to
+        :mod:`signalforge.llm._openai_client` — every
+        ``# pyright: ignore`` / ``# type: ignore`` for the SDK's async
+        constructor lives in that shim. AST Scan 9b in
+        ``tests/test_audit_completeness.py`` pins async-SDK construction
+        there, mirroring Scan 9 for the sync constructor.
+
+        The returned client satisfies
+        :class:`signalforge.llm._openai_client.AsyncOpenAIClientProtocol`
+        structurally — the async orchestrator
+        :func:`signalforge.llm.client.call_llm_async` (US-006) narrows
+        it to :class:`signalforge.llm.client._LLMAsyncClientProtocol`,
+        which is duck-typed at the same ``messages.create`` /
+        ``messages.count_tokens`` surface. The adapter's
+        ``messages.create`` awaitable forwards to the SDK's
+        ``chat.completions.create`` coroutine, preserving the JSON-mode
+        ``response_format`` kwarg from :meth:`build_create_kwargs`
+        (DEC-006 of #136).
         """
-        raise NotImplementedError(
-            "OpenAIProvider.make_async_client: US-004 of issue #186 will implement this."
-        )
+        from signalforge.llm._openai_client import _make_openai_async_client
+
+        return _make_openai_async_client()
 
     def is_clean_completion(self, response: object) -> bool:
         """Return ``True`` iff ``response.choices[0].finish_reason`` is in
