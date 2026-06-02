@@ -462,7 +462,13 @@ field, because a `COUNT(*)` is a table-level fact.
 The system prompt's `_TEST_CATALOGUE_LINES` carries two JSON-shape
 illustrations for `row_count_between` — the no-`where` form (whole-table
 bound) and the with-`where` form (filtered bound) — so a cooperative LLM
-sees both shapes and picks the one that matches the model's intent. The
+sees both shapes and picks the one that matches the model's intent.
+Alongside the illustrations, the system prompt carries a scope-instruction
+block (`_ROW_COUNT_BETWEEN_SCOPE_INSTRUCTION`, added in #183 to complete
+the #169 DEC-012 worked example) that teaches the bounded-aggregation
+heuristic below plus the `minimum`/`maximum`/`where` calibration guidance —
+the prompt-level steer that drives the drafter to propose the test in the
+first place. The
 drafter typically proposes `row_count_between` when:
 
 - The model SQL is a **bounded aggregation** (a `GROUP BY` with a date
