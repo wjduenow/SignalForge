@@ -7,9 +7,27 @@
 - **Base branch:** `dev` (0.6.0.dev0). PRs target `dev`.
 - **Worktree:** `../worktrees/SignalForge/187-fast-grade-defaults`
 - **Branch:** `feature/187-fast-grade-defaults`
-- **Phase:** published (awaiting approval)
-- **PR:** [#193](https://github.com/wjduenow/SignalForge/pull/193) (draft, base `dev`)
+- **Phase:** devolved
+- **PR:** [#193](https://github.com/wjduenow/SignalForge/pull/193) (base `dev`)
 - **Sessions:** 1 (2026-06-02)
+
+### Beads Manifest
+
+- **Epic:** `SignalForge-dpy` — #187: Faster grade defaults — Haiku + per-provider fast models
+- **Worktree (planning):** `../worktrees/SignalForge/187-fast-grade-defaults` (`feature/187-fast-grade-defaults`)
+
+| Bead | Story | Depends on | Ready at devolve |
+|---|---|---|---|
+| `SignalForge-dpy.1` | US-001 — PROVIDER_FAST_MODELS + PROVIDER_SKU_PREFIXES constants | — | ✅ ready |
+| `SignalForge-dpy.2` | US-002 — GradeConfig sentinel resolver + compat validator + token-cap bump | .1 | blocked |
+| `SignalForge-dpy.3` | US-003 — Fixture + downstream test lockstep | .2 | blocked |
+| `SignalForge-dpy.4` | US-004 — DraftConfig.cheap_model SKU alignment | — | ✅ ready |
+| `SignalForge-dpy.5` | US-005 — Haiku calibration harness + writeup (gated) | .2 | blocked |
+| `SignalForge-dpy.6` | US-006 — Docs + CHANGELOG + rule lockstep | .2 | blocked |
+| `SignalForge-dpy.7` | Quality Gate — code review x4 + CodeRabbit | .3, .4, .5, .6 | blocked |
+| `SignalForge-dpy.8` | Patterns & Memory | .7 | blocked |
+
+*Note: `bd` auto-push to `origin/main` warns "no common ancestor" — the dolt remote tracks `main` but the active line is `dev`. Local beads DB is committed and intact; this is the pre-existing environment quirk, not a devolve failure.*
 
 ---
 
