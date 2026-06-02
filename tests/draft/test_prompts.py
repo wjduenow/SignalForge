@@ -349,14 +349,21 @@ def test_render_system_prompt_includes_row_count_between_when_not_excluded() -> 
 
 def test_render_system_prompt_excludes_row_count_between_when_in_exclude_tests() -> None:
     """``exclude_tests=("row_count_between",)`` drops the catalogue line
-    AND removes ``row_count_between`` from the SCOPE phrase (issue #169,
-    DEC-012; mirrors the ``exclude_tests`` filter contract from #54)."""
+    AND removes ``row_count_between`` from the SCOPE phrase AND the
+    ``_ROW_COUNT_BETWEEN_SCOPE_INSTRUCTION`` block (issue #169, DEC-012;
+    scope-instruction block added in #183 US-001; mirrors the
+    ``exclude_tests`` filter contract from #54)."""
     from signalforge.draft.prompts import _render_system_prompt
 
     rendered = _render_system_prompt(("row_count_between",))
     assert '"type": "row_count_between"' not in rendered
     # The SCOPE phrase no longer names row_count_between.
     assert "`row_count_between`" not in rendered
+    # The dedicated SCOPE-instruction block is also gone (collapsed-whitespace
+    # match to absorb the source-literal line wraps).
+    collapsed = " ".join(rendered.split())
+    assert "bounded aggregation" not in collapsed
+    assert "vacuous `minimum: 0`" not in collapsed
     # Other types still present (the other survivors).
     assert '"type": "not_null"' in rendered
     assert '"type": "custom_sql"' in rendered
@@ -387,6 +394,64 @@ def test_custom_sql_survives_when_only_standard_types_excluded() -> None:
     # custom_sql remains because it was not excluded.
     assert '"type": "custom_sql"' in prompt
     assert '"type": "accepted_values"' in prompt
+
+
+# ---------------------------------------------------------------------------
+# row_count_between SCOPE-instruction prose (issue #183, US-001)
+# ---------------------------------------------------------------------------
+
+
+def test_system_prompt_scope_teaches_bounded_aggregation_heuristic() -> None:
+    """US-001 prose: propose ``row_count_between`` when the SQL shows a
+    bounded aggregation — a ``GROUP BY`` over a date-window ``WHERE`` clause
+    or any rollup whose cardinality is predictable from the grain — with a
+    calibrated ``minimum`` to catch upstream pipeline gaps. The phrase
+    ``bounded aggregation`` may split across a newline by the Python
+    source-literal line wrap; search collapsed-whitespace text."""
+    collapsed = " ".join(_SYSTEM_PROMPT.split())
+    assert "bounded aggregation" in collapsed
+    assert "GROUP BY" in _SYSTEM_PROMPT
+    # Minimum-as-pipeline-gap framing.
+    assert "`minimum` >= 1" in collapsed
+    assert "pipeline gaps" in collapsed
+
+
+def test_system_prompt_scope_documents_maximum_where_and_vacuous_bound() -> None:
+    """US-001 prose: set ``maximum`` only when a known upper bound exists,
+    leave it null for unbounded growth; use the ``where`` form to bound a
+    subset; and do NOT propose a vacuous ``minimum: 0`` with no ``maximum``
+    (it adds no signal)."""
+    collapsed = " ".join(_SYSTEM_PROMPT.split())
+    # Maximum-only-when-known framing.
+    assert "Set `maximum` only when" in collapsed
+    assert "leave it null when the table grows unboundedly" in collapsed
+    # where-form guidance.
+    assert "Use the `where` form" in collapsed
+    # Vacuous-bound caution.
+    assert "vacuous `minimum: 0`" in collapsed
+    assert "adds no signal" in collapsed
+
+
+def test_render_system_prompt_includes_row_count_between_scope_when_not_excluded() -> None:
+    """Default render (no exclusions) includes the
+    ``_ROW_COUNT_BETWEEN_SCOPE_INSTRUCTION`` block (issue #183, US-001)."""
+    from signalforge.draft.prompts import _render_system_prompt
+
+    rendered = _render_system_prompt(())
+    collapsed = " ".join(rendered.split())
+    assert "bounded aggregation" in collapsed
+    assert "vacuous `minimum: 0`" in collapsed
+
+
+def test_render_system_prompt_keeps_row_count_between_scope_when_other_types_excluded() -> None:
+    """Excluding other types but NOT ``row_count_between`` keeps the
+    catalogue line AND the SCOPE instruction (issue #183, US-001)."""
+    from signalforge.draft.prompts import _render_system_prompt
+
+    rendered = _render_system_prompt(("not_null", "unique"))
+    assert '"type": "row_count_between"' in rendered
+    collapsed = " ".join(rendered.split())
+    assert "bounded aggregation" in collapsed
 
 
 # ---------------------------------------------------------------------------
