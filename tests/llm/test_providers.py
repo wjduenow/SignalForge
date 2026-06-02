@@ -41,6 +41,14 @@ class _DummyProvider(LLMProvider):
     def make_client(self) -> object:
         return object()
 
+    def make_async_client(self) -> Any:
+        # Issue #186 US-002 — registry tests don't exercise the async
+        # path; raise so any accidental call is loud while the abstract
+        # requirement (must be overridden) is satisfied. ``Any`` return
+        # type sidesteps the strict ``_LLMAsyncClientProtocol`` override
+        # check; the registry tests never inspect the return value.
+        raise NotImplementedError("registry test stub — async client not wired")
+
     def build_create_kwargs(
         self,
         *,
@@ -198,6 +206,49 @@ def test_llm_provider_is_abstract() -> None:
     unimplemented abstract methods."""
     with pytest.raises(TypeError):
         LLMProvider()  # type: ignore[abstract]
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_llmprovider_abc_declares_async_methods() -> None:
+    """Issue #186 US-002 / DEC-005: :class:`LLMProvider` declares the async
+    surface — ``supports_async`` capability flag (defaulting to ``True``)
+    and the abstract ``make_async_client()`` method.
+
+    The default ``supports_async = True`` matches v0.3: every concrete
+    provider (Anthropic / OpenAI / Gemini) ships an async client; a future
+    provider lacking async opts out by setting ``supports_async = False``,
+    and :func:`signalforge.grade.engine.grade_artifacts` raises
+    :class:`signalforge.llm.errors.LLMProviderAsyncUnsupportedError` at
+    orchestrator entry (DEC-006) when concurrency was requested.
+
+    The abstract method is in :attr:`LLMProvider.__abstractmethods__`; a
+    concrete subclass that forgets to implement it cannot instantiate.
+    """
+    # ABC-level default: ``supports_async`` is True on the ABC itself so
+    # any concrete subclass inherits it unless it overrides explicitly.
+    assert LLMProvider.supports_async is True
+    # ``make_async_client`` is registered as abstract on the ABC — any
+    # concrete subclass that forgets to override fails at instantiation.
+    assert "make_async_client" in LLMProvider.__abstractmethods__
+    # Every shipped concrete provider sets the flag explicitly to True and
+    # provides the method (US-003 / US-004 / US-005 wire the real shims;
+    # v0.3 ships stubs raising NotImplementedError so the abstract
+    # requirement is satisfied without committing to a partial impl).
+    for cls in (AnthropicProvider, OpenAIProvider):
+        assert cls.supports_async is True, (
+            f"{cls.__name__} must declare ``supports_async = True`` (DEC-005)."
+        )
+        assert "make_async_client" not in cls.__abstractmethods__, (
+            f"{cls.__name__} must implement ``make_async_client`` to instantiate."
+        )
+    # GeminiProvider mirror — imported separately to keep this test
+    # tolerant of import-time changes (no impact if a future split moves
+    # the class).
+    from signalforge.llm.providers import GeminiProvider as _GP
+
+    assert _GP.supports_async is True
+    assert "make_async_client" not in _GP.__abstractmethods__
 
 
 # ---------------------------------------------------------------------------

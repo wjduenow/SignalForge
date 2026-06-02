@@ -249,6 +249,31 @@ class UnknownProviderError(LLMError):
         super().__init__(message, remediation=remediation)
 
 
+class LLMProviderAsyncUnsupportedError(LLMError):
+    """The configured LLM provider does not support async dispatch, but the
+    operator requested concurrent grade calls (``grade.max_concurrent_calls
+    > 1``).
+
+    Raised by :func:`signalforge.grade.engine.grade_artifacts` at orchestrator
+    entry — **before** ``asyncio.run`` — when
+    :attr:`signalforge.llm.providers.LLMProvider.supports_async` is ``False``
+    on the active provider and the operator set ``grade.max_concurrent_calls``
+    above 1 in ``signalforge.yml`` (issue #186, US-002 / DEC-006).
+
+    The CLI maps this to tier 3 (external-dep / runtime resource) because the
+    provider's capability gap is an environment / configuration fact the
+    operator must resolve (downgrade concurrency or pick another provider) —
+    not a structural input bug (tier 2) and not a parse / load failure (tier 1).
+    Mirrors the project's ``extra="forbid"`` fail-loud posture: rather than
+    silently clamp ``max_concurrent_calls`` to 1, raise a typed error and let
+    the operator decide.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Set 'grade.max_concurrent_calls: 1' in signalforge.yml or pick an async-capable provider."
+    )
+
+
 class LLMCacheTooLargeError(LLMError):
     """Pre-send token-count check (DEC-024) reported the cached block is
     above the SignalForge cap (DEC-009 — 8000 input tokens).
@@ -291,6 +316,7 @@ __all__ = [
     "LLMConnectionError",
     "LLMError",
     "LLMHelperError",
+    "LLMProviderAsyncUnsupportedError",
     "LLMRateLimitError",
     "LLMResponseFormatError",
     "LLMServerError",
