@@ -44,6 +44,7 @@ Observability discipline:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -63,8 +64,11 @@ from signalforge.llm.models import LLMResult
 from signalforge.llm.providers import ExceptionCategory, provider_for
 
 # Module-level aliases — tests reassign for deterministic backoff (DEC-004).
+# ``_async_sleep`` mirrors the sync aliases for the upcoming async retry path
+# (``call_llm_async``, US-006); see DEC-011 of plans/super/186-grade-asyncio-parallel.md.
 _sleep = time.sleep
 _rand_uniform = random.uniform
+_async_sleep = asyncio.sleep
 
 _LOGGER = logging.getLogger(__name__)
 
