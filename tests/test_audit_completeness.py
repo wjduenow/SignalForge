@@ -9,6 +9,12 @@ this module adds the remaining scans:
 * **Scan 2** — ``AuditEvent(...)`` outside ``signalforge.safety.request``.
 * **Scan 3** — ``anthropic.Anthropic(...)`` outside
   ``signalforge.llm._anthropic_client``.
+* **Scan 3b** — ``anthropic.AsyncAnthropic(...)`` outside
+  ``signalforge.llm._anthropic_client`` (issue #186 US-003 / DEC-014).
+  Mirrors Scan 3 verbatim with ``AsyncAnthropic`` substituted; the
+  Anthropic SDK exposes a separate ``AsyncAnthropic`` class for async
+  dispatch, and the same DEC-012 confinement contract applies to its
+  construction site.
 * **Scan 4** — ``LLMResponseEvent(...)`` outside
   ``signalforge.draft.audit``.
 * **Scan 5** — ``PruneEvent(...)`` outside ``signalforge.prune.audit``.
@@ -450,6 +456,68 @@ def test_anthropic_client_construction_in_llm_client_shim_is_present() -> None:
     finder.visit(tree)
     assert finder.calls, (
         "Expected anthropic.Anthropic(...) call in "
+        "signalforge.llm._anthropic_client — the AST-scan above is no longer "
+        "load-bearing if the legitimate constructor disappears."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Scan 3b — anthropic.AsyncAnthropic only in llm._anthropic_client (#186 US-003)
+# ---------------------------------------------------------------------------
+
+
+# DEC-012 of llm-drafter.md / DEC-014 of issue #186: every Anthropic
+# async-SDK ``# pyright: ignore`` and the SDK construction call itself
+# live in ``_anthropic_client.py``. Mirrors Scan 3 (sync
+# ``anthropic.Anthropic``); the Anthropic SDK exposes a separate
+# ``AsyncAnthropic`` class for async dispatch, so the existing Scan 3
+# (which scans for ``anthropic.Anthropic``) does NOT catch the async
+# constructor. Scan 3b is the sibling gate. Reuses the same exclusion
+# set as Scan 3 — both the sync factory ``_make_anthropic_client`` and
+# the async factory ``_make_anthropic_async_client`` live in the same
+# shim file.
+
+
+def test_async_anthropic_client_construction_only_in_llm_client_shim() -> None:
+    """DEC-014 of #186: ``anthropic.AsyncAnthropic(...)`` outside
+    ``signalforge.llm._anthropic_client`` violates the SDK-confinement
+    convention. The AST scan is stricter than a regex check (catches
+    multi-line / commented forms a regex would miss).
+
+    Mirrors :func:`test_anthropic_client_construction_only_in_llm_client_shim`
+    verbatim with ``AsyncAnthropic`` substituted. The
+    :class:`_AttributeCallFinder` handles all three bypass patterns
+    (bare ``from anthropic import AsyncAnthropic``, alias
+    ``import anthropic as a``, attribute ``anthropic.AsyncAnthropic(...)``).
+    """
+    hits = _scan_dir_for_attribute_calls(
+        _LLM_DIR,
+        obj_name="anthropic",
+        attr_name="AsyncAnthropic",
+        excluded_relpaths=_LLM_ANTHROPIC_EXCLUSIONS,
+    )
+    formatted = "\n".join(f"  {p}:{line}" for p, line in hits)
+    assert not hits, (
+        "anthropic.AsyncAnthropic(...) constructed outside "
+        "signalforge.llm._anthropic_client:\n"
+        f"{formatted}\n"
+        "Construct only via _make_anthropic_async_client — DEC-014 of #186 "
+        "confines Anthropic async-SDK noise to the shim alongside the "
+        "sync constructor."
+    )
+
+
+def test_async_anthropic_client_construction_in_llm_client_shim_is_present() -> None:
+    """Sanity: at least one ``anthropic.AsyncAnthropic(...)`` in
+    ``_anthropic_client.py``. If this fails the scan above is no longer
+    load-bearing.
+    """
+    client_path = _LLM_DIR / "_anthropic_client.py"
+    tree = ast.parse(client_path.read_text(encoding="utf-8"))
+    finder = _AttributeCallFinder("anthropic", "AsyncAnthropic")
+    finder.visit(tree)
+    assert finder.calls, (
+        "Expected anthropic.AsyncAnthropic(...) call in "
         "signalforge.llm._anthropic_client — the AST-scan above is no longer "
         "load-bearing if the legitimate constructor disappears."
     )
@@ -1226,6 +1294,79 @@ def test_qualified_name_finder_catches_all_three_bypass_patterns() -> None:
             f"_QualifiedNameCallFinder regressed on Pattern 3 "
             f"(`module.{target}(...)`)"
         )
+
+
+def test_attribute_call_finder_catches_all_three_async_anthropic_bypass_patterns() -> None:
+    """#186 US-003 / DEC-014 planted-violation regression: Scan 3b must
+    catch each of the three bypass patterns for
+    ``anthropic.AsyncAnthropic(...)``.
+
+    Mirrors :func:`test_attribute_call_finder_catches_all_three_openai_bypass_patterns`
+    in spirit but for the Anthropic async constructor. Per
+    ``testing-signal.md`` § "AST single-construction-seam scans must
+    catch all three bypass patterns" — a bare-name-only visitor is
+    trivially bypassable and provides false confidence; the planted-
+    violation self-check is mandatory because without it a refactor
+    breaking the visitor would silently disable Scan 3b at the exact
+    moment a real violation needed catching.
+
+    Pattern 4 (late-import alias) is also exercised — the two-pass
+    ``visit_Module`` alias collection is shared with Scan 3 / Scan 9 /
+    Scan 10 and a regression in it would break all four async/sync
+    scans simultaneously.
+    """
+    # Pattern 1: bare ``AsyncAnthropic(...)`` after
+    # ``from anthropic import AsyncAnthropic``.
+    bare_src = (
+        "from anthropic import AsyncAnthropic\n"
+        "def make():\n"
+        "    return AsyncAnthropic(api_key='x')\n"
+    )
+    bare = _AttributeCallFinder("anthropic", "AsyncAnthropic")
+    bare.visit(ast.parse(bare_src))
+    assert len(bare.calls) == 1, (
+        "Pattern 1 (bare `from anthropic import AsyncAnthropic; AsyncAnthropic(...)`) "
+        "not detected — _AttributeCallFinder regressed for the Anthropic async "
+        "constructor; Scan 3b is no longer load-bearing."
+    )
+
+    # Pattern 2: import-alias ``from anthropic import AsyncAnthropic as A``.
+    alias_src = (
+        "from anthropic import AsyncAnthropic as A\ndef make():\n    return A(api_key='x')\n"
+    )
+    alias = _AttributeCallFinder("anthropic", "AsyncAnthropic")
+    alias.visit(ast.parse(alias_src))
+    assert len(alias.calls) == 1, (
+        "Pattern 2 (import-alias `from anthropic import AsyncAnthropic as A; A(...)`) "
+        "not detected — _AttributeCallFinder regressed for the Anthropic async "
+        "constructor; Scan 3b is no longer load-bearing."
+    )
+
+    # Pattern 3: module-attribute ``import anthropic; anthropic.AsyncAnthropic(...)``.
+    attr_src = "import anthropic\n\nx = anthropic.AsyncAnthropic(api_key='x')\n"
+    attr = _AttributeCallFinder("anthropic", "AsyncAnthropic")
+    attr.visit(ast.parse(attr_src))
+    assert len(attr.calls) == 1, (
+        "Pattern 3 (module-attribute `import anthropic; anthropic.AsyncAnthropic(...)`) "
+        "not detected — _AttributeCallFinder regressed for the Anthropic async "
+        "constructor; Scan 3b is no longer load-bearing."
+    )
+
+    # Pattern 4: late-import alias — call appears in source order BEFORE
+    # the import that defines its alias. Single-pass alias collection
+    # misses this; ``_AttributeCallFinder.visit_Module`` does a two-pass
+    # walk to close the bypass (shared with Scan 3 / Scan 9 / Scan 10).
+    late_alias_src = (
+        "def make():\n    return A(api_key='x')\nfrom anthropic import AsyncAnthropic as A\n"
+    )
+    late = _AttributeCallFinder("anthropic", "AsyncAnthropic")
+    late.visit(ast.parse(late_alias_src))
+    assert len(late.calls) == 1, (
+        "Pattern 4 (late-import alias: call appears before its `from anthropic "
+        "import AsyncAnthropic as A` line) not detected — _AttributeCallFinder "
+        "regressed; the two-pass `visit_Module` alias collection is the gate "
+        "that closes this bypass."
+    )
 
 
 def test_attribute_call_finder_catches_all_three_openai_bypass_patterns() -> None:
