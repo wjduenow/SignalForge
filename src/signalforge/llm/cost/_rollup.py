@@ -62,6 +62,7 @@ from signalforge.llm.cost.errors import (
 )
 from signalforge.llm.errors import EstimateUnknownModelError
 from signalforge.llm.pricing import PRICE_TABLE_VERSION, PRICES, lookup
+from signalforge.llm.providers import PROVIDER_SKU_PREFIXES
 
 # ---------------------------------------------------------------------------
 # Provider derivation. The pricing table groups entries by provider in
@@ -72,10 +73,14 @@ from signalforge.llm.pricing import PRICE_TABLE_VERSION, PRICES, lookup
 # Prefix -> canonical provider name (matches the names registered in
 # ``signalforge.llm.providers``). Order doesn't matter — prefixes are
 # disjoint as of PRICE_TABLE_VERSION 2026-05-28.
-_PROVIDER_PREFIXES: tuple[tuple[str, str], ...] = (
-    ("claude-", "anthropic"),
-    ("gpt-", "openai"),
-    ("gemini-", "gemini"),
+#
+# Derived from the single-source-of-truth :data:`PROVIDER_SKU_PREFIXES`
+# (provider -> prefix) in :mod:`signalforge.llm.providers`, inverted to
+# prefix -> provider for the dispatch below (#187 US-001). The constant
+# was previously a duplicated literal here; importing keeps the prefix set
+# in lockstep with the provider registry.
+_PROVIDER_PREFIXES: tuple[tuple[str, str], ...] = tuple(
+    (prefix, provider) for provider, prefix in PROVIDER_SKU_PREFIXES.items()
 )
 
 

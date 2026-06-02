@@ -19,6 +19,8 @@ import pytest
 
 from signalforge.llm.errors import UnknownProviderError
 from signalforge.llm.providers import (
+    PROVIDER_FAST_MODELS,
+    PROVIDER_SKU_PREFIXES,
     AnthropicProvider,
     ExceptionCategory,
     LLMProvider,
@@ -1433,3 +1435,85 @@ def test_unclean_finish_reason_message_default_returns_generic_diagnostic() -> N
     # Mentions the "stop reason" concept generically (the default doesn't
     # know which vendor field to name — that's the override's job).
     assert "stop reason" in message
+
+
+# ---------------------------------------------------------------------------
+# #187 US-001 — PROVIDER_FAST_MODELS + PROVIDER_SKU_PREFIXES constants
+# ---------------------------------------------------------------------------
+
+
+#: The three providers registered at import time in
+#: :mod:`signalforge.llm.providers` (anthropic / openai / gemini).
+_REGISTERED_PROVIDER_NAMES = frozenset({"anthropic", "openai", "gemini"})
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_provider_fast_models_keys_are_the_three_registered_providers() -> None:
+    """``PROVIDER_FAST_MODELS`` is keyed by exactly the three provider names
+    registered in the module (#187 US-001). A new provider that ships without
+    a fast-model entry — or a dropped/renamed key — breaks this loudly."""
+    assert set(PROVIDER_FAST_MODELS) == _REGISTERED_PROVIDER_NAMES
+    # Cross-check against the live registry, not just a hard-coded set, so a
+    # future registry change forces a fast-models update in lockstep.
+    for name in PROVIDER_FAST_MODELS:
+        assert provider_for(name).name == name
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_provider_fast_models_values_are_all_priced_skus() -> None:
+    """Every ``PROVIDER_FAST_MODELS`` value MUST be an exact key in
+    :data:`signalforge.llm.pricing.PRICES` so ``pricing.lookup(model)`` and
+    the ``--estimate`` cost-preview path never raise on a fast default
+    (#187 US-001)."""
+    from signalforge.llm.pricing import PRICES, lookup
+
+    for provider, model in PROVIDER_FAST_MODELS.items():
+        assert model in PRICES, f"{provider} fast model {model!r} is not a priced SKU"
+        # lookup() raising would surface the same gap as a hard failure; pin it.
+        lookup(model)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_provider_sku_prefixes_keys_match_fast_models_keys() -> None:
+    """``PROVIDER_SKU_PREFIXES`` and ``PROVIDER_FAST_MODELS`` cover the same
+    provider names — the two tables stay in lockstep (#187 US-001)."""
+    assert set(PROVIDER_SKU_PREFIXES) == set(PROVIDER_FAST_MODELS)
+    assert set(PROVIDER_SKU_PREFIXES) == _REGISTERED_PROVIDER_NAMES
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_each_fast_model_starts_with_its_provider_prefix() -> None:
+    """Each provider's fast model id begins with that provider's SKU prefix
+    (#187 US-001) — a guard that the two tables describe the same SKUs."""
+    for provider, model in PROVIDER_FAST_MODELS.items():
+        prefix = PROVIDER_SKU_PREFIXES[provider]
+        assert model.startswith(prefix), (
+            f"{provider} fast model {model!r} does not start with prefix {prefix!r}"
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_provider_sku_prefixes_values_match_expected() -> None:
+    """Pin the exact prefix strings the cost-rollup dispatch depends on
+    (#187 US-001) — a typo in any prefix would silently route a priced SKU
+    to ``CostRollupUnknownModelError`` at rollup time."""
+    assert PROVIDER_SKU_PREFIXES == {
+        "anthropic": "claude-",
+        "openai": "gpt-",
+        "gemini": "gemini-",
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_both_constants_are_exported() -> None:
+    """Both constants are part of the module's public surface (#187 US-001)."""
+    from signalforge.llm import providers as providers_module
+
+    assert "PROVIDER_FAST_MODELS" in providers_module.__all__
+    assert "PROVIDER_SKU_PREFIXES" in providers_module.__all__
