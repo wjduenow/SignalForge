@@ -26,6 +26,22 @@ Two responsibilities:
   ``anthropic.Anthropic(api_key=api_key)``. Lazy-imports the SDK so test
   environments that inject a fake never pay the import cost.
 
+Issue #186 (US-003 — async grade engine) adds the async siblings:
+
+* :class:`AsyncAnthropicClientProtocol` — async counterpart to
+  :class:`AnthropicClientProtocol`. The same DEC-012 confinement contract
+  applies verbatim — every ``# pyright: ignore`` for the
+  ``anthropic.AsyncAnthropic`` construction lives in this module, and
+  :func:`signalforge.llm.client.call_llm_async` (US-006) narrows
+  ``object`` to this protocol so the orchestrator stays vendor-neutral.
+* :func:`_make_anthropic_async_client` — factory returning
+  ``anthropic.AsyncAnthropic(api_key=api_key)``. Lazy-imports the SDK
+  the same way as the sync factory.
+
+AST Scan 3b in ``tests/test_audit_completeness.py`` pins
+``anthropic.AsyncAnthropic(...)`` construction to this module alongside
+the existing Scan 3 for ``anthropic.Anthropic(...)``.
+
 Observability discipline (mirroring DEC-027 from the warehouse layer): no
 logger calls in this shim. Logging lives in the seam (US-006) where the
 stage label is known. The shim itself is structural plumbing.
@@ -95,6 +111,76 @@ def _make_anthropic_client(
     return anthropic.Anthropic(api_key=api_key)  # type: ignore[no-any-return]
 
 
+@runtime_checkable
+class _AnthropicAsyncMessagesProtocol(Protocol):
+    """Async sibling of :class:`_AnthropicMessagesProtocol` (issue #186, US-003).
+
+    The Anthropic Python SDK's ``anthropic.AsyncAnthropic`` exposes
+    :meth:`create` and :meth:`count_tokens` directly on ``client.messages``
+    as coroutines (i.e. ``await client.messages.create(...)``). The
+    signatures are intentionally permissive — the real SDK accepts a
+    large kwargs surface and the fake (``tests/llm/_fake.py``) only cares
+    about the subset :func:`signalforge.llm.client.call_llm_async`
+    (US-006) passes.
+
+    Structural conformance is checked at runtime via
+    ``@runtime_checkable``; both the real ``anthropic.AsyncAnthropic``
+    and ``tests/llm/_fake.py::FakeAnthropicClient`` (the same fake class
+    drives sync + async paths via its shared ``_FakeMessages`` queue —
+    DEC-012 of #186) satisfy the protocol.
+    """
+
+    async def create(self, **kwargs: Any) -> Any: ...
+
+    async def count_tokens(self, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
+class AsyncAnthropicClientProtocol(Protocol):
+    """Async sibling of :class:`AnthropicClientProtocol` (issue #186, US-003).
+
+    Duck-typed surface common to ``anthropic.AsyncAnthropic`` and the
+    test fake (``tests/llm/_fake.py::FakeAnthropicClient`` — same class,
+    its ``.messages`` surface satisfies BOTH sync and async protocols).
+    The protocol is intentionally narrow — only the surface
+    :func:`signalforge.llm.client.call_llm_async` (US-006) consumes
+    (``messages.create``, ``messages.count_tokens``, both awaitable).
+
+    The DEC-012 SDK-ignore confinement contract applies verbatim — every
+    ``# pyright: ignore`` for the ``anthropic.AsyncAnthropic``
+    construction lives in this module, and AST Scan 3b in
+    ``tests/test_audit_completeness.py`` pins
+    ``anthropic.AsyncAnthropic(...)`` construction to
+    ``signalforge.llm._anthropic_client``.
+    """
+
+    messages: _AnthropicAsyncMessagesProtocol
+
+
+def _make_anthropic_async_client(
+    api_key: str | None = None,
+) -> AsyncAnthropicClientProtocol:  # pragma: no cover - exercised by integration tests only
+    """Construct a real ``anthropic.AsyncAnthropic`` client.
+
+    Async sibling of :func:`_make_anthropic_client` (issue #186, US-003).
+    The ``anthropic`` import is lazy so test environments that inject a
+    fake async client never pay the SDK import cost.
+
+    ``api_key=None`` lets the SDK consume the ``ANTHROPIC_API_KEY``
+    environment variable (standard SDK behaviour); explicit values are
+    preserved for callers that thread credentials through configuration.
+
+    DEC-012 confinement: AST Scan 3b in
+    ``tests/test_audit_completeness.py`` enforces that
+    ``anthropic.AsyncAnthropic(...)`` is constructed only here. Any
+    bypass (bare-name / import-alias / module-attribute) is caught by
+    the three-pattern :class:`_AttributeCallFinder` visitor.
+    """
+    import anthropic  # type: ignore[import-not-found]
+
+    return anthropic.AsyncAnthropic(api_key=api_key)  # type: ignore[no-any-return]
+
+
 @dataclass(frozen=True)
 class _AnthropicExceptionClasses:
     """Bundle of SDK exception classes used by the retry loop in
@@ -137,8 +223,11 @@ def _load_anthropic_exception_classes() -> _AnthropicExceptionClasses:
 
 __all__ = [
     "AnthropicClientProtocol",
+    "AsyncAnthropicClientProtocol",
+    "_AnthropicAsyncMessagesProtocol",
     "_AnthropicExceptionClasses",
     "_AnthropicMessagesProtocol",
     "_load_anthropic_exception_classes",
+    "_make_anthropic_async_client",
     "_make_anthropic_client",
 ]

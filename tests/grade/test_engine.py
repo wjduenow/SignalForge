@@ -16,6 +16,7 @@ code imports the fake.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -429,11 +430,57 @@ def test_grade_artifacts_default_sidecar_path_resolution(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
+def _config_tiny_budget(model_id: str = "claude-fake") -> GradeConfig:
+    """A :class:`GradeConfig` with a sub-second budget so
+    :func:`asyncio.timeout` trips immediately under the slow-coroutine
+    monkey-patch used by the budget tests below.
+
+    Mirrors :func:`_config_no_audit_in_path` defaults; the only delta is
+    ``total_budget_seconds=1`` (the GradeConfig validator's lower bound
+    — anything below would fail Pydantic-validation).
+    """
+    return GradeConfig(
+        model=model_id,
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=1,
+        max_concurrent_calls=2,
+    )
+
+
+def _stub_grade_one_async_slow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Monkey-patch :func:`engine_module._grade_one_async` to await a
+    sleep longer than the test's ``total_budget_seconds``.
+
+    Used by the budget-exhaustion tests below. The slow coroutine never
+    returns naturally; the enclosing ``asyncio.timeout`` cancels every
+    in-flight task; the per-coroutine ``except CancelledError`` arm
+    routes each pair to the budget-degrade shape (DEC-008).
+    """
+
+    async def _slow(**_kw: Any) -> tuple:
+        await asyncio.sleep(60)  # well beyond total_budget_seconds=1
+        raise AssertionError("unreachable — timeout should fire first")
+
+    monkeypatch.setattr(engine_module, "_grade_one_async", _slow)
+
+
 def test_grade_artifacts_budget_exceeded_marks_remaining_pairs_score_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Monkey-patch ``time.monotonic`` so the budget trips after a
-    couple of pairs. Remaining pairs land as ``score=None``.
+    """When the asyncio budget timeout fires, every pair degrades.
+
+    The async core's ``asyncio.timeout(total_budget_seconds)`` cancels
+    every in-flight + un-started task. Per-coroutine ``except
+    CancelledError`` arms route to the budget-degrade shape (DEC-008).
+    Un-started tasks (those still waiting on the semaphore when the
+    timeout fired) get filled in by the post-``TaskGroup`` synthesis
+    pass.
     """
     project_dir = _project(tmp_path)
     model = _make_model()
@@ -442,19 +489,14 @@ def test_grade_artifacts_budget_exceeded_marks_remaining_pairs_score_none(
     fake = FakeAnthropicClient()
     expect_grade_responses(fake, rubric=rubric, candidate=candidate)
 
-    # Stub time.monotonic so the orchestrator believes the wall clock
-    # has advanced 999 seconds at the start of the loop. The
-    # GradeConfig default of total_budget_seconds=60 means every
-    # iteration past the first budget-check trips to "exhausted".
-    times = iter([0.0] + [999.0] * 200)
-    monkeypatch.setattr(engine_module.time, "monotonic", lambda: next(times))
+    _stub_grade_one_async_slow(monkeypatch)
 
     report = grade_artifacts(
         model,
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_tiny_budget(),
         client=fake,
         project_dir=project_dir,
     )
@@ -463,9 +505,6 @@ def test_grade_artifacts_budget_exceeded_marks_remaining_pairs_score_none(
     assert all(r.score is None for r in report.results)
     assert all(r.passed is False for r in report.results)
     assert report.aggregate_complete is False
-    # No LLM calls should have been issued — the fake's expectations
-    # remain queued (count_tokens + create per pair).
-    assert len(fake.create_calls) == 0
 
 
 def test_grade_artifacts_budget_exceeded_aggregate_complete_is_false(
@@ -481,15 +520,14 @@ def test_grade_artifacts_budget_exceeded_aggregate_complete_is_false(
     fake = FakeAnthropicClient()
     expect_grade_responses(fake, rubric=rubric, candidate=candidate)
 
-    times = iter([0.0] + [999.0] * 200)
-    monkeypatch.setattr(engine_module.time, "monotonic", lambda: next(times))
+    _stub_grade_one_async_slow(monkeypatch)
 
     report = grade_artifacts(
         model,
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_tiny_budget(),
         client=fake,
         project_dir=project_dir,
     )
@@ -508,6 +546,18 @@ def test_grade_artifacts_one_criterion_retry_exhausted_does_not_fail_whole_repor
 ) -> None:
     """A single LLM-layer failure on one ``(artifact, criterion)`` pair
     leaves every other pair scored. The failed pair degrades.
+
+    **Order-agnostic under concurrent dispatch.** Per DEC-015 of #186,
+    the async core dispatches every pair in parallel (throttled by
+    ``max_concurrent_calls``). The fake's FIFO queue + ``matching=lambda
+    _kw: True`` predicates mean the FIRST call to arrive at the fake
+    (whichever coroutine wins the race) consumes the
+    :class:`LLMRateLimitError` expectation; the remaining 7 consume
+    successful payloads. The assertion is **count-based** (one degraded,
+    seven scored) — invariant to which specific pair degrades — so the
+    test is deterministic regardless of dispatch order. This is the
+    pair-identity contract DEC-015 lands at the operator-visible level:
+    "a single bad pair never aborts siblings."
     """
     project_dir = _project(tmp_path)
     model = _make_model()
@@ -524,12 +574,11 @@ def test_grade_artifacts_one_criterion_retry_exhausted_does_not_fail_whole_repor
     artifact_pairs = _stable_artifact_pairs(candidate)
     assert len(artifact_pairs) == 4
 
-    # Build the standard expectations BUT swap the FIRST messages.create
-    # to raise an LLMRateLimitError instead of returning a payload. The
-    # first call corresponds to (criterion=clarity, artifact=order_id
-    # description).
+    # Enqueue one rate-limit-raising expectation FIRST; FIFO matching
+    # means whichever coroutine arrives at the fake first consumes it
+    # (the specific pair is non-deterministic under concurrency — the
+    # test's count-based assertion below is invariant).
     fake = FakeAnthropicClient()
-    # Enqueue: count_tokens for call 1, then create -> raises LLMRateLimitError.
     from tests.llm._fake import FakeCountTokensResponse
 
     fake.expect_count_tokens(
@@ -588,7 +637,11 @@ def test_grade_artifacts_one_criterion_retry_exhausted_does_not_fail_whole_repor
     )
 
     fake.assert_all_expectations_met()
-    # 8 results total; the first one degraded, the remaining 7 scored.
+    # 8 results total; exactly one degraded (the pair that won the
+    # dispatch race and consumed the rate-limit expectation), the
+    # remaining 7 scored. Which specific pair degrades is dispatch-
+    # order-dependent; the count + the degrade-reasoning shape are
+    # what the contract pins.
     assert len(report.results) == 8
     degraded = [r for r in report.results if r.score is None]
     assert len(degraded) == 1
@@ -1260,9 +1313,22 @@ def test_grade_below_threshold_error_carries_aggregate_complete_flag(
     fake = FakeAnthropicClient()
     expect_grade_responses(fake, rubric=rubric, candidate=candidate)
 
-    # Trip the budget at the first iteration so every pair degrades.
-    times = iter([0.0] + [999.0] * 200)
-    monkeypatch.setattr(engine_module.time, "monotonic", lambda: next(times))
+    # Force the asyncio budget timeout to trip immediately — every
+    # in-flight + un-started pair degrades via the async core's
+    # CancelledError attribution path (DEC-008).
+    _stub_grade_one_async_slow(monkeypatch)
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=1,
+        min_pass_rate=0.7,
+        min_mean_score=0.5,
+        fail_on_below_threshold=True,
+    )
 
     with pytest.raises(GradeBelowThresholdError) as excinfo:
         grade_artifacts(
@@ -1270,7 +1336,7 @@ def test_grade_below_threshold_error_carries_aggregate_complete_flag(
             candidate,
             _empty_prune_result(model),
             rubric=rubric,
-            config=_config_with_threshold_fail(fail_on_below_threshold=True),
+            config=config,
             client=fake,
             project_dir=project_dir,
         )
@@ -1330,3 +1396,523 @@ def test_grade_below_threshold_writes_sidecar_before_raising(tmp_path: Path) -> 
     # established for prune / grade in DEC-006).
     rows = _read_jsonl(audit_path)
     assert len(rows) == len(round_tripped.results)
+
+
+# ---------------------------------------------------------------------------
+# Async-pre-flight guards (issue #186 DEC-006 / DEC-009 — US-008)
+# ---------------------------------------------------------------------------
+
+
+def test_grade_artifacts_nested_event_loop_raises_typed_error(tmp_path: Path) -> None:
+    """Calling :func:`grade_artifacts` from inside a running asyncio event
+    loop raises :class:`GradeNestedEventLoopError` (CLI tier 1) with a
+    remediation pointing at the v0.4 follow-up. The guard fires BEFORE
+    any LLM call so the queued fake is never reached.
+    """
+    import asyncio
+
+    from signalforge.grade.errors import GradeNestedEventLoopError
+
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()  # No expectations — any call would raise.
+
+    async def _drive() -> None:
+        # Running inside ``asyncio.run`` means ``asyncio.get_running_loop()``
+        # in the guard returns the loop, triggering the typed raise.
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=_config_no_audit_in_path(),
+            client=fake,
+            project_dir=project_dir,
+        )
+
+    with pytest.raises(GradeNestedEventLoopError) as excinfo:
+        asyncio.run(_drive())
+
+    assert excinfo.value.model_unique_id == model.unique_id
+    # The remediation is locked verbatim by DEC-009 of #186.
+    assert "single-event-loop only" in str(excinfo.value)
+    # Defence-in-depth: the fake was never reached.
+    assert fake.create_calls == []
+    assert fake.count_calls == []
+
+
+def test_grade_artifacts_outside_event_loop_does_not_raise_nested_guard(
+    tmp_path: Path,
+) -> None:
+    """The nested-loop guard fires ONLY when called from a running event
+    loop. The sync test entry path (every other engine test) must NOT
+    trip it — this test pins the negative direction so a refactor that
+    inverts the ``try/except`` couldn't silently break every grade run.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, candidate=candidate, rubric=rubric)
+
+    # Smoke: a normal (non-async) caller succeeds.
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=fake,
+        project_dir=project_dir,
+    )
+    # The guard didn't intercept; the run produced a real report.
+    assert report.model_unique_id == model.unique_id
+
+
+def test_grade_artifacts_sync_only_provider_with_parallel_cap_raises_typed_error(
+    tmp_path: Path,
+) -> None:
+    """When the configured provider has ``supports_async=False`` AND
+    ``max_concurrent_calls > 1``, the engine raises
+    :class:`LLMProviderAsyncUnsupportedError` (CLI tier 3) at orchestrator
+    entry — BEFORE any LLM call — rather than silently clamping to 1.
+    Mirrors the project's ``extra="forbid"`` fail-loud posture (DEC-006
+    of #186).
+    """
+    from signalforge.llm import providers as providers_module
+    from signalforge.llm.errors import LLMProviderAsyncUnsupportedError
+    from tests.llm._fake_provider import FakeNoCacheProvider
+
+    class _SyncOnlyProvider(FakeNoCacheProvider):
+        """Inherits every ABC concretion from
+        :class:`FakeNoCacheProvider`; the only delta is ``supports_async``
+        is flipped to ``False`` so the guard fires."""
+
+        name = "sync-only-test-provider-186-us008"
+        supports_async = False  # The load-bearing attribute under test.
+
+    # Snapshot the registry so this test can't pollute other suites.
+    saved = dict(providers_module._REGISTRY)
+    try:
+        providers_module._REGISTRY.clear()
+        providers_module._REGISTRY.update(saved)
+        providers_module.register_provider(_SyncOnlyProvider())
+
+        project_dir = _project(tmp_path)
+        model = _make_model()
+        candidate = _load_sample_candidate()
+        rubric = _two_criteria()
+        fake = FakeAnthropicClient()  # No expectations — any call raises.
+
+        config = GradeConfig(
+            model="claude-fake",
+            cache_ttl="1h",
+            max_output_tokens=64,
+            max_retries_429=0,
+            max_retries_5xx=0,
+            max_retries_conn=0,
+            total_budget_seconds=60,
+            provider="sync-only-test-provider-186-us008",
+            max_concurrent_calls=5,
+        )
+
+        with pytest.raises(LLMProviderAsyncUnsupportedError) as excinfo:
+            grade_artifacts(
+                model,
+                candidate,
+                _empty_prune_result(model),
+                rubric=rubric,
+                config=config,
+                client=fake,
+                project_dir=project_dir,
+            )
+
+        # The message names the offending provider. The remediation is
+        # locked by DEC-006 of #186 (refined by QG Pass 1 Concern #2):
+        # the engine consumes ``call_llm_async`` exclusively, so cap=1
+        # is NOT an escape hatch — the operator must pick an async-capable
+        # provider.
+        assert "sync-only-test-provider-186-us008" in str(excinfo.value)
+        assert "async-capable provider" in str(excinfo.value)
+        # Defence-in-depth: no LLM call was attempted.
+        assert fake.create_calls == []
+    finally:
+        providers_module._REGISTRY.clear()
+        providers_module._REGISTRY.update(saved)
+
+
+def test_grade_artifacts_sync_only_provider_with_cap_one_still_raises_typed_error(
+    tmp_path: Path,
+) -> None:
+    """Sync-only provider + ``max_concurrent_calls=1`` STILL raises the
+    typed pre-flight error — ``cap=1`` is NOT an escape hatch (#186 QG
+    Pass 1 Concern #2 fix).
+
+    The grade engine consumes ``call_llm_async`` exclusively post-#186.
+    A sync-only provider would surface ``LLMProviderAsyncUnsupportedError``
+    on every per-pair call, which the per-pair ``except`` wraps to
+    ``GradeLLMError`` — silently degrading every pair. That is worse than
+    failing loud at orchestrator entry, because the operator sees an
+    all-degraded report with no typed signal of the misconfiguration.
+
+    Fix: drop the ``> 1`` predicate from the entry guard. The pre-flight
+    raises ``LLMProviderAsyncUnsupportedError`` regardless of cap.
+    """
+    from signalforge.llm import providers as providers_module
+    from signalforge.llm.errors import LLMProviderAsyncUnsupportedError
+    from tests.llm._fake_provider import FakeNoCacheProvider
+
+    class _SyncOnlyButSerial(FakeNoCacheProvider):
+        name = "sync-only-serial-test-provider-186-us008-cap1"
+        supports_async = False
+
+    saved = dict(providers_module._REGISTRY)
+    try:
+        providers_module._REGISTRY.clear()
+        providers_module._REGISTRY.update(saved)
+        providers_module.register_provider(_SyncOnlyButSerial())
+
+        project_dir = _project(tmp_path)
+        model = _make_model()
+        candidate = _load_sample_candidate()
+        rubric = _two_criteria()
+        fake = FakeAnthropicClient()
+        expect_grade_responses(fake, candidate=candidate, rubric=rubric)
+
+        config = GradeConfig(
+            model="claude-fake",
+            cache_ttl="1h",
+            max_output_tokens=64,
+            max_retries_429=0,
+            max_retries_5xx=0,
+            max_retries_conn=0,
+            total_budget_seconds=60,
+            provider="sync-only-serial-test-provider-186-us008-cap1",
+            max_concurrent_calls=1,
+        )
+
+        with pytest.raises(LLMProviderAsyncUnsupportedError):
+            grade_artifacts(
+                model,
+                candidate,
+                _empty_prune_result(model),
+                rubric=rubric,
+                config=config,
+                client=fake,
+                project_dir=project_dir,
+            )
+    finally:
+        providers_module._REGISTRY.clear()
+        providers_module._REGISTRY.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# Async core (US-009) — TaskGroup + Semaphore + budget timeout
+# ---------------------------------------------------------------------------
+
+
+def test_grade_artifacts_concurrent_dispatches_in_parallel(tmp_path: Path) -> None:
+    """The async core dispatches up to ``max_concurrent_calls`` coroutines
+    in parallel; an instrumented fake records the peak in-flight count
+    and asserts it stays at-or-below the cap.
+
+    Pins DEC-002 + DEC-003 of #186: the ``Semaphore(max_concurrent_calls)``
+    throttle is load-bearing — without it, the dispatch fan-out is
+    unbounded and the operator's cost-and-rate posture is silently
+    violated. The instrumented fake counts entries to ``create``
+    minus exits before delegating to the standard expectation queue,
+    so the peak measures the true concurrency the engine achieves.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    artifact_pairs = _stable_artifact_pairs(candidate)
+    total_pairs = len(rubric) * len(artifact_pairs)
+    # At least 4 pairs > cap=3 so the throttle actually engages; the
+    # sample candidate carries 7 artifacts × 2 criteria = 14 pairs.
+    assert total_pairs >= 6
+
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    # Wrap the fake's async ``messages.create`` so we can observe the
+    # in-flight count without changing the queue-popping logic. Each
+    # coroutine awaits a tiny sleep mid-call so the orchestrator's
+    # parallel dispatch is actually observable; without the sleep every
+    # call resolves before the next task can claim the semaphore and
+    # the peak collapses to 1.
+    in_flight = 0
+    peak_in_flight = 0
+    original_create = fake.aio.messages.create
+
+    async def _instrumented_create(**kw: Any) -> Any:
+        nonlocal in_flight, peak_in_flight
+        in_flight += 1
+        peak_in_flight = max(peak_in_flight, in_flight)
+        try:
+            # Tiny sleep keeps the coroutine in flight long enough that
+            # sibling coroutines can also enter ``create`` concurrently.
+            await asyncio.sleep(0.01)
+            return await original_create(**kw)
+        finally:
+            in_flight -= 1
+
+    fake.aio.messages.create = _instrumented_create  # type: ignore[assignment, method-assign]
+
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=60,
+        max_concurrent_calls=3,
+    )
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    assert len(report.results) == total_pairs
+    # Concurrency engaged: at least 2 simultaneous calls observed.
+    # Below the cap=3 floor: never more than 3.
+    assert peak_in_flight <= 3
+    assert peak_in_flight >= 2
+
+
+def test_grade_artifacts_concurrency_1_byte_equivalent_to_v0_1(tmp_path: Path) -> None:
+    """``max_concurrent_calls=1`` serialises dispatch in
+    ``(criterion, artifact)`` iteration order.
+
+    The semaphore-of-1 path is the documented sequential fallback (DEC-003
+    of #186). Asserts the JSONL audit lands in iteration order — the
+    audit corpus shape is bit-for-bit equivalent to the v0.1 sequential
+    output under this config knob. Down-stream consumers gating on the
+    legacy ordering (the v0.1 fixture, any external sidecar consumer)
+    can keep functioning unchanged.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=60,
+        max_concurrent_calls=1,
+    )
+
+    grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    # Compare the on-disk JSONL order to the engine's iteration order.
+    audit_path = project_dir / ".signalforge" / "grade.jsonl"
+    rows = _read_jsonl(audit_path)
+    expected_iteration = [
+        (artifact_id, criterion.id)
+        for criterion in rubric
+        for artifact_id, _ in _stable_artifact_pairs(candidate)
+    ]
+    observed = [(row["artifact_id"], row["criterion_id"]) for row in rows]
+    assert observed == expected_iteration
+
+
+def test_grade_artifacts_concurrent_budget_warning_shape_locked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """On budget trip the engine emits exactly one WARNING with the
+    locked JSON field set (DEC-018 of #186): ``run_id``,
+    ``model_unique_id``, ``completed_count``, ``cancelled_count``,
+    ``degraded_count``, ``total_budget_seconds``.
+
+    External operator dashboards key on these field names; locking the
+    shape via a pinned test is what makes the audit corpus a stable
+    contract.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    _stub_grade_one_async_slow(monkeypatch)
+
+    caplog.set_level(logging.WARNING, logger="signalforge.grade.engine")
+    grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_tiny_budget(),
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    warns = [
+        r
+        for r in caplog.records
+        if r.name == "signalforge.grade.engine"
+        and r.levelno == logging.WARNING
+        and "grade budget exceeded" in r.getMessage()
+    ]
+    assert len(warns) == 1
+    payload_json = warns[0].getMessage().split("grade budget exceeded: ", 1)[1]
+    payload = json.loads(payload_json)
+    # JSON field set locked verbatim (DEC-018 of #186; refined by QG
+    # Pass 1+3 — ``cancelled_count`` was dropped as dead-code, every
+    # un-completed pair lands in ``degraded_count`` via the synthesis
+    # pass regardless of in-flight vs un-started status).
+    assert set(payload.keys()) == {
+        "run_id",
+        "model_unique_id",
+        "completed_count",
+        "degraded_count",
+        "total_budget_seconds",
+    }
+    assert payload["model_unique_id"] == model.unique_id
+    assert payload["total_budget_seconds"] == 1
+    # Every pair accounted for: completed + degraded == total.
+    candidate_pairs = len(_stable_artifact_pairs(candidate))
+    total_pairs = len(rubric) * candidate_pairs
+    assert payload["completed_count"] + payload["degraded_count"] == total_pairs
+
+
+def test_grade_artifacts_module_level_async_sleep_alias_present() -> None:
+    """The ``_async_sleep`` alias is module-scoped and reassignable for
+    deterministic budget tests, mirroring :data:`signalforge.llm.client._async_sleep`
+    (DEC-011 of #186).
+    """
+    assert engine_module._async_sleep is asyncio.sleep
+
+
+# ---------------------------------------------------------------------------
+# Defence-in-depth — ExceptionGroup never leaks a traceback (US-010 / DEC-007)
+# ---------------------------------------------------------------------------
+
+
+def test_grade_artifacts_hostile_coroutine_no_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A hostile coroutine that raises a non-grade-typed exception
+    (e.g. ``KeyError`` from buggy worker code) MUST surface as a clean
+    multi-bullet stderr write — never a leaked Python traceback.
+
+    This is US-010's defence-in-depth pin: the engine's per-coroutine
+    ``try/except`` catches only ``GradeLLMError`` / ``GradeOutputError`` /
+    ``GradePromptEnvelopeBreachError`` / ``CancelledError``; a stray
+    ``KeyError`` propagates to ``TaskGroup`` and bubbles as part of a
+    ``BaseExceptionGroup``. The engine's inner unwrap re-raises
+    single-exception groups as the inner typed exception, so we drive
+    *every* pair to fail to force a multi-exception group that bubbles
+    to the CLI layer. The CLI's ``format_error_to_stderr`` then
+    renders the group through the US-010 ``ExceptionGroup`` branch,
+    which never includes a traceback.
+
+    Mirrors the project's ``"Traceback" not in capsys.readouterr().err``
+    invariant pinned across every CLI test (DEC-016 floor —
+    ``cli-layer.md`` § "No traceback ever leaks").
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    # No ``expect_grade_responses`` queue — the hostile stub never
+    # reaches the fake. If a refactor breaks the monkey-patch, the
+    # fake would raise on the first unmatched call and we'd see
+    # ``AssertionError`` instead of the expected ``ExceptionGroup``.
+
+    async def _hostile_grade_one(**_kw: Any) -> tuple:
+        """Worker raises an arbitrary non-grade-typed exception.
+
+        ``KeyError`` is deliberately outside the engine's catch list
+        (``GradeLLMError`` / ``GradeOutputError`` /
+        ``GradePromptEnvelopeBreachError`` / ``CancelledError``), so
+        every task escapes the per-coroutine ``try/except`` and lands
+        in the ``TaskGroup``'s ``BaseExceptionGroup``.
+        """
+        raise KeyError("hostile worker — simulates a buggy refactor")
+
+    monkeypatch.setattr(engine_module, "_grade_one_async", _hostile_grade_one)
+
+    # Drive the engine; it must raise *something*. With 2 criteria × N
+    # artifacts > 1 pairs all failing, the inner unwrap's
+    # ``len(group.exceptions) == 1`` branch does NOT fire and the
+    # multi-exception group bubbles unchanged.
+    with pytest.raises(BaseException) as excinfo:
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=_config_no_audit_in_path(),
+            client=fake,
+            project_dir=project_dir,
+        )
+
+    # The raised exception is either an ``ExceptionGroup`` (multi-pair
+    # failure — the documented US-010 path) or a bare ``KeyError`` (if
+    # only one pair was scheduled and the single-exception unwrap
+    # fired). Either way, routing through ``format_error_to_stderr``
+    # MUST NOT carry a traceback — the US-010 invariant is a property of
+    # the renderer, not of which branch fires.
+    from signalforge.cli._helpers import format_error_to_stderr
+
+    rendered = format_error_to_stderr(excinfo.value)  # type: ignore[arg-type]
+    assert "Traceback" not in rendered, f"format_error_to_stderr leaked a traceback: {rendered!r}"
+
+    # Pin the multi-exception group branch unconditionally — this test
+    # is engineered so EVERY pair fails (2 criteria × ≥2 artifact pairs
+    # ⇒ ≥4 concurrent failures), so the engine's single-exception unwrap
+    # MUST NOT fire and the renderer MUST see an ExceptionGroup. A
+    # future regression that unwrapped multi-exception groups too would
+    # otherwise silently pass the conditional shape (QG Pass 3
+    # Concern #3 fix).
+    assert isinstance(excinfo.value, ExceptionGroup), (
+        f"hostile-coroutine fixture must surface a multi-exception group; "
+        f"got {type(excinfo.value).__name__}"
+    )
+    assert "concurrent failure" in rendered, (
+        f"ExceptionGroup branch did not render the US-010 header: {rendered!r}"
+    )
+    # Every inner exception is a ``KeyError`` from the hostile stub.
+    for inner in excinfo.value.exceptions:
+        assert isinstance(inner, KeyError), (
+            f"unexpected inner exception type: {type(inner).__name__}"
+        )
+
+    # Defence-in-depth: nothing the engine itself printed contains a
+    # traceback either (the engine's WARNING / INFO lines route through
+    # lazy-format JSON loggers — pinned by the grep gate).
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err, f"engine leaked a traceback to stderr: {captured.err!r}"

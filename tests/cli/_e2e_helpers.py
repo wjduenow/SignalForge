@@ -28,11 +28,14 @@ Public surface:
   steers the drafter toward the structured anomaly variant rather than
   freeform ``custom_sql``).
 * :func:`apply_provider_override` — overlays per-test ``grade:`` block
-  knobs (``provider`` / ``model`` / ``max_output_tokens``) onto a copied
-  fixture's ``signalforge.yml`` (issue #155 / US-004 / DEC-012). The
-  canonical seam the multi-provider e2e smokes (BigQuery+Anthropic /
-  +OpenAI / +Gemini) use to swap the grader without maintaining N
-  near-duplicate fixtures.
+  knobs (``provider`` / ``model`` / ``max_output_tokens`` /
+  ``max_concurrent_calls``) onto a copied fixture's ``signalforge.yml``
+  (issue #155 / US-004 / DEC-012; ``max_concurrent_calls`` extension
+  added by issue #186 / US-012 / DEC-020 for the async live smokes).
+  The canonical seam the multi-provider e2e smokes (BigQuery+Anthropic /
+  +OpenAI / +Gemini, plus the three async per-provider smokes from
+  #186) use to swap the grader and tune concurrency without maintaining
+  N near-duplicate fixtures.
 
 Used only by the gated e2e smokes (``tests/cli/test_e2e_*.py``) plus the
 helper's own unit tests under ``tests/cli/test_e2e_helpers.py``. Not
@@ -249,14 +252,21 @@ def apply_provider_override(
     grade_provider: str | None = None,
     grade_model: str | None = None,
     grade_max_output_tokens: int | None = None,
+    grade_max_concurrent_calls: int | None = None,
 ) -> None:
     """Overlay ``grade:`` block provider config onto an existing ``signalforge.yml``.
 
-    Issue #155 / US-004 / DEC-012. The multi-provider e2e smokes
-    (BigQuery+Anthropic baseline, +OpenAI, +Gemini) share the committed
-    Austin fixture and swap only the grader's provider/model. This helper
-    is the canonical seam: read the per-run ``signalforge.yml``, set the
-    three ``grade:`` knobs whose argument is non-``None``, write back.
+    Issue #155 / US-004 / DEC-012 (initial provider/model/tokens shape).
+    Issue #186 / US-012 / DEC-020 added the
+    ``grade_max_concurrent_calls`` kwarg for the async per-provider live
+    smokes (additive — ``None`` default preserves byte-equality with
+    every existing caller).
+
+    The multi-provider e2e smokes (BigQuery+Anthropic baseline, +OpenAI,
+    +Gemini) share the committed Austin fixture and swap only the
+    grader's provider/model. This helper is the canonical seam: read the
+    per-run ``signalforge.yml``, set the ``grade:`` knobs whose argument
+    is non-``None``, write back.
 
     Non-destructive — unset knobs (default ``None``) are left untouched, so
     existing thresholds (``min_pass_rate``, ``min_mean_score``,
@@ -277,6 +287,12 @@ def apply_provider_override(
         grade_max_output_tokens: optional override for
             ``grade.max_output_tokens`` (e.g. ``2048`` for Gemini to
             avoid mid-response truncation per #155).
+        grade_max_concurrent_calls: optional override for
+            ``grade.max_concurrent_calls`` (issue #186 / DEC-020;
+            small values like ``3`` exercise the concurrent dispatch
+            path against a real provider while keeping live-call cost
+            bounded). ``1`` reproduces the v0.1 sequential ordering
+            bit-for-bit (semaphore serialises in dispatch order).
 
     Raises:
         FileNotFoundError: if ``<project_dir>/signalforge.yml`` is
@@ -292,4 +308,6 @@ def apply_provider_override(
         grade_block["model"] = grade_model
     if grade_max_output_tokens is not None:
         grade_block["max_output_tokens"] = grade_max_output_tokens
+    if grade_max_concurrent_calls is not None:
+        grade_block["max_concurrent_calls"] = grade_max_concurrent_calls
     config_path.write_text(yaml.safe_dump(data, sort_keys=False))

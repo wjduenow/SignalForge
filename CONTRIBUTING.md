@@ -120,9 +120,11 @@ contract.
 
 ### Tests in the live e2e suite
 
-Five paid e2e tests cover the full `signalforge generate` pipeline
+Eight paid e2e tests cover the full `signalforge generate` pipeline
 (manifest → safety → draft → prune → grade → diff) against real
-warehouses and real graders:
+warehouses and real graders. Five exercise sequential (v0.1) grading;
+three exercise concurrent grade dispatch (issue #186 / US-012 /
+DEC-020 — `grade.max_concurrent_calls=3`):
 
 1. **`tests/cli/test_e2e_bigquery_smoke.py`** — `@pytest.mark.e2e`.
    Parametrized over `grade.provider ∈ {"anthropic", "openai", "gemini"}`
@@ -166,6 +168,28 @@ warehouses and real graders:
    See [`docs/snowflake-e2e-setup.md`](docs/snowflake-e2e-setup.md) for
    warehouse-side setup (resource monitor, XS warehouse, aggressive
    auto-suspend — guardrails against runaway cost).
+6. **`tests/cli/test_e2e_anthropic_async_smoke.py`** — `@pytest.mark.e2e`
+   + `@pytest.mark.anthropic` (issue #186 / US-012 / DEC-020).
+   Concurrent grade dispatch (`grade.max_concurrent_calls=3`) with
+   Anthropic as both drafter and grader against the Austin bikeshare
+   BQ fixture. Pins the async TaskGroup + Semaphore path (US-009) and
+   the Anthropic prompt-cache write-penalty surface (DEC-021). Gate:
+   `SF_RUN_BQ=1` + `ANTHROPIC_API_KEY` + `GOOGLE_CLOUD_PROJECT`.
+7. **`tests/cli/test_e2e_openai_async_smoke.py`** — `@pytest.mark.e2e`
+   + `@pytest.mark.openai` (issue #186 / US-012 / DEC-020). Concurrent
+   grade dispatch with the OpenAI `gpt-4o` async grader (Anthropic
+   drafter per DEC-011). Pins the `AsyncOpenAI` async-client seam.
+   Five-env-var gate (mirrors the sync OpenAI sibling): `SF_RUN_OPENAI=1`
+   + `OPENAI_API_KEY` + `SF_RUN_BQ=1` + `ANTHROPIC_API_KEY` +
+   `GOOGLE_CLOUD_PROJECT`.
+8. **`tests/cli/test_e2e_gemini_async_smoke.py`** — `@pytest.mark.e2e`
+   + `@pytest.mark.gemini` (issue #186 / US-012 / DEC-020). Concurrent
+   grade dispatch with the Gemini `gemini-2.5-flash` async grader
+   (Anthropic drafter per DEC-011, `grade.max_output_tokens=4096` per
+   #158). Pins the `google-genai` `client.aio` async-namespace seam.
+   Five-env-var gate (mirrors the sync Gemini sibling):
+   `SF_RUN_GEMINI=1` + `GOOGLE_API_KEY` + `SF_RUN_BQ=1` +
+   `ANTHROPIC_API_KEY` + `GOOGLE_CLOUD_PROJECT`.
 
 Six **grade-only / draft-only live-API smokes** complement the e2e
 suite. They exercise a single layer (no warehouse) against a real

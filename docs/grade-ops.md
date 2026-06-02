@@ -123,6 +123,7 @@ grade:
   max_retries_5xx: 1
   max_retries_conn: 1
   total_budget_seconds: 300       # Wall-clock budget across the whole run
+  max_concurrent_calls: 10        # In-flight LLM calls (range [1, 100]); 1 = v0.1 sequential
   min_pass_rate: 0.7              # Aggregate threshold: fraction of passed criteria
   min_mean_score: 0.5             # Aggregate threshold: mean score across criteria
   fail_on_below_threshold: false  # opt-in hard-fail; default report-only
@@ -162,7 +163,8 @@ Field-by-field:
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
 - **`max_output_tokens`** — Per-criterion judge response cap. Default `256`. The expected JSON response is ~150 tokens; 256 gives 2× safety. Independent of `DraftConfig.max_output_tokens`.
 - **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised, provider-neutral `signalforge.llm.call_llm` seam (#5 DEC-012; #135 DEC-005). Defaults `3 / 1 / 1` mirror `DraftConfig`; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.
-- **`total_budget_seconds`** — Whole-run wall-clock budget. Default `300` (5 minutes — ~3× safety on 60 calls × 1s p50). Mirrors `PruneConfig.total_budget_seconds` semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped. **Crucially** the LLM-layer retry budget does NOT count against this — `total_budget_seconds` is a top-of-loop wall-clock check; an in-flight call is allowed to complete before the next iteration's check fires.
+- **`total_budget_seconds`** — Whole-run wall-clock budget. Default `300` (5 minutes — historically ~3× safety on 60 sequential calls × 1s p50; ~10× headroom under concurrent dispatch). Mirrors `PruneConfig.total_budget_seconds` semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped. Under the asyncio orchestrator (issue #186) the budget is enforced via `asyncio.timeout(...)` wrapping the `TaskGroup`; on trip, un-completed pairs are filled in by a synthesis pass with `reasoning="grade budget exceeded ({N}s) before evaluation"`. Tests inject deterministic timing via the module-level `_async_sleep` alias (mirrors the `_sleep` injection pattern from `llm-drafter.md` DEC-004).
+- **`max_concurrent_calls`** — Number of in-flight `(artifact × criterion)` LLM calls allowed concurrently (issue #186). Default `10` matches the typical Anthropic-tier throughput sweet-spot; bounded `[1, 100]` with `@field_validator` rejecting `< 1` or `> 100` at config-load. Setting `1` yields v0.1 sequential behaviour bit-for-bit (semaphore-of-1 serialises in dispatch order, preserving `(criterion, artifact)` JSONL ordering). Under concurrent dispatch the audit JSONL lands in **arrival order** (`audit_schema_version` unchanged at `Literal[1]`); the `tests/grade/_helpers.py::_sort_grade_events(lines)` helper restores deterministic ordering for tests that snapshot the file. CLI does not expose a `--max-concurrent-calls` flag (mirrors `min_pass_rate` / `min_mean_score` config-file-only convention).
 - **`min_pass_rate`** — Floor on the fraction of `(artefact, criterion)` pairs that scored `passed=True` for the rubric to count as passed overall. Default `0.7`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_pass_rate`.
 - **`min_mean_score`** — Floor on the mean numeric score across non-null verdicts. Default `0.5`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_mean_score`.
 - **`fail_on_below_threshold`** — Hard-fail switch for the aggregate threshold check. Default `false` — v0.1 ships report-only posture by default. When `true`, `grade_artifacts(...)` raises `GradeBelowThresholdError` once the aggregate `GradingReport.passed` is `False` (`pass_rate < min_pass_rate` and/or `mean_score < min_mean_score`). The raise lands AFTER the sidecar JSON is durably persisted so the operator has a complete `grade.json` for diagnosis. See [Threshold-fail behaviour](#threshold-fail-behaviour) below for the full ordering invariant. Graduated from v0.2 reservation to v0.1 wiring in #9 (US-002).
@@ -231,6 +233,31 @@ except GradeBelowThresholdError as exc:
 The CLI (#9) wires the raise into its `INPUT` exit-code tier (exit 2);
 see [`docs/cli-ops.md`](cli-ops.md) for the full exit-code table once
 US-009 lands.
+
+## Concurrency (asyncio orchestrator)
+
+Issue #186 graduated the grade layer from sequential per-`(artifact × criterion)` LLM calls to an `asyncio.TaskGroup`-orchestrated concurrent dispatch with a configurable cap. Default `max_concurrent_calls = 10` cuts grade wall-clock from ~280 s sequential to ~30 s concurrent on a **typical ~280-pair model** (~70 artifacts × 4 default criteria) — measured ~9× speedup, close to the Amdahl ceiling at concurrency=10 (the small synchronous prefix + per-call tail latencies leave a few seconds of irreducible serial work). Operators tune via `signalforge.yml`; setting `1` reverts to v0.1 sequential behaviour bit-for-bit.
+
+The public `grade_artifacts(...)` signature is unchanged — sync prefix → `asyncio.run(_grade_artifacts_async_core(...))` → sync suffix. From the caller's perspective the grade layer still looks synchronous; the concurrency lives entirely inside.
+
+### Typed errors at orchestrator entry
+
+Two pre-flight guards run BEFORE `asyncio.run`, both fail loud:
+
+- **`GradeNestedEventLoopError`** (CLI tier 1) raises if `grade_artifacts(...)` is called from within a running event loop. The v0.3 grader is single-event-loop only — wrapping in an outer event loop (e.g. for cross-model batch parallelism) is a v0.4 follow-up. Remediation: `"v0.3 grade_artifacts is single-event-loop only. Call before entering an event loop, or wait for v0.4 async sibling."`
+- **`LLMProviderAsyncUnsupportedError`** (CLI tier 3) raises if the configured provider's `supports_async` is `False`, **regardless of `max_concurrent_calls`** (the grade engine consumes `call_llm_async` exclusively post-#186, so cap=1 is NOT an escape hatch — every per-pair call would degrade to `GradeLLMError` silently). All three v0.3 providers (Anthropic, OpenAI, Gemini) set `supports_async = True`; this guard exists for v0.4+ providers that may ship sync-only. Remediation: `"Pick an async-capable provider for grading (Anthropic / OpenAI / Gemini all support async)."` — fail loud rather than silent-clamp (mirrors the project's `extra="forbid"` posture).
+
+### Cost expectations under concurrency
+
+Anthropic prompt caching pays the cache-write premium on the first call and the read discount on subsequent calls. Under concurrent dispatch, calls 1..N start *before* any response returns, so each of the first `max_concurrent_calls` calls pays the write premium (~1.25× input cost on the cached rubric block) instead of the read discount (~0.10×). For the default cap of 10 and the ~445-token rubric block, that's ~4 450 extra input-token-equivalents per model run — absolute cost ~$0.003–$0.005 per typical model. Operators cost-sensitive enough to care can set `grade.max_concurrent_calls: 1` to recover the v0.1 cost profile (trading off ~9× wall-clock reduction). OpenAI and Gemini do not support prompt caching, so concurrent dispatch carries no additional cost penalty on those providers.
+
+### Concurrent-append atomicity assumption
+
+The fail-closed audit writer (`write_grade_event`) caps individual JSONL records at `_GRADE_AUDIT_RECORD_LIMIT_BYTES = 4000`. POSIX guarantees that an `O_APPEND` `write(2)` syscall **atomically seeks to end-of-file and writes** — concurrent appenders never overwrite each other's bytes within a single syscall. **Caveat:** unlike the well-known `PIPE_BUF` guarantee (which applies strictly to pipes/FIFOs, not regular files), POSIX does NOT specify a per-write atomic-byte ceiling for regular-file writes. In practice on Linux, the kernel writes a small buffer (≤ 4 000 bytes ≪ typical page size) in one syscall — but the `write()` syscall is permitted to return short, and our short-write loop (`while written < len(encoded): n = os.write(fd, encoded[written:])`) handles that by issuing additional `write()` calls. If a short write occurs mid-record, a concurrent appender's record can interleave between the two writes. The probability is low for small (< 4 KiB) records on Linux's ext4 / btrfs / xfs, but it is not zero. SignalForge's CI matrix is Linux-only; users who need stricter byte-level atomicity guarantees (and the macOS/BSD users where the same caveat applies) should set `max_concurrent_calls: 1` (which serialises writes by construction).
+
+### JSONL arrival ordering
+
+Under concurrent dispatch, `.signalforge/grade.jsonl` lands in **arrival order**, not the `(criterion, artifact)` iteration order from the sequential path. The record shape is unchanged (`audit_schema_version` still `Literal[1]`); external sidecar consumers that need stable order should sort by `(artifact_id, criterion_id)` post-load (the SignalForge test suite uses `tests/grade/_helpers.py::_sort_grade_events(...)` for the same purpose). Setting `max_concurrent_calls: 1` preserves v0.1 ordering for byte-identity workflows.
 
 ## Decision matrix
 

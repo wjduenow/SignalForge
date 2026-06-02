@@ -62,6 +62,7 @@ Design commitments operationalised here (``plans/super/7-quality-grader.md``):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -70,6 +71,7 @@ import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import signalforge as _sf
 from signalforge._common.artifact_id import (
@@ -102,6 +104,7 @@ from signalforge.grade.errors import (
     GradeBelowThresholdError,
     GradeError,
     GradeLLMError,
+    GradeNestedEventLoopError,
     GradeOutputError,
     GradePromptEnvelopeBreachError,
 )
@@ -122,8 +125,13 @@ from signalforge.grade.rubric import (
     validate_rubric,
 )
 from signalforge.llm import AnthropicClientProtocol
-from signalforge.llm.client import call_llm
-from signalforge.llm.errors import LLMError, LLMResponseFormatError
+from signalforge.llm.client import call_llm_async
+from signalforge.llm.errors import (
+    LLMError,
+    LLMProviderAsyncUnsupportedError,
+    LLMResponseFormatError,
+)
+from signalforge.llm.providers import provider_for
 from signalforge.manifest.models import Model
 from signalforge.prune.models import PruneResult
 
@@ -136,6 +144,14 @@ _LOGGER = logging.getLogger(__name__)
 # that monkey-patch a slow stand-in to exercise budget paths, and for a
 # possible v0.2 inter-call pacing knob.
 _sleep = time.sleep
+
+# Async sibling alias (issue #186, US-009 / DEC-011). Mirrors
+# :data:`signalforge.llm.client._async_sleep`. Tests reassign this to a
+# fast-forwarding stand-in to drive the budget-cancellation path under
+# :func:`asyncio.timeout`. The orchestrator does NOT call ``_async_sleep``
+# on the happy path either; the alias is reserved for tests AND for
+# possible v0.2 inter-call pacing on the async core.
+_async_sleep = asyncio.sleep
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +284,42 @@ def _hash_response_text(response_text: str) -> str:
     return hashlib.blake2b(response_text.encode("utf-8"), digest_size=8).hexdigest()
 
 
-def _grade_one(
+def _resolve_async_client(client: AnthropicClientProtocol | None) -> object | None:
+    """Translate a test-injected sync-shaped client to its async surface.
+
+    The public :func:`grade_artifacts` signature accepts ``client:
+    AnthropicClientProtocol | None`` for back-compat — every existing
+    test passes a :class:`FakeAnthropicClient` (sync) and the production
+    contract pre-#186 only knew sync clients. The async refactor (US-009)
+    routes through :func:`signalforge.llm.client.call_llm_async`, which
+    expects an **async-shaped client** (its ``messages.create`` must be
+    awaitable).
+
+    The fakes from US-007 expose both surfaces on the same instance:
+    ``client.messages`` is sync; ``client.aio.messages`` is async; both
+    drain the same expectation queue (DEC-012 of #186). Tests therefore
+    pass the sync FakeAnthropicClient via ``client=fake`` and expect the
+    engine to route to ``fake.aio`` under the hood. Production callers
+    pass ``client=None`` and let :func:`call_llm_async` construct via
+    ``provider.make_async_client()``.
+
+    The detection is duck-typed on ``client.aio.messages``: a real
+    ``anthropic.Anthropic`` does NOT have ``.aio``, but it also never
+    flows through here because production callers don't inject a client.
+    A future async-shaped client passed directly is detected as
+    "already async" (no ``.aio`` namespace) and forwarded as-is.
+    """
+    if client is None:
+        return None
+    aio = getattr(client, "aio", None)
+    if aio is None:
+        # Already an async-shaped client (or a fake whose top-level
+        # ``messages`` is already async). Forward as-is.
+        return client
+    return aio
+
+
+async def _grade_one_async(
     *,
     artifact_id: str,
     artifact_text: str,
@@ -278,22 +329,25 @@ def _grade_one(
     rubric_hash: str,
     template_hash: str,
     crit_hash: str,
-    client: AnthropicClientProtocol | None,
+    client: object | None,
     run_id: str,
     timestamp: datetime,
     model_unique_id: str,
 ) -> tuple[GradingResult, GradeEvent]:
-    """Issue one ``(artifact, criterion)`` LLM-judge call.
+    """Issue one ``(artifact, criterion)`` LLM-judge call (async).
 
-    Returns ``(result, event)`` on the happy path. On
-    :class:`GradePromptEnvelopeBreachError` propagation lands here ONLY
-    if the whole-run pre-flight scan was bypassed (e.g., a future
-    caller used :func:`_grade_one` directly without
-    :func:`grade_artifacts`); the orchestrator's normal flow has
-    already checked. ``GradePromptEnvelopeBreachError`` /
-    :class:`LLMError` / :class:`GradeOutputError` propagate to the
-    caller — :func:`grade_artifacts` converts them into degraded
+    Async sibling of :func:`_grade_one` (issue #186, US-009 / DEC-004).
+    The body is byte-equivalent except for ``await call_llm_async(...)``
+    instead of ``call_llm(...)``.
+
+    Returns ``(result, event)`` on the happy path.
+    ``GradePromptEnvelopeBreachError`` / :class:`LLMError` /
+    :class:`GradeOutputError` propagate to the caller —
+    :func:`_grade_artifacts_async_core` converts them into degraded
     results.
+
+    The ``client`` parameter is the **already-translated** async client
+    surface (see :func:`_resolve_async_client`).
     """
     # 1. Render the per-pair dynamic block. Raises
     #    GradePromptEnvelopeBreachError if the payload contains
@@ -303,7 +357,7 @@ def _grade_one(
     # 2. Issue the LLM call. Wrap LLMError -> GradeLLMError once at
     #    the seam (DEC-015 of #5 mirror: one-level adapter).
     try:
-        result = call_llm(
+        result = await call_llm_async(
             system=_SYSTEM_PROMPT,
             cached_block=rubric_block,
             dynamic_block=dynamic_block,
@@ -464,6 +518,289 @@ def _write_event_or_abort(event: GradeEvent, *, audit_path: Path) -> None:
             "Failed to durably persist a grade-decision audit record.",
             cause=exc,
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Async core (issue #186, US-009 — TaskGroup + Semaphore + budget timeout)
+# ---------------------------------------------------------------------------
+
+
+async def _grade_artifacts_async_core(
+    *,
+    candidate: CandidateSchema,
+    resolved_rubric: Rubric,
+    resolved_config: GradeConfig,
+    resolved_audit_path: Path,
+    client: object | None,
+    run_id: str,
+    rubric_hash: str,
+    template_hash: str,
+    rubric_block: str,
+    crit_hash_by_id: dict[str, str],
+    model_unique_id: str,
+) -> list[GradingResult]:
+    """Concurrent dispatch of every ``(criterion, artifact)`` pair (DEC-002).
+
+    Replaces the sequential ``while iter_index < len(iterator)`` loop
+    from the v0.1 ``grade_artifacts``. Orchestrates concurrent dispatch
+    via :class:`asyncio.TaskGroup` throttled by an
+    :class:`asyncio.Semaphore(max_concurrent_calls)`, bounded by
+    :func:`asyncio.timeout(total_budget_seconds)`. Each pair runs as a
+    coroutine; per-coroutine ``try/except`` isolates LLM-layer failures
+    so one bad pair doesn't abort siblings (DEC-004 retry isolation).
+
+    Cancellation attribution (DEC-008): when the budget trips, the
+    enclosing ``asyncio.timeout`` cancels every in-flight task. Each
+    coroutine catches :class:`asyncio.CancelledError` and consults the
+    orchestrator-scope ``_budget_exceeded`` flag — if set, the pair
+    degrades with the locked ``"grade budget exceeded ({N}s) before
+    evaluation"`` reasoning (preserves the existing audit-corpus shape
+    from v0.1); if unset, the cancellation is re-raised so an unrelated
+    parent-task death (``KeyboardInterrupt``, ``SystemExit``) propagates
+    intact to the CLI boundary.
+
+    Audit writes happen inside each coroutine via
+    ``await loop.run_in_executor(None, _write_event_or_abort, ...)``
+    (DEC-017): ``os.fsync`` still serialises at the OS level (no
+    wall-time win), but the event loop is free to schedule the next
+    coroutine's prompt-build during the fsync.
+
+    Returns the list of per-pair :class:`GradingResult`s in **iteration
+    order** (NOT arrival order) — caller-visible result ordering is
+    preserved across the refactor by storing each task's result at the
+    iterator-index slot. On-disk JSONL ordering becomes arrival-order
+    (per DEC-015); this is the deliberate concurrent-dispatch trade.
+    """
+    # Resolve the async-shaped client surface (US-009 docstring on
+    # :func:`_resolve_async_client`). Production callers pass
+    # ``client=None``; ``call_llm_async`` builds via
+    # ``provider.make_async_client()``. Tests pass a sync
+    # FakeAnthropicClient whose ``.aio`` namespace carries the async
+    # surface; we translate once here so the per-coroutine forwarding
+    # is a no-op.
+    async_client = _resolve_async_client(cast(AnthropicClientProtocol | None, client))
+
+    pairs = list(_iterate_artifacts(candidate, resolved_rubric))
+    total_pairs = len(pairs)
+    # Results land at their iterator-index slot so caller-visible
+    # ``report.results`` stays in (criterion-outer, artifact-inner)
+    # order even though tasks complete in arrival order on disk.
+    results_by_index: list[GradingResult | None] = [None] * total_pairs
+
+    semaphore = asyncio.Semaphore(resolved_config.max_concurrent_calls)
+    # ``_budget_exceeded`` is the orchestrator-scope flag the per-task
+    # ``except CancelledError`` arm reads (DEC-008). Closure capture
+    # via a list mutable cell so the flag survives across nested
+    # coroutines without resorting to ``nonlocal`` from a sibling.
+    budget_state: dict[str, bool] = {"exceeded": False}
+
+    # Per-pair category counters; populated as tasks finish.
+    # ``completed`` covers both happy-path scores AND LLM-layer per-pair
+    # degrades (DEC-015) — anything that ran to completion inside the
+    # coroutine, regardless of verdict. ``degraded`` is the synthesis-pass
+    # count of pairs that did NOT complete by budget-trip (whether they
+    # were in-flight or never started — the asyncio cancellation contract
+    # doesn't let us distinguish, per #186 QG Pass 1+3 triangulation).
+    counters: dict[str, int] = {
+        "completed": 0,  # scored (or LLM-layer-degraded — non-budget)
+        "degraded": 0,  # synthesis pass: un-completed at trip time → budget degrade
+    }
+
+    total_budget_seconds = resolved_config.total_budget_seconds
+
+    async def _one(index: int, artifact_id: str, artifact_text: str, criterion: Criterion) -> None:
+        async with semaphore:
+            # Each call gets its own ``timestamp`` so a forensic query
+            # can distinguish per-call latency. The sidecar carries
+            # ``started_at`` separately.
+            crit_hash = crit_hash_by_id[criterion.id]
+            per_call_ts = datetime.now(UTC)
+            try:
+                grading_result, event = await _grade_one_async(
+                    artifact_id=artifact_id,
+                    artifact_text=artifact_text,
+                    criterion=criterion,
+                    config=resolved_config,
+                    rubric_block=rubric_block,
+                    rubric_hash=rubric_hash,
+                    template_hash=template_hash,
+                    crit_hash=crit_hash,
+                    client=async_client,
+                    run_id=run_id,
+                    timestamp=per_call_ts,
+                    model_unique_id=model_unique_id,
+                )
+            except (
+                GradeLLMError,
+                GradeOutputError,
+                GradePromptEnvelopeBreachError,
+            ) as exc:
+                # Per-pair degrade — DEC-015. Do NOT let one
+                # criterion's failure abort the whole run.
+                grading_result, event = _build_degraded(
+                    artifact_id=artifact_id,
+                    criterion=criterion,
+                    reasoning=_format_degrade_reasoning(exc),
+                    config=resolved_config,
+                    rubric_hash=rubric_hash,
+                    template_hash=template_hash,
+                    crit_hash=crit_hash,
+                    run_id=run_id,
+                    timestamp=per_call_ts,
+                    model_unique_id=model_unique_id,
+                )
+            # NOTE: deliberately NO ``except asyncio.CancelledError`` arm
+            # here. Pre-#186-QG the orchestrator's ``budget_state["exceeded"]``
+            # flag was set in ``except TimeoutError`` AFTER ``TaskGroup``'s
+            # ``__aexit__`` returned — but cancelled children's
+            # ``except CancelledError`` runs BEFORE that, so the flag was
+            # always ``False`` when checked here. The branch was dead code
+            # (QG Pass 1+3 triangulated). The synthesis pass below is now
+            # the single source of truth for "this pair was un-completed
+            # at trip time" — accurate by construction.
+
+            # In-memory slot assignment FIRST. Under the worst-case
+            # cancellation timing (timeout fires while the
+            # ``run_in_executor`` audit await is suspended), the executor
+            # thread keeps running and durably writes the audit record;
+            # without setting the slot first the coroutine raises
+            # ``CancelledError`` before line 691 runs, leaving the slot
+            # ``None`` — and the synthesis pass then writes a SECOND audit
+            # record for the same pair (QG Pass 1 BLOCKER). Setting the
+            # slot before the await closes the race: even if the await
+            # raises, the in-memory state is consistent with disk.
+            results_by_index[index] = grading_result
+            counters["completed"] += 1
+
+            # Audit-write per pair (DEC-006 fail-closed; DEC-017
+            # executor-wrap so the fsync doesn't block the loop). On
+            # GradeAuditRecordTooLargeError / GradeAuditWriteError we
+            # propagate; the run aborts.
+            #
+            # ``asyncio.shield`` ensures the audit-write completes even
+            # when the outer task is cancelled — the executor work is
+            # sync (cannot be killed mid-fsync); shielding lets it finish
+            # before the cancellation propagates back. The slot was set
+            # above so the synthesis pass will correctly skip this index.
+            #
+            # PR #190 review (CodeRabbit) refinement: capture the
+            # executor future explicitly so a cancellation arriving
+            # mid-shield doesn't silently swallow a downstream
+            # ``GradeAuditWriteError`` / ``GradeAuditRecordTooLargeError``.
+            # If the outer ``shield`` await raises ``CancelledError``,
+            # await the future directly so the writer's exception (if
+            # any) propagates to the TaskGroup as the run's abort signal
+            # — preserves the fail-closed contract under concurrent
+            # cancellation. On the happy path this is a no-op
+            # (``audit_future.done()`` is already True when the shield
+            # returns).
+            loop = asyncio.get_running_loop()
+            audit_future = loop.run_in_executor(
+                None, _write_event_or_abort_kw, event, resolved_audit_path
+            )
+            try:
+                await asyncio.shield(audit_future)
+            except asyncio.CancelledError:
+                await audit_future
+                raise
+
+    try:
+        async with asyncio.timeout(total_budget_seconds):
+            async with asyncio.TaskGroup() as tg:
+                for index, (artifact_id, artifact_text, criterion) in enumerate(pairs):
+                    tg.create_task(_one(index, artifact_id, artifact_text, criterion))
+    except TimeoutError:
+        # The timeout fired. Tasks not yet completed at this point
+        # received CancelledError and routed through the budget-degrade
+        # branch above (which populated ``results_by_index`` and bumped
+        # ``counters["cancelled"]``). The TaskGroup's __aexit__ awaited
+        # every cancelled task to finish before re-raising, so by the
+        # time we land here every slot is populated UNLESS the task
+        # body had not yet entered (``async with semaphore`` was still
+        # pending) — in that case the slot is still ``None`` and we
+        # synthesise a degraded result below.
+        budget_state["exceeded"] = True
+    except BaseExceptionGroup as group:
+        # DEC-007 defence in depth — every per-coroutine grade-typed
+        # exception is caught inside the coroutine, so a
+        # ``BaseExceptionGroup`` here means a fail-closed audit-write
+        # error (``GradeAuditRecordTooLargeError`` /
+        # ``GradeAuditWriteError``) — or, more rarely, a non-grade
+        # exception slipping through. The audit error MUST abort the
+        # run AS THE ORIGINAL ERROR TYPE so the CLI / library callers
+        # can pattern-match on the typed exception they already know
+        # (mirrors the v0.1 sequential-loop ``raise`` semantics — the
+        # only fail-closed boundary in the engine). Unwrap a single
+        # representative exception via ``group.exceptions[0]`` (the
+        # canonical pattern for re-raising-after-TaskGroup).
+        # Multi-exception ExceptionGroups bubble unchanged to US-010's
+        # CLI-level renderer.
+        if len(group.exceptions) == 1:
+            raise group.exceptions[0] from group
+        raise
+
+    # Fill any un-started slots with the budget-degrade shape. A slot is
+    # ``None`` iff the task was cancelled BEFORE its body executed
+    # (i.e. while it was still awaiting the semaphore). Mirrors the v0.1
+    # "iter_index past the trip" semantics.
+    for index, (artifact_id, _artifact_text, criterion) in enumerate(pairs):
+        if results_by_index[index] is not None:
+            continue
+        crit_hash = crit_hash_by_id[criterion.id]
+        per_call_ts = datetime.now(UTC)
+        grading_result, event = _build_degraded(
+            artifact_id=artifact_id,
+            criterion=criterion,
+            reasoning=(f"grade budget exceeded ({total_budget_seconds}s) before evaluation"),
+            config=resolved_config,
+            rubric_hash=rubric_hash,
+            template_hash=template_hash,
+            crit_hash=crit_hash,
+            run_id=run_id,
+            timestamp=per_call_ts,
+            model_unique_id=model_unique_id,
+        )
+        _write_event_or_abort_kw(event, resolved_audit_path)
+        results_by_index[index] = grading_result
+        counters["degraded"] += 1
+
+    # Emit ONE WARNING on budget trip, field set locked per DEC-018.
+    # NB: ``cancelled_count`` was dropped in #186 QG (Pass 1 + Pass 3
+    # triangulation) — the asyncio cancellation contract doesn't let
+    # the engine distinguish "in-flight at trip" from "un-started at
+    # trip", so the field was always 0 in practice and ``degraded_count``
+    # carries everything-not-completed. The simpler invariant
+    # ``completed_count + degraded_count == total_pairs`` holds.
+    if budget_state["exceeded"]:
+        _LOGGER.warning(
+            "grade budget exceeded: %s",
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "model_unique_id": model_unique_id,
+                    "completed_count": counters["completed"],
+                    "degraded_count": counters["degraded"],
+                    "total_budget_seconds": total_budget_seconds,
+                }
+            ),
+        )
+
+    # By construction every slot is populated; the type-narrowing cast
+    # is safe.
+    return [cast(GradingResult, r) for r in results_by_index]
+
+
+def _write_event_or_abort_kw(event: GradeEvent, audit_path: Path) -> None:
+    """Positional-arg shim so ``loop.run_in_executor`` can call the
+    keyword-only writer.
+
+    :func:`_write_event_or_abort` declares ``audit_path`` keyword-only
+    for symmetry with :func:`signalforge.grade.audit.write_grade_event`,
+    but :meth:`asyncio.AbstractEventLoop.run_in_executor` cannot bind
+    keyword arguments. The shim closes the impedance mismatch in one
+    line; no behavioural divergence.
+    """
+    _write_event_or_abort(event, audit_path=audit_path)
 
 
 # ---------------------------------------------------------------------------
@@ -649,6 +986,41 @@ def grade_artifacts(
     # 3. Whole-run pre-flight envelope-breach scan (DEC-013).
     _scan_envelope_breach(candidate)
 
+    # 3a. Async-pre-flight guards (issue #186, DEC-006 / DEC-009). These
+    #     fire BEFORE the iterator is materialised and BEFORE any future
+    #     ``asyncio.run(...)`` call lands (US-009 wires the async core).
+    #     They reject two operator-environment misconfigurations:
+    #       1. Nested event loop — calling ``grade_artifacts`` from
+    #          inside an already-running asyncio loop would cause the
+    #          forthcoming ``asyncio.run`` to raise ``RuntimeError``;
+    #          we surface a typed ``GradeNestedEventLoopError`` (CLI
+    #          tier 1) with a remediation pointing at the v0.4 follow-up.
+    #       2. Sync-only provider — when the configured provider has
+    #          ``supports_async=False`` we raise the typed
+    #          ``LLMProviderAsyncUnsupportedError`` (CLI tier 3) regardless
+    #          of ``max_concurrent_calls``. The async sibling
+    #          ``call_llm_async`` is the only LLM seam the engine consumes
+    #          post-#186, so even ``max_concurrent_calls=1`` would fail
+    #          per-pair with ``GradeLLMError`` and silently degrade every
+    #          pair (QG Pass 1 Concern #2: ``cap=1`` is NOT an escape hatch
+    #          on a sync-only provider — there's no path forward without
+    #          async). Fail loud at entry. Mirrors the project's
+    #          ``extra="forbid"`` posture.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise GradeNestedEventLoopError(model_unique_id=model.unique_id)
+
+    provider_strategy = provider_for(resolved_config.provider)
+    if not provider_strategy.supports_async:
+        raise LLMProviderAsyncUnsupportedError(
+            f"Provider {resolved_config.provider!r} does not support async dispatch, "
+            f"required by the grade engine since #186. "
+            f"Pick an async-capable provider for grading."
+        )
+
     # 4. Run-wide derived values.
     run_id = uuid.uuid4().hex
     started_at = datetime.now(UTC)
@@ -657,93 +1029,31 @@ def grade_artifacts(
     rubric_block = render_rubric_block(resolved_rubric)
     crit_hash_by_id: dict[str, str] = {c.id: criterion_prompt_hash(c) for c in resolved_rubric}
 
-    # 5. Iterate ``(criterion, artifact)`` pairs.
+    # 5. Iterate ``(criterion, artifact)`` pairs via the async core
+    #    (issue #186, US-009 / DEC-002 + DEC-004). The async core wraps
+    #    a ``TaskGroup`` in ``asyncio.timeout(total_budget_seconds)``
+    #    and dispatches up to ``max_concurrent_calls`` coroutines via a
+    #    ``Semaphore``. Per-coroutine ``try/except`` handles LLM-layer
+    #    failures and budget-cancellation; the public sync entry-point
+    #    is preserved by wrapping in ``asyncio.run(...)``. The
+    #    nested-event-loop guard (3a above) ensured this ``asyncio.run``
+    #    call is safe.
     start_monotonic = time.monotonic()
-    total_budget_seconds = resolved_config.total_budget_seconds
-
-    iterator = list(_iterate_artifacts(candidate, resolved_rubric))
-    results: list[GradingResult] = []
-    budget_exhausted = False
-    iter_index = 0
-    while iter_index < len(iterator):
-        artifact_id, artifact_text, criterion = iterator[iter_index]
-
-        if not budget_exhausted and (time.monotonic() - start_monotonic) >= total_budget_seconds:
-            budget_exhausted = True
-            _LOGGER.warning(
-                "grade budget exceeded: %s",
-                json.dumps(
-                    {
-                        "run_id": run_id,
-                        "model_unique_id": model.unique_id,
-                        "evaluated": len(results),
-                        "remaining_pairs": len(iterator) - iter_index,
-                        "total_budget_seconds": total_budget_seconds,
-                    }
-                ),
-            )
-
-        crit_hash = crit_hash_by_id[criterion.id]
-        # Each call gets its own ``timestamp`` so a forensic query can
-        # distinguish per-call latency. The sidecar carries
-        # ``started_at`` separately.
-        per_call_ts = datetime.now(UTC)
-
-        if budget_exhausted:
-            grading_result, event = _build_degraded(
-                artifact_id=artifact_id,
-                criterion=criterion,
-                reasoning=(f"grade budget exceeded ({total_budget_seconds}s) before evaluation"),
-                config=resolved_config,
-                rubric_hash=rubric_hash,
-                template_hash=template_hash,
-                crit_hash=crit_hash,
-                run_id=run_id,
-                timestamp=per_call_ts,
-                model_unique_id=model.unique_id,
-            )
-        else:
-            try:
-                grading_result, event = _grade_one(
-                    artifact_id=artifact_id,
-                    artifact_text=artifact_text,
-                    criterion=criterion,
-                    config=resolved_config,
-                    rubric_block=rubric_block,
-                    rubric_hash=rubric_hash,
-                    template_hash=template_hash,
-                    crit_hash=crit_hash,
-                    client=client,
-                    run_id=run_id,
-                    timestamp=per_call_ts,
-                    model_unique_id=model.unique_id,
-                )
-            except (
-                GradeLLMError,
-                GradeOutputError,
-                GradePromptEnvelopeBreachError,
-            ) as exc:
-                # Per-pair degrade — DEC-015. Do NOT let one
-                # criterion's failure abort the whole run.
-                grading_result, event = _build_degraded(
-                    artifact_id=artifact_id,
-                    criterion=criterion,
-                    reasoning=_format_degrade_reasoning(exc),
-                    config=resolved_config,
-                    rubric_hash=rubric_hash,
-                    template_hash=template_hash,
-                    crit_hash=crit_hash,
-                    run_id=run_id,
-                    timestamp=per_call_ts,
-                    model_unique_id=model.unique_id,
-                )
-
-        # Audit-write per pair (DEC-006 fail-closed). On
-        # GradeAuditRecordTooLargeError / GradeAuditWriteError we
-        # propagate; the run aborts.
-        _write_event_or_abort(event, audit_path=resolved_audit_path)
-        results.append(grading_result)
-        iter_index += 1
+    results = asyncio.run(
+        _grade_artifacts_async_core(
+            candidate=candidate,
+            resolved_rubric=resolved_rubric,
+            resolved_config=resolved_config,
+            resolved_audit_path=resolved_audit_path,
+            client=client,
+            run_id=run_id,
+            rubric_hash=rubric_hash,
+            template_hash=template_hash,
+            rubric_block=rubric_block,
+            crit_hash_by_id=crit_hash_by_id,
+            model_unique_id=model.unique_id,
+        )
+    )
 
     # 6. Build the aggregate :class:`GradingReport` and write sidecar.
     elapsed_seconds = time.monotonic() - start_monotonic

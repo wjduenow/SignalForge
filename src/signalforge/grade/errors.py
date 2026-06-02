@@ -375,6 +375,39 @@ class GradeAuditRecordTooLargeError(GradeError):
         super().__init__(message, remediation=remediation)
 
 
+class GradeNestedEventLoopError(GradeError):
+    """:func:`signalforge.grade.grade_artifacts` was invoked from inside a
+    running :mod:`asyncio` event loop.
+
+    Issue #186 DEC-009. The grade orchestrator's async core is dispatched
+    via :func:`asyncio.run` from the sync public entry point; that call
+    raises :exc:`RuntimeError` ("``asyncio.run()`` cannot be called from
+    a running event loop") when invoked re-entrantly from inside another
+    loop (e.g. a v0.4 cross-model batch parallelism wrapper). The grade
+    engine detects the running loop via
+    :func:`asyncio.get_running_loop` BEFORE the ``asyncio.run`` call and
+    raises this typed error so the operator sees a remediation-bearing
+    failure instead of a bare ``RuntimeError`` from the asyncio stdlib.
+
+    Mapped to CLI tier 1 (operator-configuration / environment problem;
+    same tier as :class:`signalforge.manifest.ManifestNotFoundError`):
+    the call site is wrong, not the warehouse or the LLM.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "v0.3 grade_artifacts is single-event-loop only. Call before entering an "
+        "event loop, or wait for v0.4 async sibling."
+    )
+
+    def __init__(self, model_unique_id: str, *, remediation: str | None = None) -> None:
+        self.model_unique_id = model_unique_id
+        message = (
+            f"grade_artifacts({_format_value(model_unique_id)}) was invoked from "
+            "inside a running asyncio event loop; refusing to nest asyncio.run()."
+        )
+        super().__init__(message, remediation=remediation)
+
+
 class GradeBelowThresholdError(GradeError):
     """The :class:`signalforge.grade.GradingReport` aggregate verdict
     fell below the configured ``min_pass_rate`` and/or ``min_mean_score``
@@ -459,6 +492,7 @@ __all__ = [
     "GradeConfigError",
     "GradeError",
     "GradeLLMError",
+    "GradeNestedEventLoopError",
     "GradeOutputError",
     "GradeOutputViolationType",
     "GradePromptEnvelopeBreachError",

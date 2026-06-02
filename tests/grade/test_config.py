@@ -194,6 +194,7 @@ def test_grade_config_defaults_match_dec_023_to_027() -> None:
     assert cfg.max_retries_5xx == 1
     assert cfg.max_retries_conn == 1
     assert cfg.total_budget_seconds == 300
+    assert cfg.max_concurrent_calls == 10
     assert cfg.min_pass_rate == 0.7
     assert cfg.min_mean_score == 0.5
     assert cfg.rubric is None
@@ -515,3 +516,75 @@ def test_load_grade_config_full_well_formed_block(tmp_path: Path) -> None:
     assert cfg.min_mean_score == 0.6
     assert cfg.fail_on_below_threshold is True
     assert cfg.rubric is None
+
+
+# ----- max_concurrent_calls range validator (issue #186 DEC-003) -----
+
+
+def test_grade_config_max_concurrent_calls_default_is_ten() -> None:
+    """Default ``max_concurrent_calls`` matches DEC-003 of #186."""
+    assert GradeConfig().max_concurrent_calls == 10
+
+
+def test_grade_config_max_concurrent_calls_field_range_lower_bound_accepted() -> None:
+    """``max_concurrent_calls=1`` is the v0.1-sequential-equivalent
+    floor and must validate."""
+    cfg = GradeConfig(max_concurrent_calls=1)
+    assert cfg.max_concurrent_calls == 1
+
+
+def test_grade_config_max_concurrent_calls_field_range_upper_bound_accepted() -> None:
+    """``max_concurrent_calls=100`` is the documented ceiling and must
+    validate (closed interval [1, 100])."""
+    cfg = GradeConfig(max_concurrent_calls=100)
+    assert cfg.max_concurrent_calls == 100
+
+
+def test_grade_config_max_concurrent_calls_zero_rejected() -> None:
+    """``max_concurrent_calls=0`` would dispatch nothing (semaphore
+    acquire deadlock); reject loud."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as excinfo:
+        GradeConfig(max_concurrent_calls=0)
+    # The message is locked verbatim by DEC-003 of #186.
+    assert "must be in the closed interval [1, 100]" in str(excinfo.value)
+
+
+def test_grade_config_max_concurrent_calls_above_ceiling_rejected() -> None:
+    """``max_concurrent_calls=101`` exceeds the documented ceiling and
+    must fail loud rather than silently invite rate-limit storms."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as excinfo:
+        GradeConfig(max_concurrent_calls=101)
+    assert "must be in the closed interval [1, 100]" in str(excinfo.value)
+
+
+def test_load_grade_config_max_concurrent_calls_out_of_range_wraps_as_grade_config_error(
+    tmp_path: Path,
+) -> None:
+    """Out-of-range values supplied via ``signalforge.yml`` route through
+    :func:`load_grade_config` and wrap as :class:`GradeConfigError`
+    (the standard loader-side wrapping; mirrors every other numeric
+    validator's loader-side test)."""
+    config_path = tmp_path / "signalforge.yml"
+    config_path.write_text(
+        "grade:\n  max_concurrent_calls: 0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GradeConfigError):
+        load_grade_config(tmp_path)
+
+
+def test_load_grade_config_max_concurrent_calls_round_trips_from_yaml(
+    tmp_path: Path,
+) -> None:
+    """A valid in-range override round-trips through the loader."""
+    config_path = tmp_path / "signalforge.yml"
+    config_path.write_text(
+        "grade:\n  max_concurrent_calls: 25\n",
+        encoding="utf-8",
+    )
+    cfg = load_grade_config(tmp_path)
+    assert cfg.max_concurrent_calls == 25

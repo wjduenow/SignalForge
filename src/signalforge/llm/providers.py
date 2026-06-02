@@ -35,11 +35,14 @@ from __future__ import annotations
 
 import abc
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
 from signalforge.llm.errors import UnknownProviderError
+
+if TYPE_CHECKING:
+    from signalforge.llm.client import _LLMAsyncClientProtocol
 
 
 class ExceptionCategory(Enum):
@@ -122,12 +125,49 @@ class LLMProvider(abc.ABC):
     supports_prompt_caching: bool
     #: Whether the provider can count input tokens before sending (DEC-008).
     supports_token_count: bool
+    #: Whether the provider supports async dispatch (issue #186, US-002 / DEC-005).
+    #:
+    #: The default is ``True`` — every concrete provider that ships with v0.3
+    #: (Anthropic / OpenAI / Gemini) supports async (each vendor SDK exposes an
+    #: async client). A future provider lacking an async surface sets this to
+    #: ``False``; :func:`signalforge.grade.engine.grade_artifacts` then raises
+    #: :class:`signalforge.llm.errors.LLMProviderAsyncUnsupportedError` at
+    #: orchestrator entry, **regardless of ``grade.max_concurrent_calls``** —
+    #: the grade engine consumes ``call_llm_async`` exclusively post-#186, so
+    #: cap=1 is not an escape hatch; the operator must pick an async-capable
+    #: provider. (Tightened by QG Pass 1 Concern #2; DEC-006.)
+    supports_async: ClassVar[bool] = True
 
     @abc.abstractmethod
     def make_client(self) -> object:
         """Build and return the real vendor SDK client.
 
         Called by the orchestrator when no client was injected for test use.
+        """
+
+    @abc.abstractmethod
+    def make_async_client(self) -> _LLMAsyncClientProtocol:
+        """Build and return the real vendor SDK *async* client
+        (issue #186, US-002 / DEC-005).
+
+        Called by the async orchestrator (``call_llm_async``, US-006) when no
+        async client was injected for test use. Implementations construct the
+        vendor's async client through the per-vendor ``_<vendor>_client.py``
+        shim so the DEC-012 SDK-ignore confinement holds for the async path
+        too.
+
+        A provider that does not ship an async client surface declares
+        :attr:`supports_async` ``= False`` and may raise
+        :class:`NotImplementedError` from this method — the grade engine
+        catches the capability gap at orchestrator entry (DEC-006) via
+        :class:`signalforge.llm.errors.LLMProviderAsyncUnsupportedError` and
+        never reaches this seam.
+
+        v0.3 ships the abstract declaration only; the concrete per-vendor
+        implementations land in US-003 (Anthropic) / US-004 (OpenAI) / US-005
+        (Gemini), with each shim adding its own async client constructor + AST
+        scan extension. The v0.3 concrete providers' temporary stubs raise
+        :class:`NotImplementedError` pointing at those tickets.
         """
 
     @abc.abstractmethod
@@ -328,6 +368,7 @@ class AnthropicProvider(LLMProvider):
     name = "anthropic"
     supports_prompt_caching = True
     supports_token_count = True
+    supports_async = True
 
     #: Stop-reason values that signal a fully-emitted, untruncated response
     #: (#155 DEC-006). ``tool_use`` is deliberately UNCLEAN in v0.3 — the
@@ -341,6 +382,29 @@ class AnthropicProvider(LLMProvider):
         from signalforge.llm._anthropic_client import _make_anthropic_client
 
         return _make_anthropic_client()
+
+    def make_async_client(self) -> _LLMAsyncClientProtocol:
+        """Construct the real Anthropic async SDK client via the shim
+        (issue #186, US-003 / DEC-002 / DEC-014).
+
+        The async path stays confined to
+        :mod:`signalforge.llm._anthropic_client` — every
+        ``# pyright: ignore`` / ``# type: ignore`` for the SDK's async
+        constructor lives in that shim. AST Scan 3b in
+        ``tests/test_audit_completeness.py`` pins async-SDK construction
+        there, mirroring Scan 3 for the sync constructor.
+
+        The returned client satisfies
+        :class:`signalforge.llm._anthropic_client.AsyncAnthropicClientProtocol`
+        structurally — the async orchestrator
+        :func:`signalforge.llm.client.call_llm_async` (US-006) narrows it
+        to :class:`signalforge.llm.client._LLMAsyncClientProtocol`,
+        which is duck-typed at the same ``messages.create`` /
+        ``messages.count_tokens`` surface.
+        """
+        from signalforge.llm._anthropic_client import _make_anthropic_async_client
+
+        return _make_anthropic_async_client()
 
     def is_clean_completion(self, response: object) -> bool:
         """Return ``True`` iff ``response.stop_reason`` is in
@@ -613,6 +677,7 @@ class OpenAIProvider(LLMProvider):
     name = "openai"
     supports_prompt_caching = False
     supports_token_count = False
+    supports_async = True
 
     #: OpenAI finish-reason values that signal a fully-emitted, untruncated
     #: response (#155 DEC-005). ``length`` (max_tokens truncation),
@@ -626,6 +691,33 @@ class OpenAIProvider(LLMProvider):
         from signalforge.llm._openai_client import _make_openai_client
 
         return _make_openai_client()
+
+    def make_async_client(self) -> _LLMAsyncClientProtocol:
+        """Construct the real OpenAI async SDK client via the shim
+        (issue #186, US-004 / DEC-002 / DEC-014).
+
+        The async path stays confined to
+        :mod:`signalforge.llm._openai_client` — every
+        ``# pyright: ignore`` / ``# type: ignore`` for the SDK's async
+        constructor lives in that shim. AST Scan 9b in
+        ``tests/test_audit_completeness.py`` pins async-SDK construction
+        there, mirroring Scan 9 for the sync constructor.
+
+        The returned client satisfies
+        :class:`signalforge.llm._openai_client.AsyncOpenAIClientProtocol`
+        structurally — the async orchestrator
+        :func:`signalforge.llm.client.call_llm_async` (US-006) narrows
+        it to :class:`signalforge.llm.client._LLMAsyncClientProtocol`,
+        which is duck-typed at the same ``messages.create`` /
+        ``messages.count_tokens`` surface. The adapter's
+        ``messages.create`` awaitable forwards to the SDK's
+        ``chat.completions.create`` coroutine, preserving the JSON-mode
+        ``response_format`` kwarg from :meth:`build_create_kwargs`
+        (DEC-006 of #136).
+        """
+        from signalforge.llm._openai_client import _make_openai_async_client
+
+        return _make_openai_async_client()
 
     def is_clean_completion(self, response: object) -> bool:
         """Return ``True`` iff ``response.choices[0].finish_reason`` is in
@@ -902,6 +994,73 @@ class _GeminiClientAdapter:
         return self._client.models
 
 
+class _GeminiAsyncMessagesAdapter:
+    """Async sibling of :class:`_GeminiMessagesAdapter` (#186 US-005).
+
+    Forwards the provider-neutral ``.messages.create(**kwargs)`` /
+    ``.messages.count_tokens(**kwargs)`` surface that the async orchestrator
+    (``call_llm_async``, US-006) consumes onto the Gemini SDK's native async
+    namespace — ``client.aio.models.generate_content(...)`` /
+    ``client.aio.models.count_tokens(...)``.
+
+    Gemini's async surface is a namespace (``.aio``) on the same
+    ``genai.Client``, NOT a separate constructor — so this adapter receives
+    the same bare client that the sync :class:`_GeminiClientAdapter` wraps,
+    and AST Scan 10 (which pins ``genai.Client(...)`` construction to
+    :mod:`signalforge.llm._gemini_client`) stays unchanged. No new vendor
+    constructor name is introduced (DEC-014 of #186 — Scan 10 untouched for
+    Gemini).
+
+    Both methods are ``async`` so the orchestrator can ``await`` them; the
+    underlying ``.aio.models.*`` coroutines from ``google-genai >= 0.5`` are
+    awaitable directly. The kwargs dict shape produced by
+    :meth:`GeminiProvider.build_create_kwargs` matches the sync path
+    verbatim (DEC-002 of #186) — no per-sync-vs-async branching in the
+    provider.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def create(self, **kwargs: Any) -> Any:
+        """Forward to the SDK's native async ``aio.models.generate_content``."""
+        return await self._client.aio.models.generate_content(**kwargs)
+
+    async def count_tokens(self, **kwargs: Any) -> Any:
+        """Forward to the SDK's native async ``aio.models.count_tokens``.
+
+        Unused on the ``call_llm_async`` happy path — :class:`GeminiProvider`
+        declares ``supports_token_count = False`` (DEC-003 of #137) so the
+        orchestrator skips the pre-send count gate on the async path too.
+        Kept on the async adapter for structural parity with the sync
+        sibling and so the façade satisfies the neutral async client
+        protocol.
+        """
+        return await self._client.aio.models.count_tokens(**kwargs)
+
+
+class _GeminiAsyncClientAdapter:
+    """Async sibling of :class:`_GeminiClientAdapter` (#186 US-005).
+
+    Wraps the SAME bare ``google.genai.Client`` the sync adapter wraps —
+    Gemini's async surface is a namespace on the existing client, not a
+    new constructor, so :meth:`GeminiProvider.make_async_client` reuses
+    :func:`signalforge.llm._gemini_client._make_gemini_client` verbatim
+    rather than introducing a separate factory. This keeps AST Scan 10
+    (``genai.Client(...)`` only in ``_gemini_client.py``) green by
+    construction — no new vendor constructor name exists.
+
+    Exposes :attr:`messages` (an :class:`_GeminiAsyncMessagesAdapter`)
+    so the async orchestrator's ``await client.messages.create(**kwargs)``
+    call type-checks against :class:`signalforge.llm.client._LLMAsyncClientProtocol`
+    and routes through the ``.aio.models`` SDK namespace at runtime.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self.messages = _GeminiAsyncMessagesAdapter(client)
+
+
 class GeminiProvider(LLMProvider):
     """Google Gemini strategy behind the generic LLM orchestrator (#137).
 
@@ -933,6 +1092,7 @@ class GeminiProvider(LLMProvider):
     name = "gemini"
     supports_prompt_caching = False
     supports_token_count = False
+    supports_async = True
 
     #: Gemini finish-reason values (read as ``finish_reason.name`` —
     #: the SDK ships it as an enum) that signal a fully-emitted,
@@ -948,6 +1108,33 @@ class GeminiProvider(LLMProvider):
         from signalforge.llm._gemini_client import _make_gemini_client
 
         return _GeminiClientAdapter(_make_gemini_client())
+
+    def make_async_client(self) -> _LLMAsyncClientProtocol:
+        """Build the real Gemini async client via the shim, wrapped in
+        the async ``.messages`` façade adapter (#186 US-005, DEC-001 / DEC-002).
+
+        Gemini's async surface is a namespace (``.aio``) on the same
+        ``google.genai.Client`` the sync path uses — there is NO separate
+        ``AsyncGenAI`` constructor. So this method reuses
+        :func:`signalforge.llm._gemini_client._make_gemini_client` (the same
+        factory the sync :meth:`make_client` calls), wrapping the bare client
+        in :class:`_GeminiAsyncClientAdapter`. AST Scan 10 (which pins
+        ``genai.Client(...)`` construction to ``_gemini_client.py``) stays
+        green by construction — no new vendor constructor name exists, no
+        new AST scan is required (DEC-014 of #186 — Anthropic + OpenAI need
+        new Scan 3b / Scan 9b for their distinct ``AsyncAnthropic`` /
+        ``AsyncOpenAI`` classes; Gemini does not).
+
+        Returns an object structurally satisfying
+        :class:`signalforge.llm.client._LLMAsyncClientProtocol`. The
+        orchestrator (``call_llm_async``, US-006) narrows the ``object``
+        return type to that protocol so the call sites type-check without
+        leaking a vendor-SDK type into ``signalforge.llm.client`` (DEC-012
+        of #135 SDK-ignore confinement extended to the async path).
+        """
+        from signalforge.llm._gemini_client import _make_gemini_client
+
+        return _GeminiAsyncClientAdapter(_make_gemini_client())
 
     def is_clean_completion(self, response: object) -> bool:
         """Return ``True`` iff ``response.candidates[0].finish_reason.name``

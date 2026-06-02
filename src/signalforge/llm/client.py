@@ -44,6 +44,7 @@ Observability discipline:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -54,17 +55,22 @@ from signalforge.llm.errors import (
     LLMAuthError,
     LLMCacheTooLargeError,
     LLMConnectionError,
+    LLMError,
     LLMHelperError,
+    LLMProviderAsyncUnsupportedError,
     LLMRateLimitError,
     LLMResponseFormatError,
     LLMServerError,
 )
 from signalforge.llm.models import LLMResult
-from signalforge.llm.providers import ExceptionCategory, provider_for
+from signalforge.llm.providers import ExceptionCategory, LLMProvider, provider_for
 
 # Module-level aliases — tests reassign for deterministic backoff (DEC-004).
+# ``_async_sleep`` mirrors the sync aliases for the upcoming async retry path
+# (``call_llm_async``, US-006); see DEC-011 of plans/super/186-grade-asyncio-parallel.md.
 _sleep = time.sleep
 _rand_uniform = random.uniform
+_async_sleep = asyncio.sleep
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,6 +102,44 @@ class _LLMClientProtocol(Protocol):
 
     @property
     def messages(self) -> _LLMMessagesProtocol: ...
+
+
+@runtime_checkable
+class _LLMAsyncMessagesProtocol(Protocol):
+    """Async sibling of :class:`_LLMMessagesProtocol` (issue #186, US-002).
+
+    The ``.messages`` surface the async orchestrator (``call_llm_async``,
+    US-006) consumes. Duck-typed at exactly ``async create`` + ``async
+    count_tokens`` — both must be awaitable so the orchestrator can ``await``
+    each call. A vendor's real async SDK client (or a test fake exposing async
+    methods) satisfies it structurally; this keeps the orchestrator free of
+    any vendor-SDK import or type-checker suppression, mirroring the sync
+    sibling's DEC-012 confinement contract.
+
+    Issue #186 ships the protocol declarations only; the concrete vendor-side
+    async shims and the ``call_llm_async`` orchestrator land in US-003 / US-004
+    / US-005 / US-006.
+    """
+
+    async def create(self, **kwargs: Any) -> Any: ...
+
+    async def count_tokens(self, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
+class _LLMAsyncClientProtocol(Protocol):
+    """Async sibling of :class:`_LLMClientProtocol` (issue #186, US-002).
+
+    ``strategy.make_async_client()`` returns ``object``; the async orchestrator
+    (``call_llm_async``, US-006) narrows it to this protocol so the call sites
+    type-check without leaking a vendor async-SDK type into
+    ``signalforge.llm.client``. The DEC-012 SDK-ignore confinement applies to
+    the async path verbatim — every ``# pyright: ignore`` for an async SDK
+    surface lives in the per-vendor ``_<vendor>_client.py`` shim.
+    """
+
+    @property
+    def messages(self) -> _LLMAsyncMessagesProtocol: ...
 
 
 # Anthropic prompt-cache minimum block sizes per model family (DEC-009 /
@@ -530,4 +574,304 @@ def call_llm(
     )
 
 
-__all__ = ("call_llm",)
+def _map_count_tokens_exception(
+    exc: BaseException,
+    *,
+    strategy: LLMProvider,
+) -> LLMError:
+    """Map a count_tokens-probe exception to a typed LLMError.
+
+    Shared by :func:`call_llm` and :func:`call_llm_async` so the
+    count-probe error taxonomy stays byte-identical across sync + async
+    paths (DEC-002 of #186 — sibling shape). count_tokens is a cheap
+    probe; per DEC-004 the orchestrator never consumes the
+    messages.create retry budget on a probe failure — every category
+    routes to a typed raise at the call site.
+    """
+    category = strategy.classify_exception(exc)
+    if category is ExceptionCategory.AUTH:
+        return LLMAuthError(
+            "LLM count_tokens rejected the request with an auth error.",
+            cause=exc,
+        )
+    if category is ExceptionCategory.RATE_LIMIT:
+        return LLMRateLimitError(
+            "LLM count_tokens hit a rate limit (no retry on the probe call).",
+            attempts=0,
+            cause=exc,
+        )
+    if category is ExceptionCategory.CONNECTION:
+        return LLMConnectionError(
+            "LLM count_tokens connection failed (no retry on the probe call).",
+            cause=exc,
+        )
+    if category is ExceptionCategory.SERVER_ERROR:
+        return LLMServerError(
+            "LLM count_tokens 5xx (no retry on the probe call).",
+            cause=exc,
+        )
+    return LLMHelperError(
+        "LLM count_tokens failed with a non-retryable error.",
+        cause=exc,
+    )
+
+
+def _build_result_from_response(
+    response: object,
+    *,
+    strategy: LLMProvider,
+    model: str,
+    prompt_version: str,
+    cache_marker_active: bool,
+    cached_block_tokens: int | None,
+    min_required: int | None,
+) -> LLMResult:
+    """Post-call response → LLMResult assembly + cache-anomaly WARNING.
+
+    Shared by :func:`call_llm` and :func:`call_llm_async`. The
+    finish-reason gate, text-blocks/usage extraction, and the dual-zero
+    cache-anomaly WARNING are byte-identical across the two orchestrators
+    (DEC-002 of #186); factoring keeps drift impossible by construction.
+    """
+    supports_caching = strategy.supports_prompt_caching
+
+    # Gate on finish/stop reason BEFORE extracting text (#155 US-001).
+    if not strategy.is_clean_completion(response):
+        raise LLMResponseFormatError(strategy.unclean_finish_reason_message(response))
+
+    text_blocks = strategy.extract_text_blocks(response)
+    usage = strategy.extract_usage(response)
+    cache_creation = usage.cache_creation_input_tokens if supports_caching else 0
+    cache_read = usage.cache_read_input_tokens if supports_caching else 0
+
+    # Cache-anomaly WARNING (gated on supports_prompt_caching + cache_marker_active).
+    if supports_caching and cache_marker_active and cache_creation == 0 and cache_read == 0:
+        _LOGGER.warning(
+            "cache marker no-op: %s",
+            json.dumps(
+                {
+                    "model": model,
+                    "cached_block_size_tokens": cached_block_tokens,
+                    "min_required": min_required,
+                }
+            ),
+        )
+
+    return LLMResult(
+        text_blocks=text_blocks,
+        response_text="".join(text_blocks),
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_creation_input_tokens=cache_creation,
+        cache_read_input_tokens=cache_read,
+        model=model,
+        prompt_version=prompt_version,
+        raw_message=response,
+    )
+
+
+async def call_llm_async(
+    *,
+    system: str,
+    cached_block: str,
+    dynamic_block: str,
+    model: str,
+    max_tokens: int,
+    cache_ttl: Literal["5m", "1h"] = "5m",
+    prompt_version: str,
+    max_retries_429: int = 3,
+    max_retries_5xx: int = 1,
+    max_retries_conn: int = 1,
+    provider: str = "anthropic",
+    client: object | None = None,
+) -> LLMResult:
+    """Async sibling of :func:`call_llm` (issue #186, US-006 / DEC-001 / DEC-002).
+
+    Identical signature, identical provider strategy dispatch, identical
+    retry taxonomy + per-class budgets, identical lazy-format JSON
+    WARNING / INFO emission as the sync orchestrator. Backoff uses
+    ``await _async_sleep(...)`` instead of ``_sleep(...)`` (DEC-011);
+    ``messages.count_tokens`` and ``messages.create`` are both awaited;
+    everything else mirrors :func:`call_llm` byte-for-byte.
+
+    The provider's :attr:`signalforge.llm.providers.LLMProvider.supports_async`
+    capability flag is checked at orchestrator entry — **before** any
+    client construction or pre-send probe. When ``False``, this raises
+    :class:`signalforge.llm.errors.LLMProviderAsyncUnsupportedError`
+    (DEC-005 of #186) so the operator gets a typed signal that the
+    selected provider has no async surface, rather than a confusing
+    ``TypeError`` at ``await client.messages.create(...)`` deep inside
+    the retry loop.
+
+    When ``client is None`` the orchestrator builds the async client via
+    ``strategy.make_async_client()`` — sync construction, NOT an
+    awaitable, mirroring the SDK's actual factory shape (the
+    ``AsyncAnthropic`` / ``AsyncOpenAI`` constructors are themselves
+    sync calls; their ``.messages.create`` is what's awaitable).
+    """
+    strategy = provider_for(provider)
+    if not strategy.supports_async:
+        # Fail loud at orchestrator entry rather than ``TypeError`` later.
+        # CLI tier 3 (external-dep / runtime resource) per DEC-006 of #186.
+        raise LLMProviderAsyncUnsupportedError(
+            f"Provider {provider!r} does not support async dispatch (supports_async=False).",
+        )
+    if client is None:
+        # ``make_async_client`` is sync — returns an async-capable client.
+        # The DEC-006 of #135 "strategy owns client construction" rule
+        # applies to the async path verbatim.
+        client = strategy.make_async_client()
+    # Narrow to the neutral async client protocol so the call sites
+    # type-check without leaking a vendor SDK type here.
+    llm_client = cast(_LLMAsyncClientProtocol, client)
+
+    supports_caching = strategy.supports_prompt_caching
+
+    # Resolve the cache-marker decision + (optionally) run the pre-send
+    # count gate. See :func:`call_llm`'s docstring for the load-bearing
+    # capability-flag invariant — the marker requires BOTH caching
+    # support AND token-count support.
+    cache_marker_active = supports_caching and strategy.supports_token_count
+    cached_block_tokens: int | None = None
+    min_required: int | None = None
+
+    if strategy.supports_token_count:
+        # Pre-send token-count gate (DEC-024). Issue against system + the
+        # cached block only. count_tokens errors are mapped to typed
+        # LLMError subclasses but NOT retried — see :func:`call_llm`.
+        count_kwargs = strategy.build_count_tokens_kwargs(
+            system=system,
+            cached_block=cached_block,
+            model=model,
+        )
+        try:
+            count_response = await llm_client.messages.count_tokens(**count_kwargs)
+        except Exception as exc:
+            raise _map_count_tokens_exception(exc, strategy=strategy) from exc
+
+        cached_block_tokens = getattr(count_response, "input_tokens", None)
+        if not isinstance(cached_block_tokens, int):
+            raise LLMResponseFormatError(
+                "count_tokens response is missing the `input_tokens` field.",
+            )
+        min_required = _min_cacheable_tokens(model)
+        if supports_caching and cached_block_tokens < min_required:
+            # Below per-model cacheable minimum — drop the marker, log once.
+            # Mirrors :func:`call_llm`'s sub-minimum drop branch verbatim.
+            _LOGGER.info(
+                "cache marker dropped (block below cacheable minimum): %s",
+                json.dumps(
+                    {
+                        "model": model,
+                        "cached_block_size_tokens": cached_block_tokens,
+                        "min_required": min_required,
+                    }
+                ),
+            )
+            cache_marker_active = False
+        if cached_block_tokens > _CACHED_BLOCK_CAP_TOKENS:
+            raise LLMCacheTooLargeError(
+                cached_block_tokens=cached_block_tokens,
+                cap=_CACHED_BLOCK_CAP_TOKENS,
+            )
+
+    create_kwargs = strategy.build_create_kwargs(
+        system=system,
+        cached_block=cached_block,
+        dynamic_block=dynamic_block,
+        model=model,
+        max_tokens=max_tokens,
+        cache_ttl=cache_ttl,
+        cache_marker_active=cache_marker_active,
+    )
+
+    # Retry loop — mirrors :func:`call_llm` per DEC-002 of #186.
+    # The only structural difference is ``await llm_client.messages.create(...)``
+    # and ``await _async_sleep(delay)``; the per-class budget bookkeeping
+    # and the WARNING emission via ``_backoff_warn`` are byte-identical.
+    attempt_429 = 0
+    attempt_5xx = 0
+    attempt_conn = 0
+    total_attempts = 0
+    while True:
+        try:
+            response = await llm_client.messages.create(**create_kwargs)
+            break
+        except Exception as exc:
+            category = strategy.classify_exception(exc)
+            if category is ExceptionCategory.AUTH:
+                raise LLMAuthError(
+                    "LLM API rejected the request with an auth error.",
+                    cause=exc,
+                ) from exc
+            if category is ExceptionCategory.RATE_LIMIT:
+                if attempt_429 >= max_retries_429:
+                    raise LLMRateLimitError(
+                        f"Rate-limit retry budget exhausted after {attempt_429} retries.",
+                        attempts=attempt_429,
+                        cause=exc,
+                    ) from exc
+                delay = _backoff_warn(
+                    total_attempts=total_attempts,
+                    class_attempt_key="class_attempt_429",
+                    class_attempt_value=attempt_429,
+                    error_class=exc.__class__.__name__,
+                    model=model,
+                )
+                await _async_sleep(delay)
+                attempt_429 += 1
+                total_attempts += 1
+                continue
+            if category is ExceptionCategory.CONNECTION:
+                if attempt_conn >= max_retries_conn:
+                    raise LLMConnectionError(
+                        f"Connection retry budget exhausted after {attempt_conn} retries.",
+                        cause=exc,
+                    ) from exc
+                delay = _backoff_warn(
+                    total_attempts=total_attempts,
+                    class_attempt_key="class_attempt_conn",
+                    class_attempt_value=attempt_conn,
+                    error_class=exc.__class__.__name__,
+                    model=model,
+                )
+                await _async_sleep(delay)
+                attempt_conn += 1
+                total_attempts += 1
+                continue
+            if category is ExceptionCategory.SERVER_ERROR:
+                if attempt_5xx >= max_retries_5xx:
+                    raise LLMServerError(
+                        f"Server-error retry budget exhausted after {attempt_5xx} retries.",
+                        cause=exc,
+                    ) from exc
+                delay = _backoff_warn(
+                    total_attempts=total_attempts,
+                    class_attempt_key="class_attempt_5xx",
+                    class_attempt_value=attempt_5xx,
+                    error_class=exc.__class__.__name__,
+                    model=model,
+                )
+                await _async_sleep(delay)
+                attempt_5xx += 1
+                total_attempts += 1
+                continue
+            # NO_RETRY — 4xx (non-auth) or any other status the strategy
+            # couldn't classify into a retryable bucket.
+            raise LLMHelperError(
+                "LLM API rejected the request with a non-retryable error.",
+                cause=exc,
+            ) from exc
+
+    return _build_result_from_response(
+        response,
+        strategy=strategy,
+        model=model,
+        prompt_version=prompt_version,
+        cache_marker_active=cache_marker_active,
+        cached_block_tokens=cached_block_tokens,
+        min_required=min_required,
+    )
+
+
+__all__ = ("call_llm", "call_llm_async")
