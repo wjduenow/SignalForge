@@ -1,13 +1,15 @@
-"""Tests for ``signalforge.safety.models`` (US-004).
+"""Tests for ``signalforge.safety.models`` (US-004, v4 shape under #185).
 
 Covers the four typed shapes added by this story:
 
 * :class:`SamplingMode` — :class:`enum.StrEnum` (see models.py DEC-024 note).
 * :class:`RedactionRecord` — frozen Pydantic v2 model with ``Literal`` reason.
-* :class:`AuditEvent` — frozen, reproducibility-carrying audit record (DEC-014).
+* :class:`AuditEvent` — frozen, reproducibility-carrying audit record (DEC-014),
+  upgraded to the v4 shape by #185: symbol-table-by-reason redactions +
+  chunk-correlation triple + chunk-shape ``@model_validator``.
 * :class:`LLMRequest` — frozen, deep-immutable request payload (DEC-022).
 
-The drift-detection ``extra="forbid"`` test lands separately in US-011; this
+The drift-detection ``extra="forbid"`` test lands separately in US-005; this
 file only validates the production shapes' behaviour.
 """
 
@@ -16,7 +18,6 @@ from __future__ import annotations
 import subprocess
 import sys
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -98,41 +99,78 @@ def test_redaction_record_is_frozen() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AuditEvent
+# AuditEvent — v4 shape (issue #185)
 # ---------------------------------------------------------------------------
 
 
 def _valid_audit_event(**overrides: object) -> AuditEvent:
+    """Build a valid **non-chunked** v4 :class:`AuditEvent`."""
     base: dict[str, object] = {
         "timestamp": datetime(2026, 4, 28, 22, 30, tzinfo=UTC),
         "model_unique_id": "model.sf_demo.customers",
         "mode": SamplingMode.SCHEMA_ONLY,
         "columns_sent": ("id", "col_a3f29c61"),
-        "redactions": (_valid_record(),),
         "signalforge_version": "0.1.0",
         "policy_hash": "abc123def456789a",
+        "policy_flags": (),
+        "redactions_by_reason": {"pattern_match": ("col_a3f29c61",)},
+        "column_name_map": {"col_a3f29c61": "email"},
+    }
+    base.update(overrides)
+    return AuditEvent(**base)  # type: ignore[arg-type]
+
+
+def _valid_chunk_header(**overrides: object) -> AuditEvent:
+    """Build a valid **chunk-header** v4 :class:`AuditEvent` (chunk_index=0)."""
+    base: dict[str, object] = {
+        "timestamp": datetime(2026, 4, 28, 22, 30, tzinfo=UTC),
+        "model_unique_id": "model.sf_demo.customers",
+        "mode": SamplingMode.SCHEMA_ONLY,
+        "columns_sent": ("id", "col_a3f29c61"),
+        "signalforge_version": "0.1.0",
+        "policy_hash": "abc123def456789a",
+        "policy_flags": (),
+        "redactions_by_reason": {},
+        "column_name_map": {},
+        "audit_id": "ad12cafe34beef56",
+        "chunk_index": 0,
+        "chunk_count": 2,
+    }
+    base.update(overrides)
+    return AuditEvent(**base)  # type: ignore[arg-type]
+
+
+def _valid_chunk_continuation(**overrides: object) -> AuditEvent:
+    """Build a valid **chunk-continuation** v4 :class:`AuditEvent`."""
+    base: dict[str, object] = {
+        "redactions_by_reason": {"pattern_match": ("col_a3f29c61",)},
+        "column_name_map": {"col_a3f29c61": "email"},
+        "audit_id": "ad12cafe34beef56",
+        "chunk_index": 1,
+        "chunk_count": 2,
     }
     base.update(overrides)
     return AuditEvent(**base)  # type: ignore[arg-type]
 
 
 def test_audit_event_schema_version_default_is_current() -> None:
-    """Issue #54 bumped the default 1 → 2 in lockstep with the writer
-    constant; issue #55 bumped 2 → 3 when ``policy_hash`` migrated from
-    ``SHA-256[:16]`` to ``blake2b(digest_size=8)``. The field stays
-    ``int`` so older JSONLs still round-trip."""
+    """Issue #185 bumped the default 3 → 4 when the v3 ``redactions`` field
+    was replaced by ``redactions_by_reason`` + ``column_name_map`` and the
+    chunk-correlation triple was added. The field stays ``int`` so future
+    bumps round-trip cleanly."""
     event = _valid_audit_event()
-    assert event.audit_schema_version == 3
+    assert event.audit_schema_version == 4
 
 
 def test_audit_event_accepts_legacy_schema_version_1() -> None:
-    """Forward-compat: older v1 audit JSONLs must still parse."""
+    """Forward-compat: older v1 audit JSONLs must still parse the
+    ``audit_schema_version`` field as an int (not a Literal)."""
     event = _valid_audit_event(audit_schema_version=1)
     assert event.audit_schema_version == 1
 
 
 def test_audit_event_accepts_legacy_schema_version_2() -> None:
-    """Forward-compat: v2 audit JSONLs (post-#54, pre-#55) must still parse."""
+    """Forward-compat: v2 audit JSONLs must still parse on the int field."""
     event = _valid_audit_event(audit_schema_version=2)
     assert event.audit_schema_version == 2
 
@@ -143,36 +181,206 @@ def test_audit_event_extra_ignore_drops_unknown_field() -> None:
     assert "unknown_field" not in dumped
 
 
-def test_audit_event_round_trips_through_json_dumps() -> None:
-    fixture_path = (
-        Path(__file__).resolve().parents[1] / "fixtures" / "safety" / "audit_events_sample.jsonl"
-    )
-    line = fixture_path.read_text(encoding="utf-8").splitlines()[0]
-    event = AuditEvent.model_validate_json(line)
-    assert event.model_unique_id == "model.sf_demo.customers"
-    assert event.mode is SamplingMode.SCHEMA_ONLY
-    assert event.columns_sent == ("id", "col_a3f29c61")
-    assert event.row_count is None
-    assert event.signalforge_version == "0.1.0"
-    assert event.policy_hash == "abc123def456789a"
-    # Fixture refreshed to v3 by issue #55 (policy_hash migrated to blake2b-8).
-    assert event.audit_schema_version == 3
-    assert event.policy_flags == ()
-    assert len(event.redactions) == 1
-    assert event.redactions[0].reason == "pattern_match"
+def test_audit_event_v3_redactions_field_removed() -> None:
+    """The v3 ``redactions: tuple[RedactionRecord, ...]`` field is replaced
+    in the v4 shape (#185); ``AuditEvent.model_fields`` must no longer
+    expose it. The :class:`RedactionRecord` class stays — it's still used
+    as an internal value object on the build path in
+    :mod:`signalforge.safety.request`."""
+    assert "redactions" not in AuditEvent.model_fields
+    # Sanity: the v4 fields ARE present.
+    assert "redactions_by_reason" in AuditEvent.model_fields
+    assert "column_name_map" in AuditEvent.model_fields
+    assert "audit_id" in AuditEvent.model_fields
+    assert "chunk_index" in AuditEvent.model_fields
+    assert "chunk_count" in AuditEvent.model_fields
 
-    # Round-trip back through JSON and reconstruct an equal record.
-    redumped = event.model_dump_json()
-    event2 = AuditEvent.model_validate_json(redumped)
-    assert event2 == event
+
+def test_audit_event_round_trips_through_json_dumps() -> None:
+    """Build a v4 event, dump → reload, assert equality. Fixture-independent
+    so it survives US-005's fixture regen."""
+    original = _valid_audit_event()
+    redumped = original.model_dump_json()
+    reloaded = AuditEvent.model_validate_json(redumped)
+    assert reloaded == original
+    assert reloaded.audit_schema_version == 4
+    assert reloaded.redactions_by_reason == {"pattern_match": ("col_a3f29c61",)}
+    assert reloaded.column_name_map == {"col_a3f29c61": "email"}
 
 
 def test_audit_event_columns_sent_immutable() -> None:
     event = _valid_audit_event()
+    assert event.columns_sent is not None
     assert event.columns_sent.__class__ is tuple
     # Concatenation works (returns a new tuple); mutation is not available.
     assert event.columns_sent + ("x",) == ("id", "col_a3f29c61", "x")
     assert not hasattr(event.columns_sent, "append")
+
+
+# ---------------------------------------------------------------------------
+# v4 chunk-shape validator — happy paths
+# ---------------------------------------------------------------------------
+
+
+def test_audit_event_v4_non_chunked_shape_validates() -> None:
+    """Non-chunked: all metadata required; both v4 maps present (may be
+    empty); the chunk-correlation triple is all-None."""
+    event = _valid_audit_event()
+    assert event.audit_id is None
+    assert event.chunk_index is None
+    assert event.chunk_count is None
+    assert event.redactions_by_reason == {"pattern_match": ("col_a3f29c61",)}
+    assert event.column_name_map == {"col_a3f29c61": "email"}
+
+
+def test_audit_event_v4_non_chunked_with_empty_redaction_maps_validates() -> None:
+    """Non-chunked event with no redactions: maps are present but empty
+    (NOT None — that's a different failure mode)."""
+    event = _valid_audit_event(redactions_by_reason={}, column_name_map={})
+    assert event.redactions_by_reason == {}
+    assert event.column_name_map == {}
+
+
+def test_audit_event_v4_chunk_header_with_empty_redactions_validates() -> None:
+    """Chunk header: metadata present, ``redactions_by_reason`` and
+    ``column_name_map`` MUST be empty dicts (the body rides on continuation
+    rows)."""
+    event = _valid_chunk_header()
+    assert event.audit_id == "ad12cafe34beef56"
+    assert event.chunk_index == 0
+    assert event.chunk_count == 2
+    assert event.redactions_by_reason == {}
+    assert event.column_name_map == {}
+    assert event.model_unique_id == "model.sf_demo.customers"
+
+
+def test_audit_event_v4_chunk_continuation_with_none_metadata_validates() -> None:
+    """Chunk continuation: all metadata fields MUST be None;
+    ``redactions_by_reason`` and ``column_name_map`` carry the slice."""
+    event = _valid_chunk_continuation()
+    assert event.audit_id == "ad12cafe34beef56"
+    assert event.chunk_index == 1
+    assert event.chunk_count == 2
+    assert event.timestamp is None
+    assert event.model_unique_id is None
+    assert event.mode is None
+    assert event.columns_sent is None
+    assert event.signalforge_version is None
+    assert event.policy_hash is None
+    assert event.policy_flags is None
+    assert event.redactions_by_reason == {"pattern_match": ("col_a3f29c61",)}
+    assert event.column_name_map == {"col_a3f29c61": "email"}
+
+
+# ---------------------------------------------------------------------------
+# v4 chunk-shape validator — rejection paths
+# ---------------------------------------------------------------------------
+
+
+def test_audit_event_chunked_missing_audit_id_raises() -> None:
+    """A chunked event missing ``audit_id`` is a partially-set chunk triple
+    (``audit_id is None`` while ``chunk_index`` / ``chunk_count`` are set)
+    — must be rejected at construction time."""
+    with pytest.raises(ValidationError):
+        AuditEvent(
+            timestamp=datetime(2026, 4, 28, 22, 30, tzinfo=UTC),
+            model_unique_id="model.sf_demo.customers",
+            mode=SamplingMode.SCHEMA_ONLY,
+            columns_sent=("id",),
+            signalforge_version="0.1.0",
+            policy_hash="abc",
+            policy_flags=(),
+            redactions_by_reason={},
+            column_name_map={},
+            audit_id=None,
+            chunk_index=0,
+            chunk_count=2,
+        )
+
+
+def test_audit_event_chunk_index_at_or_above_count_raises() -> None:
+    """``chunk_index >= chunk_count`` is a contract violation (index is
+    0-based; on a 2-chunk event, valid indices are 0 and 1)."""
+    with pytest.raises(ValidationError):
+        _valid_chunk_continuation(chunk_index=2, chunk_count=2)
+    with pytest.raises(ValidationError):
+        _valid_chunk_continuation(chunk_index=5, chunk_count=2)
+
+
+def test_audit_event_non_chunked_with_audit_id_raises() -> None:
+    """Setting ``audit_id`` without ``chunk_index`` / ``chunk_count`` is a
+    partially-set chunk triple; the validator rejects it."""
+    with pytest.raises(ValidationError):
+        _valid_audit_event(audit_id="ad12cafe34beef56")
+
+
+def test_audit_event_chunk_header_with_nonempty_redactions_raises() -> None:
+    """Chunk header (``chunk_index=0``) MUST carry empty
+    ``redactions_by_reason`` and ``column_name_map`` — the redaction body
+    rides on continuation rows."""
+    with pytest.raises(ValidationError):
+        _valid_chunk_header(redactions_by_reason={"pattern_match": ("col_a3f29c61",)})
+    with pytest.raises(ValidationError):
+        _valid_chunk_header(column_name_map={"col_a3f29c61": "email"})
+
+
+def test_audit_event_chunk_continuation_with_metadata_raises() -> None:
+    """Chunk continuation MUST omit every metadata field — having any
+    non-None metadata on a continuation row is a contract violation."""
+    with pytest.raises(ValidationError):
+        _valid_chunk_continuation(model_unique_id="model.sf_demo.customers")
+    with pytest.raises(ValidationError):
+        _valid_chunk_continuation(timestamp=datetime(2026, 4, 28, 22, 30, tzinfo=UTC))
+    with pytest.raises(ValidationError):
+        _valid_chunk_continuation(signalforge_version="0.1.0")
+
+
+def test_audit_event_non_chunked_with_none_redaction_maps_raises() -> None:
+    """Non-chunked event with ``redactions_by_reason=None`` or
+    ``column_name_map=None`` is invalid — the v4 shape requires both
+    present (use empty dicts for an event with no redactions)."""
+    with pytest.raises(ValidationError):
+        _valid_audit_event(redactions_by_reason=None)
+    with pytest.raises(ValidationError):
+        _valid_audit_event(column_name_map=None)
+
+
+def test_audit_event_chunk_count_lt_2_raises() -> None:
+    """A chunked event with ``chunk_count == 1`` is degenerate (would be
+    representable as non-chunked); the validator rejects it."""
+    with pytest.raises(ValidationError):
+        AuditEvent(
+            redactions_by_reason={},
+            column_name_map={},
+            audit_id="ad12cafe34beef56",
+            chunk_index=0,
+            chunk_count=1,
+        )
+
+
+# ---------------------------------------------------------------------------
+# v4 __repr__ — PII redaction (safety-layer DEC-022)
+# ---------------------------------------------------------------------------
+
+
+def test_audit_event_repr_omits_column_name_map() -> None:
+    """``column_name_map`` carries (hashed → real) and so its values are
+    real column names — potentially PII-bearing. The custom ``__repr__``
+    omits the dict's contents while still surfacing a count, matching the
+    safety-layer DEC-022 redaction precedent."""
+    event = _valid_audit_event(
+        column_name_map={"col_a3f29c61": "patient_ssn", "col_92aa17bd": "diagnosis_code"},
+        redactions_by_reason={"pattern_match": ("col_a3f29c61", "col_92aa17bd")},
+    )
+    rendered = repr(event)
+    # Real column names must not leak.
+    assert "patient_ssn" not in rendered
+    assert "diagnosis_code" not in rendered
+    # Counts and IDs survive.
+    assert "model.sf_demo.customers" in rendered
+    assert "column_name_map_count=2" in rendered
+    assert "redactions_by_reason_count=2" in rendered
+    assert "audit_schema_version=4" in rendered
 
 
 # ---------------------------------------------------------------------------
