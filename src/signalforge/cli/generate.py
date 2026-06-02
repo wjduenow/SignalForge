@@ -92,6 +92,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import cast
 
@@ -162,6 +163,13 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
     ``-- signalforge:generated``-marked ``.sql`` test file is overwritten.
     Hand-authored (unmarked) files are never overwritten, even with
     ``--force``. No-op without ``--write``.
+
+    US-013 of #171 adds ``--as-of YYYY-MM-DD`` (DEC-001): evaluation
+    date for time-bound anomaly tests. ``type=date.fromisoformat`` —
+    bad-format input lands at argparse's usage error (exit 2).
+    Default ``None`` lets :func:`signalforge.prune.prune_tests`
+    resolve to ``date.today()`` at prune time. In ``--select`` batch
+    mode, the same value applies to every matched model.
     """
     parser = subparsers.add_parser(
         "generate",
@@ -373,6 +381,28 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "Precedence: flag > prune.sample_strategy in signalforge.yml "
             "> library default ('materialised'). Applied via "
             "PruneConfig.model_validate so validators re-run."
+        ),
+    )
+    # US-013 of #171 / DEC-001 — time-bound anomaly-test reference date.
+    # ``type=date.fromisoformat`` accepts strict ISO ``YYYY-MM-DD`` only;
+    # a bad format raises ``ValueError`` which argparse converts to its
+    # usage error → ``SystemExit(2)`` (maps cleanly to tier 2,
+    # input-validation, in the four-tier exit-code taxonomy). Default
+    # ``None`` lets :func:`signalforge.prune.prune_tests` resolve to
+    # ``date.today()`` at prune time (operator-friendly default; the
+    # resolved value is recorded on every ``PruneEvent.as_of`` audit
+    # record for after-the-fact reproducibility — DEC-001).
+    parser.add_argument(
+        "--as-of",
+        dest="as_of",
+        type=date.fromisoformat,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "Evaluation date (YYYY-MM-DD) for time-bound anomaly tests. "
+            "When omitted, resolves to today at prune time. Same value "
+            "applies to every model in a multi-model --select batch. See "
+            "#171 DEC-001."
         ),
     )
     # US-007 / DEC-014 / DEC-016 — observability flags. ``--quiet`` and
@@ -971,6 +1001,14 @@ def _run_single_model(
                 f"running {candidate_test_count} candidate tests against warehouse...",
             )
         _t0 = time.monotonic()
+        # US-013 of #171 / DEC-001 — ``--as-of`` threads through to the
+        # engine; when ``None``, ``prune_tests`` resolves it to
+        # ``date.today()`` at prune time and stamps the resolved value on
+        # every ``PruneEvent.as_of`` audit record. The kwarg flows
+        # uniformly: the same ``args.as_of`` reaches every per-model call
+        # in batch mode (``_run_batch`` re-invokes this helper per match,
+        # so the operator's single ``--as-of`` value applies to every
+        # model in a ``--select`` run).
         prune_result = prune_module.prune_tests(
             model,
             adapter,
@@ -978,6 +1016,7 @@ def _run_single_model(
             manifest,
             config=prune_config,
             project_dir=project_dir,
+            as_of=getattr(args, "as_of", None),
         )
         if progress_on:
             emit_progress_done(3, "prune", time.monotonic() - _t0)
@@ -1270,6 +1309,13 @@ def cmd_generate(args: argparse.Namespace) -> int:
     * ``--scope`` > ``prune.scope`` > library default (``"sample"``).
     * ``--sample-strategy`` > ``prune.sample_strategy`` > library default
       (``"materialised"``).
+    * ``--as-of YYYY-MM-DD`` (US-013 of #171 / DEC-001) — evaluation
+      date for time-bound anomaly tests; threaded to
+      :func:`signalforge.prune.prune_tests` as the ``as_of`` kwarg.
+      Default ``None`` lets the engine resolve to ``date.today()`` at
+      prune time. The same value applies to every model in a
+      multi-model ``--select`` batch (resolved once at the orchestrator
+      and re-passed per-model).
 
     The prune overrides apply via :meth:`PruneConfig.model_validate`
     (NOT ``model_copy(update=...)``) so every Pydantic validator

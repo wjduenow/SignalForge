@@ -86,6 +86,21 @@ class StrictCandidateTestUniqueCombination(BaseModel):
     rationale: str | None = None
 
 
+class StrictCandidateTestRowCountAnomalyByPeriod(BaseModel):
+    model_config = _STRICT_BASE
+    type: Literal["row_count_anomaly_by_period"] = "row_count_anomaly_by_period"
+    column: None = None
+    date_column: str
+    period: Literal["hour", "day", "week"] = "day"
+    lookback_periods: int = 28
+    method: Literal["mad", "zscore", "percentile", "min_max"] = "mad"
+    seasonality: Literal["none", "dow"] = "none"
+    threshold: float = 3.0
+    min_samples_per_bucket: int = 3
+    where: str | None = None
+    rationale: str | None = None
+
+
 _StrictCandidateTest = Annotated[
     StrictCandidateTestNotNull
     | StrictCandidateTestUnique
@@ -93,7 +108,8 @@ _StrictCandidateTest = Annotated[
     | StrictCandidateTestRelationships
     | StrictCandidateTestCustomSQL
     | StrictCandidateTestRowCountBetween
-    | StrictCandidateTestUniqueCombination,
+    | StrictCandidateTestUniqueCombination
+    | StrictCandidateTestRowCountAnomalyByPeriod,
     Field(discriminator="type"),
 ]
 

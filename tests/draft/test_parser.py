@@ -29,6 +29,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountAnomalyByPeriod,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
     CandidateTestUniqueCombination,
@@ -1780,3 +1781,268 @@ def test_unique_combination_collect_all_multi_violation() -> None:
         "unique_combination where references nonexistent column 'phantom_where_col'" in v
         for v in violations
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #171 — row_count_anomaly_by_period anchor-contract arm (US-006)
+#
+# The 8th variant is model-level only (``column`` is hard-coded to ``None``
+# by the Pydantic model per DEC-007). It carries a ``date_column`` (the
+# required bucketing field; must exist on the model) and an optional
+# ``where`` SQL fragment. The parser arm threads ``model_columns_by_type``
+# and reuses the ``_check_where_clause`` sqlglot helper for column-existence
+# + type-coherence on the ``where`` — "reuse, don't fork" per DEC-005 of
+# #169. The ``exclude_tests`` dual-defence backstop applies.
+# ---------------------------------------------------------------------------
+
+
+def _row_count_anomaly_candidate(
+    *,
+    column_names: tuple[str, ...],
+    date_column: str = "ordered_at",
+    where: str | None = None,
+) -> CandidateSchema:
+    """Build a synthetic CandidateSchema carrying one model-level
+    ``row_count_anomaly_by_period`` test."""
+    return CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=tuple(CandidateColumn(name=n, description="...", tests=()) for n in column_names),
+        tests=(
+            CandidateTestRowCountAnomalyByPeriod(
+                date_column=date_column,
+                where=where,
+            ),
+        ),
+    )
+
+
+def test_row_count_anomaly_valid_no_where() -> None:
+    """Canonical model-level shape — valid ``date_column``, no ``where``;
+    no violations. Also pins the load-bearing ``column=None``
+    early-out: the generic ``test.column not in model_columns`` arm
+    would otherwise fire "model-level test references nonexistent
+    column None"."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at", "amount"),
+        date_column="ordered_at",
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"ordered_at", "amount"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(ordered_at="TIMESTAMP", amount="FLOAT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_row_count_anomaly_valid_where_known_column() -> None:
+    """A ``where`` referencing a real column passes."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at", "amount"),
+        date_column="ordered_at",
+        where="amount > 0",
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"ordered_at", "amount"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(ordered_at="TIMESTAMP", amount="FLOAT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_row_count_anomaly_date_column_unknown_rejected() -> None:
+    """A hallucinated ``date_column`` (absent from ``model_columns``) is
+    surfaced as a violation. The message names the variant, the field,
+    and the available columns so the operator can correct."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("amount",),
+        date_column="loaded_at",  # phantom — only `amount` exists
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"amount"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(amount="FLOAT64"),
+        )
+    assert any(
+        "row_count_anomaly_by_period: date_column 'loaded_at' not in model columns" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_anomaly_where_unknown_column_rejected() -> None:
+    """A ``where`` referencing a column that is not on the model appends
+    a violation via the shared ``_check_where_clause`` helper —
+    mirrors the row_count_between / unique_combination behaviour."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at",),
+        date_column="ordered_at",
+        where="phantom_col > 1",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"ordered_at"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(ordered_at="TIMESTAMP"),
+        )
+    assert any(
+        "row_count_anomaly_by_period where references nonexistent column 'phantom_col'" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_anomaly_type_incoherent_where_rejected() -> None:
+    """A ``where`` comparing two columns of incompatible types is
+    rejected by the sqlglot type-coherence pass (reuse of the #159 /
+    #169 / #170 sqlglot machinery)."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at", "user_id", "name"),
+        date_column="ordered_at",
+        where="user_id = name",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"ordered_at", "user_id", "name"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(
+                ordered_at="TIMESTAMP", user_id="INT64", name="STRING"
+            ),
+        )
+    assert any(
+        "row_count_anomaly_by_period where references column" in v
+        and "'user_id'" in v
+        and "'name'" in v
+        and "incompatible" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_anomaly_collect_all_date_column_and_where() -> None:
+    """Collect-all preserved (DEC-022 of #5): a candidate with BOTH a
+    hallucinated ``date_column`` AND an unknown-column ``where``
+    surfaces BOTH violations in one ``LLMOutputAnchorContractError`` —
+    never short-circuits on the first violation."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("user_id",),
+        date_column="phantom_date_col",
+        where="phantom_where_col > 1",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64"),
+        )
+    violations = excinfo.value.violations
+    assert any(
+        "row_count_anomaly_by_period: date_column 'phantom_date_col' not in model columns" in v
+        for v in violations
+    )
+    assert any(
+        "row_count_anomaly_by_period where references nonexistent column 'phantom_where_col'" in v
+        for v in violations
+    )
+
+
+def test_row_count_anomaly_collect_all_with_unrelated_violation() -> None:
+    """Collect-all across variants: a hallucinated CandidateColumn AND a
+    bad row_count_anomaly_by_period ``date_column`` AND an unknown
+    ``where`` column all surface together. The collect-all contract is
+    the foundation for the operator's "fix everything wrong in one
+    round" UX."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(CandidateColumn(name="hallucinated", description="LLM made this up", tests=()),),
+        tests=(
+            CandidateTestRowCountAnomalyByPeriod(
+                date_column="phantom_date_col",
+                where="phantom_where_col > 1",
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64"),
+        )
+    violations = excinfo.value.violations
+    assert any(
+        "CandidateColumn references nonexistent column 'hallucinated'" in v for v in violations
+    )
+    assert any(
+        "row_count_anomaly_by_period: date_column 'phantom_date_col' not in model columns" in v
+        for v in violations
+    )
+    assert any(
+        "row_count_anomaly_by_period where references nonexistent column 'phantom_where_col'" in v
+        for v in violations
+    )
+
+
+def test_row_count_anomaly_excluded_type_rejected() -> None:
+    """``exclude_tests=("row_count_anomaly_by_period",)`` rejects a
+    drafted row_count_anomaly_by_period via the dual-defence backstop
+    (the prompt-builder filter from US-005 is the primary defence; this
+    parser-side check catches an LLM that ignores the prompt)."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at",),
+        date_column="ordered_at",
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"ordered_at"}),
+            llm_result_meta=_meta(),
+            exclude_tests=frozenset({"row_count_anomaly_by_period"}),
+        )
+    assert any(
+        "model-level" in v and "'row_count_anomaly_by_period'" in v and "exclude_tests" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_anomaly_column_none_does_not_trigger_generic_arm() -> None:
+    """Regression test for the model-level early-out (load-bearing per
+    DEC-007 of #171). Without the explicit ``elif test.type ==
+    "row_count_anomaly_by_period"`` arm ahead of the generic
+    ``test.column not in model_columns`` fallthrough, the validator
+    would emit "model-level test references nonexistent column None"
+    on every well-formed candidate.
+
+    The test ALSO omits ``model_columns_by_type`` to pin the inactive-
+    type-arm path: even without the type map, the ``date_column``
+    existence check + the ``column=None`` early-out must hold."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at",),
+        date_column="ordered_at",
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"ordered_at"}),
+        llm_result_meta=_meta(),
+        # Deliberately omit model_columns_by_type to exercise the
+        # inactive-type-arm path (DEC-006 — column-existence still runs).
+    )
+    assert isinstance(result, CandidateSchema)

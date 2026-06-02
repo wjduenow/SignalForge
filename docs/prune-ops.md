@@ -342,6 +342,143 @@ This applies under both `sample_strategy="materialised"` and
 `unique_combination` candidate always full-scans the source (bounded
 by `maximum_bytes_billed`), never the sample.
 
+### `row_count_anomaly_by_period`
+
+The eighth test variant, `row_count_anomaly_by_period` (issue #171; see
+[`docs/drafter-catalogue.md` § `row_count_anomaly_by_period`](drafter-catalogue.md#row_count_anomaly_by_period)),
+is pruned through the same orchestrator and routes to the same five
+`DropReason` literals as the seven other variants. There is **no new
+drop reason**; what differs is the two-query evaluation shape, the
+time-bound reproducibility carve-out, and the partition-filter cost
+mechanics on date-partitioned source tables.
+
+**Two-query split — stats query first, then violation query (DEC-008).**
+Unlike the single-statement variants above, `row_count_anomaly_by_period`
+compiles to TWO queries that the engine runs sequentially:
+
+1. **Stats query (Query 1)** — returns one row of method-specific
+   statistics from the model's `lookback_periods` of history: `(median,
+   MAD, n)` for `method=mad`, `(μ, σ, n)` for `method=zscore`, `(p_lo,
+   p_hi, n)` for `method=percentile`, `(min, max, n)` for
+   `method=min_max`. Under `seasonality="dow"` the result is one row
+   per day-of-week bucket. Populates `AnomalyTestStats` on the
+   `PruneDecision`.
+2. **Violation query (Query 2)** — the actual band-violation check for
+   the most-recent period (the `as_of` bucket). Returns failing rows
+   when the bucket's `COUNT(*)` falls outside the band; the adapter
+   wraps in the standard `SELECT COUNT(*) AS failures FROM (<sql>) AS t`
+   contract.
+
+If Query 1 reports `n_periods < min_samples_per_bucket` (cold-start),
+the engine **skips Query 2 entirely** and routes the candidate to
+`kept-without-evidence` with structured `why="insufficient history:
+<n>/<min> periods"`. The DropReason literal stays at five values —
+cold-start re-uses the existing `kept-without-evidence` slot per the
+conservative-bias contract (see [Drop-reason taxonomy](#drop-reason-taxonomy)).
+
+**Time-bound reproducibility carve-out — `--as-of YYYY-MM-DD` (DEC-001).**
+Every other SignalForge primitive satisfies Architectural Commitment #5
+("same input → same prune decision"). `row_count_anomaly_by_period`
+cannot: a per-period anomaly check evaluated on Monday and again on
+Tuesday may produce different decisions because the underlying band
+shifts as history accrues and the "most-recent period" moves forward.
+Reproducibility is restored at the `(model, as_of)` granularity via
+the `--as-of` CLI flag (`signalforge generate` and
+`signalforge prune-existing`).
+
+When omitted, the engine resolves to `date.today()` at prune time and
+emits one INFO log line naming the resolved value (lazy-format JSON);
+the resolved date lands on every `PruneEvent.as_of` audit field for
+after-the-fact reproducibility (re-run with `--as-of <recorded value>`
+to reproduce the prior decision). In a multi-model `--select` batch
+the same `--as-of` applies to every model — resolved once at the
+orchestrator. See [`docs/cli-ops.md` § `--as-of`](cli-ops.md) for the
+flag reference.
+
+**Sample-mode behaviour — always routes to source, regardless of
+strategy (DEC-002, DEC-009).** A hash-mod sample over a date-partitioned
+table does not preserve per-period counts (a 1/N sample shrinks the
+"yesterday" bucket the same way as every other bucket, so per-period
+anomaly detection on a sample reports the sample's own anomaly
+profile — useless). The engine's `_test_requires_source_table` helper
+returns `True` for `row_count_anomaly_by_period` under **any**
+`sample_strategy` (`materialised` OR `oneshot`), tighter than
+`row_count_between` / `unique_combination` (which bypass under
+`materialised` only in pre-#171 builds; #171 graduated both to also
+bypass under `oneshot` for the same semantic-correctness reason). One
+INFO log line names the per-test source override.
+
+**Partition-filter cost mechanics (DEC-012) — load-bearing for cost.**
+The compiled SQL **must** include a partition-pruning WHERE clause:
+
+    <date_column> >= <as_of> - INTERVAL <lookback_periods> <period>
+    AND <date_column> < <as_of> + INTERVAL 1 <period>
+
+(or the dialect-equivalent form). Without it, the warehouse scans
+every partition; with it, BigQuery and Snowflake prune to the lookback
+window only.
+
+**Worked example.** A 1-billion-row event table partitioned daily
+(`PARTITION BY DATE(event_ts)`) with ~11M rows / day. A 90-day-lookback
+`row_count_anomaly_by_period` test:
+
+- **Unfiltered** — scans all 1B rows. At ~10 bytes / row for the
+  partitioned-date column alone, that's **~9 GB scanned per test**.
+  Over 50 candidate anomaly tests across a project, ~450 GB of
+  warehouse cost per `signalforge generate` run.
+- **Partition-filter pruned** — scans 90 partitions of ~11M rows each
+  (~990M rows narrowed). With BigQuery's partition pruning the
+  metadata-only date scan reads ~300 MB. **~30× reduction**; ~15 GB
+  across 50 candidates instead of 450 GB.
+
+The `--as-of` value drives the partition-filter literal; choosing
+`--as-of 2026-01-15` with `lookback_periods=90 period=day` prunes to
+the `[2025-10-17, 2026-01-16)` partition range, regardless of which
+date you run the command.
+
+There is **no new opt-in flag** for the partition filter — the
+compiler always emits it (DEC-012). The existing
+`maximum_bytes_billed` cap remains the safety net: a query that
+exceeds it surfaces as `BytesBilledExceededError` → routes to
+`kept-without-evidence` per the conservative-bias contract.
+
+**DOW degrade WARNING (US-011).** Under `seasonality="dow"` + thin
+per-DOW samples (any DOW bucket below `min_samples_per_bucket`), the
+engine **degrades to non-seasonal**: recomputes the stats query
+without DOW partitioning and proceeds with the test. The degrade
+emits one operator-actionable WARNING log line per test naming the
+model, test column, the affected DOW bucket(s), and the per-bucket
+counts. The candidate's decision then proceeds normally (typically
+`kept` or `dropped`); the WARNING is informational so operators see
+when `seasonality="dow"` is asking more of their history than they
+have data for. Tune by lowering `min_samples_per_bucket`, widening
+`lookback_periods`, or switching to `seasonality="none"` in
+`signalforge.yml`.
+
+**Non-BigQuery adapter degrade — `StatsQueryNotSupportedError`.** v0.7
+ships the BigQuery override of `WarehouseAdapter.run_stats_query` (the
+new vendor-neutral seam for the two-query split). Non-BigQuery
+adapters (Snowflake, Postgres) inherit the ABC default, which raises
+`StatsQueryNotSupportedError` — the prune engine catches this as any
+other `WarehouseError` and routes the anomaly test to
+`kept-without-evidence`. Operators on non-BigQuery warehouses see all
+`row_count_anomaly_by_period` candidates land in `kept-uncertain` with
+the typed error name in the `why` field until each adapter grows its
+own `run_stats_query` override. Mirrors the
+`MaterialisationNotSupportedError` / `EstimateNotSupportedError` /
+`RowCountNotSupportedError` graceful-degrade pattern (see
+[`docs/warehouse-adapter-ops.md`](warehouse-adapter-ops.md)).
+
+**Cost-and-budget guidance.** A `row_count_anomaly_by_period` candidate
+issues 1 (cold-start) or 2 (warm) warehouse queries per test. With the
+partition filter active the per-test cost is small (single-digit
+seconds, ~300 MB on a billion-row daily-partitioned table); without
+the partition column populated the cost grows ~30× and the
+`maximum_bytes_billed` cap becomes the actual ceiling. Plan
+`prune.total_budget_seconds` accordingly when the project carries N
+anomaly candidates: budget ~2-5s per warm candidate plus the
+materialisation step's own time when other variants share the run.
+
 ## Expected drop rates
 
 **A high drop rate is the working state, not the failure state.** The

@@ -172,6 +172,7 @@ def _batch_namespace(select: str, project_dir: Path, **overrides: Any) -> argpar
         "format": "ansi",
         "scope": None,
         "sample_strategy": None,
+        "as_of": None,  # US-013 of #171 — None lets the engine resolve to date.today()
         "quiet": False,
         "verbose": False,
         "no_color": False,
@@ -488,3 +489,64 @@ def test_single_model_outcome_failure_carries_exception_class_name(
     assert outcome.exception_class_name == "LLMRateLimitError"
     assert outcome.rendered_text == ""
     assert outcome.model_unique_id == "model.multi.stg_a"
+
+
+# ---------------------------------------------------------------------------
+# US-013 of #171 — multi-model batch threads ONE --as-of to every model
+# ---------------------------------------------------------------------------
+
+
+def test_generate_multi_model_batch_uses_one_as_of(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A single ``--as-of YYYY-MM-DD`` applies to **every** model in a
+    multi-model ``--select`` run (US-013 of #171 / DEC-001).
+
+    The CLI does not resolve ``--as-of`` differently per model — the
+    operator picks one evaluation date and every per-model
+    :func:`prune_tests` call receives the same :class:`date` instance.
+    The engine then resolves ``None`` to ``date.today()`` once per
+    call; this test pins the value-supplied path (operator passes the
+    flag), where the CLI is the source of truth.
+    """
+    from datetime import date
+
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    manifest, _models = _make_multi_manifest()
+    mocks = _install_batch_happy_patches(monkeypatch, manifest)
+
+    # ``tag:staging`` matches stg_a + stg_b (two of three models).
+    code = main(["generate", "--select", "tag:staging", "--as-of", "2026-05-01"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    # Two models pruned; two calls to prune_tests.
+    assert mocks["prune_tests"].call_count == 2
+    # Every call received the same as_of value.
+    expected = date(2026, 5, 1)
+    for call in mocks["prune_tests"].call_args_list:
+        assert call.kwargs["as_of"] == expected
+
+
+def test_generate_multi_model_batch_default_as_of_is_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Without ``--as-of``, every per-model ``prune_tests`` call in a
+    ``--select`` batch receives ``as_of=None`` — the engine does the
+    resolution per call (DEC-001).
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    manifest, _models = _make_multi_manifest()
+    mocks = _install_batch_happy_patches(monkeypatch, manifest)
+
+    code = main(["generate", "--select", "tag:staging"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert mocks["prune_tests"].call_count == 2
+    for call in mocks["prune_tests"].call_args_list:
+        assert call.kwargs["as_of"] is None

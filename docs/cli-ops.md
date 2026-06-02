@@ -243,6 +243,32 @@ Runtime knob flags:
   tables). Per-run override; the config-file value is the
   durable default. (DEC-011 of issue #22; see
   `docs/prune-ops.md` cost model section.)
+- `--as-of YYYY-MM-DD` — Evaluation date for the time-bound
+  `row_count_anomaly_by_period` test variant (issue #171 /
+  DEC-001). Drives both the partition-filter literal in the
+  compiled SQL (`<date_column> >= <as_of> - INTERVAL
+  <lookback_periods> <period>`) AND the "most-recent period"
+  bucket whose row count the engine compares against the
+  predicted band. When omitted, the prune engine resolves to
+  `date.today()` at prune time and emits one INFO log line
+  naming the resolved value (`as_of resolved to YYYY-MM-DD`),
+  then stamps the resolved value on every `PruneEvent.as_of`
+  audit record for after-the-fact reproducibility — re-run
+  with `--as-of <recorded value>` to reproduce the prior
+  decision. The same value applies to every model in a
+  multi-model `--select` batch (resolved once at the
+  orchestrator). Strict ISO parsing via `date.fromisoformat`;
+  a bad format like `not-a-date` raises argparse's usage
+  error → exit 2 (tier 2, input-validation). Inert when no
+  `row_count_anomaly_by_period` candidate is in play. The
+  flag is the **only** way to restore reproducibility on this
+  variant — every other primitive satisfies "same SQL + same
+  warehouse data → same prune decision" (Architectural
+  Commitment #5); `row_count_anomaly_by_period` is the
+  carve-out, and `--as-of` restores reproducibility at the
+  `(model, as_of)` granularity. See
+  [`docs/prune-ops.md` § `row_count_anomaly_by_period`](prune-ops.md#row_count_anomaly_by_period)
+  for the variant's full evaluation contract.
 
 Observability flags:
 
@@ -537,6 +563,7 @@ Flag reference:
 | `--tests-dir PATH` | no | `<project_dir>/tests` | Override the singular-test directory enumerated for model-level `tests/*.sql` files (US-014). Each `.sql` referencing this model is pruned alongside the schema.yml tests; unrelated files are ignored. The **default** directory is optional — when absent only the schema.yml tests are pruned; an **explicit** `--tests-dir` pointing at a missing directory fails loud (`IngestSchemaNotFoundError`). |
 | `--scope {sample,full}` | no | from config | Override `prune.scope`. Applied via `PruneConfig.model_validate` so validators re-run (DEC-002). |
 | `--sample-strategy {oneshot,materialised}` | no | from config | Override `prune.sample_strategy`. Applied via `PruneConfig.model_validate` (DEC-002). |
+| `--as-of YYYY-MM-DD` | no | resolves to `date.today()` at prune time | Evaluation date for the time-bound `row_count_anomaly_by_period` test variant (issue #171 / DEC-001). Drives both the partition-filter literal and the "most-recent period" bucket the engine evaluates against the predicted band. When omitted, the engine resolves to `date.today()` and emits one INFO log line naming the resolved value; the resolved value lands on every `PruneEvent.as_of` audit record for after-the-fact reproducibility (re-run with `--as-of <recorded value>` to reproduce). Threaded to `prune_tests` as the `as_of` kwarg. Strict ISO parsing via `date.fromisoformat`; a bad format → argparse usage error (exit 2, tier 2 input-validation). Inert when no `row_count_anomaly_by_period` candidate is in play. See [`docs/prune-ops.md` § `row_count_anomaly_by_period`](prune-ops.md#row_count_anomaly_by_period). |
 | `--format {ansi,markdown,json}` | no | `ansi` | Select the diff renderer. ANSI: coloured terminal output. Markdown: GitHub-friendly report. JSON: stdout receives the JSON sidecar's contents. |
 | `--dry-run` | no | off | Run ingest → prune → diff and print the diff to stdout, suppressing the default-on `.signalforge/diff.json` sidecar. The fail-closed `.signalforge/prune.jsonl` audit is **still written** (every prune run leaves a durable receipt — the cross-stage fail-closed invariant; mirrors `generate`). There is **no `--write`** (read-only w.r.t. your `schema.yml`). |
 | `--quiet` | no | off | Suppress per-stage stderr progress lines and the skipped-test report, and raise the log level to `WARNING`. Mutually exclusive with `--verbose`. |

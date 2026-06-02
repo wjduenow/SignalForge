@@ -98,8 +98,10 @@ def test_valid_test_types_constant_matches_known_set() -> None:
     VALID_TEST_TYPES (and the prompt catalogue) fails loud here. The four
     standard dbt schema tests, the ``custom_sql`` business-rule variant
     (DEC-002), the ``row_count_between`` model-level row-count guard
-    (DEC-001 of #169), and the ``unique_combination`` model-level
-    composite-uniqueness variant (DEC-001 of #170)."""
+    (DEC-001 of #169), the ``unique_combination`` model-level
+    composite-uniqueness variant (DEC-001 of #170), and the
+    ``row_count_anomaly_by_period`` model-level per-period anomaly
+    variant (DEC-007 of #171)."""
     assert (
         frozenset(
             {
@@ -110,6 +112,7 @@ def test_valid_test_types_constant_matches_known_set() -> None:
                 "custom_sql",
                 "row_count_between",
                 "unique_combination",
+                "row_count_anomaly_by_period",
             }
         )
         == VALID_TEST_TYPES
@@ -136,7 +139,13 @@ def test_render_system_prompt_drops_excluded_from_catalogue() -> None:
 
 def test_render_system_prompt_updates_scope_line() -> None:
     prompt = _render_system_prompt(
-        ("accepted_values", "relationships", "row_count_between", "unique_combination")
+        (
+            "accepted_values",
+            "relationships",
+            "row_count_between",
+            "unique_combination",
+            "row_count_anomaly_by_period",
+        )
     )
     # SCOPE line names only the surviving standard types; custom_sql (still
     # allowed) is appended via the "plus" clause.
@@ -145,6 +154,7 @@ def test_render_system_prompt_updates_scope_line() -> None:
     assert "relationships" not in prompt
     assert "row_count_between" not in prompt
     assert "unique_combination" not in prompt
+    assert "row_count_anomaly_by_period" not in prompt
 
 
 def test_render_system_prompt_single_remaining_type_uses_bare_form() -> None:
@@ -155,16 +165,18 @@ def test_render_system_prompt_single_remaining_type_uses_bare_form() -> None:
             "relationships",
             "row_count_between",
             "unique_combination",
+            "row_count_anomaly_by_period",
         )
     )
     assert "Propose only `not_null`, plus `custom_sql` tests" in prompt
 
 
 def test_render_system_prompt_excluding_all_four_standard_keeps_custom_sql() -> None:
-    # Excluding the six standard types leaves custom_sql, which is enough
+    # Excluding the seven standard types leaves custom_sql, which is enough
     # for the drafter to propose (issue #116 — custom_sql is a valid type;
     # issue #169 — row_count_between joined the standard set;
-    # issue #170 — unique_combination joined the standard set).
+    # issue #170 — unique_combination joined the standard set;
+    # issue #171 — row_count_anomaly_by_period joined the standard set).
     prompt = _render_system_prompt(
         (
             "not_null",
@@ -173,6 +185,7 @@ def test_render_system_prompt_excluding_all_four_standard_keeps_custom_sql() -> 
             "relationships",
             "row_count_between",
             "unique_combination",
+            "row_count_anomaly_by_period",
         )
     )
     assert "Propose only `custom_sql` tests" in prompt
@@ -190,6 +203,7 @@ def test_render_system_prompt_excluding_everything_raises() -> None:
                 "relationships",
                 "row_count_between",
                 "unique_combination",
+                "row_count_anomaly_by_period",
                 "custom_sql",
             )
         )

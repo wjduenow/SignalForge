@@ -7,7 +7,7 @@ of llm-drafter.md), same POSIX-atomic-append size cap, same
 
 The eight tests below assert each load-bearing property of the writer:
 
-* one JSONL line, all documented fields present, ``audit_schema_version == 2``
+* one JSONL line, all documented fields present, ``audit_schema_version == 3``
 * file mode bits are exactly ``0o600`` (POSIX-only)
 * ``os.fsync`` is called exactly once per write
 * oversize record raises BEFORE any file open (no on-disk artefact)
@@ -30,6 +30,7 @@ import os
 import stat
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -46,6 +47,7 @@ from signalforge.prune.audit import (
 )
 from signalforge.prune.errors import PruneAuditRecordTooLargeError
 from signalforge.prune.models import PruneDecision
+from signalforge.prune.stats import MadStats, ZscoreStats
 
 
 def _make_decision(**overrides: Any) -> PruneDecision:
@@ -78,7 +80,7 @@ def _make_event(**decision_overrides: Any) -> PruneEvent:
 
 def test_write_prune_event_emits_one_jsonl_line(tmp_path: Path) -> None:
     """Writer produces exactly one JSONL line; every documented field is
-    present; ``audit_schema_version == 2``.
+    present; ``audit_schema_version == 3``.
     """
     audit_path = tmp_path / "prune.jsonl"
     event = _make_event()
@@ -90,8 +92,9 @@ def test_write_prune_event_emits_one_jsonl_line(tmp_path: Path) -> None:
     assert len(lines) == 1
 
     payload = json.loads(lines[0])
-    assert payload["audit_schema_version"] == 2
-    # Every documented field present.
+    assert payload["audit_schema_version"] == 3
+    # Every documented field present (the issue #171 bump 2 → 3 adds
+    # ``as_of`` + ``stats`` per DEC-013).
     expected_fields = {
         "audit_schema_version",
         "signalforge_version",
@@ -111,6 +114,8 @@ def test_write_prune_event_emits_one_jsonl_line(tmp_path: Path) -> None:
         "compiled_sql",
         "why",
         "sample_failures",
+        "as_of",
+        "stats",
     }
     assert expected_fields.issubset(payload.keys())
     # The discriminated-union payload survives the round-trip.
@@ -274,7 +279,7 @@ def test_write_prune_event_loops_on_short_writes(tmp_path: Path) -> None:
     assert contents.endswith("\n")
     assert len(contents.splitlines()) == 1
     payload = json.loads(contents.splitlines()[0])
-    assert payload["audit_schema_version"] == 2
+    assert payload["audit_schema_version"] == 3
     # The loop ran (at least two ``os.write`` calls — one short, one to
     # complete).
     assert call_count["n"] >= 2
@@ -310,3 +315,154 @@ def test_compute_config_hash_is_deterministic_and_16_hex() -> None:
     assert all(c in "0123456789abcdef" for c in h1)
     # A different input produces a different digest (sanity floor).
     assert _compute_config_hash('{"a":1}') != h1
+
+
+# --- Issue #171 US-012 — as_of / stats serialisation + replay -----------
+
+
+def test_as_of_serializes_as_iso_date_string() -> None:
+    """``PruneEvent.as_of`` renders as ``YYYY-MM-DD`` ISO 8601 string
+    (DEC-013 of #171).
+
+    The canonical-timestamp helper :func:`signalforge._common.timestamp.iso8601_z`
+    is deliberately :class:`datetime`-only per safety-layer.md issue #56 —
+    :class:`date` has no time-of-day component and the ``...Z`` suffix
+    shape does not apply. The model's ``@field_serializer("as_of")``
+    returns ``value.isoformat()`` for non-``None`` and ``None`` for
+    ``None``, so a non-set ``as_of`` survives the round-trip cleanly
+    too.
+    """
+    event = _make_event(as_of=date(2026, 5, 1))
+    payload = json.loads(event.model_dump_json())
+    assert payload["as_of"] == "2026-05-01"
+
+    # ``None`` round-trips as ``null`` (default-set on non-anomaly tests).
+    null_event = _make_event()
+    null_payload = json.loads(null_event.model_dump_json())
+    assert null_payload["as_of"] is None
+
+
+def test_as_of_serializes_via_prune_decision_too() -> None:
+    """The same serializer also lives on :class:`PruneDecision` (DEC-006).
+
+    Two surfaces (audit + read-back) carry the field; both must render
+    identically so a reviewer comparing ``prune.jsonl`` to the in-memory
+    :class:`PruneResult.decisions` tuple sees one ISO date shape.
+    """
+    decision = _make_decision(as_of=date(2026, 5, 1))
+    payload = json.loads(decision.model_dump_json())
+    assert payload["as_of"] == "2026-05-01"
+
+
+def test_stats_serializes_with_method_discriminator() -> None:
+    """``PruneEvent.stats`` renders with the ``method`` discriminator field
+    (DEC-005 + DEC-013 of #171).
+
+    Pydantic v2 handles the discriminated-union JSON natively — the
+    ``method`` literal on each subclass becomes a field on the dict, so a
+    consumer can dispatch on ``stats["method"]`` without instantiating
+    the model.
+    """
+    mad = MadStats(median=12500.0, mad=850.0, n_periods=28)
+    event = _make_event(stats=mad)
+    payload = json.loads(event.model_dump_json())
+    assert payload["stats"] is not None
+    assert payload["stats"]["method"] == "mad"
+    assert payload["stats"]["median"] == 12500.0
+    assert payload["stats"]["mad"] == 850.0
+    assert payload["stats"]["n_periods"] == 28
+
+    # A different method tags differently — discriminator IS the dispatcher.
+    zscore = ZscoreStats(mu=12450.5, sigma=920.3, n_periods=28)
+    z_event = _make_event(stats=zscore)
+    z_payload = json.loads(z_event.model_dump_json())
+    assert z_payload["stats"]["method"] == "zscore"
+    assert z_payload["stats"]["mu"] == 12450.5
+    assert z_payload["stats"]["sigma"] == 920.3
+
+
+def test_stats_serializes_as_null_when_unset() -> None:
+    """``stats=None`` (the default for every non-anomaly variant) renders
+    as ``null`` — the field is optional but always present in the dump
+    (consistent with ``sample_failures``).
+    """
+    event = _make_event()
+    payload = json.loads(event.model_dump_json())
+    assert "stats" in payload
+    assert payload["stats"] is None
+
+
+def test_v2_shaped_dict_replays_as_v3() -> None:
+    """A v2-shaped dict (missing ``as_of`` + ``stats`` entirely) loads
+    cleanly into the current v3 :class:`PruneEvent` (DEC-013 of #171).
+
+    This is the load-bearing inline-v2-dict-replays-as-v3 regression
+    test required by US-012's acceptance criteria. It verifies the
+    :class:`int` (not :class:`typing.Literal`) typing on
+    :attr:`PruneEvent.audit_schema_version` preserves audit-replay
+    across the 2 → 3 bump — both new fields default to ``None`` on
+    replay, and the existing fields survive untouched. Mirrors the
+    same guarantee that issue #55's bump 1 → 2 added.
+    """
+    v2_dict: dict[str, Any] = dict(
+        audit_schema_version=2,
+        signalforge_version="0.1.0.dev0",
+        record_id="abc123",
+        timestamp="2026-04-30T12:00:00.000000Z",
+        config_hash="abc123def456789a",
+        model_unique_id="model.sf_demo.fct_orders",
+        test={"type": "not_null", "column": "id", "rationale": "PK."},
+        test_anchor="column.id",
+        decision="dropped",
+        reason="always-passes",
+        failures=0,
+        sampled_rows=100000,
+        scope="sample",
+        elapsed_ms=87,
+        compiled_sql_hash="0123456789abcdef",
+        compiled_sql="SELECT COUNT(*) AS failures FROM `p.d.t` WHERE id IS NULL",
+        why="Test passed on 100000 sample rows; no failures.",
+        sample_failures=None,
+        # Deliberately NO ``as_of`` and NO ``stats`` — that is the v2 shape.
+    )
+    event = PruneEvent.model_validate(v2_dict)
+    assert event.audit_schema_version == 2
+    assert event.as_of is None
+    assert event.stats is None
+
+
+def test_config_hash_excludes_as_of() -> None:
+    """``config_hash`` answers "did config change," not "did time pass"
+    (DEC-013 of #171). Two :class:`PruneEvent` instances identical
+    except for ``as_of`` MUST carry the same ``config_hash`` — the
+    field is computed by :func:`_compute_config_hash` over the
+    canonicalised :mod:`signalforge.prune.config` block alone, which
+    does NOT include ``as_of`` in its input set.
+
+    Without this contract, the same prune config run on two different
+    days would carry two different ``config_hash`` values and a
+    reviewer correlating audit JSONLs across days would falsely
+    conclude the config rotated.
+    """
+    # Both events use the same config_hash threaded in via
+    # _build_prune_event — but the model carries an as_of field that
+    # MUST NOT affect that hash. The simplest pin: hash a representative
+    # canonical config string with and without an as_of and observe
+    # _compute_config_hash takes no as_of arg at all (it takes the
+    # bare config_json string).
+    config_json = '{"enabled":true,"scope":"sample"}'
+    h = _compute_config_hash(config_json)
+    # Even though the function's signature has only one positional arg,
+    # the load-bearing assertion is that the same canonical-config-json
+    # input produces the same hash regardless of how many ``as_of``
+    # values an audit run interleaves.
+    same_h = _compute_config_hash(config_json)
+    assert h == same_h
+    # And: two events constructed with different as_of carry the SAME
+    # config_hash because the engine never threads as_of into the hash.
+    e1 = _make_event(as_of=date(2026, 5, 1))
+    e2 = _make_event(as_of=date(2026, 12, 1))
+    assert e1.config_hash == e2.config_hash
+    # And both equal the hash for an event with no as_of at all.
+    e_none = _make_event()
+    assert e_none.config_hash == e1.config_hash

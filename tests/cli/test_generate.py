@@ -1597,3 +1597,112 @@ def test_existing_file_is_signalforge_generated_marked_returns_true(
     f = tmp_path / "marked.sql"
     f.write_text(f"{_GENERATED_MARKER_PREFIX} abc\n\nselect 1\n", encoding="utf-8")
     assert _existing_file_is_signalforge_generated(f) is True
+
+
+# ---------------------------------------------------------------------------
+# US-013 of #171 — --as-of flag (DEC-001)
+# ---------------------------------------------------------------------------
+
+
+def test_generate_as_of_parses_iso_date() -> None:
+    """``--as-of 2026-05-01`` parses cleanly via ``date.fromisoformat``
+    and lands on ``args.as_of`` as a :class:`datetime.date` instance
+    (US-013 of #171 / DEC-001). The argparse ``type=date.fromisoformat``
+    contract: a strict ISO ``YYYY-MM-DD`` string round-trips to a real
+    :class:`date` object — no string fall-through.
+    """
+    from datetime import date
+
+    from signalforge.cli import _build_parser
+
+    parser = _build_parser()
+    args = parser.parse_args(["generate", "model.shop.customers", "--as-of", "2026-05-01"])
+    assert args.as_of == date(2026, 5, 1)
+
+
+def test_generate_as_of_default_is_none() -> None:
+    """Omitting ``--as-of`` leaves ``args.as_of`` at ``None``; the prune
+    engine resolves to ``date.today()`` at prune time (DEC-001).
+    """
+    from signalforge.cli import _build_parser
+
+    parser = _build_parser()
+    args = parser.parse_args(["generate", "model.shop.customers"])
+    assert args.as_of is None
+
+
+def test_generate_as_of_bad_format_exits_2(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--as-of not-a-date`` raises ``ValueError`` inside
+    ``date.fromisoformat``; argparse wraps it as its usage error and
+    raises ``SystemExit(2)``. Our top-level ``main`` returns the exit
+    code without printing a traceback (cli-layer.md DEC-016, four-tier
+    taxonomy: tier 2, input-validation).
+    """
+    code = main(["generate", "model.shop.customers", "--as-of", "not-a-date"])
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "Traceback" not in captured.err
+
+
+def test_generate_threads_as_of_to_prune_tests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--as-of 2026-05-01`` threads through to ``prune_tests`` as the
+    ``as_of`` kwarg (US-013 of #171 / DEC-001). The CLI does NOT mutate
+    or wrap the value — it passes the parsed :class:`date` straight to
+    the engine, which owns ``None`` → ``date.today()`` resolution at
+    prune time.
+    """
+    from datetime import date
+
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--as-of", "2026-05-01"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    forwarded_as_of = mocks["prune_tests"].call_args.kwargs["as_of"]
+    assert forwarded_as_of == date(2026, 5, 1)
+
+
+def test_generate_no_as_of_threads_none_to_prune_tests(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Without ``--as-of`` the CLI threads ``as_of=None`` to
+    ``prune_tests``; the engine then resolves to ``date.today()`` at
+    prune time (DEC-001). Pinned so a future regression to "default to
+    today in the CLI" would fail — the resolution belongs in the
+    engine, not the CLI, so the audit (`PruneEvent.as_of`) records the
+    same resolved value regardless of caller.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    assert mocks["prune_tests"].call_args.kwargs["as_of"] is None
+
+
+def test_generate_help_text_lists_as_of_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``signalforge generate --help`` names the ``--as-of`` flag and
+    its metavar. Multi-surface parity (cli-layer.md): the argparse help
+    string is surface 1 of the 5-surface contract for US-013 of #171.
+    """
+    code = main(["generate", "--help"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "--as-of" in captured.out
+    assert "YYYY-MM-DD" in captured.out

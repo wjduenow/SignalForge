@@ -21,6 +21,7 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountAnomalyByPeriod,
     CandidateTestRowCountBetween,
     CandidateTestUnique,
     CandidateTestUniqueCombination,
@@ -636,3 +637,339 @@ def test_candidate_test_repr_args_redacted_for_rich_pretty_hooks() -> None:
     assert "SECRET_SQL" in sql_test.model_dump_json()
     assert "SECRET_RCB_WHERE" in rcb_test.model_dump_json()
     assert "SECRET_UC_WHERE" in uc_test.model_dump_json()
+
+
+# ---------------------------------------------------------------------------
+# CandidateTestRowCountAnomalyByPeriod (#171, DEC-007)
+# ---------------------------------------------------------------------------
+
+
+def test_candidate_test_row_count_anomaly_by_period_happy_path_defaults() -> None:
+    """Minimal happy path: only the required ``date_column``; every other
+    field takes its default."""
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at")
+    assert test.type == "row_count_anomaly_by_period"
+    assert test.column is None
+    assert test.date_column == "ordered_at"
+    assert test.period == "day"
+    assert test.lookback_periods == 28
+    assert test.method == "mad"
+    assert test.seasonality == "none"
+    assert test.threshold == 3.0
+    assert test.min_samples_per_bucket == 3
+    assert test.where is None
+    assert test.rationale is None
+
+
+def test_candidate_test_row_count_anomaly_by_period_accepts_full_fields() -> None:
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="created_at",
+        period="hour",
+        lookback_periods=72,
+        method="zscore",
+        seasonality="dow",
+        threshold=2.5,
+        min_samples_per_bucket=5,
+        where="status = 'active'",
+        rationale="Hourly anomaly band with weekly seasonality.",
+    )
+    assert test.date_column == "created_at"
+    assert test.period == "hour"
+    assert test.lookback_periods == 72
+    assert test.method == "zscore"
+    assert test.seasonality == "dow"
+    assert test.threshold == 2.5
+    assert test.min_samples_per_bucket == 5
+    assert test.where == "status = 'active'"
+    assert test.rationale == "Hourly anomaly band with weekly seasonality."
+
+
+def test_candidate_test_row_count_anomaly_by_period_rejects_empty_date_column() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(date_column="")
+
+
+def test_candidate_test_row_count_anomaly_by_period_rejects_whitespace_date_column() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(date_column="   \t\n  ")
+
+
+def test_candidate_test_row_count_anomaly_by_period_rejects_zero_lookback() -> None:
+    """``lookback_periods >= 1`` — zero history yields no anomaly band."""
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(date_column="d", lookback_periods=0)
+
+
+def test_candidate_test_row_count_anomaly_by_period_rejects_negative_lookback() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(date_column="d", lookback_periods=-1)
+
+
+def test_candidate_test_row_count_anomaly_by_period_accepts_lookback_one() -> None:
+    """Boundary: ``lookback_periods=1`` is the minimum allowed (a one-period
+    "compare to yesterday" anomaly recipe)."""
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="d", lookback_periods=1)
+    assert test.lookback_periods == 1
+
+
+def test_candidate_test_row_count_anomaly_by_period_rejects_zero_min_samples() -> None:
+    """``min_samples_per_bucket >= 1`` — zero samples cannot drive a band."""
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(date_column="d", min_samples_per_bucket=0)
+
+
+def test_candidate_test_row_count_anomaly_by_period_rejects_negative_min_samples() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(date_column="d", min_samples_per_bucket=-1)
+
+
+@pytest.mark.parametrize("method", ["mad", "zscore", "percentile"])
+def test_candidate_test_row_count_anomaly_by_period_rejects_zero_threshold_for_band_methods(
+    method: str,
+) -> None:
+    """``threshold > 0`` for ``method in {mad, zscore, percentile}`` (DEC-007)
+    — a zero or negative band multiplier collapses the anomaly window."""
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(
+            date_column="d",
+            method=method,  # type: ignore[arg-type]
+            threshold=0.0,
+        )
+
+
+@pytest.mark.parametrize("method", ["mad", "zscore", "percentile"])
+def test_candidate_test_row_count_anomaly_by_period_rejects_negative_threshold_for_band_methods(
+    method: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(
+            date_column="d",
+            method=method,  # type: ignore[arg-type]
+            threshold=-1.0,
+        )
+
+
+def test_candidate_test_row_count_anomaly_by_period_min_max_accepts_zero_threshold() -> None:
+    """``method=min_max`` IGNORES ``threshold`` (DEC-007) — any value
+    accepted, including ``0`` and negatives."""
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="d",
+        method="min_max",
+        threshold=0.0,
+    )
+    assert test.method == "min_max"
+    assert test.threshold == 0.0
+
+
+def test_candidate_test_row_count_anomaly_by_period_min_max_accepts_negative_threshold() -> None:
+    """``method=min_max`` IGNORES ``threshold`` — a negative value is
+    accepted (it's unused by the compile arm)."""
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="d",
+        method="min_max",
+        threshold=-99.0,
+    )
+    assert test.threshold == -99.0
+
+
+def test_candidate_test_row_count_anomaly_by_period_rejects_empty_where() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(date_column="d", where="")
+
+
+def test_candidate_test_row_count_anomaly_by_period_rejects_whitespace_only_where() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(date_column="d", where="   \t\n  ")
+
+
+def test_candidate_test_row_count_anomaly_by_period_accepts_where_clause() -> None:
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="d",
+        where="status = 'active'",
+    )
+    assert test.where == "status = 'active'"
+
+
+def test_candidate_test_row_count_anomaly_by_period_column_must_be_none() -> None:
+    """``column`` is hard-coded to ``None`` (model-level only); a
+    non-``None`` value fails type-validation."""
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(
+            column="any_column",  # type: ignore[arg-type]
+            date_column="d",
+        )
+
+
+def test_candidate_test_row_count_anomaly_by_period_rejects_unknown_period() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(
+            date_column="d",
+            period="month",  # type: ignore[arg-type]
+        )
+
+
+def test_candidate_test_row_count_anomaly_by_period_rejects_unknown_method() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(
+            date_column="d",
+            method="bayesian",  # type: ignore[arg-type]
+        )
+
+
+def test_candidate_test_row_count_anomaly_by_period_rejects_unknown_seasonality() -> None:
+    with pytest.raises(ValidationError):
+        CandidateTestRowCountAnomalyByPeriod(
+            date_column="d",
+            seasonality="quarterly",  # type: ignore[arg-type]
+        )
+
+
+def test_candidate_test_row_count_anomaly_by_period_is_frozen() -> None:
+    test = CandidateTestRowCountAnomalyByPeriod(date_column="d")
+    with pytest.raises(ValidationError):
+        test.threshold = 5.0  # type: ignore[misc]
+
+
+def test_candidate_test_row_count_anomaly_by_period_round_trip_byte_stable() -> None:
+    """``model_validate_json`` ∘ ``model_dump_json`` is a no-op on a
+    populated variant — required for fixture-driven drift detection."""
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="created_at",
+        period="week",
+        lookback_periods=12,
+        method="percentile",
+        seasonality="dow",
+        threshold=2.0,
+        min_samples_per_bucket=4,
+        where="status = 'active'",
+        rationale="weekly anomaly with dow seasonality",
+    )
+    raw = test.model_dump_json()
+    reparsed = CandidateTestRowCountAnomalyByPeriod.model_validate_json(raw)
+    assert reparsed == test
+
+
+def test_candidate_test_row_count_anomaly_by_period_in_discriminated_union() -> None:
+    """The variant resolves correctly through the discriminated union."""
+    adapter: TypeAdapter[CandidateTest] = TypeAdapter(CandidateTest)
+    parsed = adapter.validate_python(
+        {
+            "type": "row_count_anomaly_by_period",
+            "column": None,
+            "date_column": "ordered_at",
+            "period": "day",
+            "lookback_periods": 28,
+            "method": "mad",
+            "seasonality": "none",
+            "threshold": 3.0,
+            "min_samples_per_bucket": 3,
+            "where": None,
+        }
+    )
+    assert isinstance(parsed, CandidateTestRowCountAnomalyByPeriod)
+    assert parsed.date_column == "ordered_at"
+
+
+def test_candidate_test_row_count_anomaly_by_period_extra_ignored() -> None:
+    """``extra="ignore"`` is inherited from ``_BASE_CONFIG`` — an unknown
+    field is silently dropped (forward-compat with future LLM emissions)."""
+    test = CandidateTestRowCountAnomalyByPeriod.model_validate(
+        {
+            "type": "row_count_anomaly_by_period",
+            "date_column": "d",
+            "phantom_field": "x",
+        }
+    )
+    assert not hasattr(test, "phantom_field")
+
+
+def test_candidate_test_row_count_anomaly_by_period_repr_omits_where_and_rationale() -> None:
+    """:meth:`__repr__` shows only ``(type, column, method, seasonality)``;
+    omits the LLM-emitted ``where`` and ``rationale`` (DEC-013 of #170)."""
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="created_at",
+        method="zscore",
+        seasonality="dow",
+        where="SECRET_WHERE_FRAGMENT = 'foo'",
+        rationale="SECRET_RATIONALE_TEXT",
+    )
+    rendered = repr(test)
+    assert "SECRET_WHERE_FRAGMENT" not in rendered, (
+        "CandidateTestRowCountAnomalyByPeriod.__repr__ must omit the LLM-emitted where"
+    )
+    assert "SECRET_RATIONALE_TEXT" not in rendered, (
+        "CandidateTestRowCountAnomalyByPeriod.__repr__ must omit the LLM-emitted rationale"
+    )
+    # The identifying surface stays visible.
+    assert "row_count_anomaly_by_period" in rendered
+    assert "zscore" in rendered
+    assert "dow" in rendered
+
+
+def test_candidate_test_row_count_anomaly_by_period_repr_args_redaction() -> None:
+    """QG Pass 1 finding C1 — ``__repr_args__`` redacts ``where`` +
+    ``rationale`` so ``rich.print()`` / ``devtools.pretty()`` /
+    ``pprint`` all inherit the filter. Pinned per memory
+    `pydantic-v2-repr-args-redaction-required`."""
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="created_at",
+        method="mad",
+        seasonality="none",
+        where="SECRET_ANOM_WHERE",
+        rationale="SECRET_ANOM_RAT",
+    )
+    args = list(test.__repr_args__())
+    args_str = repr(args)
+    assert "SECRET_ANOM_WHERE" not in args_str
+    assert "SECRET_ANOM_RAT" not in args_str
+    safe_fields = {name for name, _ in args}
+    assert "where" not in safe_fields
+    assert "rationale" not in safe_fields
+    # These should appear in __repr_args__ per the DEC-007 redacted shape.
+    assert {"type", "column", "method", "seasonality"} <= safe_fields
+
+
+def test_candidate_test_row_count_anomaly_by_period_pprint_redaction() -> None:
+    """``pprint.pformat`` reaches through ``__repr_args__`` (Pydantic v2);
+    a pure ``__repr__`` override alone would leak via this path. Pinned
+    per memory `pydantic-v2-repr-args-redaction-required`."""
+    import pprint
+
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="created_at",
+        method="mad",
+        where="SECRET_PPRINT_WHERE",
+        rationale="SECRET_PPRINT_RAT",
+    )
+    rendered = pprint.pformat(test)
+    assert "SECRET_PPRINT_WHERE" not in rendered
+    assert "SECRET_PPRINT_RAT" not in rendered
+
+
+def test_candidate_test_row_count_anomaly_by_period_model_dump_json_carries_text() -> None:
+    """:meth:`model_dump_json` is unchanged — serialisation still carries
+    ``where`` / ``rationale`` (only the casual debug-print path is
+    redacted)."""
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="created_at",
+        where="SECRET_DUMP_WHERE",
+        rationale="SECRET_DUMP_RAT",
+    )
+    dumped = test.model_dump_json()
+    assert "SECRET_DUMP_WHERE" in dumped
+    assert "SECRET_DUMP_RAT" in dumped
+
+
+def test_candidate_test_row_count_anomaly_by_period_repr_under_ansi_injection() -> None:
+    """Defence-in-depth — hostile ANSI escapes in ``where`` / ``rationale``
+    cannot reach a log viewer via ``repr()`` because the fields are
+    redacted entirely."""
+    test = CandidateTestRowCountAnomalyByPeriod(
+        date_column="d",
+        where="\x1b[31mEVIL_ANSI\x1b[0m",
+        rationale="\x1b[33mEVIL_RAT\x1b[0m",
+    )
+    rendered = repr(test)
+    assert "EVIL_ANSI" not in rendered
+    assert "EVIL_RAT" not in rendered
+    assert "\x1b" not in rendered

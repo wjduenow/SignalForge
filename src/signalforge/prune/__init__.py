@@ -33,6 +33,17 @@ from signalforge.prune.models import (
     PruneResult,
     Scope,
 )
+from signalforge.prune.stats import (
+    AnomalyTestStats,
+    MadDowStats,
+    MadStats,
+    MinMaxDowStats,
+    MinMaxStats,
+    PercentileDowStats,
+    PercentileStats,
+    ZscoreDowStats,
+    ZscoreStats,
+)
 
 __all__ = (
     # Public API
@@ -44,6 +55,16 @@ __all__ = (
     "DropReason",
     "Scope",
     "PruneEvent",
+    # Anomaly stats (issue #171, US-001)
+    "AnomalyTestStats",
+    "MadStats",
+    "ZscoreStats",
+    "PercentileStats",
+    "MinMaxStats",
+    "MadDowStats",
+    "ZscoreDowStats",
+    "PercentileDowStats",
+    "MinMaxDowStats",
     # Errors
     "PruneError",
     "PruneConfigError",

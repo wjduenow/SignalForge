@@ -569,6 +569,50 @@ def _validate_anchor_contract(
                         dialect_name,
                     )
                 )
+        elif test.type == "row_count_anomaly_by_period":
+            # Issue #171 (US-006) — row_count_anomaly_by_period is
+            # model-level only (``column`` is hard-coded to ``None`` by
+            # the Pydantic model — see DEC-007), so it MUST special-case
+            # ahead of the generic ``test.column not in model_columns``
+            # fallthrough below. Mirrors the row_count_between /
+            # unique_combination arms verbatim.
+            #
+            # ``date_column`` is the bucketing field — it MUST exist on
+            # the model. A hallucinated value (e.g. the LLM inferring
+            # ``loaded_at`` against a model that only carries
+            # ``ordered_at``) appends a violation. No type-coherence
+            # check here: ``date_column`` is consumed by a TRUNC/DATE
+            # function in the compile arm, not in a column-column
+            # comparison, so the #159 type-coherence machinery does not
+            # apply to it directly. Pydantic already enforces non-empty
+            # (after-validator on the variant), so we only check anchor
+            # membership.
+            if test.date_column not in model_columns:
+                violations.append(
+                    f"row_count_anomaly_by_period: date_column "
+                    f"{test.date_column!r} not in model columns "
+                    f"(available: {sorted(model_columns)})"
+                )
+            # ``where`` (when present) is validated via the same sqlglot
+            # helper #169 / #170 ship — "reuse, don't fork" per
+            # DEC-005 of #169. Column-existence AND type-coherence on
+            # the WHERE fragment route through ``_check_where_clause``;
+            # an empty type map preserves the column-existence check
+            # when the type-arm is inactive (model_columns_by_type=None
+            # or all-None types).
+            if test.where is not None and test.where.strip():
+                rca_types_map: Mapping[str, str | None] = (
+                    model_columns_by_type if model_columns_by_type is not None else {}
+                )
+                violations.extend(
+                    _check_where_clause(
+                        test.where,
+                        "row_count_anomaly_by_period",
+                        model_columns,
+                        rca_types_map,
+                        dialect_name,
+                    )
+                )
         elif test.column not in model_columns:
             violations.append(f"model-level test references nonexistent column {test.column!r}")
         if test.type in exclude_tests:

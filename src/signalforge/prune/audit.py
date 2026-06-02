@@ -49,7 +49,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from hashlib import blake2b
 from pathlib import Path
 from typing import Any, Final, Literal
@@ -61,6 +61,7 @@ from signalforge._common.timestamp import iso8601_z
 from signalforge.draft.models import CandidateTest
 from signalforge.prune.errors import PruneAuditRecordTooLargeError
 from signalforge.prune.models import DropReason, PruneDecision, Scope
+from signalforge.prune.stats import AnomalyTestStats
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -77,8 +78,15 @@ _PRUNE_AUDIT_RECORD_LIMIT_BYTES: Final[int] = 4000
 # evolves; v0.2 readers gate on this. Mirrors safety.AuditEvent.audit_schema_version
 # and draft.LLMResponseEvent.audit_schema_version. Issue #55 bumped 1 → 2 when
 # ``config_hash`` migrated from ``SHA-256[:16]`` to ``blake2b(digest_size=8)``
-# so the audit corpus reads one hash recipe across every writer.
-_PRUNE_AUDIT_SCHEMA_VERSION: Final[int] = 2
+# so the audit corpus reads one hash recipe across every writer. Issue #171
+# bumped 2 → 3 when ``as_of: date | None`` (the time-bound evaluation date
+# threaded through for the ``row_count_anomaly_by_period`` variant) and
+# ``stats: AnomalyTestStats | None`` (per-decision numerical state from the
+# anomaly-stats query) landed on :class:`PruneEvent` per DEC-013 — both
+# optional with ``None`` default, so v2 records still round-trip cleanly
+# under the :class:`int` (not :class:`typing.Literal`) typing on
+# :attr:`PruneEvent.audit_schema_version`.
+_PRUNE_AUDIT_SCHEMA_VERSION: Final[int] = 3
 
 
 class PruneEvent(BaseModel):
@@ -107,10 +115,11 @@ class PruneEvent(BaseModel):
     audit_schema_version: int = _PRUNE_AUDIT_SCHEMA_VERSION
     """Frozen at :data:`_PRUNE_AUDIT_SCHEMA_VERSION`. Issue #55 bumped 1 → 2
     when ``config_hash`` migrated from ``SHA-256[:16]`` to
-    ``blake2b(digest_size=8)``. The field stays :class:`int`
+    ``blake2b(digest_size=8)``; issue #171 bumped 2 → 3 when ``as_of`` and
+    ``stats`` landed (both optional). The field stays :class:`int`
     (not :class:`typing.Literal`) so older ``prune.jsonl`` records with
-    ``audit_schema_version: 1`` still round-trip cleanly — audit replay
-    across versions is a real requirement. Mirrors
+    ``audit_schema_version: 1`` or ``2`` still round-trip cleanly — audit
+    replay across versions is a real requirement. Mirrors
     :attr:`signalforge.safety.models.AuditEvent.audit_schema_version`."""
     signalforge_version: str
     record_id: str
@@ -129,10 +138,43 @@ class PruneEvent(BaseModel):
     compiled_sql: str
     why: str
     sample_failures: tuple[dict[str, Any], ...] | None = None
+    as_of: date | None = None
+    """Evaluation date for time-bound prune decisions (issue #171, DEC-006
+    + DEC-013). Set for the ``row_count_anomaly_by_period`` variant — the
+    first SignalForge primitive whose decision is inherently time-bound —
+    and ``None`` for every other test variant. Reproducibility for anomaly
+    variants is restored at the ``(model, as_of)`` granularity via this
+    audit field; same input + same ``as_of`` = same decision. Serialised as
+    ``YYYY-MM-DD`` ISO 8601 string via :meth:`_serialize_as_of`. NOT in
+    the ``config_hash`` input set — ``config_hash`` answers "did config
+    change," not "did time pass.\""""
+    stats: AnomalyTestStats | None = None
+    """Per-decision numerical state from the anomaly-stats query (issue
+    #171, DEC-006 + DEC-013). Populated only for the
+    ``row_count_anomaly_by_period`` variant; ``None`` for every other test
+    type. The discriminated-union serialisation (the ``method`` field
+    discriminates over ``mad`` / ``zscore`` / ``percentile`` / ``min_max``,
+    DEC-005) is handled natively by Pydantic v2 — emits the discriminator
+    field as part of the dict on ``model_dump`` / ``model_dump_json``."""
 
     @field_serializer("timestamp")
     def _serialize_timestamp(self, value: datetime) -> str:
         return iso8601_z(value)
+
+    @field_serializer("as_of")
+    def _serialize_as_of(self, value: date | None) -> str | None:
+        """Render ``as_of`` as ``YYYY-MM-DD`` ISO 8601 string.
+
+        DEC-013 of #171: the canonical-timestamp helper
+        :func:`signalforge._common.timestamp.iso8601_z` is deliberately
+        :class:`datetime`-only per safety-layer.md issue #56 — :class:`date`
+        has no time-of-day component and the ``...Z`` suffix shape does
+        not apply. Pydantic v2's native :class:`date` JSON serialisation
+        already emits ``YYYY-MM-DD``, but the explicit serializer documents
+        the contract and keeps :class:`PruneEvent` rendering identically
+        to :class:`signalforge.prune.models.PruneDecision`.
+        """
+        return value.isoformat() if value is not None else None
 
 
 def _build_prune_event(
@@ -176,6 +218,8 @@ def _build_prune_event(
         compiled_sql=decision.compiled_sql,
         why=decision.why,
         sample_failures=decision.sample_failures,
+        as_of=decision.as_of,
+        stats=decision.stats,
     )
 
 

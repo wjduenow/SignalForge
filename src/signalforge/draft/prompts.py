@@ -86,16 +86,26 @@ _TEST_CATALOGUE_LINES: dict[str, str] = {
         '         "columns": ["<col1>", "<col2>"], "where": "<SQL predicate>",\n'
         '         "rationale": "<1 sentence>"}'
     ),
+    "row_count_anomaly_by_period": (
+        '        {"type": "row_count_anomaly_by_period",\n'
+        '         "date_column": "<timestamp/date column>", "rationale": "<1 sentence>"},\n'
+        '        {"type": "row_count_anomaly_by_period",\n'
+        '         "date_column": "<timestamp/date column>", "seasonality": "dow",\n'
+        '         "rationale": "<1 sentence>"},\n'
+        '        {"type": "row_count_anomaly_by_period",\n'
+        '         "date_column": "<timestamp/date column>", "method": "percentile",\n'
+        '         "threshold": 5.0, "rationale": "<1 sentence>"}'
+    ),
 }
 """Per-test-type catalogue lines for the system prompt (issue #54).
 
-The six entries (extended in issue #169 with ``row_count_between`` and
-in issue #170 with ``unique_combination``) are emitted in this fixed
-order so the rendered prompt stays byte-stable when no exclusions
-apply. When :class:`DraftConfig` sets ``exclude_tests``, the excluded
-entries are dropped before rendering and the surviving entries'
-trailing-comma placement is fixed up so the JSON example stays
-well-formed.
+The seven entries (extended in issue #169 with ``row_count_between``,
+in issue #170 with ``unique_combination``, and in issue #171 with
+``row_count_anomaly_by_period``) are emitted in this fixed order so
+the rendered prompt stays byte-stable when no exclusions apply. When
+:class:`DraftConfig` sets ``exclude_tests``, the excluded entries are
+dropped before rendering and the surviving entries' trailing-comma
+placement is fixed up so the JSON example stays well-formed.
 
 The ``row_count_between`` entry (issue #169, DEC-012) illustrates BOTH
 the no-``where`` form (whole-table bound) and the with-``where`` form
@@ -112,6 +122,17 @@ Do NOT propose ``unique_combination`` over a primary key combined with
 any other column — that tuple is always unique by construction (the
 primary key alone guarantees it) and adds no signal beyond the existing
 single-column ``unique`` test.
+
+The ``row_count_anomaly_by_period`` entry (issue #171, DEC-007)
+illustrates three forms: a bare minimal call (defaults to ``method=mad``,
+``period=day``, ``lookback_periods=28``, ``threshold=3.0``,
+``seasonality=none``); a day-of-week-seasonality form for business-calendar
+grain; and an explicit ``method`` + ``threshold`` override form. Propose
+this variant when the model is an incremental fact table whose projection
+includes ``loaded_at`` / ``created_at`` / ``event_date`` /
+``partition_date`` — a static :class:`row_count_between` band cannot
+catch the "suddenly 1% of normal" or "10× the rolling baseline" volume
+anomaly class.
 
 The ``custom_sql`` singular-test illustration (issue #116, DEC-001 /
 DEC-015) lives in :data:`_CUSTOM_SQL_CATALOGUE_LINE` rather than here.
@@ -173,6 +194,39 @@ drafter away from vacuously-unique tuples — the grader's `no-redundant`
 criterion (US-008 of #170) flags them in scoring, but catching them at
 the prompt level prevents the warehouse round-trip and a wasted slot in
 the candidate schema."""
+
+
+_ROW_COUNT_ANOMALY_SCOPE_INSTRUCTION: str = """\
+
+`row_count_anomaly_by_period` tests bucket the model's rows by
+`date_column` truncated to `period` (day by default; `hour` or `week`
+also supported) and flag each bucket whose row count falls outside an
+anomaly band derived from the previous `lookback_periods` buckets
+(default `28`). Propose this when the model is an incremental fact
+table — its SQL projection includes a load/event/partition timestamp
+column like `loaded_at`, `created_at`, `event_date`, or
+`partition_date`. A static whole-table row-count bound cannot catch
+the volume-anomaly class (load drops to 1% of normal; spikes to 10×
+the rolling baseline). Propose `seasonality="dow"` when the SQL
+semantics suggest a business-calendar grain (weekday vs. weekend
+traffic differs systematically). The default `method="mad"` (median
+absolute deviation) is robust to occasional outliers in the lookback
+history; switch to `zscore` only when you want sensitivity to those
+outliers, to `percentile` for a percentile-band (`threshold` is the
+half-band width in percentile points: e.g. `threshold=5.0` →
+`[p5, p95]`), or to `min_max`
+to catch any excursion beyond the historical envelope (no margin;
+`threshold` is ignored for `min_max`). Default `threshold=3.0` and
+`min_samples_per_bucket=3` are sensible starting points; raise
+`threshold` to widen the band on a noisier signal."""
+"""SCOPE-section instruction block for ``row_count_anomaly_by_period``
+(issue #171, DEC-007). Emitted only when ``"row_count_anomaly_by_period"``
+is allowed (not in ``exclude_tests``). Inserted as a :meth:`str.format`
+*value* (not part of the format string), so any future literal braces
+would render verbatim. Teaches the LLM the "propose this when projection
+includes an incremental-load timestamp" heuristic AND the "use
+`seasonality=dow` for business-calendar grain" heuristic from #171
+US-005 + the per-method calibration prose."""
 
 
 _SYSTEM_PROMPT_TEMPLATE = """\
@@ -243,7 +297,8 @@ forwarded from the manifest.
 ### SCOPE
 
 Propose only {allowed_scope} tests. dbt-utils / dbt-expectations macros
-are out of scope for this draft step.{custom_sql_scope}{unique_combination_scope}
+are out of scope for this draft step.\
+{custom_sql_scope}{unique_combination_scope}{row_count_anomaly_scope}
 """
 
 
@@ -302,11 +357,16 @@ def _render_system_prompt(exclude_tests: tuple[str, ...]) -> str:
     unique_combination_scope = (
         _UNIQUE_COMBINATION_SCOPE_INSTRUCTION if unique_combination_allowed else ""
     )
+    row_count_anomaly_allowed = "row_count_anomaly_by_period" in allowed
+    row_count_anomaly_scope = (
+        _ROW_COUNT_ANOMALY_SCOPE_INSTRUCTION if row_count_anomaly_allowed else ""
+    )
     return _SYSTEM_PROMPT_TEMPLATE.format(
         test_catalogue=test_catalogue,
         allowed_scope=scope_phrase,
         custom_sql_scope=custom_sql_scope,
         unique_combination_scope=unique_combination_scope,
+        row_count_anomaly_scope=row_count_anomaly_scope,
     )
 
 

@@ -262,7 +262,7 @@ def test_prompt_version_template_pinned_to_golden_hex() -> None:
     * ``5a70561088930c97`` — rotated under #169 (DEC-009) when the
       ``no-redundant`` criterion gained calibration prose for
       numeric-bounded tests (``row_count_between``).
-    * ``4dae4421972e9c2d`` — current. Rotated under #170 (DEC-007) when
+    * ``4dae4421972e9c2d`` — rotated under #170 (DEC-007) when
       the ``no-redundant`` criterion gained sibling calibration prose
       for composite-key tests (``unique_combination``): a vacuously
       unique tuple of the shape ``(primary_key, anything)`` carries no
@@ -272,8 +272,20 @@ def test_prompt_version_template_pinned_to_golden_hex() -> None:
       stayed locked — a vacuous composite key routes through a low
       criterion score → ``passed: bool`` threshold → ``flagged`` tier,
       NOT a 4th degrade trigger.
+    * ``b1e609fae240ac1c`` — current. Rotated under #171 (DEC-004) when
+      the ``no-redundant`` criterion gained sibling calibration prose
+      for per-period anomaly tests (``row_count_anomaly_by_period``):
+      the judge scores whether the ``(method, seasonality, threshold)``
+      combination is tight enough to catch the failure mode (anomalously
+      small/empty period) but loose enough not to fire on legitimate
+      weekday/weekend or seasonal swings. The system prompt, envelope
+      tags, and rubric structure are unchanged; only the ``no-redundant``
+      criterion text grew. The grader's 3-trigger degrade taxonomy
+      (DEC-011) stayed locked — weak calibration routes through a low
+      criterion score → ``passed: bool`` threshold → ``flagged`` tier,
+      NOT a 4th degrade trigger.
     """
-    assert prompt_version_template(DEFAULT_RUBRIC) == "4dae4421972e9c2d"
+    assert prompt_version_template(DEFAULT_RUBRIC) == "b1e609fae240ac1c"
 
 
 # ---------------------------------------------------------------------------
@@ -340,13 +352,20 @@ def test_criterion_prompt_hash_pinned_to_golden_hex() -> None:
       unique tuple of the shape ``(primary_key, anything)`` carries no
       grain signal. The other three criterion hashes are unchanged — only
       ``no-redundant`` was extended.
+    * ``no-redundant`` rotated ``7b96cfdfe63bc8bc`` → ``b24ff0014a5dcb86``
+      under #171 (DEC-004) when the criterion gained sibling calibration
+      prose for per-period anomaly tests (``row_count_anomaly_by_period``):
+      the judge scores whether the ``(method, seasonality, threshold)``
+      combination is tight enough to catch the failure mode but loose
+      enough not to fire on legitimate seasonal swings. The other three
+      criterion hashes are unchanged — only ``no-redundant`` was extended.
     """
     actual = {c.id: criterion_prompt_hash(c) for c in DEFAULT_RUBRIC}
     assert actual == {
         "clarity": "182ebed168a11076",
         "consistency": "4f739879138c19d6",
         "rationale": "d355e87f2381bcdf",
-        "no-redundant": "7b96cfdfe63bc8bc",
+        "no-redundant": "b24ff0014a5dcb86",
     }
 
 

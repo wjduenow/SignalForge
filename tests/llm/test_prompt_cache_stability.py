@@ -46,13 +46,24 @@ does not hard-code a hash so it can't drift. Latest known rotations:
   BOTH the no-``where`` and with-``where`` shapes so the drafter has
   two forms to mirror. Only the system prompt changed; the cached-block
   golden (manifest summary) is unchanged.
-- ``389c8aa970df86cc`` — current. Rotated under #170 (DEC-002, US-003)
+- ``389c8aa970df86cc`` — rotated under #170 (DEC-002, US-003)
   when ``unique_combination`` was added to ``_TEST_CATALOGUE_LINES`` as
   the 7th first-class test primitive. The new catalogue entry illustrates
   BOTH the no-``where`` and with-``where`` shapes (composite uniqueness
   whole-table vs. filtered). A new ``_UNIQUE_COMBINATION_SCOPE_INSTRUCTION``
   block was added to the SCOPE section with cautionary prose steering the
   drafter away from vacuously-unique tuples like ``(pk, anything)``.
+  Only the system prompt changed; the cached-block golden (manifest
+  summary) is unchanged.
+- ``a4fea640b3b60f24`` — current. Rotated under #171 (DEC-007, US-005)
+  when ``row_count_anomaly_by_period`` was added to ``_TEST_CATALOGUE_LINES``
+  as the 8th first-class test primitive. The new catalogue entry
+  illustrates THREE forms (bare default-method call; ``seasonality="dow"``
+  for business-calendar grain; explicit ``method`` + ``threshold``
+  override). A new ``_ROW_COUNT_ANOMALY_SCOPE_INSTRUCTION`` block was
+  added to the SCOPE section teaching the "propose this variant when
+  the projection includes ``loaded_at`` / ``created_at`` / ``event_date``
+  / ``partition_date``" heuristic plus per-method calibration prose.
   Only the system prompt changed; the cached-block golden (manifest
   summary) is unchanged.
 
@@ -83,7 +94,7 @@ _FIXTURE_PATH = (
 )
 
 
-_EXPECTED_PROMPT_VERSION: str = "389c8aa970df86cc"
+_EXPECTED_PROMPT_VERSION: str = "c11a73cc95b31614"
 
 
 # Captured once via ``render_prompt`` against the canonical fixture below.
