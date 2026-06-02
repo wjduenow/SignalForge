@@ -16,6 +16,24 @@ confines every ``# pyright: ignore`` (DEC-012)") and
 :mod:`signalforge.llm` for the same reason; do not pool SDK ignores into a
 generic util module.
 
+Issue #186 (US-004 — async grade engine) adds the async siblings:
+
+* :class:`_OpenAIAsyncMessagesProtocol` / :class:`AsyncOpenAIClientProtocol`
+  — async counterparts to the sync protocols. The DEC-012 confinement
+  contract applies verbatim — every ``# pyright: ignore`` for the SDK's
+  async constructor lives in this module, and AST Scan 9b in
+  ``tests/test_audit_completeness.py`` pins the async-SDK construction
+  here alongside the existing Scan 9 for the sync constructor.
+* :class:`_OpenAIAsyncClientAdapter` — async sibling of
+  :class:`_OpenAIClientAdapter`. ``messages.create`` is an awaitable that
+  forwards to ``await self._raw.chat.completions.create(**kwargs)``;
+  ``messages.count_tokens`` raises :class:`NotImplementedError` (orchestrator
+  gates the pre-send count call off via ``supports_token_count=False``).
+* :func:`_make_openai_async_client` — factory returning
+  ``_OpenAIAsyncClientAdapter(AsyncOpenAI(api_key=api_key))``. Lazy-imports
+  the SDK so test environments that inject a fake async client never pay
+  the SDK import cost.
+
 Three responsibilities:
 
 * :class:`OpenAIClientProtocol` — duck-typed surface common to the real
@@ -187,6 +205,145 @@ def _make_openai_client(
     return _OpenAIClientAdapter(openai.OpenAI(api_key=api_key))  # type: ignore[no-any-return]
 
 
+@runtime_checkable
+class _OpenAIAsyncMessagesProtocol(Protocol):
+    """Async sibling of :class:`_OpenAIMessagesProtocol` (issue #186, US-004).
+
+    The async OpenAI SDK (``openai.AsyncOpenAI``) exposes
+    ``client.chat.completions.create(...)`` as a coroutine. The
+    :class:`_OpenAIAsyncClientAdapter` returned by
+    :func:`_make_openai_async_client` wraps it to expose a
+    :attr:`messages` namespace whose :meth:`create` awaitable delegates
+    to ``await self._raw.chat.completions.create``. This protocol types
+    that namespace so :func:`signalforge.llm.client.call_llm_async`
+    (US-006) calls the same method signatures regardless of which
+    provider is wired.
+
+    :meth:`count_tokens` raises :class:`NotImplementedError` because
+    OpenAI has no equivalent of Anthropic's pre-send count API; the
+    orchestrator gates the pre-send count call on
+    ``supports_token_count=True`` and so never invokes this method for
+    an ``OpenAIProvider`` (capability flag is ``False``). Declared on the
+    protocol for structural parity with the sync sibling.
+
+    Structural conformance is checked at runtime via
+    ``@runtime_checkable``; both the real ``openai.AsyncOpenAI``
+    (wrapped in :class:`_OpenAIAsyncClientAdapter`) and
+    ``tests/llm/_fake_openai.py::FakeOpenAIClient`` (via its ``.aio``
+    namespace — same fake instance drives sync + async paths, DEC-012 of
+    #186) satisfy the protocol.
+    """
+
+    async def create(self, **kwargs: Any) -> Any: ...
+
+    async def count_tokens(self, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
+class AsyncOpenAIClientProtocol(Protocol):
+    """Async sibling of :class:`OpenAIClientProtocol` (issue #186, US-004).
+
+    Duck-typed surface common to the async OpenAI adapter
+    (:class:`_OpenAIAsyncClientAdapter`, returned by
+    :func:`_make_openai_async_client`) and the test fake
+    (``tests/llm/_fake_openai.py::FakeOpenAIClient`` — same class, its
+    ``.aio.messages`` surface satisfies this protocol). The protocol is
+    intentionally narrow — only the surface
+    :func:`signalforge.llm.client.call_llm_async` (US-006) consumes
+    (``messages.create``, ``messages.count_tokens``, both awaitable).
+
+    The DEC-010 SDK-confinement contract applies verbatim — every
+    ``# pyright: ignore`` for the async-SDK construction lives in this
+    module, and AST Scan 9b in ``tests/test_audit_completeness.py``
+    pins the async-SDK construction site to
+    ``signalforge.llm._openai_client`` alongside the existing Scan 9
+    for the sync constructor.
+    """
+
+    messages: _OpenAIAsyncMessagesProtocol
+
+
+class _OpenAIAsyncClientAdapter:
+    """Async sibling of :class:`_OpenAIClientAdapter` (issue #186, US-004).
+
+    Wraps an ``openai.AsyncOpenAI`` client to expose a ``.messages``
+    namespace whose :meth:`create` awaitable delegates to ``await
+    self._raw.chat.completions.create``. The orchestrator at
+    :func:`signalforge.llm.client.call_llm_async` (US-006) hard-calls
+    ``await llm_client.messages.create(**kwargs)``; the SDK exposes
+    ``chat.completions.create(...)`` instead, so the adapter rebinds
+    the surface the same way as the sync sibling.
+
+    :meth:`messages.count_tokens` is also an awaitable that raises
+    :class:`NotImplementedError` — orchestrator never calls it for a
+    ``supports_token_count=False`` provider, but raising is the honest
+    behaviour if the gate ever drifts (mirrors the sync adapter).
+
+    Construction goes only through :func:`_make_openai_async_client` —
+    this class is internal plumbing for the async shim.
+    """
+
+    def __init__(self, raw_client: Any) -> None:
+        self._raw = raw_client
+        self.messages = SimpleNamespace(
+            create=self._messages_create,
+            count_tokens=self._messages_count_tokens,
+        )
+
+    async def _messages_create(self, **kwargs: Any) -> Any:
+        """Delegate to ``await self._raw.chat.completions.create(**kwargs)``.
+
+        Mirrors :meth:`_OpenAIClientAdapter._messages_create` for the
+        async path. The kwargs dict is OpenAI-native (``model``,
+        ``max_tokens``, ``messages`` list, ``response_format``) and is
+        shaped by :meth:`OpenAIProvider.build_create_kwargs`; the JSON-mode
+        ``response_format={"type":"json_object"}`` flag rides on every
+        call (DEC-006 of #136).
+        """
+        return await self._raw.chat.completions.create(**kwargs)
+
+    async def _messages_count_tokens(self, **kwargs: Any) -> Any:  # pragma: no cover - defensive
+        """Defensive: orchestrator never calls this for OpenAI.
+
+        Mirrors :meth:`_OpenAIClientAdapter._messages_count_tokens` for
+        the async path; raising surfaces a regression where the
+        ``supports_token_count=False`` gate has drifted and the async
+        orchestrator started calling this method against an OpenAI
+        client.
+        """
+        raise NotImplementedError(
+            "OpenAI async provider does not support pre-send count_tokens; "
+            "supports_token_count=False gates this call off in the "
+            "orchestrator. If you see this, the capability-flag gate has drifted."
+        )
+
+
+def _make_openai_async_client(
+    api_key: str | None = None,
+) -> AsyncOpenAIClientProtocol:  # pragma: no cover - exercised by integration tests only
+    """Construct a real ``openai.AsyncOpenAI`` client wrapped in the adapter.
+
+    Async sibling of :func:`_make_openai_client` (issue #186, US-004).
+    ``api_key=None`` lets the SDK consume the ``OPENAI_API_KEY``
+    environment variable (standard SDK behaviour); explicit values are
+    preserved for callers that thread credentials through configuration.
+
+    The ``openai`` import is lazy so test environments that inject a
+    fake async client never pay the SDK import cost, and so a base
+    install without the ``[openai]`` extra does not crash at module-
+    import time (mirrors the sync factory's DEC-014 of #136 contract).
+
+    DEC-010 / DEC-014 confinement: AST Scan 9b in
+    ``tests/test_audit_completeness.py`` enforces that the async-SDK
+    constructor is instantiated only here. Any bypass (bare-name /
+    import-alias / module-attribute / late-import alias) is caught by
+    the four-pattern :class:`_AttributeCallFinder` visitor.
+    """
+    from openai import AsyncOpenAI  # type: ignore[import-not-found]
+
+    return _OpenAIAsyncClientAdapter(AsyncOpenAI(api_key=api_key))  # type: ignore[no-any-return]
+
+
 @dataclass(frozen=True)
 class _OpenAIExceptionClasses:
     """Bundle of SDK exception classes used by the retry loop in
@@ -268,11 +425,15 @@ def _count_openai_tokens(model: str, text: str) -> int:
 
 
 __all__ = [
+    "AsyncOpenAIClientProtocol",
     "OpenAIClientProtocol",
+    "_OpenAIAsyncClientAdapter",
+    "_OpenAIAsyncMessagesProtocol",
     "_OpenAIClientAdapter",
     "_OpenAIExceptionClasses",
     "_OpenAIMessagesProtocol",
     "_count_openai_tokens",
     "_load_openai_exception_classes",
+    "_make_openai_async_client",
     "_make_openai_client",
 ]
