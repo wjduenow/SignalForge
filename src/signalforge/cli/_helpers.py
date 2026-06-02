@@ -97,6 +97,7 @@ from signalforge.grade import (
     GradeConfigError,
     GradeError,
     GradeLLMError,
+    GradeNestedEventLoopError,
     GradeOutputError,
     GradePromptEnvelopeBreachError,
     GradeRubricError,
@@ -271,6 +272,11 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     PruneConfigError: 1,
     GradeConfigError: 1,
     GradeRubricError: 1,
+    # Nested-event-loop guard at ``grade_artifacts`` sync entry
+    # (issue #186 DEC-009). Tier 1 — the operator's call site is wrong
+    # (re-entered from inside an asyncio loop); same tier as
+    # :class:`ManifestNotFoundError` (operator-environment-shape error).
+    GradeNestedEventLoopError: 1,
     DiffError: 1,
     # CLI-layer load-shape errors.
     CliError: 1,

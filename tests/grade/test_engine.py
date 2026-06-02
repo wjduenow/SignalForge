@@ -1330,3 +1330,227 @@ def test_grade_below_threshold_writes_sidecar_before_raising(tmp_path: Path) -> 
     # established for prune / grade in DEC-006).
     rows = _read_jsonl(audit_path)
     assert len(rows) == len(round_tripped.results)
+
+
+# ---------------------------------------------------------------------------
+# Async-pre-flight guards (issue #186 DEC-006 / DEC-009 — US-008)
+# ---------------------------------------------------------------------------
+
+
+def test_grade_artifacts_nested_event_loop_raises_typed_error(tmp_path: Path) -> None:
+    """Calling :func:`grade_artifacts` from inside a running asyncio event
+    loop raises :class:`GradeNestedEventLoopError` (CLI tier 1) with a
+    remediation pointing at the v0.4 follow-up. The guard fires BEFORE
+    any LLM call so the queued fake is never reached.
+    """
+    import asyncio
+
+    from signalforge.grade.errors import GradeNestedEventLoopError
+
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()  # No expectations — any call would raise.
+
+    async def _drive() -> None:
+        # Running inside ``asyncio.run`` means ``asyncio.get_running_loop()``
+        # in the guard returns the loop, triggering the typed raise.
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=_config_no_audit_in_path(),
+            client=fake,
+            project_dir=project_dir,
+        )
+
+    with pytest.raises(GradeNestedEventLoopError) as excinfo:
+        asyncio.run(_drive())
+
+    assert excinfo.value.model_unique_id == model.unique_id
+    # The remediation is locked verbatim by DEC-009 of #186.
+    assert "single-event-loop only" in str(excinfo.value)
+    # Defence-in-depth: the fake was never reached.
+    assert fake.create_calls == []
+    assert fake.count_calls == []
+
+
+def test_grade_artifacts_outside_event_loop_does_not_raise_nested_guard(
+    tmp_path: Path,
+) -> None:
+    """The nested-loop guard fires ONLY when called from a running event
+    loop. The sync test entry path (every other engine test) must NOT
+    trip it — this test pins the negative direction so a refactor that
+    inverts the ``try/except`` couldn't silently break every grade run.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, candidate=candidate, rubric=rubric)
+
+    # Smoke: a normal (non-async) caller succeeds.
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=fake,
+        project_dir=project_dir,
+    )
+    # The guard didn't intercept; the run produced a real report.
+    assert report.model_unique_id == model.unique_id
+
+
+def test_grade_artifacts_sync_only_provider_with_parallel_cap_raises_typed_error(
+    tmp_path: Path,
+) -> None:
+    """When the configured provider has ``supports_async=False`` AND
+    ``max_concurrent_calls > 1``, the engine raises
+    :class:`LLMProviderAsyncUnsupportedError` (CLI tier 3) at orchestrator
+    entry — BEFORE any LLM call — rather than silently clamping to 1.
+    Mirrors the project's ``extra="forbid"`` fail-loud posture (DEC-006
+    of #186).
+    """
+    from signalforge.llm import providers as providers_module
+    from signalforge.llm.errors import LLMProviderAsyncUnsupportedError
+    from tests.llm._fake_provider import FakeNoCacheProvider
+
+    class _SyncOnlyProvider(FakeNoCacheProvider):
+        """Inherits every ABC concretion from
+        :class:`FakeNoCacheProvider`; the only delta is ``supports_async``
+        is flipped to ``False`` so the guard fires."""
+
+        name = "sync-only-test-provider-186-us008"
+        supports_async = False  # The load-bearing attribute under test.
+
+    # Snapshot the registry so this test can't pollute other suites.
+    saved = dict(providers_module._REGISTRY)
+    try:
+        providers_module._REGISTRY.clear()
+        providers_module._REGISTRY.update(saved)
+        providers_module.register_provider(_SyncOnlyProvider())
+
+        project_dir = _project(tmp_path)
+        model = _make_model()
+        candidate = _load_sample_candidate()
+        rubric = _two_criteria()
+        fake = FakeAnthropicClient()  # No expectations — any call raises.
+
+        config = GradeConfig(
+            model="claude-fake",
+            cache_ttl="1h",
+            max_output_tokens=64,
+            max_retries_429=0,
+            max_retries_5xx=0,
+            max_retries_conn=0,
+            total_budget_seconds=60,
+            provider="sync-only-test-provider-186-us008",
+            max_concurrent_calls=5,
+        )
+
+        with pytest.raises(LLMProviderAsyncUnsupportedError) as excinfo:
+            grade_artifacts(
+                model,
+                candidate,
+                _empty_prune_result(model),
+                rubric=rubric,
+                config=config,
+                client=fake,
+                project_dir=project_dir,
+            )
+
+        # The message names both the offending provider and the cap.
+        assert "sync-only-test-provider-186-us008" in str(excinfo.value)
+        assert "max_concurrent_calls=5" in str(excinfo.value)
+        # The remediation is locked verbatim by DEC-006 of #186.
+        assert "grade.max_concurrent_calls: 1" in str(excinfo.value)
+        # Defence-in-depth: no LLM call was attempted.
+        assert fake.create_calls == []
+    finally:
+        providers_module._REGISTRY.clear()
+        providers_module._REGISTRY.update(saved)
+
+
+def test_grade_artifacts_sync_only_provider_with_cap_one_does_not_raise(
+    tmp_path: Path,
+) -> None:
+    """The pair (``supports_async=False``, ``max_concurrent_calls=1``)
+    is the documented escape hatch — pin the negative direction so a
+    refactor that drops the ``> 1`` predicate (and hence rejects every
+    sync provider unconditionally) breaks loud.
+
+    Asserts the GUARD does not fire, by verifying that
+    :class:`LLMProviderAsyncUnsupportedError` is NOT raised. We do NOT
+    drive the full grade pipeline because the canned ``FakeNoCacheClient``
+    runtime is mismatched with the ``FakeAnthropicClient`` test injection
+    seam used by every other engine test; the load-bearing assertion here
+    is purely "the typed pre-flight error was not raised".
+    """
+    from signalforge.llm import providers as providers_module
+    from signalforge.llm.errors import LLMProviderAsyncUnsupportedError
+    from tests.llm._fake_provider import FakeNoCacheProvider
+
+    class _SyncOnlyButSerial(FakeNoCacheProvider):
+        name = "sync-only-serial-test-provider-186-us008"
+        supports_async = False
+
+    saved = dict(providers_module._REGISTRY)
+    try:
+        providers_module._REGISTRY.clear()
+        providers_module._REGISTRY.update(saved)
+        providers_module.register_provider(_SyncOnlyButSerial())
+
+        project_dir = _project(tmp_path)
+        model = _make_model()
+        candidate = _load_sample_candidate()
+        rubric = _two_criteria()
+        fake = FakeAnthropicClient()
+        expect_grade_responses(fake, candidate=candidate, rubric=rubric)
+
+        config = GradeConfig(
+            model="claude-fake",
+            cache_ttl="1h",
+            max_output_tokens=64,
+            max_retries_429=0,
+            max_retries_5xx=0,
+            max_retries_conn=0,
+            total_budget_seconds=60,
+            provider="sync-only-serial-test-provider-186-us008",
+            max_concurrent_calls=1,
+        )
+
+        # The guard must not raise ``LLMProviderAsyncUnsupportedError``.
+        # The grade pipeline may surface a different error downstream
+        # (FakeNoCacheClient vs FakeAnthropicClient runtime mismatch is
+        # not the contract under test); the load-bearing assertion is
+        # that the pre-flight guard let execution through.
+        try:
+            grade_artifacts(
+                model,
+                candidate,
+                _empty_prune_result(model),
+                rubric=rubric,
+                config=config,
+                client=fake,
+                project_dir=project_dir,
+            )
+        except LLMProviderAsyncUnsupportedError:  # pragma: no cover - regression guard
+            pytest.fail(
+                "LLMProviderAsyncUnsupportedError raised with "
+                "max_concurrent_calls=1; the > 1 predicate has regressed."
+            )
+        except Exception:
+            # Any other exception is acceptable — the runtime mismatch
+            # between FakeNoCacheClient and FakeAnthropicClient is not
+            # the contract under test. The guard fired before the LLM
+            # call; downstream failures only confirm execution proceeded
+            # past it.
+            pass
+    finally:
+        providers_module._REGISTRY.clear()
+        providers_module._REGISTRY.update(saved)

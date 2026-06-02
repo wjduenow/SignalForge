@@ -143,6 +143,30 @@ class GradeConfig(BaseModel):
     pairs land as a degraded :class:`signalforge.grade.models.GradingResult`
     rather than silently dropped."""
 
+    max_concurrent_calls: int = 10
+    """Asyncio dispatch concurrency cap for the per-``(artifact, criterion)``
+    judge calls (issue #186 DEC-003).
+
+    Default ``10`` — matches the ticket's "realistic concurrency target" for
+    the typical ~270–290-call grade run on a ~70-artifact model; operators
+    raise it via ``signalforge.yml`` for ~170-col wide models without code
+    changes. Range-bounded ``[1, 100]`` inclusive by the field validator —
+    ``< 1`` would dispatch nothing; ``> 100`` invites provider rate-limit
+    storms with no operator-visible benefit (the per-vendor TPM ceiling is
+    the load-bearing throttle below that).
+
+    Setting ``1`` yields bit-for-bit equivalent behaviour to v0.1 sequential
+    output (the semaphore serialises in dispatch order). Mirrors the
+    config-file-only convention of :attr:`min_pass_rate` /
+    :attr:`min_mean_score` / :attr:`cache_ttl` — no CLI flag (DEC-023 of
+    #186).
+
+    When the configured :attr:`provider` has
+    :attr:`signalforge.llm.providers.LLMProvider.supports_async` ``= False``
+    AND ``max_concurrent_calls > 1``, :func:`grade_artifacts` raises
+    :class:`signalforge.llm.errors.LLMProviderAsyncUnsupportedError` at
+    orchestrator entry — no silent clamp (DEC-006 of #186)."""
+
     min_pass_rate: float = 0.7
     """Fraction of ``(artifact, criterion)`` pairs that must score
     ``passed=True`` for the rubric to count as passed overall (DEC-016).
@@ -197,6 +221,22 @@ class GradeConfig(BaseModel):
     def _positive(cls, v: int) -> int:
         if v <= 0:
             raise ValueError("must be positive")
+        return v
+
+    @field_validator("max_concurrent_calls")
+    @classmethod
+    def _max_concurrent_calls_bounded(cls, v: int) -> int:
+        """Range ``[1, 100]`` inclusive (issue #186 DEC-003).
+
+        ``< 1`` would dispatch nothing (semaphore acquire deadlock at
+        construction); ``> 100`` invites provider rate-limit storms with
+        no operator-visible benefit (the per-vendor TPM ceiling is the
+        real throttle below that). Both ends are operator-actionable
+        misconfigurations — fail loud at config-load rather than
+        silently clamp.
+        """
+        if v < 1 or v > 100:
+            raise ValueError("must be in the closed interval [1, 100]")
         return v
 
     @field_validator("max_retries_429", "max_retries_5xx", "max_retries_conn")

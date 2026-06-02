@@ -62,6 +62,7 @@ Design commitments operationalised here (``plans/super/7-quality-grader.md``):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -102,6 +103,7 @@ from signalforge.grade.errors import (
     GradeBelowThresholdError,
     GradeError,
     GradeLLMError,
+    GradeNestedEventLoopError,
     GradeOutputError,
     GradePromptEnvelopeBreachError,
 )
@@ -123,7 +125,12 @@ from signalforge.grade.rubric import (
 )
 from signalforge.llm import AnthropicClientProtocol
 from signalforge.llm.client import call_llm
-from signalforge.llm.errors import LLMError, LLMResponseFormatError
+from signalforge.llm.errors import (
+    LLMError,
+    LLMProviderAsyncUnsupportedError,
+    LLMResponseFormatError,
+)
+from signalforge.llm.providers import provider_for
 from signalforge.manifest.models import Model
 from signalforge.prune.models import PruneResult
 
@@ -648,6 +655,35 @@ def grade_artifacts(
 
     # 3. Whole-run pre-flight envelope-breach scan (DEC-013).
     _scan_envelope_breach(candidate)
+
+    # 3a. Async-pre-flight guards (issue #186, DEC-006 / DEC-009). These
+    #     fire BEFORE the iterator is materialised and BEFORE any future
+    #     ``asyncio.run(...)`` call lands (US-009 wires the async core).
+    #     They reject two operator-environment misconfigurations:
+    #       1. Nested event loop — calling ``grade_artifacts`` from
+    #          inside an already-running asyncio loop would cause the
+    #          forthcoming ``asyncio.run`` to raise ``RuntimeError``;
+    #          we surface a typed ``GradeNestedEventLoopError`` (CLI
+    #          tier 1) with a remediation pointing at the v0.4 follow-up.
+    #       2. Sync-only provider + parallel cap — when the configured
+    #          provider has ``supports_async=False`` AND the operator
+    #          asked for ``max_concurrent_calls > 1`` we raise the
+    #          typed ``LLMProviderAsyncUnsupportedError`` (CLI tier 3)
+    #          rather than silently clamping to 1. Mirrors the project's
+    #          ``extra="forbid"`` fail-loud posture.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise GradeNestedEventLoopError(model_unique_id=model.unique_id)
+
+    provider_strategy = provider_for(resolved_config.provider)
+    if not provider_strategy.supports_async and resolved_config.max_concurrent_calls > 1:
+        raise LLMProviderAsyncUnsupportedError(
+            f"Provider {resolved_config.provider!r} does not support async dispatch, "
+            f"but grade.max_concurrent_calls={resolved_config.max_concurrent_calls} > 1."
+        )
 
     # 4. Run-wide derived values.
     run_id = uuid.uuid4().hex
