@@ -99,6 +99,47 @@ class FakeNoCacheClient:
         return list(self._messages.create_calls)
 
 
+@dataclass
+class _FakeNoCacheAsyncMessages:
+    """Async ``.messages`` namespace on :class:`_FakeNoCacheAsyncClient`.
+
+    Mirrors :class:`_FakeNoCacheMessages` byte-for-byte but with ``async``
+    methods so :func:`signalforge.llm.client.call_llm_async` can ``await``
+    each call. ``count_tokens`` still raises loudly because the provider
+    declares ``supports_token_count=False`` — if the async orchestrator
+    invokes it that's a silent gating regression and the raise turns it
+    into a loud failure.
+    """
+
+    response_text: str
+    create_calls: list[dict[str, Any]] = field(default_factory=list)
+
+    async def create(self, **kwargs: Any) -> FakeNoCacheResponse:
+        self.create_calls.append(kwargs)
+        return FakeNoCacheResponse(text=self.response_text)
+
+    async def count_tokens(self, **kwargs: Any) -> Any:
+        raise AssertionError(
+            "count_tokens must never be called for a provider with supports_token_count=False"
+        )
+
+
+class _FakeNoCacheAsyncClient:
+    """Async sibling of :class:`FakeNoCacheClient` (US-006 of issue #186).
+
+    Structurally satisfies the orchestrator's neutral async ``.messages``
+    surface (awaitable ``create`` / ``count_tokens``). Constructed by
+    :meth:`FakeNoCacheProvider.make_async_client` when the provider is
+    declared async-capable; not exported because the call_llm_async tests
+    drive it through :func:`signalforge.llm.providers.provider_for` rather
+    than directly.
+    """
+
+    def __init__(self, response_text: str = '{"ok": true}') -> None:
+        self._messages = _FakeNoCacheAsyncMessages(response_text=response_text)
+        self.messages = self._messages
+
+
 class FakeNoCacheProvider(LLMProvider):
     """A test-only :class:`LLMProvider` with neither caching nor token counting.
 
@@ -116,6 +157,13 @@ class FakeNoCacheProvider(LLMProvider):
     name = FAKE_NOCACHE_PROVIDER_NAME
     supports_prompt_caching = False
     supports_token_count = False
+    # Inherits ``supports_async = True`` from the ABC (see the default in
+    # :class:`signalforge.llm.providers.LLMProvider`). Sync-only fixtures
+    # for the US-006 capability-gate test subclass :class:`FakeNoCacheProvider`
+    # with ``supports_async = False`` rather than carrying an instance flag —
+    # the ABC declares ``supports_async`` as a ``ClassVar`` so subclass
+    # override is the type-checker-clean seam (see
+    # :class:`FakeSyncOnlyNoCacheProvider` below).
 
     def __init__(self, response_text: str = '{"ok": true}') -> None:
         self._response_text = response_text
@@ -125,20 +173,24 @@ class FakeNoCacheProvider(LLMProvider):
         return FakeNoCacheClient(response_text=self._response_text)
 
     def make_async_client(self) -> Any:
-        """Issue #186 US-002 — abstract-method stub.
+        """Build a tiny async-capable canned-response client (US-006 of #186).
 
-        The neutrality tests drive the sync path (``call_llm``); the async
-        path lands in US-006 with its own dual sync+async fake surface.
-        Raising :class:`NotImplementedError` satisfies the ABC's abstract
-        requirement (must be overridden in the concrete subclass) without
-        committing to a partial implementation; a future async neutrality
-        test extends :class:`FakeNoCacheClient` with the async methods and
-        updates this stub in lockstep. ``Any`` return type sidesteps the
-        strict ``_LLMAsyncClientProtocol`` override check.
+        Returns an :class:`_FakeNoCacheAsyncClient` whose ``messages.create``
+        / ``messages.count_tokens`` are awaitable wrappers around the same
+        canned-response surface :meth:`make_client` exposes. ``Any`` return
+        type sidesteps the strict ``_LLMAsyncClientProtocol`` override
+        check at the ABC boundary (mirrors :class:`AnthropicProvider`'s
+        explicit-protocol return for the same reason).
+
+        A sync-only provider subclasses this class and sets
+        ``supports_async = False``; the orchestrator
+        (``call_llm_async``) raises
+        :class:`signalforge.llm.errors.LLMProviderAsyncUnsupportedError`
+        at entry BEFORE this method is reached, so this implementation
+        is exercised only when the subclass leaves the flag at the
+        inherited ``True`` (or doesn't subclass at all).
         """
-        raise NotImplementedError(
-            "FakeNoCacheProvider.make_async_client: US-006 of issue #186 will wire this."
-        )
+        return _FakeNoCacheAsyncClient(response_text=self._response_text)
 
     def build_create_kwargs(
         self,
@@ -267,10 +319,40 @@ class FakeNoCacheProvider(LLMProvider):
         return len(f"{system} {text}".split())
 
 
+class FakeSyncOnlyNoCacheProvider(FakeNoCacheProvider):
+    """Sync-only sibling of :class:`FakeNoCacheProvider` (US-006 of issue #186).
+
+    Declares ``supports_async = False`` so the
+    :func:`signalforge.llm.client.call_llm_async` capability-gate test
+    can exercise the
+    :class:`signalforge.llm.errors.LLMProviderAsyncUnsupportedError`
+    short-circuit at orchestrator entry. Subclass (not instance flag)
+    because the ABC declares ``supports_async`` as a ``ClassVar`` —
+    subclass override is the type-checker-clean seam (DEC-005 of #186
+    establishes the capability flag; this is the sync-only variant
+    that demonstrates the gate fires).
+
+    :meth:`make_async_client` defensively raises so any accidental call
+    past the orchestrator gate is loud rather than silent — the gate
+    runs at ``call_llm_async`` entry BEFORE any client construction, so
+    in correct use this raise is unreachable.
+    """
+
+    supports_async = False
+
+    def make_async_client(self) -> Any:
+        raise NotImplementedError(
+            "FakeSyncOnlyNoCacheProvider.make_async_client: provider declares "
+            "supports_async=False; the orchestrator must short-circuit with "
+            "LLMProviderAsyncUnsupportedError before reaching this method.",
+        )
+
+
 __all__ = [
     "FAKE_NOCACHE_PROVIDER_NAME",
     "FakeNoCacheClient",
     "FakeNoCacheProvider",
     "FakeNoCacheResponse",
     "FakeNoCacheUsage",
+    "FakeSyncOnlyNoCacheProvider",
 ]
