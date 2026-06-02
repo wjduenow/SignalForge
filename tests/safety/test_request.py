@@ -472,6 +472,7 @@ def test_build_llm_request_audit_policy_flags_sample_mode_enabled(
     build_llm_request(customers_model, fake, policy)
 
     event, _ = rec.calls[0]
+    assert event.policy_flags is not None
     assert "sample_mode_enabled" in event.policy_flags
 
 
@@ -491,6 +492,7 @@ def test_build_llm_request_audit_policy_flags_redaction_disabled(
     build_llm_request(customers_model, fake, policy)
 
     event, _ = rec.calls[0]
+    assert event.policy_flags is not None
     assert "redaction_disabled" in event.policy_flags
 
 
@@ -505,6 +507,7 @@ def test_build_llm_request_audit_policy_flags_audit_path_overridden(
     build_llm_request(customers_model, fake, policy)
 
     event, _ = rec.calls[0]
+    assert event.policy_flags is not None
     assert "audit_path_overridden" in event.policy_flags
 
 
@@ -693,33 +696,25 @@ def test_build_llm_request_returns_llmrequest_instance(
     assert request.model_unique_id == customers_model.unique_id
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Issue #185 US-002 builds the v4 AuditEvent shape, but safety.audit.write "
-        "still reads the v3 event.redactions field. US-003 (sibling bead) lands "
-        "the v4-aware writer; this end-to-end disk-write test passes again then."
-    ),
-    strict=True,
-    raises=Exception,
-)
 def test_build_llm_request_writes_audit_to_disk_under_default_path(
     customers_model: Model, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End-to-end: with no ``audit.write`` patch, the JSONL file is created.
 
-    Issue #185 US-002 leaves the writer at its v3 shape (``audit.py`` is
-    US-003's territory and is explicitly out-of-scope for this bead).
-    Override the autouse no-op fixture and undo the patch so the real
-    ``audit.write`` fires; it will fail until US-003 lands the v4-aware
-    writer that reads ``event.redactions_by_reason`` instead of the gone
-    ``event.redactions``.
-    """
-    # Re-import audit.write fresh so the autouse no-op patch is undone for
-    # this single test (last ``monkeypatch.setattr`` wins within the test
-    # function — monkeypatch unwinds in LIFO order at teardown).
-    from signalforge.safety import audit as real_audit
+    Issue #185 US-005: US-003's v4-aware writer ships, so this end-to-end
+    test runs for real. Undo the autouse no-op patch via
+    ``monkeypatch.undo()`` so the REAL ``audit.write`` fires from the
+    request module; with the writer now reading
+    ``event.redactions_by_reason`` instead of the gone ``event.redactions``,
+    the JSONL artefact is written successfully.
 
-    monkeypatch.setattr("signalforge.safety.request.audit.write", real_audit.write)
+    Note: ``monkeypatch.setattr`` cannot recover the real ``audit.write``
+    once the autouse fixture has overwritten the module attribute (a
+    subsequent ``getattr(audit, "write")`` returns the *replacement*).
+    ``monkeypatch.undo()`` is the load-bearing seam — it rewinds the
+    autouse patch so the original function is restored.
+    """
+    monkeypatch.undo()
 
     fake = FakeAdapter()
     policy = _policy(tmp_path, mode=SamplingMode.SCHEMA_ONLY)
