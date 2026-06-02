@@ -429,6 +429,15 @@ async def test_call_llm_async_sync_only_provider_raises_capability_error() -> No
     sync_only_name = "fake-nocache-sync-only-v8j6"
     sync_only = FakeSyncOnlyNoCacheProvider()
     sync_only.name = sync_only_name
+    # Save any prior registration so an unrelated suite that registered
+    # this name first doesn't lose its entry on teardown (PR #190 review
+    # CodeRabbit — order-dependent failures avoided by restore-not-pop).
+    registry = cast(
+        dict[str, Any],
+        client_module.__dict__.get("_REGISTRY")
+        or __import__("signalforge.llm.providers", fromlist=["_REGISTRY"])._REGISTRY,
+    )
+    prior = registry.get(sync_only_name)
     register_provider(sync_only)
     try:
         # Double-check the registration actually carries the False flag —
@@ -449,15 +458,11 @@ async def test_call_llm_async_sync_only_provider_raises_capability_error() -> No
         # can spot the misconfiguration without sniffing message text.
         assert sync_only_name in str(exc_info.value)
     finally:
-        # Pop the test-only registration to keep cross-test state clean.
-        # Cast to access the private _REGISTRY for cleanup; the registry
-        # is module-level state by design (DEC-003 of #135).
-        registry = cast(
-            dict[str, Any],
-            client_module.__dict__.get("_REGISTRY")
-            or __import__("signalforge.llm.providers", fromlist=["_REGISTRY"])._REGISTRY,
-        )
-        registry.pop(sync_only_name, None)
+        # Restore any prior entry; otherwise remove the test-only one.
+        if prior is None:
+            registry.pop(sync_only_name, None)
+        else:
+            registry[sync_only_name] = prior
 
 
 # ---- supports_async=True with FakeNoCacheProvider drives the happy path ---
@@ -479,6 +484,8 @@ async def test_call_llm_async_drives_fake_nocache_provider_async() -> None:
     async_name = "fake-nocache-async-v8j6"
     async_provider = FakeNoCacheProvider(response_text="async-ok")
     async_provider.name = async_name
+    registry = __import__("signalforge.llm.providers", fromlist=["_REGISTRY"])._REGISTRY
+    prior = registry.get(async_name)
     register_provider(async_provider)
     try:
         result = await call_llm_async(
@@ -495,8 +502,10 @@ async def test_call_llm_async_drives_fake_nocache_provider_async() -> None:
         assert result.cache_creation_input_tokens == 0
         assert result.cache_read_input_tokens == 0
     finally:
-        registry = __import__("signalforge.llm.providers", fromlist=["_REGISTRY"])._REGISTRY
-        registry.pop(async_name, None)
+        if prior is None:
+            registry.pop(async_name, None)
+        else:
+            registry[async_name] = prior
 
 
 # ---- Module-level fixture cross-check -------------------------------------

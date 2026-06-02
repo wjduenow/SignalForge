@@ -132,9 +132,10 @@ class LLMProvider(abc.ABC):
     #: async client). A future provider lacking an async surface sets this to
     #: ``False``; :func:`signalforge.grade.engine.grade_artifacts` then raises
     #: :class:`signalforge.llm.errors.LLMProviderAsyncUnsupportedError` at
-    #: orchestrator entry when the operator requested ``grade.max_concurrent_calls
-    #: > 1`` (DEC-006), surfacing the capability gap to the operator rather than
-    #: silently clamping concurrency.
+    #: orchestrator entry, **regardless of ``grade.max_concurrent_calls``** —
+    #: the grade engine consumes ``call_llm_async`` exclusively post-#186, so
+    #: cap=1 is not an escape hatch; the operator must pick an async-capable
+    #: provider. (Tightened by QG Pass 1 Concern #2; DEC-006.)
     supports_async: ClassVar[bool] = True
 
     @abc.abstractmethod

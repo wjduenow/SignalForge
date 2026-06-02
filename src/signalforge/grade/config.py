@@ -162,10 +162,13 @@ class GradeConfig(BaseModel):
     #186).
 
     When the configured :attr:`provider` has
-    :attr:`signalforge.llm.providers.LLMProvider.supports_async` ``= False``
-    AND ``max_concurrent_calls > 1``, :func:`grade_artifacts` raises
+    :attr:`signalforge.llm.providers.LLMProvider.supports_async` ``= False``,
+    :func:`grade_artifacts` raises
     :class:`signalforge.llm.errors.LLMProviderAsyncUnsupportedError` at
-    orchestrator entry — no silent clamp (DEC-006 of #186)."""
+    orchestrator entry — **regardless of** ``max_concurrent_calls`` (the
+    engine consumes ``call_llm_async`` exclusively post-#186, so cap=1
+    is NOT an escape hatch; the operator must pick an async-capable
+    provider). Tightened by QG Pass 1 Concern #2 (DEC-006 of #186)."""
 
     min_pass_rate: float = 0.7
     """Fraction of ``(artifact, criterion)`` pairs that must score

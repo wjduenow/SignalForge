@@ -682,10 +682,27 @@ async def _grade_artifacts_async_core(
             # sync (cannot be killed mid-fsync); shielding lets it finish
             # before the cancellation propagates back. The slot was set
             # above so the synthesis pass will correctly skip this index.
+            #
+            # PR #190 review (CodeRabbit) refinement: capture the
+            # executor future explicitly so a cancellation arriving
+            # mid-shield doesn't silently swallow a downstream
+            # ``GradeAuditWriteError`` / ``GradeAuditRecordTooLargeError``.
+            # If the outer ``shield`` await raises ``CancelledError``,
+            # await the future directly so the writer's exception (if
+            # any) propagates to the TaskGroup as the run's abort signal
+            # — preserves the fail-closed contract under concurrent
+            # cancellation. On the happy path this is a no-op
+            # (``audit_future.done()`` is already True when the shield
+            # returns).
             loop = asyncio.get_running_loop()
-            await asyncio.shield(
-                loop.run_in_executor(None, _write_event_or_abort_kw, event, resolved_audit_path)
+            audit_future = loop.run_in_executor(
+                None, _write_event_or_abort_kw, event, resolved_audit_path
             )
+            try:
+                await asyncio.shield(audit_future)
+            except asyncio.CancelledError:
+                await audit_future
+                raise
 
     try:
         async with asyncio.timeout(total_budget_seconds):

@@ -47,7 +47,7 @@ Each is a `grade-layer.md` DEC. The refactor MUST preserve all of them:
 
 | # | DEC | Invariant | Impact under asyncio |
 |---|---|---|---|
-| 1 | DEC-002, DEC-015 | Conservative two-state `score: float | None`; three degrade routes (LLMError, GradeOutputError, budget) | **Adds 4th source:** `asyncio.CancelledError` mid-flight when budget trips. Folds into existing "budget exceeded" reasoning text — no new degrade reason. |
+| 1 | DEC-002, DEC-015 | Conservative two-state `score: float \| None`; three degrade routes (LLMError, GradeOutputError, budget) | **Adds 4th source:** `asyncio.CancelledError` mid-flight when budget trips. Folds into existing "budget exceeded" reasoning text — no new degrade reason. |
 | 2 | DEC-004 (per-criterion retry isolation) | One failed pair degrades; siblings keep running | `asyncio.gather(..., return_exceptions=True)` style OR `TaskGroup` with per-coroutine `try/except`. Each pair's exception caught inside its own coroutine. |
 | 3 | DEC-006, DEC-012 | Fail-closed audit JSONL; size cap before open; atomic per-line write | **Preserved unchanged** — each coroutine opens its own fd; PIPE_BUF (4096) ≥ record cap (4000), so concurrent `O_APPEND` writes are atomic. Ordering across pairs becomes arrival-order, NOT (criterion × artifact) order — explicitly accepted per ticket and grade-layer audit semantics. |
 | 4 | DEC-008 (envelope breach) | Whole-run pre-flight scan over every `(artifact_id, artifact_text)` before first LLM call | Runs once before async dispatch. Unchanged. |

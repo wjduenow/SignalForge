@@ -453,12 +453,14 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     LLMConnectionError: 3,
     LLMResponseFormatError: 3,
     LLMCacheTooLargeError: 3,
-    # Provider async-capability gate (issue #186 / US-002 / DEC-006): the
-    # configured LLM provider declares ``supports_async = False`` but the
-    # operator requested ``grade.max_concurrent_calls > 1``. Raised at
-    # ``grade_artifacts`` orchestrator entry **before** ``asyncio.run`` —
-    # an environment / configuration fact the operator must resolve
-    # (downgrade concurrency or pick another provider), so tier 3.
+    # Provider async-capability gate (issue #186 / US-002 / DEC-006;
+    # tightened by QG Pass 1 Concern #2): the configured LLM provider
+    # declares ``supports_async = False``. Raised at ``grade_artifacts``
+    # orchestrator entry **before** ``asyncio.run``, **regardless of
+    # ``grade.max_concurrent_calls``** (the engine consumes
+    # ``call_llm_async`` exclusively post-#186; cap=1 is not an escape
+    # hatch). An environment / configuration fact the operator must
+    # resolve (pick an async-capable provider), so tier 3.
     LLMProviderAsyncUnsupportedError: 3,
     # Warehouse connectivity / quota (auth, query syntax that came back
     # from a real query, billing limit).

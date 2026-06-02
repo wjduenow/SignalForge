@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -183,22 +184,34 @@ def test_fake_satisfies_async_anthropic_client_protocol() -> None:
     assert hasattr(aio.messages, "count_tokens")
 
 
-def test_async_anthropic_provider_make_async_client_returns_async_client() -> None:
+def test_async_anthropic_provider_make_async_client_returns_async_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """:meth:`AnthropicProvider.make_async_client` delegates to
-    :func:`_make_anthropic_async_client` and returns an object exposing
-    the async ``messages.create`` / ``messages.count_tokens`` surface
-    (issue #186, US-003).
+    :func:`_make_anthropic_async_client` (issue #186, US-003).
 
-    The orchestrator narrows the returned ``object`` to
-    :class:`signalforge.llm.client._LLMAsyncClientProtocol`; the
-    structural duck-typed match against ``messages.create`` /
-    ``messages.count_tokens`` is what makes the call-site type-check
-    without leaking a vendor SDK type into the seam.
+    Hermetic: monkey-patches the shim factory to a sentinel so the test
+    pins delegation without touching the real ``anthropic.AsyncAnthropic``
+    constructor (which the SDK may reject without credentials). Mirrors
+    :func:`tests.llm.test_providers.test_anthropic_provider_make_client_uses_shim`
+    — refined by PR #190 review (CodeRabbit) to avoid SDK-availability
+    coupling.
     """
+    import signalforge.llm._anthropic_client as shim
     from signalforge.llm.providers import AnthropicProvider
 
-    provider = AnthropicProvider()
-    client = provider.make_async_client()
+    sentinel = SimpleNamespace(
+        messages=SimpleNamespace(
+            create=lambda **_: None,
+            count_tokens=lambda **_: None,
+        ),
+    )
+    monkeypatch.setattr(shim, "_make_anthropic_async_client", lambda: sentinel)
+    client = AnthropicProvider().make_async_client()
+    assert client is sentinel
+    # Structural pinning kept as defence-in-depth: the orchestrator narrows
+    # the returned ``object`` to ``_LLMAsyncClientProtocol`` and consumes
+    # ``messages.create`` / ``messages.count_tokens``.
     assert hasattr(client, "messages")
     assert hasattr(client.messages, "create")
     assert hasattr(client.messages, "count_tokens")
