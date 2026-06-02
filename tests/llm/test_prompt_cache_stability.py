@@ -55,7 +55,7 @@ does not hard-code a hash so it can't drift. Latest known rotations:
   drafter away from vacuously-unique tuples like ``(pk, anything)``.
   Only the system prompt changed; the cached-block golden (manifest
   summary) is unchanged.
-- ``a4fea640b3b60f24`` — current. Rotated under #171 (DEC-007, US-005)
+- ``a4fea640b3b60f24`` — rotated under #171 (DEC-007, US-005)
   when ``row_count_anomaly_by_period`` was added to ``_TEST_CATALOGUE_LINES``
   as the 8th first-class test primitive. The new catalogue entry
   illustrates THREE forms (bare default-method call; ``seasonality="dow"``
@@ -66,6 +66,16 @@ does not hard-code a hash so it can't drift. Latest known rotations:
   / ``partition_date``" heuristic plus per-method calibration prose.
   Only the system prompt changed; the cached-block golden (manifest
   summary) is unchanged.
+- ``e568fb3e4602e465`` — current. Rotated under #183 (US-001) when the
+  missing ``_ROW_COUNT_BETWEEN_SCOPE_INSTRUCTION`` block was added to the
+  SCOPE section (the ``row_count_between`` primitive shipped its catalogue
+  line in #169 but never got a dedicated narrative scope-instruction block
+  like its two sibling variants). The block embeds the DEC-012 worked
+  example, teaching the "propose this when the SQL shows a bounded
+  aggregation whose cardinality is predictable from the grain" heuristic
+  plus the ``minimum``/``maximum``/``where`` calibration prose. Only the
+  system prompt changed; the cached-block golden (manifest summary) is
+  unchanged.
 
 If this rotates again, update both :data:`_EXPECTED_PROMPT_VERSION` and
 :data:`_CACHED_BLOCK_GOLDEN` in lockstep — the rotation is the signal
@@ -94,7 +104,7 @@ _FIXTURE_PATH = (
 )
 
 
-_EXPECTED_PROMPT_VERSION: str = "c11a73cc95b31614"
+_EXPECTED_PROMPT_VERSION: str = "e568fb3e4602e465"
 
 
 # Captured once via ``render_prompt`` against the canonical fixture below.

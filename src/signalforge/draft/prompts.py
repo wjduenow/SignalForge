@@ -229,6 +229,31 @@ includes an incremental-load timestamp" heuristic AND the "use
 US-005 + the per-method calibration prose."""
 
 
+_ROW_COUNT_BETWEEN_SCOPE_INSTRUCTION: str = """\
+
+`row_count_between` tests assert that the model's total row count (or the
+count of rows matching an optional `where` predicate) falls within a
+[`minimum`, `maximum`] band. When the SQL shows a bounded aggregation —
+a `GROUP BY` over a date-window `WHERE` clause, or any rollup whose
+cardinality is predictable from the grain (one row per day, per region,
+per active account) — propose `row_count_between` with a calibrated
+`minimum` >= 1 to catch upstream pipeline gaps (an empty load, a broken
+join that drops every row). Set `maximum` only when an upper bound is
+genuinely known (a fixed dimension cardinality, a capped lookback
+window); leave it null when the table grows unboundedly over time. Use
+the `where` form to bound a meaningful subset (e.g. rows for the current
+period). Do NOT propose a bound you cannot justify from the SQL — a
+vacuous `minimum: 0` with no `maximum` adds no signal."""
+"""SCOPE-section instruction block for ``row_count_between`` (issue #183,
+US-001). Emitted only when ``"row_count_between"`` is allowed (not in
+``exclude_tests``). Inserted as a :meth:`str.format` *value* (not part of
+the format string), so any future literal braces would render verbatim.
+Teaches the LLM the "propose this when the SQL shows a bounded aggregation
+whose cardinality is predictable from the grain" heuristic plus the
+``minimum``/``maximum``/``where`` calibration prose from #169's DEC-012
+worked example."""
+
+
 _SYSTEM_PROMPT_TEMPLATE = """\
 You are a senior dbt analytics engineer drafting schema.yml entries for a
 single dbt model. Your task is to propose column descriptions and tests
@@ -298,7 +323,7 @@ forwarded from the manifest.
 
 Propose only {allowed_scope} tests. dbt-utils / dbt-expectations macros
 are out of scope for this draft step.\
-{custom_sql_scope}{unique_combination_scope}{row_count_anomaly_scope}
+{custom_sql_scope}{row_count_between_scope}{unique_combination_scope}{row_count_anomaly_scope}
 """
 
 
@@ -353,6 +378,10 @@ def _render_system_prompt(exclude_tests: tuple[str, ...]) -> str:
         scope_phrase = f"{scope_phrase}, plus `custom_sql`"
 
     custom_sql_scope = _CUSTOM_SQL_SCOPE_INSTRUCTION if custom_sql_allowed else ""
+    row_count_between_allowed = "row_count_between" in allowed
+    row_count_between_scope = (
+        _ROW_COUNT_BETWEEN_SCOPE_INSTRUCTION if row_count_between_allowed else ""
+    )
     unique_combination_allowed = "unique_combination" in allowed
     unique_combination_scope = (
         _UNIQUE_COMBINATION_SCOPE_INSTRUCTION if unique_combination_allowed else ""
@@ -365,6 +394,7 @@ def _render_system_prompt(exclude_tests: tuple[str, ...]) -> str:
         test_catalogue=test_catalogue,
         allowed_scope=scope_phrase,
         custom_sql_scope=custom_sql_scope,
+        row_count_between_scope=row_count_between_scope,
         unique_combination_scope=unique_combination_scope,
         row_count_anomaly_scope=row_count_anomaly_scope,
     )
