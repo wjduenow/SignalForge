@@ -122,12 +122,18 @@ class _FakeOpenAIMessages:
     ``chat.completions.create``); ``count_tokens`` raises (the orchestrator
     never calls it for a ``supports_token_count=False`` provider — a raise
     here turns a capability-flag-gate regression loud).
+
+    The async sibling :class:`_FakeOpenAIAsyncMessages` (reachable via
+    ``client.aio.messages``) shares the same ``_create_queue`` so tests can
+    mix sync drains and async drains against one fake instance. Traces to
+    DEC-012 of ``plans/super/186-grade-asyncio-parallel.md``.
     """
 
     _create_queue: list[_MessagesCreateExpectation] = field(default_factory=list)
     _create_calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def create(self, **kwargs: Any) -> Any:
+    def _pop_create(self, kwargs: dict[str, Any]) -> Any:
+        """Shared queue-popping logic for sync + async ``create``."""
         self._create_calls.append(kwargs)
         if not self._create_queue:
             raise AssertionError(f"unexpected messages.create call: {kwargs!r}")
@@ -142,6 +148,9 @@ class _FakeOpenAIMessages:
             raise expectation.returns
         return expectation.returns
 
+    def create(self, **kwargs: Any) -> Any:
+        return self._pop_create(kwargs)
+
     def count_tokens(self, **kwargs: Any) -> Any:
         raise NotImplementedError(
             "OpenAI fake does not support pre-send count_tokens; "
@@ -149,6 +158,43 @@ class _FakeOpenAIMessages:
             "in the orchestrator. If you see this, the capability-flag gate "
             "has drifted."
         )
+
+
+@dataclass
+class _FakeOpenAIAsyncMessages:
+    """Async sibling of :class:`_FakeOpenAIMessages`, reachable via
+    ``client.aio.messages``. Both ``async create`` and ``async count_tokens``
+    delegate to the SAME ``_FakeOpenAIMessages`` instance's surface, so a
+    single :class:`FakeOpenAIClient` can drive both sync
+    :func:`signalforge.llm.client.call_llm` and async
+    :func:`signalforge.llm.client.call_llm_async` paths interchangeably.
+    Traces to DEC-012.
+    """
+
+    _sync: _FakeOpenAIMessages
+
+    async def create(self, **kwargs: Any) -> Any:
+        return self._sync._pop_create(kwargs)
+
+    async def count_tokens(self, **kwargs: Any) -> Any:
+        # Parity with the sync surface: capability-flag-gate regression turns
+        # loud rather than silently no-op'ing.
+        raise NotImplementedError(
+            "OpenAI fake does not support pre-send count_tokens; "
+            "OpenAIProvider.supports_token_count=False gates this call off "
+            "in the orchestrator. If you see this, the capability-flag gate "
+            "has drifted."
+        )
+
+
+@dataclass
+class _FakeOpenAIAioNamespace:
+    """The ``.aio`` namespace on :class:`FakeOpenAIClient` — exposes the
+    async messages surface. Mirrors Gemini's ``client.aio.models.*`` pattern
+    so all three fakes share one async-namespace shape (DEC-012).
+    """
+
+    messages: _FakeOpenAIAsyncMessages
 
 
 class FakeOpenAIClient:
@@ -169,6 +215,10 @@ class FakeOpenAIClient:
     def __init__(self) -> None:
         self._messages = _FakeOpenAIMessages()
         self.messages = self._messages
+        # The ``.aio`` namespace carries the async sibling surface; both
+        # ``self.messages.create`` (sync) and ``self.aio.messages.create``
+        # (async) drain the SAME ``_messages._create_queue``. DEC-012.
+        self.aio = _FakeOpenAIAioNamespace(messages=_FakeOpenAIAsyncMessages(_sync=self._messages))
 
     def expect_messages_create(
         self,
