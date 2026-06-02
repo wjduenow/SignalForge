@@ -36,17 +36,29 @@ pytestmark = pytest.mark.safety
 
 
 def _make_event(**overrides: Any) -> AuditEvent:
+    """Build a small non-chunked v4 AuditEvent (issue #185).
+
+    The v3 ``redactions: tuple[RedactionRecord, ...]`` field was replaced
+    by the v4 symbol-table-by-reason maps; this default has empty
+    redaction maps so the event fits trivially in a single chunk. Tests
+    that need a wide-table event (multi-chunk emission) use
+    :func:`_wide_event` further down the module.
+    """
     base: dict[str, Any] = dict(
         timestamp=datetime(2026, 1, 1, tzinfo=UTC),
         model_unique_id="model.test.x",
         mode=SamplingMode.SCHEMA_ONLY,
         columns_sent=("id", "name"),
-        redactions=(),
         row_count=None,
         signalforge_version="0.1.0",
         policy_hash="abc123def456789a",
-        audit_schema_version=3,
         policy_flags=(),
+        redactions_by_reason={},
+        column_name_map={},
+        audit_id=None,
+        chunk_index=None,
+        chunk_count=None,
+        audit_schema_version=4,
     )
     base.update(overrides)
     return AuditEvent(**base)
@@ -70,8 +82,12 @@ def test_audit_write_round_trips_through_json_loads(tmp_path: Path) -> None:
     assert payload["model_unique_id"] == "model.test.x"
     assert payload["mode"] == SamplingMode.SCHEMA_ONLY
     assert payload["columns_sent"] == ["id", "name"]
-    assert payload["redactions"] == []
-    assert payload["audit_schema_version"] == 3
+    # v4: ``redactions_by_reason`` + ``column_name_map`` replaced the v3
+    # ``redactions: tuple[RedactionRecord, ...]`` field (issue #185).
+    assert payload["redactions_by_reason"] == {}
+    assert payload["column_name_map"] == {}
+    assert "redactions" not in payload
+    assert payload["audit_schema_version"] == 4
     assert payload["signalforge_version"] == "0.1.0"
     assert payload["policy_hash"] == "abc123def456789a"
 
@@ -116,7 +132,7 @@ def test_audit_write_emits_logger_info_line(
     assert f'"mode": "{SamplingMode.SCHEMA_ONLY}"' in msg
     assert '"columns_sent": 2' in msg
     assert '"redacted": 0' in msg
-    assert '"audit_schema_version": 3' in msg
+    assert '"audit_schema_version": 4' in msg
 
 
 def test_audit_write_logger_message_escapes_ansi_in_user_input(
@@ -291,7 +307,7 @@ def test_audit_write_logger_includes_audit_schema_version(
         write(_make_event(), audit_path)
     records = [r for r in caplog.records if r.name == "signalforge.safety"]
     assert len(records) == 1
-    assert '"audit_schema_version": 3' in records[0].getMessage()
+    assert '"audit_schema_version": 4' in records[0].getMessage()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only permission semantics")
