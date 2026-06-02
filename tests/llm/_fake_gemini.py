@@ -188,12 +188,18 @@ class _FakeGeminiMessages:
     a stray call should fail loudly via the missing-attribute path or via
     the test's own assertion (mirrors :class:`tests.llm._fake_provider.
     _FakeNoCacheMessages` where ``count_tokens`` raises).
+
+    The async sibling :class:`_FakeGeminiAsyncMessages` (reachable via
+    ``client.aio.messages``) shares the same ``_create_queue`` so tests can
+    mix sync drains and async drains against one fake instance. Traces to
+    DEC-012 of ``plans/super/186-grade-asyncio-parallel.md``.
     """
 
     _create_queue: list[_CreateExpectation] = field(default_factory=list)
     _create_calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def create(self, **kwargs: Any) -> Any:
+    def _pop_create(self, kwargs: dict[str, Any]) -> Any:
+        """Shared queue-popping logic for sync + async ``create``."""
         self._create_calls.append(kwargs)
         if not self._create_queue:
             raise AssertionError(f"unexpected messages.create call: {kwargs!r}")
@@ -208,11 +214,37 @@ class _FakeGeminiMessages:
             raise expectation.returns
         return expectation.returns
 
+    def create(self, **kwargs: Any) -> Any:
+        return self._pop_create(kwargs)
+
     def count_tokens(self, **kwargs: Any) -> Any:
         # The Gemini provider declares ``supports_token_count=False`` so the
         # orchestrator must never call this. Mirroring
         # ``_FakeNoCacheMessages.count_tokens``, this raises loudly to turn a
         # silent gating regression into a hard test failure.
+        raise AssertionError(
+            "count_tokens must never be called for a provider with supports_token_count=False"
+        )
+
+
+@dataclass
+class _FakeGeminiAsyncMessages:
+    """Async sibling of :class:`_FakeGeminiMessages`, reachable via
+    ``client.aio.messages``. ``async create`` delegates to the same
+    ``_FakeGeminiMessages._pop_create`` helper as sync ``create``, so a single
+    :class:`FakeGeminiClient` can drive both sync
+    :func:`signalforge.llm.client.call_llm` and async
+    :func:`signalforge.llm.client.call_llm_async` paths interchangeably.
+    Traces to DEC-012.
+    """
+
+    _sync: _FakeGeminiMessages
+
+    async def create(self, **kwargs: Any) -> Any:
+        return self._sync._pop_create(kwargs)
+
+    async def count_tokens(self, **kwargs: Any) -> Any:
+        # Parity with sync: capability-flag-gate regression turns loud.
         raise AssertionError(
             "count_tokens must never be called for a provider with supports_token_count=False"
         )
@@ -233,12 +265,19 @@ class _FakeGeminiModels:
     :class:`signalforge.llm.providers._GeminiMessagesAdapter` rather than
     being called directly on the client. The US-007 estimate path bypasses
     the messages façade and reaches ``client.models.count_tokens`` natively.
+
+    The async sibling :class:`_FakeGeminiAsyncModels` (reachable via
+    ``client.aio.models``, mirroring the real SDK's namespace) shares the
+    same ``_count_queue`` so tests can mix sync and async ``count_tokens``
+    drains against one fake instance. Traces to DEC-012 of
+    ``plans/super/186-grade-asyncio-parallel.md``.
     """
 
     _count_queue: list[_CountTokensExpectation] = field(default_factory=list)
     _count_calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def count_tokens(self, **kwargs: Any) -> Any:
+    def _pop_count_tokens(self, kwargs: dict[str, Any]) -> Any:
+        """Shared queue-popping logic for sync + async ``count_tokens``."""
         self._count_calls.append(kwargs)
         if not self._count_queue:
             raise AssertionError(f"unexpected models.count_tokens call: {kwargs!r}")
@@ -252,6 +291,34 @@ class _FakeGeminiModels:
         if isinstance(expectation.returns, BaseException):
             raise expectation.returns
         return expectation.returns
+
+    def count_tokens(self, **kwargs: Any) -> Any:
+        return self._pop_count_tokens(kwargs)
+
+
+@dataclass
+class _FakeGeminiAsyncModels:
+    """Async sibling of :class:`_FakeGeminiModels`, reachable via
+    ``client.aio.models``. ``async count_tokens`` delegates to the same
+    ``_FakeGeminiModels._pop_count_tokens`` helper. Traces to DEC-012.
+    """
+
+    _sync: _FakeGeminiModels
+
+    async def count_tokens(self, **kwargs: Any) -> Any:
+        return self._sync._pop_count_tokens(kwargs)
+
+
+@dataclass
+class _FakeGeminiAioNamespace:
+    """The ``.aio`` namespace on :class:`FakeGeminiClient` — exposes both
+    async ``messages`` and async ``models`` surfaces, mirroring the real
+    Gemini SDK's ``client.aio.models.generate_content`` /
+    ``client.aio.models.count_tokens`` shape. DEC-012.
+    """
+
+    messages: _FakeGeminiAsyncMessages
+    models: _FakeGeminiAsyncModels
 
 
 class FakeGeminiClient:
@@ -279,6 +346,15 @@ class FakeGeminiClient:
         self.messages = self._messages
         self._models = _FakeGeminiModels()
         self.models = self._models
+        # The ``.aio`` namespace carries the async sibling surface; both
+        # sync ``self.messages.create`` / ``self.models.count_tokens`` and
+        # async ``self.aio.messages.create`` / ``self.aio.models.count_tokens``
+        # drain the SAME queues. Mirrors the real Gemini SDK's
+        # ``client.aio.models.*`` shape. DEC-012.
+        self.aio = _FakeGeminiAioNamespace(
+            messages=_FakeGeminiAsyncMessages(_sync=self._messages),
+            models=_FakeGeminiAsyncModels(_sync=self._models),
+        )
 
     def expect_messages_create(
         self,

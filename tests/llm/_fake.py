@@ -111,14 +111,24 @@ def _matches(matcher: _Matcher, kwargs: dict[str, Any]) -> bool:
 
 @dataclass
 class _FakeMessages:
-    """Implements the ``messages`` namespace on the fake client."""
+    """Implements the ``messages`` namespace on the fake client.
+
+    Both the sync ``count_tokens`` / ``create`` methods AND the async siblings
+    on :class:`_FakeAsyncMessages` (reachable via ``client.aio.messages``)
+    consume from the SAME ``_count_queue`` / ``_create_queue``. Tests can mix
+    sync drains and async drains against one fake instance — the shared queue
+    is the proof that production sync (``call_llm``) and async
+    (``call_llm_async``) paths exercise identical expectation logic. Traces to
+    DEC-012 of ``plans/super/186-grade-asyncio-parallel.md``.
+    """
 
     _count_queue: list[_CountTokensExpectation] = field(default_factory=list)
     _create_queue: list[_MessagesCreateExpectation] = field(default_factory=list)
     _create_calls: list[dict[str, Any]] = field(default_factory=list)
     _count_calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def count_tokens(self, **kwargs: Any) -> Any:
+    def _pop_count_tokens(self, kwargs: dict[str, Any]) -> Any:
+        """Shared queue-popping logic for sync + async ``count_tokens``."""
         self._count_calls.append(kwargs)
         if not self._count_queue:
             raise AssertionError(f"unexpected count_tokens call: {kwargs!r}")
@@ -133,7 +143,8 @@ class _FakeMessages:
             raise expectation.returns
         return expectation.returns
 
-    def create(self, **kwargs: Any) -> Any:
+    def _pop_create(self, kwargs: dict[str, Any]) -> Any:
+        """Shared queue-popping logic for sync + async ``create``."""
         self._create_calls.append(kwargs)
         if not self._create_queue:
             raise AssertionError(f"unexpected messages.create call: {kwargs!r}")
@@ -147,6 +158,43 @@ class _FakeMessages:
         if isinstance(expectation.returns, Exception):
             raise expectation.returns
         return expectation.returns
+
+    def count_tokens(self, **kwargs: Any) -> Any:
+        return self._pop_count_tokens(kwargs)
+
+    def create(self, **kwargs: Any) -> Any:
+        return self._pop_create(kwargs)
+
+
+@dataclass
+class _FakeAsyncMessages:
+    """Async sibling of :class:`_FakeMessages`, reachable via ``client.aio.messages``.
+
+    Both ``async create`` and ``async count_tokens`` delegate to the SAME
+    ``_FakeMessages`` instance's queue-popping helpers, so a single
+    :class:`FakeAnthropicClient` can be driven by the sync
+    :func:`signalforge.llm.client.call_llm` AND the async
+    :func:`signalforge.llm.client.call_llm_async` (US-006) interchangeably.
+    Traces to DEC-012.
+    """
+
+    _sync: _FakeMessages
+
+    async def count_tokens(self, **kwargs: Any) -> Any:
+        return self._sync._pop_count_tokens(kwargs)
+
+    async def create(self, **kwargs: Any) -> Any:
+        return self._sync._pop_create(kwargs)
+
+
+@dataclass
+class _FakeAioNamespace:
+    """The ``.aio`` namespace on :class:`FakeAnthropicClient` — exposes the
+    async messages surface. Mirrors Gemini's ``client.aio.models.*`` pattern
+    so all three fakes share one async-namespace shape (DEC-012).
+    """
+
+    messages: _FakeAsyncMessages
 
 
 class FakeAnthropicClient:
@@ -169,6 +217,11 @@ class FakeAnthropicClient:
         # backing object the ``expect_*`` helpers reach into.
         self._messages = _FakeMessages()
         self.messages = self._messages
+        # The ``.aio`` namespace carries the async sibling surface; both
+        # ``self.messages.create`` (sync) and ``self.aio.messages.create``
+        # (async) drain the SAME ``_messages._create_queue``. DEC-012 of
+        # ``plans/super/186-grade-asyncio-parallel.md``.
+        self.aio = _FakeAioNamespace(messages=_FakeAsyncMessages(_sync=self._messages))
 
     def expect_count_tokens(
         self,
