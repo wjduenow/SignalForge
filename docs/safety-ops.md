@@ -279,65 +279,177 @@ customer_ssn  ->  col_a3f29c61
 ```
 
 The mapping (`real_name -> hashed_name`) is recorded in the audit log's
-`redactions` array; the LLM never sees the real name. This closes the
-"column name itself leaks PII" gap — names like `john_smith_ssn_1234`
-or `card_number_last4` would otherwise reach the LLM even when the
-*values* were redacted.
+`column_name_map` field (paired with `redactions_by_reason` for the
+reason — see the v4 schema below); the LLM never sees the real name.
+This closes the "column name itself leaks PII" gap — names like
+`john_smith_ssn_1234` or `card_number_last4` would otherwise reach the
+LLM even when the *values* were redacted.
 
 The hash is deterministic across runs, so re-running a draft against
 the same model produces the same placeholder; reviewers can correlate
 audit records to manifest columns by re-hashing the real name.
 
-## Audit JSONL schema
+## Audit JSONL schema (v4)
 
-> **Consumer guide.** For cross-stage joins, `jq` / pandas worked examples,
-> the forward-compat policy, and the redaction surface across all five
-> stages, see [`docs/audits.md`](audits.md). This section is the
-> safety-layer production contract.
+> **Pre-1.0 break.** SignalForge is pre-1.0 and the safety audit
+> corpus was not yet adopted at v4 ship time, so **v3 backward-compat
+> read is NOT supported.** Operators with stale v3
+> `.signalforge/audit.jsonl` files from prior runs should treat them
+> as historical artefacts (the v4 `read_audit_events` helper raises
+> `pydantic.ValidationError` on v3 records — by design per DEC-005);
+> the production `AuditEvent` model accepts v4 only. The
+> `audit_schema_version` integer bumps 3 → 4 as a forward-compat
+> marker for future readers.
 
-Every LLM call produces exactly one JSONL record at `safety.audit_path`
-(default `.signalforge/audit.jsonl`). One record per line; atomic
-append via `O_APPEND` + a single `os.write` (DEC-005).
+Issue [#185](https://github.com/wjduenow/SignalForge/issues/185)
+reshapes the audit-event payload to keep wide-table models (tens to
+hundreds of columns) under the 4000-byte POSIX-atomic append cap.
+Two changes:
 
-`AuditEvent` fields:
+1. **Symbol-table compression.** The per-column
+   `redactions: tuple[RedactionRecord, ...]` field is **removed**.
+   In its place, two sibling fields:
+   - `redactions_by_reason: dict[RedactionReason, tuple[str, ...]]` —
+     keys are redaction reason literals; values are sorted tuples of
+     hashed names. Compresses repeated reason strings out of the
+     per-record payload.
+   - `column_name_map: dict[str, str]` — hashed name → real column
+     name. Preserves the reviewer mapback path the old
+     `RedactionRecord.column_name` field served.
+2. **Chunked records.** When the serialised event exceeds the 4000 B
+   cap, the writer splits it across multiple JSONL lines correlated
+   by three new fields:
+   - `audit_id: str | None` — 16-hex `blake2b-8` correlation key
+     (deterministic per source event; NUL-byte separators prevent
+     field-concatenation collisions): `blake2b(model_unique_id + b"\x00" + timestamp.isoformat() + b"\x00" + signalforge_version, digest_size=8).hexdigest()`.
+   - `chunk_index: int | None` — 0 for the header chunk, ≥ 1 for
+     continuations.
+   - `chunk_count: int | None` — total chunks for this event; ≥ 2
+     when chunking is in effect.
 
-| Field                    | Type                          | Meaning                                                                 | Example                                |
-| ------------------------ | ----------------------------- | ----------------------------------------------------------------------- | -------------------------------------- |
-| `timestamp`              | ISO 8601 datetime             | UTC timestamp of the LLM call.                                          | `"2026-04-28T14:33:01.122Z"`           |
-| `model_unique_id`        | string                        | dbt unique_id of the drafted model.                                     | `"model.shop.dim_customers"`           |
-| `mode`                   | string                        | Sampling mode in effect.                                                | `"schema-only"`                        |
-| `columns_sent`           | array of string               | LLM-visible column names (hashed for redacted columns).                 | `["customer_id", "col_a3f29c61"]`      |
-| `redactions`             | array of `RedactionRecord`    | Full redaction decisions — both real and hashed names. **Sensitive.**   | `[{"column_name": "customer_ssn", ...}]` |
-| `row_count`              | integer or `null`             | Row count for sample mode; `null` for schema-only / aggregate-only.     | `100` or `null`                        |
-| `signalforge_version`    | PEP-440 version string        | The package version that produced the record.                           | `"0.1.0"`                              |
-| `policy_hash`            | 16 hex chars                  | `blake2b(policy, digest_size=8)`. Migrated from `SHA-256[:16]` by issue #55. DEC-014. | `"6f1c0e3d2c44c012"`                   |
-| `audit_schema_version`   | integer                       | Audit shape version. Currently `3` (bumped 1→2 by #54, 2→3 by #55).     | `3`                                    |
-| `policy_flags`           | array of string               | Closed set of flag literals — see below.                                | `["sample_mode_enabled"]`              |
+   `None` on all three fields means the record is a single-line
+   non-chunked event.
 
-**`policy_flags` closed set:**
+`audit_schema_version` is now `4`. The internal `RedactionRecord`
+value object is retained for the build path inside
+`signalforge.safety.request` but no longer appears on `AuditEvent`.
 
-- `sample_mode_enabled` — `policy.mode is SamplingMode.SAMPLE`.
-- `redaction_disabled` — `policy.redact_patterns` is empty.
-- `audit_path_overridden` — `policy.audit_path != DEFAULT_AUDIT_PATH`.
+### Three legal v4 record shapes
 
-`RedactionRecord` fields: `column_name` (real), `hashed_name`
-(`col_<8 hex>`), `redacted` (bool), `reason` (one of nine literal
-strings — see [Per-column opt-out](#per-column-opt-out); the two
-`draft_skip_*` reasons added in issue #54 indicate omit-entirely
-semantics rather than hashed-placeholder substitution).
+| Shape                | `audit_id`        | `chunk_index`     | `chunk_count`     | Metadata fields                | `redactions_by_reason`        | `column_name_map`               |
+| -------------------- | ----------------- | ----------------- | ----------------- | ------------------------------ | ----------------------------- | ------------------------------- |
+| Non-chunked          | `null`            | `null`            | `null`            | All populated                  | Full data (may be empty `{}`) | Full data (may be empty `{}`)   |
+| Chunk header         | 16-hex correlator | `0`               | `N` (≥ 2)         | All populated                  | Empty `{}`                    | Empty `{}`                      |
+| Chunk continuation   | matches header    | `≥ 1`, `< chunk_count` | matches header | All `null`                     | Slice of full data            | Slice of full data              |
 
-**Audit schema version 2 (issue #54).** The bump from 1 → 2 reflects
-the new `draft_skip_column_meta` / `draft_skip_model_meta`
-`RedactionReason` values. Consumers parsing audit JSONLs should gate
-on `audit_schema_version >= 2` before pattern-matching the new
-reasons. Older v1 records continue to round-trip cleanly (the
-production model keeps `audit_schema_version: int`, not
-`Literal[2]`).
+A `@model_validator(mode="after")` on `AuditEvent` enforces these
+shape rules at validation time:
+
+- Setting any one of `audit_id` / `chunk_index` / `chunk_count`
+  requires all three to be coherent.
+- `chunk_index >= chunk_count` is rejected.
+- Non-chunked records cannot carry `audit_id`.
+- Chunk-header records (`chunk_index == 0`) must have empty
+  `redactions_by_reason` / `column_name_map` — the header reserves
+  its byte budget for metadata.
+- Chunk-continuation records (`chunk_index >= 1`) must have all
+  metadata fields `None` — they only carry the correlation triple
+  plus their redaction slice.
+
+### Reader reassembly
+
+`signalforge.safety.audit.read_audit_events(path: Path) -> Iterator[AuditEvent]`
+walks the JSONL line-by-line, passes non-chunked rows through
+unchanged, and accumulates chunked rows by `audit_id`. When every
+chunk for an `audit_id` has arrived (`chunk_index` set ==
+`chunk_count`), the reader emits one reassembled `AuditEvent` with
+metadata copied from the header chunk and the union of every
+continuation's `redactions_by_reason` / `column_name_map` slice.
+
+End-of-stream partial groups (header without all continuations, or
+continuations without a header) surface a **WARNING** via the
+standard ANSI-safe lazy-format JSON logger but do **not** raise —
+the reader is forward-resilient by design.
+
+### Wide-table behaviour (operator-visible)
+
+The empirical chunking ceilings, measured against the shipped
+`_chunk_event` writer against the full `AuditEvent` serialised
+shape:
+
+| Column count (redacted) | Audit JSONL shape                                |
+| ----------------------- | ------------------------------------------------ |
+| 1 – ~65                 | Single-line v4 record (no chunking)              |
+| ~66 – ~243              | Chunked across ≥ 2 JSONL lines, correlated by `audit_id` |
+| > ~243                  | `AuditRecordTooLargeError` raised at the writer  |
+
+The hard ceiling (~243 columns) is bounded by the **header chunk**:
+`columns_sent` (the full LLM-visible column-name tuple) rides on
+every header, and once the header alone overflows 4000 B no amount
+of redaction-slice chunking can recover. The single-line ceiling
+(~65 columns) is lower than the plan's design-time estimate (170
+cols / 3,865 B) because the plan measured the redactions-only
+payload; the full event also carries `columns_sent`, `policy_hash`,
+`policy_flags`, `signalforge_version`, `model_unique_id`,
+`timestamp`, and `mode`.
+
+**If you hit the hard ceiling**, the actionable workaround is to
+narrow the LLM-visible column set via
+[`meta.signalforge.skip_draft: true`](#per-column-opt-out) on noise
+columns (internal tokens, mirror columns, computed-elsewhere data)
+until the model drops below ~243 columns. The `skip_draft` opt-out
+omits the column entirely from `columns_sent` AND
+`redactions_by_reason` AND `column_name_map`, which is what brings
+the header back under the cap.
+
+**Anti-pattern — do NOT use `safety.mode: aggregate-only` as a
+workaround.** `aggregate-only` controls what *statistics* the LLM
+sees; it does **not** shrink the redactions surface (every redacted
+column still produces a `RedactionRecord` entry on the build path,
+folded into `redactions_by_reason` / `column_name_map` at the audit
+event). Switching modes will not move the chunking ceilings; only
+the column-omitting `skip_draft` signal does.
+
+### `AuditRecordTooLargeError` remediation
+
+When the writer raises `AuditRecordTooLargeError` (header chunk
+overflow ≈ > 243 columns on the typical Austin bikeshare fixture),
+the operator sees a three-sentence remediation. The exact wording is
+**locked verbatim** by
+`tests/safety/test_errors.py::test_audit_record_too_large_default_remediation_locked`
+— byte-equal across stderr, docs, and the rule file. With
+`column_count=170` (a real wide-table model), the rendered
+`↳ Remediation:` line reads:
+
+```text
+Model has 170 columns; after compression and chunking the audit record is still 135 bytes over the 4000 B atomic-append limit. Audit records must stay under 4000 bytes for atomic concurrent appends. Mark non-critical columns with meta.signalforge.skip_draft: true to omit them from the audit entirely; this is distinct from PII opt-out and is more effective for wide-table noise reduction. NOTE: safety.mode: aggregate-only does NOT shrink the redactions surface — do not use it as a workaround. For hyper-wide tables that still over-cap, see the columns_sent roadmap in docs/safety-ops.md.
+```
+
+Without `column_count`, the leading "Model has N columns…" sentence
+is omitted; the rest is identical.
+
+The `column_count` field on `AuditRecordTooLargeError` carries the
+redacted-column count (`len(event.column_name_map)`). Each redacted
+column appears exactly once in `column_name_map` by construction in
+`request.py`, so the count is exact — a CI consumer can pattern-match
+the exact column threshold a model crossed.
+
+### Why the header carries `columns_sent` (deferred work)
+
+A future iteration could shrink the header further by chunking
+`columns_sent` itself, or by replacing it with a count + a sibling
+chunk-carried tuple. v4 deliberately defers that: `columns_sent` is
+load-bearing for the cross-stage join surface documented in
+[`docs/audits.md`](audits.md), and reshaping it would touch every
+downstream consumer. The ~243-column ceiling is the deliberate
+trade-off between v4's "single LLM call, multi-line audit" shape
+and "everything reads `columns_sent` from one place."
 
 ## Audit log sensitivity
 
-The audit JSONL contains plaintext column names in
-`RedactionRecord.column_name`. For PII-laden schemas this metadata can
+The audit JSONL contains plaintext column names in `column_name_map`
+(the v4 hashed-name → real-name reviewer mapback dict — see § "Audit
+JSONL schema (v4)" above). For PII-laden schemas this metadata can
 itself be sensitive; treat the file at-rest as such.
 
 Recommendations:
@@ -388,8 +500,11 @@ logging.getLogger("signalforge.safety").setLevel(logging.DEBUG)
 Levels:
 
 - **INFO** — One line per `audit.write` (the JSON-encoded summary:
-  `unique_id`, `mode`, `columns_sent` count, `redactions` count,
-  `audit_schema_version`).
+  `unique_id` (model unique_id), `mode`, `columns_sent` (count),
+  `redacted` (total redacted-column count summed across
+  `redactions_by_reason` values), `audit_schema_version`, and
+  `chunk_count` (the number of JSONL lines this logical event produced;
+  1 for non-chunked, ≥ 2 for chunked).
 - **WARNING** — Sample-mode-enabled (one per policy construction); the
   empty-redaction `redact: replace: []` warning; the
   suspicious-unmatched-column heuristic (one per offending column).
@@ -407,9 +522,10 @@ call happened, not *what* was in it.
 - Parent directory not writable (no `+w` for the user, or
   `.signalforge/` is a symlink to a read-only mount).
 - Disk full (`ENOSPC`).
-- Oversize record (raises `AuditRecordTooLargeError` instead — reduce
-  `columns_sent` or `redactions` count; the cap is 4000 bytes for
-  POSIX-atomic concurrent appends).
+- Oversize record (raises `AuditRecordTooLargeError` instead — see
+  [Audit JSONL schema (v4)](#audit-jsonl-schema-v4) for the chunking
+  ceilings and the `meta.signalforge.skip_draft` workaround; the
+  per-line cap is 4000 bytes for POSIX-atomic concurrent appends).
 
 ## Typed-error reference
 
@@ -426,7 +542,7 @@ rendered on a `↳ Remediation:` line by `__str__`.
 | `InvalidPatternError`          | A redact pattern is empty or one of the bare wildcards `"*"` / `"?"`.                    | `SafetyPolicy._validate_patterns`              | Use a non-empty fnmatch glob; use `redact.replace: []` to disable redaction explicitly. |
 | `ColumnNotInModelError`        | A safety helper looked up a column not declared on the manifest model.                   | `aggregate_columns` / sibling helpers          | Verify the column exists in `manifest.nodes[model].columns`.                            |
 | `AuditWriteError`              | Appending to the JSONL audit log failed (any I/O or encoding error). DEC-011 fail-closed.| `audit.write`                                  | Check `<project_dir>/.signalforge/` exists and is writable; resolve disk / permission.  |
-| `AuditRecordTooLargeError`     | Serialised audit line exceeded the POSIX-atomic-append cap (4000 bytes).                 | `audit.write`                                  | Reduce `columns_sent` or `redactions` count.                                            |
+| `AuditRecordTooLargeError`     | Header chunk would exceed the 4000-byte POSIX-atomic-append cap (~> 243 redacted columns).| `audit.write`                                  | Narrow `columns_sent` via `meta.signalforge.skip_draft: true` on noise columns. See [Audit JSONL schema (v4)](#audit-jsonl-schema-v4). |
 | `PolicyValidationError`        | Generic Pydantic validation failure not covered by a more specific subclass.             | `load_safety_config` (last-resort wrap)        | Inspect `.field`, `.value`, `.reason`; reconcile against the documented field types.    |
 | `UnknownConfigKeyError`        | A typo'd / unsupported key under a known scope (`safety.redacts:`, etc.).                | `SafetyPolicy.model_validate` / redact resolver | Remove or rename the unknown key; see this doc's schema.                                |
 
