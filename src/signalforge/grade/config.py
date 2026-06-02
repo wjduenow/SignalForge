@@ -135,7 +135,11 @@ class GradeConfig(BaseModel):
     cheaper/faster model can exceed 256 tokens, and a truncated response
     surfaces as the wrong typed degrade. This is a **cap**, not a target;
     the expected JSON is still ~150 tokens, so the larger ceiling costs
-    nothing on the happy path while removing the truncation risk.
+    nothing on the happy path while substantially reducing truncation
+    risk. Note 1024 reduces but does not eliminate Gemini truncation at
+    scale — ``docs/grade-ops.md`` § per-provider floors records that
+    ``gemini-2.5-flash`` may still degrade on a minority of pairs at the
+    full-fixture scale (#158) and recommends 4096 for Gemini-heavy runs.
     Independent of :attr:`signalforge.draft.DraftConfig.max_output_tokens`."""
 
     max_retries_429: int = 3
@@ -256,9 +260,14 @@ class GradeConfig(BaseModel):
         :data:`signalforge.llm.providers.PROVIDER_FAST_MODELS` keyed on
         the requested ``provider`` (defaulting to ``"anthropic"`` to
         match the field default). A provider NOT in the fast-model table
-        is left alone — no injection — so the existing ``provider``
-        field-validator raises :class:`UnknownProviderError` rather than
-        this masking it with a ``KeyError`` (#187 US-002 / DEC-004).
+        is left alone — no injection — via ``.get()`` so this never masks
+        an error with a ``KeyError`` (#187 US-002 / DEC-004). Two such
+        cases follow downstream: an *unregistered* provider is rejected by
+        the ``provider`` field-validator (:class:`UnknownProviderError`);
+        a *registered* provider absent from the fast-model table with no
+        explicit model is rejected by
+        :meth:`_validate_model_provider_compat` (which requires the
+        operator to set ``grade.model`` explicitly).
         """
         if not isinstance(data, dict):
             return data
@@ -372,18 +381,31 @@ class GradeConfig(BaseModel):
           a future SKU the table doesn't yet enumerate must not be
           rejected as a mismatch).
         * A registry-valid provider that is NOT in the prefix table
-          (a custom/plugin provider). Such a provider may use any model
-          name — the cross-vendor mismatch concept only applies among the
-          three known-prefix vendors, so the check does not fire when
-          :attr:`provider` is outside the table.
+          (a custom/plugin provider) *with an explicit model*. Such a
+          provider may use any model name — the cross-vendor mismatch
+          concept only applies among the three known-prefix vendors, so
+          the check does not fire when :attr:`provider` is outside the
+          table.
+
+        A registry-valid provider absent from
+        :data:`signalforge.llm.providers.PROVIDER_FAST_MODELS` AND given
+        no explicit ``model`` reaches here with ``model is None`` (the
+        before-validator had no fast model to inject; the ``provider``
+        field-validator passed because the provider IS registered). We
+        cannot guess a custom provider's model, so this fails loud rather
+        than letting ``None`` flow into the engine — which keeps the
+        post-construction "``model`` is never ``None``" invariant the
+        consumers assert on genuinely true (#187 QG).
 
         This is a read-only check — no mutation — so it is safe on the
         frozen instance.
         """
-        # ``model`` is concrete by this point on every reachable path.
         model = self.model
-        if model is None:  # pragma: no cover - defensive; resolution + provider guard cover it
-            return self
+        if model is None:
+            raise ValueError(
+                f"provider {self.provider!r} has no built-in default model; "
+                f"set 'grade.model' explicitly in signalforge.yml"
+            )
         # Only the known-prefix providers participate in the mismatch check.
         if self.provider not in PROVIDER_SKU_PREFIXES:
             return self

@@ -169,9 +169,18 @@ def test_haiku_grade_concordance_vs_sonnet_baseline(tmp_path: Path) -> None:
             print(f"  - {artifact_id} / {crit}: sonnet={sonnet_p} haiku={haiku_p}")
     print("================================================")
 
-    # The aggregate must be complete enough to be a meaningful gate: if
-    # most pairs degraded, the run did not actually measure concordance.
+    # The aggregate must be complete enough to be a meaningful gate. Excluding
+    # degraded (score=None) pairs from the denominator is correct (a pair that
+    # could not be evaluated is neither concordance nor discordance), but a run
+    # where degraded pairs DOMINATE has too small/biased a comparable set to
+    # trust the percentage — a high rate over a handful of survivors is not a
+    # real ≥85% signal. Require the comparable set to be the majority.
     assert comparable >= 1, "no comparable verdicts — every pair degraded"
+    assert comparable >= degraded, (
+        f"too many degraded verdicts ({degraded}) vs comparable ({comparable}); "
+        "the sample/run is too noisy to trust the concordance number — "
+        "raise max_output_tokens or investigate the degradations before judging the gate"
+    )
 
     assert rate >= _CONCORDANCE_THRESHOLD, (
         f"Haiku concordance {rate:.1%} below the {_CONCORDANCE_THRESHOLD:.0%} "

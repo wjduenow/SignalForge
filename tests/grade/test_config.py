@@ -594,8 +594,12 @@ def test_load_grade_config_explicit_path_takes_precedence(tmp_path: Path) -> Non
 
 
 def test_load_grade_config_doc_example_round_trips(tmp_path: Path) -> None:
-    """The example YAML in docs/grade-ops.md round-trips through
-    load_grade_config without errors."""
+    """The committed example fixture (tests/fixtures/grade/example_config.yml)
+    round-trips through load_grade_config without errors. The fixture pins
+    EXPLICIT model/token values (not the #187 resolved defaults) to exercise
+    the explicit-override path — `claude-sonnet-4-6` under the default
+    `anthropic` provider is accepted by the model↔provider compat validator
+    (matching `claude-` prefix)."""
     fixture = Path(__file__).parent.parent / "fixtures" / "grade" / "example_config.yml"
     target = tmp_path / "signalforge.yml"
     target.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")

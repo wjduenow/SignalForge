@@ -162,7 +162,7 @@ Field-by-field:
 - **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point. Today `anthropic`, `openai`, and `gemini` are registered; see [OpenAI provider](#openai-provider) and [Gemini provider](#gemini-provider) below for the non-default options.
 - **`model`** — The model id used by every per-pair judge call. **Default resolves per-provider at config-load** (#187): when `model:` is omitted, the loader injects the calling provider's fast model from `signalforge.llm.providers.PROVIDER_FAST_MODELS` — `anthropic` → `claude-haiku-4-5`, `openai` → `gpt-4o-mini`, `gemini` → `gemini-2.5-flash`. An explicit `model:` is honoured verbatim. A SKU-prefix/provider mismatch (e.g. `provider: openai` with a `claude-` model) fails loud at config-load via the model↔provider compat validator (reusing `signalforge.llm.providers.PROVIDER_SKU_PREFIXES`).
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
-- **`max_output_tokens`** — Per-criterion judge response cap. Default `1024` (#187 — raised from 256 so a verbose one-line `gemini-2.5-flash` grade JSON is not truncated; the expected JSON response is still ~150 tokens, so the larger ceiling costs nothing on the happy path while removing truncation risk). Independent of `DraftConfig.max_output_tokens`.
+- **`max_output_tokens`** — Per-criterion judge response cap. Default `1024` (#187 — raised from 256 to substantially reduce truncation risk for a verbose one-line `gemini-2.5-flash` grade JSON; the expected JSON response is still ~150 tokens, so the larger ceiling costs nothing on the happy path). 1024 reduces but does not fully eliminate Gemini truncation at scale — see the per-provider floors below; Gemini-heavy runs may want `4096`. Independent of `DraftConfig.max_output_tokens`.
 - **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised, provider-neutral `signalforge.llm.call_llm` seam (#5 DEC-012; #135 DEC-005). Defaults `3 / 1 / 1` mirror `DraftConfig`; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.
 - **`total_budget_seconds`** — Whole-run wall-clock budget. Default `300` (5 minutes — historically ~3× safety on 60 sequential calls × 1s p50; ~10× headroom under concurrent dispatch). Mirrors `PruneConfig.total_budget_seconds` semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped. Under the asyncio orchestrator (issue #186) the budget is enforced via `asyncio.timeout(...)` wrapping the `TaskGroup`; on trip, un-completed pairs are filled in by a synthesis pass with `reasoning="grade budget exceeded ({N}s) before evaluation"`. Tests inject deterministic timing via the module-level `_async_sleep` alias (mirrors the `_sleep` injection pattern from `llm-drafter.md` DEC-004).
 - **`max_concurrent_calls`** — Number of in-flight `(artifact × criterion)` LLM calls allowed concurrently (issue #186). Default `10` matches the typical Anthropic-tier throughput sweet-spot; bounded `[1, 100]` with `@field_validator` rejecting `< 1` or `> 100` at config-load. Setting `1` yields v0.1 sequential behaviour bit-for-bit (semaphore-of-1 serialises in dispatch order, preserving `(criterion, artifact)` JSONL ordering). Under concurrent dispatch the audit JSONL lands in **arrival order** (`audit_schema_version` unchanged at `Literal[1]`); the `tests/grade/_helpers.py::_sort_grade_events(lines)` helper restores deterministic ordering for tests that snapshot the file. CLI does not expose a `--max-concurrent-calls` flag (mirrors `min_pass_rate` / `min_mean_score` config-file-only convention).
@@ -650,7 +650,10 @@ default fan-out is too expensive for their use case:
 - **`max_output_tokens`** (default `1024`) — Per-call output cap. The
   expected JSON response is ~150 tokens, so the cap is a truncation
   guard, not a target; the default was raised from 256 to 1024 in #187
-  so a verbose one-line `gemini-2.5-flash` grade JSON doesn't truncate.
+  to substantially reduce truncation of a verbose one-line
+  `gemini-2.5-flash` grade JSON (1024 reduces but does not fully
+  eliminate it at the full-fixture scale — the per-provider floors below
+  recommend `4096` for Gemini-heavy runs).
   Tightening it trims the output-token bill at the cost of truncation
   risk (handled by `GradeOutputError(violation_type="json_parse")` and
   the degraded path); see the per-provider floors below before lowering it.
@@ -716,7 +719,7 @@ Issue #136 registered `OpenAIProvider` as the second
 ```yaml
 grade:
   provider: openai
-  model: gpt-4o            # default judge model for the OpenAI provider; any model id the SDK accepts is allowed
+  model: gpt-4o            # explicit override; omit `model:` to auto-resolve to the OpenAI fast default `gpt-4o-mini` (#187). Any model id the SDK accepts is allowed.
   # cache_ttl, max_retries_*, total_budget_seconds, thresholds — same shape as the anthropic provider
 ```
 

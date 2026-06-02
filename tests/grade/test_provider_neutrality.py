@@ -152,9 +152,19 @@ def test_registering_provider_is_the_only_wiring_needed(_isolate_registry: None)
     # Registry resolves the freshly-registered provider by name.
     assert provider_for(FAKE_NOCACHE_PROVIDER_NAME) is provider
 
-    # The registry-validated config str accepts it (and rejects an unknown name).
-    config = GradeConfig(provider=FAKE_NOCACHE_PROVIDER_NAME)
+    # The registry-validated config str accepts it. A custom provider is not in
+    # PROVIDER_FAST_MODELS, so #187 requires an explicit model (we can't guess a
+    # plugin provider's fast model) rather than silently defaulting it.
+    config = GradeConfig(provider=FAKE_NOCACHE_PROVIDER_NAME, model="fake-nocache-judge")
     assert config.provider == FAKE_NOCACHE_PROVIDER_NAME
+
+    # ...and a custom provider WITHOUT an explicit model fails loud at config-load
+    # (#187 QG — keeps the "model is never None post-construction" invariant the
+    # grade engine asserts on genuinely true for the plugin-provider growth path).
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="no built-in default model"):
+        GradeConfig(provider=FAKE_NOCACHE_PROVIDER_NAME)
 
     from signalforge.llm.errors import UnknownProviderError
 

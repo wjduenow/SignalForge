@@ -289,7 +289,11 @@ def test_estimate_total_llm_usd_matches_hand_calculation(
 
     # The drafter and grader key on separate price rows post #187 US-002.
     draft_pricing = pricing_lookup(draft_config.model)
-    assert grade_config.model is not None  # resolved to the fast model at config-load
+    # Pin the resolved fast default explicitly so a resolver regression (grade
+    # silently falling back to Sonnet) fails HERE rather than drifting the
+    # engine and the expected USD together into a passing tautology. The
+    # `is not None` also narrows `str | None` -> `str` for pricing_lookup.
+    assert grade_config.model is not None and grade_config.model == "claude-haiku-4-5"
     grade_pricing = pricing_lookup(grade_config.model)
     expected_draft = (1_000_000 / 1_000_000.0) * draft_pricing.input_per_mtok + (
         4096 / 1_000_000.0
