@@ -671,7 +671,7 @@ def setup_logging(verbose: bool, quiet: bool) -> None:
 def format_error_to_stderr(exc: Exception) -> str:
     """Render a typed exception to the canonical CLI stderr shape.
 
-    Two shapes (DEC-008):
+    Three shapes (DEC-008 + DEC-007 of #186):
 
     * Tier 1 / 3 errors and most tier 2 errors render as a single
       ``ERROR: <message>`` line followed by an optional
@@ -683,6 +683,18 @@ def format_error_to_stderr(exc: Exception) -> str:
       message; the bullets carry the per-column / per-test detail. CI
       parsers rely on this two-shape contract — see clauditor's source
       rule.
+    * :class:`ExceptionGroup` (DEC-007 of #186) — belt-and-braces
+      defence for the grade asyncio orchestrator. Multi-exception groups
+      escaping the engine's ``BaseExceptionGroup`` unwrap (a hostile
+      non-grade-typed exception slipping through the per-coroutine
+      ``try/except``, or a fail-closed audit-write error pair) render as
+      a header line plus one ``  - <ExcClass>: <repr-safe-msg>`` bullet
+      per inner exception. Cap 10 bullets + ``  ... and K more``
+      overflow line. Each inner exception's text is routed through
+      :func:`repr` so ANSI / control bytes don't leak; the sink's
+      :func:`print_stderr` also strips ANSI, but the repr-quote is the
+      defence-in-depth layer (mirrors the safety / warehouse layers'
+      ``_format_value`` helpers).
 
     The ``↳ Remediation:`` line is rendered when the typed error's
     ``__str__`` already carries it (every stage error class produced by
@@ -707,6 +719,30 @@ def format_error_to_stderr(exc: Exception) -> str:
         if remediation:
             return f"{body}\n  ↳ Remediation: {remediation}"
         return body
+    # ExceptionGroup shape — DEC-007 of #186. Defence-in-depth for the
+    # grade asyncio orchestrator (US-009): the engine's inner
+    # ``BaseExceptionGroup`` unwrap re-raises single-exception groups as
+    # the inner typed exception, so any group reaching this branch
+    # carries two or more inner exceptions (typically a hostile
+    # non-grade-typed exception slipping through the per-coroutine
+    # ``try/except``, or paired fail-closed audit-write errors). Render
+    # as ``ERROR: ...N concurrent failures:`` header + ``  - <Class>:
+    # <repr(msg)>`` bullets, capped at 10 with an overflow line. NOTE:
+    # ``ExceptionGroup`` is a subclass of ``Exception`` (3.11+);
+    # ``BaseExceptionGroup`` (which also catches ``KeyboardInterrupt``
+    # children) inherits from ``BaseException`` and never reaches the
+    # ``cmd_<name>`` boundary catch — checking ``ExceptionGroup`` here
+    # is the correct narrow surface for this typed renderer signature.
+    if isinstance(exc, ExceptionGroup):
+        inners = exc.exceptions
+        n = len(inners)
+        plural = "s" if n != 1 else ""
+        header = f"ERROR: Grade orchestrator encountered {n} concurrent failure{plural}:"
+        cap = 10
+        bullet_lines = [f"  - {type(inner).__name__}: {repr(str(inner))}" for inner in inners[:cap]]
+        if n > cap:
+            bullet_lines.append(f"  ... and {n - cap} more")
+        return "\n".join([header] + bullet_lines)
     # Single-line shape — every other typed error. ``str(exc)`` already
     # includes the ``↳ Remediation:`` line (when set) thanks to the
     # uniform layer-base pattern.
