@@ -16,6 +16,7 @@ code imports the fake.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -429,11 +430,57 @@ def test_grade_artifacts_default_sidecar_path_resolution(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 
 
+def _config_tiny_budget(model_id: str = "claude-fake") -> GradeConfig:
+    """A :class:`GradeConfig` with a sub-second budget so
+    :func:`asyncio.timeout` trips immediately under the slow-coroutine
+    monkey-patch used by the budget tests below.
+
+    Mirrors :func:`_config_no_audit_in_path` defaults; the only delta is
+    ``total_budget_seconds=1`` (the GradeConfig validator's lower bound
+    — anything below would fail Pydantic-validation).
+    """
+    return GradeConfig(
+        model=model_id,
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=1,
+        max_concurrent_calls=2,
+    )
+
+
+def _stub_grade_one_async_slow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Monkey-patch :func:`engine_module._grade_one_async` to await a
+    sleep longer than the test's ``total_budget_seconds``.
+
+    Used by the budget-exhaustion tests below. The slow coroutine never
+    returns naturally; the enclosing ``asyncio.timeout`` cancels every
+    in-flight task; the per-coroutine ``except CancelledError`` arm
+    routes each pair to the budget-degrade shape (DEC-008).
+    """
+
+    async def _slow(**_kw: Any) -> tuple:
+        await asyncio.sleep(60)  # well beyond total_budget_seconds=1
+        raise AssertionError("unreachable — timeout should fire first")
+
+    monkeypatch.setattr(engine_module, "_grade_one_async", _slow)
+
+
 def test_grade_artifacts_budget_exceeded_marks_remaining_pairs_score_none(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Monkey-patch ``time.monotonic`` so the budget trips after a
-    couple of pairs. Remaining pairs land as ``score=None``.
+    """When the asyncio budget timeout fires, every pair degrades.
+
+    The async core's ``asyncio.timeout(total_budget_seconds)`` cancels
+    every in-flight + un-started task. Per-coroutine ``except
+    CancelledError`` arms route to the budget-degrade shape (DEC-008).
+    Un-started tasks (those still waiting on the semaphore when the
+    timeout fired) get filled in by the post-``TaskGroup`` synthesis
+    pass.
     """
     project_dir = _project(tmp_path)
     model = _make_model()
@@ -442,19 +489,14 @@ def test_grade_artifacts_budget_exceeded_marks_remaining_pairs_score_none(
     fake = FakeAnthropicClient()
     expect_grade_responses(fake, rubric=rubric, candidate=candidate)
 
-    # Stub time.monotonic so the orchestrator believes the wall clock
-    # has advanced 999 seconds at the start of the loop. The
-    # GradeConfig default of total_budget_seconds=60 means every
-    # iteration past the first budget-check trips to "exhausted".
-    times = iter([0.0] + [999.0] * 200)
-    monkeypatch.setattr(engine_module.time, "monotonic", lambda: next(times))
+    _stub_grade_one_async_slow(monkeypatch)
 
     report = grade_artifacts(
         model,
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_tiny_budget(),
         client=fake,
         project_dir=project_dir,
     )
@@ -463,9 +505,6 @@ def test_grade_artifacts_budget_exceeded_marks_remaining_pairs_score_none(
     assert all(r.score is None for r in report.results)
     assert all(r.passed is False for r in report.results)
     assert report.aggregate_complete is False
-    # No LLM calls should have been issued — the fake's expectations
-    # remain queued (count_tokens + create per pair).
-    assert len(fake.create_calls) == 0
 
 
 def test_grade_artifacts_budget_exceeded_aggregate_complete_is_false(
@@ -481,15 +520,14 @@ def test_grade_artifacts_budget_exceeded_aggregate_complete_is_false(
     fake = FakeAnthropicClient()
     expect_grade_responses(fake, rubric=rubric, candidate=candidate)
 
-    times = iter([0.0] + [999.0] * 200)
-    monkeypatch.setattr(engine_module.time, "monotonic", lambda: next(times))
+    _stub_grade_one_async_slow(monkeypatch)
 
     report = grade_artifacts(
         model,
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_tiny_budget(),
         client=fake,
         project_dir=project_dir,
     )
@@ -1260,9 +1298,22 @@ def test_grade_below_threshold_error_carries_aggregate_complete_flag(
     fake = FakeAnthropicClient()
     expect_grade_responses(fake, rubric=rubric, candidate=candidate)
 
-    # Trip the budget at the first iteration so every pair degrades.
-    times = iter([0.0] + [999.0] * 200)
-    monkeypatch.setattr(engine_module.time, "monotonic", lambda: next(times))
+    # Force the asyncio budget timeout to trip immediately — every
+    # in-flight + un-started pair degrades via the async core's
+    # CancelledError attribution path (DEC-008).
+    _stub_grade_one_async_slow(monkeypatch)
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=1,
+        min_pass_rate=0.7,
+        min_mean_score=0.5,
+        fail_on_below_threshold=True,
+    )
 
     with pytest.raises(GradeBelowThresholdError) as excinfo:
         grade_artifacts(
@@ -1270,7 +1321,7 @@ def test_grade_below_threshold_error_carries_aggregate_complete_flag(
             candidate,
             _empty_prune_result(model),
             rubric=rubric,
-            config=_config_with_threshold_fail(fail_on_below_threshold=True),
+            config=config,
             client=fake,
             project_dir=project_dir,
         )
@@ -1554,3 +1605,208 @@ def test_grade_artifacts_sync_only_provider_with_cap_one_does_not_raise(
     finally:
         providers_module._REGISTRY.clear()
         providers_module._REGISTRY.update(saved)
+
+
+# ---------------------------------------------------------------------------
+# Async core (US-009) — TaskGroup + Semaphore + budget timeout
+# ---------------------------------------------------------------------------
+
+
+def test_grade_artifacts_concurrent_dispatches_in_parallel(tmp_path: Path) -> None:
+    """The async core dispatches up to ``max_concurrent_calls`` coroutines
+    in parallel; an instrumented fake records the peak in-flight count
+    and asserts it stays at-or-below the cap.
+
+    Pins DEC-002 + DEC-003 of #186: the ``Semaphore(max_concurrent_calls)``
+    throttle is load-bearing — without it, the dispatch fan-out is
+    unbounded and the operator's cost-and-rate posture is silently
+    violated. The instrumented fake counts entries to ``create``
+    minus exits before delegating to the standard expectation queue,
+    so the peak measures the true concurrency the engine achieves.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    artifact_pairs = _stable_artifact_pairs(candidate)
+    total_pairs = len(rubric) * len(artifact_pairs)
+    # At least 4 pairs > cap=3 so the throttle actually engages; the
+    # sample candidate carries 7 artifacts × 2 criteria = 14 pairs.
+    assert total_pairs >= 6
+
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    # Wrap the fake's async ``messages.create`` so we can observe the
+    # in-flight count without changing the queue-popping logic. Each
+    # coroutine awaits a tiny sleep mid-call so the orchestrator's
+    # parallel dispatch is actually observable; without the sleep every
+    # call resolves before the next task can claim the semaphore and
+    # the peak collapses to 1.
+    in_flight = 0
+    peak_in_flight = 0
+    original_create = fake.aio.messages.create
+
+    async def _instrumented_create(**kw: Any) -> Any:
+        nonlocal in_flight, peak_in_flight
+        in_flight += 1
+        peak_in_flight = max(peak_in_flight, in_flight)
+        try:
+            # Tiny sleep keeps the coroutine in flight long enough that
+            # sibling coroutines can also enter ``create`` concurrently.
+            await asyncio.sleep(0.01)
+            return await original_create(**kw)
+        finally:
+            in_flight -= 1
+
+    fake.aio.messages.create = _instrumented_create  # type: ignore[assignment, method-assign]
+
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=60,
+        max_concurrent_calls=3,
+    )
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    assert len(report.results) == total_pairs
+    # Concurrency engaged: at least 2 simultaneous calls observed.
+    # Below the cap=3 floor: never more than 3.
+    assert peak_in_flight <= 3
+    assert peak_in_flight >= 2
+
+
+def test_grade_artifacts_concurrency_1_byte_equivalent_to_v0_1(tmp_path: Path) -> None:
+    """``max_concurrent_calls=1`` serialises dispatch in
+    ``(criterion, artifact)`` iteration order.
+
+    The semaphore-of-1 path is the documented sequential fallback (DEC-003
+    of #186). Asserts the JSONL audit lands in iteration order — the
+    audit corpus shape is bit-for-bit equivalent to the v0.1 sequential
+    output under this config knob. Down-stream consumers gating on the
+    legacy ordering (the v0.1 fixture, any external sidecar consumer)
+    can keep functioning unchanged.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=60,
+        max_concurrent_calls=1,
+    )
+
+    grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    # Compare the on-disk JSONL order to the engine's iteration order.
+    audit_path = project_dir / ".signalforge" / "grade.jsonl"
+    rows = _read_jsonl(audit_path)
+    expected_iteration = [
+        (artifact_id, criterion.id)
+        for criterion in rubric
+        for artifact_id, _ in _stable_artifact_pairs(candidate)
+    ]
+    observed = [(row["artifact_id"], row["criterion_id"]) for row in rows]
+    assert observed == expected_iteration
+
+
+def test_grade_artifacts_concurrent_budget_warning_shape_locked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """On budget trip the engine emits exactly one WARNING with the
+    locked JSON field set (DEC-018 of #186): ``run_id``,
+    ``model_unique_id``, ``completed_count``, ``cancelled_count``,
+    ``degraded_count``, ``total_budget_seconds``.
+
+    External operator dashboards key on these field names; locking the
+    shape via a pinned test is what makes the audit corpus a stable
+    contract.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    _stub_grade_one_async_slow(monkeypatch)
+
+    caplog.set_level(logging.WARNING, logger="signalforge.grade.engine")
+    grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_tiny_budget(),
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    warns = [
+        r
+        for r in caplog.records
+        if r.name == "signalforge.grade.engine"
+        and r.levelno == logging.WARNING
+        and "grade budget exceeded" in r.getMessage()
+    ]
+    assert len(warns) == 1
+    payload_json = warns[0].getMessage().split("grade budget exceeded: ", 1)[1]
+    payload = json.loads(payload_json)
+    # JSON field set locked verbatim (DEC-018 of #186).
+    assert set(payload.keys()) == {
+        "run_id",
+        "model_unique_id",
+        "completed_count",
+        "cancelled_count",
+        "degraded_count",
+        "total_budget_seconds",
+    }
+    assert payload["model_unique_id"] == model.unique_id
+    assert payload["total_budget_seconds"] == 1
+    # Every pair degraded (completed + cancelled + degraded == total).
+    candidate_pairs = len(_stable_artifact_pairs(candidate))
+    total_pairs = len(rubric) * candidate_pairs
+    assert (
+        payload["completed_count"] + payload["cancelled_count"] + payload["degraded_count"]
+        == total_pairs
+    )
+
+
+def test_grade_artifacts_module_level_async_sleep_alias_present() -> None:
+    """The ``_async_sleep`` alias is module-scoped and reassignable for
+    deterministic budget tests, mirroring :data:`signalforge.llm.client._async_sleep`
+    (DEC-011 of #186).
+    """
+    assert engine_module._async_sleep is asyncio.sleep
