@@ -4,7 +4,8 @@
 > - **Ticket:** [#185](https://github.com/wjduenow/SignalForge/issues/185) — `safety: AuditRecordTooLargeError blocks generate on wide-table models (170+ columns)`
 > - **Branch:** `feature/185-wide-table-audit` (off `origin/dev`)
 > - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/185-wide-table-audit`
-> - **Phase:** detailing (in flight)
+> - **Phase:** devolved
+> - **Plan PR:** [#192](https://github.com/wjduenow/SignalForge/pull/192) (draft, targets `dev`)
 > - **Plan started:** 2026-06-02
 > - **Tracks follow-on of:** #179 (empirical retest, PR #182)
 
@@ -490,13 +491,34 @@ Cross-referenced each story against the Phase 1 Convention Checker output:
 
 No rule violations found; ready for publish.
 
-## Publish (Phase 5 — pending user approval)
+## Publish + Devolve (Phases 5–7 — complete)
 
-The next turn will:
-1. Commit `plans/super/185-wide-table-audit.md` on `feature/185-wide-table-audit`.
-2. Push to `origin/feature/185-wide-table-audit`.
-3. Open a **draft PR** against `dev` (per memory `feedback_pr_target_dev`): title `#185: Wide-table audit-record size cap (plan)`.
+Plan committed to `feature/185-wide-table-audit` and pushed; draft PR [#192](https://github.com/wjduenow/SignalForge/pull/192) opened against `dev`. User approved + requested devolve in the same turn. Beads created:
 
----
+### Beads manifest
 
-*Plan continues in subsequent phases (PR → approval → devolve to beads).*
+- **Epic:** `bd_1-scaffolding-2i3` — #185: Wide-table audit-record size cap
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/185-wide-table-audit`
+- **Branch:** `feature/185-wide-table-audit`
+- **Plan PR:** #192
+
+| Bead ID | Story | Depends on |
+|---|---|---|
+| `bd_1-scaffolding-2i3.1` | US-001 — safety.models drop v3 + add v4 + shape validator | — |
+| `bd_1-scaffolding-2i3.2` | US-002 — safety.request build v4 AuditEvent (symbol-table) | US-001 |
+| `bd_1-scaffolding-2i3.3` | US-003 — safety.audit chunker + multi-line writer + reader | US-001 |
+| `bd_1-scaffolding-2i3.4` | US-004 — safety.errors parametric `AuditRecordTooLargeError` | US-001 |
+| `bd_1-scaffolding-2i3.5` | US-005 — drift detector + fixture regen (v4-only) | US-001, US-002, US-003 |
+| `bd_1-scaffolding-2i3.6` | US-006 — wide-table integration tests (4 tests) | US-002, US-003, US-005 |
+| `bd_1-scaffolding-2i3.7` | US-007 — extend concurrent-write test for chunked events | US-003 |
+| `bd_1-scaffolding-2i3.8` | US-008 — docs safety-ops.md v4 schema + CHANGELOG | US-001 … US-005 |
+| `bd_1-scaffolding-2i3.9` | US-009 — rule update `.claude/rules/safety-layer.md` (orchestrator-only) | US-008 |
+| `bd_1-scaffolding-2i3.10` | US-010 — Quality Gate (4-angle code review + CodeRabbit) | US-001 … US-009 |
+| `bd_1-scaffolding-2i3.11` | US-011 — Patterns & Memory | US-010 |
+
+**Ready (`bd ready`):** `bd_1-scaffolding-2i3.1` (US-001).
+
+### Orchestrator-only beads
+
+- **US-009** (`bd_1-scaffolding-2i3.9`) edits `.claude/rules/safety-layer.md` — Ralph workers cannot Write to `.claude/` in worktrees (memory `ralph-worker-claude-dir-perms`). The orchestrator must edit this directly during the run, then close the bead.
+
