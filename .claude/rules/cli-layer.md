@@ -19,6 +19,18 @@ src/signalforge/cli/
 
 One module per subcommand, no nested directories, no `__main__.py`. Every subcommand module exports exactly two public symbols: `add_parser(subparsers) -> None` and `cmd_<name>(args) -> int`. Top-level `main(argv: list[str] | None = None) -> int` accepts an explicit argv list — tests call `main([...])` directly and never spawn a subprocess.
 
+### Nested-subaction precedent — `cache clear` (#189 DEC-015)
+
+`signalforge cache clear --grade` introduced the FIRST nested-subparser shape in the codebase. The top-level `cache` subcommand carries an internal `add_subparsers()` for sub-actions; the only sub-action today is `clear`. This is a **documented deviation** from the "flat per-subcommand modules" rule, justified by forward-compat for a future `cache clear --drafter` / `cache stats` / `cache list` family. Alternatives (`cache-clear` hyphenated flat name; `clear-grade-cache` verb-first) lose the namespace claim and the `git remote add / remove` idiom.
+
+The deviation is bounded:
+- `cache` IS one module per top-level subcommand (`src/signalforge/cli/cache.py`); the nesting is purely on the argparse side via `add_subparsers()`.
+- `cmd_cache(args)` dispatches on `args.cache_subcommand`. Today's `clear` is hardcoded; future sub-actions extend the dispatch.
+- The skill-parity gate's `_subparser_flags` helper was extended to BFS over nested subparsers — `--grade` correctly validates as a flag on the nested `clear` parser. Mirror this BFS extension if a sibling subcommand grows its own nested action.
+- `--grade` on `clear` is `required=True` so a bare `signalforge cache clear` exits 2 via argparse. When a sibling flag like `--drafter` lands, the `required` constraint becomes a mutex group.
+
+When a future subcommand wants nested sub-actions, follow this shape; otherwise the flat convention still holds.
+
 ## Library-surface pattern: CLI handler wraps a public lib module at the boundary (issue #47)
 
 Subcommands with a useful programmatic surface ship as TWO layers — a public lib module (e.g. `signalforge.demo.copy_demo(...) -> Path`) and a thin CLI handler that wraps it. The split:
