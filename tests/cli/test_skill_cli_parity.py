@@ -275,6 +275,15 @@ def _subparser_flags(subcommand: str) -> frozenset[str]:
     every ``option_string`` that starts with ``--`` from every action.
     Returns an empty frozenset if the subcommand isn't registered (caller
     is responsible for distinguishing that case).
+
+    Recurses into NESTED :class:`argparse._SubParsersAction` instances
+    (introduced by US-008 / issue #189's ``signalforge cache clear --grade``
+    — the first nested subparser in the CLI). A skill prose line like
+    ``signalforge cache clear --grade`` should not trip the flag-existence
+    gate just because ``--grade`` lives on the ``clear`` sub-action's
+    parser rather than ``cache``'s; the regex captures ``cache`` as the
+    subcommand and ``--grade`` as the flag, so the harvester must walk
+    transitively.
     """
     parser = _build_parser()
     subparser_actions = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
@@ -284,10 +293,20 @@ def _subparser_flags(subcommand: str) -> frozenset[str]:
         return frozenset()
     sub = choices[subcommand]
     flags: set[str] = set()
-    for action in sub._actions:
-        for opt in action.option_strings:
-            if opt.startswith("--"):
-                flags.add(opt)
+    # BFS over the subparser tree so nested sub-actions contribute their
+    # flags too. Today only ``cache clear`` has a nested layer; future
+    # ``cache stats`` / ``cache list`` (or any future namespace subcommand)
+    # inherit the same behaviour automatically.
+    queue: list[argparse.ArgumentParser] = [sub]
+    while queue:
+        node = queue.pop()
+        for action in node._actions:
+            for opt in action.option_strings:
+                if opt.startswith("--"):
+                    flags.add(opt)
+            if isinstance(action, argparse._SubParsersAction):
+                for nested in action.choices.values():
+                    queue.append(nested)
     return frozenset(flags)
 
 
