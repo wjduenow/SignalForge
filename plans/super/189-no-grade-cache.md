@@ -6,8 +6,31 @@
 - **Base branch:** `dev` (0.6.0.dev0). PRs target `dev`.
 - **Worktree:** `../worktrees/SignalForge/189-no-grade-cache`
 - **Branch:** `feature/189-no-grade-cache`
-- **Phase:** published
+- **Phase:** devolved
 - **Sessions:** 1 (2026-06-03)
+
+### Beads Manifest
+
+- **Epic:** `bd_1-scaffolding-63t` — #189: --no-grade flag + persistent grade cache
+- **PR:** [#196](https://github.com/wjduenow/SignalForge/pull/196) (draft, base `dev`)
+- **Worktree:** `../worktrees/SignalForge/189-no-grade-cache` (`feature/189-no-grade-cache`)
+
+| Bead | Story | Depends on | Ready at devolve |
+|---|---|---|---|
+| `bd_1-scaffolding-63t.1` | US-001 — GradeEvent.audit_schema_version: Literal→int (prereq) | — | ✅ ready |
+| `bd_1-scaffolding-63t.2` | US-002 — GradeEvent.cache_hit + _build_grade_event kwarg + v2 fixture | .1 | blocked |
+| `bd_1-scaffolding-63t.3` | US-003 — signalforge.grade.cache module: keys, record, I/O | — | ✅ ready |
+| `bd_1-scaffolding-63t.4` | US-004 — Cache typed errors + exit-code registration | — | ✅ ready |
+| `bd_1-scaffolding-63t.5` | US-005 — GradeConfig.cache_enabled knob | — | ✅ ready |
+| `bd_1-scaffolding-63t.6` | US-010 — Cost-rollup cache-hit zero-cost test | .2 | blocked |
+| `bd_1-scaffolding-63t.7` | US-006 — Wire cache into the grade engine | .2, .3, .5 | blocked |
+| `bd_1-scaffolding-63t.8` | US-008 — `signalforge cache clear --grade` subcommand | .3, .4 | blocked |
+| `bd_1-scaffolding-63t.9` | US-007 — `--no-grade` + `--no-cache` + `[N/4]` progress | .7 | blocked |
+| `bd_1-scaffolding-63t.10` | US-009 — Docs + SKILL.md + 5-surface parity test | .8, .9 | blocked |
+| `bd_1-scaffolding-63t.11` | Quality Gate — code review × 4 + CodeRabbit | .1–.10 | blocked |
+| `bd_1-scaffolding-63t.12` | Patterns & Memory | .11 | blocked |
+
+*Note on numbering:* `bd` assigns child suffixes in creation order, so US-010 lands as `.6` (created before US-006 to keep its dep on `.2` valid) and US-006 lands as `.7`. The README order in the plan body matches story-naming, not bead-numbering.
 - **Composes with:** #186 (grade asyncio parallelism — already shipped), #187 (Haiku/per-provider fast defaults — already shipped, Sonnet stayed the Anthropic default).
 
 ### Two parts, two scopes (operator-facing motivation from the ticket)
