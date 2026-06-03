@@ -786,6 +786,18 @@ _EXCEPTION_MAPPING_EXCLUDED_BASES: frozenset[str] = frozenset(
         # tier 1 and the AST scan catches the missing per-class entry
         # at test time.
         "SkillError",
+        # ``GradeCacheRecordTooLargeError`` (issue #189 / DEC-017) — a
+        # subclass of ``GradeCacheWriteError`` (NOT a layer-base sibling
+        # of ``GradeError``). Per DEC-017 the TooLarge variant
+        # deliberately has NO explicit entry in ``_EXCEPTION_TO_EXIT_CODE``;
+        # the MRO walk in :func:`map_exception_to_exit_code` resolves it
+        # to its parent's tier (3, external dep / disk I/O). The class
+        # is excluded here so the AST scan does not require an explicit
+        # mapping — the inheritance IS the mapping. Contrast with
+        # ``GradeAuditRecordTooLargeError`` which IS mapped explicitly
+        # because it does NOT subclass ``GradeAuditWriteError`` (both
+        # are direct ``GradeError`` siblings).
+        "GradeCacheRecordTooLargeError",
     }
 )
 

@@ -483,12 +483,184 @@ class GradeBelowThresholdError(GradeError):
         super().__init__(message, remediation=remediation)
 
 
+class GradeCacheReadError(GradeError):
+    """The persistent grade cache file is present but unreadable or
+    unparseable.
+
+    Issue #189 / DEC-017. The grade cache (``<project_dir>/.signalforge/
+    grade-cache/``) is derived/optional state: a hit lets the engine
+    skip a live LLM call; a miss falls through to the normal grade
+    path. Cache reads are best-effort — when the on-disk record is
+    present but cannot be loaded (corrupt JSON, schema mismatch,
+    permission denied on the file, …), this typed error surfaces in the
+    engine's catch-and-warn path so the WARNING line names the failure
+    type. **The live grade run is NEVER aborted by a read failure** —
+    the engine treats it as a miss and re-grades.
+
+    Mapped to CLI tier 3 (external dependency, disk I/O) — same tier as
+    the fail-closed audit-write durability errors. The operator-visible
+    remediation names the cache-clear command and the
+    ``--no-cache`` / ``cache_enabled: false`` opt-out paths.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The grade cache file is present but unreadable or unparseable. Delete "
+        "the cache file or run `signalforge cache clear --grade` to drop the "
+        "entire cache directory; the next grade run will re-grade and "
+        "re-populate. Cache reads are best-effort — a read failure NEVER "
+        "aborts the live grade."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: BaseException,
+        remediation: str | None = None,
+    ) -> None:
+        self.cause = cause
+        super().__init__(message, remediation=remediation)
+        # Chain the underlying I/O cause so ``raise GradeCacheReadError(...)``
+        # exposes ``exc.__cause__`` for callers that want the OS-level detail
+        # (mirrors ``raise X from cause`` and the GradeAuditWriteError /
+        # GradeLLMError precedents).
+        self.__cause__ = cause
+
+
+class GradeCacheWriteError(GradeError):
+    """The persistent grade cache writer could not durably persist a
+    record.
+
+    Issue #189 / DEC-005 / DEC-017. Unlike the fail-closed audit writers
+    (DEC-006 of #7), the cache writer is **fail-soft**: a write failure
+    NEVER propagates from :func:`signalforge.grade.grade_artifacts`.
+    The engine catches any escaping ``OSError`` / oversize /
+    concurrent-write conflict and routes it to a single WARNING line
+    via the lazy-format JSON logger (mirrors the
+    ``warehouse-adapters.md`` cleanup-boundary fail-soft pattern). The
+    next run will re-grade the affected pair and attempt the cache
+    write again.
+
+    The class still exists (and is registered in
+    :data:`signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE` at tier 3)
+    so the catch-and-warn site can name the failure type, and so the
+    7th AST scan in :mod:`tests.test_audit_completeness` finds the
+    type registration. **In production, a user will not see this
+    exception escape** — it surfaces only as a WARNING line.
+
+    Mapped to CLI tier 3 (external dependency, disk I/O) — same tier
+    family as :class:`GradeCacheReadError`.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The grade cache write failed (disk full, permission denied, oversize "
+        "record, or a concurrent-write conflict). The live grade run is NOT "
+        "aborted — cache writes are fail-soft per DEC-005; the next run will "
+        "re-grade this pair and attempt the cache write again. To suppress the "
+        "warning, fix the underlying I/O issue or set `grade.cache_enabled: "
+        "false` in signalforge.yml."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: BaseException,
+        remediation: str | None = None,
+    ) -> None:
+        self.cause = cause
+        super().__init__(message, remediation=remediation)
+        # Chain the underlying I/O cause — mirrors GradeAuditWriteError.
+        self.__cause__ = cause
+
+
+class GradeCachePathError(GradeError):
+    """The persistent grade cache directory resolved outside the
+    project directory via a symlink.
+
+    Issue #189 / DEC-017. The grade engine canonicalises
+    ``<project_dir>/.signalforge/grade-cache/`` via
+    :func:`signalforge._common.path_safety.canonicalise_path` at
+    orchestrator entry (load-time). A symlink that resolves outside the
+    project tree raises :class:`signalforge._common.path_safety.PathContainmentError`,
+    which the engine wraps into this typed error so the CLI's exit-code
+    table can route it to tier 1 (load-time / parse-layer; same tier as
+    :class:`signalforge.cli.errors.CliPathError` and
+    :class:`signalforge.manifest.ManifestNotFoundError`).
+
+    Mapped to CLI tier 1 (operator-config problem; the project tree's
+    ``.signalforge/`` has a symlink pointing elsewhere — fix the
+    symlink, re-run).
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The grade cache directory (`<project_dir>/.signalforge/grade-cache/`) "
+        "resolved outside the project directory via a symlink. This is the "
+        "symlink-containment gate refusing to read or write outside the "
+        "project tree. Inspect the `.signalforge/grade-cache` path; remove "
+        "any symlinks that point elsewhere, then re-run."
+    )
+
+
+class GradeCacheRecordTooLargeError(GradeCacheWriteError):
+    """A persistent grade cache record would exceed the per-record
+    byte cap.
+
+    Issue #189 / DEC-006 / DEC-017. ``_GRADE_CACHE_RECORD_LIMIT_BYTES``
+    is 16 KB — deliberately distinct from the 4 KB POSIX-atomic-append
+    limit on audit JSONL records, because cache files are *not*
+    concurrent-append targets. A typical cache record is ~500–2000
+    bytes; the 16 KB headroom accommodates unusually verbose
+    ``evidence`` / ``reasoning`` fields without forcing a fail-soft
+    skip.
+
+    Subclasses :class:`GradeCacheWriteError` (NOT :class:`GradeError`
+    directly) so the orchestrator's fail-soft catch on Write also
+    catches oversize, and so the MRO walk in
+    :func:`signalforge.cli._helpers.map_exception_to_exit_code`
+    resolves to Write's tier without an explicit entry in
+    :data:`_EXCEPTION_TO_EXIT_CODE`.
+
+    Raised BEFORE any file is opened (mirrors the audit-record-too-large
+    precedent), so an oversize record leaves no on-disk artefact.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The grade cache record exceeded the 16 KB per-record budget. This is "
+        "the cache-record cap, distinct from the 4 KB POSIX-atomic-append "
+        "limit on audit JSONL records (cache files are not concurrent-append "
+        "targets). Common cause: an unusually large `evidence` or `reasoning` "
+        "field in the LLM response — the live grade still succeeds; only the "
+        "cache write is skipped."
+    )
+
+    def __init__(
+        self,
+        size: int,
+        limit: int,
+        *,
+        remediation: str | None = None,
+    ) -> None:
+        self.size = size
+        self.limit = limit
+        message = f"Grade cache record size {size} exceeds per-record limit {limit}."
+        # Skip GradeCacheWriteError.__init__ (which requires cause=) by
+        # going straight to the GradeError base — there's no underlying
+        # OS-level cause for an oversize record; the writer detects the
+        # cap-breach in-memory before any os.open.
+        GradeError.__init__(self, message, remediation=remediation)
+
+
 # Sorted alphabetically (mirrors safety / draft / prune / warehouse error modules).
 __all__ = [
     "GradeAuditRecordTooLargeError",
     "GradeAuditWriteError",
     "GradeBelowThresholdError",
     "GradeBudgetExceededError",
+    "GradeCachePathError",
+    "GradeCacheReadError",
+    "GradeCacheRecordTooLargeError",
+    "GradeCacheWriteError",
     "GradeConfigError",
     "GradeError",
     "GradeLLMError",
