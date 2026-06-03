@@ -94,6 +94,9 @@ from signalforge.grade import (
     GradeAuditWriteError,
     GradeBelowThresholdError,
     GradeBudgetExceededError,
+    GradeCachePathError,
+    GradeCacheReadError,
+    GradeCacheWriteError,
     GradeConfigError,
     GradeError,
     GradeLLMError,
@@ -277,6 +280,12 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # (re-entered from inside an asyncio loop); same tier as
     # :class:`ManifestNotFoundError` (operator-environment-shape error).
     GradeNestedEventLoopError: 1,
+    # Grade persistent-cache path-containment failure (issue #189 / DEC-017).
+    # Tier 1 — the `.signalforge/grade-cache/` directory resolved outside
+    # ``project_dir`` via a symlink. This is an operator-config problem
+    # (the project tree has a symlink pointing elsewhere); same tier as
+    # :class:`CliPathError` and :class:`ManifestNotFoundError`.
+    GradeCachePathError: 1,
     DiffError: 1,
     # CLI-layer load-shape errors.
     CliError: 1,
@@ -519,6 +528,17 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     GradeBudgetExceededError: 3,
     GradeAuditWriteError: 3,
     GradeAuditRecordTooLargeError: 3,
+    # Grade persistent-cache disk-I/O errors (issue #189 / DEC-017).
+    # Both tier 3 (external dependency, disk I/O) — same family as the
+    # fail-closed audit-write durability errors above. ``GradeCacheReadError``
+    # propagates from the engine's catch-and-warn read path; ``GradeCacheWriteError``
+    # is registered for catch-and-warn diagnostics but never escapes
+    # ``grade_artifacts`` (fail-soft per DEC-005 — write failure → WARNING).
+    # ``GradeCacheRecordTooLargeError`` is a subclass of
+    # ``GradeCacheWriteError`` and inherits tier 3 via the MRO walk in
+    # :func:`map_exception_to_exit_code` — no explicit entry per DEC-017.
+    GradeCacheReadError: 3,
+    GradeCacheWriteError: 3,
     LLMResponseAuditWriteError: 3,
     LLMResponseAuditRecordTooLargeError: 3,
     DiffSidecarWriteError: 3,
