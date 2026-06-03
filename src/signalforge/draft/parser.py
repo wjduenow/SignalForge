@@ -38,6 +38,7 @@ without sniffing message text).
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -50,12 +51,36 @@ from sqlglot.expressions import DataType
 from sqlglot.optimizer.annotate_types import TypeAnnotator, annotate_types
 
 from signalforge._common.json_payload import extract_json_payload
+from signalforge.draft.audit import ReshapeRecord
 from signalforge.draft.errors import (
     LLMOutputAnchorContractError,
     LLMOutputJSONError,
     LLMOutputValidationError,
 )
-from signalforge.draft.models import CandidateSchema
+from signalforge.draft.models import CandidateSchema, CandidateTest
+
+_LOGGER = logging.getLogger(__name__)
+
+# Issue #184 (DEC-002, DEC-004) — model-only test variants that the LLM
+# may mis-emit nested inside a column's ``tests:`` array. When detected
+# the parser re-attaches them to ``candidate.tests`` (model scope) and
+# emits a WARNING + ReshapeRecord audit (DEC-005, DEC-006). Mutating-the-
+# candidate path is the ONE non-fatal carve-out of the otherwise fail-loud
+# anchor contract (DEC-022 of #5 — preserved for every other violation).
+_MODEL_ONLY_TEST_TYPES: frozenset[str] = frozenset(
+    {
+        "row_count_anomaly_by_period",
+        "row_count_between",
+        "unique_combination",
+    }
+)
+
+# Locked reason text for the v0.1 cause (DEC-005 of #184). Mirrors the
+# verbatim string from the plan; the ReshapeRecord audit consumer keys
+# on this exact wording.
+_REATTACH_REASON: str = (
+    "model-only variant emitted at column scope; re-attached to model-level tests:"
+)
 
 # Jinja substitution pattern used to neutralise ``{{ this }}`` /
 # ``{{ ref(...) }}`` / ``{{ source(...) }}`` BEFORE handing the SQL body
@@ -368,6 +393,93 @@ def _check_where_clause(
     return tuple(violations)
 
 
+def _validate_model_only_test_args(
+    test: CandidateTest,
+    model_columns: frozenset[str],
+    model_columns_by_type: Mapping[str, str | None] | None,
+    dialect_name: str,
+) -> list[str]:
+    """Validate args of a model-level-only test variant against the schema.
+
+    Three variants are model-level-only by type-level constraint
+    (``column: None = None``): ``row_count_between`` (#169),
+    ``unique_combination`` (#170), ``row_count_anomaly_by_period`` (#171).
+    Each carries args (``where`` / ``columns`` / ``date_column``) that
+    must reference real columns on the model.
+
+    Called from the column loop's re-attach branch (#184 DEC-002) AFTER
+    a column-scoped emission is lifted to model scope — the model-level
+    loop has already run by the time the re-attach happens, so without
+    this re-validation a hallucinated ``date_column`` / ``where`` /
+    ``columns`` value would silently ship and degrade to
+    ``kept-without-evidence`` at prune instead of surfacing a typed
+    parser violation (#184 QG Pass 1 finding). The model-level loop's
+    own validation arms remain inline (they pre-date this helper and
+    refactoring them would touch unchanged code without a behaviour
+    change); this helper duplicates the args-membership / WHERE-clause
+    checks for the re-attach path only.
+
+    Returns a list (not tuple) so callers can ``.extend()`` into their
+    own running violations list cheaply.
+    """
+    out: list[str] = []
+    if test.type == "row_count_between":
+        if test.where is not None and test.where.strip():
+            types_map: Mapping[str, str | None] = (
+                model_columns_by_type if model_columns_by_type is not None else {}
+            )
+            out.extend(
+                _check_where_clause(
+                    test.where,
+                    "row_count_between",
+                    model_columns,
+                    types_map,
+                    dialect_name,
+                )
+            )
+    elif test.type == "unique_combination":
+        for col in test.columns:
+            if col not in model_columns:
+                out.append(
+                    f"unique_combination references nonexistent column {col!r} "
+                    f"(available: {sorted(model_columns)})"
+                )
+        if test.where is not None and test.where.strip():
+            uc_types_map: Mapping[str, str | None] = (
+                model_columns_by_type if model_columns_by_type is not None else {}
+            )
+            out.extend(
+                _check_where_clause(
+                    test.where,
+                    "unique_combination",
+                    model_columns,
+                    uc_types_map,
+                    dialect_name,
+                )
+            )
+    elif test.type == "row_count_anomaly_by_period":
+        if test.date_column not in model_columns:
+            out.append(
+                f"row_count_anomaly_by_period: date_column "
+                f"{test.date_column!r} not in model columns "
+                f"(available: {sorted(model_columns)})"
+            )
+        if test.where is not None and test.where.strip():
+            rca_types_map: Mapping[str, str | None] = (
+                model_columns_by_type if model_columns_by_type is not None else {}
+            )
+            out.extend(
+                _check_where_clause(
+                    test.where,
+                    "row_count_anomaly_by_period",
+                    model_columns,
+                    rca_types_map,
+                    dialect_name,
+                )
+            )
+    return out
+
+
 def _validate_anchor_contract(
     candidate: CandidateSchema,
     model_columns: frozenset[str],
@@ -376,6 +488,9 @@ def _validate_anchor_contract(
     dialect_name: str = "bigquery",
     exclude_tests: frozenset[str] = frozenset(),
     business_rules: tuple[str, ...] = (),
+    reshapes_collected: list[ReshapeRecord] | None = None,
+    model_unique_id: str = "",
+    _reattach_actions: list[tuple[int, int]] | None = None,
 ) -> tuple[str, ...]:
     """Walk ``candidate`` collecting every anchor-contract violation.
 
@@ -418,6 +533,34 @@ def _validate_anchor_contract(
     short of ``len(business_rules)``. ``business_rules=()`` is a no-op (the
     inferred-fallback path stays open — DEC-008). The check appends to the
     collect-all violations list, never short-circuits.
+
+    Issue #184 US-003 — when ``test.type`` is in ``_MODEL_ONLY_TEST_TYPES``
+    (``row_count_anomaly_by_period`` / ``row_count_between`` /
+    ``unique_combination``) AND the test is nested inside a column's
+    ``tests`` array, the parser silently RE-ATTACHES the test to model
+    scope rather than failing loud (DEC-002, DEC-004). The re-attach is
+    the ONE non-fatal carve-out of the otherwise fail-loud anchor
+    contract (DEC-022 of #5 — preserved for every other violation).
+
+    Detection runs BEFORE the existing column-name validation for that
+    test. The ``exclude_tests`` kill-switch (DEC-003) beats re-attach: a
+    column-scoped model-only variant whose type is excluded still falls
+    through to the existing exclude-violation path.
+
+    On re-attach, the parser:
+
+    * emits ONE ``_LOGGER.warning(...)`` with lazy-format JSON (DEC-006),
+    * appends one :class:`ReshapeRecord` to ``reshapes_collected`` if
+      caller supplied a list (DEC-005); silently no-ops when ``None``,
+    * records the ``(column_index, test_index)`` pair in
+      ``_reattach_actions`` (internal output channel — :func:`parse_draft_response`
+      uses it to rebuild the frozen ``CandidateSchema``); when ``None``
+      no rebuild happens (caller-driven; existing direct unit-test
+      callers stay unaffected).
+
+    ``model_unique_id`` rides in the WARNING payload so a multi-model
+    drafter run produces forensically traceable signal; defaults to
+    ``""`` for back-compat with callers that don't thread it.
     """
     violations: list[str] = []
     type_arm_active = model_columns_by_type is not None and any(
@@ -428,7 +571,7 @@ def _validate_anchor_contract(
     # CandidateColumn name itself + parent-column-match + nonexistent-
     # column check on each test + duplicate not_null/unique check +
     # excluded-test-type rejection.
-    for column in candidate.columns:
+    for col_idx, column in enumerate(candidate.columns):
         # The CandidateColumn name itself must reference a real column.
         # Without this check, an LLM could invent
         # ``CandidateColumn(name="hallucinated", tests=[NotNull(column="hallucinated")])``
@@ -440,7 +583,68 @@ def _validate_anchor_contract(
             )
         not_null_count = 0
         unique_count = 0
-        for test in column.tests:
+        for test_idx, test in enumerate(column.tests):
+            # Issue #184 US-003 — re-attach branch (DEC-002, DEC-003, DEC-004,
+            # DEC-006). Detect a model-only variant sitting at column scope;
+            # emit WARNING + ReshapeRecord and skip the rest of this test's
+            # column-scoped validation (the test will live at model scope
+            # after rebuild). The exclude_tests kill-switch beats re-attach
+            # (DEC-003): a column-scoped model-only variant whose type is
+            # excluded falls through to the normal exclude-violation path
+            # below so the operator's opt-out is honoured.
+            if test.type in _MODEL_ONLY_TEST_TYPES and test.type not in exclude_tests:
+                # Build the JSON payload outside the _LOGGER call so the
+                # lazy-format AST gate (tests/llm/test_logger_grep_gate.py)
+                # sees a clean call shape. ``from_scope`` uses ``repr()`` on
+                # the column name (not an f-string) to keep the value safely
+                # quoted in log viewers (ANSI / newlines escape via repr).
+                _from_scope = "column=" + repr(column.name)
+                _payload = json.dumps(
+                    {
+                        "test_type": test.type,
+                        "from_scope": _from_scope,
+                        "to_scope": "<model-level>",
+                        "model_unique_id": model_unique_id,
+                        "reason": "model-only variant mis-scoped to column",
+                    },
+                    sort_keys=True,
+                )
+                _LOGGER.warning("parser re-attach: %s", _payload)
+                if reshapes_collected is not None:
+                    reshapes_collected.append(
+                        ReshapeRecord(
+                            original_column=column.name,
+                            test_type=test.type,
+                            reason=_REATTACH_REASON,
+                        )
+                    )
+                if _reattach_actions is not None:
+                    _reattach_actions.append((col_idx, test_idx))
+                # Re-validate the re-attached test's args against model
+                # scope — without this, a re-attached
+                # ``row_count_between(where="phantom IS NULL")`` /
+                # ``unique_combination(columns=("ghost", ...))`` /
+                # ``row_count_anomaly_by_period(date_column="phantom")``
+                # would skip the model-level membership + sqlglot WHERE
+                # checks (the model-level loop already ran when we got
+                # here; the re-attached test will be appended to
+                # ``candidate.tests`` after this function returns).
+                # Surface those hallucinations as anchor-contract
+                # violations instead of silently degrading to
+                # ``kept-without-evidence`` at prune. Collect-all
+                # preserved: violations append to the same list and the
+                # raise (if any) fires after the column loop completes
+                # (#184 QG Pass 1 finding).
+                violations.extend(
+                    _validate_model_only_test_args(
+                        test, model_columns, model_columns_by_type, dialect_name
+                    )
+                )
+                # Continue to the next test — the re-attached one is handled
+                # at model scope after rebuild, so we deliberately skip the
+                # column-scoped checks below (parent-column equality would
+                # fire spuriously since ``test.column`` is ``None``).
+                continue
             if test.type == "custom_sql":
                 # custom_sql is exempt from the parent-column-equality
                 # rule: its SQL body may legitimately reference columns
@@ -652,6 +856,8 @@ def parse_draft_response(
     model_columns_by_type: Mapping[str, str | None] | None = None,
     dialect_name: str = "bigquery",
     business_rules: tuple[str, ...] = (),
+    reshapes_collected: list[ReshapeRecord] | None = None,
+    model_unique_id: str = "",
 ) -> CandidateSchema:
     """Parse and validate the LLM's textual response.
 
@@ -661,6 +867,15 @@ def parse_draft_response(
     failure; every error carries the full provenance envelope from
     ``llm_result_meta`` so the response audit / CLI does not need to
     sniff message text to render an incident report.
+
+    Issue #184 US-003 — when a column-scoped model-only variant
+    (``row_count_anomaly_by_period`` / ``row_count_between`` /
+    ``unique_combination``) is detected the parser silently re-attaches
+    it to model scope, emits a WARNING, and appends one
+    :class:`ReshapeRecord` to ``reshapes_collected`` (when supplied).
+    The returned :class:`CandidateSchema` reflects the re-attached
+    shape. ``model_unique_id`` rides in the WARNING payload for
+    forensic traceability across multi-model drafter runs.
     """
     # Stage 1 — JSON parse + Pydantic validation.
     #
@@ -707,7 +922,14 @@ def parse_draft_response(
             output_tokens=llm_result_meta.output_tokens,
         ) from exc
 
-    # Stage 2 — Anchor-contract validation.
+    # Stage 2 — Anchor-contract validation. Issue #184 US-003 — allocate
+    # the internal ``_reattach_actions`` collector so we can rebuild the
+    # frozen :class:`CandidateSchema` with column-scoped model-only
+    # variants moved to model scope (DEC-002). ``reshapes_collected`` is
+    # caller-supplied (US-004 wires this from ``draft_from_request``);
+    # when ``None`` we still rebuild + emit WARNINGs, just without the
+    # durable audit trail.
+    reattach_actions: list[tuple[int, int]] = []
     violations = _validate_anchor_contract(
         candidate,
         model_columns,
@@ -715,7 +937,19 @@ def parse_draft_response(
         dialect_name=dialect_name,
         exclude_tests=exclude_tests,
         business_rules=business_rules,
+        reshapes_collected=reshapes_collected,
+        model_unique_id=model_unique_id,
+        _reattach_actions=reattach_actions,
     )
+
+    # Apply re-attach BEFORE raising on violations so the rebuilt
+    # candidate is consistent even on a failure path (collect-all
+    # invariant: a column-scoped model-only variant + an unrelated
+    # hallucinated-column violation both surface; the re-attach is not
+    # gated on a clean violations list).
+    if reattach_actions:
+        candidate = _apply_reattach_actions(candidate, reattach_actions)
+
     if violations:
         raise LLMOutputAnchorContractError(
             f"LLM response violated the anchor contract ({len(violations)} violation(s)).",
@@ -729,6 +963,49 @@ def parse_draft_response(
         )
 
     return candidate
+
+
+def _apply_reattach_actions(
+    candidate: CandidateSchema,
+    actions: list[tuple[int, int]],
+) -> CandidateSchema:
+    """Rebuild ``candidate`` with the listed column-scoped tests moved to
+    model scope (DEC-002 of #184).
+
+    ``actions`` is a list of ``(col_idx, test_idx)`` pairs identifying
+    tests inside ``candidate.columns[col_idx].tests`` that the parser's
+    re-attach branch decided belong at model scope. Returns a NEW
+    :class:`CandidateSchema` (Pydantic models are frozen): the re-attached
+    tests are appended to ``candidate.tests`` in the order they appeared
+    in column-iteration; the affected ``CandidateColumn`` instances are
+    rebuilt with the re-attached test removed from their ``tests`` tuple.
+
+    DEC-010 — no dedupe pass. If the LLM emits the same variant both at
+    column scope (re-attached here) AND at model scope (already valid),
+    both forms land in the rebuilt ``candidate.tests`` tuple. Diff +
+    prune handle redundant tests gracefully; canonical-args comparison
+    is deferred to a follow-up.
+    """
+    # Index the actions by column so we can rebuild each affected column
+    # in one pass. ``columns_to_remove[col_idx]`` is the set of test
+    # indices to drop from that column's ``tests`` tuple.
+    columns_to_remove: dict[int, set[int]] = {}
+    reattached_tests: list[CandidateTest] = []
+    for col_idx, test_idx in actions:
+        columns_to_remove.setdefault(col_idx, set()).add(test_idx)
+        reattached_tests.append(candidate.columns[col_idx].tests[test_idx])
+
+    new_columns = []
+    for col_idx, column in enumerate(candidate.columns):
+        drop = columns_to_remove.get(col_idx)
+        if drop is None:
+            new_columns.append(column)
+        else:
+            kept_tests = tuple(test for i, test in enumerate(column.tests) if i not in drop)
+            new_columns.append(column.model_copy(update={"tests": kept_tests}))
+
+    new_model_tests = candidate.tests + tuple(reattached_tests)
+    return candidate.model_copy(update={"columns": tuple(new_columns), "tests": new_model_tests})
 
 
 __all__ = ("parse_draft_response",)

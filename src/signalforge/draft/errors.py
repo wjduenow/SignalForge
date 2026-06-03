@@ -419,10 +419,10 @@ class PromptEnvelopeBreachError(DraftError):
       model's content (its raw SQL or one of its own business rules). The
       pre-#188 behaviour, byte-for-byte.
     * ``rule_source="project"`` — the breach traces to the project-wide
-      aggregation (a model description in the ``<PROJECT_MANIFEST>``
-      summary, or an aggregated project business rule). ``model_unique_id``
-      is the offending model when known, ``None`` when the breach is in the
-      project summary as a whole.
+      aggregation (a model name in the ``<PROJECT_MANIFEST>`` summary, or an
+      aggregated project business rule). ``model_unique_id`` is the offending
+      model when known, ``None`` when the breach is in the project summary as
+      a whole.
 
     Future envelopes follow the same shape — extend with a new ``envelope=``
     value (and ``rule_source=`` where the origin differs), never a new error
@@ -434,12 +434,12 @@ class PromptEnvelopeBreachError(DraftError):
         "The input contains the literal closing tag of a prompt-injection "
         "envelope (e.g. '</MODEL_SQL>' in a model's raw SQL, "
         "'</BUSINESS_RULE>' in an operator-supplied business rule, or "
-        "'</PROJECT_MANIFEST>' in a model description aggregated into the "
-        "project summary), which would break the envelope. Inspect the "
-        "offending input (likely a SQL comment, a model description, or a "
-        "meta.signalforge.business_rules entry); remove the literal or "
-        "escape it. If this is legitimate content (rare), open an issue — "
-        "the envelope tag will need to rotate to an unguessable nonce."
+        "'</PROJECT_MANIFEST>' in a model name or aggregated business rule "
+        "in the project summary), which would break the envelope. Inspect "
+        "the offending input (likely a SQL comment, a "
+        "meta.signalforge.business_rules entry, or a model name); remove the "
+        "literal or escape it. If this is legitimate content (rare), open an "
+        "issue — the envelope tag will need to rotate to an unguessable nonce."
     )
 
     def __init__(
@@ -472,10 +472,14 @@ class PromptEnvelopeBreachError(DraftError):
                     f"render the project prompt prefix."
                 )
             else:
+                subject = (
+                    f"The project summary (model {_format_value(model_unique_id)})"
+                    if model_unique_id is not None
+                    else "The project summary"
+                )
                 message = (
-                    f"The project summary ({where}) contains the literal "
-                    f"'{closing_tag}' — refusing to render the project "
-                    f"prompt prefix."
+                    f"{subject} contains the literal '{closing_tag}' — "
+                    f"refusing to render the project prompt prefix."
                 )
         elif envelope == "BUSINESS_RULE" and rule_index is not None:
             message = (

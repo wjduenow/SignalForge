@@ -265,7 +265,142 @@ def test_draft_from_request_writes_response_audit_record(
     assert len(record["response_text_hash"]) == 16
     assert len(record["parsed_schema_hash"]) == 16
     assert len(record["sent_sql_hash"]) == 16
-    assert record["audit_schema_version"] == 1
+    # Bumped 1 → 2 in #184 (DEC-005) to carry the new ``parser_reshaped``
+    # field. No-reshape happy-path writes an empty tuple (default value
+    # preserves byte-equality for the rest of the record).
+    assert record["audit_schema_version"] == 2
+    assert record["parser_reshaped"] == []
+
+
+def test_draft_from_request_threads_reshapes_to_audit_event(
+    model: Model,
+    manifest: Manifest,
+    config: DraftConfig,
+    tmp_path: Path,
+) -> None:
+    """US-004 (issue #184) — when the LLM emits a column-scoped
+    ``row_count_anomaly_by_period`` (the bug shape #184 fixes), the parser
+    re-attaches it to model scope AND appends one
+    :class:`signalforge.draft.audit.ReshapeRecord` to the collector list
+    that ``draft_from_request`` threads through. The orchestrator forwards
+    the populated tuple into ``_build_response_event(...)`` so the
+    corrective action lands durably in the response-audit JSONL alongside
+    the runtime WARNING (DEC-005).
+    """
+    from signalforge.draft.models import (
+        CandidateColumn,
+        CandidateSchema,
+        CandidateTestRowCountAnomalyByPeriod,
+    )
+
+    # Build a CandidateSchema where the model-only variant is nested
+    # under a column's ``tests`` list — the bug shape. Re-serialised to
+    # JSON so the fake LLM can return it as ``response_text``.
+    bug_shape = CandidateSchema(
+        name="fct_orders",
+        description="orders fact table",
+        columns=(
+            CandidateColumn(
+                name="ordered_at",
+                description="timestamp the order was placed",
+                tests=(
+                    CandidateTestRowCountAnomalyByPeriod(
+                        date_column="ordered_at",
+                    ),
+                ),
+            ),
+        ),
+        tests=(),
+    )
+    bug_response_text = bug_shape.model_dump_json()
+
+    request = LLMRequest(
+        model_unique_id=model.unique_id,
+        mode=SamplingMode.SCHEMA_ONLY,
+        columns_sent=("ordered_at",),
+        redactions=(),
+        sampled_rows=None,
+        aggregates=None,
+        schema=(("ordered_at", "TIMESTAMP"),),
+    )
+    anthropic_fake = FakeAnthropicClient()
+    _set_up_fake_anthropic(anthropic_fake, response_text=bug_response_text)
+
+    audit_path = tmp_path / "safety_audit.jsonl"
+    outcome = draft_from_request(
+        request,
+        model,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        _client=anthropic_fake,
+    )
+
+    # The parser re-attached the variant to model scope (post-parse
+    # invariant; this just guards that the bug-shape input was actually
+    # processed through the re-attach branch).
+    assert len(outcome.candidate.tests) == 1
+    assert outcome.candidate.tests[0].type == "row_count_anomaly_by_period"
+
+    # The reshape lands in the response-audit JSONL via the threaded
+    # ``parser_reshaped`` tuple.
+    response_audit = audit_path.with_name("llm_responses.jsonl")
+    record = json.loads(response_audit.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert record["audit_schema_version"] == 2
+    reshapes = record["parser_reshaped"]
+    assert len(reshapes) == 1
+    rec = reshapes[0]
+    assert rec["original_column"] == "ordered_at"
+    assert rec["target_scope"] == "model"
+    assert rec["test_type"] == "row_count_anomaly_by_period"
+    assert rec["reason"] == (
+        "model-only variant emitted at column scope; re-attached to model-level tests:"
+    )
+
+
+def test_draft_from_request_no_reshapes_writes_empty_tuple(
+    model: Model,
+    manifest: Manifest,
+    config: DraftConfig,
+    valid_response_text: str,
+    tmp_path: Path,
+) -> None:
+    """US-004 (issue #184) — when the LLM response triggers no re-attach
+    (the existing happy path), the audit JSONL record carries
+    ``parser_reshaped: []``. Pins byte-equality back-compat for v1-shape
+    consumers reading v2 fixtures: the default empty tuple serialises to
+    an empty JSON array, leaving the rest of the record byte-identical to
+    a pre-#184 line apart from the new field + the bumped version.
+    """
+    request = LLMRequest(
+        model_unique_id=model.unique_id,
+        mode=SamplingMode.SCHEMA_ONLY,
+        columns_sent=("order_id",),
+        redactions=(),
+        sampled_rows=None,
+        aggregates=None,
+        schema=(("order_id", "INT64"),),
+    )
+    anthropic_fake = FakeAnthropicClient()
+    _set_up_fake_anthropic(anthropic_fake, response_text=valid_response_text)
+
+    audit_path = tmp_path / "safety_audit.jsonl"
+    draft_from_request(
+        request,
+        model,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        _client=anthropic_fake,
+    )
+
+    response_audit = audit_path.with_name("llm_responses.jsonl")
+    record = json.loads(response_audit.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert record["parser_reshaped"] == []
+    # Audit schema version stays at 2 regardless of whether the field is
+    # populated — the bump is a one-shot lift from US-002, not gated on
+    # the presence of a reshape.
+    assert record["audit_schema_version"] == 2
 
 
 def test_draft_from_request_audit_failure_drops_outcome(
