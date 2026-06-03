@@ -1916,3 +1916,731 @@ def test_grade_artifacts_hostile_coroutine_no_traceback(
     # lazy-format JSON loggers — pinned by the grep gate).
     captured = capsys.readouterr()
     assert "Traceback" not in captured.err, f"engine leaked a traceback to stderr: {captured.err!r}"
+
+
+# ---------------------------------------------------------------------------
+# US-006 — Persistent grade cache wiring (issue #189)
+# ---------------------------------------------------------------------------
+#
+# Pins the orchestrator surgery that wires :mod:`signalforge.grade.cache`
+# into :func:`grade_artifacts`:
+#
+# * Sync-prefix cache lookup BEFORE the asyncio.TaskGroup
+#   (``grade-layer.md`` § "Symlink-hardened path canonicalisation" +
+#   DEC-013 of #189).
+# * Cache hits skip the LLM call AND flow through
+#   :func:`_build_grade_event(..., cache_hit=True, ...)` (the SOLE
+#   construction seam — AST scan 6).
+# * Cache misses route through the existing async dispatch and write a
+#   :class:`CacheRecord` post-grade, fail-soft (DEC-005).
+# * Five invalidation axes: criterion, artifact text, provider, model,
+#   prompt_version_template (DEC-004).
+# * Degraded results (``score=None``) never reach the cache (DEC-007).
+
+
+def _build_cache_record_from_pair(
+    *,
+    artifact_id: str,
+    criterion: Criterion,
+    artifact_text: str,
+    rubric: Rubric,
+    provider: str = "anthropic",
+    model: str = "claude-fake",
+    score: float = 0.5,
+    passed: bool = True,
+    evidence: str = "",
+    reasoning: str = "",
+):
+    """Build a :class:`CacheRecord` for a synthetic cache pre-population.
+
+    Mirrors the hash recipe :func:`grade_artifacts` uses so that
+    pre-populated cache entries are looked up under the right key. The
+    five-part recipe (DEC-004) is criterion_prompt_hash +
+    artifact_text_hash + provider + model + prompt_version_template.
+    """
+    import hashlib as _hashlib
+    from datetime import UTC as _UTC
+    from datetime import datetime as _dt
+
+    from signalforge.grade.cache import CacheRecord, compute_cache_key
+    from signalforge.grade.prompts import criterion_prompt_hash, prompt_version_template
+    from signalforge.grade.rubric import _canonical_rubric_hash
+
+    crit_hash = criterion_prompt_hash(criterion)
+    artifact_text_hash = _hashlib.blake2b(artifact_text.encode("utf-8"), digest_size=8).hexdigest()
+    template_hash = prompt_version_template(rubric)
+    rubric_hash = _canonical_rubric_hash(rubric)
+    response_hash = _hashlib.blake2b(b"fake-response", digest_size=8).hexdigest()
+    record = CacheRecord(
+        artifact_id=artifact_id,
+        criterion_id=criterion.id,
+        score=score,
+        passed=passed,
+        evidence=evidence,
+        reasoning=reasoning,
+        criterion_prompt_hash=crit_hash,
+        artifact_text_hash=artifact_text_hash,
+        provider=provider,
+        model=model,
+        prompt_version_template=template_hash,
+        response_text_hash=response_hash,
+        rubric_hash=rubric_hash,
+        original_timestamp=_dt(2026, 5, 1, 17, 42, 13, 123456, tzinfo=_UTC),
+    )
+    key = compute_cache_key(
+        criterion_prompt_hash=crit_hash,
+        artifact_text_hash=artifact_text_hash,
+        provider=provider,
+        model=model,
+        prompt_version_template=template_hash,
+    )
+    return key, record
+
+
+def _seed_cache(project_dir: Path, key: str, record) -> Path:
+    """Write a :class:`CacheRecord` under
+    ``<project_dir>/.signalforge/grade-cache/<key>.json``.
+    """
+    from signalforge.grade.cache import write_cache
+
+    cache_dir = project_dir / ".signalforge" / "grade-cache"
+    write_cache(cache_dir, key, record)
+    return cache_dir / f"{key}.json"
+
+
+def test_grade_engine_cache_hit_skips_llm_call(tmp_path: Path) -> None:
+    """A pre-populated cache entry for one pair skips the LLM call for
+    that pair. The fake's expectation queue carries entries ONLY for
+    the OTHER pairs; if the engine erroneously called the LLM for the
+    cached pair, the fake would raise on the unexpected call.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+
+    # Pre-populate the cache with the very first pair.
+    pairs = _stable_artifact_pairs(candidate)
+    target_aid, target_text = pairs[0]
+    target_crit = rubric[0]
+    key, record = _build_cache_record_from_pair(
+        artifact_id=target_aid,
+        criterion=target_crit,
+        artifact_text=target_text,
+        rubric=rubric,
+        score=0.93,
+        passed=True,
+        evidence="cached evidence",
+        reasoning="cached reasoning",
+    )
+    _seed_cache(project_dir, key, record)
+
+    # Enqueue LLM expectations ONLY for the non-cached pairs.
+    fake = FakeAnthropicClient()
+    scores: dict[tuple[str, str], tuple[float | None, bool, str, str]] = {}
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate, scores=scores)
+    # Drop the (count_tokens, messages.create) pair for the cached entry.
+    # The fake's queue is shared — but the matchers are ``lambda _kw: True``
+    # so dropping the first two entries is the same as dropping the cached
+    # pair's pair. We do this by re-constructing: replay all pairs minus the cached.
+    fake = FakeAnthropicClient()
+    from tests.llm._fake import FakeCountTokensResponse, FakeMessage, FakeTextBlock, FakeUsage
+
+    for criterion in rubric:
+        for aid, _atext in pairs:
+            if aid == target_aid and criterion.id == target_crit.id:
+                continue
+            fake.expect_count_tokens(
+                matching=lambda _kw: True,
+                returns=FakeCountTokensResponse(input_tokens=1500),
+            )
+            fake.expect_messages_create(
+                matching=lambda _kw: True,
+                returns=FakeMessage(
+                    content=[
+                        FakeTextBlock(
+                            text=json.dumps(
+                                {
+                                    "criterion_id": criterion.id,
+                                    "score": 0.5,
+                                    "passed": True,
+                                    "evidence": "",
+                                    "reasoning": "live",
+                                }
+                            ),
+                        )
+                    ],
+                    usage=FakeUsage(input_tokens=1700, output_tokens=80),
+                    model="claude-fake-grade-judge",
+                ),
+            )
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    fake.assert_all_expectations_met()
+
+    # The cached pair surfaces with the cached score.
+    cached_result = [
+        r
+        for r in report.results
+        if r.artifact_id == target_aid and r.criterion_id == target_crit.id
+    ]
+    assert len(cached_result) == 1
+    assert cached_result[0].score == 0.93
+    assert cached_result[0].evidence == "cached evidence"
+
+
+def test_grade_engine_cache_miss_writes_entry(tmp_path: Path) -> None:
+    """An empty cache + a happy live grade produces one ``<key>.json`` per
+    successfully-graded pair under ``.signalforge/grade-cache/``.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    cache_dir = project_dir / ".signalforge" / "grade-cache"
+    assert cache_dir.exists()
+    json_files = list(cache_dir.glob("*.json"))
+    # One cache file per non-degraded result.
+    expected = sum(1 for r in report.results if r.score is not None)
+    assert len(json_files) == expected
+    # Filenames are 16-hex.
+    for path in json_files:
+        stem = path.stem
+        assert len(stem) == 16
+        assert all(c in "0123456789abcdef" for c in stem)
+
+
+def test_grade_engine_cache_disabled_skips_lookup_and_write(tmp_path: Path) -> None:
+    """``cache_enabled=False`` short-circuits BOTH lookup AND write.
+
+    * Pre-populate the cache with a hit; assert the LLM is still called
+      (lookup skipped — the engine never consults the cache).
+    * Assert the cache dir contents are unchanged post-run (write skipped).
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+
+    pairs = _stable_artifact_pairs(candidate)
+    target_aid, target_text = pairs[0]
+    target_crit = rubric[0]
+    key, record = _build_cache_record_from_pair(
+        artifact_id=target_aid,
+        criterion=target_crit,
+        artifact_text=target_text,
+        rubric=rubric,
+        score=0.93,
+    )
+    cache_file = _seed_cache(project_dir, key, record)
+    before_bytes = cache_file.read_bytes()
+    cache_dir = project_dir / ".signalforge" / "grade-cache"
+    before_listing = sorted(p.name for p in cache_dir.glob("*.json"))
+
+    fake = FakeAnthropicClient()
+    # The full set of expectations is enqueued — the engine MUST call
+    # every pair because lookup is disabled.
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=60,
+        cache_enabled=False,
+    )
+
+    grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    fake.assert_all_expectations_met()  # all LLM calls fired
+    after_listing = sorted(p.name for p in cache_dir.glob("*.json"))
+    assert after_listing == before_listing  # no new cache entries
+    assert cache_file.read_bytes() == before_bytes  # existing entry untouched
+
+
+def test_grade_engine_artifact_text_change_invalidates_cache(tmp_path: Path) -> None:
+    """Pre-populate cache for the FIRST artifact's first criterion; then
+    edit the column description; assert miss → LLM call fires.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+
+    pairs = _stable_artifact_pairs(candidate)
+    target_aid, original_text = pairs[0]
+    target_crit = rubric[0]
+    key, record = _build_cache_record_from_pair(
+        artifact_id=target_aid,
+        criterion=target_crit,
+        artifact_text=original_text,
+        rubric=rubric,
+        score=0.99,  # would surface if cache hit
+    )
+    _seed_cache(project_dir, key, record)
+
+    # Mutate the first column's description so its artifact_text_hash
+    # rotates. The candidate's first pair is
+    # ``column.<first_col>.description``.
+    new_columns = list(candidate.columns)
+    first = new_columns[0]
+    new_columns[0] = first.model_copy(update={"description": "MUTATED DESCRIPTION"})
+    candidate = candidate.model_copy(update={"columns": tuple(new_columns)})
+
+    # All pairs need LLM expectations (the cached pair MUST also fire
+    # because the key rotated).
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    fake.assert_all_expectations_met()
+    # The (originally) cached pair surfaces with the LIVE score (0.5
+    # from the fake's default), NOT the cached 0.99.
+    rotated = [
+        r
+        for r in report.results
+        if r.artifact_id == target_aid and r.criterion_id == target_crit.id
+    ]
+    assert len(rotated) == 1
+    assert rotated[0].score == 0.5
+
+
+def test_grade_engine_model_change_invalidates_cache(tmp_path: Path) -> None:
+    """Pre-populate with model A; re-run with model B in GradeConfig;
+    assert miss + live call.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+
+    pairs = _stable_artifact_pairs(candidate)
+    target_aid, target_text = pairs[0]
+    target_crit = rubric[0]
+    key, record = _build_cache_record_from_pair(
+        artifact_id=target_aid,
+        criterion=target_crit,
+        artifact_text=target_text,
+        rubric=rubric,
+        model="claude-fake-A",
+        score=0.99,
+    )
+    _seed_cache(project_dir, key, record)
+
+    # Run with a different model. All pairs route through the LLM.
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(model_id="claude-fake-B"),
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    fake.assert_all_expectations_met()
+    rotated = [
+        r
+        for r in report.results
+        if r.artifact_id == target_aid and r.criterion_id == target_crit.id
+    ]
+    assert len(rotated) == 1
+    assert rotated[0].score == 0.5  # live score, NOT cached 0.99
+
+
+def test_grade_engine_provider_change_invalidates_cache(tmp_path: Path) -> None:
+    """Provider rotation is one of the five cache-key axes (DEC-004).
+
+    We pre-populate the cache under a synthetic ``"other-provider"``
+    key string. The actual run uses the default ``anthropic`` provider
+    — so the lookup computes a different key and misses, even though
+    every other axis (criterion / artifact / model / template) is
+    identical. Decoupling the test from real cross-provider
+    capability flags keeps the assertion focused on the load-bearing
+    behaviour: changing the provider string rotates the cache key.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+
+    pairs = _stable_artifact_pairs(candidate)
+    target_aid, target_text = pairs[0]
+    target_crit = rubric[0]
+    # Pre-populate under a SYNTHETIC ``"other-provider"`` key. The
+    # default Anthropic-provider run below will compute a different
+    # key and miss.
+    key, record = _build_cache_record_from_pair(
+        artifact_id=target_aid,
+        criterion=target_crit,
+        artifact_text=target_text,
+        rubric=rubric,
+        provider="other-provider",
+        model="claude-fake",
+        score=0.99,
+    )
+    _seed_cache(project_dir, key, record)
+
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    fake.assert_all_expectations_met()
+    rotated = [
+        r
+        for r in report.results
+        if r.artifact_id == target_aid and r.criterion_id == target_crit.id
+    ]
+    assert len(rotated) == 1
+    assert rotated[0].score == 0.5  # live, NOT cached 0.99
+
+
+def test_grade_engine_degraded_result_not_cached(tmp_path: Path) -> None:
+    """A degraded result (score=None) never lands in the cache.
+
+    Force a degrade by exhausting retries (``max_retries_429=0`` +
+    queue a rate-limit error). Assert no cache file exists for that
+    pair post-run.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    # Simpler candidate: 1 column, 0 tests = 4 artifacts × 1 criterion = 4 calls.
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        rationale="r",
+        columns=(CandidateColumn(name="order_id", description="pk", rationale="rat"),),
+        tests=(),
+    )
+    rubric: Rubric = (Criterion(id="clarity", criterion="Is it clear?"),)
+
+    fake = FakeAnthropicClient()
+    from tests.llm._fake import FakeCountTokensResponse
+
+    # Every pair gets a rate-limit error.
+    pairs = _stable_artifact_pairs(candidate)
+    for _aid, _text in pairs:
+        fake.expect_count_tokens(
+            matching=lambda _kw: True,
+            returns=FakeCountTokensResponse(input_tokens=1500),
+        )
+        fake.expect_messages_create(
+            matching=lambda _kw: True,
+            returns=LLMRateLimitError(
+                "fake rate limit",
+                attempts=0,
+                cause=Exception("fake"),
+            ),
+        )
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    # All pairs degraded → no cache writes.
+    assert all(r.score is None for r in report.results)
+    cache_dir = project_dir / ".signalforge" / "grade-cache"
+    json_files = list(cache_dir.glob("*.json")) if cache_dir.exists() else []
+    assert json_files == [], f"degraded results must never reach the cache; found {json_files!r}"
+
+
+def test_grade_engine_cache_write_failure_is_fail_soft(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cache-write failure does NOT abort the live grade.
+
+    Monkey-patch :func:`signalforge.grade.cache.write_cache` (as imported
+    by the engine) to raise. Assert :func:`grade_artifacts` still
+    returns a complete :class:`GradingReport` and no exception
+    escapes.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    def _exploding_write(cache_dir, key, record) -> None:  # type: ignore[no-untyped-def]
+        raise OSError("simulated disk full")
+
+    # Patch the symbol the engine imports — engine.write_cache, not
+    # cache.write_cache — because the engine binds the import at module
+    # load time.
+    monkeypatch.setattr(engine_module, "write_cache", _exploding_write)
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    # The live grade completed despite the cache-write explosion.
+    assert isinstance(report, GradingReport)
+    assert len(report.results) == 14
+    assert all(r.score == 0.5 for r in report.results)
+
+
+def test_grade_engine_cache_hit_event_has_zero_tokens(tmp_path: Path) -> None:
+    """A cache-hit :class:`GradeEvent` carries ``cache_hit=True`` and
+    all four token-count fields == 0.
+
+    Pre-populate the cache with one entry, run a single-criterion
+    grade over a single-column candidate, scan the resulting
+    ``grade.jsonl`` for the cache-hit record.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    # Trim to 1 column / no tests so total pairs = 4 (2 desc/rationale on the
+    # one column + 2 model fields) × 1 criterion = 4 calls.
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        rationale="r",
+        columns=(CandidateColumn(name="order_id", description="pk", rationale="rat"),),
+        tests=(),
+    )
+    rubric: Rubric = (Criterion(id="clarity", criterion="Is it clear?"),)
+
+    pairs = _stable_artifact_pairs(candidate)
+    target_aid, target_text = pairs[0]
+    target_crit = rubric[0]
+    key, record = _build_cache_record_from_pair(
+        artifact_id=target_aid,
+        criterion=target_crit,
+        artifact_text=target_text,
+        rubric=rubric,
+        score=0.77,
+        passed=True,
+        evidence="cached ev",
+        reasoning="cached rsn",
+    )
+    _seed_cache(project_dir, key, record)
+
+    # 3 remaining pairs route through the LLM.
+    fake = FakeAnthropicClient()
+    from tests.llm._fake import FakeCountTokensResponse, FakeMessage, FakeTextBlock, FakeUsage
+
+    for aid, _text in pairs:
+        if aid == target_aid:
+            continue
+        fake.expect_count_tokens(
+            matching=lambda _kw: True,
+            returns=FakeCountTokensResponse(input_tokens=1500),
+        )
+        fake.expect_messages_create(
+            matching=lambda _kw: True,
+            returns=FakeMessage(
+                content=[
+                    FakeTextBlock(
+                        text=json.dumps(
+                            {
+                                "criterion_id": "clarity",
+                                "score": 0.5,
+                                "passed": True,
+                                "evidence": "",
+                                "reasoning": "live",
+                            }
+                        ),
+                    )
+                ],
+                usage=FakeUsage(
+                    input_tokens=1700,
+                    output_tokens=80,
+                    cache_creation_input_tokens=100,
+                    cache_read_input_tokens=50,
+                ),
+                model="claude-fake-grade-judge",
+            ),
+        )
+
+    audit_path = project_dir / ".signalforge" / "grade.jsonl"
+    grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=fake,
+        project_dir=project_dir,
+        audit_path=audit_path,
+    )
+
+    rows = _read_jsonl(audit_path)
+    hits = [
+        r for r in rows if r["artifact_id"] == target_aid and r["criterion_id"] == target_crit.id
+    ]
+    assert len(hits) == 1
+    hit = hits[0]
+    assert hit["cache_hit"] is True
+    assert hit["input_tokens"] == 0
+    assert hit["output_tokens"] == 0
+    assert hit["cache_creation_input_tokens"] == 0
+    assert hit["cache_read_input_tokens"] == 0
+    # The cached score surfaces verbatim.
+    assert hit["score"] == 0.77
+    assert hit["evidence"] == "cached ev"
+
+
+def test_grade_engine_cache_hit_dispatch_order_preserved_with_async_misses(
+    tmp_path: Path,
+) -> None:
+    """Mixed hit/miss pairs land in deterministic post-sort order.
+
+    Per the asyncio refactor (#186) JSONL arrival order is
+    non-deterministic; tests sort via the
+    :func:`tests.grade._helpers._sort_grade_events` helper for
+    deterministic comparison. The cache-hit slot lands too.
+    """
+    from tests.grade._helpers import _sort_grade_events
+
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+
+    # Pre-populate ONE pair so the run mixes cache hits and live misses.
+    pairs = _stable_artifact_pairs(candidate)
+    target_aid, target_text = pairs[0]
+    target_crit = rubric[0]
+    key, record = _build_cache_record_from_pair(
+        artifact_id=target_aid,
+        criterion=target_crit,
+        artifact_text=target_text,
+        rubric=rubric,
+        score=0.88,
+    )
+    _seed_cache(project_dir, key, record)
+
+    fake = FakeAnthropicClient()
+    from tests.llm._fake import FakeCountTokensResponse, FakeMessage, FakeTextBlock, FakeUsage
+
+    for criterion in rubric:
+        for aid, _atext in pairs:
+            if aid == target_aid and criterion.id == target_crit.id:
+                continue
+            fake.expect_count_tokens(
+                matching=lambda _kw: True,
+                returns=FakeCountTokensResponse(input_tokens=1500),
+            )
+            fake.expect_messages_create(
+                matching=lambda _kw: True,
+                returns=FakeMessage(
+                    content=[
+                        FakeTextBlock(
+                            text=json.dumps(
+                                {
+                                    "criterion_id": criterion.id,
+                                    "score": 0.5,
+                                    "passed": True,
+                                    "evidence": "",
+                                    "reasoning": "live",
+                                }
+                            ),
+                        )
+                    ],
+                    usage=FakeUsage(input_tokens=1700, output_tokens=80),
+                    model="claude-fake-grade-judge",
+                ),
+            )
+
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=60,
+        max_concurrent_calls=10,
+    )
+
+    audit_path = project_dir / ".signalforge" / "grade.jsonl"
+    grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=fake,
+        project_dir=project_dir,
+        audit_path=audit_path,
+    )
+
+    rows = _read_jsonl(audit_path)
+    sorted_rows = _sort_grade_events(rows)
+    # Idempotent: re-sort and compare.
+    assert _sort_grade_events(sorted_rows) == sorted_rows
+    # Cache-hit row is present in the sorted set.
+    hits = [
+        r
+        for r in sorted_rows
+        if r["artifact_id"] == target_aid
+        and r["criterion_id"] == target_crit.id
+        and r.get("cache_hit") is True
+    ]
+    assert len(hits) == 1
