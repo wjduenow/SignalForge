@@ -10,7 +10,8 @@ Covers the three read-back-shaped Pydantic models:
   ``mean_score``, ``aggregate_complete``, ``passed``), minimal
   ``__repr__``, ``passed`` requiring BOTH thresholds met.
 * :class:`GradeEvent` — score-range validation, audit_schema_version
-  pinned to 1.
+  typed ``int`` (DEC-008 of #189) with default ``1``; the strict drift
+  mirror still pins ``Literal[1]``.
 
 Every test must be capable of failing if its target is broken
 (:file:`.claude/rules/testing-signal.md`); no ``assert True``-shaped
@@ -356,13 +357,56 @@ def test_grade_event_score_none_accepted_degraded_path() -> None:
     assert event.response_text_hash == ""
 
 
-def test_grade_event_audit_schema_version_locked_to_one() -> None:
-    """``audit_schema_version`` is ``Literal[1]`` and defaults to 1."""
+def test_grade_event_audit_schema_version_defaults_to_one() -> None:
+    """``audit_schema_version`` defaults to ``1`` on production model."""
     event = _make_event()
     assert event.audit_schema_version == 1
-    # Constructing with a different value should fail validation.
+
+
+def test_grade_event_audit_schema_version_is_int_typed() -> None:
+    """Production ``GradeEvent.audit_schema_version`` is typed ``int``.
+
+    Per DEC-008 of #189: the field is widened from ``Literal[1]`` to ``int``
+    so older audit JSONLs round-trip across version bumps (mirrors
+    ``safety-layer.md`` § "AuditEvent reproducibility fields" — the
+    ``audit_schema_version`` field stays ``int``, never ``Literal``).
+    Constructing with any positive ``int`` (e.g. ``99``) must succeed
+    without ``ValidationError``.
+    """
+    event = GradeEvent(
+        audit_schema_version=99,
+        signalforge_version="0.1.0.dev0",
+        run_id="a1b2c3d4e5f6478890aabbccddeeff00",
+        timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=UTC),
+        model_unique_id="model.shop.dim_customers",
+        artifact_id="column.email.description",
+        criterion_id="clarity",
+        score=0.8,
+        passed=True,
+        rubric_hash="0123456789abcdef",
+        prompt_version_template="fedcba9876543210",
+        criterion_prompt_hash="1111222233334444",
+        response_text_hash="5555666677778888",
+        model="claude-sonnet-4-6",
+        input_tokens=1820,
+        output_tokens=140,
+    )
+    assert event.audit_schema_version == 99
+
+
+def test_strict_grade_event_still_rejects_non_literal_one() -> None:
+    """``StrictGradeEvent`` mirror keeps ``Literal[1]`` to pin the v1 fixture.
+
+    Per DEC-008 of #189: while production widens to ``int`` for replay
+    forward-compat, the strict drift-detector mirror MUST stay
+    ``Literal[1]`` so the committed v1 fixture's shape is still pinned.
+    A future v2 bump grows a sibling ``StrictGradeEventV2`` mirror; this
+    one continues to guard the v1 line.
+    """
+    from tests.grade.test_drift_detector import StrictGradeEvent
+
     with pytest.raises(ValidationError):
-        GradeEvent(
+        StrictGradeEvent(
             audit_schema_version=2,  # type: ignore[arg-type]
             signalforge_version="0.1.0.dev0",
             run_id="a1b2c3d4e5f6478890aabbccddeeff00",
