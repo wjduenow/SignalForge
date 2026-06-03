@@ -439,6 +439,47 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "precedence chain emits plain text."
         ),
     )
+    # US-007 of #189 / DEC-001 — skip the grade stage entirely for fast
+    # iteration. ``grade_artifacts`` is never invoked; ``grading_report``
+    # defaults to ``None`` and ``render_diff`` already accepts that
+    # (``diff-renderer.md`` § "Tier classification with no-grading-report
+    # degrade" — the ``flagged`` tier only fires when
+    # ``grading_report is not None``). No ``grade.jsonl`` /
+    # ``grade.json`` side files are produced. Progress renumbers from
+    # ``[N/5]`` to ``[N/4]`` (DEC-003) so the operator sees an honest
+    # stage count. Bare boolean; mutex with nothing — combines with
+    # ``--write``, ``--dry-run``, ``--mode``, ``--estimate``.
+    parser.add_argument(
+        "--no-grade",
+        dest="no_grade",
+        action="store_true",
+        help=(
+            "Skip the grade stage entirely (no LLM-as-judge calls). The "
+            "diff still renders kept/kept-uncertain/dropped tiers; no "
+            "flagged tier appears. Progress renumbers to [N/4]. Useful "
+            "for fast iteration where the grader's signal is not "
+            "needed. No grade.jsonl / grade.json side files. (DEC-001 "
+            "of #189.)"
+        ),
+    )
+    # US-007 of #189 / DEC-002 — bypass the persistent grade cache for
+    # one run. Skips BOTH the cache read (no lookup) AND the cache
+    # write (no entry persisted). Cache files from prior runs are NOT
+    # deleted — use ``signalforge cache clear --grade`` for that.
+    # Precedence: ``--no-grade`` implicitly wins when both are set
+    # (no grade calls = no cache reads or writes).
+    parser.add_argument(
+        "--no-cache",
+        dest="no_cache",
+        action="store_true",
+        help=(
+            "Bypass the persistent grade cache for one run (no read, "
+            "no write). Existing cache files are NOT removed; use "
+            "`signalforge cache clear --grade` to wipe them. "
+            "`--no-grade` implicitly wins when both flags are set "
+            "(no grade calls = no cache I/O). (DEC-002 of #189.)"
+        ),
+    )
     parser.set_defaults(func=cmd_generate)
 
 
@@ -777,10 +818,34 @@ def _run_single_model(
     ``--estimate`` short-circuit (DEC-009 of #36) — see
     :func:`cmd_generate`'s docstring for the full rules; this helper
     consumes the resulting ``args`` namespace verbatim.
+
+    ``--no-grade`` (US-007 / DEC-001 of #189) wraps the entire
+    grade-stage block in ``if not no_grade:`` so the LLM judge is never
+    called; ``grade_report`` stays ``None`` and the diff renders without
+    a ``flagged`` tier (``diff-renderer.md``). The progress count
+    renumbers from ``[N/5]`` to ``[N/4]`` (DEC-003) via the ``total``
+    threaded through every ``emit_progress_*`` call. ``--no-cache``
+    (DEC-002) flips ``grade_config.cache_enabled=False`` for one run so
+    both the cache lookup AND the post-grade write are skipped;
+    existing cache files on disk are untouched. ``--no-grade``
+    implicitly wins over ``--no-cache`` (no grade block runs → no cache
+    code runs); no explicit mutex.
     """
     quiet = bool(getattr(args, "quiet", False))
     verbose = bool(getattr(args, "verbose", False))
     progress_on = should_emit_progress(quiet=quiet, verbose=verbose)
+
+    # US-007 of #189 / DEC-003 — when ``--no-grade`` is set, the pipeline
+    # is honestly four stages (safety / draft / prune / diff) — drop the
+    # grade entry and renumber diff from 5 → 4. The orchestrator resolves
+    # ``total`` ONCE here and threads it through every progress call so
+    # the count line says ``[N/4]`` end-to-end. Diff's stage number is
+    # also computed once below (``_diff_stage_n``) so the entry / done
+    # pair stay in lockstep.
+    no_grade = bool(getattr(args, "no_grade", False))
+    no_cache = bool(getattr(args, "no_cache", False))
+    total = 4 if no_grade else 5
+    _diff_stage_n = 4 if no_grade else 5
 
     # US-005 / DEC-014 — per-model progress prefix. Only fires when this
     # helper is invoked from :func:`_run_batch` (both kwargs non-``None``);
@@ -910,7 +975,7 @@ def _run_single_model(
         # the size of the work that's about to happen rather than a
         # stale estimate.
         if progress_on:
-            emit_progress_entry(1, "safety", "building LLM request...")
+            emit_progress_entry(1, "safety", "building LLM request...", total=total)
         _t0 = time.monotonic()
         # Safety policy (the first stage in the documented pipeline
         # order — DEC-025 / CLAUDE.md "Pipeline shape"). US-006: apply
@@ -922,7 +987,7 @@ def _run_single_model(
         if mode_override is not None:
             policy = policy.with_mode(safety_module.SamplingMode(mode_override))
         if progress_on:
-            emit_progress_done(1, "safety", time.monotonic() - _t0)
+            emit_progress_done(1, "safety", time.monotonic() - _t0, total=total)
 
         # ---- 2/5: draft -------------------------------------------------
         # DEC-006 of #135 — the CLI no longer constructs an Anthropic client
@@ -933,7 +998,9 @@ def _run_single_model(
         # patching the provider's ``make_client`` rather than a CLI helper.
         draft_config = draft_module.load_draft_config(project_dir)
         if progress_on:
-            emit_progress_entry(2, "draft", f"calling LLM (model {draft_config.model})...")
+            emit_progress_entry(
+                2, "draft", f"calling LLM (model {draft_config.model})...", total=total
+            )
         _t0 = time.monotonic()
         draft_outcome = draft_module.draft_schema(
             model,
@@ -944,7 +1011,7 @@ def _run_single_model(
             _client=None,
         )
         if progress_on:
-            emit_progress_done(2, "draft", time.monotonic() - _t0)
+            emit_progress_done(2, "draft", time.monotonic() - _t0, total=total)
 
         # ---- 3/5: prune -------------------------------------------------
         # US-006 of #22 / DEC-011 / DEC-012 — apply ``--scope`` and
@@ -999,6 +1066,7 @@ def _run_single_model(
                 3,
                 "prune",
                 f"running {candidate_test_count} candidate tests against warehouse...",
+                total=total,
             )
         _t0 = time.monotonic()
         # US-013 of #171 / DEC-001 — ``--as-of`` threads through to the
@@ -1019,68 +1087,98 @@ def _run_single_model(
             as_of=getattr(args, "as_of", None),
         )
         if progress_on:
-            emit_progress_done(3, "prune", time.monotonic() - _t0)
+            emit_progress_done(3, "prune", time.monotonic() - _t0, total=total)
 
         # ---- 4/5: grade -------------------------------------------------
-        # US-006 / DEC-004 — apply ``--min-score`` by re-validating the
-        # frozen :class:`GradeConfig` with the override. Reporting-only:
-        # we do NOT flip ``fail_on_below_threshold`` — the operator's
-        # ``signalforge.yml`` owns that knob (DEC-011 path through the
-        # grader's :class:`GradeBelowThresholdError`).
-        grade_config = grade_module.load_grade_config(project_dir)
-        min_score_override = getattr(args, "min_score", None)
-        if min_score_override is not None:
-            grade_config = grade_module.GradeConfig.model_validate(
-                {**grade_config.model_dump(), "min_mean_score": min_score_override}
+        # US-007 of #189 / DEC-001 — ``--no-grade`` skips the entire grade
+        # stage. ``grade_report`` stays ``None`` and ``render_diff`` already
+        # accepts that path (``diff-renderer.md`` § "Tier classification with
+        # no-grading-report degrade") — the resulting diff renders kept /
+        # kept-uncertain / dropped without any ``flagged`` tier. The
+        # ``[4/5] grade: ...`` progress lines are also suppressed; the diff
+        # progress below renumbers to ``[4/4]`` via ``_diff_stage_n`` /
+        # ``total``. DEC-002 — ``--no-cache`` flips
+        # ``grade_config.cache_enabled = False`` via ``model_copy(update=...)``
+        # so the engine skips both the persistent-cache lookup AND the
+        # post-grade write for this run (existing cache files on disk are
+        # NOT touched; use ``signalforge cache clear --grade`` for that).
+        # Precedence: ``--no-grade`` implicitly wins when both are set
+        # because the entire block — including the
+        # ``cache_enabled=False`` mutation — is skipped.
+        grade_report = None
+        if not no_grade:
+            # US-006 / DEC-004 — apply ``--min-score`` by re-validating the
+            # frozen :class:`GradeConfig` with the override. Reporting-only:
+            # we do NOT flip ``fail_on_below_threshold`` — the operator's
+            # ``signalforge.yml`` owns that knob (DEC-011 path through the
+            # grader's :class:`GradeBelowThresholdError`).
+            grade_config = grade_module.load_grade_config(project_dir)
+            min_score_override = getattr(args, "min_score", None)
+            if min_score_override is not None:
+                grade_config = grade_module.GradeConfig.model_validate(
+                    {**grade_config.model_dump(), "min_mean_score": min_score_override}
+                )
+            # US-007 of #189 / DEC-002 — per-run cache bypass. Flip
+            # ``cache_enabled=False`` so the engine's sync-prefix lookup and
+            # post-grade write are both no-ops for this run. ``model_copy``
+            # is acceptable here (no validator side-effect depends on the
+            # field — it's a plain bool the engine reads at lookup time);
+            # the safety-layer ``with_mode`` rule (DEC-018 of
+            # ``safety-layer.md``) governs cases where validators MUST
+            # re-run, which is not the case for this knob.
+            if no_cache:
+                grade_config = grade_config.model_copy(update={"cache_enabled": False})
+            # Count artifacts the grader will actually iterate over. The
+            # grade engine's ``_stable_artifact_pairs`` (DEC-018) yields one
+            # entry per (column.description, column.rationale,
+            # model.description, model.rationale, column-scoped test
+            # rationale, model-scoped test rationale) — independent of which
+            # tests prune kept. Earlier CLI versions used
+            # ``prune_result.kept_count`` here, which conflated "tests
+            # surviving prune" with "artifacts visible to the grader" and
+            # emitted "0 artifacts" runs when prune dropped everything
+            # (issue #10 follow-up).
+            candidate = draft_outcome.candidate
+            artifact_count = (
+                2 * len(candidate.columns)  # column description + rationale per column
+                + 2  # model description + rationale
+                + sum(len(c.tests) for c in candidate.columns)  # column-scoped test rationales
+                + len(candidate.tests)  # model-scoped test rationales
             )
-        # Count artifacts the grader will actually iterate over. The
-        # grade engine's ``_stable_artifact_pairs`` (DEC-018) yields one
-        # entry per (column.description, column.rationale, model.description,
-        # model.rationale, column-scoped test rationale, model-scoped test
-        # rationale) — independent of which tests prune kept. Earlier CLI
-        # versions used ``prune_result.kept_count`` here, which conflated
-        # "tests surviving prune" with "artifacts visible to the grader"
-        # and emitted "0 artifacts" runs when prune dropped everything
-        # (issue #10 follow-up).
-        candidate = draft_outcome.candidate
-        artifact_count = (
-            2 * len(candidate.columns)  # column description + rationale per column
-            + 2  # model description + rationale
-            + sum(len(c.tests) for c in candidate.columns)  # column-scoped test rationales
-            + len(candidate.tests)  # model-scoped test rationales
-        )
-        # Honour ``GradeConfig.rubric`` overrides — the operator may
-        # ship a custom rubric in ``signalforge.yml grade:`` (or via
-        # ``--config``) that has a different criterion count than the
-        # default. ``rubric is None`` means "use DEFAULT_RUBRIC" per
-        # ``grade-layer.md`` DEC-016, so the progress count matches the
-        # rubric the LLM judge will actually iterate over.
-        active_rubric = grade_config.rubric or DEFAULT_RUBRIC
-        criteria_count = len(active_rubric)
-        total_calls = artifact_count * criteria_count
-        if progress_on:
-            emit_progress_entry(
-                4,
-                "grade",
-                (
-                    f"scoring {artifact_count} artifacts × {criteria_count} "
-                    f"criteria ({total_calls} calls)..."
-                ),
+            # Honour ``GradeConfig.rubric`` overrides — the operator may
+            # ship a custom rubric in ``signalforge.yml grade:`` (or via
+            # ``--config``) that has a different criterion count than the
+            # default. ``rubric is None`` means "use DEFAULT_RUBRIC" per
+            # ``grade-layer.md`` DEC-016, so the progress count matches the
+            # rubric the LLM judge will actually iterate over.
+            active_rubric = grade_config.rubric or DEFAULT_RUBRIC
+            criteria_count = len(active_rubric)
+            total_calls = artifact_count * criteria_count
+            if progress_on:
+                emit_progress_entry(
+                    4,
+                    "grade",
+                    (
+                        f"scoring {artifact_count} artifacts × {criteria_count} "
+                        f"criteria ({total_calls} calls)..."
+                    ),
+                    total=total,
+                )
+            _t0 = time.monotonic()
+            # DEC-006 of #135 — ``client=None`` lets ``grade_artifacts`` thread
+            # it into ``call_llm``, which lazy-builds via the provider resolved
+            # from ``grade_config.provider`` (independent of the drafter's
+            # provider).
+            grade_report = grade_module.grade_artifacts(
+                model,
+                draft_outcome.candidate,
+                prune_result,
+                config=grade_config,
+                client=None,
+                project_dir=project_dir,
             )
-        _t0 = time.monotonic()
-        # DEC-006 of #135 — ``client=None`` lets ``grade_artifacts`` thread it
-        # into ``call_llm``, which lazy-builds via the provider resolved from
-        # ``grade_config.provider`` (independent of the drafter's provider).
-        grade_report = grade_module.grade_artifacts(
-            model,
-            draft_outcome.candidate,
-            prune_result,
-            config=grade_config,
-            client=None,
-            project_dir=project_dir,
-        )
-        if progress_on:
-            emit_progress_done(4, "grade", time.monotonic() - _t0)
+            if progress_on:
+                emit_progress_done(4, "grade", time.monotonic() - _t0, total=total)
 
         # ---- 5/5: diff --------------------------------------------------
         # US-006 / DEC-020 — apply ``--format`` by re-validating the
@@ -1116,7 +1214,7 @@ def _run_single_model(
             output_path = (project_dir / model_relpath).parent / "schema.yml"
 
         if progress_on:
-            emit_progress_entry(5, "diff", "rendering...")
+            emit_progress_entry(_diff_stage_n, "diff", "rendering...", total=total)
         _t0 = time.monotonic()
         diff_report = diff_module.render_diff(
             model,
@@ -1129,7 +1227,7 @@ def _run_single_model(
             project_dir=project_dir,
         )
         if progress_on:
-            emit_progress_done(5, "diff", time.monotonic() - _t0)
+            emit_progress_done(_diff_stage_n, "diff", time.monotonic() - _t0, total=total)
 
         # US-012 of #116 / DEC-010 / DEC-014 — on ``--write`` (NOT
         # ``--dry-run``), additionally materialise every proposed singular
