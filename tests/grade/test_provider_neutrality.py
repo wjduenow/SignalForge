@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from signalforge.llm import AnthropicClientProtocol
 from signalforge.manifest.models import Column, Model
 from signalforge.prune.models import PruneResult
-from tests.grade.test_drift_detector import StrictGradeEvent
+from tests.grade.test_drift_detector import StrictGradeEventV2
 from tests.llm._fake_provider import (
     FAKE_NOCACHE_PROVIDER_NAME,
     FakeNoCacheProvider,
@@ -228,7 +228,7 @@ def test_grade_artifacts_drives_nocache_provider_end_to_end(
     #     extra="forbid" mirror (zero-cache events validate cleanly). ---
     for line in audit_path.read_text(encoding="utf-8").splitlines():
         if line.strip():
-            StrictGradeEvent.model_validate_json(line)
+            StrictGradeEventV2.model_validate_json(line)
 
     # --- Sidecar JSON: present + round-trips through GradingReport. ---
     assert sidecar_path.exists()

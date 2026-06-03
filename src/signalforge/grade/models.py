@@ -289,7 +289,7 @@ class GradeEvent(BaseModel):
 
     model_config = _BASE_CONFIG
 
-    audit_schema_version: int = 1
+    audit_schema_version: int = 2
     signalforge_version: str
     run_id: str
     timestamp: datetime
@@ -304,6 +304,7 @@ class GradeEvent(BaseModel):
     prompt_version_template: str
     criterion_prompt_hash: str
     response_text_hash: str
+    cache_hit: bool = False
     model: str
     input_tokens: int
     output_tokens: int
@@ -332,6 +333,24 @@ class GradeEvent(BaseModel):
         if value < 0.0 or value > 1.0:
             raise ValueError(f"score must be in [0.0, 1.0] or None; got {value!r}")
         return value
+
+    def __repr__(self) -> str:
+        """Minimal repr — omits ``evidence`` and ``reasoning``.
+
+        Mirrors :meth:`GradingResult.__repr__` (DEC-022 of issue #6) at
+        the audit-record boundary. ``cache_hit`` is a non-sensitive
+        bool — it appears in the compact repr so operators reading log
+        lines can distinguish live-grade records from cache-rehydration
+        records at a glance. The full ``evidence`` / ``reasoning`` body
+        remains accessible via :meth:`pydantic.BaseModel.model_dump`.
+        """
+        return (
+            f"GradeEvent(run_id={self.run_id!r}, "
+            f"artifact_id={self.artifact_id!r}, "
+            f"criterion_id={self.criterion_id!r}, "
+            f"score={self.score!r}, passed={self.passed!r}, "
+            f"cache_hit={self.cache_hit!r})"
+        )
 
 
 __all__ = (

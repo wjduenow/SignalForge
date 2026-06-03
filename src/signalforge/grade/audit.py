@@ -99,6 +99,7 @@ def _build_grade_event(
     output_tokens: int,
     cache_creation_input_tokens: int = 0,
     cache_read_input_tokens: int = 0,
+    cache_hit: bool = False,
 ) -> GradeEvent:
     """Construct a :class:`GradeEvent` — the **single** construction seam.
 
@@ -112,8 +113,18 @@ def _build_grade_event(
 
     Stamps :attr:`signalforge.grade.models.GradeEvent.signalforge_version`
     from :data:`signalforge.__version__` so a reviewer can identify which
-    code shipped the receipt. ``audit_schema_version`` is frozen at the
-    Literal default of ``1`` on the model.
+    code shipped the receipt. ``audit_schema_version`` defaults to ``2``
+    on the production model (DEC-008 of #189 — widened from ``Literal[1]``
+    to ``int`` for replay forward-compat, then bumped 1 → 2 for the
+    ``cache_hit`` field).
+
+    The keyword-only ``cache_hit`` parameter (default ``False``, DEC-010
+    of #189) is the audit signal for grade-cache rehydration. A cache-hit
+    record carries ``cache_hit=True`` plus zero token counts (no LLM call
+    was made); a live-grade record carries ``cache_hit=False`` and real
+    token counts. Both flow through this single seam, so the 6th AST
+    scan in :file:`tests/test_audit_completeness.py` continues to gate
+    every :class:`GradeEvent` construction.
     """
     return GradeEvent(
         signalforge_version=_SIGNALFORGE_VERSION,
@@ -130,6 +141,7 @@ def _build_grade_event(
         prompt_version_template=prompt_version_template,
         criterion_prompt_hash=criterion_prompt_hash,
         response_text_hash=response_text_hash,
+        cache_hit=cache_hit,
         model=model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
