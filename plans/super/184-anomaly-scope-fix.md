@@ -7,7 +7,7 @@
 - **Branch:** `plan/184-anomaly-scope-fix`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/184-anomaly-scope-fix`
 - **Base:** `origin/dev` @ `b19c161` (post-#183 / #185)
-- **Phase:** `detailing` (stories ready for review)
+- **Phase:** `published` (PR #194 — draft, targeting `dev`, awaiting approval)
 - **Sessions:** 1 (2026-06-02)
 - **Related:** #171 (origin), #179 (retest that surfaced it), #183 (parallel pattern — shipped today), PR #182 (writeup), PR #191 (#183 lockstep precedent)
 
@@ -403,7 +403,7 @@ Specific QG focus areas (from architecture review + memory hits):
 
 ## Phase 5 — Publish PR
 
-Pending. After user approval of the breakdown.
+[PR #194](https://github.com/wjduenow/SignalForge/pull/194) — draft, targeting `dev`. Opened 2026-06-02.
 
 ---
 
