@@ -421,6 +421,24 @@ Columns:
 """
 
 
+_PROJECT_SUMMARY_TEMPLATE = """\
+## Project models
+
+Every model in this dbt project, listed by name with its column count.
+Full column detail for the model under draft and its direct neighbours
+appears in the per-model section below.
+
+{models}
+"""
+"""Template for the project-wide cached-prefix block (#188 US-002, DEC-004).
+
+The ``{models}`` placeholder is filled with one compressed
+``- <name> (<N> cols)`` line per manifest model, iterated in
+``sorted(unique_id)`` order. Byte-identical across the batch regardless of
+which model is "under draft" — that byte-identity is the precondition for
+Anthropic's prompt cache to hit on the shared prefix (DEC-007)."""
+
+
 _DATA_SECTION_TEMPLATES: dict[SamplingMode, str] = {
     SamplingMode.SCHEMA_ONLY: (
         "You have only column names and types. Propose tests on shape, "
@@ -761,6 +779,161 @@ def _render_business_rules_section(
         lines.append(f"  {rule}")
         lines.append("</BUSINESS_RULE>")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Project-wide cached-prefix renderers (#188 US-002)
+# ---------------------------------------------------------------------------
+
+
+def _read_project_business_rules(manifest: Manifest) -> list[str]:
+    """Aggregate ``meta.signalforge.business_rules`` across ALL models (#188 US-002).
+
+    Deterministic total order (DEC-007 — the cache-hit precondition): iterate
+    models in ``sorted(manifest.nodes)`` order by ``unique_id``; within each
+    model emit model-level rules first, then per-column rules (columns sorted
+    by name); a single global de-duplication set keeps first-seen order.
+
+    Mirrors :func:`_read_business_rules` exactly: uses the safety-layer
+    dict-guard read pattern (only a genuine ``dict`` under the ``signalforge``
+    key is inspected; scalar / list noise is dropped, never fail-loud) and the
+    same ``(model) `` / ``(column <name>) `` scope prefixes. The only
+    difference is the outer iteration over every model in deterministic
+    ``unique_id`` order — the project summary lists every model, so a project
+    rule line is additionally prefixed with the source model name so the LLM
+    can attribute it.
+
+    Returns a flat ``list[str]`` of scope-prefixed rule lines; the caller
+    (:func:`_render_project_business_rules_section`) applies the single global
+    1-indexed ``<BUSINESS_RULE id="N">`` counter.
+    """
+    collected: list[str] = []
+    seen: set[str] = set()
+
+    def _add(prefix: str, rules: list[str]) -> None:
+        for rule in rules:
+            line = f"{prefix}{rule}"
+            if line not in seen:
+                seen.add(line)
+                collected.append(line)
+
+    for unique_id in sorted(manifest.nodes):
+        model = manifest.nodes[unique_id]
+        model_meta = getattr(model.config, "meta", {}) or {}
+        sf_model_meta = model_meta.get("signalforge")
+        if isinstance(sf_model_meta, dict):
+            _add(
+                f"({model.name}, model) ",
+                _coerce_business_rules(sf_model_meta.get("business_rules")),
+            )
+        for column in sorted(model.columns_list, key=lambda c: c.name):
+            column_meta = column.meta or {}
+            sf_meta = column_meta.get("signalforge")
+            if isinstance(sf_meta, dict):
+                _add(
+                    f"({model.name}, column {column.name}) ",
+                    _coerce_business_rules(sf_meta.get("business_rules")),
+                )
+
+    return collected
+
+
+def _render_project_business_rules_section(manifest: Manifest) -> str:
+    """Render project-wide business rules as a fenced, numbered section (#188 US-002).
+
+    Aggregates via :func:`_read_project_business_rules` (deterministic
+    ``unique_id`` → model-level → column-name order, DEC-007) and wraps each
+    rule in a ``<BUSINESS_RULE id="N">…</BUSINESS_RULE>`` envelope with a
+    SINGLE global 1-indexed counter spanning the whole project.
+
+    Returns the empty string when no project rules are present (the
+    ``<PROJECT_MANIFEST>`` block then carries only the model summary).
+
+    Boring-substring breach guard (DEC-008): a rule body containing the literal
+    ``</BUSINESS_RULE>`` raises :class:`PromptEnvelopeBreachError` with
+    ``rule_source="project"`` and the 1-indexed ``rule_index``. No
+    whitespace / case normalisation — opening tags and truncated fragments are
+    allowed (only the exact closing substring is a breach), mirroring the
+    ``</MODEL_SQL>`` / per-model ``</BUSINESS_RULE>`` precedent.
+    """
+    from signalforge.draft.errors import PromptEnvelopeBreachError
+
+    rules = _read_project_business_rules(manifest)
+    if not rules:
+        return ""
+    for i, rule in enumerate(rules, start=1):
+        if "</BUSINESS_RULE>" in rule:
+            raise PromptEnvelopeBreachError(
+                None,
+                envelope="BUSINESS_RULE",
+                rule_index=i,
+                rule_source="project",
+            )
+    lines = [
+        "## PROJECT BUSINESS RULES",
+        "",
+        (
+            "Operator-supplied business rules across every model in this "
+            "project, for shared context. Rules for the model under draft "
+            "also appear in its per-model section below:"
+        ),
+        "",
+    ]
+    for i, rule in enumerate(rules, start=1):
+        lines.append(f'<BUSINESS_RULE id="{i}">')
+        lines.append(f"  {rule}")
+        lines.append("</BUSINESS_RULE>")
+    return "\n".join(lines)
+
+
+def _render_project_summary(manifest: Manifest) -> str:
+    """Render the project-wide cached prefix (#188 US-002, DEC-004).
+
+    One compressed ``- <name> (<N> cols)`` line per manifest model, iterated
+    in ``sorted(manifest.nodes)`` order by ``unique_id`` (DEC-007). Columns
+    are COUNTED, not detailed — full column detail for the model under draft
+    and its direct neighbours lives in the per-model dynamic block.
+
+    The whole summary (plus any project business rules) is wrapped in a
+    ``<PROJECT_MANIFEST>…</PROJECT_MANIFEST>`` envelope (DEC-005, the
+    envelope only; the scope-aware injection-defence *instruction* in the
+    system prompt is US-003). Output is byte-identical regardless of which
+    model is passed as "under draft" — that byte-identity is the cache-hit
+    precondition (DEC-007).
+
+    Boring-substring breach guard (DEC-008): if the rendered model-summary
+    content contains the literal ``</PROJECT_MANIFEST>`` (e.g. a hostile model
+    name or description that leaked into the summary) the function raises
+    :class:`PromptEnvelopeBreachError` with ``envelope="PROJECT_MANIFEST"`` and
+    ``rule_source="project"``. Project business rules are guarded separately by
+    :func:`_render_project_business_rules_section` against ``</BUSINESS_RULE>``.
+    No whitespace / case normalisation — opening tags / truncated fragments are
+    allowed; only the exact closing substring is a breach. A breach fails
+    closed (it never silently degrades to a per-model render) because it is a
+    security signal the operator must fix.
+    """
+    from signalforge.draft.errors import PromptEnvelopeBreachError
+
+    model_lines: list[str] = []
+    for unique_id in sorted(manifest.nodes):
+        model = manifest.nodes[unique_id]
+        n_cols = len(model.columns)
+        unit = "col" if n_cols == 1 else "cols"
+        model_lines.append(f"- {model.name} ({n_cols} {unit})")
+    models_block = "\n".join(model_lines) if model_lines else "(no models in manifest)"
+
+    summary = _PROJECT_SUMMARY_TEMPLATE.format(models=models_block)
+    # Breach scan over the rendered model-summary content (boring substring).
+    if "</PROJECT_MANIFEST>" in summary:
+        raise PromptEnvelopeBreachError(
+            None,
+            envelope="PROJECT_MANIFEST",
+            rule_source="project",
+        )
+
+    project_rules = _render_project_business_rules_section(manifest)
+    inner = summary if not project_rules else f"{summary}\n{project_rules}"
+    return f"<PROJECT_MANIFEST>\n{inner}\n</PROJECT_MANIFEST>"
 
 
 def _render_dynamic_block(
