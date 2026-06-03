@@ -383,6 +383,34 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "PruneConfig.model_validate so validators re-run."
         ),
     )
+    # US-005 of #188 / DEC-002 / DEC-003 — prompt-cache prefix scope.
+    # Argparse-level ``choices`` rejection produces exit 2 (the argparse
+    # default). ``default=None`` is the sentinel that distinguishes "the
+    # operator pinned a scope" (override) from "no flag" (config-file
+    # value applies, and ``--select`` >= 2 models may auto-promote to
+    # 'project'). Precedence: explicit ``--cache-scope`` flag > YAML
+    # ``llm.cache_scope`` (when non-default) > auto-promote. Applied via
+    # :meth:`DraftConfig.model_validate` so validators re-run — mirrors
+    # :meth:`SafetyPolicy.with_mode` (DEC-018 of ``safety-layer.md``) and
+    # the prune ``--scope`` / ``--sample-strategy`` overlay (DEC-012 of
+    # #22). The single-model positional path passes the flag's value (or
+    # nothing) and NEVER auto-promotes.
+    parser.add_argument(
+        "--cache-scope",
+        dest="cache_scope",
+        choices=("per-model", "project"),
+        default=None,
+        help=(
+            "Override the prompt-cache prefix scope for the drafter "
+            "(default: from config). Precedence: flag > llm.cache_scope "
+            "in signalforge.yml (when non-default) > auto-promote. A "
+            "--select batch matching >= 2 models auto-promotes to "
+            "'project' so cache_creation is paid once and the cheaper "
+            "cache_read applies on models 2..N; pass --cache-scope "
+            "per-model to opt out. Applied via DraftConfig.model_validate "
+            "so validators re-run."
+        ),
+    )
     # US-013 of #171 / DEC-001 — time-bound anomaly-test reference date.
     # ``type=date.fromisoformat`` accepts strict ISO ``YYYY-MM-DD`` only;
     # a bad format raises ``ValueError`` which argparse converts to its
@@ -745,6 +773,7 @@ def _run_single_model(
     project_dir: Path,
     batch_index: int | None = None,
     batch_count: int | None = None,
+    draft_overrides: dict[str, str] | None = None,
 ) -> _SingleModelOutcome:
     """Run the full safety → draft → prune → grade → diff pipeline for one model.
 
@@ -772,6 +801,17 @@ def _run_single_model(
     (US-005 / DEC-014). The single-model positional path leaves both at
     their default ``None`` so the prefix is suppressed and the v0.1
     capsys-pinned stderr shape is preserved byte-for-byte.
+
+    ``draft_overrides`` (US-005 of #188 / DEC-010) carries the resolved
+    draft-config overrides — currently just ``cache_scope`` (from the
+    explicit ``--cache-scope`` flag or :func:`_run_batch`'s auto-promote).
+    When non-``None`` / non-empty, it is applied via
+    :meth:`DraftConfig.model_validate` (NOT ``model_copy(update=...)``) so
+    every Pydantic validator re-runs — mirrors the prune ``--scope`` /
+    ``--sample-strategy`` overlay (DEC-012 of #22). ``None`` / empty leaves
+    the loaded :class:`DraftConfig` untouched so the no-override path keeps
+    the config-file value verbatim and the single-model positional output
+    stays byte-identical to v0.1.
 
     Inherits :func:`cmd_generate`'s per-flag override precedence and the
     ``--estimate`` short-circuit (DEC-009 of #36) — see
@@ -932,6 +972,19 @@ def _run_single_model(
         # registry-validated config field, DEC-007). Tests inject a fake by
         # patching the provider's ``make_client`` rather than a CLI helper.
         draft_config = draft_module.load_draft_config(project_dir)
+        # US-005 of #188 / DEC-010 — apply the draft-config overlay
+        # (currently just ``cache_scope`` from the ``--cache-scope`` flag
+        # or :func:`_run_batch`'s auto-promote). ``model_validate`` (NOT
+        # ``model_copy(update=...)``) so every Pydantic validator re-runs —
+        # mirrors the prune ``--scope`` / ``--sample-strategy`` overlay
+        # (DEC-012 of #22) and :meth:`SafetyPolicy.with_mode` (DEC-018 of
+        # ``safety-layer.md``). When ``draft_overrides`` is ``None`` /
+        # empty the loaded config flows through unchanged so the
+        # single-model positional output stays byte-identical to v0.1.
+        if draft_overrides:
+            draft_config = draft_module.DraftConfig.model_validate(
+                {**draft_config.model_dump(), **draft_overrides}
+            )
         if progress_on:
             emit_progress_entry(2, "draft", f"calling LLM (model {draft_config.model})...")
         _t0 = time.monotonic()
@@ -1188,6 +1241,54 @@ def _run_single_model(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_batch_draft_overrides(
+    args: argparse.Namespace,
+    project_dir: Path,
+    *,
+    matched_count: int,
+) -> dict[str, str] | None:
+    """Resolve the draft-config overlay for a ``--select`` batch (DEC-002 / DEC-003).
+
+    Precedence for ``cache_scope`` (highest first):
+
+    1. **Explicit ``--cache-scope`` flag** — the operator pinned a scope;
+       honour it verbatim (``per-model`` on a >= 2 batch is the documented
+       opt-out of auto-promote — the flag wins).
+    2. **YAML ``llm.cache_scope`` when non-default** — the operator pinned
+       it in ``signalforge.yml``; we must NOT silently override their
+       choice with auto-promote. Return ``None`` so the loaded config flows
+       through unchanged.
+    3. **Auto-promote** — when >= 2 models matched AND neither (1) nor (2)
+       applies, overlay ``cache_scope="project"`` so the cached prefix is
+       byte-identical across the batch (``cache_creation`` paid once,
+       cheaper ``cache_read`` on models 2..N).
+
+    Returns the overlay dict (``{"cache_scope": ...}``) to thread through
+    to every per-model :func:`_run_single_model` call, or ``None`` when no
+    overlay should apply (cases 2-without-promote and the < 2 match
+    no-flag case).
+    """
+    cache_scope_flag = getattr(args, "cache_scope", None)
+    if cache_scope_flag is not None:
+        # (1) explicit flag wins over both YAML and auto-promote.
+        return {"cache_scope": cache_scope_flag}
+
+    # (2) Read the YAML value to decide whether the operator pinned a scope
+    # there. ``model_fields`` carries the field default ("per-model"); a
+    # loaded value that differs means the operator set it explicitly.
+    draft_config = draft_module.load_draft_config(project_dir)
+    default_scope = draft_module.DraftConfig.model_fields["cache_scope"].default
+    if draft_config.cache_scope != default_scope:
+        # Operator pinned a non-default scope in signalforge.yml — honour
+        # it; do NOT auto-promote on top of an explicit YAML choice.
+        return None
+
+    # (3) Auto-promote when >= 2 models matched and nothing was pinned.
+    if matched_count >= 2:
+        return {"cache_scope": "project"}
+    return None
+
+
 def _run_batch(
     manifest: Manifest,
     profile: warehouse_module.DbtProfileTarget,
@@ -1238,6 +1339,24 @@ def _run_batch(
         raise CliSelectorNoMatchError(expr=expr)
 
     total = len(matched)
+
+    # US-005 of #188 / DEC-002 / DEC-003 — resolve the draft-config
+    # overlay once for the whole batch. Precedence:
+    #
+    #   1. explicit ``--cache-scope`` flag  (operator pinned a scope)
+    #   2. YAML ``llm.cache_scope`` when non-default  (operator pinned it
+    #      in signalforge.yml — we must NOT override it)
+    #   3. auto-promote to "project" when >= 2 models matched
+    #
+    # The same resolved overlay is passed to every per-model
+    # :func:`_run_single_model` call so the cached prefix is byte-identical
+    # across the batch (the project-scope amortisation contract). The
+    # config is loaded here purely to read its ``cache_scope`` for the
+    # precedence check; each per-model call re-loads + re-validates the
+    # config itself (with this overlay) so the loader stays the single
+    # source of truth and we never thread a partially-built config object.
+    draft_overrides = _resolve_batch_draft_overrides(args, project_dir, matched_count=total)
+
     outcomes: list[_SingleModelOutcome] = []
     for index, model in enumerate(matched, start=1):
         outcome = _run_single_model(
@@ -1248,6 +1367,7 @@ def _run_batch(
             project_dir=project_dir,
             batch_index=index,
             batch_count=total,
+            draft_overrides=draft_overrides,
         )
         outcomes.append(outcome)
 
@@ -1309,6 +1429,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
     * ``--scope`` > ``prune.scope`` > library default (``"sample"``).
     * ``--sample-strategy`` > ``prune.sample_strategy`` > library default
       (``"materialised"``).
+    * ``--cache-scope`` (US-005 of #188 / DEC-002 / DEC-003) >
+      ``llm.cache_scope`` in ``signalforge.yml`` (when non-default) >
+      auto-promote. A ``--select`` batch matching >= 2 models
+      auto-promotes the draft overlay to ``cache_scope="project"`` unless
+      the operator pinned a scope via the flag or a non-default YAML
+      value; the single-model positional path NEVER auto-promotes (it
+      reflects only an explicit flag). Applied via
+      :meth:`DraftConfig.model_validate` so validators re-run (DEC-010).
     * ``--as-of YYYY-MM-DD`` (US-013 of #171 / DEC-001) — evaluation
       date for time-bound anomaly tests; threaded to
       :func:`signalforge.prune.prune_tests` as the ``as_of`` kwarg.
@@ -1425,8 +1553,26 @@ def cmd_generate(args: argparse.Namespace) -> int:
         # Single-model path. ``manifest.get_model`` may raise
         # :class:`signalforge.manifest.errors.ModelNotFoundError` (tier 2);
         # the outer try catches it.
+        #
+        # US-005 of #188 / DEC-002 / DEC-003 — the single-model positional
+        # path reflects ONLY an explicit ``--cache-scope`` flag in its
+        # draft overlay; it NEVER auto-promotes (auto-promote is a batch
+        # affordance). With no flag, ``draft_overrides`` is ``None`` so the
+        # loaded config flows through unchanged and the v0.1 output shape
+        # is preserved byte-for-byte.
+        cache_scope_flag = getattr(args, "cache_scope", None)
+        single_overrides = (
+            {"cache_scope": cache_scope_flag} if cache_scope_flag is not None else None
+        )
         model = manifest.get_model(args.model)
-        single_outcome = _run_single_model(model, manifest, profile, args, project_dir=project_dir)
+        single_outcome = _run_single_model(
+            model,
+            manifest,
+            profile,
+            args,
+            project_dir=project_dir,
+            draft_overrides=single_overrides,
+        )
         if single_outcome.rendered_text:
             sys.stdout.write(single_outcome.rendered_text)
         return single_outcome.exit_code

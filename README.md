@@ -111,6 +111,8 @@ Three providers are supported behind a single provider-neutral seam:
 
 The drafter and grader resolve their providers independently — a common pattern is Anthropic drafter (benefits from prompt caching across `--select` siblings) + Gemini grader (cheaper per-token rates on the multi-call fan-out). All three providers integrate with `signalforge generate --estimate` for pre-flight cost preview.
 
+On the Anthropic drafter, a `--select` batch of ≥ 2 models auto-shares one cached prompt prefix across the whole batch (cache hit rate ~0% → ~95% on models 2..N) — see [docs/draft-ops.md § Bulk-mode shared cache](docs/draft-ops.md#bulk-mode-shared-cache---select-batches) for the cost model, the `--cache-scope` override, and why it is a no-op (no benefit, no penalty) on OpenAI / Gemini.
+
 Full reference, capability matrix, cost / caching tradeoffs, and the "adding a fourth provider" recipe live in [docs/llm-providers-ops.md](docs/llm-providers-ops.md).
 
 ## Quick start

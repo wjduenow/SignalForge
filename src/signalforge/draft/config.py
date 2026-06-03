@@ -120,6 +120,26 @@ class DraftConfig(BaseModel):
     """Prompt-cache TTL. ``"1h"`` opts into the
     ``extended-cache-ttl-2025-04-11`` beta header at the LLM seam."""
 
+    cache_scope: Literal["per-model", "project"] = "per-model"
+    """Prompt-cache prefix scope for the drafter's cached block (issue #188).
+
+    * ``"per-model"`` (default) — the cached block carries the model under
+      draft plus its direct ``refs`` / ``depends_on`` neighbours. Single-model
+      positional runs keep this scope, which preserves the existing
+      prompt-cache-stability snapshot byte-for-byte.
+    * ``"project"`` — the cached block is restructured into a project-level
+      shared prefix that is byte-identical across every model in a
+      ``signalforge generate --select`` batch, so ``cache_creation`` is paid
+      once on the first model and the cheaper ``cache_read`` applies on
+      models 2..N. Per-model neighbour detail moves into the dynamic block.
+
+    **Auto-promote:** a ``--select`` batch matching >= 2 models auto-promotes
+    the per-model overlay to ``"project"`` (unless the operator has explicitly
+    pinned a scope via ``--cache-scope`` or a non-default ``llm.cache_scope``
+    in ``signalforge.yml``). The renderer / prompt-version / CLI-flag /
+    drafter wiring that consumes this field ships in the later #188 stories
+    (US-002 … US-008); this field is the foundation they read from."""
+
     max_retries_429: int = 3
     """429 (rate limit) retry budget."""
 
