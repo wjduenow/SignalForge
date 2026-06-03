@@ -289,7 +289,7 @@ class GradeEvent(BaseModel):
 
     model_config = _BASE_CONFIG
 
-    audit_schema_version: Literal[1] = 1
+    audit_schema_version: int = 1
     signalforge_version: str
     run_id: str
     timestamp: datetime
