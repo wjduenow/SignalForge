@@ -709,6 +709,179 @@ have raised otherwise) yet the response reports
 this can happen on Anthropic load-balancer rerouting or partial cache
 miss, and surfaces so the operator knows the discount didn't land.
 
+## Bulk-mode shared cache (`--select` batches)
+
+Issue #188. When you run `signalforge generate` across **many models in
+one process** — the `--select <expr>` batch path — the drafter can share
+a single cached prompt prefix across every model in the batch instead of
+caching a different per-model block on each call. This is the
+`cache_scope="project"` mode, and it exists to fix a measured cost
+problem.
+
+### What it is and the problem it solves
+
+The default per-model cache scope (the "What's cached" behaviour above)
+caches *the model under draft + its direct refs/`depends_on`
+neighbours*. That block is **different for every model**, so across a
+`--select` batch nothing is byte-identical from one call to the next and
+**the Anthropic prompt-cache hit rate is 0%** — every call pays
+`cache_creation_input_tokens` from scratch and `cache_read_input_tokens`
+is always 0. (This was measured empirically: 14 consecutive drafter
+calls in a batch each paid 1,612–2,572 cache-creation tokens, zero
+reads.)
+
+Bulk-mode shared cache restructures the cached block so it is
+**byte-identical across the whole batch**. The first model pays the
+cache write once; every subsequent model reads the cached prefix at
+roughly **one-tenth the input-token price** — driving the cross-batch
+cache-hit rate from 0% to ~95% (models 2..N hit; model 1 is the write).
+
+### How it works
+
+In project scope the cached prefix is a **compressed, whole-project
+manifest summary**, not a per-model neighbour subgraph:
+
+- One line per manifest model, `name (N cols)` — no per-column detail.
+- Project-wide business rules (`meta.signalforge.business_rules`
+  aggregated across the project), in a deterministic total order.
+- The whole thing wrapped in a `<PROJECT_MANIFEST>…</PROJECT_MANIFEST>`
+  envelope with a boring-substring breach guard (the project summary
+  carries every model's description + column names, so the envelope is
+  the injection boundary — a poisoned description can't escape the fence
+  and reach the LLM as instructions).
+
+Because the prefix does **not** depend on which model is under draft, it
+renders to the same bytes for every model in the batch — the load-bearing
+precondition for an Anthropic cache read. Anthropic caches the prefix =
+`system` + that shared block; on models 2..N the `system` + block must be
+byte-identical for a `cache_read` hit, and the deterministic ordering
+(`sorted(unique_id)`, columns by name, a single global 1-indexed business
+-rule counter) guarantees it.
+
+The **per-model detail still flows to the LLM** — it just moves into the
+*uncached dynamic block*: the model under draft, its full column /
+neighbour detail, its `<MODEL_SQL>` envelope, the sampled-rows / aggregate
+data section, and the model's own `<BUSINESS_RULE>` instructions. Draft
+quality is preserved; only the *placement* of the shared context changed.
+(The model-under-draft's own business rules appear in both the cached
+project context and its dynamic instruction block; the duplication is
+intentional and small — typically 1–3 rules.)
+
+The project-scope template carries a distinct `prompt_version` from the
+per-model template, so the two never collide in the response audit or in
+Anthropic's cache.
+
+### Automatic activation and operator override
+
+You do not have to opt in by hand for the common case:
+
+- **`--select` matching ≥ 2 models auto-promotes** the drafter's
+  `cache_scope` to `project`. The match count is known before the
+  per-model loop, so the batch driver overlays `cache_scope="project"`
+  on the per-model `DraftConfig` for every model in the run.
+- **Single-model runs stay `per-model`.** A positional
+  `signalforge generate <model>` (one model) keeps the default scope and
+  produces byte-identical output / cache behaviour to before this feature
+  landed — there is no sibling to amortise against.
+
+Override precedence, highest first:
+
+1. The `--cache-scope {per-model,project}` CLI flag (explicit operator
+   choice — wins over everything; see `docs/cli-ops.md` for the flag
+   reference).
+2. A non-default `llm.cache_scope` in `signalforge.yml`.
+3. The auto-promote on a `--select` ≥ 2 batch.
+
+So `--cache-scope per-model` forces per-model even on a large batch, and
+`--cache-scope project` forces project even on a single-model run.
+
+```yaml
+# signalforge.yml — pin project scope for every drafter run
+llm:
+  cache_scope: project
+```
+
+### Oversize fallback
+
+The shared project prefix is still subject to the 8000-input-token cap.
+On a very large project the compressed summary can exceed it. When that
+happens in project scope, the drafter **degrades that one model to
+per-model scope, logs one `INFO` line naming the model and the token
+count, and retries the call once** — the model still drafts, the batch
+continues, and the run exits 0. (Mechanically: `call_llm` raises
+`LLMCacheTooLargeError` at the cap; the drafter catches it *only when the
+scope was project*, re-renders the per-model cached block, and retries
+once. A per-model-scope oversize is a real error and re-raises — it
+signals genuine prompt bloat.) An envelope **breach** (a `</PROJECT_MANIFEST>`
+literal in manifest content) is a different signal: it fails closed, not
+fall-back, because it's a security problem the operator must fix.
+
+If the compressed prefix lands *below* the per-family minimum cacheable
+size (a tiny project), the existing marker-drop behaviour covers it — the
+marker is dropped, an `INFO` line logs, and the run is correct, just
+uncached. Auto-promote does not special-case tiny projects.
+
+### Cost model
+
+Anthropic's Sonnet pricing makes the lever concrete (per MTok):
+non-cached input `$3.00`, cache **write** `$3.75` (1.25× input), cache
+**read** `$0.30` (0.1× input). Opus and Haiku carry the same 1.25× /
+0.1× multipliers at their own base rates.
+
+So for a shared prefix of `T` input tokens across an `N`-model batch:
+
+| Scope | What you pay for the shared prefix |
+| --- | --- |
+| `per-model` (before #188) | `N × T` tokens at full input rate — every call re-sends and re-bills the whole block; 0% cache hit. |
+| `project` (#188) | `T` tokens at the 1.25× cache-**write** rate on model 1, then `T` tokens at the 0.1× cache-**read** rate on each of models 2..N. |
+
+The crossover is immediate: the shared block is read at ~10× cheaper than
+re-sending it at full input rate, and the single 1.25× write is recouped
+after roughly **two reads** (1.25 ≈ 0.1 + 0.1 + …; break-even at ~2
+subsequent models). On a batch of 15 models the shared-prefix portion of
+the input cost drops by an order of magnitude versus the per-model path
+(one write + 14 reads vs. 15 full-rate sends); on a 50-model batch the
+saving on that portion approaches the full ~10× ceiling (one write + 49
+reads). Only the *shared-prefix* tokens are affected — the per-model
+dynamic block (model SQL, sampled data, the model's own rules) is billed
+at full input rate in both scopes, so the realised total-cost saving
+depends on the prefix-to-dynamic ratio for your project.
+
+(The shared prefix is rendered and token-counted once per model — the same
+one-`count_tokens`-per-call profile as the per-model path, so this is not a
+new per-call cost. Batch-level memoisation of the render is a deferred
+follow-up.)
+
+### Provider & model applicability
+
+**Prompt caching is an Anthropic-only capability.** The `cache_scope`
+lever only delivers a cost saving on the **Anthropic** provider, because
+only Anthropic exposes the `cache_control` marker that the seam keys on
+(`AnthropicProvider.supports_prompt_caching = True`). The per-family
+minimum cacheable block sizes that gate the discount:
+
+| Anthropic family | Minimum cacheable block | Benefits from project scope? |
+| --- | --- | --- |
+| **Sonnet** (`claude-sonnet-*`) | 1024 input tokens | ✅ yes — above the minimum on any non-trivial project |
+| **Opus** (`claude-opus-*`) | 1024 input tokens | ✅ yes |
+| **Haiku** (`claude-haiku-*`) | 2048 input tokens | ✅ yes, but the prefix must clear the higher 2048 floor before the cache engages |
+
+(Below the family minimum the `cache_control` marker is dropped — see
+"Hard cap and pre-send check" above. An unknown Anthropic model id falls
+into the permissive 1024 bucket.)
+
+On the **OpenAI** and **Google Gemini** providers
+(`supports_prompt_caching = False`), there is **no cache and therefore no
+benefit — and no penalty.** When `cache_scope="project"` is in effect on
+a non-Anthropic provider the prompt is still restructured to the
+shared-prefix shape, but the seam emits no `cache_control` marker,
+reports `cache_creation_input_tokens = 0` / `cache_read_input_tokens =
+0`, and skips the cache-anomaly WARNING. The restructure is effectively a
+**no-op for the cost lever** on those providers: a `--select` batch runs
+correctly, just without the cross-batch discount. Operators drafting on
+OpenAI or Gemini should treat `cache_scope` as inert and tune cost via
+provider/model choice instead.
+
 ## Retry taxonomy
 
 Exponential backoff with bounded ±25% jitter. Each retry emits a
