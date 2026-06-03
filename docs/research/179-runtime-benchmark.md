@@ -1,14 +1,13 @@
 # Issue #179 — runtime benchmark after efficiency improvements (#186 + #187 + #188)
 
-**Status:** SKELETON — harness drafted, measurement not yet run. The per-stage
-timing scaffold, degraded-grade counting, and table output are complete and
-runnable against an inlined substrate model. The real measurement requires (a)
-swapping the substrate to the intuit_airflow slice and (b) the two-checkout A/B
-below, run by a maintainer with a live `ANTHROPIC_API_KEY`.
+**Status:** SKELETON — harness drafted, measurement not yet run. The script,
+sidecar parsing, degraded-grade counting, and table output are complete and
+runnable; the measurement requires a maintainer with a live `ANTHROPIC_API_KEY`
+and the prepared local intuit_airflow repo (below).
 
 Companion to the "Runtime benchmark retest" story on epic
 [#179](https://github.com/wjduenow/SignalForge/issues/179). The harness lives at
-`tests/research/179-runtime-benchmark/`.
+`tests/research/179-runtime-benchmark/benchmark_runtime.py`.
 
 ## Why this exists
 
@@ -29,112 +28,130 @@ bottleneck) and the `--select` batch path:
 This benchmark turns "we made it faster" into a measured per-stage delta, and
 confirms the 17/34 budget degradation is **closed**, not assumed closed.
 
-## Harness
+## The A/B: production PyPI package vs. the code on `dev`
 
-`tests/research/179-runtime-benchmark/`:
+The "before" is the released **`signalforge-dbt` PyPI package**; the "after" is
+the editable **`dev`** checkout. You cannot swap an installed package
+mid-process, so each side runs in its own venv and the only stable contract
+across the two versions is the `signalforge` CLI. The harness is therefore a
+pure-stdlib script that shells out to the venv-local `signalforge` and reads the
+durable sidecars — a prod venv needs ONLY `pip install signalforge-dbt`.
 
-- `test_runtime_benchmark.py` — gated by the `anthropic` marker (deselected from
-  default CI). Times draft → prune → grade → diff per stage, counts grade
-  degradations (total + budget-exceeded subset), prints a table.
-- `_substrate.py` — deterministic inputs: a representative inlined model, a
-  schema-only `SafetyPolicy`, shipped-default configs, a do-nothing adapter, an
-  empty `PruneResult` (prune disabled).
-
-### Run command
+Run the SAME command in two venvs, on ONE machine (wall-clock is machine- and
+network-dependent — both halves must run on the same host):
 
 ```bash
-# -s is required: the per-stage table is PRINTED, not asserted.
-pytest -m anthropic --no-cov -s \
-    tests/research/179-runtime-benchmark/test_runtime_benchmark.py
+# 1. BEFORE — production PyPI package
+python -m venv .venv-prod
+.venv-prod/bin/pip install signalforge-dbt
+.venv-prod/bin/python tests/research/179-runtime-benchmark/benchmark_runtime.py \
+    --project-dir ~/Projects/intuit_airflow/plugins/dbt \
+    --profiles-dir /tmp/sf-demo-profiles
+
+# 2. AFTER — the code on dev (editable from this checkout)
+python -m venv .venv-dev
+.venv-dev/bin/pip install -e .
+.venv-dev/bin/python tests/research/179-runtime-benchmark/benchmark_runtime.py \
+    --project-dir ~/Projects/intuit_airflow/plugins/dbt \
+    --profiles-dir /tmp/sf-demo-profiles
 ```
 
-Levers (environment variables):
+The script resolves `signalforge` from the SAME venv as the interpreter running
+it, so `.venv-prod/bin/python` benchmarks prod and `.venv-dev/bin/python`
+benchmarks dev — unambiguously. It prints the resolved version in the table so
+the two runs are self-labelling.
 
-- `SF_BENCH_GRADE_MODEL=claude-haiku-4-5` — time the **#187** opt-in fast-grade
-  path. Unset → shipped anthropic default (Sonnet), which captures **#186** only.
+### #187 opt-in (Haiku)
 
-## Protocol
+The shipped anthropic grade default stays Sonnet, so a default run captures #186
+only. To also measure #187, set `grade.model: claude-haiku-4-5` in the intuit
+project's `signalforge.yml` and run a third time; record it in the Haiku column.
 
-### The before/after A/B is a TWO-checkout protocol
+### Honest caveat — net release-to-release delta, not pure isolation
 
-Wall-clock is machine- and network-dependent, so the only honest A/B re-runs the
-OLD revision on the **same machine** rather than comparing against the preserved
-2026-05-30 sidecars.
+The prod PyPI release predates #169/#170/#171, so `dev` drafts 8 test primitives
+vs. prod's 5 — dev does *more* grading work, not less. The wall-clock delta is
+therefore the **net user-facing change between the last release and dev**, which
+conflates the efficiency wins (#186/#187/#188) with the added primitives. The
+**budget-exceeded degradation count** is the cleaner isolated signal. For a pure
+efficiency isolation, A/B two git checkouts at the SAME primitive set
+(`90af28b` — the `#179` writeup commit, last before #186 — vs. `dev`); the script
+works there too (`pip install -e .` on each checkout).
 
-1. **Before:** `git checkout 90af28b` (the `#179` empirical-retest-writeup
-   commit — last commit before #186). Copy `tests/research/179-runtime-benchmark/`
-   onto that checkout (it uses only long-stable public APIs), run the harness,
-   record the per-stage table.
-2. **After:** `git checkout dev` (currently `d280fc6`), run again, record.
-3. Diff the tables. The grade-stage delta is the #186 (and, with
-   `SF_BENCH_GRADE_MODEL`, #187) win.
+## Preconditions (one-time, per the epic's retest protocol)
 
-### Substrate: skeleton vs. real measurement
+The intuit project must already be prepared per
+[`179-test-primitive-expansion-retest.md` § Substrate](179-test-primitive-expansion-retest.md):
 
-The skeleton ships ONE inlined model so the harness runs without intuit_airflow.
-The real measurement swaps `_substrate.build_models()` to the
-`weekly_query_cost.sql` baseline target + the 10-model retest slice from
-`~/Projects/intuit_airflow/plugins/dbt` (synthesise each model's columns per
-[`179-test-primitive-expansion-retest.md` § Substrate](179-test-primitive-expansion-retest.md),
-then `manifest.load` and select the slice). The timing scaffold iterates whatever
-`build_models()` returns — no other change needed.
+- `dbt deps` + `dbt parse` run (generates `target/manifest.json`).
+- A synthesised `_signalforge_*_schema.yml` so the target model exposes its
+  columns (the Python-annotation manifest gap).
+- A `signalforge.yml` with `safety.mode: schema-only` + `prune.enabled: false`.
+- The `/tmp/sf-demo-profiles` profile override.
+- `ANTHROPIC_API_KEY` set.
+- The prod version must support `prune.enabled` (#35) + the Snowflake adapter
+  (#53) — any 0.4+ release qualifies.
 
-### Prune stays disabled
+## What the script measures
 
-The baseline ran `prune.enabled: false` (no Snowflake auth). The harness mirrors
-that — the prune stage does no warehouse work, its timing reads ~0. Keep it
-disabled for the apples-to-apples grade-stage A/B; lifting it (real Snowflake)
-changes what is being measured.
+`grade` and `diff` durations are read from the sidecars' `duration_seconds`
+(`.signalforge/grade.json`, `.signalforge/diff.json` — stable fields since #7/#8,
+so they parse identically under prod and dev). `draft + overhead` is **derived**
+as `total − grade − diff` (no sidecar carries draft duration; CLI startup +
+manifest load fall in here too). `prune` reads ~0 while disabled. `TOTAL` is the
+subprocess wall-clock. The grade-degradation counts come from `grade.json`'s
+`results` (`score is None`, and the `budget`-reasoning subset). The script
+asserts nothing — a benchmark records numbers; it does not gate a build.
 
 ### #188 `--select` batch — measured separately
 
 #188 amortises the shared cached prefix across models in ONE
-`signalforge generate --select` process. That is a CLI / multi-process concern,
-not an in-process orchestrator call, so it is NOT timed by the pytest harness.
-Measure it on the real slice on both revisions:
+`signalforge generate --select` process. That is a multi-model concern the
+single-model script does not cover. Measure it on both venvs:
 
 ```bash
-time signalforge generate --select 'path:models/reporting/*' \
-    --project-dir <intuit>/plugins/dbt --profiles-dir /tmp/sf-demo-profiles
+time .venv-prod/bin/signalforge generate --select 'path:models/reporting/*' \
+    --project-dir ~/Projects/intuit_airflow/plugins/dbt --profiles-dir /tmp/sf-demo-profiles
+# ...repeat with .venv-dev/bin/signalforge, and vs. an equivalent shell-loop
 ```
 
-against the equivalent shell-loop (one process per model), and record the total
-batch wall-clock + per-model `[i/N]` timings below.
+Record the totals in the batch table below.
 
 ## Result (maintainer-filled)
 
-> Fill these after running both checkouts. Delete this blockquote when done.
+> Fill these after running both venvs. Delete this blockquote when done.
 
-**Substrate used:** _(inlined skeleton model / intuit_airflow N-model slice)_
+**Intuit project:** `~/Projects/intuit_airflow/plugins/dbt` — **model:** _(target)_
 **Machine:** _(host, network)_ — **Date:** _(YYYY-MM-DD)_
+**Prod version:** _(e.g. 0.5.0)_ — **Dev version:** _(0.6.0.dev0)_
 
 ### Per-stage wall-clock — Sonnet default (captures #186)
 
-| Stage | Before (`90af28b`) | After (`dev`) | Δ | Δ % |
+| Stage | Before (prod PyPI) | After (`dev`) | Δ | Δ % |
 |---|---:|---:|---:|---:|
-| draft | _s | _s | _s | _% |
+| draft + overhead (derived) | _s | _s | _s | _% |
 | prune (disabled) | ~0s | ~0s | — | — |
 | grade | _s | _s | _s | _% |
 | diff | _s | _s | _s | _% |
 | **TOTAL** | **_s** | **_s** | **_s** | **_%** |
 
-### Per-stage wall-clock — Haiku opt-in (`SF_BENCH_GRADE_MODEL=claude-haiku-4-5`, adds #187)
+### Grade stage — Haiku opt-in (`grade.model: claude-haiku-4-5`, adds #187)
 
-| Stage | Before (`90af28b`) | After (`dev`) | Δ | Δ % |
-|---|---:|---:|---:|---:|
-| grade | _s | _s | _s | _% |
-| **TOTAL** | **_s** | **_s** | **_s** | **_%** |
+| | Before (prod PyPI) | After (`dev`, Haiku) |
+|---|---:|---:|
+| grade | _s | _s |
 
 ### Grade degradation (the headline correctness signal)
 
 | | Baseline 2026-05-30 | After (`dev`, Sonnet) | After (`dev`, Haiku) |
 |---|---:|---:|---:|
-| comparable (scored) | 17 of 34 | _ | _ |
+| artifacts graded | 34 | _ | _ |
+| comparable (scored) | 17 | _ | _ |
 | degraded — budget exceeded | **17** | _ | _ |
 
 ### #188 batch amortisation (`--select` vs. shell-loop)
 
-| | Before (`90af28b`) | After (`dev`) |
+| | Before (prod PyPI) | After (`dev`) |
 |---|---:|---:|
 | `--select` total wall-clock | _s | _s |
 | shell-loop total wall-clock | _s | _s |
@@ -142,5 +159,5 @@ batch wall-clock + per-model `[i/N]` timings below.
 ### Findings
 
 - _(grade-stage reduction attributable to #186 + #187; whether budget-exceeded
-  reached 0; whether #188 produced a measurable per-model amortisation; any
-  follow-on tickets for remaining degradations.)_
+  reached 0; whether #188 produced a measurable per-model amortisation; the
+  primitive-count conflation's effect on draft time; any follow-on tickets.)_
