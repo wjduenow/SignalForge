@@ -72,6 +72,7 @@ def _make_event(
     score: float | None = 0.8,
     passed: bool = True,
     response_text_hash: str = "5555666677778888",
+    cache_hit: bool = False,
 ) -> GradeEvent:
     """Construct a :class:`GradeEvent` with sensible defaults."""
     return GradeEvent(
@@ -89,6 +90,7 @@ def _make_event(
         prompt_version_template="fedcba9876543210",
         criterion_prompt_hash="1111222233334444",
         response_text_hash=response_text_hash,
+        cache_hit=cache_hit,
         model="claude-sonnet-4-6",
         input_tokens=1820,
         output_tokens=140,
@@ -357,10 +359,16 @@ def test_grade_event_score_none_accepted_degraded_path() -> None:
     assert event.response_text_hash == ""
 
 
-def test_grade_event_audit_schema_version_defaults_to_one() -> None:
-    """``audit_schema_version`` defaults to ``1`` on production model."""
+def test_grade_event_audit_schema_version_defaults_to_two() -> None:
+    """``audit_schema_version`` defaults to ``2`` on production model.
+
+    Per DEC-008 / DEC-009 of #189: the default bumped 1 → 2 in lockstep
+    with the new ``cache_hit`` field. The field stays typed ``int`` so
+    older v1 records still round-trip (see
+    :func:`tests.grade.test_drift_detector.test_v1_fixture_still_validates_against_production_grade_event`).
+    """
     event = _make_event()
-    assert event.audit_schema_version == 1
+    assert event.audit_schema_version == 2
 
 
 def test_grade_event_audit_schema_version_is_int_typed() -> None:
@@ -442,6 +450,88 @@ def test_grading_report_grade_schema_version_locked_to_one() -> None:
             thresholds=(0.7, 0.5),
             results=(_make_result(),),
         )
+
+
+# --- GradeEvent.cache_hit (DEC-009, DEC-010 of #189) -----------------------
+
+
+def test_grade_event_default_cache_hit_is_false() -> None:
+    """``GradeEvent.cache_hit`` defaults to ``False`` (DEC-009 of #189).
+
+    A v1 audit record (pre-#189) loaded via ``extra="ignore"`` lands
+    with ``cache_hit = False``, which is the correct semantic value:
+    the record predates cache support, so it cannot have been a
+    cache-hit. New live-grade records (US-008 follow-on) construct via
+    ``_build_grade_event(...)`` with the default; rehydration call
+    sites pass ``cache_hit=True`` explicitly.
+    """
+    event = _make_event()
+    assert event.cache_hit is False
+
+
+def test_grade_event_cache_hit_true_round_trips_through_jsonl() -> None:
+    """A ``cache_hit=True`` event survives a ``model_dump_json`` →
+    ``model_validate_json`` round-trip losslessly.
+
+    The audit writer (:func:`signalforge.grade.audit.write_grade_event`)
+    serialises via ``model_dump_json``; a JSONL replay reconstructs the
+    event via ``model_validate_json``. The new field must travel
+    cleanly across that boundary so cost-rollup / audit-replay tools
+    distinguish cache-hit records from live-grade records.
+    """
+    event = _make_event(cache_hit=True)
+    serialised = event.model_dump_json(by_alias=True)
+    reparsed = GradeEvent.model_validate_json(serialised)
+    assert reparsed.cache_hit is True
+    # Round-trip preserves every other reproducibility field too.
+    assert reparsed.audit_schema_version == 2
+    assert reparsed.artifact_id == event.artifact_id
+    assert reparsed.criterion_id == event.criterion_id
+
+
+def test_grade_event_repr_keeps_cache_hit_visible() -> None:
+    """The custom :meth:`GradeEvent.__repr__` exposes ``cache_hit``.
+
+    Per the bead spec: ``cache_hit`` is a non-sensitive ``bool`` — it
+    should appear in the compact repr so operators reading log lines
+    can distinguish live-grade records from cache-rehydration records
+    at a glance. ``evidence`` / ``reasoning`` (potentially PII-bearing)
+    stay excluded.
+    """
+    sensitive_evidence = "user_email='alice@example.com' was sampled"
+    sensitive_reasoning = "Quoted PII content from the warehouse sample"
+    event = GradeEvent(
+        signalforge_version="0.1.0.dev0",
+        run_id="a1b2c3d4e5f6478890aabbccddeeff00",
+        timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=UTC),
+        model_unique_id="model.shop.dim_customers",
+        artifact_id="column.email.description",
+        criterion_id="clarity",
+        score=0.8,
+        passed=True,
+        evidence=sensitive_evidence,
+        reasoning=sensitive_reasoning,
+        rubric_hash="0123456789abcdef",
+        prompt_version_template="fedcba9876543210",
+        criterion_prompt_hash="1111222233334444",
+        response_text_hash="5555666677778888",
+        cache_hit=True,
+        model="claude-sonnet-4-6",
+        input_tokens=0,
+        output_tokens=0,
+    )
+    rendered = repr(event)
+    # cache_hit IS shown (non-sensitive bool).
+    assert "cache_hit=True" in rendered
+    # Sensitive fields are NOT shown.
+    assert "alice@example.com" not in rendered
+    assert "PII content" not in rendered
+    assert "evidence=" not in rendered
+    assert "reasoning=" not in rendered
+    # Identity + verdict are shown.
+    assert "GradeEvent(" in rendered
+    assert "column.email.description" in rendered
+    assert "clarity" in rendered
 
 
 # --- frozen + transitive immutability --------------------------------------
