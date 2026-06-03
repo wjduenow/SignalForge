@@ -757,3 +757,46 @@ def test_verify_provider_prefix_coverage_raises_when_model_unmapped() -> None:
     # find the SKU to fix.
     assert "mistral-large-2" in str(exc_info.value)
     assert "_PROVIDER_PREFIXES" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# #187 US-001 — SKU-prefix dispatch now sources PROVIDER_SKU_PREFIXES from
+# signalforge.llm.providers instead of a duplicated local literal. The
+# classification behaviour must be byte-identical to the pre-refactor
+# literal.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("claude-sonnet-4-6", "anthropic"),
+        ("claude-haiku-4-5", "anthropic"),
+        ("gpt-4o", "openai"),
+        ("gpt-4o-mini", "openai"),
+        ("gemini-2.5-flash", "gemini"),
+        ("gemini-2.5-pro", "gemini"),
+        ("mistral-large-2", None),  # no matching prefix → None
+        ("", None),
+    ],
+)
+def test_provider_for_model_classifies_each_sku(model: str, expected: str | None) -> None:
+    """``_provider_for_model`` maps a SKU to its provider via the SKU-prefix
+    dispatch (now sourced from ``PROVIDER_SKU_PREFIXES`` — #187 US-001). The
+    claude-/gpt-/gemini- classification is byte-identical to the pre-refactor
+    local literal; an unknown prefix returns ``None``."""
+    from signalforge.llm.cost._rollup import _provider_for_model
+
+    assert _provider_for_model(model) == expected
+
+
+def test_rollup_prefix_table_is_derived_from_provider_sku_prefixes() -> None:
+    """The cost-rollup's ``_PROVIDER_PREFIXES`` is the inversion of the
+    single-source-of-truth ``PROVIDER_SKU_PREFIXES`` (#187 US-001) — no
+    duplicated literal. A drift between the two tables breaks this loudly."""
+    from signalforge.llm.cost._rollup import _PROVIDER_PREFIXES
+    from signalforge.llm.providers import PROVIDER_SKU_PREFIXES
+
+    assert dict((prefix, provider) for prefix, provider in _PROVIDER_PREFIXES) == {
+        prefix: provider for provider, prefix in PROVIDER_SKU_PREFIXES.items()
+    }

@@ -926,7 +926,7 @@ other stages and silently ignored by the draft loader.
 llm:
   provider: anthropic        # registry-validated; "anthropic" + "openai" + "gemini" are registered (see provider sections below)
   model: claude-sonnet-4-6
-  cheap_model: claude-haiku-4-5-20251001
+  cheap_model: claude-haiku-4-5
   max_output_tokens: 4096
   cache_ttl: 5m              # one of "5m" | "1h"
   max_retries_429: 3
@@ -949,7 +949,9 @@ Field-by-field:
   Default `claude-sonnet-4-6`. Any string the SDK accepts is allowed.
 - **`cheap_model`** — informational; not selected automatically.
   The CLI (#9) flips on `--cheap` to swap `model` for this value.
-  Default `claude-haiku-4-5-20251001`.
+  Default `claude-haiku-4-5` (bare SKU — matches a `PRICES` key; it is
+  also the opt-in fast judge on the grade side per #187, though the grade
+  *default* stayed `claude-sonnet-4-6` after the #187 calibration gate).
 - **`max_output_tokens`** — Anthropic `max_tokens` ceiling. Must be
   positive (validator).
 - **`cache_ttl`** — `Literal["5m", "1h"]`. `"1h"` opts into the
