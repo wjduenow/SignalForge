@@ -72,6 +72,7 @@ def _grade_record(
     output_tokens: int,
     cache_creation: int = 0,
     cache_read: int = 0,
+    cache_hit: bool = False,
     artifact_id: str = "column.email.description",
     criterion_id: str = "clarity",
     timestamp: str = "2026-05-29T00:00:00.000000Z",
@@ -93,6 +94,7 @@ def _grade_record(
         "prompt_version_template": "5555555555555555",
         "criterion_prompt_hash": "6666666666666666",
         "response_text_hash": "7777777777777777",
+        "cache_hit": cache_hit,
         "model": model,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
@@ -675,6 +677,93 @@ def test_rollup_grand_total_equals_sum_of_provider_subtotals(tmp_path: Path) -> 
     for provider in report.per_provider.values():
         model_sum = sum(m.total_usd for m in provider.per_model.values())
         assert provider.subtotal_usd == pytest.approx(model_sum)
+
+
+# ---------------------------------------------------------------------------
+# #189 DEC-020 — Cache-hit GradeEvent contributes $0 to the rollup but is
+# still walked by _ingest_jsonl (the rollup must NOT skip cache-hit rows;
+# they're GradeEvents like any other, and the audit-walk count must match
+# the on-disk record count).
+# ---------------------------------------------------------------------------
+
+
+def test_cost_rollup_treats_cache_hit_grade_event_as_zero_cost(tmp_path: Path) -> None:
+    """Cache-hit ``GradeEvent`` contributes \\$0 to the rollup but is walked.
+
+    Pins DEC-020 of plans/super/189-no-grade-cache.md:
+
+      * The cache-hit row carries ``cache_hit=True`` AND zero token counts
+        (no LLM call was made), so the per-record price arithmetic
+        multiplies by zero → \\$0 USD contribution.
+      * The cache-hit row IS a ``GradeEvent`` like any other and MUST be
+        traversed by ``_ingest_jsonl`` — concretely, the per-model
+        ``call_count`` counts BOTH the miss and the hit (not just the
+        miss). A regression that skipped cache-hit rows on the audit walk
+        would silently drop them from ``call_count``.
+    """
+    project = _make_project(tmp_path)
+    # Two grade events:
+    #   1) cache-MISS — realistic non-zero tokens (1820/140 mirrors the
+    #      figures used by the live-grade fixtures elsewhere).
+    #   2) cache-HIT  — all four token counts at 0; cache_hit=True.
+    miss_input_tokens = 1820
+    miss_output_tokens = 140
+    _write_jsonl(
+        _audit_dir(project) / "grade.jsonl",
+        [
+            _grade_record(
+                model="claude-sonnet-4-6",
+                input_tokens=miss_input_tokens,
+                output_tokens=miss_output_tokens,
+                cache_hit=False,
+                artifact_id="column.email.description",
+                criterion_id="clarity",
+            ),
+            _grade_record(
+                model="claude-sonnet-4-6",
+                input_tokens=0,
+                output_tokens=0,
+                cache_creation=0,
+                cache_read=0,
+                cache_hit=True,
+                artifact_id="column.email.description",
+                criterion_id="completeness",
+            ),
+        ],
+    )
+
+    report = rollup_audit_dir(project)
+
+    # (a) Total grade USD == miss-only contribution.
+    # Hand-computed against PRICES (claude-sonnet-4-6 in/out = $3.00/$15.00 per Mtok):
+    #   (1820 × $3.00 + 140 × $15.00) / 1e6 = ($5460 + $2100) / 1e6 = $0.00756
+    expected_miss_usd = _expected_usd(
+        model="claude-sonnet-4-6",
+        input_tokens=miss_input_tokens,
+        output_tokens=miss_output_tokens,
+    )
+    rolled = report.per_provider["anthropic"].per_model["claude-sonnet-4-6"]
+    assert rolled.total_usd == pytest.approx(expected_miss_usd)
+    assert rolled.total_usd == pytest.approx(0.00756)
+    assert report.total_usd == pytest.approx(0.00756)
+
+    # The cache-hit row contributes exactly zero — i.e. the total matches
+    # the miss alone, NOT (miss + something). A regression that priced
+    # cache-hit tokens against the non-cached rate would still produce 0
+    # here (0 × price = 0), so this assertion alone is necessary but not
+    # sufficient. The call_count assertion below is the second leg.
+    assert rolled.input_tokens == miss_input_tokens  # only the miss contributed
+    assert rolled.output_tokens == miss_output_tokens
+
+    # (b) Cache-hit row IS walked — call_count == 2, not 1.
+    # If a regression made the rollup skip cache-hit rows on ingestion,
+    # call_count would drop to 1 (only the miss). This is the load-bearing
+    # "rollup must NOT skip cache_hit rows" assertion from DEC-020.
+    assert rolled.call_count == 2, (
+        f"expected rollup to walk BOTH the miss AND the cache-hit GradeEvent "
+        f"(call_count=2); got call_count={rolled.call_count} — a regression "
+        f"silently skipped cache-hit rows on the audit walk."
+    )
 
 
 # ---------------------------------------------------------------------------
