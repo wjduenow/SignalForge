@@ -104,10 +104,18 @@ not a `Literal`). See [Adding a provider](#adding-a-provider) below.
 | **Server-side JSON mode** | n/a (Anthropic parser tolerant) | ✅ `response_format={"type":"json_object"}` | ✅ `response_mime_type="application/json"` |
 | **Pre-send `count_tokens` gate** | ✅ | ❌ (no SDK token-count API) | ❌ (deferred — Gemini has the API but we don't gate on it for cache parity) |
 | **`cache_ttl` config** | honoured (`"5m"` / `"1h"`) | silently ignored | silently ignored |
-| **Default drafter model** | `claude-sonnet-4-6` | `gpt-4o` | unset |
-| **Default grader model** | `claude-sonnet-4-6` (#187; Haiku is opt-in) | `gpt-4o-mini` (fast default) | `gemini-2.5-flash` (fast default) |
+| **Default drafter model** | `claude-sonnet-4-6` | `claude-sonnet-4-6` † | `claude-sonnet-4-6` † |
+| **Default grader model** | `claude-sonnet-4-6` (#187; Haiku is opt-in) | `gpt-4o-mini` (resolved per-provider, #187) | `gemini-2.5-flash` (resolved per-provider, #187) |
 | **Live smoke marker** | `@pytest.mark.anthropic` | `@pytest.mark.openai` | `@pytest.mark.gemini` |
 | **Live smoke env** | `ANTHROPIC_API_KEY` | `SF_RUN_OPENAI=1` + `OPENAI_API_KEY` | `SF_RUN_GEMINI=1` + `GOOGLE_API_KEY` |
+
+† **The drafter has no per-provider default** — `DraftConfig.model` defaults to
+`claude-sonnet-4-6` regardless of `llm.provider`. Switching the drafter to OpenAI
+or Gemini therefore **requires setting `llm.model` explicitly** (e.g.
+`llm.model: gpt-4o`); leaving it unset sends `claude-sonnet-4-6` to the other
+vendor and fails at the API. This is the same footgun the grader's per-provider
+resolver closed in #187 — but per #187 DEC-008 the drafter stayed out of scope,
+so the drafter's per-provider default resolution is a future follow-up.
 
 A `❌` on prompt caching does **not** mean the provider is unusable —
 it means every drafter call ships the full system + cached_block

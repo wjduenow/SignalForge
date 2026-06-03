@@ -16,7 +16,8 @@ Gating — belt-and-suspenders, mirroring
 
 * ``pytestmark = pytest.mark.gemini`` — the existing ``gemini`` marker,
   excluded from the default ``pytest`` run via :file:`pyproject.toml`'s
-  ``addopts``. Default CI never collects this test.
+  ``addopts``. Default CI **deselects** this test (it is imported during
+  collection but the test body never runs).
 * A runtime ``pytest.skip(...)`` when ``SF_RUN_GEMINI != "1"`` OR
   ``GOOGLE_API_KEY`` is unset/blank.
 

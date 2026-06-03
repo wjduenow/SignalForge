@@ -22,8 +22,9 @@ Gating — belt-and-suspenders, mirroring
 * ``pytestmark = pytest.mark.anthropic`` — the existing ``anthropic``
   marker, excluded from the default ``pytest`` run via
   :file:`pyproject.toml`'s
-  ``addopts = "... -m 'not anthropic ...'"``. Default CI never collects
-  this test.
+  ``addopts = "... -m 'not anthropic ...'"``. Default CI **deselects**
+  this test (the module is still imported during collection — hence the
+  lazy `_substrate` import below — but the test body never runs).
 * A runtime ``pytest.skip(...)`` when ``ANTHROPIC_API_KEY`` is unset (or
   blank) — so a maintainer who runs ``pytest -m anthropic`` without a
   key sees a clean skip-with-reason, not a noisy auth failure.
@@ -42,20 +43,16 @@ from pathlib import Path
 
 import pytest
 
-# Research-tier sibling import: the harness lives outside the importable
-# package tree, so add this directory to ``sys.path`` for ``_substrate``.
-sys.path.insert(0, str(Path(__file__).parent))
+from signalforge.grade import grade_artifacts
+from signalforge.grade.config import GradeConfig
 
-from _substrate import (  # noqa: E402  (path insert must precede import)
-    build_candidate,
-    build_model,
-    empty_prune_result,
-    expected_artifact_ids,
-    load_baseline,
-)
-
-from signalforge.grade import grade_artifacts  # noqa: E402
-from signalforge.grade.config import GradeConfig  # noqa: E402
+# NOTE: the `_substrate` sibling import is intentionally LAZY (inside the test,
+# after the skip) rather than module-level. The harness lives outside the
+# importable package tree, so reaching `_substrate` needs a `sys.path` insert —
+# doing that at import time would mutate `sys.path` during pytest collection
+# even though this test is deselected by `-m 'not anthropic'` (Copilot PR
+# review). Keeping it lazy means importing this module has no global side
+# effects.
 
 pytestmark = pytest.mark.anthropic
 
@@ -73,11 +70,11 @@ def _skip_reason() -> str | None:
 
 
 def test_haiku_grade_concordance_vs_sonnet_baseline(tmp_path: Path) -> None:
-    """Re-grade the pinned sample with the Haiku default; assert ≥ 85% concordance.
+    """Re-grade the pinned sample with the Haiku opt-in; assert ≥ 85% concordance.
 
-    Builds the resolved Haiku-default :class:`GradeConfig` (``model``
-    resolves to ``claude-haiku-4-5`` via the #187 US-002 provider
-    fast-model resolver; ``max_output_tokens=1024``), grades the pinned
+    Builds the Haiku opt-in :class:`GradeConfig(model="claude-haiku-4-5")`
+    (the anthropic *default* is Sonnet post-calibration — this gate is why;
+    ``max_output_tokens=1024``), grades the pinned
     candidate over the default four-criterion rubric, joins each
     :class:`GradingResult` to the committed Sonnet baseline by
     ``(artifact_id, criterion_id)``, computes per-criterion pass/fail
@@ -92,6 +89,17 @@ def test_haiku_grade_concordance_vs_sonnet_baseline(tmp_path: Path) -> None:
     reason = _skip_reason()
     if reason:
         pytest.skip(reason)
+
+    # Lazy sibling import (after the skip) — keeps `sys.path` un-mutated at
+    # collection time when this test is deselected (Copilot PR review).
+    sys.path.insert(0, str(Path(__file__).parent))
+    from _substrate import (
+        build_candidate,
+        build_model,
+        empty_prune_result,
+        expected_artifact_ids,
+        load_baseline,
+    )
 
     model = build_model()
     candidate = build_candidate()
@@ -187,7 +195,7 @@ def test_haiku_grade_concordance_vs_sonnet_baseline(tmp_path: Path) -> None:
     assert rate >= _CONCORDANCE_THRESHOLD, (
         f"Haiku concordance {rate:.1%} below the {_CONCORDANCE_THRESHOLD:.0%} "
         f"decision rule ({agreements}/{comparable} agreements). "
-        "The Haiku default does NOT grade concordantly with the Sonnet "
+        "The Haiku opt-in does NOT grade concordantly with the Sonnet "
         "baseline on this sample; record the discordances in "
         "docs/research/187-haiku-calibration.md and reconsider the default."
     )

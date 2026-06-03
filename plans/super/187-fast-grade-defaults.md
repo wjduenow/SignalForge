@@ -7,7 +7,7 @@
 - **Base branch:** `dev` (0.6.0.dev0). PRs target `dev`.
 - **Worktree:** `../worktrees/SignalForge/187-fast-grade-defaults`
 - **Branch:** `feature/187-fast-grade-defaults`
-- **Phase:** devolved
+- **Phase:** complete (implemented; PR #193) — calibration drove the final shape: **Sonnet stays the grade default, Haiku is opt-in** (the per-provider table is `PROVIDER_DEFAULT_MODELS`, anthropic→`claude-sonnet-4-6`). See `docs/research/187-haiku-calibration.md`.
 - **PR:** [#193](https://github.com/wjduenow/SignalForge/pull/193) (base `dev`)
 - **Sessions:** 1 (2026-06-02)
 
@@ -71,6 +71,7 @@ This ticket flips the **grade-stage default** to a faster/cheaper model, and —
 - **Risk:** the unused draft placeholder uses the dated `claude-haiku-4-5-20251001`, which is NOT a pricing key. Adopting that exact string as the grade default would break `--estimate`/cost-rollup. The bare SKU `claude-haiku-4-5` matches pricing and the `sonnet-4-6`/`opus-4-7` convention.
 
 **Fastest/cheapest known SKU per provider (from pricing):**
+
 | Provider | Cheapest known SKU | input $/MTok | output $/MTok |
 |---|---|---|---|
 | Anthropic | `claude-haiku-4-5` | 0.80 | 4.00 |
@@ -248,7 +249,7 @@ No blockers remain after the refinement decisions below.
 
 ## Story dependency graph
 
-```
+```text
 US-001 ─┬─> US-002 ─┬─> US-003 ─┐
         │           ├─> US-005 ─┤
         │           └─> US-006 ─┤
