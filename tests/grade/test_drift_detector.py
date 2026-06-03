@@ -30,6 +30,7 @@ from typing import Literal
 import pytest
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from signalforge.grade.cache import CacheRecord
 from signalforge.grade.models import GradeEvent, GradingReport, GradingResult
 
 _STRICT = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
@@ -161,6 +162,37 @@ class StrictGradeEventV2(BaseModel):
     cache_read_input_tokens: int = 0
 
 
+class StrictCacheRecord(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`CacheRecord` (v1).
+
+    Pins the v1 cache-record shape introduced by #189 (DEC-011) against
+    :file:`grade_cache_record_v1.json`. Adding a field to production
+    :class:`CacheRecord` without mirroring it here OR refreshing the
+    fixture breaks this test loudly.
+
+    Production :class:`CacheRecord` uses ``extra="ignore"`` for
+    forward-compat; this strict mirror is the regression gate.
+    """
+
+    model_config = _STRICT
+
+    cache_schema_version: int = 1
+    artifact_id: str
+    criterion_id: str
+    score: float
+    passed: bool
+    evidence: str = ""
+    reasoning: str = ""
+    criterion_prompt_hash: str
+    artifact_text_hash: str
+    provider: str
+    model: str
+    prompt_version_template: str
+    response_text_hash: str
+    rubric_hash: str
+    original_timestamp: datetime
+
+
 # --- Fixture validation ----------------------------------------------------
 
 
@@ -273,6 +305,20 @@ def test_v1_fixture_still_validates_against_production_grade_event() -> None:
         assert event.cache_hit is False
 
 
+def test_strict_cache_record_validates_committed_fixture() -> None:
+    """The :file:`grade_cache_record_v1.json` fixture validates against
+    :class:`StrictCacheRecord`.
+
+    Production :class:`signalforge.grade.CacheRecord` uses
+    ``extra="ignore"`` for forward-compat; this strict mirror catches
+    silent schema drift before a future cache-corruption bug strikes
+    in the field.
+    """
+    fixture_path = _FIXTURES_DIR / "grade_cache_record_v1.json"
+    payload = json.loads(fixture_path.read_text(encoding="utf-8"))
+    StrictCacheRecord.model_validate(payload)
+
+
 # --- Field-set parity ------------------------------------------------------
 
 
@@ -317,6 +363,29 @@ def test_grading_report_field_set_parity() -> None:
         f"StrictGradingReport has fields absent from GradingReport: "
         f"{extra_in_strict}. Remove from StrictGradingReport or add to "
         f"GradingReport."
+    )
+
+
+def test_cache_record_field_set_parity() -> None:
+    """:class:`StrictCacheRecord` model_fields exactly match
+    :class:`signalforge.grade.CacheRecord` model_fields.
+
+    Adding a field to production :class:`CacheRecord` MUST land in
+    :class:`StrictCacheRecord` AND refresh
+    :file:`grade_cache_record_v1.json` in the same change.
+    """
+    strict_fields = set(StrictCacheRecord.model_fields.keys())
+    prod_fields = set(CacheRecord.model_fields.keys())
+    missing_in_strict = prod_fields - strict_fields
+    extra_in_strict = strict_fields - prod_fields
+    assert not missing_in_strict, (
+        f"StrictCacheRecord is missing fields present in CacheRecord: "
+        f"{missing_in_strict}. Update StrictCacheRecord to match."
+    )
+    assert not extra_in_strict, (
+        f"StrictCacheRecord has fields absent from CacheRecord: "
+        f"{extra_in_strict}. Remove from StrictCacheRecord or add to "
+        f"CacheRecord."
     )
 
 
