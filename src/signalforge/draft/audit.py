@@ -176,6 +176,7 @@ def _build_response_event(
     result: LLMResult,
     prompt_version: str,
     signalforge_version: str,
+    parser_reshaped: tuple[ReshapeRecord, ...] = (),
 ) -> LLMResponseEvent:
     """Internal seam: construct an :class:`LLMResponseEvent` from the inputs.
 
@@ -191,6 +192,13 @@ def _build_response_event(
     so the audit log records 16-hex digests rather than the raw cleartext
     (keeps records under the POSIX-atomic-append cap; avoids re-emitting
     PII the LLM may have echoed from the prompt).
+
+    ``parser_reshaped`` (issue #184 DEC-005) carries zero-or-more
+    :class:`ReshapeRecord` instances produced by the parser when it
+    re-attaches a mis-scoped model-only variant from column scope to model
+    scope. Default empty tuple preserves byte-equality of the audit JSONL
+    line for the no-reshape happy path (existing v1-shape consumers still
+    parse cleanly under the v2 schema bump).
     """
     return LLMResponseEvent(
         timestamp=timestamp,
@@ -205,6 +213,7 @@ def _build_response_event(
         output_tokens=result.output_tokens,
         model=result.model,
         signalforge_version=signalforge_version,
+        parser_reshaped=parser_reshaped,
     )
 
 
