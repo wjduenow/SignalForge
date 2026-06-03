@@ -66,7 +66,7 @@ does not hard-code a hash so it can't drift. Latest known rotations:
   / ``partition_date``" heuristic plus per-method calibration prose.
   Only the system prompt changed; the cached-block golden (manifest
   summary) is unchanged.
-- ``e568fb3e4602e465`` — current. Rotated under #183 (US-001) when the
+- ``e568fb3e4602e465`` — rotated under #183 (US-001) when the
   missing ``_ROW_COUNT_BETWEEN_SCOPE_INSTRUCTION`` block was added to the
   SCOPE section (the ``row_count_between`` primitive shipped its catalogue
   line in #169 but never got a dedicated narrative scope-instruction block
@@ -76,6 +76,17 @@ does not hard-code a hash so it can't drift. Latest known rotations:
   plus the ``minimum``/``maximum``/``where`` calibration prose. Only the
   system prompt changed; the cached-block golden (manifest summary) is
   unchanged.
+- ``32d33f14a3a57060`` — current. Rotated under #184 when
+  ``_ROW_COUNT_ANOMALY_SCOPE_INSTRUCTION`` gained explicit model-vs-column
+  scope teaching (DEC-001 / DEC-007). The rewritten prose adds the
+  verbatim sentence "This test goes in the model-level ``tests:`` list,
+  NOT inside any column's ``tests:`` list — the ``date_column`` argument
+  names the column but the test itself is model-scoped" plus a worked
+  YAML example showing model-level placement under a surrounding
+  ``models:`` / ``tests:`` structure. All pre-#184 calibration prose
+  (incremental-fact-table heuristic, dow seasonality, method defaults,
+  the four example column names) is preserved verbatim. Only the system
+  prompt changed; the cached-block golden (manifest summary) is unchanged.
 
 If this rotates again, update both :data:`_EXPECTED_PROMPT_VERSION` and
 :data:`_CACHED_BLOCK_GOLDEN` in lockstep — the rotation is the signal
@@ -104,7 +115,7 @@ _FIXTURE_PATH = (
 )
 
 
-_EXPECTED_PROMPT_VERSION: str = "e568fb3e4602e465"
+_EXPECTED_PROMPT_VERSION: str = "32d33f14a3a57060"
 
 
 # Captured once via ``render_prompt`` against the canonical fixture below.

@@ -51,7 +51,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 import signalforge as _sf
-from signalforge.draft.audit import _build_response_event, write_response_event
+from signalforge.draft.audit import ReshapeRecord, _build_response_event, write_response_event
 from signalforge.draft.config import DraftConfig
 from signalforge.draft.errors import (
     LLMResponseAuditRecordTooLargeError,
@@ -221,6 +221,14 @@ def draft_from_request(
     # the rule strings (with their ``(model)`` / ``(column X)`` prefixes)
     # that the LLM saw.
     business_rules: tuple[str, ...] = tuple(_read_business_rules(model))
+    # Issue #184 DEC-005 — collect any parser re-attaches of mis-scoped
+    # model-only variants (``row_count_anomaly_by_period`` / ``row_count_between``
+    # / ``unique_combination``) so the corrective action lands in the
+    # response-audit JSONL alongside the runtime WARNING. The parser appends
+    # one ``ReshapeRecord`` per re-attach when this list is supplied.
+    # ``model_unique_id`` rides through to the parser's WARNING payload so a
+    # multi-model batch can be reconciled at audit-replay time.
+    reshapes_collected: list[ReshapeRecord] = []
     candidate = parse_draft_response(
         result.response_text,
         model_columns,
@@ -229,6 +237,8 @@ def draft_from_request(
         model_columns_by_type=model_columns_by_type,
         dialect_name="bigquery",
         business_rules=business_rules,
+        reshapes_collected=reshapes_collected,
+        model_unique_id=model.unique_id,
     )
 
     # 4. Write the response-audit record. Fail-closed (DEC-011):
@@ -249,6 +259,7 @@ def draft_from_request(
         result=result,
         prompt_version=prompt_version,
         signalforge_version=_sf.__version__,
+        parser_reshaped=tuple(reshapes_collected),
     )
     try:
         write_response_event(event, audit_path=response_audit_path)
