@@ -3,8 +3,8 @@
 ## Meta
 
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/188
-- **Phase:** detailing
-- **PR:** _(pending)_
+- **Phase:** published
+- **PR:** https://github.com/wjduenow/SignalForge/pull/195 (draft, base `dev`)
 - **Branch / worktree:** `feature/188-bulk-cache-prefix` at `../worktrees/SignalForge/188-bulk-cache-prefix` (cut from `origin/dev`, 0.6.0.dev0)
 - **Labels:** enhancement, perf, draft
 - **Sessions:** 1 (2026-06-03)
