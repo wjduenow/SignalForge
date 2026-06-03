@@ -228,6 +228,27 @@ Runtime knob flags:
   ANSI: coloured terminal output (default). Markdown:
   GitHub-friendly report. JSON: stdout receives the JSON
   sidecar's contents.
+- `--cache-scope {per-model,project}` — Override the prompt-cache
+  prefix scope for the drafter (default: from config, which itself
+  defaults to `per-model`). Precedence: explicit `--cache-scope`
+  flag > `llm.cache_scope` in `signalforge.yml` (when non-default)
+  > auto-promote. A `--select` batch matching ≥ 2 models
+  auto-promotes the per-model `DraftConfig` overlay to `project`
+  unless the operator has pinned a scope (DEC-002 / DEC-003 of
+  issue #188). Under `project` scope the drafter renders a
+  byte-identical project-level cached prefix shared across every
+  model in the batch: `cache_creation` is paid once on the first
+  model, and the ≈12× cheaper `cache_read` applies on models
+  2..N. Pass `--cache-scope per-model` to opt a multi-model batch
+  back out of project scope; pass `--cache-scope project` to force
+  it on a single-model run. Single-model positional runs default
+  to `per-model` and never auto-promote (preserving the existing
+  cache-stability snapshot byte-for-byte). Applied via
+  `DraftConfig.model_validate(...)` so validators re-run on the
+  override (mirrors `--mode`'s `SafetyPolicy.with_mode` and the
+  prune `--scope` / `--sample-strategy` overlay). Argparse rejects
+  unknown values → exit 2. See [Running across many
+  models](#running-across-many-models) for the batch cost model.
 - `--scope {sample,full}` — Override `prune.scope`
   (default: from config). `sample`: tests run against a
   100k-row deterministic sample. `full`: tests run against
@@ -1156,16 +1177,37 @@ Semantics:
   batch start, so `_active_session_id` and the rest of the BigQuery
   session state cannot bleed between iterations. Adds ~100-500ms BQ
   client init per model — acceptable vs. state-corruption risk.
-- **Anthropic prompt cache behavior** (DEC-015). The drafter's
-  explicitly cache-marked block is the manifest summary (model
-  under draft + its neighbours), which **changes per model** — so
-  the marked cache does NOT amortise across siblings in a batch.
-  Cost savings within one process come from Anthropic's automatic
-  caching of the static system prompt, which IS byte-stable across
-  iterations once it crosses the auto-cache size threshold. Net:
-  expect partial cache savings on system-prompt tokens; do not
-  expect the marked manifest-summary block to hit on subsequent
-  models.
+- **Anthropic prompt cache behavior** (DEC-015; updated by
+  issue #188 DEC-002 / DEC-003). The amortisation now depends on the
+  drafter's cache scope, set by `--cache-scope` (or `llm.cache_scope`
+  in `signalforge.yml`, or auto-promotion — see the precedence in the
+  [`--cache-scope` flag reference](#signalforge-generate-model)):
+  - **`cache_scope=project` (the auto-promoted default for a
+    `--select` batch matching ≥ 2 models).** The drafter renders a
+    byte-identical project-level cached prefix that is **shared
+    across every model in the batch**. `cache_creation` is paid once
+    on the first model; the ≈12× cheaper `cache_read` applies on
+    models 2..N. The per-model specifics (this model's SQL under the
+    `<MODEL_SQL>` envelope, its own rules, and its neighbour detail)
+    move into the dynamic block, so the shared prefix stays stable
+    and **does amortise across siblings**. This corrects the v0.2
+    caveat — under project scope the marked cache hits on subsequent
+    models in the batch.
+  - **`cache_scope=per-model` (the default for single-model
+    positional runs; opt-in for a batch via `--cache-scope
+    per-model`).** The explicitly cache-marked block is the manifest
+    summary (model under draft + its neighbours), which **changes per
+    model** — so the marked cache does NOT amortise across siblings.
+    Cost savings within one process then come only from Anthropic's
+    automatic caching of the static system prompt, which IS
+    byte-stable across iterations once it crosses the auto-cache size
+    threshold. Net under per-model scope: expect partial cache
+    savings on system-prompt tokens; do not expect the marked
+    manifest-summary block to hit on subsequent models.
+  - **Oversize fallback.** If a project-scope prefix still exceeds
+    the 8000-token cache cap for a given model, that one model
+    degrades to per-model scope (one INFO line) and the batch
+    completes (exit 0) — the other models keep the shared prefix.
 - **Per-model progress prefix.** When a TTY is attached and the
   batch driver runs, each iteration emits one stderr line
   `[i/N] <model_unique_id>` before that model's existing stage
