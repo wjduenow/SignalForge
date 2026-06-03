@@ -777,6 +777,22 @@ except LLMOutputAnchorContractError as exc:
     raise
 ```
 
+### Parser re-attach for mis-scoped model-only variants (issue #184)
+
+`row_count_anomaly_by_period`, `row_count_between`, and `unique_combination` are **model-level-only** variants (type-level `column: None = None`). The drafter is steered toward model scope by `_ROW_COUNT_*_SCOPE_INSTRUCTION` prose, but on models carrying audit-timestamp columns (`creation_ts`, `update_ts`, `loaded_at`, `created_at`, `event_date`, `partition_date`, `LOAD_TIMESTAMP`) the LLM has historically over-anchored — emitting the variant *inside* the date column's `tests:` array (issue #184; reproduced 3/3 on the Phase B candidates of the #179 retest).
+
+Rather than fail loud with the confusing "model-level test references nonexistent column None" message, the parser **silently re-attaches** a column-scoped emission of a model-only variant to model scope, emits ONE operator-visible WARNING per re-attach, and records a `ReshapeRecord` in `LLMResponseEvent.parser_reshaped` for the forensic trail:
+
+```text
+WARNING signalforge.draft.parser:parser re-attach: {"from_scope": "column='creation_ts'", "model_unique_id": "model.acme.fct_orders", "reason": "model-only variant mis-scoped to column", "test_type": "row_count_anomaly_by_period", "to_scope": "<model-level>"}
+```
+
+The WARNING is always emitted (no `--quiet` suppression, no config flag) so the operator can see the LLM is mis-steering even when the run succeeds. A healthy prompt-side fix (#184 DEC-001) makes this WARNING rare; if you see it firing on every run, file an issue — the drafter prose has likely drifted.
+
+**`exclude_tests` kill-switch wins.** If you've set `exclude_tests: [<variant>]` in `signalforge.yml`, a column-scoped emission of that excluded variant is REJECTED with the standard exclude violation, NOT re-attached. The operator's opt-out is always honoured (DEC-003 of #184).
+
+**Audit field.** `LLMResponseEvent.parser_reshaped: tuple[ReshapeRecord, ...] = ()` carries one `ReshapeRecord` per re-attach with `original_column`, `target_scope="model"`, `test_type`, and a locked `reason` string. The audit-event schema is bumped from v1 to v2 (`audit_schema_version: int = 2`); v1 audit JSONLs still round-trip because the field defaults to an empty tuple and the version field stays typed `int`, not `Literal`. The drift detector at `tests/draft/test_drift_detector.py` validates both v1 and v2 fixtures.
+
 ## Type-coherence defence (issue #159)
 
 `_validate_anchor_contract` extends the structural anchor-contract
