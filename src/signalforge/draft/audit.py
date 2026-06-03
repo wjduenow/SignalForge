@@ -41,7 +41,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, field_serializer
 
@@ -59,6 +59,32 @@ if TYPE_CHECKING:
 _RESPONSE_AUDIT_RECORD_LIMIT_BYTES: Final[int] = 4000
 
 
+class ReshapeRecord(BaseModel):
+    """One audit record per parser re-attach of a mis-scoped candidate test.
+
+    The drafter occasionally emits a model-only variant
+    (``row_count_anomaly_by_period`` / ``row_count_between`` /
+    ``unique_combination``) nested inside a column's ``tests`` list rather
+    than at model scope. The parser re-attaches the offender to
+    ``candidate.tests`` and APPENDS one ``ReshapeRecord`` per re-attach so
+    the corrective action is preserved in the durable audit log alongside
+    the runtime ``_LOGGER.warning(...)``.
+
+    Read-back-stable shape (``extra="ignore"``) — older audit JSONLs
+    tolerate forward-compat field additions; the paired strict mirror in
+    ``tests/draft/test_drift_detector.py`` catches silent expansion.
+
+    Established by issue #184 DEC-005.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
+
+    original_column: str
+    target_scope: Literal["model"] = "model"
+    test_type: str
+    reason: str
+
+
 class LLMResponseEvent(BaseModel):
     """One JSONL audit record per LLM response.
 
@@ -72,6 +98,12 @@ class LLMResponseEvent(BaseModel):
     and the rendered SQL respectively. Storing hashes (not cleartext) keeps
     individual records under the POSIX-atomic-append size cap and avoids
     re-emitting whatever PII the LLM may have echoed back from the prompt.
+
+    ``audit_schema_version`` bumped 1 → 2 in #184 to carry the new
+    ``parser_reshaped`` field (DEC-005). Field stays typed ``int`` (NOT
+    ``Literal[2]``) so older v1 audit JSONLs still round-trip — audit
+    replay across versions is a real requirement (mirrors safety
+    ``AuditEvent.audit_schema_version`` convention).
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
@@ -88,7 +120,8 @@ class LLMResponseEvent(BaseModel):
     output_tokens: int
     model: str
     signalforge_version: str
-    audit_schema_version: int = 1
+    audit_schema_version: int = 2
+    parser_reshaped: tuple[ReshapeRecord, ...] = ()
 
     @field_serializer("timestamp")
     def _serialize_timestamp(self, value: datetime) -> str:
@@ -253,4 +286,4 @@ def write_response_event(event: LLMResponseEvent, *, audit_path: Path) -> None:
 
 
 # Sorted alphabetically (mirrors the convention enforced by tests/draft/test_errors.py).
-__all__ = ("LLMResponseEvent", "write_response_event")
+__all__ = ("LLMResponseEvent", "ReshapeRecord", "write_response_event")

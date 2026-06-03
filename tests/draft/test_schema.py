@@ -265,7 +265,11 @@ def test_draft_from_request_writes_response_audit_record(
     assert len(record["response_text_hash"]) == 16
     assert len(record["parsed_schema_hash"]) == 16
     assert len(record["sent_sql_hash"]) == 16
-    assert record["audit_schema_version"] == 1
+    # Bumped 1 → 2 in #184 (DEC-005) to carry the new ``parser_reshaped``
+    # field. No-reshape happy-path writes an empty tuple (default value
+    # preserves byte-equality for the rest of the record).
+    assert record["audit_schema_version"] == 2
+    assert record["parser_reshaped"] == []
 
 
 def test_draft_from_request_audit_failure_drops_outcome(
