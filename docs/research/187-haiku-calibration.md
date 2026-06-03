@@ -1,12 +1,13 @@
 # Issue #187 — Haiku grade-default calibration gate
 
-**Status:** RUN COMPLETE (2026-06-02). The #187 plan ships `claude-haiku-4-5`
-as the new grade-default SKU behind this empirical gate (DEC-005). The gate has
-now been run against a **real Sonnet baseline drafted from a real
-`intuit_airflow` model** — and **Haiku does NOT clear the ≥ 85% concordance
-bar** (81.8% and 77.0% on two independent runs). Per the DEC-005 decision rule,
-this points to **shipping Haiku as an opt-in fast mode, not the default**. See
-§ "Result" and § "Disposition".
+**Status:** RUN COMPLETE + DECISION IMPLEMENTED (2026-06-02). This gate was run
+against a **real Sonnet baseline drafted from a real `intuit_airflow` model** and
+**Haiku did NOT clear the ≥ 85% concordance bar** (81.8% and 77.0% on two
+independent runs). Per the DEC-005 decision rule (`< 85% → opt-in, not default`),
+**the grade default was kept at `claude-sonnet-4-6`** and `claude-haiku-4-5` ships
+as an **explicit opt-in** (`grade.model: claude-haiku-4-5`). `PROVIDER_DEFAULT_MODELS`
+now maps `anthropic → claude-sonnet-4-6` (OpenAI/Gemini keep their fast defaults).
+See § "Result" and § "Disposition".
 
 **Companion artefacts:**
 
@@ -90,15 +91,18 @@ bytes, the rubric is locked, the Sonnet baseline is committed.
 
 ### Config under test
 
-`GradeConfig()` with all defaults — after US-002 this resolves to `model →
-claude-haiku-4-5`, `max_output_tokens → 1024`, `provider → anthropic`. The
-harness asserts both resolved values before grading, so a resolver regression
-fails the gate loud rather than silently measuring the wrong SKU.
+`GradeConfig(model="claude-haiku-4-5")` — the **Haiku opt-in**. After the
+decision below, `GradeConfig()` (no model) resolves to the *Sonnet* default, so
+the gate selects Haiku explicitly to measure the opt-in. `max_output_tokens →
+1024`, `provider → anthropic`. The harness also asserts `GradeConfig().model ==
+"claude-sonnet-4-6"` (the default is Sonnet, not Haiku) so a resolver regression
+fails loud.
 
 ## Method — the ≥ 85% concordance rule
 
-1. Build the resolved Haiku-default `GradeConfig()`; assert `model ==
-   "claude-haiku-4-5"` and `max_output_tokens == 1024`.
+1. Build the Haiku opt-in `GradeConfig(model="claude-haiku-4-5")`; assert
+   `max_output_tokens == 1024` and that the *default* `GradeConfig().model` is
+   `claude-sonnet-4-6`.
 2. Assert the committed baseline covers every `artifact_id` the engine will
    grade (no silent gaps).
 3. Run `grade_artifacts(...)` — 84 live Haiku judge calls.
@@ -197,16 +201,19 @@ the uncertainty.
 
 Per the DEC-005 decision rule (**< 85% → opt-in knob, not default**), the real
 calibration says **do not ship `claude-haiku-4-5` as the resolved grade
-default**. Options, in order of fidelity to the data:
+default**. **Decision: Option 1 was chosen and implemented** (2026-06-02).
 
-1. **Recommended — make Haiku opt-in, keep Sonnet the grade default.** Revert
-   the Anthropic entry in `PROVIDER_FAST_MODELS` (or the grade resolution) so
-   `provider: anthropic` resolves to `claude-sonnet-4-6`, and document
-   `grade.model: claude-haiku-4-5` as the operator-opt-in fast mode. The
-   per-provider resolver, compat validator, and 1024 cap (US-001..US-006) all
-   stand — only the Anthropic *default target* changes. OpenAI/Gemini fast
-   defaults are unaffected by this Anthropic-specific finding (they were never
-   calibrated against a Sonnet baseline; they're explicit operator choices).
+1. **✅ CHOSEN + IMPLEMENTED — Haiku is opt-in, Sonnet is the grade default.**
+   `PROVIDER_DEFAULT_MODELS["anthropic"]` now resolves to `claude-sonnet-4-6`;
+   `grade.model: claude-haiku-4-5` is the documented operator opt-in (faster,
+   ~3.75× cheaper, but stricter). The per-provider resolver, compat validator,
+   and 1024 cap all stand — only the Anthropic *default target* changed.
+   OpenAI/Gemini fast defaults are unaffected by this Anthropic-specific finding
+   (they were never calibrated against a Sonnet baseline; they're explicit
+   operator choices). The constant was renamed `PROVIDER_FAST_MODELS` →
+   `PROVIDER_DEFAULT_MODELS` since Sonnet is not "fast". This gated test now
+   selects Haiku explicitly and still asserts ≥ 85% (so it fails) — the failure
+   is the durable record that Haiku is the stricter opt-in, not the default.
 2. **Accept Haiku at ~80% with eyes open** — only if the maintainer judges the
    ~3× speed / ~3.75× cost win worth a stricter judge that flags ~1 in 5 rubric
    verdicts differently. This contradicts the gate's own rule; if taken, lower

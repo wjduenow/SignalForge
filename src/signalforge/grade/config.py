@@ -24,12 +24,15 @@ Design commitments operationalised here (``plans/super/7-quality-grader.md``):
   here. The loader takes it as a required argument so the caller is
   explicit about the resolution base.
 * **DEC-023..DEC-027** — Locked default values:
-  ``model=None`` (resolves to the calling provider's fast model at
-  config-load — ``anthropic`` -> ``claude-haiku-4-5`` per
-  :data:`signalforge.llm.providers.PROVIDER_FAST_MODELS`; #187 US-002 /
-  DEC-004), ``cache_ttl="1h"``, ``max_output_tokens=1024`` (#187 DEC-004
-  — raised from 256 so a one-line ``gemini-2.5-flash`` grade JSON is not
-  truncated), ``max_retries_429=3``, ``max_retries_5xx=1``,
+  ``model=None`` (resolves to the calling provider's default judge model
+  at config-load — ``anthropic`` -> ``claude-sonnet-4-6`` per
+  :data:`signalforge.llm.providers.PROVIDER_DEFAULT_MODELS`; #187 US-002 /
+  DEC-004. The #187 calibration gate found ``claude-haiku-4-5`` grades
+  the rubric stricter than Sonnet — below the 85% bar — so Haiku stays an
+  explicit opt-in, not the default), ``cache_ttl="1h"``,
+  ``max_output_tokens=1024`` (#187 DEC-004 — raised from 256 so a one-line
+  ``gemini-2.5-flash`` grade JSON is substantially less likely to
+  truncate), ``max_retries_429=3``, ``max_retries_5xx=1``,
   ``max_retries_conn=1``, ``total_budget_seconds=300``,
   ``min_pass_rate=0.7``, ``min_mean_score=0.5``, ``rubric=None``,
   ``fail_on_below_threshold=False``.
@@ -80,7 +83,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from signalforge.grade.errors import GradeConfigError, GradeRubricError
 from signalforge.grade.rubric import Rubric, validate_rubric
-from signalforge.llm.providers import PROVIDER_FAST_MODELS, PROVIDER_SKU_PREFIXES
+from signalforge.llm.providers import PROVIDER_DEFAULT_MODELS, PROVIDER_SKU_PREFIXES
 
 _DEFAULT_CONFIG_FILENAME = "signalforge.yml"
 
@@ -106,14 +109,17 @@ class GradeConfig(BaseModel):
     model: str | None = None
     """LLM-judge model id (DEC-026; #187 US-002 / DEC-004).
 
-    The sentinel default ``None`` means "use the calling provider's fast
-    model" — resolved at config-load by the
+    The sentinel default ``None`` means "use the calling provider's
+    default judge model" — resolved at config-load by the
     :meth:`_resolve_model_default` before-validator to
-    :data:`signalforge.llm.providers.PROVIDER_FAST_MODELS` keyed on
-    :attr:`provider` (``anthropic`` -> ``claude-haiku-4-5``, ``openai``
-    -> ``gpt-4o-mini``, ``gemini`` -> ``gemini-2.5-flash``). An explicit
-    ``model:`` is always honoured verbatim. After construction this
-    field is always a concrete non-empty string — never ``None``.
+    :data:`signalforge.llm.providers.PROVIDER_DEFAULT_MODELS` keyed on
+    :attr:`provider` (``anthropic`` -> ``claude-sonnet-4-6``, ``openai``
+    -> ``gpt-4o-mini``, ``gemini`` -> ``gemini-2.5-flash``). Anthropic
+    defaults to Sonnet because the #187 calibration gate found
+    ``claude-haiku-4-5`` grades stricter than Sonnet (below the 85% bar);
+    Haiku is an explicit opt-in (``grade.model: claude-haiku-4-5``). An
+    explicit ``model:`` is always honoured verbatim. After construction
+    this field is always a concrete non-empty string — never ``None``.
 
     When set explicitly, a SKU-prefix/provider mismatch (e.g.
     ``provider="openai"`` with a ``claude-`` model) fails loud at
@@ -246,7 +252,7 @@ class GradeConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _resolve_model_default(cls, data: Any) -> Any:
-        """Resolve the sentinel ``model=None`` to the provider's fast model.
+        """Resolve the sentinel ``model=None`` to the provider's default judge model.
 
         Runs BEFORE field validation (and before the frozen instance
         exists) so the injected value flows through the normal
@@ -257,14 +263,14 @@ class GradeConfig(BaseModel):
         untouched.
 
         When ``model`` is absent or ``None``, inject
-        :data:`signalforge.llm.providers.PROVIDER_FAST_MODELS` keyed on
+        :data:`signalforge.llm.providers.PROVIDER_DEFAULT_MODELS` keyed on
         the requested ``provider`` (defaulting to ``"anthropic"`` to
-        match the field default). A provider NOT in the fast-model table
+        match the field default). A provider NOT in the default-model table
         is left alone — no injection — via ``.get()`` so this never masks
         an error with a ``KeyError`` (#187 US-002 / DEC-004). Two such
         cases follow downstream: an *unregistered* provider is rejected by
         the ``provider`` field-validator (:class:`UnknownProviderError`);
-        a *registered* provider absent from the fast-model table with no
+        a *registered* provider absent from the default-model table with no
         explicit model is rejected by
         :meth:`_validate_model_provider_compat` (which requires the
         operator to set ``grade.model`` explicitly).
@@ -273,7 +279,7 @@ class GradeConfig(BaseModel):
             return data
         if data.get("model") is None:
             provider = data.get("provider", "anthropic")
-            resolved = PROVIDER_FAST_MODELS.get(provider)
+            resolved = PROVIDER_DEFAULT_MODELS.get(provider)
             if resolved is not None:
                 # Copy-on-write so we don't mutate a caller-owned dict.
                 data = {**data, "model": resolved}
@@ -388,9 +394,9 @@ class GradeConfig(BaseModel):
           table.
 
         A registry-valid provider absent from
-        :data:`signalforge.llm.providers.PROVIDER_FAST_MODELS` AND given
+        :data:`signalforge.llm.providers.PROVIDER_DEFAULT_MODELS` AND given
         no explicit ``model`` reaches here with ``model is None`` (the
-        before-validator had no fast model to inject; the ``provider``
+        before-validator had no default model to inject; the ``provider``
         field-validator passed because the provider IS registered). We
         cannot guess a custom provider's model, so this fails loud rather
         than letting ``None`` flow into the engine — which keeps the

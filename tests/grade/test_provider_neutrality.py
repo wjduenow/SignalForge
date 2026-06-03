@@ -153,7 +153,7 @@ def test_registering_provider_is_the_only_wiring_needed(_isolate_registry: None)
     assert provider_for(FAKE_NOCACHE_PROVIDER_NAME) is provider
 
     # The registry-validated config str accepts it. A custom provider is not in
-    # PROVIDER_FAST_MODELS, so #187 requires an explicit model (we can't guess a
+    # PROVIDER_DEFAULT_MODELS, so #187 requires an explicit model (we can't guess a
     # plugin provider's fast model) rather than silently defaulting it.
     config = GradeConfig(provider=FAKE_NOCACHE_PROVIDER_NAME, model="fake-nocache-judge")
     assert config.provider == FAKE_NOCACHE_PROVIDER_NAME

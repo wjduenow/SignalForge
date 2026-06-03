@@ -347,7 +347,7 @@ def provider_for(name: str) -> LLMProvider:
 # source of truth for two cross-cutting facts that previously lived as
 # duplicated literals scattered across stages:
 #
-# * ``PROVIDER_FAST_MODELS`` — the cheap/fast judge SKU per provider, used by
+# * ``PROVIDER_DEFAULT_MODELS`` — the cheap/fast judge SKU per provider, used by
 #   the faster-grade defaults (#187). Every value MUST be an exact key in
 #   :data:`signalforge.llm.pricing.PRICES` so ``pricing.lookup(model)`` and the
 #   ``--estimate`` cost-preview path never raise.
@@ -361,10 +361,16 @@ def provider_for(name: str) -> LLMProvider:
 # lookup tables, the values are immutable strings, and no caller mutates them.
 # ---------------------------------------------------------------------------
 
-#: Cheap/fast judge SKU per provider (#187 US-001). Every value is an exact
-#: key in :data:`signalforge.llm.pricing.PRICES`.
-PROVIDER_FAST_MODELS: dict[str, str] = {
-    "anthropic": "claude-haiku-4-5",
+#: Default judge SKU per provider (#187) — used when ``grade.model`` is unset.
+#: Anthropic defaults to ``claude-sonnet-4-6``: the #187 calibration gate found
+#: ``claude-haiku-4-5`` grades the rubric stricter than Sonnet (~77-82%
+#: concordance, below the 85% bar — see ``docs/research/187-haiku-calibration.md``),
+#: so Haiku stays an explicit opt-in (`grade.model: claude-haiku-4-5`), not the
+#: default. OpenAI/Gemini default to their fast judges (explicit operator choices
+#: of a cheaper provider; never calibrated against the Sonnet baseline). Every
+#: value is an exact key in :data:`signalforge.llm.pricing.PRICES`.
+PROVIDER_DEFAULT_MODELS: dict[str, str] = {
+    "anthropic": "claude-sonnet-4-6",
     "openai": "gpt-4o-mini",
     "gemini": "gemini-2.5-flash",
 }
@@ -1463,7 +1469,7 @@ register_provider(GeminiProvider())
 
 
 __all__ = (
-    "PROVIDER_FAST_MODELS",
+    "PROVIDER_DEFAULT_MODELS",
     "PROVIDER_SKU_PREFIXES",
     "AnthropicProvider",
     "ExceptionCategory",

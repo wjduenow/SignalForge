@@ -188,9 +188,10 @@ def test_grade_config_defaults_match_dec_023_to_027() -> None:
     drift here is a behaviour change masquerading as a refactor."""
     cfg = GradeConfig()
     # #187 US-002 / DEC-004: ``model`` now defaults to the sentinel that
-    # resolves to the calling provider's fast model. With the default
-    # provider (``anthropic``) that is ``claude-haiku-4-5``.
-    assert cfg.model == "claude-haiku-4-5"
+    # resolves to the calling provider's default judge model. With the
+    # default provider (``anthropic``) that is ``claude-sonnet-4-6`` — the
+    # #187 calibration gate kept Sonnet the default (Haiku is opt-in).
+    assert cfg.model == "claude-sonnet-4-6"
     assert cfg.cache_ttl == "1h"
     # #187 DEC-004: raised from 256 to avoid one-line gemini-flash truncation.
     assert cfg.max_output_tokens == 1024
@@ -276,10 +277,12 @@ def test_load_grade_config_unknown_provider_fails_loud(tmp_path: Path) -> None:
 # ----- Per-provider fast-model resolution (#187 US-002 / DEC-004) -----
 
 
-def test_grade_config_model_resolves_anthropic_fast_default() -> None:
+def test_grade_config_model_resolves_anthropic_default() -> None:
     """The sentinel ``model=None`` (default) resolves to the anthropic
-    fast model via :data:`PROVIDER_FAST_MODELS`."""
-    assert GradeConfig().model == "claude-haiku-4-5"
+    default judge model (``claude-sonnet-4-6``) via
+    :data:`PROVIDER_DEFAULT_MODELS`. Haiku is an explicit opt-in — the
+    #187 calibration gate found it grades stricter than Sonnet."""
+    assert GradeConfig().model == "claude-sonnet-4-6"
 
 
 def test_grade_config_model_resolves_openai_fast_default() -> None:

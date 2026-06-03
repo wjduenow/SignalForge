@@ -117,7 +117,7 @@ load cleanly through `load_grade_config`:
 # signalforge.yml — grade stage configuration
 grade:
   provider: anthropic             # registry-validated; "anthropic" + "openai" + "gemini" are registered (see provider sections below)
-  # model: claude-haiku-4-5       # omit to auto-resolve to the provider's fast model (anthropic -> claude-haiku-4-5); set explicitly to override
+  # model: claude-haiku-4-5       # omit to auto-resolve to the provider's default judge (anthropic -> claude-sonnet-4-6); set claude-haiku-4-5 to opt into the faster/stricter Haiku judge
   cache_ttl: 1h                   # Prompt-cache TTL ('5m' or '1h')
   max_output_tokens: 1024         # Per-criterion JSON response cap (default 1024)
   max_retries_429: 3              # Rate-limit retry budget
@@ -160,7 +160,7 @@ grade:
 Field-by-field:
 
 - **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point. Today `anthropic`, `openai`, and `gemini` are registered; see [OpenAI provider](#openai-provider) and [Gemini provider](#gemini-provider) below for the non-default options.
-- **`model`** — The model id used by every per-pair judge call. **Default resolves per-provider at config-load** (#187): when `model:` is omitted, the loader injects the calling provider's fast model from `signalforge.llm.providers.PROVIDER_FAST_MODELS` — `anthropic` → `claude-haiku-4-5`, `openai` → `gpt-4o-mini`, `gemini` → `gemini-2.5-flash`. An explicit `model:` is honoured verbatim. A SKU-prefix/provider mismatch (e.g. `provider: openai` with a `claude-` model) fails loud at config-load via the model↔provider compat validator (reusing `signalforge.llm.providers.PROVIDER_SKU_PREFIXES`).
+- **`model`** — The model id used by every per-pair judge call. **Default resolves per-provider at config-load** (#187): when `model:` is omitted, the loader injects the calling provider's default judge model from `signalforge.llm.providers.PROVIDER_DEFAULT_MODELS` — `anthropic` → `claude-sonnet-4-6`, `openai` → `gpt-4o-mini`, `gemini` → `gemini-2.5-flash`. **Anthropic defaults to Sonnet:** the #187 calibration gate found `claude-haiku-4-5` grades the rubric stricter than Sonnet (~77–82% concordance, below the 85% bar — see `docs/research/187-haiku-calibration.md`), so Haiku is an explicit opt-in (`grade.model: claude-haiku-4-5`), not the default. An explicit `model:` is honoured verbatim. A SKU-prefix/provider mismatch (e.g. `provider: openai` with a `claude-` model) fails loud at config-load via the model↔provider compat validator (reusing `signalforge.llm.providers.PROVIDER_SKU_PREFIXES`).
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
 - **`max_output_tokens`** — Per-criterion judge response cap. Default `1024` (#187 — raised from 256 to substantially reduce truncation risk for a verbose one-line `gemini-2.5-flash` grade JSON; the expected JSON response is still ~150 tokens, so the larger ceiling costs nothing on the happy path). 1024 reduces but does not fully eliminate Gemini truncation at scale — see the per-provider floors below; Gemini-heavy runs may want `4096`. Independent of `DraftConfig.max_output_tokens`.
 - **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised, provider-neutral `signalforge.llm.call_llm` seam (#5 DEC-012; #135 DEC-005). Defaults `3 / 1 / 1` mirror `DraftConfig`; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.
@@ -593,24 +593,27 @@ specifically. See
 § "Measured baseline (2026-05-29)" for the full-suite rollup
 ($1.38/run across the three providers).
 
-**Per-provider fast-default judge models (#187).** When `grade.model:` is
-omitted the loader resolves to the calling provider's *fast* model — the
-cheapest registered SKU per provider (`signalforge.llm.providers.PROVIDER_FAST_MODELS`).
-The rows below pair each fast default with its per-MTok USD list price from
-`signalforge.llm.pricing` (pricing-table version `2026-05-28`) and an
-*estimated* per-model grade cost, scaled from the Sonnet baseline above by
-the input/output price ratio (estimate, not a measured run):
+**Per-provider default judge models (#187).** When `grade.model:` is omitted
+the loader resolves to the calling provider's default judge
+(`signalforge.llm.providers.PROVIDER_DEFAULT_MODELS`). Anthropic defaults to
+**Sonnet** (the #187 calibration gate kept it the default — Haiku grades
+stricter, below the 85% bar); OpenAI/Gemini default to their fast judges
+(explicit operator choices of a cheaper provider). The rows below pair each
+default with its per-MTok USD list price from `signalforge.llm.pricing`
+(pricing-table version `2026-05-28`) and an *estimated* per-model grade cost
+(estimate, not a measured run, except where noted):
 
-| Provider × fast default          | Input $/MTok | Output $/MTok | Est. per-model grade cost | Notes                                                                                  |
+| Provider × default judge         | Input $/MTok | Output $/MTok | Est. per-model grade cost | Notes                                                                                  |
 |----------------------------------|--------------|---------------|---------------------------|----------------------------------------------------------------------------------------|
-| Anthropic `claude-haiku-4-5`     | $0.80        | $4.00         | ~$0.10                    | The new default grade judge; ~3.75× cheaper than `claude-sonnet-4-6` per token.        |
-| OpenAI `gpt-4o-mini`             | $0.15        | $0.60         | ~$0.013                   | ~16.7× cheaper than `gpt-4o` per token; the fast default when `provider: openai`.       |
+| Anthropic `claude-sonnet-4-6`    | $3.00        | $15.00        | ~$0.38 (measured)         | The default grade judge (calibration baseline). `claude-haiku-4-5` ($0.80/$4.00, ~$0.10, ~3.75× cheaper) is the opt-in fast judge — stricter, see the calibration writeup. |
+| OpenAI `gpt-4o-mini`             | $0.15        | $0.60         | ~$0.013                   | ~16.7× cheaper than `gpt-4o` per token; the default when `provider: openai`.            |
 | Gemini `gemini-2.5-flash`        | $0.30        | $2.50         | ~$0.045                   | Already the documented mid-tier default; the measured figure above is this same SKU.    |
 
 For completeness, the registered Anthropic SKUs span `claude-haiku-4-5`
 ($0.80 / $4.00 per MTok), `claude-sonnet-4-6` ($3.00 / $15.00), and
-`claude-opus-4-7` ($15.00 / $75.00) — switching the grade judge from
-Sonnet to the Haiku default cuts the per-token grade cost ~3.75×.
+`claude-opus-4-7` ($15.00 / $75.00) — opting into the Haiku judge
+(`grade.model: claude-haiku-4-5`) cuts the per-token grade cost ~3.75× vs the
+Sonnet default, at the cost of stricter grading (#187 calibration).
 
 **Fan-out comparison vs the batched alternative:**
 

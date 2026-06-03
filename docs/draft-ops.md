@@ -949,8 +949,9 @@ Field-by-field:
   Default `claude-sonnet-4-6`. Any string the SDK accepts is allowed.
 - **`cheap_model`** — informational; not selected automatically.
   The CLI (#9) flips on `--cheap` to swap `model` for this value.
-  Default `claude-haiku-4-5` (bare SKU — matches the `anthropic` entry
-  in `signalforge.llm.providers.PROVIDER_FAST_MODELS`).
+  Default `claude-haiku-4-5` (bare SKU — matches a `PRICES` key; it is
+  also the opt-in fast judge on the grade side per #187, though the grade
+  *default* stayed `claude-sonnet-4-6` after the #187 calibration gate).
 - **`max_output_tokens`** — Anthropic `max_tokens` ceiling. Must be
   positive (validator).
 - **`cache_ttl`** — `Literal["5m", "1h"]`. `"1h"` opts into the

@@ -98,15 +98,16 @@ def test_haiku_grade_concordance_vs_sonnet_baseline(tmp_path: Path) -> None:
     prune_result = empty_prune_result(model)
     baseline = load_baseline()
 
-    # Resolved Haiku default — model=None resolves to claude-haiku-4-5;
-    # max_output_tokens defaults to 1024. Explicit construction with the
-    # defaults documents the contract under test.
-    config = GradeConfig()
-    assert config.model == "claude-haiku-4-5", (
-        "this gate measures the Haiku default; the resolver should have "
-        f"produced claude-haiku-4-5, got {config.model!r}"
-    )
+    # The Haiku OPT-IN (post-calibration, the anthropic default is Sonnet —
+    # this gate is exactly why). We explicitly select claude-haiku-4-5 to
+    # measure whether the opt-in grades concordantly with the Sonnet default;
+    # the recorded result is that it does NOT (~77-82% < 85%), which is why
+    # Haiku stays opt-in. max_output_tokens defaults to 1024.
+    config = GradeConfig(model="claude-haiku-4-5")
+    assert config.model == "claude-haiku-4-5"
     assert config.max_output_tokens == 1024
+    # Sanity: confirm the anthropic DEFAULT is Sonnet (Haiku is opt-in only).
+    assert GradeConfig().model == "claude-sonnet-4-6"
 
     # Sanity: the committed baseline must cover every artifact_id the
     # engine will grade (engineered determinism — no silent gaps).

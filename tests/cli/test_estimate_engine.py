@@ -239,37 +239,27 @@ def test_estimate_total_llm_usd_matches_hand_calculation(
 ) -> None:
     """Pin USD to four decimals against a hand-computed expected.
 
-    Hand calculation with the default ``DraftConfig`` / ``GradeConfig``
-    and the default rubric (4 criteria). Post #187 US-002 the two stages
-    use DIFFERENT default models — the drafter stays on
-    ``claude-sonnet-4-6`` (``$3/MTok`` input, ``$15/MTok`` output) while
-    the grader resolves to the provider's fast model
-    ``claude-haiku-4-5`` (``$0.80/MTok`` input, ``$4/MTok`` output). The
-    draft and grade halves therefore key on separate price rows:
+    Hand calculation with the default ``DraftConfig``/``GradeConfig``
+    (``claude-sonnet-4-6`` for both, ``$3/MTok`` input, ``$15/MTok``
+    output) and the default rubric (4 criteria):
 
-    Draft (sonnet pricing):
-        Draft input: 1_000_000 tokens (1 MTok) → 1 * 3.00 = $3.00.
-        Draft output: 4096 tokens (default ``DraftConfig.max_output_tokens``)
-            → 4096 / 1e6 * 15 ≈ $0.06144.
-        Draft USD ≈ 3.06144.
+    Draft input: 1_000_000 tokens (1 MTok) → $3.00.
+    Draft output: 4096 tokens (default ``max_output_tokens``)
+        → 4096 / 1e6 * 15 ≈ $0.06144.
+    Draft USD ≈ 3.06144.
 
-    Grade (haiku pricing — 4 criteria):
+    Grade per criterion (4 criteria):
         artifact_count for our 2-column model:
             2*2 (column desc+rationale) + 2 (model desc+rationale) +
             int(3.5*2) (test rationales) = 4 + 2 + 7 = 13.
         Input tokens per call (queued) = 500 → 500 * 13 = 6500.
-        Per-criterion input USD: 6500/1e6 * 0.80 = 0.0052.
-        Per-criterion output USD: 50 * 13 / 1e6 * 4 = 650/1e6*4
-            = 0.0026.
-        (The grade output-token figure is the fixed
-        ``_GRADE_OUTPUT_TOKENS_PER_CALL`` of 50, NOT
-        ``GradeConfig.max_output_tokens`` — the 256→1024 default bump in
-        #187 US-002 is a response cap, not the estimate's per-call
-        output projection, so it does not enter this math.)
-        Per-criterion total: 0.0052 + 0.0026 = 0.0078.
-        Across 4 criteria: 4 * 0.0078 = 0.0312.
+        Per-criterion input USD: 6500/1e6 * 3 = 0.0195.
+        Per-criterion output USD: 50 * 13 / 1e6 * 15 = 650/1e6*15
+            = 0.00975.
+        Per-criterion total: 0.0195 + 0.00975 = 0.02925.
+        Across 4 criteria: 4 * 0.02925 = 0.117.
 
-    Grand total: 3.06144 + 0.0312 = 3.09264.
+    Grand total: 3.06144 + 0.117 = 3.17844.
 
     Test pins to 4 decimals.
     """
@@ -287,20 +277,13 @@ def test_estimate_total_llm_usd_matches_hand_calculation(
         fake_anthropic,
     )
 
-    # The drafter and grader key on separate price rows post #187 US-002.
-    draft_pricing = pricing_lookup(draft_config.model)
-    # Pin the resolved fast default explicitly so a resolver regression (grade
-    # silently falling back to Sonnet) fails HERE rather than drifting the
-    # engine and the expected USD together into a passing tautology. The
-    # `is not None` also narrows `str | None` -> `str` for pricing_lookup.
-    assert grade_config.model is not None and grade_config.model == "claude-haiku-4-5"
-    grade_pricing = pricing_lookup(grade_config.model)
-    expected_draft = (1_000_000 / 1_000_000.0) * draft_pricing.input_per_mtok + (
+    pricing = pricing_lookup(draft_config.model)
+    expected_draft = (1_000_000 / 1_000_000.0) * pricing.input_per_mtok + (
         4096 / 1_000_000.0
-    ) * draft_pricing.output_per_mtok
+    ) * pricing.output_per_mtok
     artifact_count = 2 * 2 + 2 + int(3.5 * 2)
-    per_crit_in = (500 * artifact_count) / 1_000_000.0 * grade_pricing.input_per_mtok
-    per_crit_out = (50 * artifact_count) / 1_000_000.0 * grade_pricing.output_per_mtok
+    per_crit_in = (500 * artifact_count) / 1_000_000.0 * pricing.input_per_mtok
+    per_crit_out = (50 * artifact_count) / 1_000_000.0 * pricing.output_per_mtok
     expected_grade = n_criteria * (per_crit_in + per_crit_out)
     expected_total = expected_draft + expected_grade
 

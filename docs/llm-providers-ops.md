@@ -105,7 +105,7 @@ not a `Literal`). See [Adding a provider](#adding-a-provider) below.
 | **Pre-send `count_tokens` gate** | ✅ | ❌ (no SDK token-count API) | ❌ (deferred — Gemini has the API but we don't gate on it for cache parity) |
 | **`cache_ttl` config** | honoured (`"5m"` / `"1h"`) | silently ignored | silently ignored |
 | **Default drafter model** | `claude-sonnet-4-6` | `gpt-4o` | unset |
-| **Default grader model** | `claude-haiku-4-5` (fast default, #187) | `gpt-4o-mini` (fast default) | `gemini-2.5-flash` (fast default) |
+| **Default grader model** | `claude-sonnet-4-6` (#187; Haiku is opt-in) | `gpt-4o-mini` (fast default) | `gemini-2.5-flash` (fast default) |
 | **Live smoke marker** | `@pytest.mark.anthropic` | `@pytest.mark.openai` | `@pytest.mark.gemini` |
 | **Live smoke env** | `ANTHROPIC_API_KEY` | `SF_RUN_OPENAI=1` + `OPENAI_API_KEY` | `SF_RUN_GEMINI=1` + `GOOGLE_API_KEY` |
 
@@ -118,15 +118,21 @@ spend at full rates.
 ### Per-provider fast-grade defaults
 
 When `grade.model:` is **omitted**, the grade-config loader resolves it
-at config-load to the calling provider's *fast* model — the cheapest
-registered SKU per provider. The single source of truth is the
-`PROVIDER_FAST_MODELS` table in `signalforge.llm.providers` (#187 US-001):
+at config-load to the calling provider's default judge model. The single
+source of truth is the `PROVIDER_DEFAULT_MODELS` table in
+`signalforge.llm.providers` (#187). Anthropic defaults to **Sonnet** —
+the #187 calibration gate found `claude-haiku-4-5` grades the rubric
+stricter than Sonnet (~77–82% concordance, below the 85% bar; see
+`docs/research/187-haiku-calibration.md`), so Haiku is an explicit opt-in
+(`grade.model: claude-haiku-4-5`), not the default. OpenAI/Gemini default
+to their fast judges (explicit operator choices of a cheaper provider,
+never calibrated against the Sonnet baseline):
 
-| Grade provider | Fast default SKU (`PROVIDER_FAST_MODELS`) |
-|---|---|
-| `anthropic` | `claude-haiku-4-5` |
-| `openai` | `gpt-4o-mini` |
-| `gemini` | `gemini-2.5-flash` |
+| Grade provider | Default judge SKU (`PROVIDER_DEFAULT_MODELS`) | Opt-in fast judge |
+|---|---|---|
+| `anthropic` | `claude-sonnet-4-6` | `claude-haiku-4-5` (stricter; #187) |
+| `openai` | `gpt-4o-mini` | — |
+| `gemini` | `gemini-2.5-flash` | — |
 
 Every value is an exact key in `signalforge.llm.pricing.PRICES`, so the
 `--estimate` cost-preview path and `pricing.lookup(model)` never raise on
@@ -154,10 +160,11 @@ compat check.
 The shipped default for both stages. No extra install; set
 `ANTHROPIC_API_KEY` and SignalForge runs out of the box.
 
-- **Default models:** `claude-sonnet-4-6` (drafter), `claude-haiku-4-5`
-  (grader fast default per #187 — see [Per-provider fast-grade
-  defaults](#per-provider-fast-grade-defaults) below), `claude-haiku-4-5`
-  (drafter `cheap_model`).
+- **Default models:** `claude-sonnet-4-6` (drafter AND grader — the
+  grader default stayed Sonnet per the #187 calibration gate; see
+  [Per-provider grade defaults](#per-provider-fast-grade-defaults) below),
+  `claude-haiku-4-5` (the opt-in fast grade judge AND the drafter
+  `cheap_model`).
 - **Prompt caching:** active. Drafter caches the manifest summary
   block; grader caches the rubric criterion list. `cache_ttl: 1h`
   opts into the `extended-cache-ttl-2025-04-11` beta header. The
