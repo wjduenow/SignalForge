@@ -634,6 +634,61 @@ def test_render_system_prompt_keeps_row_count_anomaly_when_other_types_excluded(
     assert "incremental fact table" in collapsed
 
 
+def test_system_prompt_scope_states_model_level_placement() -> None:
+    """Issue #184 DEC-001 (primary lever): the SCOPE instruction MUST
+    explicitly teach that ``row_count_anomaly_by_period`` is a model-level
+    test, not a column-level test. Pinned by the verbatim phrase
+    ``model-level `tests:` list`` (and the contrasting clause).
+
+    Pre-#184 the prompt described mechanics + heuristics but never said
+    "model-level" — the drafter mis-scoped the test to whichever
+    audit-timestamp column it found (Phase B of the #179 retest reproduced
+    this 3/3 against an intuit_airflow model with ``creation_ts`` /
+    ``update_ts``). Without this pin a future prose tidy-pass could quietly
+    drop the explicit scope sentence and the regression class re-opens.
+    """
+    # The verbatim sentence from DEC-001 may wrap across lines in the source
+    # literal (``model-level\n`tests:` list``); collapse whitespace before
+    # the substring match — mirrors the sibling prose tests above.
+    collapsed = " ".join(_SYSTEM_PROMPT.split())
+    assert "model-level `tests:` list" in collapsed
+    # The contrasting clause names the column-level placement that the
+    # drafter MUST NOT use — both halves of the contrast are load-bearing
+    # for unambiguous teaching.
+    assert "NOT inside any column's `tests:` list" in collapsed
+    # The ``date_column`` argument is explicitly called out as the source
+    # of confusion (it names a column, but the test itself is model-scoped).
+    assert "date_column" in _SYSTEM_PROMPT
+    assert "model-scoped" in collapsed
+
+
+def test_system_prompt_scope_shows_worked_example_at_model_scope() -> None:
+    """Issue #184 DEC-001: alongside the prose rule, the SCOPE instruction
+    embeds a worked YAML snippet showing the test under the model's
+    top-level ``tests:`` list (with surrounding ``models:`` /
+    ``columns:`` context so the LLM sees the structural contrast between
+    column-level and model-level placement).
+
+    Distinctive substrings pinned: the inline comment marker
+    ``# model-level test (NOT under a column's tests:)`` (chosen unique
+    to this worked example — neither the prose nor the catalogue uses
+    that exact phrasing) and the example's ``models:`` / ``tests:``
+    structural anchor lines.
+    """
+    # The comment marker is on a single source line so a direct substring
+    # match (no whitespace collapse) is sufficient and stricter.
+    assert "# model-level test (NOT under a column's tests:)" in _SYSTEM_PROMPT
+    # The worked example uses ``fct_orders`` + ``ordered_at`` as a
+    # concrete-but-generic shape (mirrors the canonical fixture's model
+    # name); pin both so a future template tidy-pass that swaps placeholders
+    # to ``<model_name>`` / ``<date_column>`` style breaks the test loudly.
+    assert "name: fct_orders" in _SYSTEM_PROMPT
+    assert "date_column: ordered_at" in _SYSTEM_PROMPT
+    # The dow-seasonality form in the worked example doubles as a usage
+    # hint — drafted alongside the prose teaching for ``seasonality="dow"``.
+    assert "seasonality: dow" in _SYSTEM_PROMPT
+
+
 # ---------------------------------------------------------------------------
 # Business-rule meta reading (issue #116, DEC-001)
 # ---------------------------------------------------------------------------
