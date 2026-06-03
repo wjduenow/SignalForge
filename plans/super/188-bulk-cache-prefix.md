@@ -3,11 +3,19 @@
 ## Meta
 
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/188
-- **Phase:** published
+- **Phase:** devolved
 - **PR:** https://github.com/wjduenow/SignalForge/pull/195 (draft, base `dev`)
 - **Branch / worktree:** `feature/188-bulk-cache-prefix` at `../worktrees/SignalForge/188-bulk-cache-prefix` (cut from `origin/dev`, 0.6.0.dev0)
 - **Labels:** enhancement, perf, draft
 - **Sessions:** 1 (2026-06-03)
+
+### Beads manifest
+
+- **Epic:** `SignalForge-fzo`
+- **Tasks:** `SignalForge-fzo.1` … `.10` = US-001 … US-010 (story number == suffix).
+- **Ready at devolve:** `SignalForge-fzo.1` (US-001), `SignalForge-fzo.2` (US-002).
+- **Dependency edges:** .3→.2; .4→.1,.3; .5→.1,.4; .6→.3; .7→.5; .8→.5; .9(QG)→.1….8; .10(P&M)→.9.
+- _Note: `bd` Dolt remote auto-push reports "no common ancestor" in this environment; the graph is persisted locally. Run `bd dolt push` once the remote is reconciled._
 
 ## Ticket summary
 
