@@ -260,19 +260,32 @@ fail loud at config-load — silent no-op would defeat the gate.
 
 ### Degraded results never land in the cache
 
-Per the [conservative score-and-degrade taxonomy](#grade-cache)
-(DEC-007 of #189), a degraded verdict (`score=None` — LLM retry
-exhausted, parser failure, envelope-breach, budget exceeded) is
-**never** written to the cache. Caching that record would silently
-replay the failure forever, preventing recovery from a transient
-LLM / network blip. Cache writes are gated on `result.score is not
-None`.
+Per the conservative score-and-degrade taxonomy (DEC-007 of #189,
+mirrors `grade-layer.md` § DEC-015), a degraded verdict
+(`score=None` — LLM retry exhausted, parser failure, envelope-breach,
+budget exceeded) is **never** written to the cache. Caching that
+record would silently replay the failure forever, preventing
+recovery from a transient LLM / network blip. Cache writes are gated
+on `result.score is not None`.
 
 Cache reads never construct a degraded `GradingResult` either — a
 malformed on-disk cache file (e.g. a `score: null` injected by an
-attacker or a corrupted record) routes to a cache miss + WARNING,
-not a degraded result. The live LLM judge runs and re-populates the
-entry.
+attacker or a corrupted record) routes to a cache miss + INFO log
+(`grade cache validation failed`, `grade cache malformed json`,
+`grade cache read failed`, or `grade cache key mismatch` depending
+on the failure mode). The live LLM judge runs and re-populates the
+entry. INFO (not WARNING) because cache miss is a normal
+non-actionable outcome — `--quiet` raises the floor to WARNING and
+correctly suppresses these.
+
+A key-recomputation gate (added by #189 QG Pass 1 Finding 1)
+defends against cache poisoning: `lookup_cache` recomputes the
+5-part cache key from the loaded record's stored hashes and
+compares to the lookup key. On mismatch (a hostile or corrupt file
+whose body lies about its forensic hashes), the read silently
+misses with `grade cache key mismatch` INFO + a `key` /
+`recomputed` payload, so the next run writes a canonical record on
+top.
 
 ### `signalforge cache clear --grade` subcommand
 

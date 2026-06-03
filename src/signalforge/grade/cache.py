@@ -350,7 +350,7 @@ def lookup_cache(cache_dir: Path, key: str) -> CacheRecord | None:
             return None
 
     try:
-        return CacheRecord.model_validate(payload)
+        record = CacheRecord.model_validate(payload)
     except Exception as exc:  # pydantic.ValidationError, etc.
         _LOGGER.info(
             "grade cache validation failed: %s",
@@ -362,6 +362,38 @@ def lookup_cache(cache_dir: Path, key: str) -> CacheRecord | None:
             ),
         )
         return None
+
+    # Key-recomputation gate (issue #189 QG Pass 1 Finding 1) — the
+    # cache is content-addressed by the 5-part key, but nothing forces
+    # the on-disk body to actually be content-addressed: a hostile or
+    # corrupt file under ``<key>.json`` could carry mismatched forensic
+    # hashes (claiming to be from criterion X while actually computed
+    # for criterion Y). Without this verification, a cache-hit would
+    # silently rehydrate a wrong verdict AND poison the audit trail with
+    # false reproducibility hashes. Recompute the key from the loaded
+    # record's stored hashes and compare; on mismatch, log INFO and
+    # return a miss (so the engine grades fresh + overwrites with a
+    # canonical record on the next write).
+    recomputed = compute_cache_key(
+        criterion_prompt_hash=record.criterion_prompt_hash,
+        artifact_text_hash=record.artifact_text_hash,
+        provider=record.provider,
+        model=record.model,
+        prompt_version_template=record.prompt_version_template,
+    )
+    if recomputed != key:
+        _LOGGER.info(
+            "grade cache key mismatch (forensic hashes do not match filename): %s",
+            json.dumps(
+                {
+                    "key": key,
+                    "recomputed": recomputed,
+                }
+            ),
+        )
+        return None
+
+    return record
 
 
 def write_cache(cache_dir: Path, key: str, record: CacheRecord) -> None:
@@ -471,8 +503,13 @@ def write_cache(cache_dir: Path, key: str, record: CacheRecord) -> None:
             0o600,
         )
     except FileExistsError:
-        # DEC-014 — content-addressed key means the existing file is
-        # byte-identical. Log DEBUG (a normal benign race, not an
+        # DEC-014 — content-addressed key means the existing file
+        # represents a valid verdict for the same
+        # ``(criterion, artifact, provider, model, prompt_version)``.
+        # The bodies may differ in ``original_timestamp`` and LLM
+        # judge prose (LLM output is non-deterministic across runs),
+        # but either is a sound rehydration target — losing this
+        # write is safe. Log DEBUG (a normal benign race, not an
         # error) and return.
         _LOGGER.debug(
             "grade cache entry already present: %s",
@@ -525,36 +562,47 @@ def write_cache(cache_dir: Path, key: str, record: CacheRecord) -> None:
             os.close(fd)
 
 
-def clear_cache(cache_dir: Path) -> None:
+def clear_cache(cache_dir: Path, *, project_dir: Path | None = None) -> None:
     """Remove the grade-cache directory recursively.
 
     Idempotent on a missing directory (no-op + INFO log).
-    Symlink-hardened: canonicalises ``cache_dir`` via
-    ``Path.resolve(strict=False)`` and rejects anything whose
-    canonical form does not end with the conventional
-    ``.signalforge/grade-cache`` suffix (DEC-012, DEC-015). This
-    refuses to ``shutil.rmtree`` an arbitrary tree even when the
-    caller passes a symlinked path.
+    Symlink-hardened in two layers (issue #189 QG Pass 1 Finding 2):
+
+    1. Suffix-containment: the canonical resolved path's last two
+       components MUST be ``.signalforge/grade-cache``. Refuses to
+       ``shutil.rmtree`` a tree whose canonical form falls outside
+       that suffix.
+    2. Project-anchor containment (when ``project_dir`` is supplied):
+       the canonical resolved path MUST also live inside the
+       canonical ``project_dir`` tree. Closes the gap where
+       ``<project>/.signalforge/grade-cache`` could be a symlink to
+       ``/tmp/.signalforge/grade-cache`` — the suffix check alone
+       would pass, but ``shutil.rmtree`` would then delete
+       ``/tmp/.signalforge/grade-cache`` (outside the project).
+
+    The CLI handler (``signalforge.cli.cache._cmd_cache_clear``)
+    passes ``project_dir`` so this second layer is active in practice.
+    Library callers without a project anchor fall back to suffix-only
+    containment.
 
     Args:
         cache_dir: the cache root directory. Conventionally
             ``<project>/.signalforge/grade-cache``.
+        project_dir: optional anchor for the second containment
+            layer. When supplied, the resolved cache path must be
+            inside the resolved ``project_dir``.
 
     Raises:
-        GradeCachePathError: ``cache_dir`` canonicalises to a path
-            whose final two components are not
-            ``.signalforge/grade-cache``. Refuses to remove anything
-            outside that suffix. Mapped to CLI tier 1 (load-time /
-            operator-config problem).
+        GradeCachePathError: ``cache_dir`` canonicalises outside the
+            ``.signalforge/grade-cache`` suffix, OR (with
+            ``project_dir`` supplied) outside the project tree.
+            Mapped to CLI tier 1 (load-time / operator-config
+            problem).
     """
     cache_dir = Path(cache_dir)
 
     # ``Path.resolve(strict=False)`` is correct for the
     # "directory might not exist" idempotent case (DEC-015).
-    # Containment check is against the conventional suffix because
-    # ``clear_cache`` takes no anchor argument; the load-bearing
-    # boundary is "the resolved canonical path lives inside a
-    # ``.signalforge/grade-cache/`` tree somewhere on disk".
     try:
         resolved = cache_dir.resolve(strict=False)
     except (RuntimeError, OSError) as exc:
@@ -571,16 +619,33 @@ def clear_cache(cache_dir: Path) -> None:
 
     suffix = _GRADE_CACHE_DIR_SUFFIX
     parts = resolved.parts
-    # Containment check: the LAST two path components must be
-    # ``.signalforge`` and ``grade-cache``. Mirrors the spirit of the
-    # ``signalforge._common.path_safety`` containment helper without
-    # requiring an anchor argument (DEC-015 — ``clear_cache`` only
-    # takes ``cache_dir``).
+    # Layer 1: suffix containment. The LAST two path components must
+    # be ``.signalforge`` and ``grade-cache``.
     if len(parts) < 2 or parts[-2:] != suffix:
         raise GradeCachePathError(
             f"Grade cache path {cache_dir!r} canonicalises to {resolved!r}, "
             f"whose final components are not {suffix!r}. Refusing to remove."
         )
+
+    # Layer 2: project-anchor containment. Closes the symlink-escape
+    # gap where ``<project>/.signalforge/grade-cache`` is a symlink
+    # whose target also ends with ``.signalforge/grade-cache`` but
+    # lives outside the project (issue #189 QG Pass 1 Finding 2).
+    if project_dir is not None:
+        try:
+            resolved_project = Path(project_dir).resolve(strict=False)
+        except (RuntimeError, OSError) as exc:
+            if isinstance(exc, OSError) and exc.errno not in (None, errno.ELOOP):
+                raise
+            raise GradeCachePathError(
+                f"Project root {project_dir!r} could not be canonicalised ({type(exc).__name__})."
+            ) from exc
+        if not resolved.is_relative_to(resolved_project):
+            raise GradeCachePathError(
+                f"Grade cache path {cache_dir!r} canonicalises to {resolved!r}, "
+                f"which is outside the project root {resolved_project!r}. "
+                "Refusing to remove."
+            )
 
     if not resolved.exists():
         _LOGGER.info(

@@ -2405,14 +2405,17 @@ def test_grade_engine_degraded_result_not_cached(tmp_path: Path) -> None:
 
 
 def test_grade_engine_cache_write_failure_is_fail_soft(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A cache-write failure does NOT abort the live grade.
 
     Monkey-patch :func:`signalforge.grade.cache.write_cache` (as imported
     by the engine) to raise. Assert :func:`grade_artifacts` still
-    returns a complete :class:`GradingReport` and no exception
-    escapes.
+    returns a complete :class:`GradingReport`, no exception escapes,
+    AND the engine emits its forensic WARNING line so operators can
+    diagnose recurring cache-write failures (#189 QG Pass 3 Finding 8).
     """
     project_dir = _project(tmp_path)
     model = _make_model()
@@ -2429,6 +2432,7 @@ def test_grade_engine_cache_write_failure_is_fail_soft(
     # load time.
     monkeypatch.setattr(engine_module, "write_cache", _exploding_write)
 
+    caplog.set_level(logging.WARNING, logger="signalforge.grade.engine")
     report = grade_artifacts(
         model,
         candidate,
@@ -2443,6 +2447,11 @@ def test_grade_engine_cache_write_failure_is_fail_soft(
     assert isinstance(report, GradingReport)
     assert len(report.results) == 14
     assert all(r.score == 0.5 for r in report.results)
+    # Forensic WARNING must surface — a silent swallow would lose the
+    # operator-actionable signal that the cache layer is broken.
+    assert any(
+        "grade cache write failed (engine guard)" in r.getMessage() for r in caplog.records
+    ), "engine's defence-in-depth WARNING must fire when write_cache raises"
 
 
 def test_grade_engine_cache_hit_event_has_zero_tokens(tmp_path: Path) -> None:
@@ -2644,3 +2653,53 @@ def test_grade_engine_cache_hit_dispatch_order_preserved_with_async_misses(
         and r.get("cache_hit") is True
     ]
     assert len(hits) == 1
+
+
+def test_grade_artifacts_raises_grade_cache_path_error_on_symlinked_cache_dir(
+    tmp_path: Path,
+) -> None:
+    """QG Pass 3 Finding 6 — the engine's ``canonicalise_path`` wrap
+    of the cache_dir is otherwise uncovered. Plant a symlink at
+    ``<project>/.signalforge/grade-cache`` whose target is outside
+    the project — the engine must raise ``GradeCachePathError`` at
+    orchestrator entry, before any LLM call."""
+    from signalforge.grade.errors import GradeCachePathError
+
+    project_dir = _project(tmp_path)
+    # Plant a symlink target outside the project tree.
+    outside = tmp_path / "outside" / ".signalforge" / "grade-cache"
+    outside.mkdir(parents=True)
+    # Replace the project's grade-cache dir with a symlink to outside.
+    signalforge_dir = project_dir / ".signalforge"
+    signalforge_dir.mkdir(parents=True, exist_ok=True)
+    cache_link = signalforge_dir / "grade-cache"
+    cache_link.symlink_to(outside)
+
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()  # no expectations queued — must NOT be called
+
+    with pytest.raises(GradeCachePathError):
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=_config_no_audit_in_path(),
+            client=fake,
+            project_dir=project_dir,
+        )
+    # The fake's expectation queue is empty — if any LLM call had
+    # leaked through, FakeAnthropicClient.messages.create would
+    # raise "unexpected query".
+
+
+# P3 Finding 7 (`prefilled_results` length-mismatch defensive guard at
+# engine.py:619) is intentionally not unit-tested: the guard sits behind
+# a private async core whose other kwargs (rubric_hash, template_hash,
+# rubric_block, crit_hash_by_id, ...) require substantial setup, and
+# it's unreachable from any public seam by construction — the
+# orchestrator always builds ``prefilled_results`` to ``total_pairs``
+# length. Coverage loss is one defensive raise; cost of testing exceeds
+# value (issue #189 QG, accepted trade-off).

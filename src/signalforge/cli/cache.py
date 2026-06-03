@@ -251,14 +251,17 @@ def _cmd_cache_clear(args: argparse.Namespace) -> int:
         project_dir = _resolve_project_dir(args)
         cache_dir = project_dir / ".signalforge" / "grade-cache"
         # ``clear_cache`` does its own ``Path.resolve(strict=False)`` +
-        # suffix-containment check (DEC-015 / DEC-017) and raises
-        # :class:`GradeCachePathError` on a symlink escape. We do NOT
-        # need to route through ``canonicalise_user_path`` here — the
-        # lib seam IS the containment gate, and the cache dir may not
-        # exist yet (the idempotent-missing case), which
-        # ``canonicalise_user_path``'s ``strict=True`` resolve would
-        # mis-handle.
-        clear_cache(cache_dir)
+        # two-layer containment check (DEC-015 / DEC-017): suffix
+        # containment AND project-anchor containment when ``project_dir``
+        # is supplied. Passing ``project_dir`` here closes the
+        # symlink-escape gap where ``<project>/.signalforge/grade-cache``
+        # could be a symlink to ``/tmp/.signalforge/grade-cache``
+        # (issue #189 QG Pass 1 Finding 2). We do NOT route through
+        # ``canonicalise_user_path`` — the lib seam IS the containment
+        # gate, and the cache dir may not exist yet (idempotent-missing
+        # case), which ``canonicalise_user_path``'s ``strict=True``
+        # resolve would mis-handle.
+        clear_cache(cache_dir, project_dir=project_dir)
     except (KeyboardInterrupt, SystemExit):
         # Preserve Python's default semantics for operator Ctrl-C and
         # any clean SystemExit raised from within ``clear_cache``

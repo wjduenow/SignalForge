@@ -357,10 +357,21 @@ def test_lookup_cache_returns_none_on_validation_failure(
 def test_lookup_cache_round_trips_a_written_record(tmp_path: Path) -> None:
     """End-to-end: ``write_cache`` then ``lookup_cache`` returns the
     same fields (modulo Pydantic's internal representation).
+
+    The key MUST be derived from the record's input-side hashes via
+    :func:`compute_cache_key` — the post-#189 key-verification gate
+    (issue #189 QG Pass 1 Finding 1) rejects a hash-mismatched record
+    as a corrupt cache file.
     """
     cache_dir = tmp_path / "grade-cache"
-    key = "deadbeefcafebabe"
     record = _record()
+    key = compute_cache_key(
+        criterion_prompt_hash=record.criterion_prompt_hash,
+        artifact_text_hash=record.artifact_text_hash,
+        provider=record.provider,
+        model=record.model,
+        prompt_version_template=record.prompt_version_template,
+    )
 
     write_cache(cache_dir, key, record)
     loaded = lookup_cache(cache_dir, key)
@@ -610,3 +621,193 @@ def test_write_cache_skips_umask_overrides(tmp_path: Path) -> None:
     # implementation that passed 0o666 would let umask=0 leave it
     # world-writable — this test guards against that regression).
     assert mode == 0o600
+
+
+# --- QG Pass 1 + Pass 3 coverage gaps (issue #189) -------------------------
+
+
+def test_lookup_cache_returns_none_on_key_mismatch_with_stored_hashes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Per QG Pass 1 Finding 1: a cache file under ``<keyA>.json`` whose
+    stored hashes recompute to a DIFFERENT key (e.g., corrupt or
+    hostile content) must be treated as a miss, not silently rehydrated.
+    The forensic-hash trail is load-bearing.
+    """
+    cache_dir = tmp_path / "grade-cache"
+    cache_dir.mkdir()
+    # Compute the legitimate key for one input set.
+    legit_key = compute_cache_key(
+        criterion_prompt_hash="1111222233334444",
+        artifact_text_hash="aaaabbbbccccdddd",
+        provider="anthropic",
+        model="claude-sonnet-4-6",
+        prompt_version_template="fedcba9876543210",
+    )
+    # Build a record whose stored hashes encode a DIFFERENT input set
+    # (different artifact_text_hash); writing it under ``legit_key.json``
+    # is a corrupted/hostile placement.
+    record = _record(artifact_text_hash="ffffeeeeddddcccc")  # mismatch
+    write_cache(cache_dir, legit_key, record)
+    # The file is on disk, but lookup must reject it.
+    caplog.set_level(logging.INFO, logger="signalforge.grade.cache")
+    result = lookup_cache(cache_dir, legit_key)
+    assert result is None
+    assert any("grade cache key mismatch" in r.getMessage() for r in caplog.records), (
+        "INFO line must name the key-mismatch diagnostic"
+    )
+
+
+def test_write_cache_fails_soft_on_mkdir_oserror(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QG Pass 3 Finding 1 — the mkdir fail-soft branch is otherwise
+    uncovered. A read-only parent (or any OSError from mkdir) must not
+    propagate; the run continues with a WARNING."""
+    cache_dir = tmp_path / "grade-cache"
+
+    def _raise(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("simulated read-only parent")
+
+    monkeypatch.setattr(Path, "mkdir", _raise)
+    caplog.set_level(logging.WARNING, logger="signalforge.grade.cache")
+    write_cache(cache_dir, "deadbeefcafebabe", _record())
+    assert not cache_dir.exists()
+    assert any("write failed (mkdir)" in r.getMessage() for r in caplog.records)
+
+
+def test_write_cache_fails_soft_on_write_error_unlinks_partial_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QG Pass 3 Finding 2 — the mid-write fail-soft branch + partial-file
+    unlink cleanup is otherwise uncovered. An OSError from ``os.write``
+    must leave no on-disk artefact (DEC-005's critical safety surface)."""
+    cache_dir = tmp_path / "grade-cache"
+    key = "deadbeefcafebabe"
+
+    def _fail_write(fd: int, data: bytes) -> int:
+        raise OSError("simulated write failure")
+
+    monkeypatch.setattr(os, "write", _fail_write)
+    caplog.set_level(logging.WARNING, logger="signalforge.grade.cache")
+    write_cache(cache_dir, key, _record())
+    # Partial file MUST be cleaned up — the next run must see a miss,
+    # not a truncated entry.
+    assert not (cache_dir / f"{key}.json").exists()
+    assert any("write failed (write/fsync)" in r.getMessage() for r in caplog.records)
+
+
+def test_write_cache_short_write_returning_zero_caught_softly(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QG Pass 3 Finding 3 — ``os.write`` returning 0 raises a synthetic
+    OSError that the fail-soft outer arm catches. The only defence
+    against a kernel returning 0 bytes on a full filesystem."""
+    cache_dir = tmp_path / "grade-cache"
+    key = "deadbeefcafebabe"
+
+    def _zero_write(fd: int, data: bytes) -> int:
+        return 0  # never make progress
+
+    monkeypatch.setattr(os, "write", _zero_write)
+    caplog.set_level(logging.WARNING, logger="signalforge.grade.cache")
+    write_cache(cache_dir, key, _record())
+    assert not (cache_dir / f"{key}.json").exists()
+    # The fail-soft WARNING fires; partial file cleanup runs. The
+    # specific "os.write returned 0" string is the synthetic OSError
+    # message but the JSON log line records only ``error_class`` per
+    # the lazy-format logger contract, so we assert on the WARNING
+    # shape (the only forensic signal an operator gets).
+    assert any("write failed (write/fsync)" in r.getMessage() for r in caplog.records)
+
+
+def test_lookup_cache_returns_none_on_unreadable_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QG Pass 3 Finding 4 — the OSError-on-read fail-soft branch.
+    A PermissionError on read (e.g., chmod 000) must return None +
+    INFO."""
+    cache_dir = tmp_path / "grade-cache"
+    cache_dir.mkdir()
+    key = "deadbeefcafebabe"
+    target = cache_dir / f"{key}.json"
+    target.write_text("{}", encoding="utf-8")
+
+    real_read_bytes = Path.read_bytes
+
+    def _raise_on_target(self: Path) -> bytes:
+        if self == target:
+            raise PermissionError("simulated unreadable cache file")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _raise_on_target)
+    caplog.set_level(logging.INFO, logger="signalforge.grade.cache")
+    result = lookup_cache(cache_dir, key)
+    assert result is None
+    assert any("grade cache read failed" in r.getMessage() for r in caplog.records)
+
+
+def test_clear_cache_raises_grade_cache_path_error_on_symlink_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """QG Pass 3 Finding 5 — the canonicalisation-failure branch
+    (``RuntimeError`` on 3.11/3.12, ``OSError(ELOOP)`` on 3.13). Force
+    via monkeypatching ``Path.resolve`` to raise — robust across the
+    matrix without depending on the kernel's actual symlink-loop
+    semantics."""
+    cache_dir = tmp_path / ".signalforge" / "grade-cache"
+    cache_dir.parent.mkdir(parents=True)
+
+    real_resolve = Path.resolve
+
+    def _raise_loop(self: Path, strict: bool = False) -> Path:
+        if self == cache_dir:
+            # Mirror Python <= 3.12's RuntimeError on symlink loops.
+            raise RuntimeError("symlink loop")
+        return real_resolve(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", _raise_loop)
+
+    with pytest.raises(GradeCachePathError, match="could not be canonicalised"):
+        clear_cache(cache_dir)
+
+
+def test_clear_cache_with_project_dir_rejects_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    """QG Pass 1 Finding 2 — the project-anchor containment layer.
+    A symlink at ``<project>/.signalforge/grade-cache`` whose target
+    is ``/tmp/.../  .signalforge/grade-cache`` (suffix matches, but
+    outside the project) MUST raise even though the suffix check
+    passes."""
+    # Plant the symlink target outside the project.
+    outside = tmp_path / "outside" / ".signalforge" / "grade-cache"
+    outside.mkdir(parents=True)
+    (outside / "sentinel.json").write_text("{}", encoding="utf-8")
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / ".signalforge").mkdir()
+    inside = project_dir / ".signalforge" / "grade-cache"
+    inside.symlink_to(outside)
+
+    # Without project_dir anchor, the suffix-only check would pass.
+    # With project_dir, the project-anchor layer rejects.
+    with pytest.raises(GradeCachePathError, match="outside the project root"):
+        clear_cache(inside, project_dir=project_dir)
+    # The outside target's contents must remain intact.
+    assert (outside / "sentinel.json").exists()
+
+
+def test_clear_cache_with_project_dir_allows_real_in_project_path(
+    tmp_path: Path,
+) -> None:
+    """Companion to the symlink-escape rejection: the happy path
+    (cache dir genuinely inside the project) must still clear."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    cache_dir = project_dir / ".signalforge" / "grade-cache"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "entry.json").write_text("{}", encoding="utf-8")
+    clear_cache(cache_dir, project_dir=project_dir)
+    assert not cache_dir.exists()

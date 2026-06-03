@@ -212,3 +212,58 @@ def test_cache_clear_requires_grade_flag(
     _out, err = _capture(capsys)
     # argparse exits with code 2 on missing-required-argument.
     assert ret == 2, f"expected argparse exit 2; got {ret}; stderr: {err}"
+
+
+# --- QG Pass 3 Finding 8 — project-dir resolution coverage gaps -----------
+
+
+def test_cache_clear_grade_project_dir_missing_dbt_project_yml_exits_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When ``--project-dir`` points at a directory WITHOUT
+    ``dbt_project.yml``, the handler raises ``CliPathError`` (tier 1).
+    Exercises the absolute-assertion branch in
+    ``_resolve_project_dir``.
+    """
+    bare = tmp_path / "no_dbt"
+    bare.mkdir()
+    code = main(["cache", "clear", "--grade", "--project-dir", str(bare)])
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "does not contain dbt_project.yml" in captured.err
+
+
+def test_cache_clear_grade_walk_up_fails_without_dbt_project_yml(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """When no ``--project-dir`` is given AND the walk-up from CWD
+    finds no ``dbt_project.yml`` anywhere, the handler raises
+    ``CliPathError`` (tier 1). Exercises the walk-up branch.
+    """
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    monkeypatch.chdir(isolated)
+    code = main(["cache", "clear", "--grade"])
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "could not find dbt_project.yml" in captured.err
+
+
+def test_cmd_cache_unknown_sub_action_returns_two(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """QG Pass 3 Finding 10 — the defensive ``unknown cache sub-action``
+    branch in :func:`cmd_cache` is otherwise unreachable (argparse
+    ``required=True`` filters it). Direct invocation with a synthetic
+    Namespace exercises the defensive branch."""
+    from signalforge.cli.cache import cmd_cache
+
+    args = argparse.Namespace(cache_subcommand="unknown_action")
+    code = cmd_cache(args)
+    assert code == 2
+    captured = capsys.readouterr()
+    assert "unknown cache sub-action" in captured.err
+    assert "'unknown_action'" in captured.err
