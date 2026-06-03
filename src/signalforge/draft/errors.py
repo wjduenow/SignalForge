@@ -397,7 +397,7 @@ class PromptEnvelopeBreachError(DraftError):
     Raised BEFORE any LLM call so a poisoned input never reaches the
     provider.
 
-    Envelope-parameterised (#163 US-001, DEC-005):
+    Envelope-parameterised (#163 US-001, DEC-005; #188 US-002, DEC-008):
 
     * ``envelope="MODEL_SQL"`` (default) — the original ``<MODEL_SQL>``
       envelope. Message is byte-equal to the pre-#163 rendering so the
@@ -405,34 +405,79 @@ class PromptEnvelopeBreachError(DraftError):
     * ``envelope="BUSINESS_RULE"`` + ``rule_index`` — the per-rule
       ``<BUSINESS_RULE id="N">`` envelope around operator-supplied rules.
       Message names the 1-indexed offending rule.
+    * ``envelope="PROJECT_MANIFEST"`` — the project-wide cached-prefix
+      envelope (#188 US-002). The breach was detected while aggregating
+      the *whole project* rather than a single model, so ``model_unique_id``
+      may be ``None`` (the project summary lists every model); pass
+      ``rule_source="project"`` so the message names the project
+      aggregation rather than a single model's raw SQL.
+
+    The ``rule_source`` discriminator (#188, DEC-008) separates the
+    *origin* of the offending content from the *envelope* it breached:
+
+    * ``rule_source="model"`` (default) — the breach traces to a single
+      model's content (its raw SQL or one of its own business rules). The
+      pre-#188 behaviour, byte-for-byte.
+    * ``rule_source="project"`` — the breach traces to the project-wide
+      aggregation (a model description in the ``<PROJECT_MANIFEST>``
+      summary, or an aggregated project business rule). ``model_unique_id``
+      is the offending model when known, ``None`` when the breach is in the
+      project summary as a whole.
 
     Future envelopes follow the same shape — extend with a new ``envelope=``
-    value, never a new error class.
+    value (and ``rule_source=`` where the origin differs), never a new error
+    class. Keeping the class stable preserves its CLI exit-code mapping
+    (tier 2; scan 7 in ``tests/test_audit_completeness.py``).
     """
 
     default_remediation: ClassVar[str] = (
         "The input contains the literal closing tag of a prompt-injection "
-        "envelope (e.g. '</MODEL_SQL>' in a model's raw SQL, or "
-        "'</BUSINESS_RULE>' in an operator-supplied business rule), which "
-        "would break the envelope. Inspect the offending input (likely a "
-        "SQL comment or meta.signalforge.business_rules entry); remove the "
-        "literal or escape it. If this is legitimate content (rare), open "
-        "an issue — the envelope tag will need to rotate to an unguessable "
-        "nonce."
+        "envelope (e.g. '</MODEL_SQL>' in a model's raw SQL, "
+        "'</BUSINESS_RULE>' in an operator-supplied business rule, or "
+        "'</PROJECT_MANIFEST>' in a model description aggregated into the "
+        "project summary), which would break the envelope. Inspect the "
+        "offending input (likely a SQL comment, a model description, or a "
+        "meta.signalforge.business_rules entry); remove the literal or "
+        "escape it. If this is legitimate content (rare), open an issue — "
+        "the envelope tag will need to rotate to an unguessable nonce."
     )
 
     def __init__(
         self,
-        model_unique_id: str,
+        model_unique_id: str | None = None,
         *,
         envelope: str = "MODEL_SQL",
         rule_index: int | None = None,
+        rule_source: str = "model",
         remediation: str | None = None,
     ) -> None:
         self.model_unique_id = model_unique_id
         self.envelope = envelope
         self.rule_index = rule_index
-        if envelope == "BUSINESS_RULE" and rule_index is not None:
+        self.rule_source = rule_source
+        if rule_source == "project":
+            # Project-wide aggregation (#188 US-002). The envelope names the
+            # surface that broke; model_unique_id names the offending model
+            # when known.
+            where = (
+                f"model {_format_value(model_unique_id)}"
+                if model_unique_id is not None
+                else "the project summary"
+            )
+            closing_tag = f"</{envelope}>"
+            if envelope == "BUSINESS_RULE" and rule_index is not None:
+                message = (
+                    f"Project business rule #{rule_index} (from {where}) "
+                    f"contains the literal '{closing_tag}' — refusing to "
+                    f"render the project prompt prefix."
+                )
+            else:
+                message = (
+                    f"The project summary ({where}) contains the literal "
+                    f"'{closing_tag}' — refusing to render the project "
+                    f"prompt prefix."
+                )
+        elif envelope == "BUSINESS_RULE" and rule_index is not None:
             message = (
                 f"Rule #{rule_index} of model {_format_value(model_unique_id)} "
                 f"contains the literal '</BUSINESS_RULE>' — refusing to render "
