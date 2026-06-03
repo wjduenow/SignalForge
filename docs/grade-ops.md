@@ -177,6 +177,141 @@ Unknown keys under `grade:` raise `GradeConfigError` (Pydantic
 `extra="forbid"`). Typos like `mdoel:` or `total_budget_secnds:` fail
 loud at load time rather than silently no-op'ing.
 
+## Grade cache
+
+The grade layer ships a **persistent, content-addressed cache** for
+per-`(artefact, criterion)` verdicts (issue #189). On a cache hit
+the LLM judge is **not** called — the prior verdict is reconstructed
+into a `GradingResult` and audit-logged with `cache_hit: true` on
+the corresponding `GradeEvent`. Across a typical multi-iteration
+session (drafter / prune tuning on the same model), cache hits
+amortise the grader's wall-clock and cost to near-zero on
+re-evaluated pairs.
+
+### Cache layout
+
+```
+<project_dir>/.signalforge/grade-cache/<cache_key>.json
+```
+
+where `<cache_key>` is a 16-hex `blake2b-8` digest. Single-level
+flat directory; one file per `(artefact, criterion)` verdict. File
+mode `0o600` (owner-only read/write) at `os.open` time — mirrors
+every other fail-closed writer in the project. Cache files may
+quote LLM-emitted `evidence` / `reasoning` text, so the mode is
+load-bearing for PII posture.
+
+A `CacheRecord` JSON document (the on-disk shape) duplicates the
+fields a reader needs without wrapping a nested `GradingResult` —
+operator UX favours `jq '.score' cache.json` over `jq
+'.result.score'`. See `signalforge.grade.cache.CacheRecord` for the
+exact field set (DEC-011 of #189).
+
+### Five-part cache key recipe
+
+The cache key is invalidated by any change to the five inputs that
+genuinely determine the verdict:
+
+```
+cache_key = blake2b(
+    criterion_prompt_hash    + "\x00" +   # changes when criterion text changes
+    artifact_text_hash       + "\x00" +   # changes when artefact text changes
+    provider                 + "\x00" +   # changes on provider swap (anthropic / openai / gemini)
+    model                    + "\x00" +   # changes on model SKU swap (claude-sonnet-4-6 -> claude-haiku-4-5, etc.)
+    prompt_version_template,              # changes when system prompt / rubric list / envelope tags change
+    digest_size=8,
+).hexdigest()  # 16 hex chars
+```
+
+NUL-byte separators prevent id/text concatenation collisions
+(mirrors the existing `criterion_prompt_hash` recipe). Five clean
+invalidation axes — no implicit TTL, no time-based eviction. If a
+change should invalidate a prior verdict, it lives in the key; if
+it does not live in the key, it should not invalidate the verdict.
+
+(Full recipe + every contributing source: DEC-004 of #189.)
+
+### `grade.cache_enabled` knob
+
+`signalforge.yml` carries one knob:
+
+```yaml
+grade:
+  cache_enabled: true   # default; set false to bypass cache entirely
+```
+
+Setting `false` skips BOTH lookup AND write for every grade pair —
+each one routes through the live LLM judge call. The on-disk cache
+files are **not** deleted by flipping the knob; an operator wanting
+to wipe them runs `signalforge cache clear --grade` (see
+[`docs/cli-ops.md`](cli-ops.md#clear-the-grade-cache-signalforge-cache-clear-grade)).
+
+The CLI's `signalforge generate --no-cache` flag flips this knob on
+a per-run copy of the resolved config — the on-disk
+`signalforge.yml` is unaffected and subsequent runs continue to
+honour whatever value is committed there. Reach for `--no-cache`
+for one-off debugging / calibration runs; reach for
+`cache_enabled: false` in `signalforge.yml` when an operator
+explicitly wants every run on a project to bypass cache (rare; the
+content-addressed key normally makes this unnecessary).
+
+`extra="forbid"` makes typos like `cache_enable:` (missing the `d`)
+fail loud at config-load — silent no-op would defeat the gate.
+
+### Degraded results never land in the cache
+
+Per the [conservative score-and-degrade taxonomy](#grade-cache)
+(DEC-007 of #189), a degraded verdict (`score=None` — LLM retry
+exhausted, parser failure, envelope-breach, budget exceeded) is
+**never** written to the cache. Caching that record would silently
+replay the failure forever, preventing recovery from a transient
+LLM / network blip. Cache writes are gated on `result.score is not
+None`.
+
+Cache reads never construct a degraded `GradingResult` either — a
+malformed on-disk cache file (e.g. a `score: null` injected by an
+attacker or a corrupted record) routes to a cache miss + WARNING,
+not a degraded result. The live LLM judge runs and re-populates the
+entry.
+
+### `signalforge cache clear --grade` subcommand
+
+Removes `<project_dir>/.signalforge/grade-cache/` recursively.
+Symlink-hardened, idempotent on a missing directory, exits 0 on
+success. Documented in
+[`docs/cli-ops.md`](cli-ops.md#clear-the-grade-cache-signalforge-cache-clear-grade)
+with the full operator-facing behaviour, exit codes, and rationale
+for the absence of a `--confirm` flag. (DEC-015 of #189.)
+
+Future siblings (`cache clear --drafter`, `cache stats`, `cache
+list`) are out of scope for #189; the nested-subcommand shape
+reserves namespace for them.
+
+### When to expect cache hits
+
+- **Same model, same rubric, same provider / SKU, same prompt
+  version.** Re-running `signalforge generate <model>` after a
+  drafter / prune tuning iteration that left the artefact set
+  byte-identical hits cache on every pair.
+- **Drafter regenerated an artefact whose text didn't actually
+  change.** The artefact-text hash captures the actual byte content
+  of `extract_artifact_text(candidate, artifact_id)` — a drafter
+  retry that produces identical text hits cache.
+
+### When to expect cache misses
+
+- **Rubric criterion text changed** (`criterion_prompt_hash` flips).
+- **System prompt / rubric list / envelope tags changed**
+  (`prompt_version_template` flips — bumped in lockstep when the
+  grade `_SYSTEM_PROMPT` or any `DEFAULT_RUBRIC` criterion text
+  changes; see [Reproducibility / hash fields](#reproducibility-hash-fields)).
+- **Provider or model swapped.** `provider: openai` ↔ `provider:
+  anthropic`; `model: claude-sonnet-4-6` ↔ `model:
+  claude-haiku-4-5`. Each combination scopes its own cache entries.
+- **Artefact text actually changed.** Drafter rewrote a column
+  description, prune dropped a test (changing which tests reach
+  grade), etc.
+
 ## Threshold-fail behaviour
 
 Default posture is report-only — `grade_artifacts(...)` always returns a

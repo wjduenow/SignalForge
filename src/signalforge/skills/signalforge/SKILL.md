@@ -113,7 +113,26 @@ Where `<model>` is a file path or unique_id from Section 1. The safety posture m
 
 `signalforge version` verifies the install resolved before you spend warehouse / API budget. `signalforge generate --estimate` previews the LLM + warehouse byte cost without firing real calls.
 
-The `.signalforge/` directory under the project carries durable audit JSONLs for every stage (safety, llm_responses, prune, grade) plus per-run sidecars (`grade.json`, `diff.json`). These are append-only; they survive crashes mid-run. The persistent grade cache lives next to them at `.signalforge/grade-cache/` (content-addressed JSON entries; cache hits skip the LLM judge on re-runs against unchanged artefacts). Wipe it with `signalforge cache clear --grade` when the rubric or model defaults change — the command is symlink-hardened and idempotent on a missing directory.
+Two flags for fast iteration loops (both compose with every other `generate` flag — no mutex):
+
+- **`--no-grade`** skips the grade stage entirely. The drafter + safety + prune + diff stages still run; the diff renders kept / kept-uncertain / dropped rows with no `flagged` tier (because the grader never ran). Zero LLM judge calls, zero grader tokens, no `grade.json` / `grade.jsonl` side files. Progress honestly re-numbers to `[N/4]`. Reach for `--no-grade` when iterating on drafter prompt or prune scope where the grader's signal would slow the feedback loop.
+- **`--no-cache`** bypasses the persistent grade cache for one run (no lookup, no write); every `(artefact, criterion)` pair routes through the live LLM judge. Existing cache files on disk are NOT deleted — `--no-cache` is a per-run bypass, not a wipe. Reach for `--no-cache` when debugging a grader verdict, after a manual fixture edit, or during calibration / concordance runs.
+
+Precedence when both flags are set: `--no-grade` implicitly wins (no grade stage runs → no cache I/O regardless of `--no-cache`).
+
+## 3a. The `.signalforge/` directory and the grade cache
+
+The `.signalforge/` directory under the project carries durable audit JSONLs for every stage (safety, llm_responses, prune, grade) plus per-run sidecars (`grade.json`, `diff.json`). These are append-only; they survive crashes mid-run.
+
+The **persistent grade cache** lives next to them at `.signalforge/grade-cache/`. Each file is a content-addressed JSON entry keyed by a 16-hex `blake2b-8` digest over the five inputs that determine a verdict: the criterion text, the artefact text, the provider, the model SKU, and the prompt-version template. On a cache hit the LLM judge is skipped entirely and the prior verdict is reconstructed; cache misses fire a live judge call and write the result back. Across a typical multi-iteration session against the same model the cache amortises the grader's wall-clock and cost to near-zero on re-evaluated pairs.
+
+**Operator commands for the cache:**
+
+- **`signalforge cache clear --grade`** removes the entire cache directory at `<project_dir>/.signalforge/grade-cache/`. Symlink-hardened (refuses to remove anything whose canonical path does not end with `.signalforge/grade-cache`), idempotent on a missing directory (exit 0, INFO line, no error), and the `--grade` flag is required so the subcommand cannot silently wipe the wrong cache as the family grows. There is no `--confirm` flag — destructive scope is bounded and the operator typed `--grade` explicitly. Reach for it when the rubric criteria change, when you swap providers / models in a way you want the cache to forget, or when you want to bound disk usage.
+- **`signalforge generate --no-cache`** (above) bypasses the cache for one run without removing any entries.
+- **`grade.cache_enabled: false`** in `signalforge.yml` disables the cache project-wide. Rare — the content-addressed key normally invalidates entries correctly on its own; reach for the knob only when an operator explicitly wants every run on the project to bypass cache.
+
+See `docs/grade-ops.md` § "Grade cache" for the full key recipe, file layout, and conservative-degrade contract (degraded `score=None` verdicts never land in the cache, so a transient LLM blip cannot silently replay forever).
 
 The drafter proposes eight structured test types: `not_null`, `unique`, `accepted_values`, `relationships`, `custom_sql` (a singular failing-rows SELECT for business rules the four built-ins can't express), `row_count_between` (a model-level bounded-cardinality assertion for daily/weekly rollups and monitoring tables — emits as a `dbt_expectations.expect_table_row_count_to_be_between` YAML block, so the operator needs `dbt-expectations` in their `packages.yml`), `unique_combination` (a model-level composite-key uniqueness assertion for grain tuples like `(order_id, line_item_id)` — emits as a `dbt_utils.unique_combination_of_columns` YAML block, so the operator needs `dbt-utils` in their `packages.yml`), and `row_count_anomaly_by_period` (a model-level time-series anomaly check predicting a row-count band from the model's own history and flagging the most-recent period when it falls outside — emits as a singular `tests/*.sql` file, proposed for incremental fact tables with a populated date partition column). Suppress any of them via `llm.exclude_tests: ["row_count_anomaly_by_period", "unique_combination", "row_count_between", "custom_sql", ...]` in `signalforge.yml` when the model under draft has no meaningful guarantee of that shape.
 
