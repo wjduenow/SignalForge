@@ -342,10 +342,18 @@ fix branch (`plan/184-anomaly-scope-fix` post-merge of US-001 … US-006);
 operator-side workaround `llm.exclude_tests: [row_count_anomaly_by_period]` was
 REMOVED in `~/Projects/intuit_airflow/plugins/dbt/signalforge.yml` for the
 duration of the run (then restored to its pre-fix state for hygiene).
-Six-minute per-model timeout cap (the original validation budget was 15 candidates,
-but Anthropic 429-rate-limiting + the large per-model token cost capped the
-run at the three load-bearing candidates per DEC-008's "at minimum the 3
-originally-failing" acceptance bar).
+Six-minute per-model timeout cap.
+
+**Status: PARTIAL — 3 of 15 candidates run.** The plan's DEC-008 commits to the
+full 15-candidate re-aggregation; this session ran only the 3 originally-failing
+candidates (`taxday_auction_insights` / `tvp_yelp` / `core_hourly_performance`)
+because Anthropic 429-rate-limiting + the large per-model token cost capped the
+budget. The remaining 12 Phase B candidates **REMAIN PENDING** — to be re-run by
+the maintainer with a fresh API window. Until that run lands, the full DEC-008
+acceptance bar is NOT closed; the 3-candidate evidence below is necessary but
+not sufficient. The bug-fix evidence on the 3 originally-failing candidates is
+load-bearing for "the bug is gone"; the 12-candidate gap leaves open "did the
+prompt rewrite introduce any unintended regressions elsewhere on Phase B?"
 
 **Per-candidate results (3 of 15 — the originally-failing trio).**
 
@@ -355,10 +363,12 @@ originally-failing" acceptance bar).
 | `analytical/tvp_yelp` | 124 (timeout @ 360s) | 360 | **NO** (timed out mid-grade, not parse) | 0 |
 | `analytical/core_hourly_performance` | (rate-limit retries) | ~300+ | **NO** | 0 |
 
-The remaining 12 Phase B candidates were not re-run in this session (Anthropic
-rate-limit + token-budget pressure). Per DEC-008's acceptance bar, the 3
-originally-failing candidates are the load-bearing check; the remaining 12
-can be re-validated by the maintainer at convenience.
+**Remaining work (12 of 15 candidates).** `raw/taxday_mappings`,
+`raw/googleads_auction_insights`, `reporting/data_store_test_control`,
+`operational/map_cid_sa360`, `analytical/fiscal_season`, `raw/query_history`,
+`raw/concord_sku`, `raw/aio`, `analytical/calendar_hour`,
+`ingress/yelp_business_metrics_stg`, `reporting/cid_all_concord_sku`,
+`raw/datashare_googlead`. Tracked as follow-up to close DEC-008 fully.
 
 **Aggregate.**
 
@@ -383,15 +393,18 @@ can be re-validated by the maintainer at convenience.
 
 **Narrative.**
 
-The primary lever (prompt rewrite) worked: across the 3 load-bearing
-candidates, the drafter proposed `row_count_anomaly_by_period` at model
+The primary lever (prompt rewrite) worked on the 3 originally-failing
+candidates: the drafter proposed `row_count_anomaly_by_period` at model
 scope on every attempt where the LLM proposed it at all, with zero parser
 re-attach events fired. The parser-side defence-in-depth never had to
 catch a mis-scoped emission in this run, which is the desired outcome —
-the safety net is silent when the prompt is honest. The remaining 12
-Phase B candidates were not re-run here because the run hit Anthropic
-rate-limits + the budget; a future maintainer-side pass with a fresh API
-window will close that gap.
+the safety net is silent when the prompt is honest. **The remaining 12
+Phase B candidates were NOT re-run here**, so the full DEC-008
+re-aggregation remains open; a future maintainer-side pass with a fresh API
+window (or chunked across sessions to avoid rate-limit) will close that
+gap. The 3-candidate evidence is enough to demonstrate the bug is fixed
+on the load-bearing failure shape but is NOT enough to demonstrate "no
+regressions on the broader Phase B cohort."
 
 Operator-side cleanup: the `llm.exclude_tests: [row_count_anomaly_by_period]`
 workaround in `~/Projects/intuit_airflow/plugins/dbt/signalforge.yml` was
