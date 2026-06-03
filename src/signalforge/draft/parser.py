@@ -393,6 +393,93 @@ def _check_where_clause(
     return tuple(violations)
 
 
+def _validate_model_only_test_args(
+    test: CandidateTest,
+    model_columns: frozenset[str],
+    model_columns_by_type: Mapping[str, str | None] | None,
+    dialect_name: str,
+) -> list[str]:
+    """Validate args of a model-level-only test variant against the schema.
+
+    Three variants are model-level-only by type-level constraint
+    (``column: None = None``): ``row_count_between`` (#169),
+    ``unique_combination`` (#170), ``row_count_anomaly_by_period`` (#171).
+    Each carries args (``where`` / ``columns`` / ``date_column``) that
+    must reference real columns on the model.
+
+    Called from the column loop's re-attach branch (#184 DEC-002) AFTER
+    a column-scoped emission is lifted to model scope — the model-level
+    loop has already run by the time the re-attach happens, so without
+    this re-validation a hallucinated ``date_column`` / ``where`` /
+    ``columns`` value would silently ship and degrade to
+    ``kept-without-evidence`` at prune instead of surfacing a typed
+    parser violation (#184 QG Pass 1 finding). The model-level loop's
+    own validation arms remain inline (they pre-date this helper and
+    refactoring them would touch unchanged code without a behaviour
+    change); this helper duplicates the args-membership / WHERE-clause
+    checks for the re-attach path only.
+
+    Returns a list (not tuple) so callers can ``.extend()`` into their
+    own running violations list cheaply.
+    """
+    out: list[str] = []
+    if test.type == "row_count_between":
+        if test.where is not None and test.where.strip():
+            types_map: Mapping[str, str | None] = (
+                model_columns_by_type if model_columns_by_type is not None else {}
+            )
+            out.extend(
+                _check_where_clause(
+                    test.where,
+                    "row_count_between",
+                    model_columns,
+                    types_map,
+                    dialect_name,
+                )
+            )
+    elif test.type == "unique_combination":
+        for col in test.columns:
+            if col not in model_columns:
+                out.append(
+                    f"unique_combination references nonexistent column {col!r} "
+                    f"(available: {sorted(model_columns)})"
+                )
+        if test.where is not None and test.where.strip():
+            uc_types_map: Mapping[str, str | None] = (
+                model_columns_by_type if model_columns_by_type is not None else {}
+            )
+            out.extend(
+                _check_where_clause(
+                    test.where,
+                    "unique_combination",
+                    model_columns,
+                    uc_types_map,
+                    dialect_name,
+                )
+            )
+    elif test.type == "row_count_anomaly_by_period":
+        if test.date_column not in model_columns:
+            out.append(
+                f"row_count_anomaly_by_period: date_column "
+                f"{test.date_column!r} not in model columns "
+                f"(available: {sorted(model_columns)})"
+            )
+        if test.where is not None and test.where.strip():
+            rca_types_map: Mapping[str, str | None] = (
+                model_columns_by_type if model_columns_by_type is not None else {}
+            )
+            out.extend(
+                _check_where_clause(
+                    test.where,
+                    "row_count_anomaly_by_period",
+                    model_columns,
+                    rca_types_map,
+                    dialect_name,
+                )
+            )
+    return out
+
+
 def _validate_anchor_contract(
     candidate: CandidateSchema,
     model_columns: frozenset[str],
@@ -519,7 +606,8 @@ def _validate_anchor_contract(
                         "to_scope": "<model-level>",
                         "model_unique_id": model_unique_id,
                         "reason": "model-only variant mis-scoped to column",
-                    }
+                    },
+                    sort_keys=True,
                 )
                 _LOGGER.warning("parser re-attach: %s", _payload)
                 if reshapes_collected is not None:
@@ -532,6 +620,26 @@ def _validate_anchor_contract(
                     )
                 if _reattach_actions is not None:
                     _reattach_actions.append((col_idx, test_idx))
+                # Re-validate the re-attached test's args against model
+                # scope — without this, a re-attached
+                # ``row_count_between(where="phantom IS NULL")`` /
+                # ``unique_combination(columns=("ghost", ...))`` /
+                # ``row_count_anomaly_by_period(date_column="phantom")``
+                # would skip the model-level membership + sqlglot WHERE
+                # checks (the model-level loop already ran when we got
+                # here; the re-attached test will be appended to
+                # ``candidate.tests`` after this function returns).
+                # Surface those hallucinations as anchor-contract
+                # violations instead of silently degrading to
+                # ``kept-without-evidence`` at prune. Collect-all
+                # preserved: violations append to the same list and the
+                # raise (if any) fires after the column loop completes
+                # (#184 QG Pass 1 finding).
+                violations.extend(
+                    _validate_model_only_test_args(
+                        test, model_columns, model_columns_by_type, dialect_name
+                    )
+                )
                 # Continue to the next test — the re-attached one is handled
                 # at model scope after rebuild, so we deliberately skip the
                 # column-scoped checks below (parent-column equality would

@@ -131,7 +131,8 @@ file open) → `mkdir -p` parent at `0o700` → `os.open` with
 | `output_tokens`                | integer               | Total output tokens billed.                                                                                                      |
 | `model`                        | string                | The Anthropic model id used (e.g. `claude-sonnet-4-6`).                                                                          |
 | `signalforge_version`          | PEP-440 version       | The package version that produced the record. Read from `signalforge.__version__` at write time.                                |
-| `audit_schema_version`         | integer               | Audit shape version. Currently `1`. Bump when the JSONL schema evolves; v0.2 readers gate on this.                                |
+| `audit_schema_version`         | integer               | Audit shape version. Currently `2`. Bumped `1 → 2` by #184 to carry the new `parser_reshaped` field. Stays typed `int` (not `Literal`) so v1 records still round-trip. v0.2 readers gate on this.                                |
+| `parser_reshaped`              | array of objects      | One `ReshapeRecord` per parser re-attach (#184); empty in the no-reshape happy path (the v1-compatible default). Each record: `{original_column, target_scope: "model", test_type, reason}`. See § [Parser re-attach for mis-scoped model-only variants](#parser-re-attach-for-mis-scoped-model-only-variants-issue-184). |
 
 Storing hashes (not cleartext) keeps individual records under the
 POSIX-atomic-append cap (`_RESPONSE_AUDIT_RECORD_LIMIT_BYTES = 4000`)
@@ -792,6 +793,8 @@ The WARNING is always emitted (no `--quiet` suppression, no config flag) so the 
 **`exclude_tests` kill-switch wins.** If you've set `exclude_tests: [<variant>]` in `signalforge.yml`, a column-scoped emission of that excluded variant is REJECTED with the standard exclude violation, NOT re-attached. The operator's opt-out is always honoured (DEC-003 of #184).
 
 **Audit field.** `LLMResponseEvent.parser_reshaped: tuple[ReshapeRecord, ...] = ()` carries one `ReshapeRecord` per re-attach with `original_column`, `target_scope="model"`, `test_type`, and a locked `reason` string. The audit-event schema is bumped from v1 to v2 (`audit_schema_version: int = 2`); v1 audit JSONLs still round-trip because the field defaults to an empty tuple and the version field stays typed `int`, not `Literal`. The drift detector at `tests/draft/test_drift_detector.py` validates both v1 and v2 fixtures.
+
+**Operator cleanup.** If you added `llm.exclude_tests: [row_count_anomaly_by_period]` to your `signalforge.yml` as a pre-#184 workaround, remove it now — the fix renders the workaround unnecessary, and leaving it in place would suppress a now-correct test variant.
 
 ## Type-coherence defence (issue #159)
 

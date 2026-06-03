@@ -2453,3 +2453,118 @@ def test_reattach_threads_model_unique_id_into_warning_payload(
     assert isinstance(args2, tuple) and isinstance(args2[0], str)
     payload = _json.loads(args2[0])
     assert payload["model_unique_id"] == "model.my_pkg.my_fct_table"
+
+
+# ---------------------------------------------------------------------------
+# QG Pass 1 fixes (#184) — re-attached test args must be validated against
+# model_columns; sibling tests on the same column must survive the rebuild.
+# ---------------------------------------------------------------------------
+
+
+def test_reattach_validates_anomaly_date_column_against_model_columns() -> None:
+    """A re-attached ``row_count_anomaly_by_period`` whose ``date_column``
+    references a hallucinated column MUST surface as an anchor-contract
+    violation — NOT silently ship through re-attach and degrade to
+    ``kept-without-evidence`` at prune. Pins the #184 QG Pass 1 fix:
+    re-validate model-only test args after re-attach."""
+    candidate = _column_scoped_anomaly_candidate(
+        column_names=("ordered_at", "amount"),
+        nested_under="ordered_at",
+        date_column="phantom_col",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(raw, frozenset({"ordered_at", "amount"}), llm_result_meta=_meta())
+    violations = excinfo.value.violations
+    assert any(
+        "row_count_anomaly_by_period" in v and "date_column" in v and "phantom_col" in v
+        for v in violations
+    ), violations
+
+
+def test_reattach_validates_row_count_between_where_against_model_columns() -> None:
+    """A re-attached ``row_count_between`` whose ``where`` clause references
+    a hallucinated column MUST surface as an anchor-contract violation."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="amount",
+                description="...",
+                tests=(
+                    CandidateTestRowCountBetween(
+                        minimum=1,
+                        maximum=1000,
+                        where="phantom_col > 0",
+                    ),
+                ),
+            ),
+        ),
+        tests=(),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(raw, frozenset({"amount"}), llm_result_meta=_meta())
+    violations = excinfo.value.violations
+    assert any("row_count_between" in v and "phantom_col" in v for v in violations), violations
+
+
+def test_reattach_validates_unique_combination_columns_against_model_columns() -> None:
+    """A re-attached ``unique_combination`` whose ``columns`` reference
+    hallucinated columns MUST surface as anchor-contract violations
+    (one per missing column, collect-all preserved)."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="...",
+                tests=(
+                    CandidateTestUniqueCombination(
+                        columns=("order_id", "phantom_a", "phantom_b"),
+                    ),
+                ),
+            ),
+        ),
+        tests=(),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(raw, frozenset({"order_id"}), llm_result_meta=_meta())
+    violations = excinfo.value.violations
+    assert any("unique_combination" in v and "phantom_a" in v for v in violations), violations
+    assert any("unique_combination" in v and "phantom_b" in v for v in violations), violations
+
+
+def test_reattach_preserves_sibling_tests_on_same_column() -> None:
+    """When a column has BOTH a re-attachable model-only variant AND a
+    valid sibling test (e.g. ``not_null``), the rebuild must drop ONLY
+    the re-attached test from ``column.tests`` and preserve the
+    sibling. Pins the #184 QG Pass 1 Finding 2 (sibling-test preservation
+    in ``_apply_reattach_actions`` was previously unpinned)."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="ordered_at",
+                description="...",
+                tests=(
+                    CandidateTestNotNull(column="ordered_at"),
+                    CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at"),
+                ),
+            ),
+        ),
+        tests=(),
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(raw, frozenset({"ordered_at"}), llm_result_meta=_meta())
+    # Re-attached variant landed at model scope.
+    assert len(result.tests) == 1
+    assert result.tests[0].type == "row_count_anomaly_by_period"
+    # Sibling ``not_null`` survived on ``ordered_at``.
+    assert len(result.columns) == 1
+    assert len(result.columns[0].tests) == 1
+    assert result.columns[0].tests[0].type == "not_null"
