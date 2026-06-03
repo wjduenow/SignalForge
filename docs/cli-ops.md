@@ -1103,6 +1103,127 @@ the gated maintainer-only test that exercises the same flow lives
 at `tests/cli/test_e2e_bigquery_smoke.py` (run via
 `pytest -m e2e --no-cov`).
 
+## Skip grading for fast iteration (`--no-grade`)
+
+`signalforge generate <model> --no-grade` skips the grade stage
+entirely. Drafter + safety + prune + diff still run; the diff
+renders kept / kept-uncertain / dropped rows with no `flagged` tier
+(because grading never ran, so there's no per-criterion verdict to
+fall short of the rubric). The LLM judge is **not** invoked — zero
+grader API calls, zero grader tokens, zero `grade.jsonl` audit
+lines, no `grade.json` sidecar.
+
+```bash
+signalforge generate models/marts/customers.sql --no-grade
+```
+
+Reach for `--no-grade` when you're iterating on the drafter prompt,
+the prune scope, or the safety policy and the grader's signal would
+just slow the feedback loop. The flag composes with every other
+`generate` flag (`--write`, `--dry-run`, `--mode sample`,
+`--estimate`, `--select`); there is no mutex with anything.
+
+Per DEC-003 of #189, the progress UX honestly re-numbers to four
+stages while `--no-grade` is set:
+
+```text
+[1/4] safety: ...
+[2/4] draft: ...
+[3/4] prune: ...
+[4/4] diff: ...
+```
+
+No `[X/5] grade: skipped` line — the pipeline is genuinely four
+stages here. (DEC-001 of #189 locks the flag's grammar.)
+
+## Bypass the grade cache for one run (`--no-cache`)
+
+`signalforge generate <model> --no-cache` bypasses the persistent
+grade cache for one invocation. Both the cache **read** (no lookup
+into `.signalforge/grade-cache/`) and the cache **write** (no new
+entries) are skipped; every `(artefact, criterion)` pair routes
+through the live LLM judge call. Existing cache files on disk are
+**not** deleted — `--no-cache` is a per-run bypass, not a wipe.
+
+```bash
+signalforge generate models/marts/customers.sql --no-cache
+```
+
+Reach for `--no-cache` when:
+
+- You're debugging a grader-emitted verdict and want to confirm the
+  current rubric / model / artefact set actually produces that
+  score, not a stale replay from an earlier run.
+- You manually edited a fixture and want the next grade to reflect
+  the new artefact text (the content-addressed cache key normally
+  picks this up automatically — `--no-cache` is the belt-and-braces
+  hammer if you don't trust the key recipe to fire).
+- You're running a calibration / concordance harness where every
+  pair must be a fresh sample from the judge.
+
+To wipe the existing entries on disk (not just bypass them for one
+run), use `signalforge cache clear --grade` (below).
+
+**Precedence when both flags are set.** Per DEC-002 of #189,
+`--no-grade` implicitly wins over `--no-cache` — when both are
+passed, the grade stage never runs, so the cache is never read or
+written regardless of `--no-cache`. Documented; no special argparse
+handling.
+
+## Clear the grade cache (`signalforge cache clear --grade`)
+
+`signalforge cache clear --grade` removes the entire persistent
+grade cache directory at
+`<project_dir>/.signalforge/grade-cache/`. Use it when:
+
+- Your rubric criteria changed and you want the next `generate` run
+  to re-grade every artefact against the new rubric. The cache key
+  already invalidates on rubric changes (the criterion text is
+  hashed into the key), so this case is belt-and-braces — but it
+  also keeps the cache size from accumulating stale entries.
+- You switched providers or models in a way the cache key doesn't
+  capture (it should, but `cache clear --grade` is the explicit
+  reset).
+- You want to bound disk usage and a wipe is cheaper than tuning
+  cache TTL knobs (there are none in v0.6 — the cache is purely
+  content-addressed).
+
+```bash
+signalforge cache clear --grade
+```
+
+Behaviour:
+
+- **Idempotent.** If the cache directory does not exist (fresh
+  project, or the operator just deleted it), the command logs an
+  INFO line and exits 0. No error, no warning.
+- **Symlink-hardened.** The handler canonicalises the cache dir
+  path via `Path.resolve(strict=False)` and refuses to remove
+  anything whose canonical form does not end with the conventional
+  `.signalforge/grade-cache` suffix. A symlinked
+  `.signalforge/grade-cache → /tmp` will raise
+  `GradeCachePathError` (tier 1 exit code 1) and `/tmp` will not be
+  touched.
+- **Exit 0** on success, including the idempotent missing-dir case.
+  Exit 1 on a symlink escape or a `--project-dir` that does not
+  contain `dbt_project.yml`.
+- **`--grade` is required.** Bare `signalforge cache clear` exits 2
+  via argparse — every `cache clear` invocation must name the
+  cache to clear explicitly. The flag exists so the subcommand can
+  grow siblings (e.g. `cache clear --drafter`) without changing
+  shape.
+
+There is **no** `--confirm` flag. The destructive scope is bounded
+to `.signalforge/grade-cache/` and the operator typed `--grade`
+explicitly. `rm -rf .signalforge/grade-cache` remains the manual
+escape hatch.
+
+(DEC-015 of #189 locks the subcommand grammar; the nested
+sub-action shape is a documented one-off deviation from the
+flat-per-subcommand convention, justified by forward-compat for a
+future `cache clear --drafter` / `cache stats` / `cache list`
+family.)
+
 ## Running across many models
 
 A typical dbt project has dozens or hundreds of models. SignalForge
