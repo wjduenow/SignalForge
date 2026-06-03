@@ -145,8 +145,23 @@ class StrictCandidateSchema(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# StrictLLMResponseEvent — mirrors src/signalforge/draft/audit.py
+# StrictReshapeRecord + StrictLLMResponseEvent — mirror src/signalforge/draft/audit.py
 # ---------------------------------------------------------------------------
+
+
+class StrictReshapeRecord(BaseModel):
+    """Mirror of production :class:`signalforge.draft.audit.ReshapeRecord`
+    with ``extra="forbid"``.
+
+    If you add a field to ``ReshapeRecord``, update this mirror AND any
+    fixture row that exercises the reshape path (issue #184 DEC-005).
+    """
+
+    model_config = _STRICT_BASE
+    original_column: str
+    target_scope: Literal["model"] = "model"
+    test_type: str
+    reason: str
 
 
 class StrictLLMResponseEvent(BaseModel):
@@ -160,6 +175,10 @@ class StrictLLMResponseEvent(BaseModel):
     2. Update ``tests/fixtures/draft/llm_response_audit_sample.jsonl``
        (regenerated via ``tests/fixtures/draft/regenerate.sh`` once US-015
        lands).
+
+    ``audit_schema_version`` typed ``int`` (NOT ``Literal[2]``) so older v1
+    audit JSONLs still round-trip — mirrors the production field's posture
+    per the safety-layer ``audit_schema_version`` convention.
     """
 
     model_config = _STRICT_BASE
@@ -175,7 +194,8 @@ class StrictLLMResponseEvent(BaseModel):
     output_tokens: int
     model: str
     signalforge_version: str
-    audit_schema_version: int = 1
+    audit_schema_version: int = 2
+    parser_reshaped: tuple[StrictReshapeRecord, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +206,7 @@ class StrictLLMResponseEvent(BaseModel):
 _FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "draft"
 _CANDIDATE_SCHEMA_FIXTURE = _FIXTURE_DIR / "candidate_schema_v1.json"
 _LLM_RESPONSE_FIXTURE = _FIXTURE_DIR / "llm_response_audit_sample.jsonl"
+_LLM_RESPONSE_V2_RESHAPE_FIXTURE = _FIXTURE_DIR / "llm_response_with_reshape_v2.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -246,11 +267,31 @@ def test_llm_response_event_extra_forbid_against_fixture() -> None:
     """Validate the committed audit-record fixture against the strict
     model. Failure means production grew a field without updating either
     the fixture or :class:`StrictLLMResponseEvent` above.
+
+    The v1 fixture (``llm_response_audit_sample.jsonl``) carries
+    ``audit_schema_version: 1`` and no ``parser_reshaped`` field — both
+    must continue to validate so older audit JSONLs still round-trip
+    after #184's schema bump.
     """
     line = _LLM_RESPONSE_FIXTURE.read_text(encoding="utf-8").strip()
     assert line, f"expected one JSON line in {_LLM_RESPONSE_FIXTURE}"
     payload = json.loads(line)
     StrictLLMResponseEvent.model_validate(payload)
+
+
+def test_llm_response_event_v2_reshape_fixture_validates_against_strict_model() -> None:
+    """Validate the v2 reshape-fixture against the strict model. Carries
+    ``audit_schema_version: 2`` and a populated ``parser_reshaped`` tuple
+    so the round-trip path for #184's new audit field is pinned.
+    """
+    line = _LLM_RESPONSE_V2_RESHAPE_FIXTURE.read_text(encoding="utf-8").strip()
+    assert line, f"expected one JSON line in {_LLM_RESPONSE_V2_RESHAPE_FIXTURE}"
+    payload = json.loads(line)
+    event = StrictLLMResponseEvent.model_validate(payload)
+    assert event.audit_schema_version == 2
+    assert len(event.parser_reshaped) == 1
+    assert event.parser_reshaped[0].target_scope == "model"
+    assert event.parser_reshaped[0].test_type == "row_count_anomaly_by_period"
 
 
 def test_llm_response_event_drift_detector_rejects_unknown_field() -> None:
@@ -278,3 +319,40 @@ def test_llm_response_event_strict_model_field_set_matches_production() -> None:
         f"StrictLLMResponseEvent has fields absent from LLMResponseEvent: "
         f"{extra}. Remove or add to LLMResponseEvent."
     )
+
+
+def test_reshape_record_strict_model_field_set_matches_production() -> None:
+    """Production :class:`ReshapeRecord` and :class:`StrictReshapeRecord`
+    must declare the same field set."""
+    from signalforge.draft.audit import ReshapeRecord
+
+    prod_fields = set(ReshapeRecord.model_fields.keys())
+    strict_fields = set(StrictReshapeRecord.model_fields.keys())
+    missing = prod_fields - strict_fields
+    extra = strict_fields - prod_fields
+    assert not missing, (
+        f"StrictReshapeRecord missing fields present in ReshapeRecord: "
+        f"{missing}. Update StrictReshapeRecord to match."
+    )
+    assert not extra, (
+        f"StrictReshapeRecord has fields absent from ReshapeRecord: "
+        f"{extra}. Remove or add to ReshapeRecord."
+    )
+
+
+def test_reshape_record_extra_forbid_rejects_unknown_field() -> None:
+    """Planted-violation self-check (mirrors ``testing-signal.md`` § "Drift
+    detection via one-off ``extra="forbid"`` model"). Confirms the strict
+    mirror's ``extra="forbid"`` posture is wired so a forward-compat field
+    addition to production ``ReshapeRecord`` without updating the strict
+    mirror breaks the test loudly.
+    """
+    payload = {
+        "original_column": "creation_ts",
+        "target_scope": "model",
+        "test_type": "row_count_anomaly_by_period",
+        "reason": ("model-only variant emitted at column scope; re-attached to model-level tests:"),
+        "bogus_field": "z",
+    }
+    with pytest.raises(ValidationError):
+        StrictReshapeRecord.model_validate(payload)
