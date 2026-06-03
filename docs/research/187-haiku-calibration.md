@@ -42,9 +42,11 @@ See § "Result" and § "Disposition".
   the rubric stricter than Sonnet**, concentrated on the **`no-redundant`** and
   **`clarity`** criteria. Haiku-as-judge would flag column rationales /
   descriptions that Sonnet passes.
-- **A second gated check** verifies DEC-004's claim that the new
-  `max_output_tokens=1024` default leaves Gemini enough headroom (separate; see
-  § "Gemini check").
+- **A second gated check PASSED** — DEC-004's claim that the new
+  `max_output_tokens=1024` default leaves Gemini enough headroom holds at the
+  single-artifact scale: `gemini-2.5-flash` graded a verbose artifact at 1024
+  tokens with no truncation degrade (see § "Gemini check"; full-fixture runs may
+  still want 4096 per #158).
 - **Default CI is untouched:** both checks are deselected by the `anthropic` /
   `gemini` markers in `pyproject.toml`'s `addopts` and skip-with-reason without
   keys. No live API call happens during normal validation. The concordance gate
@@ -191,11 +193,15 @@ operator calibrated against.
 ### Gemini check
 
 The `gemini-2.5-flash` @ 1024-token no-truncation check
-(`test_gemini_1024_no_truncation.py`) was **not run** in this session (no
-`GOOGLE_API_KEY` available). It remains a separate maintainer step; DEC-004's
-softened claim (1024 reduces but does not eliminate Gemini truncation at
-full-fixture scale; the per-provider floors recommend 4096) already accounts for
-the uncertainty.
+(`test_gemini_1024_no_truncation.py`) was **run and PASSED** (2026-06-02,
+`SF_RUN_GEMINI=1` + `GOOGLE_API_KEY`): grading a deliberately verbose artifact on
+`gemini-2.5-flash` at the new `max_output_tokens=1024` default produced a clean
+`GradingResult` with **no `score=None` truncation degrade**. So DEC-004's bump
+(256 → 1024) is empirically sufficient at the **single-artifact-in-isolation**
+scale. The full-fixture caveat still stands: #158 observed a minority of pairs
+degrading at 1024/2048 across the whole Austin fixture, so the per-provider
+floors recommend **4096** for Gemini-heavy runs — 1024 is a safe default-level
+improvement, not a guarantee at volume.
 
 ## Disposition
 
