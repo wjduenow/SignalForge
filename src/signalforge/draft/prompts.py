@@ -519,12 +519,9 @@ _PROMPT_VERSION_PER_MODEL: str = hashlib.blake2b(
 # system prompt (which carries the ``<PROJECT_MANIFEST>`` defence line), so a
 # run in project scope cannot collide with a per-model run on the prompt cache.
 _PROMPT_VERSION_PROJECT: str = hashlib.blake2b(
-    (
-        _render_system_prompt((), "project")
-        + _MANIFEST_SUMMARY_TEMPLATE
-        + _PROJECT_SUMMARY_TEMPLATE
-        + _DATA_SECTION_JSON
-    ).encode("utf-8"),
+    (_render_system_prompt((), "project") + _PROJECT_SUMMARY_TEMPLATE + _DATA_SECTION_JSON).encode(
+        "utf-8"
+    ),
     digest_size=8,
 ).hexdigest()
 

@@ -195,12 +195,13 @@ Columns:
 """
 
 
-_EXPECTED_PROMPT_VERSION_PROJECT: str = "0d7dbc9e5f69f5fc"
+_EXPECTED_PROMPT_VERSION_PROJECT: str = "49e58185a1848b43"
 """The ``_PROMPT_VERSION_PROJECT`` *base* constant (#188 US-006, DEC-009).
 
 This is the project-scope base hash — ``blake2b-8`` over the project-scope
-system prompt + ``_MANIFEST_SUMMARY_TEMPLATE`` + ``_PROJECT_SUMMARY_TEMPLATE``
-+ ``_DATA_SECTION_TEMPLATES`` JSON. It is the value
+system prompt + ``_PROJECT_SUMMARY_TEMPLATE`` + ``_DATA_SECTION_TEMPLATES``
+JSON (DEC-014: the project version rotates on the *project* template, NOT
+``_MANIFEST_SUMMARY_TEMPLATE`` which governs only the per-model block). It is the value
 :func:`test_project_prompt_version_pinned` asserts against
 ``signalforge.draft.prompts._PROMPT_VERSION_PROJECT``.
 
@@ -217,7 +218,7 @@ the base OR the composition rule fails loud."""
 # actually returns for the canonical fixture (#188 US-006). Differs from the
 # base constant above because ``_prompt_version_for`` folds the non-default
 # scope into the hash.
-_RENDERED_PROMPT_VERSION_PROJECT: str = "2cd2df7087ce462d"
+_RENDERED_PROMPT_VERSION_PROJECT: str = "e3ec59979446fbe0"
 
 
 # Captured once via ``render_prompt(..., cache_scope="project")`` against the
