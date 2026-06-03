@@ -128,6 +128,7 @@ grade:
   min_pass_rate: 0.7              # Aggregate threshold: fraction of passed criteria
   min_mean_score: 0.5             # Aggregate threshold: mean score across criteria
   fail_on_below_threshold: false  # opt-in hard-fail; default report-only
+  cache_enabled: true             # Per-pair grade cache; set false to bypass (or pass --no-cache)
   # rubric:                       # Optional override; omitted = use DEFAULT_RUBRIC
   #   - id: clarity
   #     criterion: "..."
@@ -169,6 +170,7 @@ Field-by-field:
 - **`min_pass_rate`** — Floor on the fraction of `(artefact, criterion)` pairs that scored `passed=True` for the rubric to count as passed overall. Default `0.7`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_pass_rate`.
 - **`min_mean_score`** — Floor on the mean numeric score across non-null verdicts. Default `0.5`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_mean_score`.
 - **`fail_on_below_threshold`** — Hard-fail switch for the aggregate threshold check. Default `false` — v0.1 ships report-only posture by default. When `true`, `grade_artifacts(...)` raises `GradeBelowThresholdError` once the aggregate `GradingReport.passed` is `False` (`pass_rate < min_pass_rate` and/or `mean_score < min_mean_score`). The raise lands AFTER the sidecar JSON is durably persisted so the operator has a complete `grade.json` for diagnosis. See [Threshold-fail behaviour](#threshold-fail-behaviour) below for the full ordering invariant. Graduated from v0.2 reservation to v0.1 wiring in #9 (US-002).
+- **`cache_enabled`** — Master switch for the per-`(artifact, criterion)` grade cache (issue #189 DEC-016). Default `true` — content-addressed cache lookup + write run on every grade pair. The cache key is a content-hash of the inputs that genuinely determine the verdict (rubric criterion, artefact payload, model + provider + prompt version), so any change that should invalidate a prior verdict invalidates the key by construction — no TTL knob is needed in v0.1. Set `false` to skip BOTH lookup AND write for the run (every pair routes through the live LLM judge call); operators reach for this for debugging, after a manual fixture edit, or during calibration. The CLI's `signalforge generate --no-cache` flag flips this knob on a per-run copy (the on-disk `signalforge.yml` is unaffected). `extra="forbid"` makes a typo like `cache_enable:` (missing the trailing `d`) fail loud at config-load, rather than silently leaving the cache enabled.
 - **`rubric`** — Optional rubric override. `None` (the default) means the orchestrator falls back to `DEFAULT_RUBRIC`. When provided, must be a non-empty list of mappings, each with non-empty `id` and `criterion` strings; duplicate `id` values raise `GradeRubricError`. Override is **wholesale**, not merge.
 
 Unknown keys under `grade:` raise `GradeConfigError` (Pydantic
