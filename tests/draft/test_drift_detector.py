@@ -179,6 +179,43 @@ class StrictLLMResponseEvent(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# StrictDraftConfig — mirrors src/signalforge/draft/config.py (issue #188)
+# ---------------------------------------------------------------------------
+
+
+class StrictDraftConfig(BaseModel):
+    """Mirror of production :class:`signalforge.draft.config.DraftConfig`
+    with ``extra="forbid"``.
+
+    ``DraftConfig`` is config-shaped and already uses ``extra="forbid"`` in
+    production (DEC-011 / safety-layer.md DEC-015), so a YAML typo already
+    fails loud at config load. This strict mirror is the *field-set* drift
+    gate: if you add a field to ``DraftConfig``, you MUST:
+
+    1. Add it here, AND
+    2. Update ``tests/fixtures/draft/draft_config_v1.json``.
+
+    The ``cache_scope`` field was added by issue #188 (DEC-001); this mirror
+    grew alongside it. The mirror deliberately omits the production field
+    validators (``provider`` registry check, ``exclude_tests`` coercion,
+    ``max_output_tokens`` positivity) — it exists to pin the field SET, not
+    to re-test the validators (those live in ``tests/draft/test_config.py``).
+    """
+
+    model_config = _STRICT_BASE
+    model: str = "claude-sonnet-4-6"
+    cheap_model: str = "claude-haiku-4-5"
+    max_output_tokens: int = 4096
+    cache_ttl: Literal["5m", "1h"] = "5m"
+    cache_scope: Literal["per-model", "project"] = "per-model"
+    max_retries_429: int = 3
+    max_retries_5xx: int = 1
+    max_retries_conn: int = 1
+    provider: str = "anthropic"
+    exclude_tests: tuple[str, ...] = ()
+
+
+# ---------------------------------------------------------------------------
 # Fixture paths
 # ---------------------------------------------------------------------------
 
@@ -186,6 +223,7 @@ class StrictLLMResponseEvent(BaseModel):
 _FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "draft"
 _CANDIDATE_SCHEMA_FIXTURE = _FIXTURE_DIR / "candidate_schema_v1.json"
 _LLM_RESPONSE_FIXTURE = _FIXTURE_DIR / "llm_response_audit_sample.jsonl"
+_DRAFT_CONFIG_FIXTURE = _FIXTURE_DIR / "draft_config_v1.json"
 
 
 # ---------------------------------------------------------------------------
@@ -278,3 +316,55 @@ def test_llm_response_event_strict_model_field_set_matches_production() -> None:
         f"StrictLLMResponseEvent has fields absent from LLMResponseEvent: "
         f"{extra}. Remove or add to LLMResponseEvent."
     )
+
+
+# ---------------------------------------------------------------------------
+# DraftConfig drift (issue #188) — fixture + field-set + typo-fails-loud
+# ---------------------------------------------------------------------------
+
+
+def test_draft_config_extra_forbid_against_fixture() -> None:
+    """Validate the committed draft-config fixture against the strict
+    model. Failure means production grew a field without updating either
+    the fixture or :class:`StrictDraftConfig` above (issue #188).
+    """
+    payload = json.loads(_DRAFT_CONFIG_FIXTURE.read_text(encoding="utf-8"))
+    StrictDraftConfig.model_validate(payload)
+
+
+def test_draft_config_drift_detector_rejects_unknown_field() -> None:
+    """A YAML typo like ``cache_scop`` (instead of ``cache_scope``) is a
+    stray key the strict mirror rejects — the same fail-loud guarantee
+    production's ``extra="forbid"`` gives at config load (issue #188)."""
+    payload = json.loads(_DRAFT_CONFIG_FIXTURE.read_text(encoding="utf-8"))
+    payload["cache_scop"] = "project"  # near-miss typo for cache_scope
+    with pytest.raises(ValidationError):
+        StrictDraftConfig.model_validate(payload)
+
+
+def test_draft_config_strict_model_field_set_matches_production() -> None:
+    """Production :class:`DraftConfig` and :class:`StrictDraftConfig` must
+    declare the same field set — so adding ``cache_scope`` (or any future
+    field) to production without mirroring it here breaks loudly."""
+    from signalforge.draft.config import DraftConfig
+
+    prod_fields = set(DraftConfig.model_fields.keys())
+    strict_fields = set(StrictDraftConfig.model_fields.keys())
+    missing = prod_fields - strict_fields
+    extra = strict_fields - prod_fields
+    assert not missing, (
+        f"StrictDraftConfig missing fields present in DraftConfig: "
+        f"{missing}. Update StrictDraftConfig to match."
+    )
+    assert not extra, (
+        f"StrictDraftConfig has fields absent from DraftConfig: "
+        f"{extra}. Remove from StrictDraftConfig or add to DraftConfig."
+    )
+
+
+def test_draft_config_cache_scope_default_is_per_model() -> None:
+    """DEC-001 of #188: ``cache_scope`` defaults to ``"per-model"`` so all
+    pre-#188 behaviour is preserved."""
+    from signalforge.draft.config import DraftConfig
+
+    assert DraftConfig().cache_scope == "per-model"
