@@ -97,11 +97,18 @@ from signalforge.grade.audit import (
     write_grade_event,
     write_grading_report,
 )
+from signalforge.grade.cache import (
+    CacheRecord,
+    compute_cache_key,
+    lookup_cache,
+    write_cache,
+)
 from signalforge.grade.config import GradeConfig
 from signalforge.grade.errors import (
     GradeAuditRecordTooLargeError,
     GradeAuditWriteError,
     GradeBelowThresholdError,
+    GradeCachePathError,
     GradeError,
     GradeLLMError,
     GradeNestedEventLoopError,
@@ -545,6 +552,9 @@ async def _grade_artifacts_async_core(
     rubric_block: str,
     crit_hash_by_id: dict[str, str],
     model_unique_id: str,
+    prefilled_results: list[GradingResult | None] | None = None,
+    cache_dir: Path | None = None,
+    artifact_text_hash_by_index: dict[int, str] | None = None,
 ) -> list[GradingResult]:
     """Concurrent dispatch of every ``(criterion, artifact)`` pair (DEC-002).
 
@@ -592,7 +602,26 @@ async def _grade_artifacts_async_core(
     # Results land at their iterator-index slot so caller-visible
     # ``report.results`` stays in (criterion-outer, artifact-inner)
     # order even though tasks complete in arrival order on disk.
-    results_by_index: list[GradingResult | None] = [None] * total_pairs
+    #
+    # ``prefilled_results`` carries cache-hit slots resolved by the sync
+    # prefix (#189 / DEC-013 of #189). Cache hits never enter the
+    # ``TaskGroup`` — they were already audit-written by the sync prefix
+    # and pre-populated here so the synthesis pass below correctly skips
+    # them. ``cache_dir`` is ``None`` when ``config.cache_enabled=False``
+    # OR the caller hasn't computed it; either way the post-grade
+    # cache-write path is short-circuited.
+    if prefilled_results is not None:
+        # Shallow copy so we own the list and can mutate freely.
+        results_by_index: list[GradingResult | None] = list(prefilled_results)
+        if len(results_by_index) != total_pairs:
+            # Defensive guard against caller misuse — the prefilled list
+            # MUST line up with the iterator order.
+            raise GradeError(
+                f"prefilled_results length {len(results_by_index)} "
+                f"does not match total_pairs {total_pairs}.",
+            )
+    else:
+        results_by_index = [None] * total_pairs
 
     semaphore = asyncio.Semaphore(resolved_config.max_concurrent_calls)
     # ``_budget_exceeded`` is the orchestrator-scope flag the per-task
@@ -612,6 +641,12 @@ async def _grade_artifacts_async_core(
         "completed": 0,  # scored (or LLM-layer-degraded — non-budget)
         "degraded": 0,  # synthesis pass: un-completed at trip time → budget degrade
     }
+    # Cache-hit slots resolved by the sync prefix (#189 / DEC-013) count
+    # toward the ``completed`` total so the budget-trip WARNING faithfully
+    # reflects the run's actual progress (a 100%-cache-hit run that
+    # never starts the async core should not WARN with completed=0).
+    if prefilled_results is not None:
+        counters["completed"] = sum(1 for r in prefilled_results if r is not None)
 
     total_budget_seconds = resolved_config.total_budget_seconds
 
@@ -711,10 +746,76 @@ async def _grade_artifacts_async_core(
                 await audit_future
                 raise
 
+            # Cache-write post-audit (#189 / DEC-005 / DEC-007). Fail-soft:
+            # write_cache catches OSError / oversize / EEXIST internally
+            # and surfaces them as WARNING lines — never raises. Skipped
+            # when (a) cache is disabled (cache_dir is None) OR (b) the
+            # result degraded (score is None — DEC-007 forbids caching
+            # transient LLM failures). ``CacheRecord`` is built from the
+            # GradeEvent's reproducibility fields so cache-hit re-runs
+            # rehydrate a byte-identical audit corpus (modulo timestamp
+            # + cache_hit=True).
+            if (
+                cache_dir is not None
+                and grading_result.score is not None
+                and artifact_text_hash_by_index is not None
+            ):
+                artifact_text_hash = artifact_text_hash_by_index.get(index)
+                if artifact_text_hash is not None:
+                    cache_record = CacheRecord(
+                        artifact_id=artifact_id,
+                        criterion_id=criterion.id,
+                        score=grading_result.score,
+                        passed=grading_result.passed,
+                        evidence=grading_result.evidence,
+                        reasoning=grading_result.reasoning,
+                        criterion_prompt_hash=event.criterion_prompt_hash,
+                        artifact_text_hash=artifact_text_hash,
+                        provider=resolved_config.provider,
+                        model=event.model,
+                        prompt_version_template=event.prompt_version_template,
+                        response_text_hash=event.response_text_hash,
+                        rubric_hash=event.rubric_hash,
+                        original_timestamp=per_call_ts,
+                    )
+                    cache_key = compute_cache_key(
+                        criterion_prompt_hash=event.criterion_prompt_hash,
+                        artifact_text_hash=artifact_text_hash,
+                        provider=resolved_config.provider,
+                        model=event.model,
+                        prompt_version_template=event.prompt_version_template,
+                    )
+                    # Fail-soft per DEC-005 — :func:`write_cache`
+                    # swallows OSError / oversize / EEXIST internally
+                    # and surfaces them as WARNING lines. The defensive
+                    # outer guard here is defence-in-depth: a future
+                    # refactor that violates the fail-soft contract, OR
+                    # a test stub that deliberately raises (see
+                    # ``test_grade_engine_cache_write_failure_is_fail_soft``)
+                    # MUST NOT abort the live grade. One lazy-format
+                    # JSON WARNING; the live run continues.
+                    try:
+                        write_cache(cache_dir, cache_key, cache_record)
+                    except Exception as cache_exc:
+                        _LOGGER.warning(
+                            "grade cache write failed (engine guard): %s",
+                            json.dumps(
+                                {
+                                    "key": cache_key,
+                                    "error_class": type(cache_exc).__name__,
+                                }
+                            ),
+                        )
+
     try:
         async with asyncio.timeout(total_budget_seconds):
             async with asyncio.TaskGroup() as tg:
                 for index, (artifact_id, artifact_text, criterion) in enumerate(pairs):
+                    # Skip cache-hit slots already populated by the sync
+                    # prefix (#189 / DEC-013). The synthesis pass below
+                    # treats a non-None slot as "do not re-grade".
+                    if results_by_index[index] is not None:
+                        continue
                     tg.create_task(_one(index, artifact_id, artifact_text, criterion))
     except TimeoutError:
         # The timeout fired. Tasks not yet completed at this point
@@ -1036,6 +1137,98 @@ def grade_artifacts(
     rubric_block = render_rubric_block(resolved_rubric)
     crit_hash_by_id: dict[str, str] = {c.id: criterion_prompt_hash(c) for c in resolved_rubric}
 
+    # 4a. Resolve the grade cache (#189 / DEC-013, DEC-016). When
+    #     ``config.cache_enabled`` is True, canonicalise the cache
+    #     directory under ``<project>/.signalforge/grade-cache/`` and
+    #     iterate every ``(artifact, criterion)`` pair in the sync
+    #     prefix BEFORE the asyncio.TaskGroup. Cache hits resolve
+    #     immediately: the GradingResult is reconstructed from the
+    #     :class:`CacheRecord`, a ``cache_hit=True`` GradeEvent flows
+    #     through the SOLE construction seam
+    #     :func:`signalforge.grade.audit._build_grade_event`, and the
+    #     audit record lands via the existing fail-closed writer with
+    #     zero token counts. Cache hits NEVER acquire the async
+    #     semaphore — they're a sync resolution.
+    #
+    #     Cache misses fall through to the async core which dispatches
+    #     a live LLM call and (post-grade) writes a
+    #     :class:`CacheRecord` via :func:`write_cache` (fail-soft per
+    #     DEC-005).
+    cache_dir: Path | None = None
+    prefilled_results: list[GradingResult | None] | None = None
+    artifact_text_hash_by_index: dict[int, str] | None = None
+    if resolved_config.cache_enabled:
+        raw_cache_dir = resolved_project_dir / ".signalforge" / "grade-cache"
+        try:
+            cache_dir = canonicalise_path(raw_cache_dir, resolved_project_dir)
+        except PathContainmentError as exc:
+            raise GradeCachePathError(
+                f"Grade cache path {raw_cache_dir!r} failed symlink/containment validation.",
+            ) from exc
+
+        # Build the pairs list once (re-used inside the async core via
+        # ``_iterate_artifacts``). Computing the hash map here keeps the
+        # sync-prefix lookup AND the post-grade write paths aligned on a
+        # single source of truth.
+        pairs = list(_iterate_artifacts(candidate, resolved_rubric))
+        artifact_text_hash_by_index = {}
+        for index, (_aid, atext, _crit) in enumerate(pairs):
+            artifact_text_hash_by_index[index] = hashlib.blake2b(
+                atext.encode("utf-8"), digest_size=8
+            ).hexdigest()
+
+        prefilled_results = cast(list[GradingResult | None], [None] * len(pairs))
+        # ``config.model`` is invariantly concrete post-construction
+        # (#187 US-002).
+        assert resolved_config.model is not None
+        for index, (artifact_id, _atext, criterion) in enumerate(pairs):
+            artifact_text_hash = artifact_text_hash_by_index[index]
+            key = compute_cache_key(
+                criterion_prompt_hash=crit_hash_by_id[criterion.id],
+                artifact_text_hash=artifact_text_hash,
+                provider=resolved_config.provider,
+                model=resolved_config.model,
+                prompt_version_template=template_hash,
+            )
+            record = lookup_cache(cache_dir, key)
+            if record is None:
+                continue
+            # ``lookup_cache`` rejects ``score=None`` records via the
+            # :class:`CacheRecord` model validator (DEC-007), so any
+            # value here is a non-None finite float in [0.0, 1.0].
+            per_call_ts = datetime.now(UTC)
+            grading_result = GradingResult(
+                artifact_id=artifact_id,
+                criterion_id=criterion.id,
+                score=record.score,
+                passed=record.passed,
+                evidence=record.evidence,
+                reasoning=record.reasoning,
+            )
+            event = _build_grade_event(
+                run_id=run_id,
+                timestamp=per_call_ts,
+                model_unique_id=model.unique_id,
+                artifact_id=artifact_id,
+                criterion_id=criterion.id,
+                score=record.score,
+                passed=record.passed,
+                evidence=record.evidence,
+                reasoning=record.reasoning,
+                rubric_hash=record.rubric_hash,
+                prompt_version_template=record.prompt_version_template,
+                criterion_prompt_hash=record.criterion_prompt_hash,
+                response_text_hash=record.response_text_hash,
+                model=record.model,
+                input_tokens=0,
+                output_tokens=0,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                cache_hit=True,
+            )
+            _write_event_or_abort(event, audit_path=resolved_audit_path)
+            prefilled_results[index] = grading_result
+
     # 5. Iterate ``(criterion, artifact)`` pairs via the async core
     #    (issue #186, US-009 / DEC-002 + DEC-004). The async core wraps
     #    a ``TaskGroup`` in ``asyncio.timeout(total_budget_seconds)``
@@ -1059,6 +1252,9 @@ def grade_artifacts(
             rubric_block=rubric_block,
             crit_hash_by_id=crit_hash_by_id,
             model_unique_id=model.unique_id,
+            prefilled_results=prefilled_results,
+            cache_dir=cache_dir,
+            artifact_text_hash_by_index=artifact_text_hash_by_index,
         )
     )
 
