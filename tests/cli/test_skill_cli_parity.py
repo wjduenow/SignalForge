@@ -293,20 +293,23 @@ def _subparser_flags(subcommand: str) -> frozenset[str]:
         return frozenset()
     sub = choices[subcommand]
     flags: set[str] = set()
-    # BFS over the subparser tree so nested sub-actions contribute their
-    # flags too. Today only ``cache clear`` has a nested layer; future
-    # ``cache stats`` / ``cache list`` (or any future namespace subcommand)
-    # inherit the same behaviour automatically.
-    queue: list[argparse.ArgumentParser] = [sub]
-    while queue:
-        node = queue.pop()
+    # DFS over the subparser tree so nested sub-actions contribute
+    # their flags too. Today only ``cache clear`` has a nested layer;
+    # future ``cache stats`` / ``cache list`` (or any future namespace
+    # subcommand) inherit the same behaviour automatically. Traversal
+    # order doesn't matter for the resulting set; ``list.pop()`` is
+    # LIFO so this is a depth-first walk (PR #196 Copilot — earlier
+    # docstring claimed BFS which was inaccurate).
+    stack: list[argparse.ArgumentParser] = [sub]
+    while stack:
+        node = stack.pop()
         for action in node._actions:
             for opt in action.option_strings:
                 if opt.startswith("--"):
                     flags.add(opt)
             if isinstance(action, argparse._SubParsersAction):
                 for nested in action.choices.values():
-                    queue.append(nested)
+                    stack.append(nested)
     return frozenset(flags)
 
 

@@ -487,15 +487,21 @@ class GradeCacheReadError(GradeError):
     """The persistent grade cache file is present but unreadable or
     unparseable.
 
-    Issue #189 / DEC-017. The grade cache (``<project_dir>/.signalforge/
-    grade-cache/``) is derived/optional state: a hit lets the engine
-    skip a live LLM call; a miss falls through to the normal grade
-    path. Cache reads are best-effort — when the on-disk record is
-    present but cannot be loaded (corrupt JSON, schema mismatch,
-    permission denied on the file, …), this typed error surfaces in the
-    engine's catch-and-warn path so the WARNING line names the failure
-    type. **The live grade run is NEVER aborted by a read failure** —
-    the engine treats it as a miss and re-grades.
+    Issue #189 / DEC-017. **Reserved-but-currently-inert** (PR #196
+    Copilot — joins the ``GradeBudgetExceededError`` precedent from
+    `grade-layer.md` § "Schema-version surfaces"). The grade cache
+    (``<project_dir>/.signalforge/grade-cache/``) is derived/optional
+    state: a hit lets the engine skip a live LLM call; a miss falls
+    through to the normal grade path. ``signalforge.grade.cache.lookup_cache``
+    handles every degenerate path (corrupt JSON, schema mismatch,
+    permission denied, key-hash mismatch) by returning ``None`` + INFO
+    log — no live code path currently raises this class. The class
+    stays exported and registered in ``_EXCEPTION_TO_EXIT_CODE`` at
+    tier 3 so a future engine refactor that wants typed visibility on
+    a recurrent read-failure surface (e.g. metric counter for cache
+    corruption) can graduate it without growing the exit-code table.
+    **The live grade run is NEVER aborted by a read failure** — fail-soft
+    is the load-bearing posture (DEC-005 of #189).
 
     Mapped to CLI tier 3 (external dependency, disk I/O) — same tier as
     the fail-closed audit-write durability errors. The operator-visible

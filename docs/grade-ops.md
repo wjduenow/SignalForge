@@ -190,7 +190,7 @@ re-evaluated pairs.
 
 ### Cache layout
 
-```
+```text
 <project_dir>/.signalforge/grade-cache/<cache_key>.json
 ```
 
@@ -212,7 +212,7 @@ exact field set (DEC-011 of #189).
 The cache key is invalidated by any change to the five inputs that
 genuinely determine the verdict:
 
-```
+```python
 cache_key = blake2b(
     criterion_prompt_hash    + "\x00" +   # changes when criterion text changes
     artifact_text_hash       + "\x00" +   # changes when artefact text changes
@@ -317,7 +317,7 @@ reserves namespace for them.
 - **System prompt / rubric list / envelope tags changed**
   (`prompt_version_template` flips — bumped in lockstep when the
   grade `_SYSTEM_PROMPT` or any `DEFAULT_RUBRIC` criterion text
-  changes; see [Reproducibility / hash fields](#reproducibility-hash-fields)).
+  changes; see [Reproducibility hash fields](#reproducibility-hash-fields)).
 - **Provider or model swapped.** `provider: openai` ↔ `provider:
   anthropic`; `model: claude-sonnet-4-6` ↔ `model:
   claude-haiku-4-5`. Each combination scopes its own cache entries.
@@ -685,7 +685,7 @@ validates against the fixture. Adding a field to `GradeEvent` /
 `GradingReport` / `GradingResult` without updating the strict mirror
 OR the fixture breaks the test loudly. Don't bypass.
 
-## Reproducibility / hash fields
+## Reproducibility hash fields
 
 Three hash fields land on every `GradeEvent`, all 16-hex-char `blake2b`
 with `digest_size=8`. The cross-stage hash domain is consistent — a

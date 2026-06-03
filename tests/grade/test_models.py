@@ -10,8 +10,9 @@ Covers the three read-back-shaped Pydantic models:
   ``mean_score``, ``aggregate_complete``, ``passed``), minimal
   ``__repr__``, ``passed`` requiring BOTH thresholds met.
 * :class:`GradeEvent` — score-range validation, audit_schema_version
-  typed ``int`` (DEC-008 of #189) with default ``1``; the strict drift
-  mirror still pins ``Literal[1]``.
+  typed ``int`` (DEC-008 of #189) with default ``2`` (v2 schema, bumped
+  by US-002 of #189 to carry the ``cache_hit`` field); the v1 strict
+  drift mirror still pins ``Literal[1]`` for the v1 fixture replay anchor.
 
 Every test must be capable of failing if its target is broken
 (:file:`.claude/rules/testing-signal.md`); no ``assert True``-shaped
@@ -556,3 +557,47 @@ def test_grade_event_is_frozen() -> None:
     event = _make_event()
     with pytest.raises(ValidationError):
         event.score = 0.1  # type: ignore[misc]
+
+
+def test_grade_event_repr_args_redacts_evidence_and_reasoning() -> None:
+    """PR #196 Copilot — GradeEvent.__repr_args__ redacts PII-bearing
+    fields the same way __repr__ does. Pydantic v2 structured-repr
+    surfaces (rich.print, devtools.pretty) use __repr_args__ instead
+    of __repr__; without this redaction, evidence + reasoning would
+    leak through those paths."""
+    # Construct directly so we can populate evidence / reasoning the
+    # helper deliberately omits.
+    event = GradeEvent(
+        signalforge_version="0.1.0.dev0",
+        run_id="a1b2c3d4e5f6478890aabbccddeeff00",
+        timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=UTC),
+        model_unique_id="model.shop.dim_customers",
+        artifact_id="column.email.description",
+        criterion_id="clarity",
+        score=0.8,
+        passed=True,
+        evidence="PII-bearing evidence text — DO NOT LEAK",
+        reasoning="PII-bearing reasoning text — DO NOT LEAK",
+        rubric_hash="0123456789abcdef",
+        prompt_version_template="fedcba9876543210",
+        criterion_prompt_hash="1111222233334444",
+        response_text_hash="5555666677778888",
+        model="claude-sonnet-4-6",
+        input_tokens=1820,
+        output_tokens=140,
+    )
+    args = event.__repr_args__()
+    arg_names = {name for name, _ in args}
+    assert "evidence" not in arg_names
+    assert "reasoning" not in arg_names
+    # Spot-check the visible field set matches __repr__'s.
+    assert "run_id" in arg_names
+    assert "artifact_id" in arg_names
+    assert "criterion_id" in arg_names
+    assert "score" in arg_names
+    assert "passed" in arg_names
+    assert "cache_hit" in arg_names
+    # Belt-and-braces: any string-coerced output of args must not
+    # leak the PII strings either.
+    rendered = repr(args)
+    assert "DO NOT LEAK" not in rendered

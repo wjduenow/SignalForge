@@ -18,7 +18,7 @@
 | Bead | Story | Depends on | Ready at devolve |
 |---|---|---|---|
 | `bd_1-scaffolding-63t.1` | US-001 — GradeEvent.audit_schema_version: Literal→int (prereq) | — | ✅ ready |
-| `bd_1-scaffolding-63t.2` | US-002 — GradeEvent.cache_hit + _build_grade_event kwarg + v2 fixture | .1 | blocked |
+| `bd_1-scaffolding-63t.2` | US-002 — GradeEvent.cache_hit + `_build_grade_event` kwarg + v2 fixture | .1 | blocked |
 | `bd_1-scaffolding-63t.3` | US-003 — signalforge.grade.cache module: keys, record, I/O | — | ✅ ready |
 | `bd_1-scaffolding-63t.4` | US-004 — Cache typed errors + exit-code registration | — | ✅ ready |
 | `bd_1-scaffolding-63t.5` | US-005 — GradeConfig.cache_enabled knob | — | ✅ ready |
@@ -78,7 +78,7 @@ Two operator UX wins for the grade-heavy iteration loop. The current pipeline pa
 **Critical clarification on the cache-key shape (resolved during scout):**
 The ticket says the key is `blake2b-8(criterion_id + "|" + response_text_hash)`. But `response_text_hash` per the GradeEvent surface is the hash of the **LLM's emitted response**, not the input. A cache LOOKUP must be derived from what we'd SEND, not what we'd RECEIVE. The natural input-side hash composition is:
 
-```
+```python
 cache_key = blake2b-8(
     criterion_prompt_hash + "\x00" +
     artifact_text_hash    + "\x00" +
@@ -266,7 +266,7 @@ Implementation: `_helpers.emit_progress_entry(stage_n, name, body, *, total=5)` 
 
 ### DEC-004 — Five-part cache key composition
 
-```
+```python
 cache_key = blake2b(
     criterion_prompt_hash    + "\x00" +  # already on GradeEvent
     artifact_text_hash       + "\x00" +  # NEW
@@ -838,7 +838,7 @@ Expected updates:
 
 ### Beads dependency graph (for Phase 7 devolve)
 
-```
+```text
 US-001 (type fix)
   └── US-002 (cache_hit field + fixture)
        ├── US-006 (engine wiring)         ──> US-007 (CLI flags)  ──┐

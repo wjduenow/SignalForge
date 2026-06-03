@@ -2703,3 +2703,113 @@ def test_grade_artifacts_raises_grade_cache_path_error_on_symlinked_cache_dir(
 # orchestrator always builds ``prefilled_results`` to ``total_pairs``
 # length. Coverage loss is one defensive raise; cost of testing exceeds
 # value (issue #189 QG, accepted trade-off).
+
+
+# --- PR #196 review fixes -------------------------------------------------
+
+
+def test_cache_hit_grade_event_uses_live_run_hashes_not_stored_values(
+    tmp_path: Path,
+) -> None:
+    """PR #196 CodeRabbit — cache-hit GradeEvent records THIS run's
+    authoritative ``rubric_hash`` / ``prompt_version_template`` /
+    ``criterion_prompt_hash`` (live values), NOT the stored record's
+    values. The stored values may carry stale provenance if a sibling
+    criterion was edited (only the 5-part cache key axes are guaranteed
+    equal on a hit; ``rubric_hash`` is NOT in the key)."""
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = CandidateSchema(
+        name="orders",
+        description="d",
+        rationale="r",
+        columns=(CandidateColumn(name="order_id", description="pk", rationale="rat"),),
+        tests=(),
+    )
+    rubric: Rubric = (Criterion(id="clarity", criterion="Is it clear?"),)
+    pairs = _stable_artifact_pairs(candidate)
+    target_aid, target_text = pairs[0]
+    target_crit = rubric[0]
+
+    # Build a legitimate cache record (with the LIVE rubric_hash so it
+    # passes the new key-recomputation gate AND the cache-record drift
+    # detector), then override its stored ``rubric_hash`` to a STALE
+    # value before write. The key recipe doesn't use ``rubric_hash``,
+    # so the file lands under the right filename but the body lies
+    # about the rubric it was scored against.
+    key, record = _build_cache_record_from_pair(
+        artifact_id=target_aid,
+        criterion=target_crit,
+        artifact_text=target_text,
+        rubric=rubric,
+        score=0.77,
+        passed=True,
+        evidence="cached ev",
+        reasoning="cached rsn",
+    )
+    STALE_RUBRIC_HASH = "deadbeefdeadbeef"
+    record_stale = record.model_copy(update={"rubric_hash": STALE_RUBRIC_HASH})
+    _seed_cache(project_dir, key, record_stale)
+
+    # Other pairs need fake LLM responses since they're not cached.
+    fake = FakeAnthropicClient()
+    from tests.llm._fake import FakeCountTokensResponse, FakeMessage, FakeTextBlock, FakeUsage
+
+    for aid, _text in pairs:
+        if aid == target_aid:
+            continue
+        fake.expect_count_tokens(
+            matching=lambda _kw: True,
+            returns=FakeCountTokensResponse(input_tokens=1500),
+        )
+        fake.expect_messages_create(
+            matching=lambda _kw: True,
+            returns=FakeMessage(
+                content=[
+                    FakeTextBlock(
+                        text=json.dumps(
+                            {
+                                "criterion_id": "clarity",
+                                "score": 0.5,
+                                "passed": True,
+                                "evidence": "",
+                                "reasoning": "live",
+                            }
+                        ),
+                    )
+                ],
+                usage=FakeUsage(
+                    input_tokens=1700,
+                    output_tokens=80,
+                    cache_creation_input_tokens=100,
+                    cache_read_input_tokens=50,
+                ),
+                model="claude-fake-grade-judge",
+            ),
+        )
+
+    audit_path = project_dir / ".signalforge" / "grade.jsonl"
+    grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=fake,
+        project_dir=project_dir,
+        audit_path=audit_path,
+    )
+
+    rows = _read_jsonl(audit_path)
+    hits = [
+        r
+        for r in rows
+        if r["artifact_id"] == target_aid
+        and r["criterion_id"] == target_crit.id
+        and r.get("cache_hit") is True
+    ]
+    assert len(hits) == 1
+    # The audit row's rubric_hash MUST be the LIVE value (the
+    # _canonical_rubric_hash of the runtime rubric), NOT the stored
+    # stale value. False provenance would be a real bug.
+    assert hits[0]["rubric_hash"] != STALE_RUBRIC_HASH

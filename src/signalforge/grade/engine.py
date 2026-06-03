@@ -762,6 +762,26 @@ async def _grade_artifacts_async_core(
             ):
                 artifact_text_hash = artifact_text_hash_by_index.get(index)
                 if artifact_text_hash is not None:
+                    # ``resolved_config.model`` is invariantly concrete
+                    # post-construction (#187 US-002) — same precondition
+                    # as the sync-prefix lookup loop at line ~1199.
+                    assert resolved_config.model is not None
+                    # PR #196 Copilot — use the LIVE config values (NOT
+                    # ``event.*``) for every cache-key axis so the write
+                    # and lookup paths source the same five inputs. The
+                    # sync-prefix lookup at line ~1186 uses
+                    # ``resolved_config.{provider,model}`` + ``crit_hash``
+                    # + ``template_hash``; mirroring those here keeps
+                    # the key-recomputation gate in ``lookup_cache``
+                    # (issue #189 QG Pass 1 Finding 1) aligned. In
+                    # practice ``event.model`` already equals
+                    # ``resolved_config.model`` (see line ~484), but a
+                    # future refactor or test stub that diverges them
+                    # would silently break the cache without this
+                    # symmetry. ``response_text_hash`` and
+                    # ``rubric_hash`` stay sourced from the live run's
+                    # GradeEvent — they're forensic (the LLM's actual
+                    # response, the full rubric in effect for this run).
                     cache_record = CacheRecord(
                         artifact_id=artifact_id,
                         criterion_id=criterion.id,
@@ -769,21 +789,21 @@ async def _grade_artifacts_async_core(
                         passed=grading_result.passed,
                         evidence=grading_result.evidence,
                         reasoning=grading_result.reasoning,
-                        criterion_prompt_hash=event.criterion_prompt_hash,
+                        criterion_prompt_hash=crit_hash,
                         artifact_text_hash=artifact_text_hash,
                         provider=resolved_config.provider,
-                        model=event.model,
-                        prompt_version_template=event.prompt_version_template,
+                        model=resolved_config.model,
+                        prompt_version_template=template_hash,
                         response_text_hash=event.response_text_hash,
-                        rubric_hash=event.rubric_hash,
+                        rubric_hash=rubric_hash,
                         original_timestamp=per_call_ts,
                     )
                     cache_key = compute_cache_key(
-                        criterion_prompt_hash=event.criterion_prompt_hash,
+                        criterion_prompt_hash=crit_hash,
                         artifact_text_hash=artifact_text_hash,
                         provider=resolved_config.provider,
-                        model=event.model,
-                        prompt_version_template=event.prompt_version_template,
+                        model=resolved_config.model,
+                        prompt_version_template=template_hash,
                     )
                     # Fail-soft per DEC-005 — :func:`write_cache`
                     # swallows OSError / oversize / EEXIST internally
@@ -1205,6 +1225,19 @@ def grade_artifacts(
                 evidence=record.evidence,
                 reasoning=record.reasoning,
             )
+            # PR #196 CodeRabbit — cache-hit GradeEvent records the
+            # LIVE run's authoritative hashes for the three axes that
+            # are PRESENT in the 5-part cache key (criterion_prompt,
+            # prompt_version_template) PLUS rubric_hash (which is NOT
+            # in the key — the cache key uses prompt_version_template
+            # not rubric_hash, so a sibling-criterion edit can change
+            # the full rubric_hash while leaving THIS criterion's key
+            # axes unchanged). Using ``record.rubric_hash`` would
+            # record FALSE provenance (the rubric the verdict was
+            # originally scored against, not the rubric in effect for
+            # this run). ``response_text_hash`` stays from the stored
+            # record — that IS the forensic trail of the original LLM
+            # response, which a cache-hit re-run never produced.
             event = _build_grade_event(
                 run_id=run_id,
                 timestamp=per_call_ts,
@@ -1215,11 +1248,11 @@ def grade_artifacts(
                 passed=record.passed,
                 evidence=record.evidence,
                 reasoning=record.reasoning,
-                rubric_hash=record.rubric_hash,
-                prompt_version_template=record.prompt_version_template,
-                criterion_prompt_hash=record.criterion_prompt_hash,
+                rubric_hash=rubric_hash,
+                prompt_version_template=template_hash,
+                criterion_prompt_hash=crit_hash_by_id[criterion.id],
                 response_text_hash=record.response_text_hash,
-                model=record.model,
+                model=resolved_config.model,
                 input_tokens=0,
                 output_tokens=0,
                 cache_creation_input_tokens=0,

@@ -1106,6 +1106,22 @@ def _run_single_model(
         # because the entire block — including the
         # ``cache_enabled=False`` mutation — is skipped.
         grade_report = None
+        if no_grade:
+            # PR #196 CodeRabbit — remove stale grade artefacts from a
+            # prior run so the operator can't mistake them for current
+            # output. Both files live in ``<project>/.signalforge/``;
+            # ``missing_ok=True`` keeps this idempotent on the
+            # first-run / clean-tree case. The grade-jsonl audit and
+            # the grade.json sidecar are derived state; their absence
+            # under ``--no-grade`` honestly reflects "the grade stage
+            # did not run". ``.signalforge/grade-cache/`` is NOT
+            # touched — cached entries from previous runs remain
+            # available to a subsequent default run.
+            for _stale in (
+                project_dir / ".signalforge" / "grade.json",
+                project_dir / ".signalforge" / "grade.jsonl",
+            ):
+                _stale.unlink(missing_ok=True)
         if not no_grade:
             # US-006 / DEC-004 — apply ``--min-score`` by re-validating the
             # frozen :class:`GradeConfig` with the override. Reporting-only:

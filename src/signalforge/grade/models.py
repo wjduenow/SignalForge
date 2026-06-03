@@ -352,6 +352,27 @@ class GradeEvent(BaseModel):
             f"cache_hit={self.cache_hit!r})"
         )
 
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        """Pydantic v2 structured-repr hook (PR #196 Copilot).
+
+        ``rich.print()``, ``devtools.pretty()``, and (sometimes)
+        ``pprint`` use ``__repr_args__`` instead of ``__repr__`` to
+        compose their structured output. Without overriding this,
+        ``evidence`` and ``reasoning`` would leak through those
+        surfaces even though our :meth:`__repr__` redacts them.
+        Mirrors the same field set as :meth:`__repr__` so PII-bearing
+        LLM-emitted prose stays redacted across every repr path.
+        See memory ``pydantic-v2-repr-args-redaction-required``.
+        """
+        return [
+            ("run_id", self.run_id),
+            ("artifact_id", self.artifact_id),
+            ("criterion_id", self.criterion_id),
+            ("score", self.score),
+            ("passed", self.passed),
+            ("cache_hit", self.cache_hit),
+        ]
+
 
 __all__ = (
     "GradeEvent",
