@@ -15,9 +15,10 @@ Design commitments operationalised here:
   read-back / response-shaped models which use ``extra="ignore"`` for
   forward-compat.
 * **DEC-017** — Defaults: ``model="claude-sonnet-4-6"``,
-  ``cheap_model="claude-haiku-4-5-20251001"``, ``max_output_tokens=4096``,
+  ``cheap_model="claude-haiku-4-5"``, ``max_output_tokens=4096``,
   ``cache_ttl="5m"``, ``max_retries_429=3``, ``max_retries_5xx=1``,
-  ``max_retries_conn=1``.
+  ``max_retries_conn=1``. The bare SKU (no date suffix) matches the
+  keys in :data:`signalforge.llm.pricing.PRICES`.
 * **DEC-027** — ``signalforge.yml`` top-level namespace key for this
   layer is ``llm:``. Other top-level keys (``safety:``, ``prune:``,
   ``grade:``, …) are reserved for other stages and silently ignored by
@@ -105,11 +106,12 @@ class DraftConfig(BaseModel):
     model: str = "claude-sonnet-4-6"
     """Default Anthropic model. Any string the SDK accepts is allowed —
     the three blessed IDs are documented in the README; ``cheap_model``
-    holds the v0.1 Haiku ID."""
+    holds the bare Haiku SKU."""
 
-    cheap_model: str = "claude-haiku-4-5-20251001"
+    cheap_model: str = "claude-haiku-4-5"
     """Informational; not selected automatically. The CLI (#9) flips on
-    ``--cheap`` to swap ``model`` for this value."""
+    ``--cheap`` to swap ``model`` for this value. The bare SKU (no date
+    suffix) matches the keys in :data:`signalforge.llm.pricing.PRICES`."""
 
     max_output_tokens: int = 4096
     """Anthropic ``max_tokens`` ceiling. Must be positive (validator)."""

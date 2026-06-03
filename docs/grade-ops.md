@@ -107,18 +107,19 @@ DEC-020 — every pipeline stage gets one top-level key). Sibling keys
 (`safety:`, `llm:`, `prune:`, future `diff:` …) are reserved for other
 stages and silently ignored by the grade loader.
 
-The full schema (every knob, every default, all v0.1 types), mirroring
-`tests/fixtures/grade/example_config.yml` (exercised by
-`test_load_grade_config_doc_example_round_trips` so the example and the
-loader cannot drift):
+The full schema (every knob, every default, all v0.1 types). The
+companion fixture `tests/fixtures/grade/example_config.yml` (exercised by
+`test_load_grade_config_doc_example_round_trips`) pins that the loader
+accepts a representative `grade:` block; both this example and the fixture
+load cleanly through `load_grade_config`:
 
 ```yaml
-# signalforge.yml — grade stage configuration (v0.1)
+# signalforge.yml — grade stage configuration
 grade:
   provider: anthropic             # registry-validated; "anthropic" + "openai" + "gemini" are registered (see provider sections below)
-  model: claude-sonnet-4-6        # model id (default)
+  # model: claude-haiku-4-5       # omit to auto-resolve to the provider's default judge (anthropic -> claude-sonnet-4-6); set claude-haiku-4-5 to opt into the faster/stricter Haiku judge
   cache_ttl: 1h                   # Prompt-cache TTL ('5m' or '1h')
-  max_output_tokens: 256          # Per-criterion JSON response cap
+  max_output_tokens: 1024         # Per-criterion JSON response cap (default 1024)
   max_retries_429: 3              # Rate-limit retry budget
   max_retries_5xx: 1
   max_retries_conn: 1
@@ -159,9 +160,9 @@ grade:
 Field-by-field:
 
 - **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point. Today `anthropic`, `openai`, and `gemini` are registered; see [OpenAI provider](#openai-provider) and [Gemini provider](#gemini-provider) below for the non-default options.
-- **`model`** — The model id used by every per-pair judge call. Default `claude-sonnet-4-6`. Mirrors `DraftConfig.model` default. Haiku 4.5 is documented as a v0.2 cost-conscious option but not exposed in v0.1.
+- **`model`** — The model id used by every per-pair judge call. **Default resolves per-provider at config-load** (#187): when `model:` is omitted, the loader injects the calling provider's default judge model from `signalforge.llm.providers.PROVIDER_DEFAULT_MODELS` — `anthropic` → `claude-sonnet-4-6`, `openai` → `gpt-4o-mini`, `gemini` → `gemini-2.5-flash`. **Anthropic defaults to Sonnet:** the #187 calibration gate found `claude-haiku-4-5` grades the rubric stricter than Sonnet (~77–82% concordance, below the 85% bar — see `docs/research/187-haiku-calibration.md`), so Haiku is an explicit opt-in (`grade.model: claude-haiku-4-5`), not the default. An explicit `model:` is honoured verbatim. A SKU-prefix/provider mismatch (e.g. `provider: openai` with a `claude-` model) fails loud at config-load via the model↔provider compat validator (reusing `signalforge.llm.providers.PROVIDER_SKU_PREFIXES`).
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
-- **`max_output_tokens`** — Per-criterion judge response cap. Default `256`. The expected JSON response is ~150 tokens; 256 gives 2× safety. Independent of `DraftConfig.max_output_tokens`.
+- **`max_output_tokens`** — Per-criterion judge response cap. Default `1024` (#187 — raised from 256 to substantially reduce truncation risk for a verbose one-line `gemini-2.5-flash` grade JSON; the expected JSON response is still ~150 tokens, so the larger ceiling costs nothing on the happy path). 1024 reduces but does not fully eliminate Gemini truncation at scale — see the per-provider floors below; Gemini-heavy runs may want `4096`. Independent of `DraftConfig.max_output_tokens`.
 - **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised, provider-neutral `signalforge.llm.call_llm` seam (#5 DEC-012; #135 DEC-005). Defaults `3 / 1 / 1` mirror `DraftConfig`; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.
 - **`total_budget_seconds`** — Whole-run wall-clock budget. Default `300` (5 minutes — historically ~3× safety on 60 sequential calls × 1s p50; ~10× headroom under concurrent dispatch). Mirrors `PruneConfig.total_budget_seconds` semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped. Under the asyncio orchestrator (issue #186) the budget is enforced via `asyncio.timeout(...)` wrapping the `TaskGroup`; on trip, un-completed pairs are filled in by a synthesis pass with `reasoning="grade budget exceeded ({N}s) before evaluation"`. Tests inject deterministic timing via the module-level `_async_sleep` alias (mirrors the `_sleep` injection pattern from `llm-drafter.md` DEC-004).
 - **`max_concurrent_calls`** — Number of in-flight `(artifact × criterion)` LLM calls allowed concurrently (issue #186). Default `10` matches the typical Anthropic-tier throughput sweet-spot; bounded `[1, 100]` with `@field_validator` rejecting `< 1` or `> 100` at config-load. Setting `1` yields v0.1 sequential behaviour bit-for-bit (semaphore-of-1 serialises in dispatch order, preserving `(criterion, artifact)` JSONL ordering). Under concurrent dispatch the audit JSONL lands in **arrival order** (`audit_schema_version` unchanged at `Literal[1]`); the `tests/grade/_helpers.py::_sort_grade_events(lines)` helper restores deterministic ordering for tests that snapshot the file. CLI does not expose a `--max-concurrent-calls` flag (mirrors `min_pass_rate` / `min_mean_score` config-file-only convention).
@@ -592,6 +593,28 @@ specifically. See
 § "Measured baseline (2026-05-29)" for the full-suite rollup
 ($1.38/run across the three providers).
 
+**Per-provider default judge models (#187).** When `grade.model:` is omitted
+the loader resolves to the calling provider's default judge
+(`signalforge.llm.providers.PROVIDER_DEFAULT_MODELS`). Anthropic defaults to
+**Sonnet** (the #187 calibration gate kept it the default — Haiku grades
+stricter, below the 85% bar); OpenAI/Gemini default to their fast judges
+(explicit operator choices of a cheaper provider). The rows below pair each
+default with its per-MTok USD list price from `signalforge.llm.pricing`
+(pricing-table version `2026-05-28`) and an *estimated* per-model grade cost
+(estimate, not a measured run, except where noted):
+
+| Provider × default judge         | Input $/MTok | Output $/MTok | Est. per-model grade cost | Notes                                                                                  |
+|----------------------------------|--------------|---------------|---------------------------|----------------------------------------------------------------------------------------|
+| Anthropic `claude-sonnet-4-6`    | $3.00        | $15.00        | ~$0.38 (measured)         | The default grade judge (calibration baseline). `claude-haiku-4-5` ($0.80/$4.00, ~$0.10, ~3.75× cheaper) is the opt-in fast judge — stricter, see the calibration writeup. |
+| OpenAI `gpt-4o-mini`             | $0.15        | $0.60         | ~$0.013                   | ~16.7× cheaper than `gpt-4o` per token; the default when `provider: openai`.            |
+| Gemini `gemini-2.5-flash`        | $0.30        | $2.50         | ~$0.045                   | Already the documented mid-tier default; the measured figure above is this same SKU.    |
+
+For completeness, the registered Anthropic SKUs span `claude-haiku-4-5`
+($0.80 / $4.00 per MTok), `claude-sonnet-4-6` ($3.00 / $15.00), and
+`claude-opus-4-7` ($15.00 / $75.00) — opting into the Haiku judge
+(`grade.model: claude-haiku-4-5`) cuts the per-token grade cost ~3.75× vs the
+Sonnet default, at the cost of stricter grading (#187 calibration).
+
 **Fan-out comparison vs the batched alternative:**
 
 - The per-criterion fan-out (one LLM call per `(criterion × artefact)`)
@@ -627,11 +650,16 @@ default fan-out is too expensive for their use case:
   `GradeBudgetExceededError` only fires if the budget trips before
   ANY criterion runs (a hard "the run did nothing" failure); a partial
   run completes with `aggregate_complete: false`.
-- **`max_output_tokens`** (default `256`) — Per-call output cap. The
-  expected JSON response is ~150 tokens; tightening to 192 trims ~25%
-  off the output-token bill at marginal risk of truncated JSON
-  (handled by `GradeOutputError(violation_type="json_parse")` and the
-  degraded path).
+- **`max_output_tokens`** (default `1024`) — Per-call output cap. The
+  expected JSON response is ~150 tokens, so the cap is a truncation
+  guard, not a target; the default was raised from 256 to 1024 in #187
+  to substantially reduce truncation of a verbose one-line
+  `gemini-2.5-flash` grade JSON (1024 reduces but does not fully
+  eliminate it at the full-fixture scale — the per-provider floors below
+  recommend `4096` for Gemini-heavy runs).
+  Tightening it trims the output-token bill at the cost of truncation
+  risk (handled by `GradeOutputError(violation_type="json_parse")` and
+  the degraded path); see the per-provider floors below before lowering it.
 - **`cache_ttl: "1h"`** (default) — Cache-read economics. Prompt
   caching is a **provider capability** (issue #135): the `cache_control`
   marker, the extended-cache-ttl beta header, and the pre-send
@@ -694,7 +722,7 @@ Issue #136 registered `OpenAIProvider` as the second
 ```yaml
 grade:
   provider: openai
-  model: gpt-4o            # default judge model for the OpenAI provider; any model id the SDK accepts is allowed
+  model: gpt-4o            # explicit override; omit `model:` to auto-resolve to the OpenAI fast default `gpt-4o-mini` (#187). Any model id the SDK accepts is allowed.
   # cache_ttl, max_retries_*, total_budget_seconds, thresholds — same shape as the anthropic provider
 ```
 

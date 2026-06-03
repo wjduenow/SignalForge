@@ -39,7 +39,7 @@ def test_draft_config_defaults_match_dec_017() -> None:
     """DEC-017: every default field value matches the spec."""
     cfg = DraftConfig()
     assert cfg.model == "claude-sonnet-4-6"
-    assert cfg.cheap_model == "claude-haiku-4-5-20251001"
+    assert cfg.cheap_model == "claude-haiku-4-5"
     assert cfg.max_output_tokens == 4096
     assert cfg.cache_ttl == "5m"
     assert cfg.max_retries_429 == 3

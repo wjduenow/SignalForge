@@ -339,6 +339,51 @@ def provider_for(name: str) -> LLMProvider:
         raise UnknownProviderError(name, available=tuple(_REGISTRY)) from None
 
 
+# ---------------------------------------------------------------------------
+# Provider -> string mappings (#187 US-001).
+#
+# Two read-only constants keyed by the canonical provider names registered
+# below (``anthropic`` / ``openai`` / ``gemini``). They are the single
+# source of truth for two cross-cutting facts that previously lived as
+# duplicated literals scattered across stages:
+#
+# * ``PROVIDER_DEFAULT_MODELS`` — the cheap/fast judge SKU per provider, used by
+#   the faster-grade defaults (#187). Every value MUST be an exact key in
+#   :data:`signalforge.llm.pricing.PRICES` so ``pricing.lookup(model)`` and the
+#   ``--estimate`` cost-preview path never raise.
+# * ``PROVIDER_SKU_PREFIXES`` — the SKU-string prefix per provider, used by
+#   the cost-rollup's prefix dispatch (``signalforge.llm.cost._rollup``) to map
+#   a priced SKU back to its provider. Consumers that need the inverse
+#   (prefix -> provider) iterate ``.items()`` and invert.
+#
+# These are plain ``dict`` literals (not ``MappingProxyType``) for the same
+# reason the cost-rollup's prefix table is a plain tuple — they are internal
+# lookup tables, the values are immutable strings, and no caller mutates them.
+# ---------------------------------------------------------------------------
+
+#: Default judge SKU per provider (#187) — used when ``grade.model`` is unset.
+#: Anthropic defaults to ``claude-sonnet-4-6``: the #187 calibration gate found
+#: ``claude-haiku-4-5`` grades the rubric stricter than Sonnet (~77-82%
+#: concordance, below the 85% bar — see ``docs/research/187-haiku-calibration.md``),
+#: so Haiku stays an explicit opt-in (`grade.model: claude-haiku-4-5`), not the
+#: default. OpenAI/Gemini default to their fast judges (explicit operator choices
+#: of a cheaper provider; never calibrated against the Sonnet baseline). Every
+#: value is an exact key in :data:`signalforge.llm.pricing.PRICES`.
+PROVIDER_DEFAULT_MODELS: dict[str, str] = {
+    "anthropic": "claude-sonnet-4-6",
+    "openai": "gpt-4o-mini",
+    "gemini": "gemini-2.5-flash",
+}
+
+#: SKU-string prefix per provider (#187 US-001). The cost-rollup's
+#: prefix dispatch consumes this (inverting to prefix -> provider).
+PROVIDER_SKU_PREFIXES: dict[str, str] = {
+    "anthropic": "claude-",
+    "openai": "gpt-",
+    "gemini": "gemini-",
+}
+
+
 class AnthropicProvider(LLMProvider):
     """Anthropic strategy behind the generic LLM orchestrator (DEC-002/003/004).
 
@@ -1424,6 +1469,8 @@ register_provider(GeminiProvider())
 
 
 __all__ = (
+    "PROVIDER_DEFAULT_MODELS",
+    "PROVIDER_SKU_PREFIXES",
     "AnthropicProvider",
     "ExceptionCategory",
     "GeminiProvider",

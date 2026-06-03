@@ -1,0 +1,496 @@
+{
+  "_provenance": "REAL claude-sonnet-4-6 baseline for the #187 Haiku-calibration gate (US-005, recaptured on request). Artifacts were drafted by the production drafter (schema-only, no warehouse) from the real intuit_airflow model plugins/dbt/models/analytical/calendar_hour.sql and frozen to real_candidate.json; the model itself is constructed deterministically by _substrate.build_model. Verdicts below are live claude-sonnet-4-6 grades of those frozen artifacts, captured via capture_sonnet_baseline.py. The gated harness re-grades the SAME frozen artifacts with the resolved Haiku default and measures per-(artifact_id, criterion_id) pass/fail concordance against these verdicts. Pairs Sonnet could not grade (score=None, e.g. retry exhaustion under rate limiting) are EXCLUDED \u2014 see degraded_count. This is NOT hand-authored \u2014 re-run the capture script to regenerate.",
+  "baseline_model": "claude-sonnet-4-6",
+  "source_model": "model.bi.calendar_hour",
+  "source_repo_path": "intuit_airflow/plugins/dbt/models/analytical/calendar_hour.sql",
+  "signalforge_version": "0.6.0.dev0",
+  "degraded_count": 4,
+  "rubric_criteria": [
+    "clarity",
+    "consistency",
+    "rationale",
+    "no-redundant"
+  ],
+  "verdicts": [
+    {
+      "artifact_id": "column.date_hour.description",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.72
+    },
+    {
+      "artifact_id": "column.date_id.description",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.62
+    },
+    {
+      "artifact_id": "column.hour_of_day.description",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.72
+    },
+    {
+      "artifact_id": "column.prior_year_date_hour.description",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.78
+    },
+    {
+      "artifact_id": "column.date_hour.rationale",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "column.date_id.rationale",
+      "criterion_id": "clarity",
+      "baseline_passed": false,
+      "baseline_score": 0.45
+    },
+    {
+      "artifact_id": "column.hour_of_day.rationale",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.62
+    },
+    {
+      "artifact_id": "column.prior_year_date_hour.rationale",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.72
+    },
+    {
+      "artifact_id": "model.description",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.72
+    },
+    {
+      "artifact_id": "model.rationale",
+      "criterion_id": "clarity",
+      "baseline_passed": false,
+      "baseline_score": 0.35
+    },
+    {
+      "artifact_id": "test.column.date_hour.not_null",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "test.column.date_hour.unique",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.82
+    },
+    {
+      "artifact_id": "test.column.date_id.not_null",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.72
+    },
+    {
+      "artifact_id": "test.column.hour_of_day.not_null",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.72
+    },
+    {
+      "artifact_id": "test.column.hour_of_day.custom_sql.22db0141",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.72
+    },
+    {
+      "artifact_id": "test.column.hour_of_day.custom_sql.e7f5b321",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.82
+    },
+    {
+      "artifact_id": "test.column.prior_year_date_hour.not_null",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "test.column.prior_year_date_hour.custom_sql",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.72
+    },
+    {
+      "artifact_id": "test.model.unique_combination",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.82
+    },
+    {
+      "artifact_id": "test.model.row_count_between",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "test.model.row_count_anomaly_by_period",
+      "criterion_id": "clarity",
+      "baseline_passed": true,
+      "baseline_score": 0.82
+    },
+    {
+      "artifact_id": "column.date_hour.description",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "column.date_id.description",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.6
+    },
+    {
+      "artifact_id": "column.hour_of_day.description",
+      "criterion_id": "consistency",
+      "baseline_passed": false,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "column.prior_year_date_hour.description",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.7
+    },
+    {
+      "artifact_id": "column.date_hour.rationale",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.8
+    },
+    {
+      "artifact_id": "column.date_id.rationale",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.6
+    },
+    {
+      "artifact_id": "column.hour_of_day.rationale",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.75
+    },
+    {
+      "artifact_id": "column.prior_year_date_hour.rationale",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.82
+    },
+    {
+      "artifact_id": "model.description",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.5
+    },
+    {
+      "artifact_id": "model.rationale",
+      "criterion_id": "consistency",
+      "baseline_passed": false,
+      "baseline_score": 0.3
+    },
+    {
+      "artifact_id": "test.column.date_hour.not_null",
+      "criterion_id": "consistency",
+      "baseline_passed": false,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "test.column.date_hour.unique",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.75
+    },
+    {
+      "artifact_id": "test.column.date_id.not_null",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.8
+    },
+    {
+      "artifact_id": "test.column.hour_of_day.not_null",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.7
+    },
+    {
+      "artifact_id": "test.column.hour_of_day.custom_sql.22db0141",
+      "criterion_id": "consistency",
+      "baseline_passed": false,
+      "baseline_score": 0.4
+    },
+    {
+      "artifact_id": "test.column.hour_of_day.custom_sql.e7f5b321",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.7
+    },
+    {
+      "artifact_id": "test.column.prior_year_date_hour.not_null",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "test.column.prior_year_date_hour.custom_sql",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.85
+    },
+    {
+      "artifact_id": "test.model.unique_combination",
+      "criterion_id": "consistency",
+      "baseline_passed": true,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "test.model.row_count_between",
+      "criterion_id": "consistency",
+      "baseline_passed": false,
+      "baseline_score": 0.4
+    },
+    {
+      "artifact_id": "test.model.row_count_anomaly_by_period",
+      "criterion_id": "consistency",
+      "baseline_passed": false,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "column.date_hour.description",
+      "criterion_id": "rationale",
+      "baseline_passed": false,
+      "baseline_score": 0.1
+    },
+    {
+      "artifact_id": "column.date_id.description",
+      "criterion_id": "rationale",
+      "baseline_passed": false,
+      "baseline_score": 0.1
+    },
+    {
+      "artifact_id": "column.hour_of_day.description",
+      "criterion_id": "rationale",
+      "baseline_passed": false,
+      "baseline_score": 0.1
+    },
+    {
+      "artifact_id": "column.prior_year_date_hour.description",
+      "criterion_id": "rationale",
+      "baseline_passed": false,
+      "baseline_score": 0.1
+    },
+    {
+      "artifact_id": "column.date_hour.rationale",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "column.date_id.rationale",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.72
+    },
+    {
+      "artifact_id": "column.hour_of_day.rationale",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.82
+    },
+    {
+      "artifact_id": "column.prior_year_date_hour.rationale",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.82
+    },
+    {
+      "artifact_id": "model.description",
+      "criterion_id": "rationale",
+      "baseline_passed": false,
+      "baseline_score": 0.1
+    },
+    {
+      "artifact_id": "model.rationale",
+      "criterion_id": "rationale",
+      "baseline_passed": false,
+      "baseline_score": 0.2
+    },
+    {
+      "artifact_id": "test.column.date_hour.not_null",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.82
+    },
+    {
+      "artifact_id": "test.column.date_hour.unique",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.85
+    },
+    {
+      "artifact_id": "test.column.date_id.not_null",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.85
+    },
+    {
+      "artifact_id": "test.column.hour_of_day.not_null",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.85
+    },
+    {
+      "artifact_id": "test.column.hour_of_day.custom_sql.22db0141",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.85
+    },
+    {
+      "artifact_id": "test.column.hour_of_day.custom_sql.e7f5b321",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.85
+    },
+    {
+      "artifact_id": "test.column.prior_year_date_hour.not_null",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.85
+    },
+    {
+      "artifact_id": "test.column.prior_year_date_hour.custom_sql",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.82
+    },
+    {
+      "artifact_id": "test.model.unique_combination",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.82
+    },
+    {
+      "artifact_id": "test.model.row_count_anomaly_by_period",
+      "criterion_id": "rationale",
+      "baseline_passed": true,
+      "baseline_score": 0.82
+    },
+    {
+      "artifact_id": "column.date_id.description",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.5
+    },
+    {
+      "artifact_id": "column.hour_of_day.description",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.5
+    },
+    {
+      "artifact_id": "column.date_hour.rationale",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.75
+    },
+    {
+      "artifact_id": "column.date_id.rationale",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.5
+    },
+    {
+      "artifact_id": "column.hour_of_day.rationale",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.6
+    },
+    {
+      "artifact_id": "column.prior_year_date_hour.rationale",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.55
+    },
+    {
+      "artifact_id": "model.description",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.5
+    },
+    {
+      "artifact_id": "model.rationale",
+      "criterion_id": "no-redundant",
+      "baseline_passed": false,
+      "baseline_score": 0.4
+    },
+    {
+      "artifact_id": "test.column.date_hour.not_null",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.75
+    },
+    {
+      "artifact_id": "test.column.date_hour.unique",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.8
+    },
+    {
+      "artifact_id": "test.column.date_id.not_null",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.85
+    },
+    {
+      "artifact_id": "test.column.hour_of_day.custom_sql.22db0141",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.85
+    },
+    {
+      "artifact_id": "test.column.hour_of_day.custom_sql.e7f5b321",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.75
+    },
+    {
+      "artifact_id": "test.column.prior_year_date_hour.not_null",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.85
+    },
+    {
+      "artifact_id": "test.column.prior_year_date_hour.custom_sql",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.6
+    },
+    {
+      "artifact_id": "test.model.unique_combination",
+      "criterion_id": "no-redundant",
+      "baseline_passed": true,
+      "baseline_score": 0.85
+    },
+    {
+      "artifact_id": "test.model.row_count_between",
+      "criterion_id": "no-redundant",
+      "baseline_passed": false,
+      "baseline_score": 0.35
+    },
+    {
+      "artifact_id": "test.model.row_count_anomaly_by_period",
+      "criterion_id": "no-redundant",
+      "baseline_passed": false,
+      "baseline_score": 0.45
+    }
+  ]
+}

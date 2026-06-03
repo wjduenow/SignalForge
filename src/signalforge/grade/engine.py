@@ -356,6 +356,11 @@ async def _grade_one_async(
 
     # 2. Issue the LLM call. Wrap LLMError -> GradeLLMError once at
     #    the seam (DEC-015 of #5 mirror: one-level adapter).
+    # ``config.model`` is invariantly a concrete string post-construction
+    # (#187 US-002: the sentinel ``None`` is resolved to the provider's fast
+    # model at config-load; an unknown provider raises before any consumer
+    # reads it). Narrow the static ``str | None`` once for this function.
+    assert config.model is not None
     try:
         result = await call_llm_async(
             system=_SYSTEM_PROMPT,
@@ -459,6 +464,8 @@ def _build_degraded(
     receipt) carry the same ``score=None`` / ``passed=False`` shape so
     a downstream replay round-trips cleanly.
     """
+    # ``config.model`` is invariantly concrete post-construction (#187 US-002).
+    assert config.model is not None
     grading_result = GradingResult(
         artifact_id=artifact_id,
         criterion_id=criterion.id,

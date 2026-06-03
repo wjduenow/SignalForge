@@ -24,11 +24,22 @@ Design commitments operationalised here (``plans/super/7-quality-grader.md``):
   here. The loader takes it as a required argument so the caller is
   explicit about the resolution base.
 * **DEC-023..DEC-027** — Locked default values:
-  ``model="claude-sonnet-4-6"``, ``cache_ttl="1h"``,
-  ``max_output_tokens=256``, ``max_retries_429=3``, ``max_retries_5xx=1``,
+  ``model=None`` (resolves to the calling provider's default judge model
+  at config-load — ``anthropic`` -> ``claude-sonnet-4-6`` per
+  :data:`signalforge.llm.providers.PROVIDER_DEFAULT_MODELS`; #187 US-002 /
+  DEC-004. The #187 calibration gate found ``claude-haiku-4-5`` grades
+  the rubric stricter than Sonnet — below the 85% bar — so Haiku stays an
+  explicit opt-in, not the default), ``cache_ttl="1h"``,
+  ``max_output_tokens=1024`` (#187 DEC-004 — raised from 256 so a one-line
+  ``gemini-2.5-flash`` grade JSON is substantially less likely to
+  truncate), ``max_retries_429=3``, ``max_retries_5xx=1``,
   ``max_retries_conn=1``, ``total_budget_seconds=300``,
   ``min_pass_rate=0.7``, ``min_mean_score=0.5``, ``rubric=None``,
   ``fail_on_below_threshold=False``.
+* **#187 US-002 / DEC-006** — when ``model`` is set explicitly, a
+  SKU-prefix/provider mismatch (e.g. ``provider="openai"`` with
+  ``model="claude-sonnet-4-6"``) fails loud at config-load. The
+  prefix table is :data:`signalforge.llm.providers.PROVIDER_SKU_PREFIXES`.
 
 Resolution order (mirrors :func:`signalforge.draft.config.load_draft_config`):
 
@@ -65,13 +76,14 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from signalforge.grade.errors import GradeConfigError, GradeRubricError
 from signalforge.grade.rubric import Rubric, validate_rubric
+from signalforge.llm.providers import PROVIDER_DEFAULT_MODELS, PROVIDER_SKU_PREFIXES
 
 _DEFAULT_CONFIG_FILENAME = "signalforge.yml"
 
@@ -94,10 +106,25 @@ class GradeConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
 
-    model: str = "claude-sonnet-4-6"
-    """LLM-judge model id (DEC-026). Mirrors the drafter's default.
-    Haiku 4.5 is documented as a v0.2 ``cheap_model`` option for
-    cost-conscious mode but is not exposed in v0.1."""
+    model: str | None = None
+    """LLM-judge model id (DEC-026; #187 US-002 / DEC-004).
+
+    The sentinel default ``None`` means "use the calling provider's
+    default judge model" — resolved at config-load by the
+    :meth:`_resolve_model_default` before-validator to
+    :data:`signalforge.llm.providers.PROVIDER_DEFAULT_MODELS` keyed on
+    :attr:`provider` (``anthropic`` -> ``claude-sonnet-4-6``, ``openai``
+    -> ``gpt-4o-mini``, ``gemini`` -> ``gemini-2.5-flash``). Anthropic
+    defaults to Sonnet because the #187 calibration gate found
+    ``claude-haiku-4-5`` grades stricter than Sonnet (below the 85% bar);
+    Haiku is an explicit opt-in (``grade.model: claude-haiku-4-5``). An
+    explicit ``model:`` is always honoured verbatim. After construction
+    this field is always a concrete non-empty string — never ``None``.
+
+    When set explicitly, a SKU-prefix/provider mismatch (e.g.
+    ``provider="openai"`` with a ``claude-`` model) fails loud at
+    config-load via :meth:`_validate_model_provider_compat` (#187
+    DEC-006), reusing :data:`signalforge.llm.providers.PROVIDER_SKU_PREFIXES`."""
 
     cache_ttl: Literal["5m", "1h"] = "1h"
     """Anthropic prompt-cache TTL (DEC-024). Defaults to ``"1h"`` (vs.
@@ -106,10 +133,20 @@ class GradeConfig(BaseModel):
     gives margin at no extra cost (cache writes are one-shot regardless
     of TTL)."""
 
-    max_output_tokens: int = 256
-    """Per-criterion judge response cap (DEC-025). The expected JSON
-    response is ~150 tokens; 256 gives 2× safety. Independent of
-    :attr:`signalforge.draft.DraftConfig.max_output_tokens`."""
+    max_output_tokens: int = 1024
+    """Per-criterion judge response cap (DEC-025; #187 DEC-004).
+
+    Raised from 256 to 1024 now that ``gemini-2.5-flash`` is a one-line
+    default judge model — a verbose-but-valid one-line grade JSON from a
+    cheaper/faster model can exceed 256 tokens, and a truncated response
+    surfaces as the wrong typed degrade. This is a **cap**, not a target;
+    the expected JSON is still ~150 tokens, so the larger ceiling costs
+    nothing on the happy path while substantially reducing truncation
+    risk. Note 1024 reduces but does not eliminate Gemini truncation at
+    scale — ``docs/grade-ops.md`` § per-provider floors records that
+    ``gemini-2.5-flash`` may still degrade on a minority of pairs at the
+    full-fixture scale (#158) and recommends 4096 for Gemini-heavy runs.
+    Independent of :attr:`signalforge.draft.DraftConfig.max_output_tokens`."""
 
     max_retries_429: int = 3
     """Mirrors :attr:`signalforge.draft.DraftConfig.max_retries_429`.
@@ -212,9 +249,51 @@ class GradeConfig(BaseModel):
     ``signalforge generate`` invocation in CI can gate on threshold
     compliance — see ``docs/cli-ops.md`` for the exit-code tier."""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_model_default(cls, data: Any) -> Any:
+        """Resolve the sentinel ``model=None`` to the provider's default judge model.
+
+        Runs BEFORE field validation (and before the frozen instance
+        exists) so the injected value flows through the normal
+        construction path — :class:`GradeConfig` is ``frozen=True`` and a
+        ``mode="after"`` mutation would raise. Only a dict input is
+        rewritten; an already-constructed instance (e.g. from
+        ``model_validate`` of a :class:`GradeConfig`) passes through
+        untouched.
+
+        When ``model`` is absent or ``None``, inject
+        :data:`signalforge.llm.providers.PROVIDER_DEFAULT_MODELS` keyed on
+        the requested ``provider`` (defaulting to ``"anthropic"`` to
+        match the field default). A provider NOT in the default-model table
+        is left alone — no injection — via ``.get()`` so this never masks
+        an error with a ``KeyError`` (#187 US-002 / DEC-004). Two such
+        cases follow downstream: an *unregistered* provider is rejected by
+        the ``provider`` field-validator (:class:`UnknownProviderError`);
+        a *registered* provider absent from the default-model table with no
+        explicit model is rejected by
+        :meth:`_validate_model_provider_compat` (which requires the
+        operator to set ``grade.model`` explicitly).
+        """
+        if not isinstance(data, dict):
+            return data
+        if data.get("model") is None:
+            provider = data.get("provider", "anthropic")
+            resolved = PROVIDER_DEFAULT_MODELS.get(provider)
+            if resolved is not None:
+                # Copy-on-write so we don't mutate a caller-owned dict.
+                data = {**data, "model": resolved}
+        return data
+
     @field_validator("model")
     @classmethod
-    def _model_non_empty(cls, v: str) -> str:
+    def _model_non_empty(cls, v: str | None) -> str | None:
+        # ``None`` only survives to here when the provider was unknown and
+        # the before-validator deliberately declined to inject a default
+        # (so the provider field-validator can raise the typed error).
+        # Pass it through cleanly rather than tripping the non-empty guard.
+        if v is None:
+            return v
         if not v or not v.strip():
             raise ValueError("must be a non-empty, non-whitespace string")
         return v
@@ -283,6 +362,72 @@ class GradeConfig(BaseModel):
         if v < 0.0 or v > 1.0:
             raise ValueError("must be in the closed interval [0.0, 1.0]")
         return v
+
+    @model_validator(mode="after")
+    def _validate_model_provider_compat(self) -> GradeConfig:
+        """Reject a SKU-prefix/provider mismatch (#187 US-002 / DEC-006).
+
+        After field validation ``model`` is always a concrete string (the
+        before-validator resolved the sentinel, OR the operator set it
+        explicitly, OR the provider was unknown and the provider
+        field-validator already raised before reaching here). When
+        :attr:`provider` is one of the *known-prefix* providers in
+        :data:`signalforge.llm.providers.PROVIDER_SKU_PREFIXES` AND the
+        model carries a *different* known provider's SKU prefix, fail
+        loud: e.g. ``provider="openai"`` with ``model="claude-sonnet-4-6"``
+        is an operator mistake that would otherwise send a ``claude-`` SKU
+        through the OpenAI strategy.
+
+        The prefix table is
+        :data:`signalforge.llm.providers.PROVIDER_SKU_PREFIXES` (single
+        source of truth — no hardcoded prefixes here). Two cases are
+        deliberately left alone:
+
+        * A model whose prefix matches no known provider (forward-compat:
+          a future SKU the table doesn't yet enumerate must not be
+          rejected as a mismatch).
+        * A registry-valid provider that is NOT in the prefix table
+          (a custom/plugin provider) *with an explicit model*. Such a
+          provider may use any model name — the cross-vendor mismatch
+          concept only applies among the three known-prefix vendors, so
+          the check does not fire when :attr:`provider` is outside the
+          table.
+
+        A registry-valid provider absent from
+        :data:`signalforge.llm.providers.PROVIDER_DEFAULT_MODELS` AND given
+        no explicit ``model`` reaches here with ``model is None`` (the
+        before-validator had no default model to inject; the ``provider``
+        field-validator passed because the provider IS registered). We
+        cannot guess a custom provider's model, so this fails loud rather
+        than letting ``None`` flow into the engine — which keeps the
+        post-construction "``model`` is never ``None``" invariant the
+        consumers assert on genuinely true (#187 QG).
+
+        This is a read-only check — no mutation — so it is safe on the
+        frozen instance.
+        """
+        model = self.model
+        if model is None:
+            raise ValueError(
+                f"provider {self.provider!r} has no built-in default model; "
+                f"set 'grade.model' explicitly in signalforge.yml"
+            )
+        # Only the known-prefix providers participate in the mismatch check.
+        if self.provider not in PROVIDER_SKU_PREFIXES:
+            return self
+        if model.startswith(PROVIDER_SKU_PREFIXES[self.provider]):
+            return self
+        # If the model carries ANOTHER known provider's prefix, that's a mismatch.
+        for other_provider, prefix in PROVIDER_SKU_PREFIXES.items():
+            if other_provider == self.provider:
+                continue
+            if model.startswith(prefix):
+                raise ValueError(
+                    f"model {model!r} has the {other_provider!r} SKU prefix "
+                    f"{prefix!r} but provider is {self.provider!r}; set a "
+                    f"{self.provider!r}-compatible model or change the provider"
+                )
+        return self
 
     @model_validator(mode="after")
     def _validate_rubric_structure(self) -> GradeConfig:
