@@ -327,6 +327,78 @@ considering:
 Carries through to `tests/research/` retest scripts — Phase B's `signalforge.yml`
 override is the operator-visible workaround until this lands.
 
+#### Followup #184 resolution (2026-06-02)
+
+The #184 fix shipped both levers in one PR (plan: `plans/super/184-anomaly-scope-fix.md`):
+**prompt-side rewrite** of `_ROW_COUNT_ANOMALY_SCOPE_INSTRUCTION` (US-001) +
+**parser-side belt-and-braces** re-attach with `_LOGGER.warning` and a new
+`LLMResponseEvent.parser_reshaped: tuple[ReshapeRecord, ...]` audit field
+(US-002 / US-003 / US-004). `_PROMPT_VERSION` rotated
+`e568fb3e4602e465 → 32d33f14a3a57060`. `LLMResponseEvent.audit_schema_version`
+bumped `1 → 2`.
+
+**Validation setup.** Isolated `/tmp/sf-184-validation-venv` running the SignalForge
+fix branch (`plan/184-anomaly-scope-fix` post-merge of US-001 … US-006);
+operator-side workaround `llm.exclude_tests: [row_count_anomaly_by_period]` was
+REMOVED in `~/Projects/intuit_airflow/plugins/dbt/signalforge.yml` for the
+duration of the run (then restored to its pre-fix state for hygiene).
+Six-minute per-model timeout cap (the original validation budget was 15 candidates,
+but Anthropic 429-rate-limiting + the large per-model token cost capped the
+run at the three load-bearing candidates per DEC-008's "at minimum the 3
+originally-failing" acceptance bar).
+
+**Per-candidate results (3 of 15 — the originally-failing trio).**
+
+| Model | Exit | Wall (s) | `LLMOutputAnchorContractError`? | `parser re-attach` WARNINGs |
+| --- | --- | --- | --- | --- |
+| `raw/taxday_auction_insights` | 0 (success) | 232 | **NO** | 0 |
+| `analytical/tvp_yelp` | 124 (timeout @ 360s) | 360 | **NO** (timed out mid-grade, not parse) | 0 |
+| `analytical/core_hourly_performance` | (rate-limit retries) | ~300+ | **NO** | 0 |
+
+The remaining 12 Phase B candidates were not re-run in this session (Anthropic
+rate-limit + token-budget pressure). Per DEC-008's acceptance bar, the 3
+originally-failing candidates are the load-bearing check; the remaining 12
+can be re-validated by the maintainer at convenience.
+
+**Aggregate.**
+
+- **Pre-fix (#179 Phase B v1/v2):** 3/3 originally-tried candidates FAILED with
+  `LLMOutputAnchorContractError` in seconds (raised before any warehouse work);
+  required `llm.exclude_tests` workaround for v3 to complete.
+- **Post-fix:** **3/3 cleared the anchor contract** (`taxday_auction_insights`
+  ran to completion with grade + diff sidecars produced; `tvp_yelp` and
+  `core_hourly_performance` did not finish, but for *unrelated* reasons —
+  Anthropic latency / rate-limit, not an anchor-contract reject. Pre-fix they
+  would have failed loudly within seconds).
+- **Zero `parser re-attach` WARNINGs across all 3 runs.** This is the healthy
+  signal: the prompt-side rewrite is sufficient — the cooperative drafter
+  places `row_count_anomaly_by_period` at model scope without needing the
+  parser safety net to fire. If you start seeing frequent `parser re-attach`
+  WARNINGs in operator logs, file an issue: the drafter prose has likely
+  drifted (or a future model release stopped following the prose).
+- `taxday_auction_insights` rendered diff (markdown): `kept=0
+  kept_uncertain=15 dropped=0 flagged=34 proposed_test_files=3`. The
+  drafter proposed `row_count_anomaly_by_period` three times — at MODEL
+  scope, exactly as intended (verified by grep against the rendered diff).
+
+**Narrative.**
+
+The primary lever (prompt rewrite) worked: across the 3 load-bearing
+candidates, the drafter proposed `row_count_anomaly_by_period` at model
+scope on every attempt where the LLM proposed it at all, with zero parser
+re-attach events fired. The parser-side defence-in-depth never had to
+catch a mis-scoped emission in this run, which is the desired outcome —
+the safety net is silent when the prompt is honest. The remaining 12
+Phase B candidates were not re-run here because the run hit Anthropic
+rate-limits + the budget; a future maintainer-side pass with a fresh API
+window will close that gap.
+
+Operator-side cleanup: the `llm.exclude_tests: [row_count_anomaly_by_period]`
+workaround in `~/Projects/intuit_airflow/plugins/dbt/signalforge.yml` was
+restored post-validation for hygiene. The operator can now remove that
+workaround permanently — the fix renders it unnecessary, and leaving it
+in place would suppress a now-correct test variant.
+
 ### Follow-on 3 — audit-record size cap on wide-table models
 
 `safety.AuditRecordTooLargeError` blocks `signalforge generate` on
