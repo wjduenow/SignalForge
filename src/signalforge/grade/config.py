@@ -249,6 +249,32 @@ class GradeConfig(BaseModel):
     ``signalforge generate`` invocation in CI can gate on threshold
     compliance — see ``docs/cli-ops.md`` for the exit-code tier."""
 
+    cache_enabled: bool = True
+    """Master switch for the per-``(artifact, criterion)`` grade cache
+    (issue #189 DEC-016).
+
+    Default ``True`` — content-addressed cache lookup + write run on
+    every grade pair. The cache key is a content-hash of the inputs
+    that genuinely determine the verdict (rubric criterion, artefact
+    payload, model + provider + prompt version, ...) so any change
+    that should invalidate a prior verdict invalidates the key by
+    construction — no TTL knob is needed in v0.1 (deferred to a future
+    ticket if demand emerges).
+
+    When ``False``, :func:`signalforge.grade.grade_artifacts` skips
+    BOTH the lookup AND the write — every pair routes through the
+    live LLM judge call. Operators reach for this knob to bypass the
+    cache for debugging, after a manual fixture edit, or during
+    calibration work. The CLI's ``signalforge generate --no-cache``
+    flag flips this field on a per-run copy via
+    :meth:`pydantic.BaseModel.model_copy` so the on-disk
+    ``signalforge.yml`` is unaffected (US-007 wires the flag).
+
+    ``extra="forbid"`` makes a typo such as ``cache_enable:`` (missing
+    the trailing ``d``) fail loud at config-load via
+    :class:`pydantic.ValidationError`, rather than silently leaving
+    the cache enabled."""
+
     @model_validator(mode="before")
     @classmethod
     def _resolve_model_default(cls, data: Any) -> Any:

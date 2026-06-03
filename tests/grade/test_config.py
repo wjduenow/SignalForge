@@ -180,6 +180,50 @@ def test_load_grade_config_unknown_field_in_inner_block_fails_loud(
         load_grade_config(tmp_path)
 
 
+# ----- Grade-cache master switch (#189 US-005 / DEC-016) -----
+
+
+def test_grade_config_cache_enabled_defaults_true() -> None:
+    """:attr:`GradeConfig.cache_enabled` defaults to ``True`` (#189 DEC-016).
+
+    The grade cache ships on-by-default so operators get the wall-clock
+    win without an opt-in step; ``signalforge generate --no-cache`` (US-007)
+    or ``grade.cache_enabled: false`` in ``signalforge.yml`` are the
+    explicit opt-outs.
+    """
+    cfg = GradeConfig()
+    assert cfg.cache_enabled is True
+
+
+def test_grade_config_cache_enabled_accepts_explicit_false() -> None:
+    """An explicit ``cache_enabled=False`` parses cleanly (#189 DEC-016).
+
+    The engine surgery in US-006 reads this field at orchestrator entry to
+    short-circuit both lookup AND write — a regression here would silently
+    re-enable the cache on a run the operator asked to bypass it.
+    """
+    cfg = GradeConfig(cache_enabled=False)
+    assert cfg.cache_enabled is False
+
+
+def test_grade_config_typo_cache_enable_missing_d_fails_loud() -> None:
+    """``cache_enable`` (missing the trailing ``d``) MUST fail loud (#189 DEC-016).
+
+    ``GradeConfig`` is ``extra="forbid"`` — a typo on a security-adjacent
+    knob (silently leaving the cache enabled when the operator meant to
+    disable it) is exactly the silent-no-op failure mode the strict
+    validator exists to prevent.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        # Deliberate typo: missing 'd' on the kwarg, exercising the
+        # ``extra="forbid"`` defence at runtime. The pyright suppression
+        # is load-bearing — without it, the test couldn't express the
+        # runtime contract.
+        GradeConfig(cache_enable=False)  # pyright: ignore[reportCallIssue]
+
+
 # ----- Defaults match DEC-023..DEC-027 verbatim -----
 
 
@@ -205,6 +249,8 @@ def test_grade_config_defaults_match_dec_023_to_027() -> None:
     assert cfg.rubric is None
     assert cfg.fail_on_below_threshold is False
     assert cfg.provider == "anthropic"
+    # #189 DEC-016: grade-cache master switch defaults on.
+    assert cfg.cache_enabled is True
 
 
 # ----- Provider validator (issue #135 DEC-007) -----
