@@ -7,7 +7,7 @@
 - **Branch:** `plan/184-anomaly-scope-fix`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/184-anomaly-scope-fix`
 - **Base:** `origin/dev` @ `b19c161` (post-#183 / #185)
-- **Phase:** `published` (PR #194 — draft, targeting `dev`, awaiting approval)
+- **Phase:** `devolved` (beads created; PR #194 draft; ready for Ralph)
 - **Sessions:** 1 (2026-06-02)
 - **Related:** #171 (origin), #179 (retest that surfaced it), #183 (parallel pattern — shipped today), PR #182 (writeup), PR #191 (#183 lockstep precedent)
 
@@ -409,6 +409,31 @@ Specific QG focus areas (from architecture review + memory hits):
 
 ## Beads Manifest
 
-Pending devolve.
+**Epic:** `bd_1-scaffolding-50i` — #184: Drafter row_count_anomaly_by_period scope fix
+**Worktree:** `/home/wesd/Projects/worktrees/SignalForge/184-anomaly-scope-fix`
+**Branch:** `plan/184-anomaly-scope-fix`
+**PR:** [#194](https://github.com/wjduenow/SignalForge/pull/194)
+
+### Tasks (9 children + 1 epic = 10 total)
+
+| Bead ID | Story | Deps | Initially ready? |
+|---|---|---|---|
+| `bd_1-scaffolding-50i.1` | US-001 — Prompt prose rewrite + `_PROMPT_VERSION` rotation | — | ✅ ready |
+| `bd_1-scaffolding-50i.2` | US-002 — `ReshapeRecord` + audit field + schema bump 1→2 | — | ✅ ready |
+| `bd_1-scaffolding-50i.3` | US-003 — Parser re-attach + WARNING + 10 new tests | US-002 | blocked |
+| `bd_1-scaffolding-50i.4` | US-004 — Wire `parser_reshaped` through schema → audit | US-002, US-003 | blocked |
+| `bd_1-scaffolding-50i.5` | US-005 — AST audit-completeness scan verification | US-002, US-003, US-004 | blocked |
+| `bd_1-scaffolding-50i.6` | US-006 — Docs + rules + CHANGELOG | US-001, US-003, US-005 | blocked |
+| `bd_1-scaffolding-50i.7` | US-007 — Phase B 15-candidate re-aggregation | US-001, US-003, US-004, US-005, US-006 | blocked |
+| `bd_1-scaffolding-50i.8` | US-009 — Quality Gate (4× /code-review + /ultrareview) | all 7 impl | blocked |
+| `bd_1-scaffolding-50i.9` | US-010 — Patterns & Memory | US-009 | blocked |
+
+**Note:** US-008 (commit plan file) was completed during Phase 5 publish; not represented as a bead.
+
+### Next steps
+
+1. `/ralph-run` from the worktree (`/home/wesd/Projects/worktrees/SignalForge/184-anomaly-scope-fix`) to execute the task graph.
+2. Monitor: `bd list --status=in_progress` from the worktree.
+3. On completion: `/closeout` to flip PR #194 from draft → ready-for-review and merge.
 
 
