@@ -717,6 +717,97 @@ def test_format_degrade_reasoning_preserves_bare_shape_for_non_response_format_c
 
 
 # ---------------------------------------------------------------------------
+# Scaled wall-clock budget formula (#198 DEC-001 / DEC-010)
+# ---------------------------------------------------------------------------
+
+
+def test_compute_effective_budget_scaled_no_cap() -> None:
+    """``total_budget_seconds=None`` returns the scaled value verbatim.
+
+    base=60, per_pair=20.0, 220 pairs @ concurrency=10 →
+    ceil(220/10)=22 waves → 60 + 20*22 = 500.
+    """
+    result = engine_module._compute_effective_budget(
+        budget_base_seconds=60,
+        budget_per_pair_seconds=20.0,
+        total_budget_seconds=None,
+        num_pairs=220,
+        max_concurrent_calls=10,
+    )
+    assert result == 500
+    assert isinstance(result, int)
+
+
+def test_compute_effective_budget_cap_wins() -> None:
+    """When the absolute ceiling is below the scaled value, the cap wins."""
+    result = engine_module._compute_effective_budget(
+        budget_base_seconds=60,
+        budget_per_pair_seconds=20.0,
+        total_budget_seconds=300,
+        num_pairs=220,
+        max_concurrent_calls=10,
+    )
+    assert result == 300
+    assert isinstance(result, int)
+
+
+def test_compute_effective_budget_scaled_wins() -> None:
+    """When the scaled value is below the absolute ceiling, scaled wins."""
+    result = engine_module._compute_effective_budget(
+        budget_base_seconds=60,
+        budget_per_pair_seconds=20.0,
+        total_budget_seconds=900,
+        num_pairs=220,
+        max_concurrent_calls=10,
+    )
+    assert result == 500
+    assert isinstance(result, int)
+
+
+def test_compute_effective_budget_single_pair() -> None:
+    """One pair still costs one full wave: 60 + 20*ceil(1/10) = 80."""
+    result = engine_module._compute_effective_budget(
+        budget_base_seconds=60,
+        budget_per_pair_seconds=20.0,
+        total_budget_seconds=None,
+        num_pairs=1,
+        max_concurrent_calls=10,
+    )
+    assert result == 80
+    assert isinstance(result, int)
+
+
+def test_compute_effective_budget_zero_pairs_returns_base() -> None:
+    """``num_pairs == 0`` short-circuits to ``budget_base_seconds``."""
+    result = engine_module._compute_effective_budget(
+        budget_base_seconds=60,
+        budget_per_pair_seconds=20.0,
+        total_budget_seconds=None,
+        num_pairs=0,
+        max_concurrent_calls=10,
+    )
+    assert result == 60
+    assert isinstance(result, int)
+
+
+def test_compute_effective_budget_non_multiple_rounds_up() -> None:
+    """A non-multiple pair count rounds the wave count up via ceil.
+
+    base=60, per_pair=20.0, 221 pairs @ concurrency=10 →
+    ceil(221/10)=ceil(22.1)=23 waves → 60 + 20*23 = 520.
+    """
+    result = engine_module._compute_effective_budget(
+        budget_base_seconds=60,
+        budget_per_pair_seconds=20.0,
+        total_budget_seconds=None,
+        num_pairs=221,
+        max_concurrent_calls=10,
+    )
+    assert result == 520
+    assert isinstance(result, int)
+
+
+# ---------------------------------------------------------------------------
 # Whole-run pre-flight envelope-breach (DEC-013)
 # ---------------------------------------------------------------------------
 

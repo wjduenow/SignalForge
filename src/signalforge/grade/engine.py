@@ -66,6 +66,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import Iterator
@@ -447,6 +448,52 @@ def _format_degrade_reasoning(exc: BaseException) -> str:
     if isinstance(exc, GradeLLMError) and isinstance(exc.cause, LLMResponseFormatError):
         return f"{base}: {exc.cause.message}"
     return base
+
+
+def _compute_effective_budget(
+    *,
+    budget_base_seconds: int,
+    budget_per_pair_seconds: float,
+    total_budget_seconds: int | None,
+    num_pairs: int,
+    max_concurrent_calls: int,
+) -> int:
+    """Scale the grade wall-clock budget with the work to be done (DEC-001).
+
+    The effective budget is a *runaway guard*, not a completion
+    constraint: it backstops 429 retry storms and pathological slow
+    calls rather than pacing normal completion.
+
+        scaled = budget_base_seconds
+                 + budget_per_pair_seconds * ceil(num_pairs / max_concurrent_calls)
+
+    ``ceil(num_pairs / max_concurrent_calls)`` is the number of
+    serial *waves* of LLM calls (each wave runs ``max_concurrent_calls``
+    pairs in parallel under the semaphore), so the per-pair term scales
+    with wall-clock depth, not raw pair count.
+
+    When ``total_budget_seconds`` is ``None`` the scaled value is
+    returned verbatim; when it is set it acts as an absolute hard
+    ceiling (``min(scaled, total_budget_seconds)``) — preserving the
+    exact v0.1 absolute-cap semantics for pinned configs (DEC-010).
+
+    Pure function: no asyncio, no I/O, no logging. Always returns a
+    finite ``int`` so the ``asyncio.timeout(...)`` site never receives
+    ``None``.
+
+    ``num_pairs == 0`` short-circuits to ``budget_base_seconds`` (no
+    work to scale). ``max_concurrent_calls`` is ``>= 1`` by the config
+    validator, but the zero-pair guard also sidesteps any division
+    concern defensively.
+    """
+    if num_pairs <= 0:
+        scaled: float = float(budget_base_seconds)
+    else:
+        waves = math.ceil(num_pairs / max_concurrent_calls)
+        scaled = budget_base_seconds + budget_per_pair_seconds * waves
+    if total_budget_seconds is None:
+        return int(scaled)
+    return int(min(scaled, total_budget_seconds))
 
 
 def _build_degraded(
