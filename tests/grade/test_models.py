@@ -581,11 +581,11 @@ def test_grade_event_repr_args_redacts_evidence_and_reasoning() -> None:
         rubric_hash="0123456789abcdef",
         prompt_version_template="fedcba9876543210",
         criterion_prompt_hash="1111222233334444",
-        # Non-PAN-shape sentinel: digits-only `5555666677778888` triggers
-        # a credit-card PAN scanner (PR #196 CodeRabbit OpenGrep). Mixed
+        # Non-PAN-shape sentinel: a digits-only 16-char value trips the
+        # credit-card PAN scanner (PR #196 CodeRabbit OpenGrep). Mixed
         # alphanumeric hex keeps the test intent without the false
-        # positive. The pre-existing ``_make_event`` helper still uses
-        # the digits-only form for fixture parity with the v1 JSONL.
+        # positive. The pre-existing ``_make_event`` helper retains the
+        # digits-only form for fixture parity with the v1 JSONL.
         response_text_hash="55a5c6667d7788ef",
         model="claude-sonnet-4-6",
         input_tokens=1820,
