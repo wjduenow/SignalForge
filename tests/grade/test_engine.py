@@ -1988,6 +1988,243 @@ def test_grade_artifacts_wide_model_completes_with_zero_budget_degradations(
     assert budget_warns == []
 
 
+# ---------------------------------------------------------------------------
+# Opt-in cost/calls/tokens ceilings (US-004 / DEC-002/003/007/009/010/011)
+# ---------------------------------------------------------------------------
+
+
+def _ceiling_warns(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    """Collect every ``grade ceiling exceeded`` WARNING payload."""
+    payloads: list[dict[str, Any]] = []
+    for r in caplog.records:
+        if (
+            r.name == "signalforge.grade.engine"
+            and r.levelno == logging.WARNING
+            and "grade ceiling exceeded" in r.getMessage()
+        ):
+            payload_json = r.getMessage().split("grade ceiling exceeded: ", 1)[1]
+            payloads.append(json.loads(payload_json))
+    return payloads
+
+
+def test_grade_artifacts_max_grade_calls_ceiling_degrades_remaining(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``max_grade_calls=K`` scores exactly K pairs and degrades the rest
+    with the locked reason; one ceiling WARNING with ``ceiling="calls"``.
+
+    ``max_concurrent_calls=1`` serialises dispatch so the first K pairs
+    (in iteration order) reserve the K slots and the remainder degrade —
+    making the "exactly K scored" assertion deterministic (the
+    check-then-reserve is race-free under any concurrency, but the WHICH-K
+    is only deterministic when serialised).
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    total_pairs = len(rubric) * len(_stable_artifact_pairs(candidate))
+    assert total_pairs == 14  # 7 artifacts × 2 criteria
+    k = 5
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        max_concurrent_calls=1,
+        max_grade_calls=k,
+    )
+
+    caplog.set_level(logging.WARNING, logger="signalforge.grade.engine")
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    scored = [r for r in report.results if r.score is not None]
+    degraded = [r for r in report.results if r.score is None]
+    assert len(scored) == k
+    assert len(degraded) == total_pairs - k
+    assert report.aggregate_complete is False
+    for r in degraded:
+        assert r.reasoning == f"grade call ceiling exceeded ({k} calls)"
+
+    warns = _ceiling_warns(caplog)
+    assert len(warns) == 1
+    payload = warns[0]
+    assert set(payload.keys()) == {
+        "run_id",
+        "model_unique_id",
+        "ceiling",
+        "limit",
+        "completed_count",
+        "degraded_count",
+    }
+    assert payload["model_unique_id"] == model.unique_id
+    assert payload["ceiling"] == "calls"
+    assert payload["limit"] == k
+    # Ceiling-degrades count as completed (DEC-011); the synthesis pass
+    # never runs (no budget trip), so degraded_count stays 0.
+    assert payload["completed_count"] == total_pairs
+    assert payload["degraded_count"] == 0
+
+
+def test_grade_artifacts_max_grade_cost_usd_ceiling_degrades_remaining(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``max_grade_cost_usd`` degrades pairs once the accumulated USD
+    crosses the cap; locked reason + ``ceiling="cost_usd"`` WARNING.
+
+    Uses a REAL SKU (``claude-sonnet-4-6``) so ``pricing.lookup`` resolves.
+    Each call's usage (input=1700, output=140, cache_read=1500) prices to
+    $0.00765, so a $0.03 cap fits exactly 4 calls
+    (4 × 0.00765 = 0.0306 ≥ 0.03 trips the 5th pair's check).
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    total_pairs = len(rubric) * len(_stable_artifact_pairs(candidate))
+    cap = 0.03
+    config = GradeConfig(
+        model="claude-sonnet-4-6",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        max_concurrent_calls=1,
+        max_grade_cost_usd=cap,
+    )
+
+    caplog.set_level(logging.WARNING, logger="signalforge.grade.engine")
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    scored = [r for r in report.results if r.score is not None]
+    degraded = [r for r in report.results if r.score is None]
+    assert len(scored) == 4
+    assert len(degraded) == total_pairs - 4
+    assert report.aggregate_complete is False
+    for r in degraded:
+        assert r.reasoning == f"grade cost ceiling exceeded (${cap})"
+
+    warns = _ceiling_warns(caplog)
+    assert len(warns) == 1
+    assert warns[0]["ceiling"] == "cost_usd"
+    assert warns[0]["limit"] == cap
+    assert warns[0]["completed_count"] == total_pairs
+    assert warns[0]["degraded_count"] == 0
+
+
+def test_grade_artifacts_max_grade_tokens_ceiling_degrades_remaining(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``max_grade_tokens`` degrades pairs once accumulated token movement
+    crosses the cap; locked reason + ``ceiling="tokens"`` WARNING.
+
+    Each call moves 1700+140+0+1500 = 3340 tokens, so a 10000-token cap
+    fits exactly 3 calls (3 × 3340 = 10020 ≥ 10000 trips the 4th pair).
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    total_pairs = len(rubric) * len(_stable_artifact_pairs(candidate))
+    cap = 10000
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        max_concurrent_calls=1,
+        max_grade_tokens=cap,
+    )
+
+    caplog.set_level(logging.WARNING, logger="signalforge.grade.engine")
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    scored = [r for r in report.results if r.score is not None]
+    degraded = [r for r in report.results if r.score is None]
+    assert len(scored) == 3
+    assert len(degraded) == total_pairs - 3
+    assert report.aggregate_complete is False
+    for r in degraded:
+        assert r.reasoning == f"grade token ceiling exceeded ({cap} tokens)"
+
+    warns = _ceiling_warns(caplog)
+    assert len(warns) == 1
+    assert warns[0]["ceiling"] == "tokens"
+    assert warns[0]["limit"] == cap
+
+
+def test_grade_artifacts_no_ceiling_emits_no_ceiling_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A default-config run (all ceilings ``None``) emits NO
+    ``grade ceiling exceeded`` WARNING and degrades nothing (regression
+    guard for the opt-in default-off contract).
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    caplog.set_level(logging.WARNING, logger="signalforge.grade.engine")
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    assert report.aggregate_complete is True
+    assert all(r.score is not None for r in report.results)
+    assert _ceiling_warns(caplog) == []
+
+
 def test_grade_artifacts_module_level_async_sleep_alias_present() -> None:
     """The ``_async_sleep`` alias is module-scoped and reassignable for
     deterministic budget tests, mirroring :data:`signalforge.llm.client._async_sleep`
