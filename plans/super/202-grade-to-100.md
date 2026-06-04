@@ -151,6 +151,14 @@ New error in `grade/errors.py` (parent `GradeError`), fields: `incomplete_pairs:
 **DEC-208 — CLI flag + config-override.**
 `grade.require_complete: bool = True` on `GradeConfig` (`extra="forbid"`). CLI flag `--require-complete / --no-require-complete` via `argparse.BooleanOptionalAction` with `default=None` sentinel; override applied as `GradeConfig.model_validate({**dump, "require_complete": override})` **only when the sentinel is not None**, so an explicit `grade.require_complete: false` in `signalforge.yml` is never clobbered by the CLI default. 6-surface parity (argparse help · handler docstring · `docs/cli-ops.md` · parity test · DEC in `plans/super/9-cli-entrypoint.md` · `SKILL.md` + skill-parity test).
 
+**DEC-210 — Library biases toward completion; budget is an intentional opt-in (user feedback, 2026-06-04).**
+The default grade posture drives **every pair to a score**. A `<100%` grade result is legitimate **only when the operator intentionally limited cost/time** — an explicit `max_grade_*` ceiling or an explicitly-set `total_budget_seconds`. Incompleteness must never be a *passive by-product* of a default guard.
+- The scaled wall-clock budget survives **only as a generous runaway guard** (catches genuine hangs / pathological artifacts), never as a throughput cap that passively degrades pairs. With Stage-1 (limiter paces at the rate limit) + Stage-2 (sweep recovers transients), a normal run completes well inside the guard (the #179 retest: ~448s grade vs an ~880s scaled guard — already non-binding).
+- A default-scaled-budget trip (`total_budget_seconds is None`) is therefore **not** a legitimate partial — it fails loud (DEC-204), surfacing a Stage-1 regression rather than silently shipping a partial.
+- **Re-tune for headroom:** confirm `budget_base_seconds` / `budget_per_pair_seconds` defaults leave ample margin over the limiter-paced wall-clock so the guard cannot passively bind at expected scales; widen if the retest (US-009) shows otherwise. Do **not** lower the default budget.
+- Docs (`grade-ops.md`) state the bias-to-completion posture plainly and show exactly how to opt into a limit (the three `max_grade_*` knobs + an explicit `total_budget_seconds`), so limiting is a deliberate, documented act.
+*Rationale:* completion is the product's job; a partial must be a choice the operator made on purpose, not something the defaults did to them.
+
 **DEC-209 — Stage-4 defaults + docs.**
 Raise `grade.max_retries_429` default `3 → 6` (belt-and-braces; the limiter is the primary fix). Docs (`docs/grade-ops.md`, `docs/cli-ops.md`) + rules (`.claude/rules/grade-layer.md`, `.claude/rules/llm-drafter.md`) distinguish **transient-recoverable** vs **operator-ceiling** vs **unrecoverable**, scope every "partial is acceptable" path to explicit ceilings only, and document the concurrency↔rate-limit relationship that caused the 70.
 
@@ -248,13 +256,16 @@ Architecture order: models/schema → llm-layer (limiter) → grade engine (swee
 - [ ] `uv run pytest` passes
 **Depends on:** US-006.
 
-### US-008 — Stage-4 defaults + docs/rules
-**Description:** Raise the `max_retries_429` default and bring docs/rules into line with the new transient/ceiling/unrecoverable taxonomy and the concurrency↔rate-limit story.
-**Traces to:** DEC-209.
-**Files:** `src/signalforge/grade/config.py` (`max_retries_429: int = 6`), `docs/grade-ops.md`, `docs/cli-ops.md`, `.claude/rules/grade-layer.md`, `.claude/rules/llm-drafter.md`, `tests/grade/test_config.py`.
+### US-008 — Stage-4 defaults + docs/rules (incl. bias-to-completion posture)
+**Description:** Raise the `max_retries_429` default, assert/re-tune the default budget so it can't passively bind, and bring docs/rules into line with the bias-to-completion posture and the transient/ceiling/unrecoverable taxonomy.
+**Traces to:** DEC-209, DEC-210.
+**Files:** `src/signalforge/grade/config.py` (`max_retries_429: int = 6`; budget defaults left non-binding, widened only if US-009 shows otherwise), `docs/grade-ops.md`, `docs/cli-ops.md`, `.claude/rules/grade-layer.md`, `.claude/rules/llm-drafter.md`, `tests/grade/test_config.py`.
 **Done When:**
 - [ ] `max_retries_429` default raised; config test updated
-- [ ] `grade-ops.md` + `grade-layer.md` distinguish transient-recoverable / operator-ceiling / unrecoverable; "partial is acceptable" scoped to explicit ceilings
+- [ ] `grade-ops.md` states the **bias-to-completion** posture plainly: the library drives to 100% by default; a `<100%` result is legitimate **only** via an intentional `max_grade_*` ceiling or an explicitly-set `total_budget_seconds`
+- [ ] `grade-ops.md` shows exactly how to opt into a limit (the knobs), and documents that a default-scaled-budget trip fails loud (never a silent partial)
+- [ ] Test asserts the default scaled budget leaves headroom over expected limiter-paced wall-clock at representative scales (non-binding by default)
+- [ ] `grade-layer.md` distinguishes transient-recoverable / operator-ceiling / unrecoverable; "partial is acceptable" scoped to explicit, operator-chosen limits only
 - [ ] `llm-drafter.md` § retry taxonomy documents the limiter seam
 - [ ] `uv run pytest` passes
 **Depends on:** US-007.
