@@ -1,9 +1,9 @@
 # Issue #179 — runtime benchmark after efficiency improvements (#186 + #187 + #188)
 
-**Status:** SKELETON — harness drafted, measurement not yet run. The script,
-sidecar parsing, degraded-grade counting, and table output are complete and
-runnable; the measurement requires a maintainer with a live `ANTHROPIC_API_KEY`
-and the prepared local intuit_airflow repo (below).
+**Status:** First measurement complete (2026-06-03) — prod 0.5.0 vs dev
+0.6.0.dev0 Sonnet A/B + #189 cache, single model. #187 Haiku and #188 batch
+dimensions still pending. See § Result. The harness is re-runnable per the
+commands below.
 
 Companion to the "Runtime benchmark retest" story on epic
 [#179](https://github.com/wjduenow/SignalForge/issues/179). The harness lives at
@@ -130,47 +130,101 @@ time .venv-prod/bin/signalforge generate --select 'path:models/reporting/*' \
 
 Record the totals in the batch table below.
 
-## Result (maintainer-filled)
+## Result — measured 2026-06-03 (Sonnet A/B + #189 cache; #187 Haiku pending)
 
-> Fill these after running both venvs. Delete this blockquote when done.
+**Intuit project:** `~/Projects/intuit_airflow/plugins/dbt` — **model:** `models/reporting/weekly_query_cost.sql` (16 columns, synthesised schema)
+**Machine:** local (single Anthropic account, runs back-to-back) — **Date:** 2026-06-03
+**Prod version:** `0.5.0` (PyPI `signalforge-dbt`) — **Dev version:** `0.6.0.dev0` (worktree editable)
+**Grade model:** anthropic default (Sonnet) both sides. Prune disabled. Diff format `json`.
 
-**Intuit project:** `~/Projects/intuit_airflow/plugins/dbt` — **model:** _(target)_
-**Machine:** _(host, network)_ — **Date:** _(YYYY-MM-DD)_
-**Prod version:** _(e.g. 0.5.0)_ — **Dev version:** _(0.6.0.dev0)_
+### Per-stage wall-clock — Sonnet default, cold grade cache
 
-### Per-stage wall-clock — Sonnet default (captures #186)
-
-| Stage | Before (prod PyPI) | After (`dev`) | Δ | Δ % |
+| Stage | Before (prod 0.5.0) | After (dev 0.6.0.dev0) | Δ | Δ % |
 |---|---:|---:|---:|---:|
-| draft + overhead (derived) | _s | _s | _s | _% |
+| draft + overhead (derived) | 39.8s | 45.8s | +6.0s | +15% |
 | prune (disabled) | ~0s | ~0s | — | — |
-| grade | _s | _s | _s | _% |
-| diff | _s | _s | _s | _% |
-| **TOTAL** | **_s** | **_s** | **_s** | **_%** |
-
-### Grade stage — Haiku opt-in (`grade.model: claude-haiku-4-5`, adds #187)
-
-| | Before (prod PyPI) | After (`dev`, Haiku) |
-|---|---:|---:|
-| grade | _s | _s |
+| grade | **303.1s** (budget-capped) | **222.9s** | −80.2s | −26% |
+| diff | 0.0s | 0.0s | — | — |
+| **TOTAL** | **342.9s** | **268.7s** | **−74.2s** | **−22%** |
 
 ### Grade degradation (the headline correctness signal)
 
-| | Baseline 2026-05-30 | After (`dev`, Sonnet) | After (`dev`, Haiku) |
+| | Baseline 2026-05-30 | Prod 0.5.0 | Dev 0.6.0.dev0 (cold) |
 |---|---:|---:|---:|
-| artifacts graded | 34 | _ | _ |
-| comparable (scored) | 17 | _ | _ |
-| degraded — budget exceeded | **17** | _ | _ |
+| artifacts graded | 34 | 208 | 220 |
+| comparable (scored) | 17 | 75 | **186** |
+| degraded — budget exceeded | **17** | **133** | **0** |
+| degraded — other (`score=None`) | 0 | 0 | 34 |
 
-### #188 batch amortisation (`--select` vs. shell-loop)
+**Read this carefully — the grade Δ of −80s *understates* the win.** Prod did not
+"finish grade in 303s"; it **hit the 300s budget ceiling and gave up**, leaving
+133 of 208 artifacts ungraded (`grade budget exceeded`). Dev graded **more**
+artifacts (220 vs 208), **scored 2.5× as many** (186 vs 75), and did it in 222s
+**without hitting the budget at all** — `0` budget degradations. The real metric
+is grade throughput, not the capped wall-clock: **#186's asyncio concurrency** is
+the win, exactly closing the 2026-05-30 baseline's 17/34 failure mode (now 0).
 
-| | Before (prod PyPI) | After (`dev`) |
+The 34 remaining dev `score=None` degradations are **not** budget-related (retry-
+exhaustion / parser degradations per DEC-015 of #7) — worth a glance at
+`.signalforge/grade.json` but orthogonal to the efficiency story.
+
+### #189 grade cache — measured, and it does NOT help full-pipeline re-runs
+
+Two `--cache-mode warm` runs back-to-back (run 1 populates, run 2 should hit):
+
+| | Dev cold (`--no-cache`) | Dev warm run 1 (populate) | Dev warm run 2 (cache present) |
+|---|---:|---:|---:|
+| grade | 222.9s | 229.5s | **241.9s** |
+| budget-exceeded | 0 | 0 | 0 |
+
+**Finding: the grade cache produced no measurable speed-up on a re-run (241.9s ≈
+the 222.9s cold run).** The cache populated 370 entries on run 1, but run 2 still
+graded from scratch. Root cause (verified in `signalforge.grade.cache.compute_cache_key`):
+the cache key includes `artifact_text_hash` — the hash of the *drafted artifact
+text*. The drafter is a live, non-deterministic LLM, so every `signalforge generate`
+re-draft emits different text → different key → **cache miss on every re-run**.
+
+#189's cache only helps when the **same** artifact text is graded again — i.e.
+re-grading a *pinned / unchanged* candidate: a `--no-grade` draft-once-then-grade
+flow, a CI run with a frozen candidate, or an interrupted grade resumed over an
+identical draft. It does **not** accelerate repeated `generate` (draft + grade)
+runs. Worth a follow-on doc note so operators don't expect a re-run speed-up the
+architecture can't deliver.
+
+### Measurement caveat — back-to-back API latency
+
+`draft + overhead` is derived (`total − grade − diff`) and absorbs all API
+latency variance. Warm run 1 showed an **outlier 647s** draft+overhead (vs ~45s
+on the cold run) with **no 429s logged** — soft latency under back-to-back load
+against a single Anthropic account, not a real draft regression. The **grade-stage
+sidecar `duration_seconds` is the stable metric**; treat derived draft+overhead as
+noisy. For publication-grade numbers, space runs out (or use separate accounts)
+and average 3 runs per side.
+
+### #187 Haiku opt-in — PENDING
+
+Not yet measured. To run: set `grade.model: claude-haiku-4-5` in the intuit
+`signalforge.yml`, re-run the dev side cold, and fill:
+
+| | Dev Sonnet (cold) | Dev Haiku (cold) |
 |---|---:|---:|
-| `--select` total wall-clock | _s | _s |
-| shell-loop total wall-clock | _s | _s |
+| grade | 222.9s | _s |
+| scored / graded | 186 / 220 | _ / _ |
+
+### #188 `--select` batch — PENDING
+
+Not yet measured (single-model run only). See § "#188 `--select` batch" above
+for the command.
 
 ### Findings
 
-- _(grade-stage reduction attributable to #186 + #187; whether budget-exceeded
-  reached 0; whether #188 produced a measurable per-model amortisation; the
-  primitive-count conflation's effect on draft time; any follow-on tickets.)_
+- **#186 (asyncio) is a decisive, default-on win.** Grade went from budget-capped
+  (303s / 133 ungraded) to complete (222s / 0 budget-degraded) while grading more
+  artifacts — the 2026-05-30 baseline's headline failure mode is closed.
+- **Net release-to-release total: 342.9s → 268.7s (−22%)** despite dev drafting 8
+  primitives vs prod's 5 (#169/#170/#171), which pushed draft+overhead slightly
+  *up* — the grade win dominates.
+- **#189's grade cache does not speed up repeated `generate` runs** (text-keyed
+  invalidation + non-deterministic draft). Re-frame its value as re-grade-of-
+  identical-candidate, not pipeline re-run. ← candidate follow-on ticket.
+- **#187 / #188 pending** a second round; rate-limit cool-down recommended first.

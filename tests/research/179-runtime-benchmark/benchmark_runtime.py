@@ -114,9 +114,15 @@ def _resolve_signalforge_bin(explicit: str | None) -> str:
     """
     if explicit:
         return explicit
-    sibling = Path(sys.executable).resolve().parent / "signalforge"
-    if sibling.exists():
-        return str(sibling)
+    # Prefer the console script next to the interpreter. Use the UNRESOLVED
+    # sys.executable path: a uv/virtualenv `bin/python` is often a symlink to a
+    # store-managed interpreter, and `.resolve()` would jump OUT of the venv and
+    # miss the venv-local `signalforge`. Check the unresolved parent first, then
+    # the resolved one, then PATH.
+    for base in (Path(sys.executable).parent, Path(sys.executable).resolve().parent):
+        sibling = base / "signalforge"
+        if sibling.exists():
+            return str(sibling)
     found = shutil.which("signalforge")
     if found:
         return found
