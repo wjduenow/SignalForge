@@ -1,4 +1,4 @@
-# Issue #179 — runtime benchmark after efficiency improvements (#186 + #187 + #188)
+# Issue #179 — runtime benchmark after efficiency improvements (#186 + #187 + #188 + #198)
 
 **Status:** First measurement complete (2026-06-03) — prod 0.5.0 vs dev
 0.6.0.dev0 Sonnet A/B + #189 cache, single model. #187 Haiku and #188 batch
@@ -228,3 +228,55 @@ for the command.
   invalidation + non-deterministic draft). Re-frame its value as re-grade-of-
   identical-candidate, not pipeline re-run. ← candidate follow-on ticket.
 - **#187 / #188 pending** a second round; rate-limit cool-down recommended first.
+
+## Result — #198 wide-model retest, measured 2026-06-04 (Sonnet A/B, raised rate tier)
+
+Validates **#198** (scale the grade wall-clock budget with the `(artifact × criterion)`
+count + optional cost ceilings; PR #199, merged to `dev`). The 16-col baseline above
+never stressed the *budget* — dev finished in 222.9s under the old flat 300s. To exercise
+the scaled budget, `weekly_query_cost` was **synthesised to 40 columns** (24 synthetic
+`NUMBER` columns appended to the manifest node — restored after the run). Default config
+plus `llm.max_output_tokens: 8192` on **both** arms (the default 4096 truncates a 40-col
+*draft* — a draft-width limit orthogonal to #198, see caveat). Cold grade cache; both arms
+back-to-back on one host at a **raised Anthropic rate tier**.
+
+### Per-stage wall-clock — 40-col model, Sonnet, cold cache
+
+| Stage | Prod 0.5.0 (sequential) | Dev 0.6.0.dev0 (#186+#198) |
+|---|---:|---:|
+| draft + overhead (derived) | 57.5s | 60.6s |
+| prune (disabled) | ~0s | ~0s |
+| grade | **302.8s** (hit flat 300s ceiling) | 447.7s |
+| diff | 0.0s | 0.0s |
+| **TOTAL** | **360.3s** | 508.4s |
+
+### Grade degradation — the #198 headline
+
+| | Prod 0.5.0 | Dev 0.6.0.dev0 |
+|---|---:|---:|
+| artifacts graded (`artifact × criterion`) | 408 | 408 |
+| comparable (scored) | 83 | **338** |
+| **degraded — budget exceeded** | **325 (80%)** | **0** |
+| degraded — other (`GradeLLMError`) | 0 | 70 |
+| grade throughput (scored / grade-s) | 0.27/s | **0.76/s (~2.8×)** |
+
+### Findings
+
+- **#198 confirmed: 0 budget-exceeded degradations on a 40-col model**, vs prod's **325**.
+  Dev's scaled budget (`60 + 20·⌈408/10⌉ ≈ 880s`) absorbed all 408 pairs; prod's flat 300s
+  sequential budget abandoned 80% at the ceiling. This is the live counterpart to the
+  deterministic `test_grade_artifacts_wide_model_completes_with_zero_budget_degradations`
+  (488 pairs, 0 degradations) unit test.
+- **Prod's lower *total* wall-clock is an artifact of quitting early** — it "finished" at
+  360s only by degrading 80% of pairs. Dev graded ~4× more pairs (338 vs 83) at ~2.8×
+  throughput. Compare *work completed*, not raw total.
+- **The 70 dev `GradeLLMError` degradations are a rate-limit artifact, NOT #198.** Even at
+  the raised tier, 10-way concurrency bursts past the per-minute cap → some calls exhaust
+  their 429 retries. Effective throughput ~55/min (408 / 447.7s) shows the rate limit is
+  *still* the binding ceiling — concurrency ran at ~3× of its 10× potential. Mitigation:
+  raise the tier further, or lower `grade.max_concurrent_calls` / raise
+  `grade.max_retries_429` to stop overshooting the cap.
+- **Draft-width caveat (orthogonal to #198):** at default `llm.max_output_tokens` (4096) a
+  40-col model truncates the single *draft* call (`stop_reason='max_tokens'`) before grade
+  is ever reached — a separate limitation of the one-shot draft step. Raised to 8192 on both
+  arms for this run; a candidate follow-on is chunked / streamed drafting for very wide models.
