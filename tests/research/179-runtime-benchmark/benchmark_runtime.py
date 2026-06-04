@@ -145,6 +145,26 @@ def _signalforge_version(bin_path: str) -> str:
     return text.split(" ", 1)[1] if text.startswith("signalforge ") else (text or "<unknown>")
 
 
+def _generate_supports(bin_path: str, flag: str) -> bool:
+    """Return True if ``signalforge generate --help`` advertises ``flag``.
+
+    Used to gate the #189 ``--no-cache`` flag: it exists on ``dev`` but NOT on
+    the prod PyPI release (which has no grade cache at all), so the prod run must
+    not pass it (argparse would reject an unknown flag and the whole run fails).
+    """
+    try:
+        out = subprocess.run(
+            [bin_path, "generate", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover
+        return False
+    return flag in (out.stdout or "")
+
+
 def _read_sidecar(project_dir: Path, name: str, *, started_at: float) -> dict | None:
     """Load ``<project>/.signalforge/<name>``; warn + return None if stale/missing.
 
@@ -194,13 +214,16 @@ def _run_generate(
     model: str,
     profiles_dir: str | None,
     fmt: str,
+    no_cache: bool,
 ) -> tuple[float, int]:
     """Run one ``signalforge generate`` and return ``(wall_seconds, returncode)``.
 
     Default (dry-run) — does NOT pass ``--write``, so the intuit repo's
     ``schema.yml`` is never mutated; the sidecars still land under
     ``.signalforge/``. ``--verbose`` is on so the run's own per-stage progress
-    is visible on stderr as a cross-check.
+    is visible on stderr as a cross-check. ``no_cache`` appends the #189
+    ``--no-cache`` flag (caller gates it on version support) so the dev grade
+    stage is measured COLD — fair against the cacheless prod release.
     """
     cmd = [
         bin_path,
@@ -214,6 +237,8 @@ def _run_generate(
     ]
     if profiles_dir:
         cmd += ["--profiles-dir", profiles_dir]
+    if no_cache:
+        cmd += ["--no-cache"]
 
     print(f"  $ {' '.join(cmd)}")
     start = time.perf_counter()
@@ -257,6 +282,15 @@ def main(argv: list[str] | None = None) -> int:
         choices=("ansi", "markdown", "json"),
         help="diff render format (default json — cheap; sidecars are written regardless).",
     )
+    parser.add_argument(
+        "--cache-mode",
+        default="bypass",
+        choices=("bypass", "warm"),
+        help="grade-cache (#189) handling. 'bypass' (default) passes --no-cache "
+        "when supported so the grade stage is measured COLD — the fair A/B vs the "
+        "cacheless prod release. 'warm' allows the cache to read/write so a SECOND "
+        "run measures the #189 re-run win (dev only; prod has no cache).",
+    )
     args = parser.parse_args(argv)
 
     if not args.project_dir:
@@ -283,11 +317,25 @@ def main(argv: list[str] | None = None) -> int:
     bin_path = _resolve_signalforge_bin(args.signalforge_bin)
     version = _signalforge_version(bin_path)
 
+    # #189 grade cache: bypass it (cold) for the fair A/B unless --cache-mode warm.
+    # The flag only exists on dev; prod has no cache, so a missing flag IS cold.
+    supports_no_cache = _generate_supports(bin_path, "--no-cache")
+    use_no_cache = args.cache_mode == "bypass" and supports_no_cache
+    if args.cache_mode == "bypass":
+        cache_note = (
+            "bypass (--no-cache, cold)"
+            if supports_no_cache
+            else "bypass (flag unsupported — release has no grade cache, cold by default)"
+        )
+    else:
+        cache_note = "warm (cache read/write enabled — run twice for the #189 re-run win)"
+
     print("\n=== #179 pipeline runtime benchmark ===")
     print(f"signalforge bin     : {bin_path}")
     print(f"signalforge version : {version}")
     print(f"project-dir         : {project_dir}")
     print(f"model               : {args.model}")
+    print(f"grade cache (#189)  : {cache_note}")
     print("--- running generate ---")
 
     started_at = time.time()
@@ -297,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
         model=args.model,
         profiles_dir=profiles_dir,
         fmt=args.format,
+        no_cache=use_no_cache,
     )
     if returncode != 0:
         # Non-zero is not fatal for the benchmark: `generate` writes the diff

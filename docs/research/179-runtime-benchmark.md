@@ -24,6 +24,19 @@ bottleneck) and the `--select` batch path:
 | **#186** grade-layer `asyncio` refactor | #190 / `f0e315b` | concurrent `(artifact × criterion)` grade calls | ✅ yes |
 | **#187** faster grade defaults | #193 / `4a70799` | Haiku + per-provider fast models | ⚠ opt-in (anthropic default stays Sonnet) |
 | **#188** bulk shared cached prefix | #195 / `d280fc6` | amortise the static system prompt across `--select` models | ✅ yes (batch only) |
+| **#189** persistent grade cache | #196 / `4ad19ef` | re-runs reuse prior grade verdicts from `.signalforge/grade-cache/` | ✅ yes (re-runs only) |
+
+### #189 grade cache — control for it, then measure it separately
+
+#189 is the wrinkle that makes a naive prod-vs-dev A/B lie: dev caches grade
+verdicts on disk; prod has no cache. A warm dev cache would make dev look
+artificially fast. So the script `--cache-mode bypass` (default) passes dev's
+`--no-cache` flag — the grade stage runs **cold**, fair against the cacheless
+prod release. The flag only exists on dev, so the script version-gates it (prod
+omits it and is cold by definition). The #189 *re-run* win is a separate, dev-only
+measurement: `--cache-mode warm` run twice (first populates, second hits cache);
+prod has no equivalent, so this column compares dev-cold vs. dev-warm, not vs.
+prod.
 
 This benchmark turns "we made it faster" into a measured per-stage delta, and
 confirms the 17/34 budget degradation is **closed**, not assumed closed.
