@@ -104,7 +104,7 @@ def test_write_grade_event_appends_one_jsonl_line(tmp_path: Path) -> None:
     assert len(lines) == 2
 
     payload = json.loads(lines[0])
-    assert payload["audit_schema_version"] == 1
+    assert payload["audit_schema_version"] == 2
     assert payload["model_unique_id"] == "model.test.x"
     assert payload["criterion_id"] == "grounded_in_sql"
 
@@ -271,7 +271,7 @@ def test_write_grade_event_short_write_loops_until_complete(tmp_path: Path) -> N
     lines = contents.splitlines()
     assert len(lines) == 1
     payload = json.loads(lines[0])
-    assert payload["audit_schema_version"] == 1
+    assert payload["audit_schema_version"] == 2
     assert call_count["n"] >= 2
 
 

@@ -123,6 +123,11 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
     }:
         return cls(5000, 4000)
 
+    # Grade cache record-too-large (US-004 of #189). Uses the 16 KB cap
+    # (distinct from the 4 KB POSIX-atomic-append audit cap above).
+    if name == "GradeCacheRecordTooLargeError":
+        return cls(size=20_000, limit=16_000)
+
     # Ingest layer (issue #104) — anchor-contract collect-all takes a
     # positional tuple of violation strings.
     if name == "IngestAnchorContractError":
@@ -232,6 +237,15 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
         "DiffTestFileWriteError",
     }:
         return cls(_SENTINEL_MESSAGE, cause=_SENTINEL_CAUSE)
+
+    # Grade persistent-cache errors (US-004 of #189). Read/Write carry a
+    # ``cause=`` kwarg mirroring the audit-write precedent above; Path
+    # carries a plain message (the canonicalisation-gate failure has no
+    # underlying I/O cause to chain).
+    if name in {"GradeCacheReadError", "GradeCacheWriteError"}:
+        return cls(_SENTINEL_MESSAGE, cause=_SENTINEL_CAUSE)
+    if name == "GradeCachePathError":
+        return cls(_SENTINEL_MESSAGE)
 
     # Sample-materialisation seam (issue #22 / DEC-008 of US-007 of the
     # plan). ``MaterialisationFailedError`` follows the ``cause=`` kwarg
@@ -620,3 +634,107 @@ def test_estimate_unavailable_error_maps_to_tier_3() -> None:
         "EstimateUnavailableError must map to tier 3 (external-dep) per DEC-003 of #130."
     )
     assert map_exception_to_exit_code(EstimateUnavailableError(detail="no GlobalStats")) == 3
+
+
+# ---------------------------------------------------------------------------
+# Per-class call-outs: grade persistent-cache errors (US-004 of #189)
+# (DEC-017 of plans/super/189-no-grade-cache.md)
+# ---------------------------------------------------------------------------
+
+
+def test_grade_cache_read_error_maps_to_tier_3() -> None:
+    """:class:`GradeCacheReadError` is tier 3 (external dependency, disk
+    I/O) per DEC-017. A cache file present but unreadable/unparseable is
+    the same external-state class as a fail-closed audit-write durability
+    error — the operator must fix the underlying I/O state. The
+    parametrized loop above covers every entry in
+    :data:`_EXCEPTION_TO_EXIT_CODE`; this non-parametrized test calls
+    the contract out by name so a future tier-change diff is easy to
+    read in code review.
+    """
+    from signalforge.cli._helpers import map_exception_to_exit_code
+    from signalforge.grade.errors import GradeCacheReadError
+
+    assert GradeCacheReadError in _EXCEPTION_TO_EXIT_CODE, (
+        "GradeCacheReadError missing from _EXCEPTION_TO_EXIT_CODE; the "
+        "7th AST scan would catch this, but the per-class assertion names "
+        "the offending class up front."
+    )
+    assert _EXCEPTION_TO_EXIT_CODE[GradeCacheReadError] == 3, (
+        "GradeCacheReadError must map to tier 3 (external-dep) per DEC-017 of #189."
+    )
+    assert (
+        map_exception_to_exit_code(
+            GradeCacheReadError("unreadable", cause=OSError("perm denied")),
+        )
+        == 3
+    )
+
+
+def test_grade_cache_write_error_maps_to_tier_3() -> None:
+    """:class:`GradeCacheWriteError` is tier 3 (external dependency,
+    disk I/O) per DEC-017. The fail-soft posture (DEC-005) means
+    ``grade_artifacts`` never propagates this error out — the engine
+    catches it and emits a WARNING — but the class is still registered
+    here for catch-and-warn diagnostics (the WARNING line names the
+    failure type) and to satisfy the 7th AST scan."""
+    from signalforge.cli._helpers import map_exception_to_exit_code
+    from signalforge.grade.errors import GradeCacheWriteError
+
+    assert GradeCacheWriteError in _EXCEPTION_TO_EXIT_CODE, (
+        "GradeCacheWriteError missing from _EXCEPTION_TO_EXIT_CODE."
+    )
+    assert _EXCEPTION_TO_EXIT_CODE[GradeCacheWriteError] == 3, (
+        "GradeCacheWriteError must map to tier 3 (external-dep) per DEC-017 of #189."
+    )
+    assert (
+        map_exception_to_exit_code(
+            GradeCacheWriteError("write failed", cause=OSError("disk full")),
+        )
+        == 3
+    )
+
+
+def test_grade_cache_path_error_maps_to_tier_1() -> None:
+    """:class:`GradeCachePathError` is tier 1 (load-time / parse-layer)
+    per DEC-017. A symlink-containment violation on the cache directory
+    is an operator-config problem (the project tree's ``.signalforge/``
+    has a symlink pointing elsewhere) — same tier as
+    :class:`CliPathError`."""
+    from signalforge.cli._helpers import map_exception_to_exit_code
+    from signalforge.grade.errors import GradeCachePathError
+
+    assert GradeCachePathError in _EXCEPTION_TO_EXIT_CODE, (
+        "GradeCachePathError missing from _EXCEPTION_TO_EXIT_CODE."
+    )
+    assert _EXCEPTION_TO_EXIT_CODE[GradeCachePathError] == 1, (
+        "GradeCachePathError must map to tier 1 (load-time) per DEC-017 of #189."
+    )
+    assert map_exception_to_exit_code(GradeCachePathError("escapes project_dir")) == 1
+
+
+def test_grade_cache_record_too_large_inherits_tier_3_via_mro() -> None:
+    """:class:`GradeCacheRecordTooLargeError` is a subclass of
+    :class:`GradeCacheWriteError` and inherits tier 3 via the MRO walk
+    in :func:`map_exception_to_exit_code` — it has NO explicit entry in
+    :data:`_EXCEPTION_TO_EXIT_CODE` (DEC-017). This mirrors how subclass
+    tier-inheritance works for the other audit-record-too-large errors
+    (e.g. ``GradeAuditRecordTooLargeError`` IS registered explicitly,
+    but a hypothetical TooLarge-of-TooLarge subclass would inherit via
+    MRO). The explicit absence is part of the contract — registering
+    the subclass would be redundant ceremony."""
+    from signalforge.cli._helpers import map_exception_to_exit_code
+    from signalforge.grade.errors import (
+        GradeCacheRecordTooLargeError,
+        GradeCacheWriteError,
+    )
+
+    # Subclass relationship is load-bearing for the MRO walk.
+    assert issubclass(GradeCacheRecordTooLargeError, GradeCacheWriteError)
+    # MRO walk resolves the subclass to the parent's tier.
+    assert (
+        map_exception_to_exit_code(
+            GradeCacheRecordTooLargeError(size=20_000, limit=16_000),
+        )
+        == 3
+    )

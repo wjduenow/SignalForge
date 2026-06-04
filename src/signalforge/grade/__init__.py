@@ -23,6 +23,13 @@ See ``plans/super/7-quality-grader.md`` for the full design and the DEC log.
 
 from __future__ import annotations
 
+from signalforge.grade.cache import (
+    CacheRecord,
+    clear_cache,
+    compute_cache_key,
+    lookup_cache,
+    write_cache,
+)
 from signalforge.grade.config import GradeConfig, load_grade_config
 from signalforge.grade.engine import grade_artifacts
 from signalforge.grade.errors import (
@@ -30,6 +37,10 @@ from signalforge.grade.errors import (
     GradeAuditWriteError,
     GradeBelowThresholdError,
     GradeBudgetExceededError,
+    GradeCachePathError,
+    GradeCacheReadError,
+    GradeCacheRecordTooLargeError,
+    GradeCacheWriteError,
     GradeConfigError,
     GradeError,
     GradeLLMError,
@@ -48,12 +59,17 @@ from signalforge.grade.rubric import (
 )
 
 __all__ = (
+    "CacheRecord",
     "Criterion",
     "DEFAULT_RUBRIC",
     "GradeAuditRecordTooLargeError",
     "GradeAuditWriteError",
     "GradeBelowThresholdError",
     "GradeBudgetExceededError",
+    "GradeCachePathError",
+    "GradeCacheReadError",
+    "GradeCacheRecordTooLargeError",
+    "GradeCacheWriteError",
     "GradeConfig",
     "GradeConfigError",
     "GradeError",
@@ -68,6 +84,10 @@ __all__ = (
     "GradingReport",
     "GradingResult",
     "Rubric",
+    "clear_cache",
+    "compute_cache_key",
     "grade_artifacts",
     "load_grade_config",
+    "lookup_cache",
+    "write_cache",
 )
