@@ -44,7 +44,7 @@ Cost via `signalforge.llm.pricing.lookup(model)`.
   - `async with asyncio.timeout(total_budget_seconds): async with asyncio.TaskGroup() as tg:` (L831) —
     ALL pairs created as tasks at once; semaphore bounds concurrency.
   - `_one(index, artifact_id, artifact_text, criterion)` (L654) — per-pair coroutine; LLM call inside;
-    `result.input_tokens / output_tokens / cache_* ` available after the call (L420–423).
+    `result.input_tokens / output_tokens / cache_*` available after the call (L420–423).
   - Synthesis pass (L870–893) fills un-completed slots with
     `reasoning=f"grade budget exceeded ({total_budget_seconds}s) before evaluation"`.
   - Budget WARNING (L902) — locked field set `{run_id, model_unique_id, completed_count,

@@ -816,6 +816,38 @@ def test_compute_effective_budget_non_multiple_rounds_up() -> None:
     assert isinstance(result, int)
 
 
+def test_compute_effective_budget_fractional_per_pair_never_rounds_down() -> None:
+    """#198 (PR review): a fractional ``budget_per_pair_seconds`` must round the
+    final budget UP, not truncate it — a smaller backstop would trip earlier
+    than the operator intended. base=60, per_pair=20.5, 220 pairs @ c=10 →
+    22 waves → 60 + 20.5*22 = 511.0 (already whole); use 21.5 to force a
+    fraction: 60 + 21.5*22 = 533.0 ... pick per_pair=20.3 → 60 + 20.3*22 =
+    506.6 → ceil = 507 (``int`` would give 506)."""
+    result = engine_module._compute_effective_budget(
+        budget_base_seconds=60,
+        budget_per_pair_seconds=20.3,
+        total_budget_seconds=None,
+        num_pairs=220,
+        max_concurrent_calls=10,
+    )
+    assert result == 507  # ceil(506.6), NOT int(506.6)=506
+    assert isinstance(result, int)
+
+
+def test_compute_effective_budget_cap_fractional_never_rounds_down() -> None:
+    """#198 (PR review): the absolute-cap branch also ceils (never truncates)
+    the post-``min`` value. cap=250.5 below scaled → min=250.5 → ceil=251."""
+    result = engine_module._compute_effective_budget(
+        budget_base_seconds=60,
+        budget_per_pair_seconds=20.0,
+        total_budget_seconds=250,  # int cap below scaled (500) → 250
+        num_pairs=220,
+        max_concurrent_calls=10,
+    )
+    assert result == 250
+    assert isinstance(result, int)
+
+
 # ---------------------------------------------------------------------------
 # Whole-run pre-flight envelope-breach (DEC-013)
 # ---------------------------------------------------------------------------

@@ -411,6 +411,14 @@ class GradeConfig(BaseModel):
         degrade every pair before any call). ``total_budget_seconds`` and the
         three ``max_grade_*`` ceilings are now optional and live on the
         separate :meth:`_optional_positive` validator below."""
+        # Reject non-finite floats up front: ``yaml.safe_load`` parses
+        # ``.nan`` / ``.inf``, and ``nan <= 0`` / ``inf <= 0`` are both
+        # ``False`` so they would slip past the positivity check — a NaN
+        # ``budget_per_pair_seconds`` then crashes ``int(nan)``/``math.ceil(nan)``
+        # in ``_compute_effective_budget`` (Pydantic floats allow inf/nan by
+        # default). Int fields can't carry inf/nan — coercion rejects them earlier.
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError("must be a finite number")
         if v <= 0:
             raise ValueError("must be positive")
         return v
@@ -434,6 +442,12 @@ class GradeConfig(BaseModel):
         validator exists to prevent."""
         if v is None:
             return v
+        # Reject non-finite floats (``max_grade_cost_usd: .inf`` would make the
+        # cost ceiling never trip — ``cost_usd >= inf`` is always ``False`` —
+        # i.e. a silent no-op; ``.nan`` is likewise never ``>=``). Same rationale
+        # as :meth:`_positive`.
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError("must be a finite number")
         if v <= 0:
             raise ValueError("must be positive")
         return v

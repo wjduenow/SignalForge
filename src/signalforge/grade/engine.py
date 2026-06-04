@@ -492,9 +492,14 @@ def _compute_effective_budget(
     else:
         waves = math.ceil(num_pairs / max_concurrent_calls)
         scaled = budget_base_seconds + budget_per_pair_seconds * waves
+    # ``math.ceil`` (not ``int``) on the final conversion so a fractional
+    # ``budget_per_pair_seconds`` never rounds the wall-clock backstop DOWN
+    # (``int(121.5)`` would shave 0.5s and trip earlier than intended). The
+    # absolute-cap branch ceils the post-``min`` value for the same reason.
+    # Both are no-ops for the default integer-valued config.
     if total_budget_seconds is None:
-        return int(scaled)
-    return int(min(scaled, total_budget_seconds))
+        return math.ceil(scaled)
+    return math.ceil(min(scaled, total_budget_seconds))
 
 
 def _build_degraded(
@@ -803,17 +808,33 @@ async def _grade_artifacts_async_core(
                     timestamp=per_call_ts,
                     model_unique_id=model_unique_id,
                 )
-                # Unshielded write — no LLM await precedes this degrade, so
-                # there is no in-flight cancellation to race (mirrors the
-                # synthesis pass). A GradeAuditWriteError /
-                # GradeAuditRecordTooLargeError still propagates and aborts
-                # the run (fail-closed, DEC-006).
-                _write_event_or_abort_kw(event, resolved_audit_path)
+                # Slot + counters FIRST (DEC-011: ceiling-degrades count as
+                # completed), then the audit write — mirroring the happy-path
+                # ordering so a cancellation during the write await leaves the
+                # synthesis pass correctly skipping this index (no double audit).
                 results_by_index[index] = grading_result
                 counters["completed"] += 1
                 if tripped["ceiling"] is None:
                     tripped["ceiling"] = ceiling_name
                     tripped["limit"] = ceiling_limit
+                # Audit-write via the executor + shield (DEC-017), exactly like
+                # the happy-path write below: this degrade runs INSIDE the
+                # concurrent TaskGroup region (unlike the sequential synthesis
+                # pass), so a synchronous fsync here would block the event loop
+                # and stall sibling in-flight coroutines. The shield lets the
+                # write finish even if a budget timeout cancels this task
+                # mid-flight; on CancelledError we await the future so a
+                # GradeAuditWriteError / GradeAuditRecordTooLargeError still
+                # propagates and aborts the run (fail-closed, DEC-006).
+                loop = asyncio.get_running_loop()
+                ceiling_audit_future = loop.run_in_executor(
+                    None, _write_event_or_abort_kw, event, resolved_audit_path
+                )
+                try:
+                    await asyncio.shield(ceiling_audit_future)
+                except asyncio.CancelledError:
+                    await ceiling_audit_future
+                    raise
                 return
 
             # Reserve a call slot for the near-hard ``max_grade_calls``

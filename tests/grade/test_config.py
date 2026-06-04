@@ -593,6 +593,27 @@ def test_grade_config_optional_positive_fields_reject_negative() -> None:
             GradeConfig(**kwargs)  # pyright: ignore[reportArgumentType]
 
 
+def test_grade_config_float_fields_reject_non_finite() -> None:
+    """#198 (PR review): the float-bearing knobs reject NaN / +/-inf.
+
+    ``yaml.safe_load`` parses ``.nan`` / ``.inf``, and Pydantic floats allow
+    them by default. ``nan <= 0`` / ``inf <= 0`` are both ``False``, so without
+    an explicit finiteness guard a NaN ``budget_per_pair_seconds`` would slip
+    through and later crash ``math.ceil(nan)`` in ``_compute_effective_budget``;
+    ``max_grade_cost_usd: .inf`` would silently make the cost ceiling a no-op."""
+    from pydantic import ValidationError
+
+    for kwargs in (
+        {"budget_per_pair_seconds": float("nan")},
+        {"budget_per_pair_seconds": float("inf")},
+        {"budget_per_pair_seconds": float("-inf")},
+        {"max_grade_cost_usd": float("nan")},
+        {"max_grade_cost_usd": float("inf")},
+    ):
+        with pytest.raises(ValidationError):
+            GradeConfig(**kwargs)  # pyright: ignore[reportArgumentType]
+
+
 def test_grade_config_soft_ceilings_accept_none() -> None:
     """#198 DEC-002: all three opt-in soft ceilings accept ``None`` (off) —
     the explicit-None path mirrors the default."""
