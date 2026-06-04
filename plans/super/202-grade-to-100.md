@@ -2,7 +2,7 @@
 
 ## Meta
 - **Ticket:** [#202](https://github.com/wjduenow/SignalForge/issues/202)
-- **Phase:** published — [PR #203](https://github.com/wjduenow/SignalForge/pull/203) (awaiting approval)
+- **Phase:** devolved — [PR #203](https://github.com/wjduenow/SignalForge/pull/203); beads created (see Beads Manifest)
 - **Branch / worktree:** `feature/202-grade-to-100` @ `../worktrees/SignalForge/202-grade-to-100`
 - **Base branch:** `origin/dev` (NOT `main` — all prior seams #186/#198/#189 live on `dev`; 35 commits ahead of `main`)
 - **Sessions:** 1 (2026-06-04)
@@ -299,5 +299,24 @@ Architecture order: models/schema → llm-layer (limiter) → grade engine (swee
 ### Rules-compliance gate (applied to every story)
 `extra="forbid"` on config models · typed validators · drift detectors + refreshed fixtures (US-001/005) · AST scans incl. scan-7 registration + planted-violation (US-006) · logger grep gate / lazy `json.dumps` (US-003/005/006) · exit-code taxonomy tier-2 (US-006) · 6-surface CLI parity (US-007) · `uv run pytest --cov-fail-under=80` every story.
 
-## Beads Manifest
-_(Phase 7 — pending)_
+## Beads Manifest (Phase 7 — devolved)
+
+- **Epic:** `SignalForge-0z5` — #202: Grade to 100% (external-ref `gh-202`)
+- **Worktree:** `../worktrees/SignalForge/202-grade-to-100` @ `feature/202-grade-to-100` (base `dev`)
+- **PR:** [#203](https://github.com/wjduenow/SignalForge/pull/203)
+
+| Task | Story | Depends on |
+|------|-------|------------|
+| `SignalForge-0z5.1` | US-001 Degrade discriminator field + schema bump | — (ready) |
+| `SignalForge-0z5.2` | US-002 RateLimitBudget + provider seam | — (ready) |
+| `SignalForge-0z5.3` | US-003 Sync+async limiters + client wiring (Stage-1) | .2 |
+| `SignalForge-0z5.4` | US-004 Share limiter across grade async core | .3 |
+| `SignalForge-0z5.5` | US-005 Bounded degraded-pair sweep (Stage 2) | .1, .4 |
+| `SignalForge-0z5.6` | US-006 GradeIncompleteError + require_complete (Stage 3 core) | .1, .5 |
+| `SignalForge-0z5.7` | US-007 CLI --require-complete + 6-surface parity | .6 |
+| `SignalForge-0z5.8` | US-008 Stage-4 defaults + docs (bias-to-completion) | .7 |
+| `SignalForge-0z5.9` | US-009 Full retest + benchmark writeup (gated/manual) | .8 |
+| `SignalForge-0z5.10` | US-010 Quality Gate (review ×4 + CodeRabbit) | .1–.9 |
+| `SignalForge-0z5.11` | US-011 Patterns & Memory | .10 |
+
+**Ready now:** `SignalForge-0z5.1`, `SignalForge-0z5.2`.
