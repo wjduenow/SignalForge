@@ -33,9 +33,13 @@ Design commitments operationalised here (``plans/super/7-quality-grader.md``):
   ``max_output_tokens=1024`` (#187 DEC-004 — raised from 256 so a one-line
   ``gemini-2.5-flash`` grade JSON is substantially less likely to
   truncate), ``max_retries_429=3``, ``max_retries_5xx=1``,
-  ``max_retries_conn=1``, ``total_budget_seconds=300``,
-  ``min_pass_rate=0.7``, ``min_mean_score=0.5``, ``rubric=None``,
-  ``fail_on_below_threshold=False``.
+  ``max_retries_conn=1``, ``total_budget_seconds=None`` (reinterpreted by
+  #198 DEC-001 as an *optional* absolute hard ceiling; ``None`` → use the
+  scaled-budget formula via ``budget_base_seconds=60`` /
+  ``budget_per_pair_seconds=20.0``), the three opt-in soft ceilings
+  ``max_grade_calls=None`` / ``max_grade_cost_usd=None`` /
+  ``max_grade_tokens=None`` (off), ``min_pass_rate=0.7``,
+  ``min_mean_score=0.5``, ``rubric=None``, ``fail_on_below_threshold=False``.
 * **#187 US-002 / DEC-006** — when ``model`` is set explicitly, a
   SKU-prefix/provider mismatch (e.g. ``provider="openai"`` with
   ``model="claude-sonnet-4-6"``) fails loud at config-load. The
@@ -173,12 +177,83 @@ class GradeConfig(BaseModel):
     registry is a plugin point designed to grow. The field validator fails
     loud on an unknown value — listing the registered provider names."""
 
-    total_budget_seconds: int = 300
-    """Whole-run wall-clock budget (DEC-023). 5 minutes default — ~3×
-    safety on 60 calls × 1s p50. Mirrors :attr:`signalforge.prune.PruneConfig.total_budget_seconds`
-    semantics: when the budget trips, un-evaluated ``(artifact, criterion)``
-    pairs land as a degraded :class:`signalforge.grade.models.GradingResult`
-    rather than silently dropped."""
+    total_budget_seconds: int | None = None
+    """Optional absolute hard ceiling on the whole-run wall-clock budget
+    (#198 DEC-001; reinterpreted from the flat DEC-023 default).
+
+    ``None`` (the new default) means the engine sizes the budget from the
+    work via the scaled formula
+    ``budget_base_seconds + budget_per_pair_seconds * ceil(num_pairs / max_concurrent_calls)``
+    — a backstop that grows with model width and concurrency rather than a
+    flat 300s that the pre-#186 sequential era was sized for. When set to an
+    int, the effective budget is ``min(scaled, total_budget_seconds)`` — i.e.
+    an explicit value still acts as a hard cap on top of the scaled estimate,
+    preserving exact v0.1 absolute-cap semantics for pinned ``signalforge.yml``
+    files (e.g. an operator who set ``total_budget_seconds: 600`` keeps that
+    600s ceiling).
+
+    Mirrors :attr:`signalforge.prune.PruneConfig.total_budget_seconds`
+    degrade semantics: when the budget trips, un-evaluated
+    ``(artifact, criterion)`` pairs land as a degraded
+    :class:`signalforge.grade.models.GradingResult` rather than silently
+    dropped (DEC-015)."""
+
+    budget_base_seconds: int = 60
+    """Fixed startup / overhead allowance in the scaled wall-clock formula
+    (#198 DEC-001).
+
+    The constant term in
+    ``budget_base_seconds + budget_per_pair_seconds * ceil(num_pairs / max_concurrent_calls)``.
+    Covers per-run setup (config resolution, cache priming, the first
+    concurrency wave's ramp) that does not scale with the number of pairs.
+    Must be positive."""
+
+    budget_per_pair_seconds: float = 20.0
+    """Per concurrency-wave wall allowance in the scaled formula (#198
+    DEC-001).
+
+    The scaled formula multiplies this by
+    ``ceil(num_pairs / max_concurrent_calls)`` — i.e. the number of
+    concurrency *waves*, not the raw pair count — so it is the wall-clock
+    allowance per wave of ``max_concurrent_calls`` in-flight judge calls.
+
+    Default ``20.0`` is grounded in the #179 baseline (Sonnet judge p50
+    ~10s/call; 220 pairs at concurrency 10 → ``60 + 20.0 * ceil(220/10) =
+    500s`` against a measured 222.9s — ~2.25× headroom). It is a runaway
+    backstop sized to tolerate 429 retry storms, NOT a completion target;
+    the ticket-literal ``2.0`` would compute 104s and degrade ~half the
+    pairs, recreating the failure this scaling fixes. Must be positive."""
+
+    max_grade_calls: int | None = None
+    """Opt-in soft ceiling on the number of LLM judge calls (#198 DEC-002).
+
+    ``None`` (default) → off. When set, dispatch stops once this many
+    judge calls have been made and the remaining ``(artifact, criterion)``
+    pairs DEGRADE (never raise) — mirroring the DEC-015 conservative-degrade
+    contract. Cache-hit pairs (#189) make no LLM call and never count
+    against this ceiling. Whichever of the three ``max_grade_*`` ceilings
+    trips first stops dispatch. Must be positive when set."""
+
+    max_grade_cost_usd: float | None = None
+    """Opt-in soft ceiling on the total USD cost of the grade run (#198
+    DEC-002).
+
+    ``None`` (default) → off. When set, dispatch stops once the accumulated
+    per-call cost (computed from per-call token usage via
+    :mod:`signalforge.llm.pricing`, including cache-read/write economics)
+    meets or exceeds this budget; remaining pairs DEGRADE (never raise).
+    Whichever of the three ``max_grade_*`` ceilings trips first stops
+    dispatch. Must be positive when set."""
+
+    max_grade_tokens: int | None = None
+    """Opt-in soft ceiling on the total token movement of the grade run
+    (#198 DEC-002).
+
+    ``None`` (default) → off. When set, dispatch stops once the accumulated
+    token count (input + output + cache-creation + cache-read across the
+    judge calls) meets or exceeds this budget; remaining pairs DEGRADE
+    (never raise). Whichever of the three ``max_grade_*`` ceilings trips
+    first stops dispatch. Must be positive when set."""
 
     max_concurrent_calls: int = 10
     """Asyncio dispatch concurrency cap for the per-``(artifact, criterion)``
@@ -324,9 +399,55 @@ class GradeConfig(BaseModel):
             raise ValueError("must be a non-empty, non-whitespace string")
         return v
 
-    @field_validator("max_output_tokens", "total_budget_seconds")
+    @field_validator("max_output_tokens", "budget_base_seconds", "budget_per_pair_seconds")
     @classmethod
-    def _positive(cls, v: int) -> int:
+    def _positive(cls, v: int | float) -> int | float:
+        """Positive-only knobs (#198 DEC-001 split).
+
+        Covers :attr:`max_output_tokens` (zero/negative would make the LLM
+        refuse output) plus the two always-on scaled-budget terms
+        :attr:`budget_base_seconds` / :attr:`budget_per_pair_seconds` (a
+        non-positive term would size the wall-clock backstop to ``0`` and
+        degrade every pair before any call). ``total_budget_seconds`` and the
+        three ``max_grade_*`` ceilings are now optional and live on the
+        separate :meth:`_optional_positive` validator below."""
+        # Reject non-finite floats up front: ``yaml.safe_load`` parses
+        # ``.nan`` / ``.inf``, and ``nan <= 0`` / ``inf <= 0`` are both
+        # ``False`` so they would slip past the positivity check — a NaN
+        # ``budget_per_pair_seconds`` then crashes ``int(nan)``/``math.ceil(nan)``
+        # in ``_compute_effective_budget`` (Pydantic floats allow inf/nan by
+        # default). Int fields can't carry inf/nan — coercion rejects them earlier.
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError("must be a finite number")
+        if v <= 0:
+            raise ValueError("must be positive")
+        return v
+
+    @field_validator(
+        "total_budget_seconds",
+        "max_grade_calls",
+        "max_grade_cost_usd",
+        "max_grade_tokens",
+    )
+    @classmethod
+    def _optional_positive(cls, v: int | float | None) -> int | float | None:
+        """Allow-``None``-or-positive knobs (#198 DEC-001 / DEC-002).
+
+        :attr:`total_budget_seconds` (optional absolute cap) and the three
+        opt-in soft ceilings :attr:`max_grade_calls` /
+        :attr:`max_grade_cost_usd` / :attr:`max_grade_tokens` all default to
+        ``None`` (off). ``None`` passes through untouched; a *present* value
+        must be positive — a zero/negative cap would trip immediately and
+        degrade the whole run, the silent-no-op failure mode the strict
+        validator exists to prevent."""
+        if v is None:
+            return v
+        # Reject non-finite floats (``max_grade_cost_usd: .inf`` would make the
+        # cost ceiling never trip — ``cost_usd >= inf`` is always ``False`` —
+        # i.e. a silent no-op; ``.nan`` is likewise never ``>=``). Same rationale
+        # as :meth:`_positive`.
+        if isinstance(v, float) and not math.isfinite(v):
+            raise ValueError("must be a finite number")
         if v <= 0:
             raise ValueError("must be positive")
         return v

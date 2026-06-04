@@ -66,6 +66,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import Iterator
@@ -138,6 +139,7 @@ from signalforge.llm.errors import (
     LLMProviderAsyncUnsupportedError,
     LLMResponseFormatError,
 )
+from signalforge.llm.pricing import lookup as _lookup_pricing
 from signalforge.llm.providers import provider_for
 from signalforge.manifest.models import Model
 from signalforge.prune.models import PruneResult
@@ -449,6 +451,57 @@ def _format_degrade_reasoning(exc: BaseException) -> str:
     return base
 
 
+def _compute_effective_budget(
+    *,
+    budget_base_seconds: int,
+    budget_per_pair_seconds: float,
+    total_budget_seconds: int | None,
+    num_pairs: int,
+    max_concurrent_calls: int,
+) -> int:
+    """Scale the grade wall-clock budget with the work to be done (DEC-001).
+
+    The effective budget is a *runaway guard*, not a completion
+    constraint: it backstops 429 retry storms and pathological slow
+    calls rather than pacing normal completion.
+
+        scaled = budget_base_seconds
+                 + budget_per_pair_seconds * ceil(num_pairs / max_concurrent_calls)
+
+    ``ceil(num_pairs / max_concurrent_calls)`` is the number of
+    serial *waves* of LLM calls (each wave runs ``max_concurrent_calls``
+    pairs in parallel under the semaphore), so the per-pair term scales
+    with wall-clock depth, not raw pair count.
+
+    When ``total_budget_seconds`` is ``None`` the scaled value is
+    returned verbatim; when it is set it acts as an absolute hard
+    ceiling (``min(scaled, total_budget_seconds)``) — preserving the
+    exact v0.1 absolute-cap semantics for pinned configs (DEC-010).
+
+    Pure function: no asyncio, no I/O, no logging. Always returns a
+    finite ``int`` so the ``asyncio.timeout(...)`` site never receives
+    ``None``.
+
+    ``num_pairs == 0`` short-circuits to ``budget_base_seconds`` (no
+    work to scale). ``max_concurrent_calls`` is ``>= 1`` by the config
+    validator, but the zero-pair guard also sidesteps any division
+    concern defensively.
+    """
+    if num_pairs <= 0:
+        scaled: float = float(budget_base_seconds)
+    else:
+        waves = math.ceil(num_pairs / max_concurrent_calls)
+        scaled = budget_base_seconds + budget_per_pair_seconds * waves
+    # ``math.ceil`` (not ``int``) on the final conversion so a fractional
+    # ``budget_per_pair_seconds`` never rounds the wall-clock backstop DOWN
+    # (``int(121.5)`` would shave 0.5s and trip earlier than intended). The
+    # absolute-cap branch ceils the post-``min`` value for the same reason.
+    # Both are no-ops for the default integer-valued config.
+    if total_budget_seconds is None:
+        return math.ceil(scaled)
+    return math.ceil(min(scaled, total_budget_seconds))
+
+
 def _build_degraded(
     *,
     artifact_id: str,
@@ -562,7 +615,8 @@ async def _grade_artifacts_async_core(
     from the v0.1 ``grade_artifacts``. Orchestrates concurrent dispatch
     via :class:`asyncio.TaskGroup` throttled by an
     :class:`asyncio.Semaphore(max_concurrent_calls)`, bounded by
-    :func:`asyncio.timeout(total_budget_seconds)`. Each pair runs as a
+    :func:`asyncio.timeout(effective_budget)` (the scaled wall-clock
+    backstop from :func:`_compute_effective_budget`, DEC-001). Each pair runs as a
     coroutine; per-coroutine ``try/except`` isolates LLM-layer failures
     so one bad pair doesn't abort siblings (DEC-004 retry isolation).
 
@@ -648,7 +702,60 @@ async def _grade_artifacts_async_core(
     if prefilled_results is not None:
         counters["completed"] = sum(1 for r in prefilled_results if r is not None)
 
-    total_budget_seconds = resolved_config.total_budget_seconds
+    # Scale the wall-clock backstop with the work to be done (DEC-001).
+    # ``effective_budget`` is a finite int (never ``None``) so the
+    # ``asyncio.timeout(...)`` site below always receives a valid value.
+    effective_budget = _compute_effective_budget(
+        budget_base_seconds=resolved_config.budget_base_seconds,
+        budget_per_pair_seconds=resolved_config.budget_per_pair_seconds,
+        total_budget_seconds=resolved_config.total_budget_seconds,
+        num_pairs=total_pairs,
+        max_concurrent_calls=resolved_config.max_concurrent_calls,
+    )
+
+    # Opt-in cost/calls/tokens ceilings (US-004 / DEC-002/003/010/011).
+    # All three default ``None`` → off; a non-None value caps the
+    # respective accumulator and degrades un-started pairs once met.
+    #
+    # Semantics are SOFT / best-effort (DEC-003): every pair is dispatched
+    # into the one ``TaskGroup``; a tripped ceiling only stops *scheduling
+    # new LLM calls*, so up to ``max_concurrent_calls - 1`` in-flight calls
+    # may complete past the threshold. The accumulators are mutable closure
+    # cells (mirroring ``budget_state`` / ``counters``) so the per-pair
+    # ``_one`` coroutine reads + updates them; the single event loop makes
+    # check-then-reserve race-free as long as no ``await`` separates the
+    # read from the slot-reservation increment (DEC-003).
+    max_grade_calls = resolved_config.max_grade_calls
+    max_grade_cost_usd = resolved_config.max_grade_cost_usd
+    max_grade_tokens = resolved_config.max_grade_tokens
+    # Resolve the cost-ceiling pricing ONCE, up front, before any LLM call
+    # is dispatched. ``GradeConfig._validate_model_provider_compat`` only
+    # checks the SKU *prefix* (``claude-`` / ``gpt-`` / ``gemini-``), NOT
+    # membership in ``pricing.PRICES`` — so a prefix-valid-but-unpriced SKU
+    # (a newer Opus, a typo passing the prefix check) is accepted at
+    # config-load. Looking the price up per-pair inside the ``TaskGroup``
+    # would raise ``EstimateUnknownModelError`` from inside a coroutine —
+    # uncaught by the per-pair ``except`` below — aborting the whole run via
+    # a ``BaseExceptionGroup`` AFTER billable calls + audit writes. Resolving
+    # here fails fast at orchestrator entry (the typed error surfaces cleanly,
+    # CLI tier 2, with its remediation) and the resolved object is reused for
+    # every pair (no redundant per-pair lookup). ``None`` when no cost ceiling
+    # is configured.
+    cost_pricing = None
+    if max_grade_cost_usd is not None:
+        # ``resolved_config.model`` is invariantly concrete post-construction
+        # (#187 US-002); the lookup raises only on an unknown SKU.
+        assert resolved_config.model is not None
+        cost_pricing = _lookup_pricing(resolved_config.model)
+    # ``calls_made`` is the near-hard call counter: reserved (incremented)
+    # BEFORE the LLM await so it bounds dispatch tightly. ``cost_usd`` and
+    # ``tokens`` are soft accumulators updated only AFTER a successful call
+    # (their values are unknown until the response returns), so the cost /
+    # token ceilings degrade pairs that START after the accumulator already
+    # crossed the cap (DEC-003 bounded overshoot).
+    accumulators: dict[str, float] = {"calls_made": 0.0, "cost_usd": 0.0, "tokens": 0.0}
+    # Records the FIRST ceiling that tripped (DEC-007 WARNING source).
+    tripped: dict[str, object | None] = {"ceiling": None, "limit": None}
 
     async def _one(index: int, artifact_id: str, artifact_text: str, criterion: Criterion) -> None:
         async with semaphore:
@@ -657,6 +764,86 @@ async def _grade_artifacts_async_core(
             # ``started_at`` separately.
             crit_hash = crit_hash_by_id[criterion.id]
             per_call_ts = datetime.now(UTC)
+
+            # --- Opt-in cost/calls/tokens ceilings (US-004) -------------
+            # CHECK-then-RESERVE with NO ``await`` between the read and the
+            # decision: this whole block runs synchronously inside the
+            # single event loop, immediately after the semaphore acquire
+            # and BEFORE the LLM ``await`` below, so the accumulator reads
+            # and the ``calls_made`` increment are race-free (DEC-003). A
+            # tripped ceiling degrades THIS un-started pair (DEC-002) with
+            # the locked reason (DEC-009), writes its audit record
+            # UNSHIELDED (no in-flight LLM await precedes it — the
+            # synchronous ``_write_event_or_abort_kw`` mirrors the
+            # synthesis pass), sets the slot (so the synthesis pass skips
+            # it — no double audit), counts it as ``completed`` (DEC-011),
+            # records the first ceiling that tripped, and returns without
+            # making the LLM call.
+            ceiling_reason: str | None = None
+            ceiling_name: str | None = None
+            ceiling_limit: object | None = None
+            if max_grade_calls is not None and accumulators["calls_made"] >= max_grade_calls:
+                ceiling_reason = f"grade call ceiling exceeded ({max_grade_calls} calls)"
+                ceiling_name = "calls"
+                ceiling_limit = max_grade_calls
+            elif max_grade_cost_usd is not None and accumulators["cost_usd"] >= max_grade_cost_usd:
+                ceiling_reason = f"grade cost ceiling exceeded (${max_grade_cost_usd})"
+                ceiling_name = "cost_usd"
+                ceiling_limit = max_grade_cost_usd
+            elif max_grade_tokens is not None and accumulators["tokens"] >= max_grade_tokens:
+                ceiling_reason = f"grade token ceiling exceeded ({max_grade_tokens} tokens)"
+                ceiling_name = "tokens"
+                ceiling_limit = max_grade_tokens
+
+            if ceiling_reason is not None:
+                grading_result, event = _build_degraded(
+                    artifact_id=artifact_id,
+                    criterion=criterion,
+                    reasoning=ceiling_reason,
+                    config=resolved_config,
+                    rubric_hash=rubric_hash,
+                    template_hash=template_hash,
+                    crit_hash=crit_hash,
+                    run_id=run_id,
+                    timestamp=per_call_ts,
+                    model_unique_id=model_unique_id,
+                )
+                # Slot + counters FIRST (DEC-011: ceiling-degrades count as
+                # completed), then the audit write — mirroring the happy-path
+                # ordering so a cancellation during the write await leaves the
+                # synthesis pass correctly skipping this index (no double audit).
+                results_by_index[index] = grading_result
+                counters["completed"] += 1
+                if tripped["ceiling"] is None:
+                    tripped["ceiling"] = ceiling_name
+                    tripped["limit"] = ceiling_limit
+                # Audit-write via the executor + shield (DEC-017), exactly like
+                # the happy-path write below: this degrade runs INSIDE the
+                # concurrent TaskGroup region (unlike the sequential synthesis
+                # pass), so a synchronous fsync here would block the event loop
+                # and stall sibling in-flight coroutines. The shield lets the
+                # write finish even if a budget timeout cancels this task
+                # mid-flight; on CancelledError we await the future so a
+                # GradeAuditWriteError / GradeAuditRecordTooLargeError still
+                # propagates and aborts the run (fail-closed, DEC-006).
+                loop = asyncio.get_running_loop()
+                ceiling_audit_future = loop.run_in_executor(
+                    None, _write_event_or_abort_kw, event, resolved_audit_path
+                )
+                try:
+                    await asyncio.shield(ceiling_audit_future)
+                except asyncio.CancelledError:
+                    await ceiling_audit_future
+                    raise
+                return
+
+            # Reserve a call slot for the near-hard ``max_grade_calls``
+            # ceiling BEFORE the LLM await (DEC-003). The check above
+            # already rejected the over-cap case, so this increment can
+            # only push ``calls_made`` up to exactly ``max_grade_calls``.
+            if max_grade_calls is not None:
+                accumulators["calls_made"] += 1
+
             try:
                 grading_result, event = await _grade_one_async(
                     artifact_id=artifact_id,
@@ -713,6 +900,36 @@ async def _grade_artifacts_async_core(
             # raises, the in-memory state is consistent with disk.
             results_by_index[index] = grading_result
             counters["completed"] += 1
+
+            # Update the soft cost / token accumulators from this call's
+            # actual usage (DEC-010). Read off ``event`` (the GradeEvent
+            # built from ``result.{input,output,cache_*}_tokens`` in
+            # ``_grade_one_async``; a degraded pair carries zeros — harmless
+            # to accumulate). ``tokens`` is ALL token movement (input +
+            # output + cache write + cache read); ``cost_usd`` is full USD
+            # incl. cache via the frozen pricing table. Cache-hit pairs
+            # (#189) bypass ``_one`` entirely so they're already excluded.
+            # The cost lookup uses ``resolved_config.model`` (the SKU the
+            # operator selected), never ``event.model`` — the live config
+            # is the single source of truth for which price table applies.
+            if max_grade_tokens is not None:
+                accumulators["tokens"] += (
+                    event.input_tokens
+                    + event.output_tokens
+                    + event.cache_creation_input_tokens
+                    + event.cache_read_input_tokens
+                )
+            if max_grade_cost_usd is not None:
+                # ``cost_pricing`` was resolved once up front (an unpriced SKU
+                # already failed fast at orchestrator entry), so reuse it here
+                # rather than looking up per pair.
+                assert cost_pricing is not None
+                accumulators["cost_usd"] += (
+                    event.input_tokens * cost_pricing.input_per_mtok
+                    + event.output_tokens * cost_pricing.output_per_mtok
+                    + event.cache_creation_input_tokens * cost_pricing.cache_write_5m_per_mtok
+                    + event.cache_read_input_tokens * cost_pricing.cache_read_per_mtok
+                ) / 1_000_000
 
             # Audit-write per pair (DEC-006 fail-closed; DEC-017
             # executor-wrap so the fsync doesn't block the loop). On
@@ -828,7 +1045,7 @@ async def _grade_artifacts_async_core(
                         )
 
     try:
-        async with asyncio.timeout(total_budget_seconds):
+        async with asyncio.timeout(effective_budget):
             async with asyncio.TaskGroup() as tg:
                 for index, (artifact_id, artifact_text, criterion) in enumerate(pairs):
                     # Skip cache-hit slots already populated by the sync
@@ -879,7 +1096,7 @@ async def _grade_artifacts_async_core(
         grading_result, event = _build_degraded(
             artifact_id=artifact_id,
             criterion=criterion,
-            reasoning=(f"grade budget exceeded ({total_budget_seconds}s) before evaluation"),
+            reasoning=(f"grade budget exceeded ({effective_budget}s) before evaluation"),
             config=resolved_config,
             rubric_hash=rubric_hash,
             template_hash=template_hash,
@@ -908,7 +1125,29 @@ async def _grade_artifacts_async_core(
                     "model_unique_id": model_unique_id,
                     "completed_count": counters["completed"],
                     "degraded_count": counters["degraded"],
-                    "total_budget_seconds": total_budget_seconds,
+                    "effective_budget_seconds": effective_budget,
+                }
+            ),
+        )
+
+    # Emit ONE ceiling WARNING (distinct from the wall-clock budget
+    # WARNING above) when any opt-in cost/calls/tokens ceiling tripped
+    # (DEC-007). Locked field set: ``run_id``, ``model_unique_id``,
+    # ``ceiling`` (∈ {"calls","cost_usd","tokens"}), ``limit``,
+    # ``completed_count``, ``degraded_count``. Lazy-format JSON per the
+    # ANSI-safe logger grep gate — no f-string interpolation of
+    # user/config data into the logger call.
+    if tripped["ceiling"] is not None:
+        _LOGGER.warning(
+            "grade ceiling exceeded: %s",
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "model_unique_id": model_unique_id,
+                    "ceiling": tripped["ceiling"],
+                    "limit": tripped["limit"],
+                    "completed_count": counters["completed"],
+                    "degraded_count": counters["degraded"],
                 }
             ),
         )
@@ -971,9 +1210,10 @@ def grade_artifacts(
     4. Generate ``run_id`` (uuid4 hex, DEC-020). Compute the run's
        ``rubric_hash`` (DEC-014), ``prompt_version_template``,
        ``rubric_block`` (cached prefix for every call).
-    5. Iterate every ``(criterion, artifact)`` pair. At the top of
-       each loop iteration, check the wall-clock against
-       ``config.total_budget_seconds``; once exceeded, every
+    5. Iterate every ``(criterion, artifact)`` pair, bounded by the
+       scaled wall-clock backstop ``_compute_effective_budget(...)``
+       (DEC-001 — base + per-pair × waves, optionally capped by
+       ``config.total_budget_seconds``); once exceeded, every
        remaining pair lands as a degraded
        ``GradingResult(score=None, ...)`` plus matching
        :class:`GradeEvent` (DEC-015). Per-pair LLM failures
@@ -1264,7 +1504,7 @@ def grade_artifacts(
 
     # 5. Iterate ``(criterion, artifact)`` pairs via the async core
     #    (issue #186, US-009 / DEC-002 + DEC-004). The async core wraps
-    #    a ``TaskGroup`` in ``asyncio.timeout(total_budget_seconds)``
+    #    a ``TaskGroup`` in ``asyncio.timeout(effective_budget)``
     #    and dispatches up to ``max_concurrent_calls`` coroutines via a
     #    ``Semaphore``. Per-coroutine ``try/except`` handles LLM-layer
     #    failures and budget-cancellation; the public sync entry-point

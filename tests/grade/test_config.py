@@ -242,7 +242,16 @@ def test_grade_config_defaults_match_dec_023_to_027() -> None:
     assert cfg.max_retries_429 == 3
     assert cfg.max_retries_5xx == 1
     assert cfg.max_retries_conn == 1
-    assert cfg.total_budget_seconds == 300
+    # #198 DEC-001: total_budget_seconds is now an OPTIONAL absolute hard
+    # ceiling; None (the new default) routes the engine to the scaled formula.
+    assert cfg.total_budget_seconds is None
+    # #198 DEC-001: scaled-budget terms (always on).
+    assert cfg.budget_base_seconds == 60
+    assert cfg.budget_per_pair_seconds == 20.0
+    # #198 DEC-002: three opt-in soft ceilings, all default off (None).
+    assert cfg.max_grade_calls is None
+    assert cfg.max_grade_cost_usd is None
+    assert cfg.max_grade_tokens is None
     assert cfg.max_concurrent_calls == 10
     assert cfg.min_pass_rate == 0.7
     assert cfg.min_mean_score == 0.5
@@ -484,7 +493,8 @@ def test_grade_config_max_output_tokens_negative_rejected(tmp_path: Path) -> Non
 
 def test_grade_config_total_budget_seconds_zero_rejected(tmp_path: Path) -> None:
     """A zero total budget would route every criterion to the degraded
-    path before any LLM call; refuse at config-load time."""
+    path before any LLM call; refuse at config-load time. (#198 DEC-001:
+    the field is now optional, but a *present* value must still be positive.)"""
     config_path = tmp_path / "signalforge.yml"
     config_path.write_text(
         "grade:\n  total_budget_seconds: 0\n",
@@ -492,6 +502,144 @@ def test_grade_config_total_budget_seconds_zero_rejected(tmp_path: Path) -> None
     )
     with pytest.raises(GradeConfigError):
         load_grade_config(tmp_path)
+
+
+# ----- #198 DEC-001/DEC-002: scaled-budget + soft-ceiling validators -----
+
+
+def test_grade_config_total_budget_seconds_none_accepted() -> None:
+    """#198 DEC-001: ``None`` is the new default and means "use the scaled
+    formula" — the allow-None-or-positive validator passes it through."""
+    cfg = GradeConfig(total_budget_seconds=None)
+    assert cfg.total_budget_seconds is None
+
+
+def test_grade_config_total_budget_seconds_explicit_int_accepted() -> None:
+    """#198 DEC-001: an explicit int still validates — it acts as an absolute
+    hard cap (``min(scaled, total_budget_seconds)``), preserving v0.1 pinned
+    configs."""
+    cfg = GradeConfig(total_budget_seconds=600)
+    assert cfg.total_budget_seconds == 600
+
+
+def test_grade_config_budget_base_seconds_zero_rejected() -> None:
+    """#198 DEC-001: ``budget_base_seconds`` is an always-on scaled-budget
+    term; a non-positive value would size the wall-clock backstop to ~0 and
+    degrade every pair. Fail loud."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(budget_base_seconds=0)
+
+
+def test_grade_config_budget_per_pair_seconds_zero_rejected() -> None:
+    """#198 DEC-001: ``budget_per_pair_seconds`` must be positive (the
+    per-wave wall allowance can't be zero)."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(budget_per_pair_seconds=0.0)
+
+
+def test_grade_config_budget_per_pair_seconds_negative_rejected() -> None:
+    """#198 DEC-001: a negative per-wave allowance is rejected."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(budget_per_pair_seconds=-1.0)
+
+
+def test_grade_config_max_grade_calls_zero_rejected() -> None:
+    """#198 DEC-002: the opt-in soft ceilings accept ``None`` but reject a
+    present ``<= 0`` value (a zero ceiling would trip immediately and degrade
+    the whole run)."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(max_grade_calls=0)
+
+
+def test_grade_config_max_grade_cost_usd_zero_rejected() -> None:
+    """#198 DEC-002: a present ``max_grade_cost_usd`` must be positive."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(max_grade_cost_usd=0.0)
+
+
+def test_grade_config_max_grade_tokens_zero_rejected() -> None:
+    """#198 DEC-002: a present ``max_grade_tokens`` must be positive."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(max_grade_tokens=0)
+
+
+def test_grade_config_optional_positive_fields_reject_negative() -> None:
+    """#198 DEC-001/002: the optional-positive validator rejects a present
+    NEGATIVE value (not just zero) for every field it guards. Zero-rejection
+    alone would still pass if a future refactor slipped from ``<= 0`` to
+    ``== 0``/``!= 0`` while letting negatives through; pin negatives too."""
+    from pydantic import ValidationError
+
+    for kwargs in (
+        {"total_budget_seconds": -1},
+        {"budget_base_seconds": -1},
+        {"max_grade_calls": -1},
+        {"max_grade_cost_usd": -0.01},
+        {"max_grade_tokens": -1},
+    ):
+        with pytest.raises(ValidationError):
+            GradeConfig(**kwargs)  # pyright: ignore[reportArgumentType]
+
+
+def test_grade_config_float_fields_reject_non_finite() -> None:
+    """#198 (PR review): the float-bearing knobs reject NaN / +/-inf.
+
+    ``yaml.safe_load`` parses ``.nan`` / ``.inf``, and Pydantic floats allow
+    them by default. ``nan <= 0`` / ``inf <= 0`` are both ``False``, so without
+    an explicit finiteness guard a NaN ``budget_per_pair_seconds`` would slip
+    through and later crash ``math.ceil(nan)`` in ``_compute_effective_budget``;
+    ``max_grade_cost_usd: .inf`` would silently make the cost ceiling a no-op."""
+    from pydantic import ValidationError
+
+    for kwargs in (
+        {"budget_per_pair_seconds": float("nan")},
+        {"budget_per_pair_seconds": float("inf")},
+        {"budget_per_pair_seconds": float("-inf")},
+        {"max_grade_cost_usd": float("nan")},
+        {"max_grade_cost_usd": float("inf")},
+    ):
+        with pytest.raises(ValidationError):
+            GradeConfig(**kwargs)  # pyright: ignore[reportArgumentType]
+
+
+def test_grade_config_soft_ceilings_accept_none() -> None:
+    """#198 DEC-002: all three opt-in soft ceilings accept ``None`` (off) —
+    the explicit-None path mirrors the default."""
+    cfg = GradeConfig(max_grade_calls=None, max_grade_cost_usd=None, max_grade_tokens=None)
+    assert cfg.max_grade_calls is None
+    assert cfg.max_grade_cost_usd is None
+    assert cfg.max_grade_tokens is None
+
+
+def test_grade_config_soft_ceilings_accept_positive() -> None:
+    """#198 DEC-002: a present positive value for each soft ceiling
+    validates."""
+    cfg = GradeConfig(max_grade_calls=50, max_grade_cost_usd=1.25, max_grade_tokens=500_000)
+    assert cfg.max_grade_calls == 50
+    assert cfg.max_grade_cost_usd == 1.25
+    assert cfg.max_grade_tokens == 500_000
+
+
+def test_grade_config_typo_max_grade_cal_fails_loud() -> None:
+    """#198 / safety-layer.md DEC-015: ``extra="forbid"`` still rejects a typo
+    on a new ceiling key (``max_grade_cal`` missing ``ls``) rather than
+    silently leaving the ceiling off."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(max_grade_cal=5)  # pyright: ignore[reportCallIssue]
 
 
 def test_grade_config_max_retries_negative_rejected(tmp_path: Path) -> None:
@@ -661,6 +809,15 @@ def test_load_grade_config_doc_example_round_trips(tmp_path: Path) -> None:
     assert config.min_pass_rate == 0.7
     assert config.min_mean_score == 0.5
     assert config.fail_on_below_threshold is False
+    # #198: the fixture carries the two always-on scaled-budget terms; pin
+    # fixture<->loader parity explicitly (a fixture typo that happened to match
+    # another valid key would otherwise pass via the defaults test alone). The
+    # three opt-in ceilings are commented out in the fixture, so they load None.
+    assert config.budget_base_seconds == 60
+    assert config.budget_per_pair_seconds == 20.0
+    assert config.max_grade_calls is None
+    assert config.max_grade_cost_usd is None
+    assert config.max_grade_tokens is None
 
 
 def test_load_grade_config_full_well_formed_block(tmp_path: Path) -> None:
