@@ -2,7 +2,7 @@
 
 ## Meta
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/198
-- **Phase:** detailing
+- **Phase:** published
 - **Branch:** feature/198-grade-budget-scaling (worktree: .claude/worktrees/198-grade-budget-scaling)
 - **Base:** origin/dev @ 4ad19ef (TBD — see Q3)
 - **Sessions:** 1 (2026-06-03)
