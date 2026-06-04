@@ -2,7 +2,7 @@
 
 ## Meta
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/198
-- **Phase:** published
+- **Phase:** devolved
 - **Branch:** feature/198-grade-budget-scaling (worktree: .claude/worktrees/198-grade-budget-scaling)
 - **Base:** origin/dev @ 4ad19ef (TBD — see Q3)
 - **Sessions:** 1 (2026-06-03)
@@ -315,3 +315,16 @@ flat"; "opt-in ceilings degrade, never raise → no exit-code/AST churn") in mem
   `~/Projects/intuit_airflow/plugins/dbt` for `weekly_query_cost` AND a ≥40-col model (live Anthropic key,
   cold grade cache, `prune.enabled: false`). Record the new per-stage numbers in
   `docs/research/179-runtime-benchmark.md` and confirm **0 width-induced budget degradations** on the wide model.
+
+## Beads manifest (devolved 2026-06-04)
+- **Epic:** `SignalForge-xfg`
+- **Tasks (dependency chain US-001 → … → Patterns & Memory):**
+  - `SignalForge-xfg.1` — US-001 GradeConfig fields + validator split (ready)
+  - `SignalForge-xfg.2` — US-002 `_compute_effective_budget` helper + formula tests (← xfg.1)
+  - `SignalForge-xfg.3` — US-003 engine wire scaled budget + WARNING rename + ≥40-col AC (← xfg.2)
+  - `SignalForge-xfg.4` — US-004 cost/calls/tokens ceilings + ceiling WARNING (← xfg.3)
+  - `SignalForge-xfg.5` — US-005 docs/grade-ops.md + example fixture parity (← xfg.4)
+  - `SignalForge-xfg.6` — Quality Gate ×4 + CodeRabbit (← xfg.5)
+  - `SignalForge-xfg.7` — Patterns & Memory incl. grade-layer.md DEC-029 (← xfg.6)
+- **Worktree:** `.claude/worktrees/198-grade-budget-scaling` (branch `feature/198-grade-budget-scaling`, base `dev`).
+- **PR:** #199 (draft → ready on devolve). Maintainer-only M-2 benchmark rerun is the closing AC.
