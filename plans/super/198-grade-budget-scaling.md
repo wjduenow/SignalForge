@@ -2,7 +2,7 @@
 
 ## Meta
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/198
-- **Phase:** devolved
+- **Phase:** complete
 - **Branch:** feature/198-grade-budget-scaling (worktree: .claude/worktrees/198-grade-budget-scaling)
 - **Base:** origin/dev @ 4ad19ef (TBD — see Q3)
 - **Sessions:** 1 (2026-06-03)
@@ -328,3 +328,21 @@ flat"; "opt-in ceilings degrade, never raise → no exit-code/AST churn") in mem
   - `SignalForge-xfg.7` — Patterns & Memory incl. grade-layer.md DEC-029 (← xfg.6)
 - **Worktree:** `.claude/worktrees/198-grade-budget-scaling` (branch `feature/198-grade-budget-scaling`, base `dev`).
 - **PR:** #199 (draft → ready on devolve). Maintainer-only M-2 benchmark rerun is the closing AC.
+
+## Status: Complete (2026-06-04)
+
+All 7 beads (epic `SignalForge-xfg`) landed via `/ralph-run`; epic auto-closed. Full suite green
+(3592 passed). Implementation commits `581b19a..ce14143` on `feature/198-grade-budget-scaling`.
+
+- **PR:** #199
+- **Quality Gate finding (real bug, fixed):** the cost ceiling looked up `pricing.lookup` per-pair
+  inside the `TaskGroup`; a prefix-valid-but-unpriced SKU + `max_grade_cost_usd` raised
+  `EstimateUnknownModelError` mid-run (uncaught by the per-pair `except`), aborting after billable
+  calls. Fixed by resolving pricing once up front (fail-fast at entry) + regression test
+  (`ce14143`/`ddc3ca6`). Lesson recorded in `grade-layer.md` + bd memory.
+- **Compounding update:** `.claude/rules/grade-layer.md` (scaled-budget + ceilings contract, DEC-029
+  enumeration), `docs/grade-ops.md`, bd memory `grade-runtime-budgets-198-scale-a-wall-clock`.
+- **Maintainer-only remaining (M-2 closing AC):** re-run `tests/research/179-runtime-benchmark/benchmark_runtime.py`
+  on `weekly_query_cost` + a ≥40-col model (live key), record numbers in `docs/research/179-runtime-benchmark.md`.
+  The deterministic ≥40-col "0 width-induced degradations" AC already passes
+  (`test_grade_artifacts_wide_model_completes_with_zero_budget_degradations`).
