@@ -1706,3 +1706,299 @@ def test_generate_help_text_lists_as_of_flag(
     assert code == 0
     assert "--as-of" in captured.out
     assert "YYYY-MM-DD" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# US-007 of #189 — --no-grade + --no-cache CLI flags + [N/4] progress UX
+# ---------------------------------------------------------------------------
+
+
+def test_no_grade_skips_grade_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--no-grade`` causes ``grade_artifacts`` to be NEVER invoked.
+
+    Traces DEC-001 of #189: the grade-stage block in ``cmd_generate``
+    is wrapped in ``if not no_grade:`` so the LLM judge is bypassed
+    entirely. ``grade_report`` defaults to ``None`` and flows through
+    to ``render_diff`` (which already accepts ``grading_report=None``
+    per ``diff-renderer.md`` § "Tier classification with
+    no-grading-report degrade").
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--no-grade"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert mocks["grade_artifacts"].call_count == 0, (
+        "grade_artifacts must not be invoked under --no-grade"
+    )
+    # render_diff still ran (the diff stage is never skipped).
+    assert mocks["render_diff"].call_count == 1
+
+
+def test_no_grade_threads_none_grading_report_to_render_diff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Under ``--no-grade``, the ``grading_report`` kwarg passed to
+    ``render_diff`` is ``None`` — the diff renders without a
+    ``flagged`` tier (``diff-renderer.md``: "``flagged`` only fires
+    when ``grading_report is not None``").
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--no-grade"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    render_call = mocks["render_diff"].call_args
+    forwarded_grading_report = render_call.kwargs.get("grading_report")
+    assert forwarded_grading_report is None, (
+        f"expected grading_report=None under --no-grade, got {forwarded_grading_report!r}"
+    )
+
+
+def test_no_grade_progress_renumbers_to_4(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Under ``--no-grade``, every progress line says ``[N/4]`` and
+    no ``[X/5]`` substring appears anywhere on stderr.
+
+    Traces DEC-003 of #189: the orchestrator computes ``total`` once
+    at startup based on ``args.no_grade`` and threads it through every
+    ``emit_progress_entry`` / ``emit_progress_done`` call. Stages
+    safety/draft/prune/diff render as ``[1/4]`` / ``[2/4]`` / ``[3/4]``
+    / ``[4/4]`` — NO ``[X/5] grade: skipped`` line; the pipeline is
+    honestly four stages when grade is skipped.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+    _force_tty(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--no-grade"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    # Every progress line uses the /4 denominator.
+    _expected_prefixes = ("[1/4]", "[2/4]", "[3/4]", "[4/4]")
+    entry_lines = [
+        line for line in captured.err.splitlines() if line.startswith(_expected_prefixes)
+    ]
+    body_lines = [line for line in entry_lines if "done in" not in line]
+    done_lines = [line for line in entry_lines if "done in" in line]
+    assert len(body_lines) == 4, f"expected 4 entry lines under --no-grade, got {body_lines}"
+    assert len(done_lines) == 4, f"expected 4 done lines under --no-grade, got {done_lines}"
+
+    # No [X/5] anywhere — the pipeline must NOT report a stale total.
+    for forbidden in ("[1/5]", "[2/5]", "[3/5]", "[4/5]", "[5/5]"):
+        assert forbidden not in captured.err, (
+            f"--no-grade must not emit {forbidden!r}; stderr={captured.err}"
+        )
+
+    # No "grade:" stage line — entirely suppressed.
+    assert "grade:" not in captured.err
+
+    # Stages in documented order; diff renumbered from 5 → 4.
+    assert "safety:" in body_lines[0]
+    assert "draft:" in body_lines[1]
+    assert "prune:" in body_lines[2]
+    assert "diff:" in body_lines[3]
+
+
+def test_no_grade_exits_zero_on_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--no-grade`` happy path exits 0 with no traceback."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--no-grade"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert "Traceback" not in captured.err
+
+
+def test_no_grade_does_not_load_grade_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Under ``--no-grade``, ``load_grade_config`` is NEVER called.
+
+    The entire grade-stage block (config load + override + cache flip +
+    invocation) is wrapped in ``if not no_grade:``, so a fresh
+    ``GradeConfig`` is never built and ``grade.cache_enabled`` is
+    never read — the cache layer never sees the bypass flag, which is
+    DEC-002's precedence rule ("``--no-grade`` implicitly wins") in
+    structural form.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--no-grade"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert mocks["load_grade_config"].call_count == 0, (
+        "load_grade_config must not be invoked under --no-grade"
+    )
+
+
+def test_no_cache_flips_grade_config_cache_enabled_false(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--no-cache`` flips ``grade_config.cache_enabled=False`` on the
+    config that reaches ``grade_artifacts``.
+
+    Traces DEC-002 of #189. The override applies via
+    ``GradeConfig.model_copy(update=...)`` before the engine is
+    invoked, so both the cache lookup AND the post-grade write are
+    no-ops for this run. Existing cache files on disk are not touched
+    (that requires ``signalforge cache clear --grade``).
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    # Start from a real GradeConfig so ``model_copy`` works (the
+    # MagicMock default would also accept the call, but a real config
+    # lets us assert the type AND the flipped knob.)
+    mocks["load_grade_config"].return_value = GradeConfig()
+
+    code = main(["generate", "model.shop.customers", "--no-cache"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    grade_call = mocks["grade_artifacts"].call_args
+    forwarded_config = grade_call.kwargs["config"]
+    assert isinstance(forwarded_config, GradeConfig)
+    assert forwarded_config.cache_enabled is False
+
+
+def test_no_cache_without_no_grade_still_runs_grade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--no-cache`` alone bypasses cache I/O but the grade stage
+    still runs (the LLM judge is still called)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+    mocks["load_grade_config"].return_value = GradeConfig()
+
+    code = main(["generate", "model.shop.customers", "--no-cache"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert mocks["grade_artifacts"].call_count == 1, (
+        "grade_artifacts must still run under --no-cache alone (only the cache layer is bypassed)"
+    )
+
+
+def test_no_cache_leaves_existing_cache_files_untouched(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--no-cache`` does NOT delete existing cache files.
+
+    Pre-populate the grade-cache directory with a sentinel; run with
+    ``--no-cache``; assert the sentinel still exists post-run. Cache
+    cleanup is a separate operation (``signalforge cache clear
+    --grade``).
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+    mocks["load_grade_config"].return_value = GradeConfig()
+
+    # Pre-populate a sentinel in the conventional cache location.
+    cache_dir = project_dir / ".signalforge" / "grade-cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    sentinel = cache_dir / "0123456789abcdef.json"
+    sentinel.write_text('{"sentinel": true}', encoding="utf-8")
+
+    code = main(["generate", "model.shop.customers", "--no-cache"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert sentinel.exists(), (
+        "--no-cache must not delete existing cache files; use "
+        "`signalforge cache clear --grade` for that"
+    )
+    assert sentinel.read_text(encoding="utf-8") == '{"sentinel": true}'
+
+
+def test_no_grade_implicitly_wins_over_no_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Both flags set → ``--no-grade`` wins (no grade calls → no
+    cache code runs).
+
+    Traces DEC-002 of #189: the precedence is structural, not
+    branched. When ``--no-grade`` is set the entire grade-stage block
+    (including the ``cache_enabled=False`` mutation) is skipped, so
+    ``--no-cache`` becomes a no-op. The cache layer never sees either
+    flag because ``load_grade_config`` is never called.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--no-grade", "--no-cache"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    # No grade calls.
+    assert mocks["grade_artifacts"].call_count == 0
+    # Cache config never even loaded.
+    assert mocks["load_grade_config"].call_count == 0
+
+
+def test_no_grade_combines_with_write_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--no-grade`` combines cleanly with ``--write`` — the diff
+    still renders + writes schema.yml; grade is just skipped."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--no-grade", "--write"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert mocks["grade_artifacts"].call_count == 0
+    assert mocks["render_diff"].call_count == 1
+    render_call = mocks["render_diff"].call_args
+    # --write passes a non-None output_path.
+    assert render_call.kwargs.get("output_path") is not None
+
+
+def test_generate_help_text_lists_no_grade_and_no_cache_flags(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``signalforge generate --help`` names both flags. Surface 1 of
+    the multi-surface parity contract for US-007 of #189."""
+    code = main(["generate", "--help"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "--no-grade" in captured.out
+    assert "--no-cache" in captured.out

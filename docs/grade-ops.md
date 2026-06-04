@@ -128,6 +128,7 @@ grade:
   min_pass_rate: 0.7              # Aggregate threshold: fraction of passed criteria
   min_mean_score: 0.5             # Aggregate threshold: mean score across criteria
   fail_on_below_threshold: false  # opt-in hard-fail; default report-only
+  cache_enabled: true             # Per-pair grade cache; set false to bypass (or pass --no-cache)
   # rubric:                       # Optional override; omitted = use DEFAULT_RUBRIC
   #   - id: clarity
   #     criterion: "..."
@@ -169,11 +170,160 @@ Field-by-field:
 - **`min_pass_rate`** — Floor on the fraction of `(artefact, criterion)` pairs that scored `passed=True` for the rubric to count as passed overall. Default `0.7`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_pass_rate`.
 - **`min_mean_score`** — Floor on the mean numeric score across non-null verdicts. Default `0.5`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_mean_score`.
 - **`fail_on_below_threshold`** — Hard-fail switch for the aggregate threshold check. Default `false` — v0.1 ships report-only posture by default. When `true`, `grade_artifacts(...)` raises `GradeBelowThresholdError` once the aggregate `GradingReport.passed` is `False` (`pass_rate < min_pass_rate` and/or `mean_score < min_mean_score`). The raise lands AFTER the sidecar JSON is durably persisted so the operator has a complete `grade.json` for diagnosis. See [Threshold-fail behaviour](#threshold-fail-behaviour) below for the full ordering invariant. Graduated from v0.2 reservation to v0.1 wiring in #9 (US-002).
+- **`cache_enabled`** — Master switch for the per-`(artifact, criterion)` grade cache (issue #189 DEC-016). Default `true` — content-addressed cache lookup + write run on every grade pair. The cache key is a content-hash of the inputs that genuinely determine the verdict (rubric criterion, artefact payload, model + provider + prompt version), so any change that should invalidate a prior verdict invalidates the key by construction — no TTL knob is needed in v0.1. Set `false` to skip BOTH lookup AND write for the run (every pair routes through the live LLM judge call); operators reach for this for debugging, after a manual fixture edit, or during calibration. The CLI's `signalforge generate --no-cache` flag flips this knob on a per-run copy (the on-disk `signalforge.yml` is unaffected). `extra="forbid"` makes a typo like `cache_enable:` (missing the trailing `d`) fail loud at config-load, rather than silently leaving the cache enabled.
 - **`rubric`** — Optional rubric override. `None` (the default) means the orchestrator falls back to `DEFAULT_RUBRIC`. When provided, must be a non-empty list of mappings, each with non-empty `id` and `criterion` strings; duplicate `id` values raise `GradeRubricError`. Override is **wholesale**, not merge.
 
 Unknown keys under `grade:` raise `GradeConfigError` (Pydantic
 `extra="forbid"`). Typos like `mdoel:` or `total_budget_secnds:` fail
 loud at load time rather than silently no-op'ing.
+
+## Grade cache
+
+The grade layer ships a **persistent, content-addressed cache** for
+per-`(artefact, criterion)` verdicts (issue #189). On a cache hit
+the LLM judge is **not** called — the prior verdict is reconstructed
+into a `GradingResult` and audit-logged with `cache_hit: true` on
+the corresponding `GradeEvent`. Across a typical multi-iteration
+session (drafter / prune tuning on the same model), cache hits
+amortise the grader's wall-clock and cost to near-zero on
+re-evaluated pairs.
+
+### Cache layout
+
+```text
+<project_dir>/.signalforge/grade-cache/<cache_key>.json
+```
+
+where `<cache_key>` is a 16-hex `blake2b-8` digest. Single-level
+flat directory; one file per `(artefact, criterion)` verdict. File
+mode `0o600` (owner-only read/write) at `os.open` time — mirrors
+every other fail-closed writer in the project. Cache files may
+quote LLM-emitted `evidence` / `reasoning` text, so the mode is
+load-bearing for PII posture.
+
+A `CacheRecord` JSON document (the on-disk shape) duplicates the
+fields a reader needs without wrapping a nested `GradingResult` —
+operator UX favours `jq '.score' cache.json` over `jq
+'.result.score'`. See `signalforge.grade.cache.CacheRecord` for the
+exact field set (DEC-011 of #189).
+
+### Five-part cache key recipe
+
+The cache key is invalidated by any change to the five inputs that
+genuinely determine the verdict:
+
+```python
+cache_key = blake2b(
+    criterion_prompt_hash    + "\x00" +   # changes when criterion text changes
+    artifact_text_hash       + "\x00" +   # changes when artefact text changes
+    provider                 + "\x00" +   # changes on provider swap (anthropic / openai / gemini)
+    model                    + "\x00" +   # changes on model SKU swap (claude-sonnet-4-6 -> claude-haiku-4-5, etc.)
+    prompt_version_template,              # changes when system prompt / rubric list / envelope tags change
+    digest_size=8,
+).hexdigest()  # 16 hex chars
+```
+
+NUL-byte separators prevent id/text concatenation collisions
+(mirrors the existing `criterion_prompt_hash` recipe). Five clean
+invalidation axes — no implicit TTL, no time-based eviction. If a
+change should invalidate a prior verdict, it lives in the key; if
+it does not live in the key, it should not invalidate the verdict.
+
+(Full recipe + every contributing source: DEC-004 of #189.)
+
+### `grade.cache_enabled` knob
+
+`signalforge.yml` carries one knob:
+
+```yaml
+grade:
+  cache_enabled: true   # default; set false to bypass cache entirely
+```
+
+Setting `false` skips BOTH lookup AND write for every grade pair —
+each one routes through the live LLM judge call. The on-disk cache
+files are **not** deleted by flipping the knob; an operator wanting
+to wipe them runs `signalforge cache clear --grade` (see
+[`docs/cli-ops.md`](cli-ops.md#clear-the-grade-cache-signalforge-cache-clear-grade)).
+
+The CLI's `signalforge generate --no-cache` flag flips this knob on
+a per-run copy of the resolved config — the on-disk
+`signalforge.yml` is unaffected and subsequent runs continue to
+honour whatever value is committed there. Reach for `--no-cache`
+for one-off debugging / calibration runs; reach for
+`cache_enabled: false` in `signalforge.yml` when an operator
+explicitly wants every run on a project to bypass cache (rare; the
+content-addressed key normally makes this unnecessary).
+
+`extra="forbid"` makes typos like `cache_enable:` (missing the `d`)
+fail loud at config-load — silent no-op would defeat the gate.
+
+### Degraded results never land in the cache
+
+Per the conservative score-and-degrade taxonomy (DEC-007 of #189,
+mirrors `grade-layer.md` § DEC-015), a degraded verdict
+(`score=None` — LLM retry exhausted, parser failure, envelope-breach,
+budget exceeded) is **never** written to the cache. Caching that
+record would silently replay the failure forever, preventing
+recovery from a transient LLM / network blip. Cache writes are gated
+on `result.score is not None`.
+
+Cache reads never construct a degraded `GradingResult` either — a
+malformed on-disk cache file (e.g. a `score: null` injected by an
+attacker or a corrupted record) routes to a cache miss + INFO log
+(`grade cache validation failed`, `grade cache malformed json`,
+`grade cache read failed`, or `grade cache key mismatch` depending
+on the failure mode). The live LLM judge runs and re-populates the
+entry. INFO (not WARNING) because cache miss is a normal
+non-actionable outcome — `--quiet` raises the floor to WARNING and
+correctly suppresses these.
+
+A key-recomputation gate (added by #189 QG Pass 1 Finding 1)
+defends against cache poisoning: `lookup_cache` recomputes the
+5-part cache key from the loaded record's stored hashes and
+compares to the lookup key. On mismatch (a hostile or corrupt file
+whose body lies about its forensic hashes), the read silently
+misses with `grade cache key mismatch` INFO + a `key` /
+`recomputed` payload, so the next run writes a canonical record on
+top.
+
+### `signalforge cache clear --grade` subcommand
+
+Removes `<project_dir>/.signalforge/grade-cache/` recursively.
+Symlink-hardened, idempotent on a missing directory, exits 0 on
+success. Documented in
+[`docs/cli-ops.md`](cli-ops.md#clear-the-grade-cache-signalforge-cache-clear-grade)
+with the full operator-facing behaviour, exit codes, and rationale
+for the absence of a `--confirm` flag. (DEC-015 of #189.)
+
+Future siblings (`cache clear --drafter`, `cache stats`, `cache
+list`) are out of scope for #189; the nested-subcommand shape
+reserves namespace for them.
+
+### When to expect cache hits
+
+- **Same model, same rubric, same provider / SKU, same prompt
+  version.** Re-running `signalforge generate <model>` after a
+  drafter / prune tuning iteration that left the artefact set
+  byte-identical hits cache on every pair.
+- **Drafter regenerated an artefact whose text didn't actually
+  change.** The artefact-text hash captures the actual byte content
+  of `extract_artifact_text(candidate, artifact_id)` — a drafter
+  retry that produces identical text hits cache.
+
+### When to expect cache misses
+
+- **Rubric criterion text changed** (`criterion_prompt_hash` flips).
+- **System prompt / rubric list / envelope tags changed**
+  (`prompt_version_template` flips — bumped in lockstep when the
+  grade `_SYSTEM_PROMPT` or any `DEFAULT_RUBRIC` criterion text
+  changes; see [Reproducibility hash fields](#reproducibility-hash-fields)).
+- **Provider or model swapped.** `provider: openai` ↔ `provider:
+  anthropic`; `model: claude-sonnet-4-6` ↔ `model:
+  claude-haiku-4-5`. Each combination scopes its own cache entries.
+- **Artefact text actually changed.** Drafter rewrote a column
+  description, prune dropped a test (changing which tests reach
+  grade), etc.
 
 ## Threshold-fail behaviour
 
@@ -535,7 +685,7 @@ validates against the fixture. Adding a field to `GradeEvent` /
 `GradingReport` / `GradingResult` without updating the strict mirror
 OR the fixture breaks the test loudly. Don't bypass.
 
-## Reproducibility / hash fields
+## Reproducibility hash fields
 
 Three hash fields land on every `GradeEvent`, all 16-hex-char `blake2b`
 with `digest_size=8`. The cross-stage hash domain is consistent — a

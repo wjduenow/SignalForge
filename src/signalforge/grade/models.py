@@ -143,6 +143,21 @@ class GradingResult(BaseModel):
             f"score={self.score!r}, passed={self.passed!r})"
         )
 
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        """Pydantic v2 structured-repr hook (PR #196 CodeRabbit).
+
+        Mirrors the field set in :meth:`__repr__` so ``rich.print()``,
+        ``devtools.pretty()``, and ``pprint`` redact ``evidence`` /
+        ``reasoning`` too — see memory
+        ``pydantic-v2-repr-args-redaction-required``.
+        """
+        return [
+            ("artifact_id", self.artifact_id),
+            ("criterion_id", self.criterion_id),
+            ("score", self.score),
+            ("passed", self.passed),
+        ]
+
 
 class GradingReport(BaseModel):
     """Sidecar shape — the grader's public output for one model.
@@ -256,6 +271,27 @@ class GradingReport(BaseModel):
             f"duration_seconds={self.duration_seconds!r})"
         )
 
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        """Pydantic v2 structured-repr hook (PR #196 CodeRabbit).
+
+        Mirrors the field set in :meth:`__repr__` so structured-repr
+        surfaces (``rich.print``, ``devtools.pretty``) don't iterate
+        through the ``results`` tuple and surface every nested
+        :class:`GradingResult`'s ``evidence`` / ``reasoning``. The
+        nested ``GradingResult.__repr_args__`` ALSO redacts, so this
+        is belt-and-braces — see memory
+        ``pydantic-v2-repr-args-redaction-required``.
+        """
+        return [
+            ("model_unique_id", self.model_unique_id),
+            ("results_count", len(self.results)),
+            ("pass_rate", self.pass_rate),
+            ("mean_score", self.mean_score),
+            ("passed", self.passed),
+            ("aggregate_complete", self.aggregate_complete),
+            ("duration_seconds", self.duration_seconds),
+        ]
+
 
 class GradeEvent(BaseModel):
     """One JSONL audit record per LLM-judge call.
@@ -289,7 +325,7 @@ class GradeEvent(BaseModel):
 
     model_config = _BASE_CONFIG
 
-    audit_schema_version: Literal[1] = 1
+    audit_schema_version: int = 2
     signalforge_version: str
     run_id: str
     timestamp: datetime
@@ -304,6 +340,7 @@ class GradeEvent(BaseModel):
     prompt_version_template: str
     criterion_prompt_hash: str
     response_text_hash: str
+    cache_hit: bool = False
     model: str
     input_tokens: int
     output_tokens: int
@@ -332,6 +369,45 @@ class GradeEvent(BaseModel):
         if value < 0.0 or value > 1.0:
             raise ValueError(f"score must be in [0.0, 1.0] or None; got {value!r}")
         return value
+
+    def __repr__(self) -> str:
+        """Minimal repr — omits ``evidence`` and ``reasoning``.
+
+        Mirrors :meth:`GradingResult.__repr__` (DEC-022 of issue #6) at
+        the audit-record boundary. ``cache_hit`` is a non-sensitive
+        bool — it appears in the compact repr so operators reading log
+        lines can distinguish live-grade records from cache-rehydration
+        records at a glance. The full ``evidence`` / ``reasoning`` body
+        remains accessible via :meth:`pydantic.BaseModel.model_dump`.
+        """
+        return (
+            f"GradeEvent(run_id={self.run_id!r}, "
+            f"artifact_id={self.artifact_id!r}, "
+            f"criterion_id={self.criterion_id!r}, "
+            f"score={self.score!r}, passed={self.passed!r}, "
+            f"cache_hit={self.cache_hit!r})"
+        )
+
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        """Pydantic v2 structured-repr hook (PR #196 Copilot).
+
+        ``rich.print()``, ``devtools.pretty()``, and (sometimes)
+        ``pprint`` use ``__repr_args__`` instead of ``__repr__`` to
+        compose their structured output. Without overriding this,
+        ``evidence`` and ``reasoning`` would leak through those
+        surfaces even though our :meth:`__repr__` redacts them.
+        Mirrors the same field set as :meth:`__repr__` so PII-bearing
+        LLM-emitted prose stays redacted across every repr path.
+        See memory ``pydantic-v2-repr-args-redaction-required``.
+        """
+        return [
+            ("run_id", self.run_id),
+            ("artifact_id", self.artifact_id),
+            ("criterion_id", self.criterion_id),
+            ("score", self.score),
+            ("passed", self.passed),
+            ("cache_hit", self.cache_hit),
+        ]
 
 
 __all__ = (

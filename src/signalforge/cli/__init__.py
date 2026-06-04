@@ -18,6 +18,7 @@ import argparse
 import sys
 
 import signalforge
+from signalforge.cli import cache as cache_cmd
 from signalforge.cli import generate as generate_cmd
 from signalforge.cli import init_demo as init_demo_cmd
 from signalforge.cli import install_skill as install_skill_cmd
@@ -85,6 +86,7 @@ def _build_parser() -> argparse.ArgumentParser:
     init_demo_cmd.add_parser(subparsers)
     install_skill_cmd.add_parser(subparsers)
     prune_existing_cmd.add_parser(subparsers)
+    cache_cmd.add_parser(subparsers)
     return parser
 
 

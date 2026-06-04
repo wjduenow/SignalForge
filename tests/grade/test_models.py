@@ -10,7 +10,9 @@ Covers the three read-back-shaped Pydantic models:
   ``mean_score``, ``aggregate_complete``, ``passed``), minimal
   ``__repr__``, ``passed`` requiring BOTH thresholds met.
 * :class:`GradeEvent` — score-range validation, audit_schema_version
-  pinned to 1.
+  typed ``int`` (DEC-008 of #189) with default ``2`` (v2 schema, bumped
+  by US-002 of #189 to carry the ``cache_hit`` field); the v1 strict
+  drift mirror still pins ``Literal[1]`` for the v1 fixture replay anchor.
 
 Every test must be capable of failing if its target is broken
 (:file:`.claude/rules/testing-signal.md`); no ``assert True``-shaped
@@ -71,6 +73,7 @@ def _make_event(
     score: float | None = 0.8,
     passed: bool = True,
     response_text_hash: str = "5555666677778888",
+    cache_hit: bool = False,
 ) -> GradeEvent:
     """Construct a :class:`GradeEvent` with sensible defaults."""
     return GradeEvent(
@@ -88,6 +91,7 @@ def _make_event(
         prompt_version_template="fedcba9876543210",
         criterion_prompt_hash="1111222233334444",
         response_text_hash=response_text_hash,
+        cache_hit=cache_hit,
         model="claude-sonnet-4-6",
         input_tokens=1820,
         output_tokens=140,
@@ -356,13 +360,62 @@ def test_grade_event_score_none_accepted_degraded_path() -> None:
     assert event.response_text_hash == ""
 
 
-def test_grade_event_audit_schema_version_locked_to_one() -> None:
-    """``audit_schema_version`` is ``Literal[1]`` and defaults to 1."""
+def test_grade_event_audit_schema_version_defaults_to_two() -> None:
+    """``audit_schema_version`` defaults to ``2`` on production model.
+
+    Per DEC-008 / DEC-009 of #189: the default bumped 1 → 2 in lockstep
+    with the new ``cache_hit`` field. The field stays typed ``int`` so
+    older v1 records still round-trip (see
+    :func:`tests.grade.test_drift_detector.test_v1_fixture_still_validates_against_production_grade_event`).
+    """
     event = _make_event()
-    assert event.audit_schema_version == 1
-    # Constructing with a different value should fail validation.
+    assert event.audit_schema_version == 2
+
+
+def test_grade_event_audit_schema_version_is_int_typed() -> None:
+    """Production ``GradeEvent.audit_schema_version`` is typed ``int``.
+
+    Per DEC-008 of #189: the field is widened from ``Literal[1]`` to ``int``
+    so older audit JSONLs round-trip across version bumps (mirrors
+    ``safety-layer.md`` § "AuditEvent reproducibility fields" — the
+    ``audit_schema_version`` field stays ``int``, never ``Literal``).
+    Constructing with any positive ``int`` (e.g. ``99``) must succeed
+    without ``ValidationError``.
+    """
+    event = GradeEvent(
+        audit_schema_version=99,
+        signalforge_version="0.1.0.dev0",
+        run_id="a1b2c3d4e5f6478890aabbccddeeff00",
+        timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=UTC),
+        model_unique_id="model.shop.dim_customers",
+        artifact_id="column.email.description",
+        criterion_id="clarity",
+        score=0.8,
+        passed=True,
+        rubric_hash="0123456789abcdef",
+        prompt_version_template="fedcba9876543210",
+        criterion_prompt_hash="1111222233334444",
+        response_text_hash="5555666677778888",
+        model="claude-sonnet-4-6",
+        input_tokens=1820,
+        output_tokens=140,
+    )
+    assert event.audit_schema_version == 99
+
+
+def test_strict_grade_event_still_rejects_non_literal_one() -> None:
+    """``StrictGradeEvent`` mirror keeps ``Literal[1]`` to pin the v1 fixture.
+
+    Per DEC-008 of #189: while production widens to ``int`` for replay
+    forward-compat, the strict drift-detector mirror MUST stay
+    ``Literal[1]`` so the committed v1 fixture's shape is still pinned.
+    A future v2 bump grows a sibling ``StrictGradeEventV2`` mirror; this
+    one continues to guard the v1 line.
+    """
+    from tests.grade.test_drift_detector import StrictGradeEvent
+
     with pytest.raises(ValidationError):
-        GradeEvent(
+        StrictGradeEvent(
             audit_schema_version=2,  # type: ignore[arg-type]
             signalforge_version="0.1.0.dev0",
             run_id="a1b2c3d4e5f6478890aabbccddeeff00",
@@ -400,6 +453,88 @@ def test_grading_report_grade_schema_version_locked_to_one() -> None:
         )
 
 
+# --- GradeEvent.cache_hit (DEC-009, DEC-010 of #189) -----------------------
+
+
+def test_grade_event_default_cache_hit_is_false() -> None:
+    """``GradeEvent.cache_hit`` defaults to ``False`` (DEC-009 of #189).
+
+    A v1 audit record (pre-#189) loaded via ``extra="ignore"`` lands
+    with ``cache_hit = False``, which is the correct semantic value:
+    the record predates cache support, so it cannot have been a
+    cache-hit. New live-grade records (US-008 follow-on) construct via
+    ``_build_grade_event(...)`` with the default; rehydration call
+    sites pass ``cache_hit=True`` explicitly.
+    """
+    event = _make_event()
+    assert event.cache_hit is False
+
+
+def test_grade_event_cache_hit_true_round_trips_through_jsonl() -> None:
+    """A ``cache_hit=True`` event survives a ``model_dump_json`` →
+    ``model_validate_json`` round-trip losslessly.
+
+    The audit writer (:func:`signalforge.grade.audit.write_grade_event`)
+    serialises via ``model_dump_json``; a JSONL replay reconstructs the
+    event via ``model_validate_json``. The new field must travel
+    cleanly across that boundary so cost-rollup / audit-replay tools
+    distinguish cache-hit records from live-grade records.
+    """
+    event = _make_event(cache_hit=True)
+    serialised = event.model_dump_json(by_alias=True)
+    reparsed = GradeEvent.model_validate_json(serialised)
+    assert reparsed.cache_hit is True
+    # Round-trip preserves every other reproducibility field too.
+    assert reparsed.audit_schema_version == 2
+    assert reparsed.artifact_id == event.artifact_id
+    assert reparsed.criterion_id == event.criterion_id
+
+
+def test_grade_event_repr_keeps_cache_hit_visible() -> None:
+    """The custom :meth:`GradeEvent.__repr__` exposes ``cache_hit``.
+
+    Per the bead spec: ``cache_hit`` is a non-sensitive ``bool`` — it
+    should appear in the compact repr so operators reading log lines
+    can distinguish live-grade records from cache-rehydration records
+    at a glance. ``evidence`` / ``reasoning`` (potentially PII-bearing)
+    stay excluded.
+    """
+    sensitive_evidence = "user_email='alice@example.com' was sampled"
+    sensitive_reasoning = "Quoted PII content from the warehouse sample"
+    event = GradeEvent(
+        signalforge_version="0.1.0.dev0",
+        run_id="a1b2c3d4e5f6478890aabbccddeeff00",
+        timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=UTC),
+        model_unique_id="model.shop.dim_customers",
+        artifact_id="column.email.description",
+        criterion_id="clarity",
+        score=0.8,
+        passed=True,
+        evidence=sensitive_evidence,
+        reasoning=sensitive_reasoning,
+        rubric_hash="0123456789abcdef",
+        prompt_version_template="fedcba9876543210",
+        criterion_prompt_hash="1111222233334444",
+        response_text_hash="5555666677778888",
+        cache_hit=True,
+        model="claude-sonnet-4-6",
+        input_tokens=0,
+        output_tokens=0,
+    )
+    rendered = repr(event)
+    # cache_hit IS shown (non-sensitive bool).
+    assert "cache_hit=True" in rendered
+    # Sensitive fields are NOT shown.
+    assert "alice@example.com" not in rendered
+    assert "PII content" not in rendered
+    assert "evidence=" not in rendered
+    assert "reasoning=" not in rendered
+    # Identity + verdict are shown.
+    assert "GradeEvent(" in rendered
+    assert "column.email.description" in rendered
+    assert "clarity" in rendered
+
+
 # --- frozen + transitive immutability --------------------------------------
 
 
@@ -422,3 +557,85 @@ def test_grade_event_is_frozen() -> None:
     event = _make_event()
     with pytest.raises(ValidationError):
         event.score = 0.1  # type: ignore[misc]
+
+
+def test_grade_event_repr_args_redacts_evidence_and_reasoning() -> None:
+    """PR #196 Copilot — GradeEvent.__repr_args__ redacts PII-bearing
+    fields the same way __repr__ does. Pydantic v2 structured-repr
+    surfaces (rich.print, devtools.pretty) use __repr_args__ instead
+    of __repr__; without this redaction, evidence + reasoning would
+    leak through those paths."""
+    # Construct directly so we can populate evidence / reasoning the
+    # helper deliberately omits.
+    event = GradeEvent(
+        signalforge_version="0.1.0.dev0",
+        run_id="a1b2c3d4e5f6478890aabbccddeeff00",
+        timestamp=datetime(2026, 5, 1, 17, 42, 13, tzinfo=UTC),
+        model_unique_id="model.shop.dim_customers",
+        artifact_id="column.email.description",
+        criterion_id="clarity",
+        score=0.8,
+        passed=True,
+        evidence="PII-bearing evidence text — DO NOT LEAK",
+        reasoning="PII-bearing reasoning text — DO NOT LEAK",
+        rubric_hash="0123456789abcdef",
+        prompt_version_template="fedcba9876543210",
+        criterion_prompt_hash="1111222233334444",
+        # Non-PAN-shape sentinel: a digits-only 16-char value trips the
+        # credit-card PAN scanner (PR #196 CodeRabbit OpenGrep). Mixed
+        # alphanumeric hex keeps the test intent without the false
+        # positive. The pre-existing ``_make_event`` helper retains the
+        # digits-only form for fixture parity with the v1 JSONL.
+        response_text_hash="55a5c6667d7788ef",
+        model="claude-sonnet-4-6",
+        input_tokens=1820,
+        output_tokens=140,
+    )
+    args = event.__repr_args__()
+    arg_names = {name for name, _ in args}
+    assert "evidence" not in arg_names
+    assert "reasoning" not in arg_names
+    # Spot-check the visible field set matches __repr__'s.
+    assert "run_id" in arg_names
+    assert "artifact_id" in arg_names
+    assert "criterion_id" in arg_names
+    assert "score" in arg_names
+    assert "passed" in arg_names
+    assert "cache_hit" in arg_names
+    # Belt-and-braces: any string-coerced output of args must not
+    # leak the PII strings either.
+    rendered = repr(args)
+    assert "DO NOT LEAK" not in rendered
+
+
+def test_grading_result_repr_args_redacts_evidence_and_reasoning() -> None:
+    """PR #196 CodeRabbit — GradingResult.__repr_args__ also redacts
+    so rich.print / devtools.pretty / pprint can't surface PII via the
+    structured-repr surface (sibling fix to GradeEvent.__repr_args__)."""
+    result = _make_result(
+        evidence="PII-bearing evidence — DO NOT LEAK",
+        reasoning="PII-bearing reasoning — DO NOT LEAK",
+    )
+    args = result.__repr_args__()
+    arg_names = {name for name, _ in args}
+    assert "evidence" not in arg_names
+    assert "reasoning" not in arg_names
+    assert "DO NOT LEAK" not in repr(args)
+
+
+def test_grading_report_repr_args_redacts_nested_result_payload() -> None:
+    """PR #196 CodeRabbit — GradingReport.__repr_args__ shows only
+    aggregate / identity fields, NOT the full ``results`` tuple. Even
+    though the nested GradingResult.__repr_args__ also redacts,
+    structured-repr surfaces that iterate the tuple would still pay
+    the iteration cost; the report-level summary is the cleaner gate."""
+    leaky_result = _make_result(
+        evidence="PII-bearing evidence — DO NOT LEAK",
+        reasoning="PII-bearing reasoning — DO NOT LEAK",
+    )
+    report = _make_report(results=(leaky_result,))
+    args = report.__repr_args__()
+    arg_names = {name for name, _ in args}
+    assert "results" not in arg_names
+    assert "results_count" in arg_names
+    assert "DO NOT LEAK" not in repr(args)
