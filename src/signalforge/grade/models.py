@@ -143,6 +143,21 @@ class GradingResult(BaseModel):
             f"score={self.score!r}, passed={self.passed!r})"
         )
 
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        """Pydantic v2 structured-repr hook (PR #196 CodeRabbit).
+
+        Mirrors the field set in :meth:`__repr__` so ``rich.print()``,
+        ``devtools.pretty()``, and ``pprint`` redact ``evidence`` /
+        ``reasoning`` too — see memory
+        ``pydantic-v2-repr-args-redaction-required``.
+        """
+        return [
+            ("artifact_id", self.artifact_id),
+            ("criterion_id", self.criterion_id),
+            ("score", self.score),
+            ("passed", self.passed),
+        ]
+
 
 class GradingReport(BaseModel):
     """Sidecar shape — the grader's public output for one model.
@@ -255,6 +270,27 @@ class GradingReport(BaseModel):
             f"aggregate_complete={self.aggregate_complete!r}, "
             f"duration_seconds={self.duration_seconds!r})"
         )
+
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        """Pydantic v2 structured-repr hook (PR #196 CodeRabbit).
+
+        Mirrors the field set in :meth:`__repr__` so structured-repr
+        surfaces (``rich.print``, ``devtools.pretty``) don't iterate
+        through the ``results`` tuple and surface every nested
+        :class:`GradingResult`'s ``evidence`` / ``reasoning``. The
+        nested ``GradingResult.__repr_args__`` ALSO redacts, so this
+        is belt-and-braces — see memory
+        ``pydantic-v2-repr-args-redaction-required``.
+        """
+        return [
+            ("model_unique_id", self.model_unique_id),
+            ("results_count", len(self.results)),
+            ("pass_rate", self.pass_rate),
+            ("mean_score", self.mean_score),
+            ("passed", self.passed),
+            ("aggregate_complete", self.aggregate_complete),
+            ("duration_seconds", self.duration_seconds),
+        ]
 
 
 class GradeEvent(BaseModel):

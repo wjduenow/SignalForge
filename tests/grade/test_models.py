@@ -581,7 +581,12 @@ def test_grade_event_repr_args_redacts_evidence_and_reasoning() -> None:
         rubric_hash="0123456789abcdef",
         prompt_version_template="fedcba9876543210",
         criterion_prompt_hash="1111222233334444",
-        response_text_hash="5555666677778888",
+        # Non-PAN-shape sentinel: digits-only `5555666677778888` triggers
+        # a credit-card PAN scanner (PR #196 CodeRabbit OpenGrep). Mixed
+        # alphanumeric hex keeps the test intent without the false
+        # positive. The pre-existing ``_make_event`` helper still uses
+        # the digits-only form for fixture parity with the v1 JSONL.
+        response_text_hash="55a5c6667d7788ef",
         model="claude-sonnet-4-6",
         input_tokens=1820,
         output_tokens=140,
@@ -601,3 +606,36 @@ def test_grade_event_repr_args_redacts_evidence_and_reasoning() -> None:
     # leak the PII strings either.
     rendered = repr(args)
     assert "DO NOT LEAK" not in rendered
+
+
+def test_grading_result_repr_args_redacts_evidence_and_reasoning() -> None:
+    """PR #196 CodeRabbit — GradingResult.__repr_args__ also redacts
+    so rich.print / devtools.pretty / pprint can't surface PII via the
+    structured-repr surface (sibling fix to GradeEvent.__repr_args__)."""
+    result = _make_result(
+        evidence="PII-bearing evidence — DO NOT LEAK",
+        reasoning="PII-bearing reasoning — DO NOT LEAK",
+    )
+    args = result.__repr_args__()
+    arg_names = {name for name, _ in args}
+    assert "evidence" not in arg_names
+    assert "reasoning" not in arg_names
+    assert "DO NOT LEAK" not in repr(args)
+
+
+def test_grading_report_repr_args_redacts_nested_result_payload() -> None:
+    """PR #196 CodeRabbit — GradingReport.__repr_args__ shows only
+    aggregate / identity fields, NOT the full ``results`` tuple. Even
+    though the nested GradingResult.__repr_args__ also redacts,
+    structured-repr surfaces that iterate the tuple would still pay
+    the iteration cost; the report-level summary is the cleaner gate."""
+    leaky_result = _make_result(
+        evidence="PII-bearing evidence — DO NOT LEAK",
+        reasoning="PII-bearing reasoning — DO NOT LEAK",
+    )
+    report = _make_report(results=(leaky_result,))
+    args = report.__repr_args__()
+    arg_names = {name for name, _ in args}
+    assert "results" not in arg_names
+    assert "results_count" in arg_names
+    assert "DO NOT LEAK" not in repr(args)
