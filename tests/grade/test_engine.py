@@ -49,7 +49,7 @@ from signalforge.grade.errors import (
 )
 from signalforge.grade.models import GradeEvent, GradingReport
 from signalforge.grade.rubric import DEFAULT_RUBRIC, Criterion, Rubric
-from signalforge.llm.errors import LLMRateLimitError
+from signalforge.llm.errors import EstimateUnknownModelError, LLMRateLimitError
 from signalforge.manifest.models import Column, Manifest, Model
 from signalforge.prune.models import PruneResult
 from tests.grade._fake import expect_grade_responses
@@ -2146,6 +2146,46 @@ def test_grade_artifacts_max_grade_cost_usd_ceiling_degrades_remaining(
     assert warns[0]["limit"] == cap
     assert warns[0]["completed_count"] == total_pairs
     assert warns[0]["degraded_count"] == 0
+
+
+def test_grade_artifacts_cost_ceiling_unpriced_model_fails_fast_before_any_call(
+    tmp_path: Path,
+) -> None:
+    """A cost ceiling on a prefix-valid-but-unpriced SKU fails fast at
+    orchestrator entry — BEFORE any (billable) LLM call — rather than aborting
+    mid-run from inside the TaskGroup after paid calls.
+
+    ``GradeConfig._validate_model_provider_compat`` checks only the SKU prefix
+    (``claude-``), so ``claude-opus-4-8`` (absent from ``pricing.PRICES``) is
+    accepted at config-load. With ``max_grade_cost_usd`` set, the engine
+    resolves pricing once up front; an unknown SKU raises
+    ``EstimateUnknownModelError`` before dispatch. The fake client is given NO
+    queued responses: if the engine reached a grade call it would raise a
+    different ("unexpected call") error, so asserting ``EstimateUnknownModelError``
+    proves the failure preceded every LLM call.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()  # deliberately no expectations queued
+
+    config = GradeConfig(
+        model="claude-opus-4-8",  # claude- prefix (valid) but NOT in PRICES
+        max_concurrent_calls=1,
+        max_grade_cost_usd=0.01,
+    )
+
+    with pytest.raises(EstimateUnknownModelError):
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=config,
+            client=fake,
+            project_dir=project_dir,
+        )
 
 
 def test_grade_artifacts_max_grade_tokens_ceiling_degrades_remaining(

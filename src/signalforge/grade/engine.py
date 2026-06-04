@@ -723,6 +723,25 @@ async def _grade_artifacts_async_core(
     max_grade_calls = resolved_config.max_grade_calls
     max_grade_cost_usd = resolved_config.max_grade_cost_usd
     max_grade_tokens = resolved_config.max_grade_tokens
+    # Resolve the cost-ceiling pricing ONCE, up front, before any LLM call
+    # is dispatched. ``GradeConfig._validate_model_provider_compat`` only
+    # checks the SKU *prefix* (``claude-`` / ``gpt-`` / ``gemini-``), NOT
+    # membership in ``pricing.PRICES`` — so a prefix-valid-but-unpriced SKU
+    # (a newer Opus, a typo passing the prefix check) is accepted at
+    # config-load. Looking the price up per-pair inside the ``TaskGroup``
+    # would raise ``EstimateUnknownModelError`` from inside a coroutine —
+    # uncaught by the per-pair ``except`` below — aborting the whole run via
+    # a ``BaseExceptionGroup`` AFTER billable calls + audit writes. Resolving
+    # here fails fast at orchestrator entry (the typed error surfaces cleanly,
+    # CLI tier 2, with its remediation) and the resolved object is reused for
+    # every pair (no redundant per-pair lookup). ``None`` when no cost ceiling
+    # is configured.
+    cost_pricing = None
+    if max_grade_cost_usd is not None:
+        # ``resolved_config.model`` is invariantly concrete post-construction
+        # (#187 US-002); the lookup raises only on an unknown SKU.
+        assert resolved_config.model is not None
+        cost_pricing = _lookup_pricing(resolved_config.model)
     # ``calls_made`` is the near-hard call counter: reserved (incremented)
     # BEFORE the LLM await so it bounds dispatch tightly. ``cost_usd`` and
     # ``tokens`` are soft accumulators updated only AFTER a successful call
@@ -880,18 +899,15 @@ async def _grade_artifacts_async_core(
                     + event.cache_read_input_tokens
                 )
             if max_grade_cost_usd is not None:
-                # ``resolved_config.model`` is invariantly concrete
-                # post-construction (#187 US-002); ``lookup`` raises only on
-                # an unknown SKU, which a configured cost ceiling implies
-                # the operator wants priced — fail loud rather than silently
-                # under-count.
-                assert resolved_config.model is not None
-                pricing = _lookup_pricing(resolved_config.model)
+                # ``cost_pricing`` was resolved once up front (an unpriced SKU
+                # already failed fast at orchestrator entry), so reuse it here
+                # rather than looking up per pair.
+                assert cost_pricing is not None
                 accumulators["cost_usd"] += (
-                    event.input_tokens * pricing.input_per_mtok
-                    + event.output_tokens * pricing.output_per_mtok
-                    + event.cache_creation_input_tokens * pricing.cache_write_5m_per_mtok
-                    + event.cache_read_input_tokens * pricing.cache_read_per_mtok
+                    event.input_tokens * cost_pricing.input_per_mtok
+                    + event.output_tokens * cost_pricing.output_per_mtok
+                    + event.cache_creation_input_tokens * cost_pricing.cache_write_5m_per_mtok
+                    + event.cache_read_input_tokens * cost_pricing.cache_read_per_mtok
                 ) / 1_000_000
 
             # Audit-write per pair (DEC-006 fail-closed; DEC-017
