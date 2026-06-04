@@ -266,9 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--model",
-        default=os.environ.get(
-            "SF_BENCH_MODEL", "models/reporting/weekly_query_cost.sql"
-        ),
+        default=os.environ.get("SF_BENCH_MODEL", "models/reporting/weekly_query_cost.sql"),
         help="model arg passed to `generate` (file path or unique_id). "
         "Defaults to the 2026-05-30 baseline target.",
     )
@@ -312,10 +310,7 @@ def main(argv: list[str] | None = None) -> int:
             "project root. See docs/research/179-runtime-benchmark.md § Preconditions."
         )
     if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
-        sys.exit(
-            "ERROR: ANTHROPIC_API_KEY not set — `generate` issues real draft + "
-            "grade calls."
-        )
+        sys.exit("ERROR: ANTHROPIC_API_KEY not set — `generate` issues real draft + grade calls.")
     profiles_dir = args.profiles_dir if Path(args.profiles_dir).expanduser().exists() else None
     if args.profiles_dir and profiles_dir is None:
         print(f"  NOTE: --profiles-dir {args.profiles_dir} does not exist; omitting it")
