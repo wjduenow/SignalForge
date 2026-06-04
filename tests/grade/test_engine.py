@@ -505,6 +505,15 @@ def test_grade_artifacts_budget_exceeded_marks_remaining_pairs_score_none(
     assert all(r.score is None for r in report.results)
     assert all(r.passed is False for r in report.results)
     assert report.aggregate_complete is False
+    # DEC-009: the wall-clock degrade reason embeds the EFFECTIVE budget, not
+    # the raw config field. The tiny-budget config sets total_budget_seconds=1,
+    # which caps effective = min(scaled, 1) = 1, so the locked string reads
+    # "(1s)". Pin it verbatim — this is the one DEC-009 reason string the other
+    # tests don't `==`-pin, so a wording drift (or a regression that reverts to
+    # interpolating the raw total instead of effective) would otherwise slip.
+    assert all(
+        r.reasoning == "grade budget exceeded (1s) before evaluation" for r in report.results
+    )
 
 
 def test_grade_artifacts_budget_exceeded_aggregate_complete_is_false(

@@ -575,6 +575,24 @@ def test_grade_config_max_grade_tokens_zero_rejected() -> None:
         GradeConfig(max_grade_tokens=0)
 
 
+def test_grade_config_optional_positive_fields_reject_negative() -> None:
+    """#198 DEC-001/002: the optional-positive validator rejects a present
+    NEGATIVE value (not just zero) for every field it guards. Zero-rejection
+    alone would still pass if a future refactor slipped from ``<= 0`` to
+    ``== 0``/``!= 0`` while letting negatives through; pin negatives too."""
+    from pydantic import ValidationError
+
+    for kwargs in (
+        {"total_budget_seconds": -1},
+        {"budget_base_seconds": -1},
+        {"max_grade_calls": -1},
+        {"max_grade_cost_usd": -0.01},
+        {"max_grade_tokens": -1},
+    ):
+        with pytest.raises(ValidationError):
+            GradeConfig(**kwargs)  # pyright: ignore[reportArgumentType]
+
+
 def test_grade_config_soft_ceilings_accept_none() -> None:
     """#198 DEC-002: all three opt-in soft ceilings accept ``None`` (off) —
     the explicit-None path mirrors the default."""
@@ -770,6 +788,15 @@ def test_load_grade_config_doc_example_round_trips(tmp_path: Path) -> None:
     assert config.min_pass_rate == 0.7
     assert config.min_mean_score == 0.5
     assert config.fail_on_below_threshold is False
+    # #198: the fixture carries the two always-on scaled-budget terms; pin
+    # fixture<->loader parity explicitly (a fixture typo that happened to match
+    # another valid key would otherwise pass via the defaults test alone). The
+    # three opt-in ceilings are commented out in the fixture, so they load None.
+    assert config.budget_base_seconds == 60
+    assert config.budget_per_pair_seconds == 20.0
+    assert config.max_grade_calls is None
+    assert config.max_grade_cost_usd is None
+    assert config.max_grade_tokens is None
 
 
 def test_load_grade_config_full_well_formed_block(tmp_path: Path) -> None:
