@@ -93,7 +93,7 @@ on a `↳ Remediation:` line by `__str__`.
 - **`GradeConfigError`** — `signalforge.yml` `grade:` block failed parse or schema validation.
 - **`GradeRubricError`** — Rubric YAML structurally invalid (duplicate `id`, empty rubric, malformed criterion entry).
 - **`GradeLLMError`** — One-level adapter wrapping `signalforge.llm.LLMError`. The original error is preserved on `__cause__` and exposed via the `cause` attribute.
-- **`GradeBudgetExceededError`** — `total_budget_seconds` tripped before any criterion was graded (a hard "the run did nothing" failure). A partial run completes normally with a `GradingReport` whose `aggregate_complete` flag is `False`.
+- **`GradeBudgetExceededError`** — The effective wall-clock budget (the scaled formula, optionally capped by `total_budget_seconds`) tripped before any criterion was graded (a hard "the run did nothing" failure). A partial run completes normally with a `GradingReport` whose `aggregate_complete` flag is `False`.
 - **`GradePromptEnvelopeBreachError`** — Artefact payload contained the literal `</ARTIFACT>` close tag. Refuses to render rather than ship a degraded envelope. Mirrors the drafter's `PromptEnvelopeBreachError` (#5 DEC-007).
 - **`GradeOutputError`** — LLM-judge response failed parse or anchor-contract validation. Carries `violation_type: GradeOutputViolationType`.
 - **`GradeAuditWriteError`** — Fail-closed audit-write failure (`OSError` / `PermissionError` / encoding / `fsync` / symlink containment). Aborts the run; original cause exposed via `.cause` and `__cause__`.
@@ -123,7 +123,12 @@ grade:
   max_retries_429: 3              # Rate-limit retry budget
   max_retries_5xx: 1
   max_retries_conn: 1
-  total_budget_seconds: 300       # Wall-clock budget across the whole run
+  budget_base_seconds: 60         # scaled-budget constant term (#198)
+  budget_per_pair_seconds: 20.0   # scaled-budget per concurrency-wave allowance (#198)
+  # total_budget_seconds: 300     # OPTIONAL absolute hard cap; omit (default None) to use the scaled formula alone, set to cap via min(scaled, this)
+  # max_grade_calls: 500          # opt-in soft ceiling: stop scheduling new pairs after N judge calls (rest degrade)
+  # max_grade_cost_usd: 1.50      # opt-in soft ceiling: stop once accumulated USD meets/exceeds this (rest degrade)
+  # max_grade_tokens: 2000000     # opt-in soft ceiling: stop once total token movement meets/exceeds this (rest degrade)
   max_concurrent_calls: 10        # In-flight LLM calls (range [1, 100]); 1 = v0.1 sequential
   min_pass_rate: 0.7              # Aggregate threshold: fraction of passed criteria
   min_mean_score: 0.5             # Aggregate threshold: mean score across criteria
@@ -165,7 +170,10 @@ Field-by-field:
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
 - **`max_output_tokens`** — Per-criterion judge response cap. Default `1024` (#187 — raised from 256 to substantially reduce truncation risk for a verbose one-line `gemini-2.5-flash` grade JSON; the expected JSON response is still ~150 tokens, so the larger ceiling costs nothing on the happy path). 1024 reduces but does not fully eliminate Gemini truncation at scale — see the per-provider floors below; Gemini-heavy runs may want `4096`. Independent of `DraftConfig.max_output_tokens`.
 - **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised, provider-neutral `signalforge.llm.call_llm` seam (#5 DEC-012; #135 DEC-005). Defaults `3 / 1 / 1` mirror `DraftConfig`; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.
-- **`total_budget_seconds`** — Whole-run wall-clock budget. Default `300` (5 minutes — historically ~3× safety on 60 sequential calls × 1s p50; ~10× headroom under concurrent dispatch). Mirrors `PruneConfig.total_budget_seconds` semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped. Under the asyncio orchestrator (issue #186) the budget is enforced via `asyncio.timeout(...)` wrapping the `TaskGroup`; on trip, un-completed pairs are filled in by a synthesis pass with `reasoning="grade budget exceeded ({N}s) before evaluation"`. Tests inject deterministic timing via the module-level `_async_sleep` alias (mirrors the `_sleep` injection pattern from `llm-drafter.md` DEC-004).
+- **`budget_base_seconds`** — Fixed constant term in the scaled wall-clock formula (issue #198, default `60`). Covers per-run setup (config resolution, cache priming, the first concurrency wave's ramp) that does not scale with the number of pairs. Must be positive.
+- **`budget_per_pair_seconds`** — Per concurrency-*wave* wall allowance in the scaled formula (issue #198, default `20.0`). The formula multiplies this by `ceil(num_pairs / max_concurrent_calls)` — the number of concurrency waves, not the raw pair count — so it is the wall-clock allowance per wave of `max_concurrent_calls` in-flight judge calls. The default is grounded in the #179 baseline (Sonnet judge p50 ~10s/call; 220 pairs at concurrency 10 → `60 + 20.0 × ceil(220/10) = 500s` against a measured 222.9s — ~2.25× headroom). It is a **runaway backstop** sized to tolerate 429 retry storms, **NOT** a completion target; the ticket-literal `2.0` would compute 104s and degrade ~half the pairs, recreating the failure this scaling fixes. Must be positive.
+- **`total_budget_seconds`** — **Optional** absolute hard ceiling on the whole-run wall-clock budget (issue #198 DEC-001; reinterpreted from the flat pre-#198 default of `300`). **Default `None`.** When `None`, the engine sizes the budget from the work via the scaled formula `effective = budget_base_seconds + budget_per_pair_seconds × ceil(num_pairs / max_concurrent_calls)` — a backstop that grows with model width and concurrency rather than a flat 300s the pre-#186 sequential era was sized for. When set to an int, the effective budget is `min(scaled, total_budget_seconds)` — i.e. an explicit value still acts as a hard cap on top of the scaled estimate, preserving exact v0.1 absolute-cap semantics for pinned `signalforge.yml` files (an operator who set `total_budget_seconds: 600` keeps that 600s ceiling). Mirrors `PruneConfig.total_budget_seconds` degrade semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped (DEC-015). Under the asyncio orchestrator (issue #186) the budget is enforced via `asyncio.timeout(effective)` wrapping the `TaskGroup`; on trip, un-completed pairs are filled in by a synthesis pass with `reasoning="grade budget exceeded ({effective}s) before evaluation"`. Tests inject deterministic timing via the module-level `_async_sleep` alias (mirrors the `_sleep` injection pattern from `llm-drafter.md` DEC-004).
+- **`max_grade_calls` / `max_grade_cost_usd` / `max_grade_tokens`** — Three **opt-in soft ceilings** on the grade run (issue #198 DEC-002). **All default `None` (off).** When set, whichever ceiling trips *first* stops scheduling **new** `(artefact, criterion)` pairs; the remaining pairs **DEGRADE** (`score=None`, never raise — mirroring the DEC-015 conservative-degrade contract) with a `reasoning` string naming the tripped ceiling. **Accounting:** `max_grade_calls` counts LLM judge calls only (cache hits make no call → never counted); `max_grade_cost_usd` accumulates the full per-call USD incl. cache-read/write economics, computed from per-call token usage via `signalforge.llm.pricing`; `max_grade_tokens` accumulates all token movement (input + output + cache-creation + cache-read). Each must be positive when set. **Soft / best-effort overshoot:** because every pair is dispatched into the one `TaskGroup` and cost/tokens are known only *after* a call returns, the cost/token ceilings stop only *un-started* pairs — up to `max_concurrent_calls − 1` in-flight calls may complete past the threshold. `max_grade_calls` is near-hard: it reserves a dispatch slot (increments a shared counter immediately, before the LLM `await`) so it stops at most one call over the limit in practice.
 - **`max_concurrent_calls`** — Number of in-flight `(artifact × criterion)` LLM calls allowed concurrently (issue #186). Default `10` matches the typical Anthropic-tier throughput sweet-spot; bounded `[1, 100]` with `@field_validator` rejecting `< 1` or `> 100` at config-load. Setting `1` yields v0.1 sequential behaviour bit-for-bit (semaphore-of-1 serialises in dispatch order, preserving `(criterion, artifact)` JSONL ordering). Under concurrent dispatch the audit JSONL lands in **arrival order** (`audit_schema_version` unchanged at `Literal[1]`); the `tests/grade/_helpers.py::_sort_grade_events(lines)` helper restores deterministic ordering for tests that snapshot the file. CLI does not expose a `--max-concurrent-calls` flag (mirrors `min_pass_rate` / `min_mean_score` config-file-only convention).
 - **`min_pass_rate`** — Floor on the fraction of `(artefact, criterion)` pairs that scored `passed=True` for the rubric to count as passed overall. Default `0.7`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_pass_rate`.
 - **`min_mean_score`** — Floor on the mean numeric score across non-null verdicts. Default `0.5`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_mean_score`.
@@ -513,7 +521,14 @@ passed=False, reasoning="..."` are unchanged:
 1. `LLMError` retries exhausted (including a provider-specific safety-
    filter / no-content response routed via `LLMResponseFormatError`).
 2. `GradeOutputError` (parser failure or anchor-contract failure).
-3. `total_budget_seconds` exceeded.
+3. The effective wall-clock budget (scaled formula, optionally capped by
+   `total_budget_seconds`) exceeded.
+
+(The opt-in `max_grade_calls` / `max_grade_cost_usd` / `max_grade_tokens`
+ceilings — issue #198 — also degrade un-started pairs, but they are a
+separate operator-chosen surface, not a fourth automatic trigger; they
+degrade with a `reasoning` naming the tripped ceiling and emit a distinct
+`grade ceiling exceeded` WARNING — see [Logging](#logging).)
 
 A fourth trigger for "vacuous bound" would conflate "we could not
 evaluate" with "we evaluated and the result was weak" — two different
@@ -791,15 +806,35 @@ DEC-004 of the plan):
    ordering, exactly the kind of loose-contract surface the safety /
    draft layers' anchor contracts exist to avoid.
 
-**Cost-control knobs.** Three levers operators can pull when the
+**Cost-control knobs.** Levers operators can pull when the
 default fan-out is too expensive for their use case:
 
-- **`total_budget_seconds`** (default `300`) — Whole-run wall-clock
-  cap. Tripping this routes every remaining pair to the degraded path
-  rather than billing for the whole rubric × every artefact. A
+- **`budget_base_seconds` / `budget_per_pair_seconds`** (defaults `60` /
+  `20.0`) — The two terms of the scaled wall-clock backstop (issue #198):
+  `effective = budget_base_seconds + budget_per_pair_seconds × ceil(num_pairs / max_concurrent_calls)`.
+  The backstop grows with model width and concurrency. It is a runaway
+  guard, not a completion target (~2.25× headroom over the #179 baseline);
+  tripping it routes every remaining pair to the degraded path.
+- **`total_budget_seconds`** (**default `None`** since #198) — Optional
+  absolute hard cap on top of the scaled formula. `None` → use the scaled
+  budget alone; set to an int → `effective = min(scaled, total_budget_seconds)`.
+  Tripping the effective budget routes every remaining pair to the degraded
+  path rather than billing for the whole rubric × every artefact. A
   `GradeBudgetExceededError` only fires if the budget trips before
   ANY criterion runs (a hard "the run did nothing" failure); a partial
   run completes with `aggregate_complete: false`.
+- **`max_grade_calls` / `max_grade_cost_usd` / `max_grade_tokens`**
+  (**all default `None` = off**, issue #198) — Opt-in soft ceilings on
+  judge calls / USD / token movement. Whichever trips first stops
+  scheduling **new** pairs; the rest **degrade** (never raise) with a
+  `reasoning` naming the ceiling, and the run emits one distinct
+  `grade ceiling exceeded` WARNING. USD/token ceilings are best-effort
+  (up to `max_concurrent_calls − 1` in-flight calls may complete past the
+  threshold because cost/tokens are known only post-call); `max_grade_calls`
+  is near-hard via pre-call slot reservation. Cache-hit pairs (#189) make
+  no LLM call and never count against any ceiling. See the field-by-field
+  [Configuration](#configuration-signalforgeyml-grade-block) above for the
+  accounting detail.
 - **`max_output_tokens`** (default `1024`) — Per-call output cap. The
   expected JSON response is ~150 tokens, so the cap is a truncation
   guard, not a target; the default was raised from 256 to 1024 in #187
@@ -1031,7 +1066,9 @@ logging.getLogger("signalforge.grade").setLevel(logging.DEBUG)
 Levels:
 
 - **INFO** — One line per `grade_artifacts` invocation at the end of the run, lazy-format JSON per DEC-027 (`run_id`, `model_unique_id`, `pass_rate`, `mean_score`, `passed`, `aggregate_complete`, `duration_seconds`, `results`). Mirrors `safety-layer.md` DEC-022 / `llm-drafter.md` DEC-011 / `prune-engine.md` DEC-017 — never f-string-interpolate user-controlled strings into a logger call.
-- **WARNING** — One line when `total_budget_seconds` trips, JSON-encoded `{run_id, model_unique_id, evaluated, remaining_pairs, total_budget_seconds}`. Plus the inherited `signalforge.llm` retry warnings (one per retry attempt at the LLM seam).
+- **WARNING (wall-clock budget)** — One line when the effective wall-clock budget trips, JSON-encoded `{run_id, model_unique_id, completed_count, degraded_count, effective_budget_seconds}`. The field is `effective_budget_seconds` (renamed from `total_budget_seconds` in #198 DEC-008) — it carries the *computed effective* budget actually passed to `asyncio.timeout`, i.e. the scaled formula optionally capped by `total_budget_seconds`.
+- **WARNING (ceiling)** — One line when any opt-in `max_grade_calls` / `max_grade_cost_usd` / `max_grade_tokens` ceiling trips (issue #198 DEC-007), distinct from the wall-clock budget WARNING. JSON-encoded `{run_id, model_unique_id, ceiling, limit, completed_count, degraded_count}` where `ceiling ∈ {"calls", "cost_usd", "tokens"}` (the first ceiling to trip) and `limit` is its configured value.
+- Plus the inherited `signalforge.llm` retry warnings (one per retry attempt at the LLM seam).
 - **DEBUG** — Reserved for future per-criterion latency observability; v0.1 emits no DEBUG from the engine.
 
 The grade layer never logs full evidence / reasoning content. The
@@ -1057,7 +1094,7 @@ as `.cause` and on `__cause__`. Common causes:
 | `GradeConfigError`                 | `signalforge.yml` `grade:` block failed parse / schema validation (`extra="forbid"`, out-of-range knob, malformed rubric override). | `load_grade_config`                                | Inspect the `grade:` block. Typos like `mdoel:` are caught here.                                 |
 | `GradeRubricError`                 | The resolved rubric is empty or carries duplicate `id` values.                           | `validate_rubric` (called at `grade_artifacts` entry and inside `load_grade_config`'s rubric validator) | Provide at least one criterion; ensure every `id` is unique.                                     |
 | `GradeLLMError`                    | One-level wrap of `signalforge.llm.LLMError`. Retry budget exhausted, auth failure, server error, malformed cache block. | `_grade_one` per pair (degraded by orchestrator); only escapes if the entire run can't recover. | Inspect `.cause` / `__cause__` for the underlying LLM-layer detail. Common: missing `ANTHROPIC_API_KEY`, rate-limit exhaustion. |
-| `GradeBudgetExceededError`         | `total_budget_seconds` tripped before ANY criterion was graded (a "the run did nothing" failure). | `grade_artifacts` (rare — the normal budget path is per-pair degrade). | Raise `total_budget_seconds`, narrow the candidate set, or reduce the rubric's criterion count. |
+| `GradeBudgetExceededError`         | The effective wall-clock budget (scaled formula, optionally capped by `total_budget_seconds`) tripped before ANY criterion was graded (a "the run did nothing" failure). | `grade_artifacts` (rare — the normal budget path is per-pair degrade). | Raise `budget_base_seconds` / `budget_per_pair_seconds` (or lift the `total_budget_seconds` cap if set), narrow the candidate set, or reduce the rubric's criterion count. |
 | `GradePromptEnvelopeBreachError`   | An artefact payload contains the literal `</ARTIFACT>` close tag.                        | Whole-run pre-flight `_scan_envelope_breach`; per-call defence-in-depth in `render_dynamic_block`. | Inspect the offending artefact (`exc.artifact_id`); remove the literal tag from the column description / rationale. |
 | `GradeOutputError`                 | LLM-judge response failed parse / anchor-contract validation. Carries `violation_type`.  | `parse_grade_response` per pair (degraded by orchestrator).                  | Pattern-match on `.violation_type` (`json_parse`, `criterion_id_mismatch`, `score_out_of_range`, …). Re-running typically resolves transient JSON failures; structural mismatches usually point at a prompt-template regression. |
 | `GradeAuditWriteError`             | Fail-closed audit / sidecar write failure (`OSError`, `PermissionError`, encoding, `fsync`, symlink containment). DEC-006 / DEC-012. | `write_grade_event` / `write_grading_report` (wrapped at the orchestrator's audit-write seams). | Verify `<project_dir>/.signalforge/` is writable, has disk space, and is not a symlink escaping the project tree. Fix the I/O issue and re-run. |

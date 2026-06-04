@@ -6,7 +6,12 @@ grade:
   max_retries_429: 3              # Rate-limit retry budget
   max_retries_5xx: 1
   max_retries_conn: 1
-  total_budget_seconds: 300       # Wall-clock budget across the whole run
+  budget_base_seconds: 60         # scaled-budget constant term (#198)
+  budget_per_pair_seconds: 20.0   # scaled-budget per concurrency-wave allowance (#198)
+  total_budget_seconds: 300       # optional ABSOLUTE hard cap; effective = min(scaled, this). Omit (None) to use the scaled formula alone.
+  # max_grade_calls: 500          # opt-in soft ceiling: stop scheduling new pairs after N judge calls (remaining pairs degrade)
+  # max_grade_cost_usd: 1.50      # opt-in soft ceiling: stop once accumulated USD meets/exceeds this (degrade rest)
+  # max_grade_tokens: 2000000     # opt-in soft ceiling: stop once total token movement meets/exceeds this (degrade rest)
   min_pass_rate: 0.7              # Aggregate threshold: fraction of passed criteria
   min_mean_score: 0.5             # Aggregate threshold: mean score across criteria
   fail_on_below_threshold: false  # v0.1 always false (flag-only); v0.2 will gate exit code
