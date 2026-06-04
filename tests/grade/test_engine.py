@@ -1839,13 +1839,15 @@ def test_grade_artifacts_concurrent_budget_warning_shape_locked(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """On budget trip the engine emits exactly one WARNING with the
-    locked JSON field set (DEC-018 of #186): ``run_id``,
-    ``model_unique_id``, ``completed_count``, ``cancelled_count``,
-    ``degraded_count``, ``total_budget_seconds``.
+    locked JSON field set (DEC-018 of #186; ``effective_budget_seconds``
+    rename per DEC-008 of #198): ``run_id``, ``model_unique_id``,
+    ``completed_count``, ``degraded_count``, ``effective_budget_seconds``.
 
     External operator dashboards key on these field names; locking the
     shape via a pinned test is what makes the audit corpus a stable
-    contract.
+    contract. ``effective_budget_seconds`` carries the value actually
+    passed to ``asyncio.timeout`` — the scaled budget capped by
+    ``total_budget_seconds`` when set (DEC-001/DEC-008 of #198).
     """
     project_dir = _project(tmp_path)
     model = _make_model()
@@ -1886,14 +1888,104 @@ def test_grade_artifacts_concurrent_budget_warning_shape_locked(
         "model_unique_id",
         "completed_count",
         "degraded_count",
-        "total_budget_seconds",
+        "effective_budget_seconds",
     }
     assert payload["model_unique_id"] == model.unique_id
-    assert payload["total_budget_seconds"] == 1
+    # The tiny-budget config sets ``total_budget_seconds=1``, so the
+    # effective budget is ``min(scaled, 1) == 1`` (the absolute cap
+    # wins). DEC-001/DEC-008 of #198.
+    config = _config_tiny_budget()
+    expected_effective = engine_module._compute_effective_budget(
+        budget_base_seconds=config.budget_base_seconds,
+        budget_per_pair_seconds=config.budget_per_pair_seconds,
+        total_budget_seconds=config.total_budget_seconds,
+        num_pairs=len(rubric) * len(_stable_artifact_pairs(candidate)),
+        max_concurrent_calls=config.max_concurrent_calls,
+    )
+    assert expected_effective == 1
+    assert payload["effective_budget_seconds"] == expected_effective
     # Every pair accounted for: completed + degraded == total.
     candidate_pairs = len(_stable_artifact_pairs(candidate))
     total_pairs = len(rubric) * candidate_pairs
     assert payload["completed_count"] + payload["degraded_count"] == total_pairs
+
+
+def _make_candidate_with_n_columns(n: int) -> CandidateSchema:
+    """Build a :class:`CandidateSchema` with ``n`` columns, each carrying
+    a description, a rationale, and one ``not_null`` test.
+
+    Drives the ≥40-column acceptance-criterion test below: a wide model
+    produces many ``(artifact × criterion)`` pairs, exercising the
+    scaled wall-clock budget (DEC-001 of #198).
+    """
+    columns = tuple(
+        CandidateColumn(
+            name=f"col_{i}",
+            description=f"column {i} description",
+            rationale=f"column {i} rationale",
+            tests=(CandidateTestNotNull(column=f"col_{i}"),),
+        )
+        for i in range(n)
+    )
+    return CandidateSchema(
+        name="orders",
+        description="wide model description",
+        rationale="wide model rationale",
+        columns=columns,
+        tests=(),
+    )
+
+
+def test_grade_artifacts_wide_model_completes_with_zero_budget_degradations(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ≥40-column model completes under the DEFAULT GradeConfig with
+    ZERO width-induced budget degradations (the #198 acceptance criterion).
+
+    With the scaled wall-clock budget (DEC-001 — ``budget_base_seconds``
+    + ``budget_per_pair_seconds`` × waves, no absolute cap by default),
+    a 40-column candidate (122 artifacts × 4 default-rubric criteria =
+    488 pairs) finishes well inside the backstop when every call returns
+    instantly via the fake. The proof: ``aggregate_complete is True``,
+    every result scored (no ``score is None``), and NO budget WARNING.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _make_candidate_with_n_columns(40)
+    # Sanity: a wide model produces many pairs (40 cols × 3 artifacts
+    # + 2 model-level = 122 artifacts × 4 criteria = 488 pairs).
+    artifact_count = len(_stable_artifact_pairs(candidate))
+    assert artifact_count == 122
+
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=DEFAULT_RUBRIC, candidate=candidate)
+
+    caplog.set_level(logging.WARNING, logger="signalforge.grade.engine")
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        # No rubric / config args → DEFAULT_RUBRIC + default GradeConfig
+        # (no ceilings, scaled budget).
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    # Every pair scored — zero width-induced budget degradations.
+    assert report.aggregate_complete is True
+    assert all(r.score is not None for r in report.results)
+    assert len(report.results) == artifact_count * len(DEFAULT_RUBRIC)
+
+    # No budget WARNING was emitted.
+    budget_warns = [
+        r
+        for r in caplog.records
+        if r.name == "signalforge.grade.engine"
+        and r.levelno == logging.WARNING
+        and "grade budget exceeded" in r.getMessage()
+    ]
+    assert budget_warns == []
 
 
 def test_grade_artifacts_module_level_async_sleep_alias_present() -> None:

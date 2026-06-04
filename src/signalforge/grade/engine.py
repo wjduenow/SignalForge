@@ -609,7 +609,8 @@ async def _grade_artifacts_async_core(
     from the v0.1 ``grade_artifacts``. Orchestrates concurrent dispatch
     via :class:`asyncio.TaskGroup` throttled by an
     :class:`asyncio.Semaphore(max_concurrent_calls)`, bounded by
-    :func:`asyncio.timeout(total_budget_seconds)`. Each pair runs as a
+    :func:`asyncio.timeout(effective_budget)` (the scaled wall-clock
+    backstop from :func:`_compute_effective_budget`, DEC-001). Each pair runs as a
     coroutine; per-coroutine ``try/except`` isolates LLM-layer failures
     so one bad pair doesn't abort siblings (DEC-004 retry isolation).
 
@@ -695,7 +696,16 @@ async def _grade_artifacts_async_core(
     if prefilled_results is not None:
         counters["completed"] = sum(1 for r in prefilled_results if r is not None)
 
-    total_budget_seconds = resolved_config.total_budget_seconds
+    # Scale the wall-clock backstop with the work to be done (DEC-001).
+    # ``effective_budget`` is a finite int (never ``None``) so the
+    # ``asyncio.timeout(...)`` site below always receives a valid value.
+    effective_budget = _compute_effective_budget(
+        budget_base_seconds=resolved_config.budget_base_seconds,
+        budget_per_pair_seconds=resolved_config.budget_per_pair_seconds,
+        total_budget_seconds=resolved_config.total_budget_seconds,
+        num_pairs=total_pairs,
+        max_concurrent_calls=resolved_config.max_concurrent_calls,
+    )
 
     async def _one(index: int, artifact_id: str, artifact_text: str, criterion: Criterion) -> None:
         async with semaphore:
@@ -875,7 +885,7 @@ async def _grade_artifacts_async_core(
                         )
 
     try:
-        async with asyncio.timeout(total_budget_seconds):
+        async with asyncio.timeout(effective_budget):
             async with asyncio.TaskGroup() as tg:
                 for index, (artifact_id, artifact_text, criterion) in enumerate(pairs):
                     # Skip cache-hit slots already populated by the sync
@@ -926,7 +936,7 @@ async def _grade_artifacts_async_core(
         grading_result, event = _build_degraded(
             artifact_id=artifact_id,
             criterion=criterion,
-            reasoning=(f"grade budget exceeded ({total_budget_seconds}s) before evaluation"),
+            reasoning=(f"grade budget exceeded ({effective_budget}s) before evaluation"),
             config=resolved_config,
             rubric_hash=rubric_hash,
             template_hash=template_hash,
@@ -955,7 +965,7 @@ async def _grade_artifacts_async_core(
                     "model_unique_id": model_unique_id,
                     "completed_count": counters["completed"],
                     "degraded_count": counters["degraded"],
-                    "total_budget_seconds": total_budget_seconds,
+                    "effective_budget_seconds": effective_budget,
                 }
             ),
         )
@@ -1018,9 +1028,10 @@ def grade_artifacts(
     4. Generate ``run_id`` (uuid4 hex, DEC-020). Compute the run's
        ``rubric_hash`` (DEC-014), ``prompt_version_template``,
        ``rubric_block`` (cached prefix for every call).
-    5. Iterate every ``(criterion, artifact)`` pair. At the top of
-       each loop iteration, check the wall-clock against
-       ``config.total_budget_seconds``; once exceeded, every
+    5. Iterate every ``(criterion, artifact)`` pair, bounded by the
+       scaled wall-clock backstop ``_compute_effective_budget(...)``
+       (DEC-001 — base + per-pair × waves, optionally capped by
+       ``config.total_budget_seconds``); once exceeded, every
        remaining pair lands as a degraded
        ``GradingResult(score=None, ...)`` plus matching
        :class:`GradeEvent` (DEC-015). Per-pair LLM failures
@@ -1311,7 +1322,7 @@ def grade_artifacts(
 
     # 5. Iterate ``(criterion, artifact)`` pairs via the async core
     #    (issue #186, US-009 / DEC-002 + DEC-004). The async core wraps
-    #    a ``TaskGroup`` in ``asyncio.timeout(total_budget_seconds)``
+    #    a ``TaskGroup`` in ``asyncio.timeout(effective_budget)``
     #    and dispatches up to ``max_concurrent_calls`` coroutines via a
     #    ``Semaphore``. Per-coroutine ``try/except`` handles LLM-layer
     #    failures and budget-cancellation; the public sync entry-point
