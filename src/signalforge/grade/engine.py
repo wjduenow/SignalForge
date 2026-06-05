@@ -111,6 +111,7 @@ from signalforge.grade.errors import (
     GradeBelowThresholdError,
     GradeCachePathError,
     GradeError,
+    GradeIncompleteError,
     GradeLLMError,
     GradeNestedEventLoopError,
     GradeOutputError,
@@ -1561,6 +1562,20 @@ def grade_artifacts(
         GradeAuditWriteError: any other I/O / encoding failure in
             either audit writer. Aborts the run; wraps the underlying
             exception on ``cause``.
+        GradeIncompleteError: raised when ``config.require_complete=True``
+            (the default) AND a non-exempt ``(artifact, criterion)`` pair
+            is still ungraded (``score=None``) after the bounded sweep.
+            Trips on ``degrade_reason_type == "transient"`` (always) and
+            on ``"budget"`` when ``total_budget_seconds is None`` (a
+            default-scaled-budget overrun — a Stage-1 sizing canary);
+            EXEMPT for ``"ceiling"`` and for ``"budget"`` when
+            ``total_budget_seconds`` was set explicitly (DEC-204). The
+            exception names the ungraded pairs (truncated) and carries
+            ``incomplete_pairs`` / ``require_complete`` /
+            ``aggregate_complete``. Raised AFTER ``write_grading_report``
+            (so the sidecar JSON lands on disk first) and BEFORE the
+            below-threshold check — incomplete is structural, below-threshold
+            is verdictual (#202 US-006 / DEC-204 + DEC-207).
         GradeBelowThresholdError: raised when
             ``config.fail_on_below_threshold=True`` AND the aggregate
             ``GradingReport.passed`` is False (i.e. ``pass_rate``
@@ -1863,7 +1878,43 @@ def grade_artifacts(
         ),
     )
 
-    # 8. Threshold-fail graduation (#9 US-002 / DEC-021). When the
+    # 8. Completeness contract (#202 US-006 / DEC-204 + DEC-207). After
+    # the always-on bounded sweep (step 5) has had its recovery rounds,
+    # any non-exempt pair still at ``score=None`` is a structural failure
+    # the operator must see — not a verdict to fold silently into
+    # ``aggregate_complete=False``. Branch on the ``degrade_reason_type``
+    # discriminator (#202 US-001), never on message text:
+    #   * "transient"                              → always trips.
+    #   * "budget" AND total_budget_seconds is None (DEFAULT-scaled budget,
+    #     a Stage-1 sizing canary)                 → trips.
+    #   * "ceiling" (explicit max_grade_* opt-in)  → EXEMPT.
+    #   * "budget" with an EXPLICIT total_budget_seconds (a deliberate
+    #     operator time-ceiling)                   → EXEMPT.
+    # The raise lands AFTER the sidecar write (step 6) + INFO log (step 7),
+    # mirroring the fail_on_below_threshold ordering so the operator has a
+    # complete `grade.json` on disk; and BEFORE the below-threshold check
+    # (step 9) — incomplete is structural, below-threshold is verdictual.
+    if resolved_config.require_complete:
+        incomplete_pairs = tuple(
+            (r.artifact_id, r.criterion_id)
+            for r in report.results
+            if r.score is None
+            and (
+                r.degrade_reason_type == "transient"
+                or (
+                    r.degrade_reason_type == "budget"
+                    and resolved_config.total_budget_seconds is None
+                )
+            )
+        )
+        if incomplete_pairs:
+            raise GradeIncompleteError(
+                incomplete_pairs=incomplete_pairs,
+                require_complete=True,
+                aggregate_complete=report.aggregate_complete,
+            )
+
+    # 9. Threshold-fail graduation (#9 US-002 / DEC-021). When the
     # operator opts into hard-fail behaviour AND the aggregate verdict
     # falls below threshold, raise AFTER the sidecar JSON is durably
     # persisted (step 6 above) and AFTER the INFO log fires. Order is

@@ -355,7 +355,10 @@ def test_grade_artifacts_safety_blocked_response_degrades_pair(
     # would otherwise re-grade the transient safety-block degrade and
     # overwrite the verdict; the sweep's own behaviour is covered by
     # ``tests/grade/test_engine.py`` § US-005.
-    config = _fast_config().model_copy(update={"sweep_max_rounds": 0})
+    # require_complete=False: with the sweep disabled the safety-blocked
+    # transient pair stays degraded; the #202 US-006 completeness raise
+    # would otherwise fire before the degrade-reasoning assertions below.
+    config = _fast_config().model_copy(update={"sweep_max_rounds": 0, "require_complete": False})
 
     report = grade_artifacts(
         model,

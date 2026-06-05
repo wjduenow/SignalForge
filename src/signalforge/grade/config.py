@@ -39,7 +39,9 @@ Design commitments operationalised here (``plans/super/7-quality-grader.md``):
   ``budget_per_pair_seconds=20.0``), the three opt-in soft ceilings
   ``max_grade_calls=None`` / ``max_grade_cost_usd=None`` /
   ``max_grade_tokens=None`` (off), ``min_pass_rate=0.7``,
-  ``min_mean_score=0.5``, ``rubric=None``, ``fail_on_below_threshold=False``.
+  ``min_mean_score=0.5``, ``rubric=None``, ``fail_on_below_threshold=False``,
+  ``require_complete=True`` (#202 US-006 — fail loud on a non-exempt
+  ungraded pair after the bounded sweep).
 * **#187 US-002 / DEC-006** — when ``model`` is set explicitly, a
   SKU-prefix/provider mismatch (e.g. ``provider="openai"`` with
   ``model="claude-sonnet-4-6"``) fails loud at config-load. The
@@ -351,6 +353,47 @@ class GradeConfig(BaseModel):
     The CLI (#9) maps the raise to a non-zero exit code so a
     ``signalforge generate`` invocation in CI can gate on threshold
     compliance — see ``docs/cli-ops.md`` for the exit-code tier."""
+
+    require_complete: bool = True
+    """Fail-loud switch for the grade-completeness contract (#202 US-006 /
+    DEC-204 + DEC-207).
+
+    Default ``True`` — after the always-on bounded transient-recovery
+    sweep (#202 US-005), :func:`signalforge.grade.grade_artifacts` raises
+    :class:`signalforge.grade.GradeIncompleteError` if any *non-exempt*
+    ``(artifact, criterion)`` pair is still ungraded (``score=None``). An
+    incomplete grade corpus is a structural failure the operator must see,
+    not a verdict to fold silently into ``aggregate_complete=False``.
+
+    The DEC-204 trip/exempt matrix branches on the
+    :attr:`signalforge.grade.GradingResult.degrade_reason_type`
+    discriminator (#202 US-001):
+
+    * ``"transient"`` → ALWAYS trips. A transient pair that survived the
+      sweep is an unrecovered LLM/network failure.
+    * ``"budget"`` AND :attr:`total_budget_seconds` is ``None`` (the
+      DEFAULT-scaled-budget formula) → trips. A default-scaled-budget
+      overrun is a Stage-1 sizing canary — the budget was sized for the
+      work, so the engine is at fault, not an operator ceiling.
+    * EXEMPT (never trip): ``"ceiling"`` degrades (an explicit
+      ``max_grade_*`` opt-in the operator chose); and ``"budget"`` degrades
+      when :attr:`total_budget_seconds` was set EXPLICITLY (a deliberate
+      operator time-ceiling — a curtailed run is the contract, not a
+      surprise).
+
+    The raise lands AFTER the fail-closed sidecar JSON write so the
+    operator has a complete ``grade.json`` on disk for diagnosis (mirrors
+    the :attr:`fail_on_below_threshold` raise-after-sidecar ordering), and
+    BEFORE the :attr:`fail_on_below_threshold` check — incomplete is
+    structural, below-threshold is verdictual.
+
+    When ``False``, the engine never raises on incompleteness; the
+    ungraded pairs surface via ``aggregate_complete=False`` (the v0.1
+    report-only posture). The CLI ``--require-complete`` flag (US-007,
+    a separate ticket) wires this field per-run.
+
+    ``extra="forbid"`` makes a typo such as ``require_complte:`` fail loud
+    at config-load rather than silently leaving the contract armed."""
 
     cache_enabled: bool = True
     """Master switch for the per-``(artifact, criterion)`` grade cache
