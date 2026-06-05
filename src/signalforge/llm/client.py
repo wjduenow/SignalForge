@@ -51,6 +51,11 @@ import random
 import time
 from typing import Any, Final, Literal, Protocol, cast, runtime_checkable
 
+from signalforge.llm._rate_limiter import (
+    _BaseRateLimiter,
+    current_async_rate_limiter,
+    current_sync_rate_limiter,
+)
 from signalforge.llm.errors import (
     LLMAuthError,
     LLMCacheTooLargeError,
@@ -247,6 +252,7 @@ def _backoff_warn(
     class_attempt_value: int,
     error_class: str,
     model: str,
+    delay: float | None = None,
 ) -> float:
     """Compute the backoff delay, emit the per-retry WARNING, return the delay.
 
@@ -254,21 +260,69 @@ def _backoff_warn(
     ``"retry attempt: <json>"`` WARNING carrying ``attempt``, the per-class
     counter (under its class-specific key), ``delay``, ``error_class``, and
     ``model``, in that key order.
+
+    ``delay=None`` (the default — every 5xx / connection caller and the
+    no-header 429 fallback) computes the historical blind backoff
+    ``(2**attempt) * _rand_uniform(0.75, 1.25)``. The 429 limiter path passes a
+    precomputed header-honouring ``delay`` (from ``retry-after`` / reset) so the
+    WARNING reports the wait the limiter actually paced to — same key shape,
+    same byte order, just a header-derived value instead of the blind guess
+    (#202 US-003 / DEC-205).
     """
-    delay = (2**total_attempts) * _rand_uniform(0.75, 1.25)
+    resolved_delay: float = (
+        (2**total_attempts) * _rand_uniform(0.75, 1.25) if delay is None else delay
+    )
     _LOGGER.warning(
         "retry attempt: %s",
         json.dumps(
             {
                 "attempt": total_attempts,
                 class_attempt_key: class_attempt_value,
-                "delay": delay,
+                "delay": resolved_delay,
                 "error_class": error_class,
                 "model": model,
             }
         ),
     )
-    return delay
+    return resolved_delay
+
+
+def _rate_limit_delay(
+    *,
+    rate_limiter: _BaseRateLimiter | None,
+    strategy: LLMProvider,
+    exc: BaseException,
+) -> float | None:
+    """Compute a header-honouring 429 wait via the limiter, or ``None``.
+
+    Shared by the sync + async retry branches (#202 US-003 / DEC-205): the wait
+    decision is identical across paths; only the subsequent SLEEP differs
+    (``_sleep`` vs ``await _async_sleep``), which the caller owns so the
+    deterministic override seams stay intact.
+
+    Returns ``None`` — meaning "use the historical blind backoff" — in every
+    fall-back case:
+
+    * no limiter wired (``rate_limiter is None``), OR
+    * the provider surfaced no rate-limit headers (an EMPTY budget — OpenAI /
+      Gemini, or a header-less Anthropic 429).
+
+    When a limiter IS present, the limiter's AIMD multiplicative-decrease is
+    applied (the budget is recorded + concurrency halved) **regardless** of
+    whether a header wait was found; an EMPTY-budget 429 still tightens the
+    concurrency, it just paces via the blind backoff this attempt. A present
+    header wait (``retry-after`` / reset) is returned so the WARNING + sleep use
+    the at-the-limit value instead of the blind guess.
+    """
+    if rate_limiter is None:
+        return None
+    budget = strategy.extract_rate_limit_info(exc)
+    # Always tighten the shared concurrency (the 429 happened regardless of
+    # headers); the header wait is returned only when the provider surfaced one.
+    # An EMPTY budget returns ``None`` so the caller's ``_backoff_warn``
+    # recomputes the canonical ``total_attempts``-based blind delay — keeping
+    # the no-header path byte-identical to the no-limiter path.
+    return rate_limiter.record_rate_limited(budget)
 
 
 def call_llm(
@@ -317,6 +371,17 @@ def call_llm(
     satisfies the Anthropic client surface); production callers leave it
     ``None`` and let ``strategy.make_client()`` lazy-construct the real SDK
     client (DEC-006).
+
+    The 429 retry branch resolves an optional :class:`SyncRateLimiter` from the
+    ``current_sync_rate_limiter`` ContextVar (#202 US-003 / DEC-205) — an
+    ambient run-scoped resource rather than a per-call argument, which keeps the
+    sync / async orchestrators at 1:1 signature parity (DEC-002 of #186). When a
+    limiter is set, a 429 HONOURS the provider's ``retry-after`` / reset headers
+    (via ``strategy.extract_rate_limit_info``) instead of bursting past the
+    limit on a blind backoff, and the limiter's AIMD state decreases concurrency
+    on each 429. When unset (or when the provider surfaces no headers — OpenAI /
+    Gemini), the retry falls back to the historical blind exponential backoff,
+    byte-unchanged.
     """
     strategy = provider_for(provider)
     if client is None:
@@ -441,6 +506,11 @@ def call_llm(
     # `total_attempts` drives the backoff math + WARNING log so delays
     # remain monotonic across mixed failure types — but per-class
     # exhaustion is what raises the typed error.
+    #
+    # Resolve the run-scoped sync rate limiter from the ContextVar seam (#202
+    # US-003 / DEC-205). Defaults to ``None`` so the limiter is OPTIONAL — when
+    # unset, the 429 retry falls back to the historical blind backoff.
+    rate_limiter = current_sync_rate_limiter.get()
     attempt_429 = 0
     attempt_5xx = 0
     attempt_conn = 0
@@ -464,12 +534,25 @@ def call_llm(
                         attempts=attempt_429,
                         cause=exc,
                     ) from exc
+                # When a limiter is wired AND the provider surfaces rate-limit
+                # headers, pace AT the limit (honour ``retry-after`` / reset)
+                # and apply the AIMD multiplicative-decrease — the core fix for
+                # the thundering-herd 429 storm. With no limiter, or an EMPTY
+                # budget (OpenAI / Gemini, or a header-less Anthropic 429), fall
+                # back to the historical blind backoff, byte-unchanged
+                # (#202 US-003 / DEC-205).
+                header_delay = _rate_limit_delay(
+                    rate_limiter=rate_limiter,
+                    strategy=strategy,
+                    exc=exc,
+                )
                 delay = _backoff_warn(
                     total_attempts=total_attempts,
                     class_attempt_key="class_attempt_429",
                     class_attempt_value=attempt_429,
                     error_class=exc.__class__.__name__,
                     model=model,
+                    delay=header_delay,
                 )
                 _sleep(delay)
                 attempt_429 += 1
@@ -785,6 +868,14 @@ async def call_llm_async(
         cache_marker_active=cache_marker_active,
     )
 
+    # Resolve the per-run async rate limiter from the ContextVar seam (#202
+    # US-003 / DEC-205). Defaults to ``None`` so the limiter is OPTIONAL — when
+    # no caller set one (US-004 wires it across the grade TaskGroup), the 429
+    # retry falls back to the historical blind backoff, unchanged. Every
+    # concurrent ``call_llm_async`` coroutine in one run reads the SAME limiter
+    # here, so a 429 on any of them tightens the shared AIMD concurrency.
+    rate_limiter = current_async_rate_limiter.get()
+
     # Retry loop — mirrors :func:`call_llm` per DEC-002 of #186.
     # The only structural difference is ``await llm_client.messages.create(...)``
     # and ``await _async_sleep(delay)``; the per-class budget bookkeeping
@@ -811,12 +902,22 @@ async def call_llm_async(
                         attempts=attempt_429,
                         cause=exc,
                     ) from exc
+                # Honour the provider's rate-limit headers via the shared async
+                # limiter (pace AT the limit + AIMD decrease) when present; else
+                # fall back to the blind backoff — mirrors the sync branch
+                # byte-for-byte except the sleep is awaited (#202 US-003).
+                header_delay = _rate_limit_delay(
+                    rate_limiter=rate_limiter,
+                    strategy=strategy,
+                    exc=exc,
+                )
                 delay = _backoff_warn(
                     total_attempts=total_attempts,
                     class_attempt_key="class_attempt_429",
                     class_attempt_value=attempt_429,
                     error_class=exc.__class__.__name__,
                     model=model,
+                    delay=header_delay,
                 )
                 await _async_sleep(delay)
                 attempt_429 += 1
