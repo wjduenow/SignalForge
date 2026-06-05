@@ -618,8 +618,14 @@ class AsyncConcurrencyGate:
         the current cap, and ``wait_for`` re-checks its predicate on each wake.
         """
         async with self._condition:
-            if self._in_flight > 0:
-                self._in_flight -= 1
+            # The gate requires balanced ``acquire``/``release`` pairing and is
+            # NOT re-entrant; every engine call site uses ``async with gate:`` so
+            # this holds by construction. Fail loud on a future caller that
+            # over-releases rather than silently shrinking usable capacity.
+            assert self._in_flight > 0, (
+                "AsyncConcurrencyGate.release() without a matching acquire()"
+            )
+            self._in_flight -= 1
             self._condition.notify_all()
 
     async def __aenter__(self) -> AsyncConcurrencyGate:
