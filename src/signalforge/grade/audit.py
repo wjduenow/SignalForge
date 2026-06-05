@@ -101,6 +101,7 @@ def _build_grade_event(
     cache_read_input_tokens: int = 0,
     cache_hit: bool = False,
     degrade_reason_type: DegradeReasonType | None = None,
+    sweep_round: int | None = None,
 ) -> GradeEvent:
     """Construct a :class:`GradeEvent` — the **single** construction seam.
 
@@ -133,6 +134,12 @@ def _build_grade_event(
     scored record; one of ``"transient"`` / ``"budget"`` / ``"ceiling"``
     for a degraded record — set by :func:`_build_degraded` from the
     reason string so callers never string-match the prose.
+
+    The keyword-only ``sweep_round`` parameter (default ``None``, #202
+    US-005) tags a record written by the bounded transient-recovery sweep.
+    ``None`` for a main-pass record; ``1+`` for a sweep round-N record so
+    forensic queries can see sweep activity. Additive optional field — no
+    ``audit_schema_version`` bump (the version stays 3).
     """
     return GradeEvent(
         signalforge_version=_SIGNALFORGE_VERSION,
@@ -151,6 +158,7 @@ def _build_grade_event(
         criterion_prompt_hash=criterion_prompt_hash,
         response_text_hash=response_text_hash,
         cache_hit=cache_hit,
+        sweep_round=sweep_round,
         model=model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,

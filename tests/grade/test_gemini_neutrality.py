@@ -349,12 +349,20 @@ def test_grade_artifacts_safety_blocked_response_degrades_pair(
             returns=_gemini_response_with_json(payload),
         )
 
+    # Disable the #202 US-005 transient-recovery sweep for this test: it
+    # pins the MAIN-PASS degrade reasoning shape (issue #158 — the inner
+    # ``LLMResponseFormatError`` message survives). The always-on sweep
+    # would otherwise re-grade the transient safety-block degrade and
+    # overwrite the verdict; the sweep's own behaviour is covered by
+    # ``tests/grade/test_engine.py`` § US-005.
+    config = _fast_config().model_copy(update={"sweep_max_rounds": 0})
+
     report = grade_artifacts(
         model,
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_fast_config(),
+        config=config,
         client=cast("AnthropicClientProtocol", fake_client),
         project_dir=project_dir,
         audit_path=audit_path,

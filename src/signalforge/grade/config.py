@@ -255,6 +255,34 @@ class GradeConfig(BaseModel):
     (never raise). Whichever of the three ``max_grade_*`` ceilings trips
     first stops dispatch. Must be positive when set."""
 
+    sweep_max_rounds: int = 3
+    """Maximum number of bounded transient-recovery sweep rounds (#202 US-005 / DEC-206).
+
+    After the main concurrent grade pass completes, an ALWAYS-ON recovery
+    sweep re-grades any pair that degraded with
+    :attr:`signalforge.grade.models.GradingResult.degrade_reason_type` ==
+    ``"transient"`` — SEQUENTIALLY (concurrency 1, so there is no second
+    thundering herd) — until zero transient pairs remain OR this many sweep
+    rounds have run. ``"budget"`` and ``"ceiling"`` degrades are NEVER swept
+    (they are not retriable on a calmer pass). A recovered pair is written
+    to the grade cache like any other success.
+
+    Default ``3`` gives a transient LLM/network blip a few calmer retries to
+    recover so a run reaches 100% scored. ``0`` runs no sweep rounds (the
+    main pass stands alone). Must be non-negative — a negative value is an
+    operator misconfiguration; fail loud at config-load rather than silently
+    clamp."""
+
+    sweep_cooldown_seconds: float = 2.0
+    """Cool-down wait (seconds) between the main pass and the first sweep
+    round AND between successive sweep rounds (#202 US-005 / DEC-206).
+
+    Gives an overloaded provider a moment to recover before the sweep
+    re-touches the transient failures. ``0.0`` disables the wait (the sweep
+    itself stays always-on — only the pause is skipped). The sleep routes
+    through the test-overridable :data:`_async_sleep` module alias so the
+    test suite runs instantly. Must be non-negative."""
+
     max_concurrent_calls: int = 10
     """Asyncio dispatch concurrency cap for the per-``(artifact, criterion)``
     judge calls (issue #186 DEC-003).
@@ -468,10 +496,27 @@ class GradeConfig(BaseModel):
             raise ValueError("must be in the closed interval [1, 100]")
         return v
 
-    @field_validator("max_retries_429", "max_retries_5xx", "max_retries_conn")
+    @field_validator("max_retries_429", "max_retries_5xx", "max_retries_conn", "sweep_max_rounds")
     @classmethod
     def _non_negative(cls, v: int) -> int:
         if v < 0:
+            raise ValueError("must be non-negative")
+        return v
+
+    @field_validator("sweep_cooldown_seconds")
+    @classmethod
+    def _non_negative_finite_float(cls, v: float) -> float:
+        """Non-negative finite cool-down (#202 US-005 / DEC-206).
+
+        ``0.0`` is allowed — it disables the inter-round pause while leaving
+        the sweep itself always-on. A negative value is an operator
+        misconfiguration; a non-finite float (``.nan`` / ``.inf`` parses out
+        of ``yaml.safe_load``) would make the test-overridable
+        :func:`signalforge.grade.engine._async_sleep` wait forever / crash,
+        so reject it up-front (same rationale as :meth:`_positive`)."""
+        if not math.isfinite(v):
+            raise ValueError("must be a finite number")
+        if v < 0.0:
             raise ValueError("must be non-negative")
         return v
 

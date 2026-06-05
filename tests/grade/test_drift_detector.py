@@ -171,8 +171,12 @@ class StrictGradeEventV3(BaseModel):
     ``audit_schema_version: Literal[3]`` plus the new
     ``degrade_reason_type: Literal["transient","budget","ceiling"] | None``
     discriminator placed after ``reasoning`` so the prose + its
-    structured classification stay adjacent. The v1 and v2 mirrors above
-    stay as replay anchors.
+    structured classification stay adjacent. #202 US-005 (DEC-206) added
+    the additive optional ``sweep_round: int | None`` field (after
+    ``cache_hit``) WITHOUT an ``audit_schema_version`` bump — a new
+    defaulted field on an ``extra="ignore"`` read-back model does not
+    require a version bump. The v1 and v2 mirrors above stay as replay
+    anchors.
 
     This is the field-set-current mirror — production :class:`GradeEvent`
     drift is gated against it. If you add a field to production
@@ -199,6 +203,7 @@ class StrictGradeEventV3(BaseModel):
     criterion_prompt_hash: str
     response_text_hash: str
     cache_hit: bool = False
+    sweep_round: int | None = None
     model: str
     input_tokens: int
     output_tokens: int
@@ -331,24 +336,37 @@ def test_strict_grade_event_v3_validates_jsonl_fixture() -> None:
 
     Pins the v3 shape introduced by #202 US-001 (DEC-203):
     ``audit_schema_version: 3`` plus the new ``degrade_reason_type``
-    discriminator. The fixture carries four lines — one scored
-    (``degrade_reason_type: null``) and one for each of the three
-    degrade causes (``"transient"`` / ``"budget"`` / ``"ceiling"``) — so
-    a regression that dropped, retyped, or mis-classified the field
-    fails loudly on at least one shape.
+    discriminator, AND the additive ``sweep_round`` field from #202 US-005
+    (DEC-206). The fixture carries five lines — one scored
+    (``degrade_reason_type: null``), one for each of the three degrade
+    causes (``"transient"`` / ``"budget"`` / ``"ceiling"``), plus a
+    sweep-recovery line (``sweep_round: 1``) — so a regression that
+    dropped, retyped, or mis-classified either field fails loudly on at
+    least one shape.
     """
     fixture_path = _FIXTURES_DIR / "grade_event_v3.jsonl"
     text = fixture_path.read_text(encoding="utf-8")
     lines = [line for line in text.splitlines() if line.strip()]
-    assert len(lines) >= 4, (
-        f"expected ≥4 JSONL lines in {fixture_path} (one scored + three degrade causes)"
+    assert len(lines) >= 5, (
+        f"expected ≥5 JSONL lines in {fixture_path} "
+        f"(one scored + three degrade causes + one sweep-recovery)"
     )
     seen: set[str | None] = set()
+    seen_sweep_rounds: set[int | None] = set()
     for line in lines:
         event = StrictGradeEventV3.model_validate_json(line)
         seen.add(event.degrade_reason_type)
+        seen_sweep_rounds.add(event.sweep_round)
     assert seen == {None, "transient", "budget", "ceiling"}, (
         f"{fixture_path} must cover scored (null) + all three degrade reason types; saw {seen}"
+    )
+    # #202 US-005: the fixture must carry both a main-pass record
+    # (sweep_round: null) and a sweep-tagged record (sweep_round >= 1).
+    assert None in seen_sweep_rounds, (
+        f"{fixture_path} must include a main-pass (sweep_round=null) row"
+    )
+    assert any(sr is not None and sr >= 1 for sr in seen_sweep_rounds), (
+        f"{fixture_path} must include a sweep-tagged (sweep_round>=1) row; saw {seen_sweep_rounds}"
     )
 
 
