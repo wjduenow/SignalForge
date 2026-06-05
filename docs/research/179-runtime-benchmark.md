@@ -1,9 +1,12 @@
-# Issue #179 — runtime benchmark after efficiency improvements (#186 + #187 + #188 + #198)
+# Issue #179 — runtime benchmark after efficiency improvements (#186 + #187 + #188 + #198 + #202)
 
-**Status:** First measurement complete (2026-06-03) — prod 0.5.0 vs dev
-0.6.0.dev0 Sonnet A/B + #189 cache, single model. #187 Haiku and #188 batch
-dimensions still pending. See § Result. The harness is re-runnable per the
-commands below.
+**Status:** #186/#198 measurements complete (2026-06-03 / 2026-06-04) — prod
+0.5.0 vs dev 0.6.0.dev0 Sonnet A/B. #187 Haiku and #188 batch dimensions still
+pending. **The #202 grade-to-completion retest is wired into the harness but
+NOT yet run** — it is a live, metered Anthropic benchmark the operator must run
+(no fabricated numbers; see § "#202 grade-to-completion retest" — every result
+cell is an explicit `_pending live run_` placeholder until then). The harness is
+re-runnable per the commands below.
 
 Companion to the "Runtime benchmark retest" story on epic
 [#179](https://github.com/wjduenow/SignalForge/issues/179). The harness lives at
@@ -280,3 +283,164 @@ back-to-back on one host at a **raised Anthropic rate tier**.
   40-col model truncates the single *draft* call (`stop_reason='max_tokens'`) before grade
   is ever reached — a separate limitation of the one-shot draft step. Raised to 8192 on both
   arms for this run; a candidate follow-on is chunked / streamed drafting for very wide models.
+
+## Result — #202 grade-to-completion retest (PENDING LIVE RUN — placeholders only)
+
+> **⚠ Every result cell below is `_pending live run_` — NOTHING here is measured yet.**
+> This section is the scaffold the harness now supports (SignalForge-0z5.9 wired
+> `--require-complete` + the new grade knobs into `benchmark_runtime.py`). The actual
+> numbers require a **live, metered Anthropic benchmark** at the required rate tier against
+> the prepared intuit_airflow dbt project — an operator-only run (see § "How to run the
+> #202 live retest" below). Do NOT infer or fabricate any cell; fill them only from a real
+> harness run's printed table.
+
+Validates **#202** (grade-to-completion): the four stages merged on this branch close the
+#198 retest's open gap — its dev arm scored 338/408 but left **70 `GradeLLMError`
+degradations** (a rate-limit artifact, not #198). #202 attacks exactly that:
+
+| Change | Stage | What it does | Default-on? |
+|---|---|---|---|
+| **#202 US-004** shared header-honoring rate limiter (DEC-205) | 1 | sync/async limiter paces dispatch at the provider's advertised rate; honours `retry-after` / `anthropic-ratelimit-*` headers + AIMD back-off | ✅ yes |
+| **#202 US-005** always-on bounded sweep | 2 | re-grades every transient `score=None` pair sequentially for a few calmer rounds before the report is assembled | ✅ yes |
+| **#202 US-006/US-007** `grade.require_complete` (default True) + `--require-complete` CLI | 3 | raises tier-2 `GradeIncompleteError` naming the still-ungraded pairs if any non-exempt pair survives the sweep | ✅ yes (config) / opt-in (CLI flag) |
+| **#202 US-008** `max_retries_429` default 3→6 (DEC-209) | 4 | wider per-call 429 budget — belt-and-braces on top of the limiter | ✅ yes |
+
+### What the harness now reports for #202
+
+The harness (`benchmark_runtime.py`) gained, all read from the same `grade.json` sidecar:
+
+- a version-gated **`--require-complete`** flag (omitted on the prod arm exactly like
+  `--no-cache`, since prod 0.5.0 has no completeness contract);
+- the top-level **`aggregate_complete`** flag (the v0.1 completeness signal);
+- the **per-`degrade_reason_type` split** (`transient` / `budget` / `ceiling`) — the #202
+  lens replacing the raw `score=None` total, since the retest target is **0 transient
+  (`GradeLLMError`) degradations**;
+- the **ungraded-pair list** (`(artifact_id, criterion_id)`), which the operator
+  cross-checks against the `GradeIncompleteError` (exit 2) message under `--require-complete`.
+
+### PASS condition (locked by the bead)
+
+Absent an explicit operator ceiling, the dev arm must EITHER reach
+**`aggregate_complete=True`** (every pair scored) **OR** exit **non-zero under
+`--require-complete` with the exact ungraded pairs named**. Targets to beat:
+
+- **40-col model:** 408/408 scored, **0 `GradeLLMError` degradations**,
+  `aggregate_complete=True` (vs #198 dev: 338 scored / 70 `GradeLLMError`).
+- **16-col model:** **0 non-budget `score=None`** (vs the #186 dev run's 34 non-budget
+  `score=None`).
+
+### Per-stage wall-clock — 40-col model, Sonnet, cold cache, fixed rate tier
+
+| Stage | Prod 0.5.0 (sequential) | Dev #198 (#186+#198) | Dev #202 (this issue) |
+|---|---:|---:|---:|
+| draft + overhead (derived) | 57.5s | 60.6s | _pending live run_ |
+| prune (disabled) | ~0s | ~0s | _pending live run_ |
+| grade | 302.8s (flat 300s ceiling) | 447.7s | _pending live run_ |
+| diff | 0.0s | 0.0s | _pending live run_ |
+| **TOTAL** | 360.3s | 508.4s | _pending live run_ |
+
+### Grade completeness — 40-col model (the #202 headline)
+
+| | Prod 0.5.0 | Dev #198 | Dev #202 (this issue) |
+|---|---:|---:|---:|
+| artifacts graded (`artifact × criterion`) | 408 | 408 | _pending live run_ |
+| comparable (scored) | 83 | 338 | _pending live run_ |
+| degraded — budget exceeded | 325 (80%) | 0 | _pending live run_ |
+| degraded — transient (`GradeLLMError`) | 0 | 70 | _pending live run_ |
+| degraded — other (`score=None`) | 0 | 0 | _pending live run_ |
+| **`aggregate_complete`** | False | False | _pending live run_ |
+| ungraded pairs named (under `--require-complete`) | n/a | n/a | _pending live run_ |
+| grade throughput (scored / grade-s) | 0.27/s | 0.76/s | _pending live run_ |
+
+### Grade completeness — 16-col model (`weekly_query_cost`, default 16 columns)
+
+| | Dev #186 (cold) | Dev #202 (this issue) |
+|---|---:|---:|
+| artifacts graded | 220 | _pending live run_ |
+| comparable (scored) | 186 | _pending live run_ |
+| degraded — budget exceeded | 0 | _pending live run_ |
+| degraded — non-budget (`score=None`) | 34 | _pending live run_ |
+| **`aggregate_complete`** | False | _pending live run_ |
+| ungraded pairs named (under `--require-complete`) | n/a | _pending live run_ |
+
+### `--require-complete` outcome (this issue)
+
+| | Dev #202 (40-col) | Dev #202 (16-col) |
+|---|---:|---:|
+| harness exit code | _pending live run_ | _pending live run_ |
+| `aggregate_complete` reached? | _pending live run_ | _pending live run_ |
+| if non-zero: ungraded pairs named (exit 2 = `GradeIncompleteError`) | _pending live run_ | _pending live run_ |
+
+### Findings (#202)
+
+_pending live run_ — fill from the harness output once the operator runs the live retest
+below. Expected narrative to confirm or refute: the Stage-1 rate limiter + Stage-2 sweep +
+raised `max_retries_429` drive the #198 dev arm's 70 transient `GradeLLMError` degradations
+to **0** (40-col `aggregate_complete=True`), and the 16-col model's 34 non-budget
+`score=None` to **0** — OR `--require-complete` exits non-zero naming the exact residual
+pairs, which is also a PASS (no signal silently dropped).
+
+## How to run the #202 live retest (operator-only, metered)
+
+> This is a **live, metered Anthropic run** — it issues real draft + grade calls and costs
+> money. It requires the prepared intuit_airflow dbt project, an `ANTHROPIC_API_KEY` at the
+> required (raised) rate tier, and a single host (wall-clock is machine/network dependent).
+> Do **not** run it in CI. Run it back-to-back on ONE machine and transcribe the printed
+> tables into the placeholder cells above.
+
+**Preconditions** — same substrate as § Preconditions (intuit project prepared per
+`179-test-primitive-expansion-retest.md` § Substrate: `dbt deps` + `dbt parse`, a synthesised
+`_signalforge_*_schema.yml`, `signalforge.yml` with `safety.mode: schema-only` +
+`prune.enabled: false`, `/tmp/sf-demo-profiles`), PLUS:
+
+- **40-col model:** synthesise `weekly_query_cost` to 40 columns (append 24 synthetic
+  `NUMBER` columns to the manifest node, as in the #198 run — restore after), and set
+  `llm.max_output_tokens: 8192` so the 40-col *draft* is not truncated (a draft-width limit
+  orthogonal to #202 — see the #198 draft-width caveat).
+- **16-col model:** the default `weekly_query_cost` (no synthesis).
+- **Cold grade cache** on every run (the harness `--cache-mode bypass` default passes
+  `--no-cache` on dev — fair vs the cacheless prod arm).
+- **Fixed rate tier:** run the whole A/B on the SAME (raised) Anthropic rate tier, since the
+  #198 70-`GradeLLMError` artifact was a rate-limit overshoot — a different tier confounds
+  the #202 limiter result.
+
+**Environment variables** (or pass the matching `--…` flags):
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...                       # raised rate tier
+export SF_BENCH_PROJECT_DIR=~/Projects/intuit_airflow/plugins/dbt
+export SF_BENCH_PROFILES_DIR=/tmp/sf-demo-profiles
+```
+
+**Commands** — dev arm, both models, cold cache, `--require-complete` armed:
+
+```bash
+# Dev venv (editable from this checkout)
+python -m venv .venv-dev && .venv-dev/bin/pip install -e .
+
+# 40-col model (synthesise weekly_query_cost → 40 cols + llm.max_output_tokens: 8192 first)
+.venv-dev/bin/python tests/research/179-runtime-benchmark/benchmark_runtime.py \
+    --model models/reporting/weekly_query_cost.sql \
+    --require-complete            # exits 2 + names ungraded pairs if not aggregate_complete
+
+# 16-col model (default weekly_query_cost; restore the manifest node first)
+.venv-dev/bin/python tests/research/179-runtime-benchmark/benchmark_runtime.py \
+    --model models/reporting/weekly_query_cost.sql \
+    --require-complete
+```
+
+Run the **prod 0.5.0 arm** the same way for the before-columns (it OMITS `--require-complete`
+and `--no-cache` automatically — both are version-gated and unsupported pre-#202):
+
+```bash
+python -m venv .venv-prod && .venv-prod/bin/pip install signalforge-dbt
+.venv-prod/bin/python tests/research/179-runtime-benchmark/benchmark_runtime.py \
+    --model models/reporting/weekly_query_cost.sql --require-complete
+```
+
+The harness prints, for each run: the per-stage wall-clock, the grade-degradation counts
+with the per-`degrade_reason_type` split, `aggregate_complete`, and the ungraded-pair list.
+A `--require-complete` run that cannot reach a complete corpus **exits non-zero (2)** and the
+dev CLI names the ungraded pairs on stderr — the harness re-derives the same list from
+`grade.json` and parses the sidecars regardless of exit code. Transcribe each table into the
+matching `_pending live run_` cells above and replace § Findings (#202).
