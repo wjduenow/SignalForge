@@ -351,6 +351,7 @@ async def _grade_one_async(
     run_id: str,
     timestamp: datetime,
     model_unique_id: str,
+    sweep_round: int | None = None,
 ) -> tuple[GradingResult, GradeEvent]:
     """Issue one ``(artifact, criterion)`` LLM-judge call (async).
 
@@ -432,6 +433,7 @@ async def _grade_one_async(
         output_tokens=result.output_tokens,
         cache_creation_input_tokens=result.cache_creation_input_tokens,
         cache_read_input_tokens=result.cache_read_input_tokens,
+        sweep_round=sweep_round,
     )
     return grading_result, event
 
@@ -556,6 +558,7 @@ def _build_degraded(
     run_id: str,
     timestamp: datetime,
     model_unique_id: str,
+    sweep_round: int | None = None,
 ) -> tuple[GradingResult, GradeEvent]:
     """Construct the ``score=None`` degraded pair (DEC-015).
 
@@ -603,6 +606,7 @@ def _build_degraded(
         output_tokens=0,
         cache_creation_input_tokens=0,
         cache_read_input_tokens=0,
+        sweep_round=sweep_round,
     )
     return grading_result, event
 
@@ -691,6 +695,16 @@ async def _grade_artifacts_async_core(
     preserved across the refactor by storing each task's result at the
     iterator-index slot. On-disk JSONL ordering becomes arrival-order
     (per DEC-015); this is the deliberate concurrent-dispatch trade.
+
+    After the main pass an ALWAYS-ON bounded transient-recovery sweep
+    (#202 US-005 / DEC-206) re-grades the ``score is None`` /
+    ``degrade_reason_type == "transient"`` pairs SEQUENTIALLY (concurrency
+    1) for up to ``sweep_max_rounds`` rounds, mutating ``results_by_index``
+    in place. The returned list therefore carries POST-sweep state — the
+    caller builds the :class:`GradingReport` from it, so the report's
+    aggregates (``aggregate_complete`` / ``pass_rate`` / ``mean_score``)
+    reflect the sweep. ``"budget"`` / ``"ceiling"`` degrades are never
+    swept.
     """
     # Resolve the async-shaped client surface (US-009 docstring on
     # :func:`_resolve_async_client`). Production callers pass
@@ -1232,6 +1246,59 @@ async def _grade_artifacts_async_core(
                     }
                 ),
             )
+
+        # Bounded transient-recovery sweep (#202 US-005 / DEC-206). ALWAYS-ON.
+        # After the main concurrent pass (and the WARNINGs above) the report
+        # is NOT yet built — it is assembled by the caller from the value this
+        # function returns, AFTER the sweep mutates ``results_by_index`` in
+        # place. ``results_by_index`` is the single source of truth the
+        # sidecar + report both read, so a recovered pair flips
+        # ``aggregate_complete`` to ``True`` without any second results list.
+        #
+        # The sweep re-grades ONLY pairs whose slot is degraded
+        # (``score is None``) AND classified ``"transient"`` — a transient LLM
+        # blip can recover on a calmer retry. ``"budget"`` and ``"ceiling"``
+        # degrades are NEVER swept (a hard wall-clock / opt-in cap is not
+        # retriable). Each round runs SEQUENTIALLY (concurrency 1) so there is
+        # no second thundering herd; the loop stops when zero transient pairs
+        # remain OR ``sweep_max_rounds`` is reached (no infinite loop).
+        #
+        # The cool-down between rounds routes through the test-overridable
+        # ``_async_sleep`` alias; ``sweep_cooldown_seconds == 0`` skips the
+        # wait but the sweep itself stays always-on.
+        for sweep_round in range(1, resolved_config.sweep_max_rounds + 1):
+            transient_indices = [
+                idx
+                for idx, (_aid, _atext, _crit) in enumerate(pairs)
+                if (r := results_by_index[idx]) is not None
+                and r.score is None
+                and r.degrade_reason_type == "transient"
+            ]
+            if not transient_indices:
+                break
+            if resolved_config.sweep_cooldown_seconds > 0:
+                await _async_sleep(resolved_config.sweep_cooldown_seconds)
+            for idx in transient_indices:
+                artifact_id, artifact_text, criterion = pairs[idx]
+                await _sweep_one_pair(
+                    index=idx,
+                    artifact_id=artifact_id,
+                    artifact_text=artifact_text,
+                    criterion=criterion,
+                    sweep_round=sweep_round,
+                    resolved_config=resolved_config,
+                    resolved_audit_path=resolved_audit_path,
+                    async_client=async_client,
+                    run_id=run_id,
+                    rubric_hash=rubric_hash,
+                    template_hash=template_hash,
+                    rubric_block=rubric_block,
+                    crit_hash=crit_hash_by_id[criterion.id],
+                    model_unique_id=model_unique_id,
+                    results_by_index=results_by_index,
+                    cache_dir=cache_dir,
+                    artifact_text_hash_by_index=artifact_text_hash_by_index,
+                )
     finally:
         # Reset the ContextVar so the shared limiter never leaks past this
         # run (belt-and-braces — ``asyncio.run`` already runs the coroutine
@@ -1242,6 +1309,142 @@ async def _grade_artifacts_async_core(
     # By construction every slot is populated; the type-narrowing cast
     # is safe.
     return [cast(GradingResult, r) for r in results_by_index]
+
+
+async def _sweep_one_pair(
+    *,
+    index: int,
+    artifact_id: str,
+    artifact_text: str,
+    criterion: Criterion,
+    sweep_round: int,
+    resolved_config: GradeConfig,
+    resolved_audit_path: Path,
+    async_client: object | None,
+    run_id: str,
+    rubric_hash: str,
+    template_hash: str,
+    rubric_block: str,
+    crit_hash: str,
+    model_unique_id: str,
+    results_by_index: list[GradingResult | None],
+    cache_dir: Path | None,
+    artifact_text_hash_by_index: dict[int, str] | None,
+) -> None:
+    """Re-grade ONE transient-degraded pair on a sweep round (#202 US-005 / DEC-206).
+
+    Runs SEQUENTIALLY from :func:`_grade_artifacts_async_core`'s sweep loop
+    (concurrency 1 — no second thundering herd). Mirrors the happy-path
+    ``_one`` coroutine's post-grade discipline but without the semaphore,
+    ceiling accounting, or budget-cancellation machinery (the sweep is the
+    calm retry; it is not budget-bounded and is never cancelled by the main
+    pass's ``asyncio.timeout`` — that scope has already exited).
+
+    Each attempt appends a NEW ``sweep_round``-tagged audit record (the
+    immutable-log posture — the original failure record is never rewritten).
+    The single source of truth ``results_by_index`` is updated in place so a
+    recovered pair flips ``score is None`` → a real score; a still-failing
+    pair stays degraded (with a fresh ``sweep_round``-tagged transient
+    record). On success the now-scored pair is written to the grade cache
+    via the same fail-soft path as the main pass — a still-degraded pair is
+    NEVER cached (DEC-007 of #189).
+    """
+    per_call_ts = datetime.now(UTC)
+    try:
+        grading_result, event = await _grade_one_async(
+            artifact_id=artifact_id,
+            artifact_text=artifact_text,
+            criterion=criterion,
+            config=resolved_config,
+            rubric_block=rubric_block,
+            rubric_hash=rubric_hash,
+            template_hash=template_hash,
+            crit_hash=crit_hash,
+            client=async_client,
+            run_id=run_id,
+            timestamp=per_call_ts,
+            model_unique_id=model_unique_id,
+            sweep_round=sweep_round,
+        )
+    except (
+        GradeLLMError,
+        GradeOutputError,
+        GradePromptEnvelopeBreachError,
+    ) as exc:
+        # Still degraded on this sweep round — append a fresh
+        # ``sweep_round``-tagged record (immutable log) and leave the slot
+        # degraded. The next sweep round (if any) re-touches it.
+        grading_result, event = _build_degraded(
+            artifact_id=artifact_id,
+            criterion=criterion,
+            reasoning=_format_degrade_reasoning(exc),
+            config=resolved_config,
+            rubric_hash=rubric_hash,
+            template_hash=template_hash,
+            crit_hash=crit_hash,
+            run_id=run_id,
+            timestamp=per_call_ts,
+            model_unique_id=model_unique_id,
+            sweep_round=sweep_round,
+        )
+
+    # Single source of truth — overwrite the prior degraded slot with this
+    # round's verdict (a recovery flips it to a real score; a repeat failure
+    # carries the new transient record's shape).
+    results_by_index[index] = grading_result
+
+    # Append the NEW audit record. The sweep runs sequentially, so a plain
+    # synchronous write (no executor/shield) is fine — there are no sibling
+    # in-flight coroutines for an fsync to stall (mirrors the synthesis
+    # pass's sync write). Fail-closed: a GradeAuditWriteError aborts the run.
+    _write_event_or_abort_kw(event, resolved_audit_path)
+
+    # Cache-write on recovery only (reuse the main-pass fail-soft path). A
+    # pair that stayed degraded (score is None) is never cached — DEC-007 of
+    # #189 forbids caching a transient failure, which would replay it forever.
+    if (
+        cache_dir is not None
+        and grading_result.score is not None
+        and artifact_text_hash_by_index is not None
+    ):
+        artifact_text_hash = artifact_text_hash_by_index.get(index)
+        if artifact_text_hash is not None:
+            assert resolved_config.model is not None
+            cache_record = CacheRecord(
+                artifact_id=artifact_id,
+                criterion_id=criterion.id,
+                score=grading_result.score,
+                passed=grading_result.passed,
+                evidence=grading_result.evidence,
+                reasoning=grading_result.reasoning,
+                criterion_prompt_hash=crit_hash,
+                artifact_text_hash=artifact_text_hash,
+                provider=resolved_config.provider,
+                model=resolved_config.model,
+                prompt_version_template=template_hash,
+                response_text_hash=event.response_text_hash,
+                rubric_hash=rubric_hash,
+                original_timestamp=per_call_ts,
+            )
+            cache_key = compute_cache_key(
+                criterion_prompt_hash=crit_hash,
+                artifact_text_hash=artifact_text_hash,
+                provider=resolved_config.provider,
+                model=resolved_config.model,
+                prompt_version_template=template_hash,
+            )
+            try:
+                write_cache(cache_dir, cache_key, cache_record)
+            except Exception as cache_exc:
+                _LOGGER.warning(
+                    "grade cache write failed (sweep guard): %s",
+                    json.dumps(
+                        {
+                            "key": cache_key,
+                            "error_class": type(cache_exc).__name__,
+                        }
+                    ),
+                )
 
 
 def _write_event_or_abort_kw(event: GradeEvent, audit_path: Path) -> None:
