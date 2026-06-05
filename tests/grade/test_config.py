@@ -239,7 +239,9 @@ def test_grade_config_defaults_match_dec_023_to_027() -> None:
     assert cfg.cache_ttl == "1h"
     # #187 DEC-004: raised from 256 to avoid one-line gemini-flash truncation.
     assert cfg.max_output_tokens == 1024
-    assert cfg.max_retries_429 == 3
+    # #202 US-008 / DEC-209: raised 3 -> 6 as belt-and-braces over the
+    # header-honoring rate limiter (the primary 429 fix).
+    assert cfg.max_retries_429 == 6
     assert cfg.max_retries_5xx == 1
     assert cfg.max_retries_conn == 1
     # #198 DEC-001: total_budget_seconds is now an OPTIONAL absolute hard

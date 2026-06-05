@@ -1096,11 +1096,17 @@ the report, exit-code consequence) without the others.
 
 The grade-completeness contract is a **structural** invariant, distinct
 from (and checked BEFORE) the verdictual threshold-fail check above.
-After the always-on bounded transient-recovery sweep (issue #202
-US-005), `grade_artifacts(...)` raises `GradeIncompleteError` if any
-non-exempt `(artifact, criterion)` pair is still ungraded
-(`score=None`) AND `grade.require_complete` is armed (`true`, the
-default). The CLI catches the typed error and exits **2** (input /
+It operationalises the library's **bias-to-completion posture** (#202
+DEC-210): the grader drives **every pair to a score by default**, and a
+`<100%` result is legitimate ONLY when the operator intentionally limited
+cost/time (an explicit `max_grade_*` ceiling or an explicitly-set
+`total_budget_seconds`) — see
+[`docs/grade-ops.md` § Bias-to-completion posture](grade-ops.md#bias-to-completion-posture-grade-completeness)
+for the full taxonomy. After the always-on bounded transient-recovery
+sweep (issue #202 US-005), `grade_artifacts(...)` raises
+`GradeIncompleteError` if any non-exempt `(artifact, criterion)` pair is
+still ungraded (`score=None`) AND `grade.require_complete` is armed
+(`true`, the default). The CLI catches the typed error and exits **2** (input /
 invariant tier — DEC-208 of issue #202). The raise lands AFTER the
 fail-closed `grade.json` sidecar write so the complete corpus is on
 disk for diagnosis (mirrors the `GradeBelowThresholdError` ordering

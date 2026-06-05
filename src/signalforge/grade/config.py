@@ -32,7 +32,9 @@ Design commitments operationalised here (``plans/super/7-quality-grader.md``):
   explicit opt-in, not the default), ``cache_ttl="1h"``,
   ``max_output_tokens=1024`` (#187 DEC-004 — raised from 256 so a one-line
   ``gemini-2.5-flash`` grade JSON is substantially less likely to
-  truncate), ``max_retries_429=3``, ``max_retries_5xx=1``,
+  truncate), ``max_retries_429=6`` (#202 US-008 / DEC-209 — raised from 3
+  as belt-and-braces over the #202 header-honoring rate limiter, which is
+  the primary 429 fix), ``max_retries_5xx=1``,
   ``max_retries_conn=1``, ``total_budget_seconds=None`` (reinterpreted by
   #198 DEC-001 as an *optional* absolute hard ceiling; ``None`` → use the
   scaled-budget formula via ``budget_base_seconds=60`` /
@@ -154,12 +156,28 @@ class GradeConfig(BaseModel):
     full-fixture scale (#158) and recommends 4096 for Gemini-heavy runs.
     Independent of :attr:`signalforge.draft.DraftConfig.max_output_tokens`."""
 
-    max_retries_429: int = 3
-    """Mirrors :attr:`signalforge.draft.DraftConfig.max_retries_429`.
-    The grader reuses the centralised :func:`signalforge.llm.call_llm`
-    seam (#5 DEC-012) so the retry taxonomy is the full clauditor
-    surface; this knob dials down the per-call attempt count for 429
-    responses without changing the global default."""
+    max_retries_429: int = 6
+    """Per-call retry budget for HTTP 429 (rate-limit) responses.
+
+    Default ``6`` (#202 US-008 / DEC-209 — raised from ``3``). The
+    load-bearing 429 fix is the #202 shared, header-honoring rate limiter
+    (DEC-205): the sync/async :class:`signalforge.llm._rate_limiter`
+    cooperating pair paces dispatch at the provider's advertised rate and
+    honours ``retry-after`` / ``anthropic-ratelimit-*`` headers, so under
+    normal load the grader rarely consumes a retry at all. This raised
+    default is *belt-and-braces* on top of that limiter: a wider per-call
+    429 budget gives the always-on transient-recovery sweep (#202 US-005)
+    even more headroom to drive every pair to a score before the
+    fail-loud ``require_complete`` check (#202 US-006) fires — consistent
+    with the bias-to-completion posture (DEC-210).
+
+    The grader reuses the centralised :func:`signalforge.llm.call_llm` /
+    :func:`signalforge.llm.call_llm_async` seam (#5 DEC-012) so the retry
+    taxonomy is the full clauditor surface; this knob dials the per-call
+    attempt count for 429 responses without changing the seam's own
+    keyword default (which still serves the drafter via ``DraftConfig``).
+    Set ``0`` for an aggressive batch posture where one retry-exhaustion is
+    preferable to a stalled call."""
 
     max_retries_5xx: int = 1
     """Mirrors :attr:`signalforge.draft.DraftConfig.max_retries_5xx`."""

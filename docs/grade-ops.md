@@ -45,6 +45,126 @@ User-facing tagline: **every drafted artefact that ships is scored;
 every scored artefact has a durable receipt; partial runs surface as
 partial, not silent.**
 
+## Bias-to-completion posture (grade-completeness)
+
+**The library biases toward completion.** By default it drives **every
+`(artifact, criterion)` pair to a score.** A `<100%` / incomplete grade
+result is legitimate **ONLY when the operator intentionally limited
+cost/time** — an explicit `max_grade_*` ceiling or an explicitly-set
+`total_budget_seconds`. Incompleteness must **never** be a *passive
+by-product* of a default guard. The default scaled wall-clock budget
+survives only as a **generous runaway catch**; if it ever trips on a
+default run it **FAILS LOUD** (via `require_complete`, below) — it does
+**not** silently ship a partial. (#202 DEC-210.)
+
+This posture rests on three always-on mechanisms that, together, take a
+default run to 100% scored:
+
+1. **A shared, header-honoring rate limiter (#202 US-002/003/004 /
+   DEC-205).** The sync/async limiter pair paces dispatch at the
+   provider's advertised rate and honours `retry-after` /
+   `anthropic-ratelimit-*` headers, so the original concurrency↔rate-limit
+   collision (which produced ~70 degradations on the full Austin fixture)
+   no longer arises. The default `max_retries_429: 6` (#202 DEC-209,
+   raised from 3) is belt-and-braces on top of it.
+2. **A bounded transient-recovery sweep (#202 US-005 / DEC-206).** After
+   the main concurrent pass, any pair that degraded as **transient** is
+   re-graded sequentially (concurrency 1 — no second herd), up to
+   `sweep_max_rounds` (default 3) with a `sweep_cooldown_seconds` (default
+   2.0) pause between rounds. A recovered pair is cached like any other
+   success. `budget` and `ceiling` degrades are **never** swept.
+3. **A fail-loud completeness check (#202 US-006/007 / DEC-204).** With
+   `require_complete: true` (the **default**), `grade_artifacts(...)`
+   raises `GradeIncompleteError` (CLI exit 2) when a **non-exempt** pair is
+   still ungraded after the sweep — see [Grade-completeness
+   contract](#grade-completeness-contract-require_complete) below.
+
+### How to opt into a limit (the deliberate, documented act)
+
+A partial grade is only legitimate when the operator **chose** to cap
+cost or time. Limiting is therefore an explicit, documented act — set one
+or more of these knobs in `signalforge.yml`:
+
+| Knob | Effect | Trips `require_complete`? |
+|---|---|---|
+| `max_grade_calls: <N>` | Stop scheduling new pairs after N judge calls; rest degrade (`ceiling`). | **No — exempt.** |
+| `max_grade_cost_usd: <X>` | Stop once accumulated USD ≥ X; rest degrade (`ceiling`). | **No — exempt.** |
+| `max_grade_tokens: <N>` | Stop once total token movement ≥ N; rest degrade (`ceiling`). | **No — exempt.** |
+| `total_budget_seconds: <S>` (explicit int) | Absolute wall-clock cap `min(scaled, S)`; on trip rest degrade (`budget`). | **No — exempt** (a deliberate operator time-ceiling). |
+
+```yaml
+grade:
+  # Opt into a cost ceiling — a deliberate partial is now legitimate:
+  max_grade_cost_usd: 1.50
+  # …and/or an explicit absolute wall-clock cap:
+  total_budget_seconds: 300
+```
+
+A run that trips one of these opt-in limits is a **legitimate partial**:
+the operator asked for it. `require_complete` does **not** fire on these
+degrades (they are exempt).
+
+### A default-scaled-budget trip fails loud — never a silent partial
+
+When `total_budget_seconds` is left at its default `None`, the engine
+sizes the wall-clock budget from the work via the scaled formula
+(`budget_base_seconds + budget_per_pair_seconds × ceil(num_pairs /
+max_concurrent_calls)`). This is a **runaway catch sized for ample
+headroom**, not a throughput cap — at representative scales (a few hundred
+pairs at the default `max_concurrent_calls: 10`) it leaves clear margin
+over a realistic limiter-paced completion time (pinned by
+`tests/grade/test_engine.py::test_default_scaled_budget_is_non_binding_at_representative_scale`).
+If the **default** scaled budget ever trips, that is treated as a
+**Stage-1 sizing regression, not a legitimate partial**: per DEC-204 the
+resulting `budget` degrades trip `require_complete` and the run **fails
+loud** rather than silently shipping a `<100%` corpus. The remedy is to
+fix the regression (or, if a partial is genuinely wanted, set
+`total_budget_seconds` explicitly to make the cap a deliberate choice) —
+never to lower the default budget.
+
+### Three degrade classes
+
+The completeness contract distinguishes three classes of degrade — they
+are NOT interchangeable, and only the operator-ceiling class is a
+legitimate partial:
+
+| Class | `degrade_reason_type` | What it is | Posture |
+|---|---|---|---|
+| **Transient-recoverable** | `"transient"` | An LLM/network blip, retry-exhaustion, parser failure, or non-clean `finish_reason`. Retriable on a calmer pass. | **Swept** (US-005) to recover it; any survivor of the sweep is **unrecovered** and **fails loud** under `require_complete`. |
+| **Operator-ceiling** | `"ceiling"`, or `"budget"` with an **explicit** `total_budget_seconds` | The operator deliberately capped calls / cost / tokens / time. | **Legitimate partial.** Exempt from `require_complete`; surfaces via `aggregate_complete: false`. The ONLY way `<100%` is acceptable by design. |
+| **Unrecoverable** | `"transient"` surviving the sweep, OR `"budget"` on the **default** scaled budget | A failure the recovery machinery could not clear, OR a default-budget overrun (a Stage-1 canary). | **Fails loud** under `require_complete` (exit 2, named pairs). Never a silent partial. |
+
+> **"Partial is acceptable" is scoped to the operator-ceiling class
+> ONLY.** Every other path drives to 100% or fails loud.
+
+### Grade-completeness contract (`require_complete`)
+
+`require_complete: bool = True` (the default). After the always-on sweep,
+`grade_artifacts(...)` raises `GradeIncompleteError` (tier-2; CLI exit 2)
+if any **non-exempt** pair is still ungraded (`score=None`). The trip /
+exempt matrix branches on each pair's `GradingResult.degrade_reason_type`
+discriminator (never on message text):
+
+- `"transient"` → **always trips** (an unrecovered LLM/network failure).
+- `"budget"` AND `total_budget_seconds is None` (the default-scaled
+  budget) → **trips** (a Stage-1 sizing canary — the budget was sized for
+  the work, so the engine is at fault, not an operator ceiling).
+- **Exempt — never trips:** `"ceiling"` degrades (an explicit `max_grade_*`
+  opt-in), and `"budget"` degrades when `total_budget_seconds` was set
+  **explicitly** (a deliberate operator time-ceiling — the curtailed run
+  is the contract, not a surprise).
+
+The raise lands **AFTER** the fail-closed `grade.json` sidecar write (so
+the operator has the complete corpus on disk for diagnosis — mirrors the
+`GradeBelowThresholdError` ordering invariant) and **BEFORE** the
+`fail_on_below_threshold` check (incomplete is *structural*;
+below-threshold is *verdictual*). Set `require_complete: false` in
+`signalforge.yml` (or pass `--no-require-complete`) to revert to the v0.1
+report-only posture, where ungraded pairs surface only via
+`aggregate_complete: false`. The CLI exposes `--require-complete` /
+`--no-require-complete` (US-007); see
+[`docs/cli-ops.md`](cli-ops.md#grade-completeness-behaviour).
+
 ## Public API
 
 Import from `signalforge.grade`. The 18 names exported by `__all__`:
@@ -120,7 +240,7 @@ grade:
   # model: claude-haiku-4-5       # omit to auto-resolve to the provider's default judge (anthropic -> claude-sonnet-4-6); set claude-haiku-4-5 to opt into the faster/stricter Haiku judge
   cache_ttl: 1h                   # Prompt-cache TTL ('5m' or '1h')
   max_output_tokens: 1024         # Per-criterion JSON response cap (default 1024)
-  max_retries_429: 3              # Rate-limit retry budget
+  max_retries_429: 6              # Rate-limit (429) retry budget; default 6 (#202)
   max_retries_5xx: 1
   max_retries_conn: 1
   budget_base_seconds: 60         # scaled-budget constant term (#198)
@@ -169,7 +289,7 @@ Field-by-field:
 - **`model`** — The model id used by every per-pair judge call. **Default resolves per-provider at config-load** (#187): when `model:` is omitted, the loader injects the calling provider's default judge model from `signalforge.llm.providers.PROVIDER_DEFAULT_MODELS` — `anthropic` → `claude-sonnet-4-6`, `openai` → `gpt-4o-mini`, `gemini` → `gemini-2.5-flash`. **Anthropic defaults to Sonnet:** the #187 calibration gate found `claude-haiku-4-5` grades the rubric stricter than Sonnet (~77–82% concordance, below the 85% bar — see `docs/research/187-haiku-calibration.md`), so Haiku is an explicit opt-in (`grade.model: claude-haiku-4-5`), not the default. An explicit `model:` is honoured verbatim. A SKU-prefix/provider mismatch (e.g. `provider: openai` with a `claude-` model) fails loud at config-load via the model↔provider compat validator (reusing `signalforge.llm.providers.PROVIDER_SKU_PREFIXES`).
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
 - **`max_output_tokens`** — Per-criterion judge response cap. Default `1024` (#187 — raised from 256 to substantially reduce truncation risk for a verbose one-line `gemini-2.5-flash` grade JSON; the expected JSON response is still ~150 tokens, so the larger ceiling costs nothing on the happy path). 1024 reduces but does not fully eliminate Gemini truncation at scale — see the per-provider floors below; Gemini-heavy runs may want `4096`. Independent of `DraftConfig.max_output_tokens`.
-- **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised, provider-neutral `signalforge.llm.call_llm` seam (#5 DEC-012; #135 DEC-005). Defaults `3 / 1 / 1` mirror `DraftConfig`; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.
+- **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised, provider-neutral `signalforge.llm.call_llm` / `call_llm_async` seam (#5 DEC-012; #135 DEC-005). Defaults `6 / 1 / 1`. **`max_retries_429` was raised `3 → 6` in #202 (DEC-209)** as *belt-and-braces* over the primary 429 fix — the #202 shared, header-honoring rate limiter (DEC-205), which paces dispatch at the provider's advertised rate and honours `retry-after` / `anthropic-ratelimit-*` headers so the grader rarely consumes a retry under normal load. The wider 429 budget gives the always-on transient-recovery sweep (#202 US-005) more headroom to drive every pair to a score before the fail-loud `require_complete` check fires, consistent with the [bias-to-completion posture](#bias-to-completion-posture-grade-completeness). Dial down (e.g. `max_retries_429: 0`) for an aggressive batch posture where one retry-exhaustion is preferable to dozens of stalled calls. The grade defaults are independent of the seam's own keyword defaults (which still serve the drafter via `DraftConfig`).
 - **`budget_base_seconds`** — Fixed constant term in the scaled wall-clock formula (issue #198, default `60`). Covers per-run setup (config resolution, cache priming, the first concurrency wave's ramp) that does not scale with the number of pairs. Must be positive.
 - **`budget_per_pair_seconds`** — Per concurrency-*wave* wall allowance in the scaled formula (issue #198, default `20.0`). The formula multiplies this by `ceil(num_pairs / max_concurrent_calls)` — the number of concurrency waves, not the raw pair count — so it is the wall-clock allowance per wave of `max_concurrent_calls` in-flight judge calls. The default is grounded in the #179 baseline (Sonnet judge p50 ~10s/call; 220 pairs at concurrency 10 → `60 + 20.0 × ceil(220/10) = 500s` against a measured 222.9s — ~2.25× headroom). It is a **runaway backstop** sized to tolerate 429 retry storms, **NOT** a completion target; the ticket-literal `2.0` would compute 104s and degrade ~half the pairs, recreating the failure this scaling fixes. Must be positive.
 - **`total_budget_seconds`** — **Optional** absolute hard ceiling on the whole-run wall-clock budget (issue #198 DEC-001; reinterpreted from the flat pre-#198 default of `300`). **Default `None`.** When `None`, the engine sizes the budget from the work via the scaled formula `effective = budget_base_seconds + budget_per_pair_seconds × ceil(num_pairs / max_concurrent_calls)` — a backstop that grows with model width and concurrency rather than a flat 300s the pre-#186 sequential era was sized for. When set to an int, the effective budget is `min(scaled, total_budget_seconds)` — i.e. an explicit value still acts as a hard cap on top of the scaled estimate, preserving exact v0.1 absolute-cap semantics for pinned `signalforge.yml` files (an operator who set `total_budget_seconds: 600` keeps that 600s ceiling). Mirrors `PruneConfig.total_budget_seconds` degrade semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped (DEC-015). Under the asyncio orchestrator (issue #186) the budget is enforced via `asyncio.timeout(effective)` wrapping the `TaskGroup`; on trip, un-completed pairs are filled in by a synthesis pass with `reasoning="grade budget exceeded ({effective}s) before evaluation"`. Tests inject deterministic timing via the module-level `_async_sleep` alias (mirrors the `_sleep` injection pattern from `llm-drafter.md` DEC-004).
@@ -813,17 +933,25 @@ default fan-out is too expensive for their use case:
 - **`budget_base_seconds` / `budget_per_pair_seconds`** (defaults `60` /
   `20.0`) — The two terms of the scaled wall-clock backstop (issue #198):
   `effective = budget_base_seconds + budget_per_pair_seconds × ceil(num_pairs / max_concurrent_calls)`.
-  The backstop grows with model width and concurrency. It is a runaway
-  guard, not a completion target (~2.25× headroom over the #179 baseline);
-  tripping it routes every remaining pair to the degraded path.
+  The backstop grows with model width and concurrency. It is a **generous
+  runaway catch, NOT a completion target** (ample headroom over the #179
+  baseline — pinned non-binding at representative scales by
+  `test_default_scaled_budget_is_non_binding_at_representative_scale`).
+  **Do not lower these defaults** — the bias-to-completion posture
+  (DEC-210) requires the default budget never passively bind; widen them
+  only if a retest shows the limiter-paced wall-clock has grown.
 - **`total_budget_seconds`** (**default `None`** since #198) — Optional
   absolute hard cap on top of the scaled formula. `None` → use the scaled
   budget alone; set to an int → `effective = min(scaled, total_budget_seconds)`.
-  Tripping the effective budget routes every remaining pair to the degraded
-  path rather than billing for the whole rubric × every artefact. A
-  `GradeBudgetExceededError` only fires if the budget trips before
-  ANY criterion runs (a hard "the run did nothing" failure); a partial
-  run completes with `aggregate_complete: false`.
+  Setting it explicitly is the **deliberate, documented way to opt into a
+  wall-clock partial** — those `budget` degrades are exempt from
+  `require_complete` (see [Bias-to-completion
+  posture](#bias-to-completion-posture-grade-completeness)). A trip of the
+  **default** scaled budget (`total_budget_seconds is None`) is **not** a
+  legitimate partial: per DEC-204 it **fails loud** under `require_complete`
+  (a Stage-1 sizing canary), never a silent `aggregate_complete: false`.
+  (`GradeBudgetExceededError` stays reserved for a future hard "the run did
+  nothing" failure where the budget trips before ANY criterion runs.)
 - **`max_grade_calls` / `max_grade_cost_usd` / `max_grade_tokens`**
   (**all default `None` = off**, issue #198) — Opt-in soft ceilings on
   judge calls / USD / token movement. Whichever trips first stops
