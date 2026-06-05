@@ -72,7 +72,11 @@ default run to 100% scored:
    re-graded sequentially (concurrency 1 — no second herd), up to
    `sweep_max_rounds` (default 3) with a `sweep_cooldown_seconds` (default
    2.0) pause between rounds. A recovered pair is cached like any other
-   success. `budget` and `ceiling` degrades are **never** swept.
+   success. `budget` and `ceiling` degrades are **never** swept. The whole
+   sweep phase is wall-clock-bounded by `sweep_budget_seconds` (default 300,
+   #202 QG-FIX-2): on timeout the sweep stops (it does **not** raise) and any
+   still-transient pairs are left degraded — they then fail loud under
+   `require_complete` or surface as an honest partial when it is `false`.
 3. **A fail-loud completeness check (#202 US-006/007 / DEC-204).** With
    `require_complete: true` (the **default**), `grade_artifacts(...)`
    raises `GradeIncompleteError` (CLI exit 2) when a **non-exempt** pair is
