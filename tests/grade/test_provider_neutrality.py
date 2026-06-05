@@ -272,7 +272,11 @@ def test_nocache_provider_builds_no_cache_marker_or_beta_header(
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_fast_config(),
+        # require_complete=False: this test inspects only the create-call
+        # kwargs (the no-cache-marker contract); the canned single-response
+        # client degrades the remaining pairs as transient, which would
+        # otherwise trip the #202 US-006 completeness raise.
+        config=_fast_config().model_copy(update={"require_complete": False}),
         client=cast("AnthropicClientProtocol", client),
         project_dir=project_dir,
         audit_path=project_dir / ".signalforge" / "grade.jsonl",

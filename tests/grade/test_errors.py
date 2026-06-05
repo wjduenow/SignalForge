@@ -26,6 +26,7 @@ from signalforge.grade.errors import (
     GradeCacheWriteError,
     GradeConfigError,
     GradeError,
+    GradeIncompleteError,
     GradeLLMError,
     GradeOutputError,
     GradePromptEnvelopeBreachError,
@@ -178,6 +179,63 @@ def test_grade_output_error_carries_violation_type() -> None:
     assert exc.violation_type == "score_out_of_range"
     rendered = str(exc)
     assert "score 1.5" in rendered
+
+
+def test_grade_incomplete_error_carries_fields_and_names_pairs() -> None:
+    """``GradeIncompleteError`` exposes ``incomplete_pairs`` /
+    ``require_complete`` / ``aggregate_complete`` on the instance and
+    names the pairs in the message (#202 US-006 / DEC-204 + DEC-207)."""
+    pairs = (("column.email.description", "clarity"), ("model.rationale", "coverage"))
+    exc = GradeIncompleteError(
+        incomplete_pairs=pairs,
+        require_complete=True,
+        aggregate_complete=False,
+    )
+    assert exc.incomplete_pairs == pairs
+    assert exc.require_complete is True
+    assert exc.aggregate_complete is False
+    rendered = str(exc)
+    # Both pairs are named verbatim (under the display cap).
+    assert "column.email.description" in rendered
+    assert "model.rationale" in rendered
+    assert "clarity" in rendered
+    assert "coverage" in rendered
+    assert "↳ Remediation:" in rendered
+    # Subclasses GradeError.
+    assert issubclass(GradeIncompleteError, GradeError)
+
+
+def test_grade_incomplete_error_truncates_pair_list() -> None:
+    """The message names the first ~20 pairs then collapses the tail to a
+    bounded ``… and N more`` (the full list lives in the JSONL audit)."""
+    pairs = tuple((f"column.c{i}.description", "clarity") for i in range(25))
+    exc = GradeIncompleteError(
+        incomplete_pairs=pairs,
+        require_complete=True,
+        aggregate_complete=False,
+    )
+    rendered = str(exc)
+    # First 20 named; the 21st (index 20) is NOT named.
+    assert "column.c0.description" in rendered
+    assert "column.c19.description" in rendered
+    assert "column.c20.description" not in rendered
+    # The overflow tail is bounded to a single "… and 5 more".
+    assert "… and 5 more" in rendered
+    # The instance still carries the FULL tuple regardless of message cap.
+    assert len(exc.incomplete_pairs) == 25
+
+
+def test_grade_incomplete_error_repr_quotes_pair_ids() -> None:
+    """An artifact_id with an ANSI escape renders repr-quoted, never as a
+    raw escape byte (DEC-022 log-injection defence)."""
+    exc = GradeIncompleteError(
+        incomplete_pairs=(("column.\x1b[31mevil.description", "clarity"),),
+        require_complete=True,
+        aggregate_complete=False,
+    )
+    rendered = str(exc)
+    assert "\x1b" not in rendered
+    assert "\\x1b" in rendered
 
 
 def test_subclass_inheritance_chain() -> None:

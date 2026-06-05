@@ -34,6 +34,13 @@ The ten classes (DEC-028 + #9 US-002 graduation):
     graduated from v0.2 reservation to v0.1 wiring in #9 (US-002,
     DEC-021). Raised AFTER the sidecar is durably persisted so the
     operator has a complete ``grade.json`` for diagnosis.
+11. :class:`GradeIncompleteError` — default-on completeness contract
+    (#202 US-006, DEC-204 + DEC-207). Raised AFTER the sidecar write and
+    BEFORE the below-threshold check when a non-exempt
+    ``(artifact, criterion)`` pair stays ungraded past the bounded sweep.
+
+(Plus the cache + nested-event-loop classes added by later issues; this
+list summarises the historical core rather than enumerating every leaf.)
 
 See ``plans/super/7-quality-grader.md`` for the full design and
 ``plans/super/9-cli-entrypoint.md`` US-002 for the threshold-fail
@@ -483,6 +490,108 @@ class GradeBelowThresholdError(GradeError):
         super().__init__(message, remediation=remediation)
 
 
+class GradeIncompleteError(GradeError):
+    """A non-exempt ``(artifact, criterion)`` pair remained ungraded
+    (``score=None``) after the always-on bounded sweep, AND the operator
+    has not opted out of the fail-loud completeness contract by setting
+    :attr:`signalforge.grade.GradeConfig.require_complete` to ``False``.
+
+    Issue #202 US-006 (DEC-204 + DEC-207). The grade engine's Stage-2
+    bounded sweep (#202 US-005) re-grades every ``"transient"`` degrade
+    SEQUENTIALLY for a few calmer rounds before the report is assembled.
+    By the time this check fires, a pair that is *still* ``score=None``
+    is a structural failure the operator must see — not a verdict to
+    quietly fold into ``aggregate_complete=False``.
+
+    The DEC-204 trip/exempt matrix (branch on the
+    :attr:`signalforge.grade.GradingResult.degrade_reason_type`
+    discriminator — #202 US-001 — never on message text):
+
+    * ``"transient"`` → ALWAYS trips. A transient pair that survived the
+      sweep is an unrecovered LLM/network failure; shipping it silently
+      hides a real gap in the grade corpus.
+    * ``"budget"`` + ``total_budget_seconds`` is ``None`` (the
+      DEFAULT-scaled-budget formula) → trips. A default-scaled-budget
+      degrade is a Stage-1-failure canary: the work overran a budget
+      that was *sized for the work*, so the engine is the thing at fault,
+      not an operator ceiling.
+    * EXEMPT (never trip): ``"ceiling"`` (an explicit ``max_grade_*``
+      opt-in the operator chose); and ``"budget"`` when
+      ``total_budget_seconds`` was set EXPLICITLY (a deliberate operator
+      time-ceiling — the operator asked for the cap, so a curtailed run
+      is the contract, not a surprise).
+
+    Raised AFTER the fail-closed sidecar JSON write so the operator has a
+    complete ``grade.json`` on disk for diagnosis (mirrors the
+    :class:`GradeBelowThresholdError` raise-after-sidecar ordering
+    invariant). ``require_complete`` is checked BEFORE
+    ``fail_on_below_threshold`` — an incomplete run is a structural
+    failure, distinct from (and prior to) a below-threshold verdict.
+
+    Carries:
+
+    * ``incomplete_pairs: tuple[tuple[str, str], ...]`` — the still-ungraded
+      pairs that tripped, each ``(artifact_id, criterion_id)``. The
+      human-facing message names the first ~20 then ``… and N more``
+      (the full list lives in the per-pair JSONL audit on disk).
+    * ``require_complete: bool`` — the config field value that armed the
+      raise (always ``True`` when this error is raised).
+    * ``aggregate_complete: bool`` — the report's aggregate-complete flag,
+      so a caller catching the error can render a diagnostic without
+      reaching back to the report (which is on disk at the sidecar path).
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The grade run left one or more non-exempt (artifact, criterion) "
+        "pairs ungraded (score=None) after the bounded transient-recovery "
+        "sweep, and `require_complete=True` opted into the fail-loud "
+        "completeness contract. The complete sidecar JSON has been written "
+        "to disk — inspect <project_dir>/.signalforge/grade.json (or the "
+        "explicit `sidecar_path`) and the per-pair `grade.jsonl` audit for "
+        "the full ungraded list and each pair's failure reason. Common "
+        "causes: a persistent LLM/network outage exhausting the sweep "
+        "rounds (transient), or a default-scaled budget overrun "
+        "(total_budget_seconds unset — a Stage-1 sizing canary). Either "
+        "re-run after the upstream issue clears, raise `grade.sweep_max_rounds` "
+        "/ widen the budget, or set `grade.require_complete: false` to revert "
+        "to report-only posture (the ungraded pairs then surface via "
+        "`aggregate_complete=False`)."
+    )
+
+    # First N pairs named verbatim in the message; the remainder collapse
+    # to a single ``… and K more`` line (the full list lives in the JSONL
+    # audit). Mirrors the failure-list-cap precedent in the CLI batch
+    # summary (`_BATCH_SUMMARY_FAILURE_CAP`).
+    _PAIR_DISPLAY_CAP: ClassVar[int] = 20
+
+    def __init__(
+        self,
+        *,
+        incomplete_pairs: tuple[tuple[str, str], ...],
+        require_complete: bool,
+        aggregate_complete: bool,
+        remediation: str | None = None,
+    ) -> None:
+        self.incomplete_pairs = incomplete_pairs
+        self.require_complete = require_complete
+        self.aggregate_complete = aggregate_complete
+        total = len(incomplete_pairs)
+        # Name the first ~20 pairs (repr-quoted via ``_format_value`` so
+        # adversarial artifact/criterion ids can't smuggle control bytes
+        # into the message), then bound the tail with ``… and N more``.
+        shown = incomplete_pairs[: self._PAIR_DISPLAY_CAP]
+        named = ", ".join(f"({_format_value(aid)}, {_format_value(cid)})" for aid, cid in shown)
+        overflow = total - len(shown)
+        suffix = f" … and {overflow} more" if overflow > 0 else ""
+        plural = "s" if total != 1 else ""
+        message = (
+            f"Grade run incomplete: {total} non-exempt pair{plural} remained "
+            f"ungraded (score=None) after the bounded sweep: {named}{suffix} "
+            f"(aggregate_complete={aggregate_complete})."
+        )
+        super().__init__(message, remediation=remediation)
+
+
 class GradeCacheReadError(GradeError):
     """The persistent grade cache file is present but unreadable or
     unparseable.
@@ -669,6 +778,7 @@ __all__ = [
     "GradeCacheWriteError",
     "GradeConfigError",
     "GradeError",
+    "GradeIncompleteError",
     "GradeLLMError",
     "GradeNestedEventLoopError",
     "GradeOutputError",

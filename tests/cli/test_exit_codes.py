@@ -204,6 +204,12 @@ def _construct_exception(exc_cls: type[BaseException]) -> BaseException:
             min_mean_score=0.6,
             aggregate_complete=True,
         )
+    if name == "GradeIncompleteError":
+        return cls(
+            incomplete_pairs=(("column.email.description", "clarity"),),
+            require_complete=True,
+            aggregate_complete=False,
+        )
 
     # Diff-layer mismatch shapes.
     if name == "DiffCandidateModelMismatchError":
