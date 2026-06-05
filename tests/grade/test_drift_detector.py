@@ -60,6 +60,7 @@ class StrictGradingResult(BaseModel):
     passed: bool
     evidence: str = ""
     reasoning: str = ""
+    degrade_reason_type: Literal["transient", "budget", "ceiling"] | None = None
 
 
 class StrictGradingReport(BaseModel):
@@ -131,10 +132,11 @@ class StrictGradeEventV2(BaseModel):
     ``audit_schema_version: Literal[2]`` and a new ``cache_hit: bool``
     field placed between ``response_text_hash`` and ``model`` so the
     reproducibility hashes stay adjacent. The v1 mirror above stays as
-    the replay anchor.
+    the replay anchor; the sibling :class:`StrictGradeEventV3` below
+    pins the v3 line and is the field-set-current mirror.
 
-    If you add a field to production :class:`GradeEvent`, mirror it
-    here AND refresh :file:`grade_event_v2.jsonl` in lockstep.
+    Do NOT grow this mirror — it is frozen as the v2 replay anchor. New
+    fields land on :class:`StrictGradeEventV3` instead.
     """
 
     model_config = _STRICT
@@ -150,6 +152,48 @@ class StrictGradeEventV2(BaseModel):
     passed: bool
     evidence: str = ""
     reasoning: str = ""
+    rubric_hash: str
+    prompt_version_template: str
+    criterion_prompt_hash: str
+    response_text_hash: str
+    cache_hit: bool = False
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
+
+
+class StrictGradeEventV3(BaseModel):
+    """One-off ``extra="forbid"`` mirror of :class:`GradeEvent` (v3).
+
+    Pins the v3 shape introduced by #202 US-001 (DEC-203):
+    ``audit_schema_version: Literal[3]`` plus the new
+    ``degrade_reason_type: Literal["transient","budget","ceiling"] | None``
+    discriminator placed after ``reasoning`` so the prose + its
+    structured classification stay adjacent. The v1 and v2 mirrors above
+    stay as replay anchors.
+
+    This is the field-set-current mirror — production :class:`GradeEvent`
+    drift is gated against it. If you add a field to production
+    :class:`GradeEvent`, mirror it here AND refresh
+    :file:`grade_event_v3.jsonl` in lockstep.
+    """
+
+    model_config = _STRICT
+
+    audit_schema_version: Literal[3] = 3
+    signalforge_version: str
+    run_id: str
+    timestamp: datetime
+    model_unique_id: str
+    artifact_id: str
+    criterion_id: str
+    score: float | None
+    passed: bool
+    evidence: str = ""
+    reasoning: str = ""
+    degrade_reason_type: Literal["transient", "budget", "ceiling"] | None = None
     rubric_hash: str
     prompt_version_template: str
     criterion_prompt_hash: str
@@ -281,6 +325,66 @@ def test_strict_grade_event_v2_validates_jsonl_fixture() -> None:
     assert seen_cache_hit_false, f"{fixture_path} must include at least one cache_hit=false line"
 
 
+def test_strict_grade_event_v3_validates_jsonl_fixture() -> None:
+    """Each line of :file:`grade_event_v3.jsonl` validates against
+    :class:`StrictGradeEventV3`.
+
+    Pins the v3 shape introduced by #202 US-001 (DEC-203):
+    ``audit_schema_version: 3`` plus the new ``degrade_reason_type``
+    discriminator. The fixture carries four lines — one scored
+    (``degrade_reason_type: null``) and one for each of the three
+    degrade causes (``"transient"`` / ``"budget"`` / ``"ceiling"``) — so
+    a regression that dropped, retyped, or mis-classified the field
+    fails loudly on at least one shape.
+    """
+    fixture_path = _FIXTURES_DIR / "grade_event_v3.jsonl"
+    text = fixture_path.read_text(encoding="utf-8")
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert len(lines) >= 4, (
+        f"expected ≥4 JSONL lines in {fixture_path} (one scored + three degrade causes)"
+    )
+    seen: set[str | None] = set()
+    for line in lines:
+        event = StrictGradeEventV3.model_validate_json(line)
+        seen.add(event.degrade_reason_type)
+    assert seen == {None, "transient", "budget", "ceiling"}, (
+        f"{fixture_path} must cover scored (null) + all three degrade reason types; saw {seen}"
+    )
+
+
+def test_v2_fixture_still_validates_against_production_grade_event() -> None:
+    """Backward-compat: the v2 JSONL fixture (without
+    ``degrade_reason_type``) round-trips through production
+    :class:`GradeEvent` via ``extra="ignore"`` and the
+    ``degrade_reason_type: ... | None = None`` default.
+
+    Per #202 US-001: a v2 audit record from a pre-#202 corpus must still
+    load through the current production model without a migration step —
+    ``degrade_reason_type`` defaults to ``None`` (i.e. "this record
+    predates the structured discriminator").
+    """
+    fixture_path = _FIXTURES_DIR / "grade_event_v2.jsonl"
+    text = fixture_path.read_text(encoding="utf-8")
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert lines, f"expected one-or-more JSONL lines in {fixture_path}"
+    for line in lines:
+        event = GradeEvent.model_validate_json(line)
+        assert event.audit_schema_version == 2
+        assert event.degrade_reason_type is None
+
+
+def test_strict_grade_event_v3_rejects_unknown_field() -> None:
+    """Sanity floor for :class:`StrictGradeEventV3` — an extra unknown
+    field raises :class:`ValidationError` (confirms ``extra="forbid"``).
+    """
+    fixture_path = _FIXTURES_DIR / "grade_event_v3.jsonl"
+    first_line = fixture_path.read_text(encoding="utf-8").splitlines()[0]
+    payload = json.loads(first_line)
+    payload["future_field_that_should_not_exist"] = "boom"
+    with pytest.raises(ValidationError):
+        StrictGradeEventV3.model_validate(payload)
+
+
 def test_v1_fixture_still_validates_against_production_grade_event() -> None:
     """Backward-compat: the v1 JSONL fixture (without ``cache_hit``)
     round-trips through production :class:`GradeEvent` via
@@ -390,27 +494,27 @@ def test_cache_record_field_set_parity() -> None:
 
 
 def test_grade_event_field_set_parity() -> None:
-    """:class:`StrictGradeEventV2` model_fields exactly match
+    """:class:`StrictGradeEventV3` model_fields exactly match
     :class:`GradeEvent` model_fields.
 
-    The v2 mirror is the field-set-current shape; the v1 mirror
-    intentionally lags (no ``cache_hit``) because it pins the v1
-    fixture's replay-compatibility surface. Production drift is gated
-    against the v2 mirror — if you add a field to :class:`GradeEvent`,
-    add it to :class:`StrictGradeEventV2` AND refresh
-    :file:`grade_event_v2.jsonl` in the same change.
+    The v3 mirror is the field-set-current shape; the v1 / v2 mirrors
+    intentionally lag (no ``cache_hit`` / no ``degrade_reason_type``)
+    because they pin earlier fixtures' replay-compatibility surfaces.
+    Production drift is gated against the v3 mirror — if you add a field
+    to :class:`GradeEvent`, add it to :class:`StrictGradeEventV3` AND
+    refresh :file:`grade_event_v3.jsonl` in the same change.
     """
-    strict_fields = set(StrictGradeEventV2.model_fields.keys())
+    strict_fields = set(StrictGradeEventV3.model_fields.keys())
     prod_fields = set(GradeEvent.model_fields.keys())
     missing_in_strict = prod_fields - strict_fields
     extra_in_strict = strict_fields - prod_fields
     assert not missing_in_strict, (
-        f"StrictGradeEventV2 is missing fields present in GradeEvent: "
-        f"{missing_in_strict}. Update StrictGradeEventV2 to match."
+        f"StrictGradeEventV3 is missing fields present in GradeEvent: "
+        f"{missing_in_strict}. Update StrictGradeEventV3 to match."
     )
     assert not extra_in_strict, (
-        f"StrictGradeEventV2 has fields absent from GradeEvent: "
-        f"{extra_in_strict}. Remove from StrictGradeEventV2 or add to "
+        f"StrictGradeEventV3 has fields absent from GradeEvent: "
+        f"{extra_in_strict}. Remove from StrictGradeEventV3 or add to "
         f"GradeEvent."
     )
 

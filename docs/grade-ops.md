@@ -593,7 +593,7 @@ convention across the codebase — mirrors `signalforge.safety.audit`,
 
 | Field                          | Type                              | Meaning                                                                                          |
 | ------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `audit_schema_version`         | integer (`Literal[1]`)            | Audit shape version. Currently `1`. Bump only on shape change; `extra="ignore"` handles additions. |
+| `audit_schema_version`         | integer (`int`)                   | Audit shape version. Currently `3` (widened `Literal[1]` → `int` and bumped 1 → 2 in #189 for `cache_hit`, 2 → 3 in #202 for `degrade_reason_type`). Bump only on shape change; `extra="ignore"` handles additions. |
 | `signalforge_version`          | PEP-440 version string            | Package version that produced the record.                                                        |
 | `run_id`                       | 32-hex-char string                | Single `uuid4().hex` per `grade_artifacts` invocation (DEC-020). Repeated on every JSONL record AND on the sidecar so JSONL → sidecar correlation never depends on timestamp ranges. |
 | `timestamp`                    | ISO-8601 UTC datetime             | When the per-call decision was finalised. Distinct from the sidecar's `started_at`.              |
@@ -604,6 +604,7 @@ convention across the codebase — mirrors `signalforge.safety.audit`,
 | `passed`                       | bool                              | The judge's own pass/fail call. `False` for every degraded record by construction.               |
 | `evidence`                     | string                            | The judge's quoted-fragment evidence pulled from the artefact text. Empty for degraded records.  |
 | `reasoning`                    | string                            | The judge's free-text rationale. Empty for degraded records other than the leading "call failed" / "grade budget exceeded" descriptor. |
+| `degrade_reason_type`          | `"transient"` / `"budget"` / `"ceiling"` / `null` | Structured degrade discriminator (#202). `null` for a scored record; one of the three literals for a degraded record. Set centrally in `_build_degraded` from the reason string so consumers classify degrades WITHOUT string-matching the prose. |
 | `rubric_hash`                  | 16 hex chars                      | `blake2b(canonical_rubric_json, digest_size=8).hexdigest()` (DEC-010). Carried on every record AND the sidecar. |
 | `prompt_version_template`      | 16 hex chars                      | `blake2b-8` of the system prompt + cached rubric block + envelope tag. Constant across all criteria of one run. |
 | `criterion_prompt_hash`        | 16 hex chars                      | `blake2b-8` of the per-criterion prompt fragment. Stable across artefacts of one run.            |

@@ -116,7 +116,12 @@ from signalforge.grade.errors import (
     GradeOutputError,
     GradePromptEnvelopeBreachError,
 )
-from signalforge.grade.models import GradeEvent, GradingReport, GradingResult
+from signalforge.grade.models import (
+    DegradeReasonType,
+    GradeEvent,
+    GradingReport,
+    GradingResult,
+)
 from signalforge.grade.parser import parse_grade_response
 from signalforge.grade.prompts import (
     _SYSTEM_PROMPT,
@@ -502,6 +507,39 @@ def _compute_effective_budget(
     return math.ceil(min(scaled, total_budget_seconds))
 
 
+def _classify_degrade_reason(reasoning: str) -> DegradeReasonType:
+    """Map a degrade ``reasoning`` string to its structured discriminator.
+
+    Centralised here (#202 US-001) so the (later) sweep /
+    ``require_complete`` logic can classify degrades by reading
+    :attr:`GradingResult.degrade_reason_type` rather than fragile
+    string-matching the human-readable prose — callers never re-parse
+    the reason text.
+
+    The three reason shapes produced upstream
+    (:func:`_format_degrade_reasoning`, the budget synthesis pass, the
+    ceiling block) map as:
+
+    * ``"call failed: …"`` (LLM / parser failure) → ``"transient"``
+    * ``"grade budget exceeded …"`` (wall-clock backstop) → ``"budget"``
+    * ``"grade … ceiling exceeded …"`` (calls/cost/tokens) → ``"ceiling"``
+
+    Ceiling reasons share the ``"grade "`` prefix with the budget
+    reason, so the ``"ceiling exceeded"`` substring is checked first to
+    disambiguate. An unrecognised reason defaults to ``"transient"`` —
+    the most conservative classification (a transient cause is retriable
+    next run), so a future reason-string drift degrades safely rather
+    than crashing or mis-classifying as a hard budget/ceiling stop.
+    """
+    if reasoning.startswith("call failed:"):
+        return "transient"
+    if "ceiling exceeded" in reasoning:
+        return "ceiling"
+    if reasoning.startswith("grade budget exceeded"):
+        return "budget"
+    return "transient"
+
+
 def _build_degraded(
     *,
     artifact_id: str,
@@ -523,9 +561,15 @@ def _build_degraded(
     of the pair (the result returned to the caller AND the JSONL
     receipt) carry the same ``score=None`` / ``passed=False`` shape so
     a downstream replay round-trips cleanly.
+
+    The structured ``degrade_reason_type`` discriminator (#202 US-001) is
+    derived from ``reasoning`` via :func:`_classify_degrade_reason` here —
+    the single place the prose→discriminator mapping lives, so callers
+    classify degrades without string-matching the reason text.
     """
     # ``config.model`` is invariantly concrete post-construction (#187 US-002).
     assert config.model is not None
+    degrade_reason_type = _classify_degrade_reason(reasoning)
     grading_result = GradingResult(
         artifact_id=artifact_id,
         criterion_id=criterion.id,
@@ -533,6 +577,7 @@ def _build_degraded(
         passed=False,
         evidence="",
         reasoning=reasoning,
+        degrade_reason_type=degrade_reason_type,
     )
     event = _build_grade_event(
         run_id=run_id,
@@ -544,6 +589,7 @@ def _build_degraded(
         passed=False,
         evidence="",
         reasoning=reasoning,
+        degrade_reason_type=degrade_reason_type,
         rubric_hash=rubric_hash,
         prompt_version_template=template_hash,
         criterion_prompt_hash=crit_hash,
