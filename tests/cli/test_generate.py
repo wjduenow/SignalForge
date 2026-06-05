@@ -30,7 +30,7 @@ from signalforge.cli import main
 from signalforge.diff import DiffConfig
 from signalforge.draft.errors import LLMOutputAnchorContractError
 from signalforge.grade import GradeConfig
-from signalforge.grade.errors import GradeBelowThresholdError
+from signalforge.grade.errors import GradeBelowThresholdError, GradeIncompleteError
 from signalforge.llm.errors import LLMRateLimitError
 from signalforge.manifest.errors import ModelNotFoundError
 from signalforge.prune import PruneConfig
@@ -591,6 +591,133 @@ def test_generate_min_score_out_of_range_exits_two(
     captured = capsys.readouterr()
     assert code == 2, f"stderr={captured.err}"
     assert "0.0" in captured.err and "1.0" in captured.err
+    assert "Traceback" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# US-007 of #202 / DEC-208 — --require-complete / --no-require-complete
+# ---------------------------------------------------------------------------
+
+
+def test_generate_require_complete_overrides_config_true(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--require-complete`` overrides ``grade.require_complete`` to ``True``
+    on the GradeConfig that reaches ``grade_artifacts`` (DEC-208).
+
+    Even when the file-loaded config has ``require_complete=False``, the
+    explicit flag re-arms the contract via ``GradeConfig.model_validate``.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    # File config explicitly disabled the contract; the flag must override.
+    mocks["load_grade_config"].return_value = GradeConfig(require_complete=False)
+
+    code = main(["generate", "model.shop.customers", "--require-complete"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    forwarded_config = mocks["grade_artifacts"].call_args.kwargs["config"]
+    assert isinstance(forwarded_config, GradeConfig)
+    assert forwarded_config.require_complete is True
+
+
+def test_generate_no_require_complete_overrides_config_false(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--no-require-complete`` overrides ``grade.require_complete`` to
+    ``False`` on the GradeConfig that reaches ``grade_artifacts`` (DEC-208).
+
+    Starts from the library default (``True``) so the override path
+    exercises the ``model_validate`` overlay flipping it off.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    # Default config has require_complete=True; the flag must flip it off.
+    mocks["load_grade_config"].return_value = GradeConfig()
+
+    code = main(["generate", "model.shop.customers", "--no-require-complete"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    forwarded_config = mocks["grade_artifacts"].call_args.kwargs["config"]
+    assert isinstance(forwarded_config, GradeConfig)
+    assert forwarded_config.require_complete is False
+
+
+def test_generate_no_require_complete_flag_preserves_config_false(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No ``--require-complete`` flag → the file-loaded
+    ``grade.require_complete: false`` is PRESERVED, not clobbered (DEC-208).
+
+    The ``default=None`` sentinel is the load-bearing guard: a bare run
+    must leave the config value untouched so a
+    ``grade.require_complete: false`` in ``signalforge.yml`` is NOT
+    silently re-armed by a CLI default.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    mocks["load_grade_config"].return_value = GradeConfig(require_complete=False)
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+
+    forwarded_config = mocks["grade_artifacts"].call_args.kwargs["config"]
+    assert isinstance(forwarded_config, GradeConfig)
+    # No flag → file value preserved (NOT clobbered to the True default).
+    assert forwarded_config.require_complete is False
+
+
+def test_generate_transient_incomplete_exits_two_with_named_pairs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """End-to-end: a transient-incomplete grade run with
+    ``--require-complete`` exits 2 with the named pairs in stderr (DEC-208).
+
+    Mirrors ``test_generate_grade_below_threshold_exits_two`` — the grade
+    seam raises the typed error (the engine raises it AFTER the sidecar
+    write per US-006); the CLI boundary catch maps ``GradeIncompleteError``
+    to tier 2 and renders the still-ungraded pairs.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    mocks = _install_happy_patches(monkeypatch)
+
+    mocks["load_grade_config"].return_value = GradeConfig()
+    mocks["grade_artifacts"].side_effect = GradeIncompleteError(
+        incomplete_pairs=(
+            ("orders.amount", "accuracy"),
+            ("orders.status", "completeness"),
+        ),
+        require_complete=True,
+        aggregate_complete=False,
+    )
+
+    code = main(["generate", "model.shop.customers", "--require-complete"])
+    captured = capsys.readouterr()
+    assert code == 2, f"stderr={captured.err}"
+    assert "incomplete" in captured.err.lower()
+    # The still-ungraded pairs are named verbatim in stderr.
+    assert "orders.amount" in captured.err
+    assert "accuracy" in captured.err
+    assert "orders.status" in captured.err
+    assert "completeness" in captured.err
     assert "Traceback" not in captured.err
 
 
@@ -1371,6 +1498,12 @@ def test_generate_help_text_lists_new_flags(
     # ``{a,b}`` in the usage line and / or the help body).
     assert "sample" in out and "full" in out
     assert "oneshot" in out and "materialised" in out
+    # DEC-208 of #202 — ``BooleanOptionalAction`` renders BOTH the
+    # ``--require-complete`` and ``--no-require-complete`` forms; the help
+    # body documents the exit-2 + named-pairs failure shape.
+    assert "--require-complete" in out
+    assert "--no-require-complete" in out
+    assert "GradeIncompleteError" in out
 
 
 def test_generate_override_re_runs_pydantic_validators(

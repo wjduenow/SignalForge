@@ -120,6 +120,8 @@ Two flags for fast iteration loops (both compose with every other `generate` fla
 
 Precedence when both flags are set: `--no-grade` implicitly wins (no grade stage runs → no cache I/O regardless of `--no-cache`).
 
+**Grade-completeness gate (`--require-complete` / `--no-require-complete`)** — overrides `grade.require_complete` (default `true`) for one run. When armed, `signalforge generate <model> --require-complete` makes the grade engine raise `GradeIncompleteError` (exit 2) if any non-exempt `(artifact, criterion)` pair is still ungraded after the always-on bounded transient-recovery sweep; stderr names the still-ungraded pairs. Exempt (never trip): `"ceiling"` degrades (an explicit `max_grade_*` opt-in) and `"budget"` degrades when `total_budget_seconds` is set explicitly. Trip: unrecovered `"transient"` degrades and default-scaled-budget overruns (`total_budget_seconds` unset). Pass `signalforge generate <model> --no-require-complete` to revert to report-only posture (ungraded pairs surface via `aggregate_complete=false`). Precedence: explicit flag > `grade.require_complete` in `signalforge.yml` > default (`true`); a bare run never re-arms a `grade.require_complete: false` set in config. Reach for `--require-complete` in CI to fail loud on a structurally incomplete grade corpus rather than shipping silent gaps.
+
 ## 3a. The `.signalforge/` directory and the grade cache
 
 The `.signalforge/` directory under the project carries durable audit JSONLs for every stage (safety, llm_responses, prune, grade) plus per-run sidecars (`grade.json`, `diff.json`). These are append-only; they survive crashes mid-run.

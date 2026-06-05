@@ -281,6 +281,38 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "NOT enable fail-on-below-threshold by itself."
         ),
     )
+    # US-007 of #202 / DEC-208 — grade-completeness contract surface.
+    # ``argparse.BooleanOptionalAction`` registers BOTH ``--require-complete``
+    # and ``--no-require-complete``. ``default=None`` is the no-clobber
+    # sentinel: when neither form is passed, ``cmd_generate`` leaves the
+    # file-loaded ``grade.require_complete`` untouched (so a
+    # ``grade.require_complete: false`` set in ``signalforge.yml`` is NOT
+    # silently re-armed by a CLI default). Only an explicit ``--require-complete``
+    # (→ True) or ``--no-require-complete`` (→ False) overrides the config,
+    # via :meth:`GradeConfig.model_validate` so validators re-run — mirrors
+    # the ``--min-score`` overlay above and the prune ``--scope`` overlay.
+    parser.add_argument(
+        "--require-complete",
+        dest="require_complete",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Override grade.require_complete (default: from config, which "
+            "itself defaults to true). When armed, the grade engine raises "
+            "GradeIncompleteError (exit 2) if any non-exempt (artifact, "
+            "criterion) pair is still ungraded after the bounded "
+            "transient-recovery sweep. Exempt (never trip): ceiling degrades "
+            "(an explicit max_grade_* opt-in) and budget degrades when "
+            "total_budget_seconds was set explicitly. Trip: transient "
+            "degrades that survived the sweep, and default-scaled-budget "
+            "overruns (total_budget_seconds unset). Failure exits 2 naming "
+            "the still-ungraded pairs in stderr. Precedence: flag > "
+            "grade.require_complete in signalforge.yml > library default "
+            "(true). Pass --no-require-complete to revert to the report-only "
+            "posture (ungraded pairs surface via aggregate_complete=False). "
+            "Applied via GradeConfig.model_validate so validators re-run."
+        ),
+    )
     # US-006 / DEC-002 / DEC-010 — write/dry-run mutex. Argparse rejects
     # the both-flags combination with its own usage error → exit 2.
     write_group = parser.add_mutually_exclusive_group()
@@ -870,6 +902,19 @@ def _run_single_model(
     existing cache files on disk are untouched. ``--no-grade``
     implicitly wins over ``--no-cache`` (no grade block runs → no cache
     code runs); no explicit mutex.
+
+    ``--require-complete`` / ``--no-require-complete`` (US-007 of #202 /
+    DEC-208) overlays ``grade_config.require_complete`` via
+    :meth:`GradeConfig.model_validate` (validators re-run) ONLY when the
+    operator passed an explicit flag — ``default=None`` is the no-clobber
+    sentinel, so a bare run leaves the file-loaded value untouched and a
+    ``grade.require_complete: false`` in ``signalforge.yml`` is NOT
+    re-armed. Precedence: flag > config > library default (``True``). When
+    armed, :func:`signalforge.grade.grade_artifacts` raises
+    :class:`signalforge.grade.GradeIncompleteError` (tier 2, exit 2) AFTER
+    the fail-closed sidecar write if any non-exempt pair stayed ungraded
+    after the bounded sweep; the boundary catch below maps it via the
+    exit-code table and the stderr message names the still-ungraded pairs.
     """
     quiet = bool(getattr(args, "quiet", False))
     verbose = bool(getattr(args, "verbose", False))
@@ -1186,6 +1231,24 @@ def _run_single_model(
             if min_score_override is not None:
                 grade_config = grade_module.GradeConfig.model_validate(
                     {**grade_config.model_dump(), "min_mean_score": min_score_override}
+                )
+            # US-007 of #202 / DEC-208 — apply ``--require-complete`` /
+            # ``--no-require-complete`` by re-validating the frozen
+            # :class:`GradeConfig` with the override. ``default=None`` is the
+            # no-clobber sentinel: only an EXPLICIT flag (True or False)
+            # overrides the file-loaded value, so a
+            # ``grade.require_complete: false`` set in ``signalforge.yml`` is
+            # NOT silently re-armed by a CLI default. ``model_validate`` (NOT
+            # ``model_copy(update=...)``) so every Pydantic validator re-runs —
+            # mirrors the ``--min-score`` overlay above, the prune ``--scope``
+            # overlay (DEC-012 of #22), and :meth:`SafetyPolicy.with_mode`.
+            require_complete_override = getattr(args, "require_complete", None)
+            if require_complete_override is not None:
+                grade_config = grade_module.GradeConfig.model_validate(
+                    {
+                        **grade_config.model_dump(),
+                        "require_complete": require_complete_override,
+                    }
                 )
             # US-007 of #189 / DEC-002 — per-run cache bypass. Flip
             # ``cache_enabled=False`` so the engine's sync-prefix lookup and
@@ -1539,6 +1602,21 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     * ``--mode`` > ``safety.mode`` in ``signalforge.yml`` > library default.
     * ``--min-score`` > ``grade.min_mean_score`` > library default.
+    * ``--require-complete`` / ``--no-require-complete`` (US-007 of #202 /
+      DEC-208) > ``grade.require_complete`` in ``signalforge.yml`` > library
+      default (``True``). ``default=None`` is the no-clobber sentinel:
+      ONLY an explicit flag overrides the file value — a bare run preserves
+      a ``grade.require_complete: false`` set in ``signalforge.yml`` (no CLI
+      default clobbers it). When armed (``True``), the grade engine raises
+      :class:`signalforge.grade.GradeIncompleteError` (tier 2, exit 2) AFTER
+      the fail-closed sidecar write if any non-exempt
+      ``(artifact, criterion)`` pair is still ungraded after the bounded
+      transient-recovery sweep; the stderr message names the still-ungraded
+      pairs. Exempt (never trip): ``"ceiling"`` degrades and ``"budget"``
+      degrades when ``total_budget_seconds`` was set EXPLICITLY. Trip:
+      ``"transient"`` degrades surviving the sweep and default-scaled-budget
+      overruns (``total_budget_seconds`` unset). Applied via
+      :meth:`GradeConfig.model_validate` so validators re-run.
     * ``--format`` > ``diff.render_kind`` > library default (``"ansi"``).
     * ``--scope`` > ``prune.scope`` > library default (``"sample"``).
     * ``--sample-strategy`` > ``prune.sample_strategy`` > library default
