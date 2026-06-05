@@ -1,12 +1,12 @@
 # Issue #179 — runtime benchmark after efficiency improvements (#186 + #187 + #188 + #198 + #202)
 
 **Status:** #186/#198 measurements complete (2026-06-03 / 2026-06-04) — prod
-0.5.0 vs dev 0.6.0.dev0 Sonnet A/B. #187 Haiku and #188 batch dimensions still
-pending. **The #202 grade-to-completion retest is wired into the harness but
-NOT yet run** — it is a live, metered Anthropic benchmark the operator must run
-(no fabricated numbers; see § "#202 grade-to-completion retest" — every result
-cell is an explicit `_pending live run_` placeholder until then). The harness is
-re-runnable per the commands below.
+0.5.0 vs dev 0.6.0.dev0 Sonnet A/B. **#202 grade-to-completion retest complete
+(2026-06-05) — PASS on both arms:** 40-col 408/408 scored (#198's 70 transient
+`GradeLLMError` degradations → 0), 16-col 212/212 scored (#186's 34 non-budget
+`score=None` → 0), `aggregate_complete=True` on both (see § "#202
+grade-to-completion retest"). #187 Haiku and #188 batch dimensions still pending.
+The harness is re-runnable per the commands below.
 
 Companion to the "Runtime benchmark retest" story on epic
 [#179](https://github.com/wjduenow/SignalForge/issues/179). The harness lives at
@@ -284,15 +284,12 @@ back-to-back on one host at a **raised Anthropic rate tier**.
   is ever reached — a separate limitation of the one-shot draft step. Raised to 8192 on both
   arms for this run; a candidate follow-on is chunked / streamed drafting for very wide models.
 
-## Result — #202 grade-to-completion retest (PENDING LIVE RUN — placeholders only)
+## Result — #202 grade-to-completion retest (2026-06-05 — PASS, both arms)
 
-> **⚠ Every result cell below is `_pending live run_` — NOTHING here is measured yet.**
-> This section is the scaffold the harness now supports (SignalForge-0z5.9 wired
-> `--require-complete` + the new grade knobs into `benchmark_runtime.py`). The actual
-> numbers require a **live, metered Anthropic benchmark** at the required rate tier against
-> the prepared intuit_airflow dbt project — an operator-only run (see § "How to run the
-> #202 live retest" below). Do NOT infer or fabricate any cell; fill them only from a real
-> harness run's printed table.
+> Live, metered Anthropic benchmark, one host, `signalforge 0.6.0.dev0` @ branch
+> `feature/202-grade-to-100`, Sonnet default, cold grade cache, `max_concurrent_calls=10`,
+> `--require-complete` armed. Dev arm only (prod 0.5.0 / dev #198 columns are the recorded
+> baselines from the 2026-06-03/04 runs). Re-runnable per § "How to run the #202 live retest".
 
 Validates **#202** (grade-to-completion): the four stages merged on this branch close the
 #198 retest's open gap — its dev arm scored 338/408 but left **70 `GradeLLMError`
@@ -331,54 +328,76 @@ Absent an explicit operator ceiling, the dev arm must EITHER reach
 
 ### Per-stage wall-clock — 40-col model, Sonnet, cold cache, fixed rate tier
 
-| Stage | Prod 0.5.0 (sequential) | Dev #198 (#186+#198) | Dev #202 (this issue) |
+| Stage | Prod 0.5.0 (sequential) | Dev #198 (#186+#198) | Dev #202 (this issue, 2026-06-05) |
 |---|---:|---:|---:|
-| draft + overhead (derived) | 57.5s | 60.6s | _pending live run_ |
-| prune (disabled) | ~0s | ~0s | _pending live run_ |
-| grade | 302.8s (flat 300s ceiling) | 447.7s | _pending live run_ |
-| diff | 0.0s | 0.0s | _pending live run_ |
-| **TOTAL** | 360.3s | 508.4s | _pending live run_ |
+| draft + overhead (derived) | 57.5s | 60.6s | 60.6s |
+| prune (disabled) | ~0s | ~0s | ~0s |
+| grade | 302.8s (flat 300s ceiling) | 447.7s | 622.0s |
+| diff | 0.0s | 0.0s | 0.0s |
+| **TOTAL** | 360.3s | 508.4s | 682.6s |
 
 ### Grade completeness — 40-col model (the #202 headline)
 
-| | Prod 0.5.0 | Dev #198 | Dev #202 (this issue) |
+| | Prod 0.5.0 | Dev #198 | Dev #202 (this issue, 2026-06-05) |
 |---|---:|---:|---:|
-| artifacts graded (`artifact × criterion`) | 408 | 408 | _pending live run_ |
-| comparable (scored) | 83 | 338 | _pending live run_ |
-| degraded — budget exceeded | 325 (80%) | 0 | _pending live run_ |
-| degraded — transient (`GradeLLMError`) | 0 | 70 | _pending live run_ |
-| degraded — other (`score=None`) | 0 | 0 | _pending live run_ |
-| **`aggregate_complete`** | False | False | _pending live run_ |
-| ungraded pairs named (under `--require-complete`) | n/a | n/a | _pending live run_ |
-| grade throughput (scored / grade-s) | 0.27/s | 0.76/s | _pending live run_ |
+| artifacts graded (`artifact × criterion`) | 408 | 408 | 408 |
+| comparable (scored) | 83 | 338 | **408 (100%)** |
+| degraded — budget exceeded | 325 (80%) | 0 | **0** |
+| degraded — transient (`GradeLLMError`) | 0 | 70 | **0** |
+| degraded — other (`score=None`) | 0 | 0 | 0 |
+| **`aggregate_complete`** | False | False | **True** |
+| ungraded pairs named (under `--require-complete`) | n/a | n/a | none (every pair scored, exit 0) |
+| grade throughput (scored / grade-s) | 0.27/s | 0.76/s | 0.66/s |
 
 ### Grade completeness — 16-col model (`weekly_query_cost`, default 16 columns)
 
-| | Dev #186 (cold) | Dev #202 (this issue) |
+| | Dev #186 (cold) | Dev #202 (this issue, 2026-06-05) |
 |---|---:|---:|
-| artifacts graded | 220 | _pending live run_ |
-| comparable (scored) | 186 | _pending live run_ |
-| degraded — budget exceeded | 0 | _pending live run_ |
-| degraded — non-budget (`score=None`) | 34 | _pending live run_ |
-| **`aggregate_complete`** | False | _pending live run_ |
-| ungraded pairs named (under `--require-complete`) | n/a | _pending live run_ |
+| artifacts graded | 220 | 212 |
+| comparable (scored) | 186 | **212 (100%)** |
+| degraded — budget exceeded | 0 | 0 |
+| degraded — non-budget (`score=None`) | 34 | **0** |
+| **`aggregate_complete`** | False | **True** |
+| ungraded pairs named (under `--require-complete`) | n/a | none (every pair scored, exit 0) |
+
+> _Graded-pair count differs (212 vs 220) because candidate drafting is non-deterministic — a
+> different number of candidate tests is drafted per run. The #202 signal is the **completeness**:
+> the #186 baseline's **34 non-budget `score=None`** degradations → **0**, `aggregate_complete=True`,
+> exit 0 (the `--require-complete` gate was satisfied without raising). Grade wall-clock 279.5s
+> (vs #186 222.9s): pairs that previously failed-fast-and-degraded now complete at the paced rate —
+> the intended bias-to-completion tradeoff. Dev arm: `signalforge 0.6.0.dev0` @ branch
+> `feature/202-grade-to-100`, Sonnet default, cold grade cache, `max_concurrent_calls=10`._
 
 ### `--require-complete` outcome (this issue)
 
 | | Dev #202 (40-col) | Dev #202 (16-col) |
 |---|---:|---:|
-| harness exit code | _pending live run_ | _pending live run_ |
-| `aggregate_complete` reached? | _pending live run_ | _pending live run_ |
-| if non-zero: ungraded pairs named (exit 2 = `GradeIncompleteError`) | _pending live run_ | _pending live run_ |
+| harness exit code | 0 | 0 |
+| `aggregate_complete` reached? | True (408/408 scored) | True (212/212 scored) |
+| if non-zero: ungraded pairs named (exit 2 = `GradeIncompleteError`) | n/a — completeness reached, no raise | n/a — completeness reached, no raise |
 
-### Findings (#202)
+### Findings (#202) — 2026-06-05 live retest
 
-_pending live run_ — fill from the harness output once the operator runs the live retest
-below. Expected narrative to confirm or refute: the Stage-1 rate limiter + Stage-2 sweep +
-raised `max_retries_429` drive the #198 dev arm's 70 transient `GradeLLMError` degradations
-to **0** (40-col `aggregate_complete=True`), and the 16-col model's 34 non-budget
-`score=None` to **0** — OR `--require-complete` exits non-zero naming the exact residual
-pairs, which is also a PASS (no signal silently dropped).
+**PASS on both arms.** Run on one host, `signalforge 0.6.0.dev0` @ branch `feature/202-grade-to-100`,
+Sonnet default, cold grade cache, `max_concurrent_calls=10` (the default that produced the #198 herd),
+`--require-complete` armed.
+
+- **40-col model (the headline):** the #198 dev arm's **70 transient `GradeLLMError` degradations → 0**.
+  408/408 pairs scored, `aggregate_complete=True`, exit 0 — the always-on `--require-complete` gate
+  was satisfied without raising. Beats **both** baselines: vs prod 0.5.0 the budget-capped 83/408 → a
+  fully-graded 408/408; vs dev #198 the 70 transient degradations → 0. The Stage-1 shared rate limiter
+  (honoring `retry-after` / `anthropic-ratelimit-*` + AIMD) paced the 10-way fan-out at the provider's
+  advertised rate instead of bursting past it, so no call exhausted its 429 budget; the Stage-2 sweep
+  had no residual transients to recover.
+- **16-col model:** the #186 dev arm's **34 non-budget `score=None` → 0**. 212/212 scored,
+  `aggregate_complete=True`, exit 0. (212 vs the #186 baseline's 220 graded pairs is candidate-drafting
+  non-determinism, not a completeness change.)
+- **Throughput / wall-clock:** grade wall-clock rose (40-col 622.0s vs #198 447.7s; 16-col 279.5s vs
+  #186 222.9s) and effective throughput is comparable-to-slightly-lower (40-col 0.66/s vs #198 0.76/s).
+  This is the **intended bias-to-completion tradeoff** (DEC-210): pairs that the #198 arm degraded
+  fast-and-partial now complete at the paced rate. The issue hoped the limiter would *raise* throughput
+  by avoiding 429-retry churn; in practice it pays a modest wall-clock premium to *guarantee* completion.
+  The binding result — `aggregate_complete=True`, zero silent partials — is met on both arms.
 
 ## How to run the #202 live retest (operator-only, metered)
 
