@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -896,6 +897,78 @@ def test_compute_effective_budget_cap_fractional_never_rounds_down() -> None:
     )
     assert result == 250
     assert isinstance(result, int)
+
+
+def test_default_scaled_budget_is_non_binding_at_representative_scale() -> None:
+    """DEC-210 guard: the DEFAULT scaled budget must NOT passively bind.
+
+    The load-bearing bias-to-completion assertion (#202 US-008 / DEC-210):
+    "the library biases toward completion — a default run must never
+    PASSIVELY produce a partial result." A ``<100%`` grade is legitimate
+    ONLY when the operator intentionally limited cost/time (an explicit
+    ``max_grade_*`` ceiling or an explicitly-set ``total_budget_seconds``).
+    The default scaled wall-clock budget survives only as a generous
+    runaway catch; at representative scales it must leave clear headroom
+    over a realistic limiter-paced completion time, so a default run never
+    trips the budget by accident (a trip would FAIL LOUD under
+    ``require_complete``, never silently ship a partial).
+
+    Deterministic: pure arithmetic on ``_compute_effective_budget`` with the
+    default config values — no sleeping, no LLM, no clock. Models a few
+    hundred pairs at the default ``max_concurrent_calls``; the expected
+    completion time is conservatively modelled from the #179 baseline
+    (Sonnet judge p50 ~10s/call) as ``waves * per_call_p50`` plus the
+    bounded sweep budget, which the default scaled budget must comfortably
+    exceed.
+    """
+    cfg = GradeConfig()  # all defaults: base=60, per_pair=20.0, conc=10,
+    #                       total_budget_seconds=None (scaled formula alone).
+    assert cfg.total_budget_seconds is None  # default path under test
+    max_concurrent = cfg.max_concurrent_calls
+
+    # A representative grade run: a few hundred (artifact, criterion) pairs.
+    # ~70 artifacts × 4 default criteria ≈ 280; take 300 for margin.
+    num_pairs = 300
+
+    effective_budget = engine_module._compute_effective_budget(
+        budget_base_seconds=cfg.budget_base_seconds,
+        budget_per_pair_seconds=cfg.budget_per_pair_seconds,
+        total_budget_seconds=cfg.total_budget_seconds,
+        num_pairs=num_pairs,
+        max_concurrent_calls=max_concurrent,
+    )
+
+    # Realistic limiter-paced completion model. With the #202 shared rate
+    # limiter pacing dispatch at the provider's advertised rate, normal
+    # completion is bounded by serial wave depth × per-call latency (the
+    # concurrency runs each wave in parallel under the semaphore).
+    waves = math.ceil(num_pairs / max_concurrent)
+    sonnet_p50_seconds = 10.0  # #179 baseline judge p50
+    expected_main_pass_seconds = waves * sonnet_p50_seconds
+    # The bounded sweep (#202 US-005) re-touches at most a handful of
+    # transients sequentially; model a generous flat allowance for it plus
+    # the inter-round cool-downs so the headroom claim survives the sweep.
+    sweep_allowance_seconds = (
+        cfg.sweep_max_rounds * cfg.sweep_cooldown_seconds
+        + cfg.sweep_max_rounds * sonnet_p50_seconds
+    )
+    expected_completion_seconds = expected_main_pass_seconds + sweep_allowance_seconds
+
+    # The default budget must COMFORTABLY exceed the realistic completion
+    # time — at least 1.5× headroom — so it is a runaway catch, never a
+    # passive throughput cap. (At 300 pairs the default computes 60 + 20*30
+    # = 660s against a ~336s modelled completion → ~1.96× headroom.)
+    assert effective_budget > expected_completion_seconds, (
+        f"default scaled budget {effective_budget}s does not exceed the modelled "
+        f"completion {expected_completion_seconds:.0f}s — a default run could "
+        f"passively bind on the budget, violating the bias-to-completion posture "
+        f"(DEC-210)."
+    )
+    assert effective_budget >= 1.5 * expected_completion_seconds, (
+        f"default scaled budget {effective_budget}s leaves under 1.5× headroom over "
+        f"the modelled completion {expected_completion_seconds:.0f}s; widen "
+        f"budget_base_seconds / budget_per_pair_seconds (never narrow) per DEC-210."
+    )
 
 
 # ---------------------------------------------------------------------------
