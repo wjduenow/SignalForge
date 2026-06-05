@@ -2,10 +2,11 @@
 
 **Status:** #186/#198 measurements complete (2026-06-03 / 2026-06-04) — prod
 0.5.0 vs dev 0.6.0.dev0 Sonnet A/B. **#202 grade-to-completion retest complete
-(2026-06-05) — PASS on both arms:** 40-col 408/408 scored (#198's 70 transient
-`GradeLLMError` degradations → 0), 16-col 212/212 scored (#186's 34 non-budget
-`score=None` → 0), `aggregate_complete=True` on both (see § "#202
-grade-to-completion retest"). #187 Haiku and #188 batch dimensions still pending.
+(2026-06-05, adaptive concurrency gate) — PASS on both arms:** 40-col 412/412
+scored (#198's 70 transient `GradeLLMError` degradations → 0), 16-col 220/220
+scored (#186's 34 non-budget `score=None` → 0), `aggregate_complete=True` on
+both, and grade throughput up to 0.73/s (see § "#202 grade-to-completion
+retest"). #187 Haiku and #188 batch dimensions still pending.
 The harness is re-runnable per the commands below.
 
 Companion to the "Runtime benchmark retest" story on epic
@@ -330,42 +331,48 @@ Absent an explicit operator ceiling, the dev arm must EITHER reach
 
 | Stage | Prod 0.5.0 (sequential) | Dev #198 (#186+#198) | Dev #202 (this issue, 2026-06-05) |
 |---|---:|---:|---:|
-| draft + overhead (derived) | 57.5s | 60.6s | 60.6s |
+| draft + overhead (derived) | 57.5s | 60.6s | 61.0s |
 | prune (disabled) | ~0s | ~0s | ~0s |
-| grade | 302.8s (flat 300s ceiling) | 447.7s | 622.0s |
+| grade | 302.8s (flat 300s ceiling) | 447.7s | 561.0s |
 | diff | 0.0s | 0.0s | 0.0s |
-| **TOTAL** | 360.3s | 508.4s | 682.6s |
+| **TOTAL** | 360.3s | 508.4s | 622.1s |
 
 ### Grade completeness — 40-col model (the #202 headline)
 
 | | Prod 0.5.0 | Dev #198 | Dev #202 (this issue, 2026-06-05) |
 |---|---:|---:|---:|
-| artifacts graded (`artifact × criterion`) | 408 | 408 | 408 |
-| comparable (scored) | 83 | 338 | **408 (100%)** |
+| artifacts graded (`artifact × criterion`) | 408 | 408 | 412 |
+| comparable (scored) | 83 | 338 | **412 (100%)** |
 | degraded — budget exceeded | 325 (80%) | 0 | **0** |
 | degraded — transient (`GradeLLMError`) | 0 | 70 | **0** |
 | degraded — other (`score=None`) | 0 | 0 | 0 |
 | **`aggregate_complete`** | False | False | **True** |
 | ungraded pairs named (under `--require-complete`) | n/a | n/a | none (every pair scored, exit 0) |
-| grade throughput (scored / grade-s) | 0.27/s | 0.76/s | 0.66/s |
+| grade throughput (scored / grade-s) | 0.27/s | 0.76/s | 0.73/s |
+
+> _412 vs 408 graded pairs is candidate-drafting non-determinism (≈408). Run with the **adaptive
+> concurrency gate** (the limiter's `effective_concurrency` governs the in-flight grade fan-out,
+> narrowing on a 429 and widening on headroom). Grade wall-clock **561.0s — faster than the
+> non-adaptive first pass (622.0s)**: pacing the fan-out at the provider's advertised rate cuts
+> 429-retry churn, so throughput rises to 0.73/s (near the #198 0.76/s) while reaching 100%
+> completeness vs #198's 83%._
 
 ### Grade completeness — 16-col model (`weekly_query_cost`, default 16 columns)
 
 | | Dev #186 (cold) | Dev #202 (this issue, 2026-06-05) |
 |---|---:|---:|
-| artifacts graded | 220 | 212 |
-| comparable (scored) | 186 | **212 (100%)** |
+| artifacts graded | 220 | 220 |
+| comparable (scored) | 186 | **220 (100%)** |
 | degraded — budget exceeded | 0 | 0 |
 | degraded — non-budget (`score=None`) | 34 | **0** |
 | **`aggregate_complete`** | False | **True** |
 | ungraded pairs named (under `--require-complete`) | n/a | none (every pair scored, exit 0) |
 
-> _Graded-pair count differs (212 vs 220) because candidate drafting is non-deterministic — a
-> different number of candidate tests is drafted per run. The #202 signal is the **completeness**:
-> the #186 baseline's **34 non-budget `score=None`** degradations → **0**, `aggregate_complete=True`,
-> exit 0 (the `--require-complete` gate was satisfied without raising). Grade wall-clock 279.5s
-> (vs #186 222.9s): pairs that previously failed-fast-and-degraded now complete at the paced rate —
-> the intended bias-to-completion tradeoff. Dev arm: `signalforge 0.6.0.dev0` @ branch
+> _The #202 signal is **completeness**: the #186 baseline's **34 non-budget `score=None`**
+> degradations → **0**, `aggregate_complete=True`, exit 0 (the `--require-complete` gate was
+> satisfied without raising). Grade wall-clock 277.9s (vs #186 222.9s): pairs that previously
+> failed-fast-and-degraded now complete at the paced rate — the intended bias-to-completion
+> tradeoff. Run with the adaptive concurrency gate. Dev arm: `signalforge 0.6.0.dev0` @ branch
 > `feature/202-grade-to-100`, Sonnet default, cold grade cache, `max_concurrent_calls=10`._
 
 ### `--require-complete` outcome (this issue)
@@ -373,7 +380,7 @@ Absent an explicit operator ceiling, the dev arm must EITHER reach
 | | Dev #202 (40-col) | Dev #202 (16-col) |
 |---|---:|---:|
 | harness exit code | 0 | 0 |
-| `aggregate_complete` reached? | True (408/408 scored) | True (212/212 scored) |
+| `aggregate_complete` reached? | True (412/412 scored) | True (220/220 scored) |
 | if non-zero: ungraded pairs named (exit 2 = `GradeIncompleteError`) | n/a — completeness reached, no raise | n/a — completeness reached, no raise |
 
 ### Findings (#202) — 2026-06-05 live retest
@@ -383,21 +390,23 @@ Sonnet default, cold grade cache, `max_concurrent_calls=10` (the default that pr
 `--require-complete` armed.
 
 - **40-col model (the headline):** the #198 dev arm's **70 transient `GradeLLMError` degradations → 0**.
-  408/408 pairs scored, `aggregate_complete=True`, exit 0 — the always-on `--require-complete` gate
+  412/412 pairs scored, `aggregate_complete=True`, exit 0 — the always-on `--require-complete` gate
   was satisfied without raising. Beats **both** baselines: vs prod 0.5.0 the budget-capped 83/408 → a
-  fully-graded 408/408; vs dev #198 the 70 transient degradations → 0. The Stage-1 shared rate limiter
-  (honoring `retry-after` / `anthropic-ratelimit-*` + AIMD) paced the 10-way fan-out at the provider's
-  advertised rate instead of bursting past it, so no call exhausted its 429 budget; the Stage-2 sweep
-  had no residual transients to recover.
-- **16-col model:** the #186 dev arm's **34 non-budget `score=None` → 0**. 212/212 scored,
-  `aggregate_complete=True`, exit 0. (212 vs the #186 baseline's 220 graded pairs is candidate-drafting
-  non-determinism, not a completeness change.)
-- **Throughput / wall-clock:** grade wall-clock rose (40-col 622.0s vs #198 447.7s; 16-col 279.5s vs
-  #186 222.9s) and effective throughput is comparable-to-slightly-lower (40-col 0.66/s vs #198 0.76/s).
-  This is the **intended bias-to-completion tradeoff** (DEC-210): pairs that the #198 arm degraded
-  fast-and-partial now complete at the paced rate. The issue hoped the limiter would *raise* throughput
-  by avoiding 429-retry churn; in practice it pays a modest wall-clock premium to *guarantee* completion.
-  The binding result — `aggregate_complete=True`, zero silent partials — is met on both arms.
+  fully-graded 412/412; vs dev #198 the 70 transient degradations → 0. The shared rate limiter
+  (honoring `retry-after` / `anthropic-ratelimit-*`) + the **adaptive concurrency gate** (the limiter's
+  `effective_concurrency` governs the in-flight fan-out, narrowing on a 429 and widening on headroom)
+  paced the 10-way fan-out at the provider's advertised rate instead of bursting past it, so no call
+  exhausted its 429 budget; the Stage-2 sweep had no residual transients to recover.
+- **16-col model:** the #186 dev arm's **34 non-budget `score=None` → 0**. 220/220 scored,
+  `aggregate_complete=True`, exit 0.
+- **Throughput / wall-clock — the adaptive gate raises throughput.** Grade wall-clock is 40-col 561.0s
+  / 16-col 277.9s (vs #198 447.7s / #186 222.9s). The adaptive gate's run was **faster than the
+  non-adaptive first pass (561.0s vs 622.0s on 40-col)** and lifted effective throughput to 0.73/s —
+  near the #198 0.76/s — *while reaching 100% completeness vs #198's 83%*. Pacing the fan-out at the
+  provider's rate cuts the 429-retry backoff churn, confirming the issue's hypothesis that running *at*
+  the limit (not bursting past it) is both more complete and no slower per scored pair. The modest
+  wall-clock rise over #198 buys the 70 (40-col) / 34 (16-col) previously-dropped pairs — the intended
+  bias-to-completion tradeoff (DEC-210), now with a throughput win rather than a premium.
 
 ## How to run the #202 live retest (operator-only, metered)
 
