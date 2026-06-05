@@ -28,10 +28,12 @@ retry loop; it just means "no hint, fall back to the backoff math".
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict
 
@@ -197,12 +199,32 @@ def _get(headers: Mapping[str, object], key: str) -> object:
 #    back off hard on congestion, probe back up gently. The effective
 #    concurrency is always clamped to ``[1, max_concurrent_calls]``.
 #
+# The AIMD value is NOT advisory — it GOVERNS dispatch. The async grade
+# fan-out admits at most ``effective_concurrency`` in-flight LLM grade calls
+# via :class:`AsyncConcurrencyGate` (#202 US-004 / QG-FIX-1), an
+# ``asyncio.Condition``-backed gate that replaces the fixed
+# ``asyncio.Semaphore(max_concurrent_calls)`` the engine used before. A
+# ``asyncio.Semaphore`` cannot be cleanly resized, so the gate tracks the
+# limiter's live ``effective_concurrency`` directly: ``acquire()`` blocks
+# while ``in_flight >= effective_concurrency``; ``release()`` decrements the
+# in-flight count and notifies waiters (so a slot freed by a completing call —
+# OR by a headroom increase that widened the cap — wakes a blocked acquirer).
+# A 429 (routed through the limiter on the retry path) narrows the cap, so the
+# in-flight calls drain and new acquires wait until the count falls back under
+# the tightened cap; a clean grade completion calls ``on_headroom`` to probe
+# the cap back up toward ``max_concurrent_calls``. The gate never admits more
+# than ``max_concurrent_calls`` nor fewer than 1 (the limiter clamps the cap;
+# the gate floors its admit-test at 1 too) so the run always makes progress.
+#
 # The sync (``call_llm``) and async (``call_llm_async``) paths SHARE one
 # :class:`_RateLimiterState` cell so a 429 seen on either path tightens the
-# budget the other path reads. The cell is guarded by a plain
-# :class:`threading.Lock` — the AIMD bookkeeping is a few-microsecond critical
-# section with no ``await`` inside it, so a threading lock is safe to take from
-# an async coroutine (it never yields the event loop while held). The two
+# budget the other path reads, and the gate reads its cap from that SAME cell
+# (one source of truth — no second concurrency value). The cell is guarded by
+# a plain :class:`threading.Lock` — the AIMD bookkeeping is a few-microsecond
+# critical section with no ``await`` inside it, so a threading lock is safe to
+# take from an async coroutine (it never yields the event loop while held). The
+# gate's in-flight counter is mutated only on the single event loop under the
+# ``asyncio.Condition`` (no threading lock held across an ``await``). The two
 # limiter classes differ ONLY in how they SLEEP: threading vs. asyncio.
 
 # Backoff math constant — mirrors the blind-backoff jitter window used by
@@ -210,6 +232,82 @@ def _get(headers: Mapping[str, object], key: str) -> object:
 # stays byte-compatible with the historical retry delay.
 _JITTER_LOW = 0.75
 _JITTER_HIGH = 1.25
+
+#: Upper bound (seconds) on a reset-derived wait (#202 QG-FIX-3). When a 429
+#: carries no ``retry-after`` but DOES carry an ``anthropic-ratelimit-*-reset``
+#: RFC-3339 timestamp, ``_wait_from_budget`` derives the wait from that reset
+#: instant. The bound caps a pathological / clock-skewed reset (a far-future
+#: timestamp, or one parsed against a wrong wall clock) so a single 429 can
+#: never park a coroutine for minutes — the wall-clock budget backstop would
+#: otherwise have to absorb it. 60s is one Anthropic per-minute window, the
+#: longest legitimate wait a request/token reset implies.
+_RESET_WAIT_CAP_SECONDS = 60.0
+
+
+def _default_utcnow() -> datetime:
+    """Real UTC wall clock for the reset-derived wait (production default)."""
+    return datetime.now(UTC)
+
+
+#: Injectable wall clock for the reset-derived wait (#202 QG-FIX-3). A
+#: zero-argument callable returning the current UTC instant. Tests reassign it
+#: to a fixed clock so the reset-fallback wait is deterministic (no real time
+#: dependence); production reads the real UTC ``now``.
+_utcnow: Callable[[], datetime] = _default_utcnow
+
+
+def _parse_reset_instant(reset: str | None) -> datetime | None:
+    """Parse an ``anthropic-ratelimit-*-reset`` RFC-3339 string to a UTC instant.
+
+    Tolerant by design (#202 QG-FIX-3): an absent (``None``) or malformed
+    timestamp yields ``None`` so the reset-fallback degrades to "no hint" rather
+    than crashing the retry loop — mirroring the value-object parse posture. A
+    naive timestamp (no offset) is assumed UTC; an offset-aware one is converted
+    to UTC so the subtraction against ``_utcnow()`` is timezone-correct.
+    """
+    if reset is None:
+        return None
+    text = reset.strip()
+    if not text:
+        return None
+    # Accept a trailing ``Z`` (RFC-3339) which ``datetime.fromisoformat``
+    # rejects before Python 3.11's relaxation — normalise to ``+00:00``.
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _reset_wait(budget: RateLimitBudget) -> float | None:
+    """Bounded wait (seconds) until the soonest request/token reset, or ``None``.
+
+    The reset-derived fallback for a 429 that carried no ``retry-after`` but did
+    carry a ``requests_reset`` / ``tokens_reset`` instant (#202 QG-FIX-3). Picks
+    the SOONEST of the two reset instants (the request window and the token
+    window can refill at different times; the earliest is when the next retry
+    could plausibly succeed), computes ``reset - _utcnow()``, clamps to
+    ``[0, _RESET_WAIT_CAP_SECONDS]``, and returns it. A reset already in the
+    past clamps to ``0.0`` ("retry now"). Returns ``None`` when neither reset
+    parsed (so the caller falls through to the blind backoff).
+    """
+    instants = [
+        instant
+        for instant in (
+            _parse_reset_instant(budget.requests_reset),
+            _parse_reset_instant(budget.tokens_reset),
+        )
+        if instant is not None
+    ]
+    if not instants:
+        return None
+    soonest = min(instants)
+    seconds = (soonest - _utcnow()).total_seconds()
+    return max(0.0, min(_RESET_WAIT_CAP_SECONDS, seconds))
 
 
 @dataclass
@@ -285,17 +383,28 @@ class _RateLimiterState:
 def _wait_from_budget(budget: RateLimitBudget) -> float | None:
     """Compute a header-honouring wait (seconds) from ``budget``, or ``None``.
 
-    Returns the ``retry-after`` value when the provider surfaced one — that is
-    the vendor's explicit "wait this long" instruction and the most reliable
-    pace-at-the-limit signal. An EMPTY budget (no headers — OpenAI / Gemini, or
-    an Anthropic 429 that carried none) returns ``None`` so the caller falls
-    back to the blind exponential backoff. A present-but-zero ``retry-after``
-    (``0.0``) is honoured as "retry immediately" rather than treated as absent.
+    Honours, in priority order (#202 QG-FIX-3):
+
+    1. ``retry-after`` — the vendor's explicit "wait this long" instruction and
+       the most reliable pace-at-the-limit signal. A present-but-zero value
+       (``0.0``) is honoured as "retry immediately" rather than treated as
+       absent; a nonsensical negative gateway value clamps to ``0.0``.
+    2. ``requests_reset`` / ``tokens_reset`` — when no ``retry-after`` is
+       present but a reset instant is, derive a BOUNDED wait until the soonest
+       reset window refills (:func:`_reset_wait`, capped at
+       ``_RESET_WAIT_CAP_SECONDS`` against clock skew / a far-future stamp).
+       This is the at-the-limit pace for vendors/gateways that surface only the
+       reset family on a 429.
+
+    Returns ``None`` only when NEITHER signal is present (an EMPTY budget — no
+    headers at all, OpenAI / Gemini, or a header-less Anthropic 429) so the
+    caller falls back to the blind exponential backoff.
     """
     if budget.retry_after is not None:
         # Clamp negative gateway values to 0 — a negative wait is nonsensical.
         return max(0.0, budget.retry_after)
-    return None
+    # No explicit retry-after — fall back to a bounded reset-derived wait.
+    return _reset_wait(budget)
 
 
 def _blind_backoff(attempt: int, rand_uniform: Callable[[float, float], float]) -> float:
@@ -368,7 +477,14 @@ class _BaseRateLimiter:
         return _wait_from_budget(budget)
 
     def record_headroom(self) -> None:
-        """Signal a clean outcome — AIMD additive-increase toward the cap."""
+        """Signal a clean outcome — AIMD additive-increase toward the cap.
+
+        Called by ``call_llm_async`` on a clean (non-429) completion when a
+        limiter is wired (#202 QG-FIX-1), so the adaptive
+        :class:`AsyncConcurrencyGate` (which reads the same shared state) probes
+        its admission cap back up toward ``max_concurrent_calls`` after a 429
+        storm narrowed it.
+        """
         self._state.on_headroom()
 
 
@@ -429,6 +545,94 @@ class AsyncRateLimiter(_BaseRateLimiter):
         return wait
 
 
+class AsyncConcurrencyGate:
+    """AIMD-governed admission gate for the async grade fan-out (#202 QG-FIX-1).
+
+    Replaces the engine's fixed ``asyncio.Semaphore(max_concurrent_calls)`` with
+    an ADAPTIVE cap that tracks the limiter's live ``effective_concurrency``.
+    ``asyncio.Semaphore`` cannot be resized after construction, so this gate is
+    a small ``asyncio.Condition`` + an in-flight counter:
+
+    * :meth:`acquire` blocks while ``in_flight >= effective_concurrency`` (the
+      cap floored at 1, so a fully-throttled run still admits one call and makes
+      progress); on admission it increments ``in_flight``.
+    * :meth:`release` decrements ``in_flight`` and notifies every waiter so a
+      freed slot — OR a headroom increase that widened the cap while a waiter
+      slept — wakes a blocked acquirer to re-check the admit condition (no lost
+      wakeup). Always called in a ``finally`` so a cancelled in-flight call
+      drains its slot.
+
+    The gate reads its cap from the SAME shared :class:`_RateLimiterState` the
+    limiter pair publishes (one source of truth — no second concurrency value).
+    A 429 routed through the limiter narrows ``effective_concurrency``; in-flight
+    calls finish and drain, and new acquires wait until ``in_flight`` falls back
+    under the tightened cap (no deadlock — in-flight calls are never cancelled by
+    a cap drop, they run to completion). A clean grade completion calls
+    ``on_headroom`` (additive-increase) BEFORE :meth:`release`, so the
+    release's notify wakes a waiter against the now-larger cap — probing
+    concurrency back up toward ``max_concurrent_calls``.
+
+    Correctness rests on three invariants: (1) the in-flight counter is mutated
+    ONLY on the single event loop, under the ``asyncio.Condition`` lock — never
+    under the state's ``threading.Lock`` across an ``await``; (2) every
+    ``release`` notifies (so a cap-widening headroom call that ran before the
+    release is always observed by waiters); (3) the admit test floors the cap at
+    1, mirroring the limiter's ``[1, max_concurrent_calls]`` clamp, so the gate
+    can never admit fewer than 1 nor — because the limiter clamps the cap above —
+    more than ``max_concurrent_calls``.
+    """
+
+    def __init__(self, state: _RateLimiterState) -> None:
+        self._state = state
+        self._condition = asyncio.Condition()
+        self._in_flight = 0
+
+    @property
+    def in_flight(self) -> int:
+        """Number of calls currently admitted (inspected by tests)."""
+        return self._in_flight
+
+    def _capacity(self) -> int:
+        """Current admission cap — the limiter's effective concurrency, floored
+        at 1 so a fully-throttled run still admits one call (never deadlocks).
+
+        Reads ``effective_concurrency`` off the shared state via its own
+        ``threading.Lock``-guarded ``snapshot`` (a non-blocking arithmetic read,
+        no ``await``), so this is safe to call while holding the
+        ``asyncio.Condition`` lock.
+        """
+        return max(1, self._state.snapshot()[0])
+
+    async def acquire(self) -> None:
+        """Block until ``in_flight < effective_concurrency``, then admit one."""
+        async with self._condition:
+            await self._condition.wait_for(lambda: self._in_flight < self._capacity())
+            self._in_flight += 1
+
+    async def release(self) -> None:
+        """Drain one in-flight slot and wake every waiter to re-check the cap.
+
+        Notifies ALL waiters (not just one) because a single ``release`` may
+        coincide with a headroom increase that widened the cap by more than one
+        — every blocked acquirer must re-evaluate the admit condition against
+        the current cap, and ``wait_for`` re-checks its predicate on each wake.
+        """
+        async with self._condition:
+            if self._in_flight > 0:
+                self._in_flight -= 1
+            self._condition.notify_all()
+
+    async def __aenter__(self) -> AsyncConcurrencyGate:
+        """``async with gate:`` admits one call (blocking on the adaptive cap)."""
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *_exc: object) -> None:
+        """Release the slot in ``__aexit__`` so a cancelled / failed in-flight
+        call ALWAYS drains its slot (release-in-finally correctness)."""
+        await self.release()
+
+
 def make_rate_limiters(
     max_concurrent_calls: int,
 ) -> tuple[SyncRateLimiter, AsyncRateLimiter]:
@@ -442,6 +646,18 @@ def make_rate_limiters(
     """
     state = _RateLimiterState(max_concurrent_calls=max_concurrent_calls)
     return SyncRateLimiter(state), AsyncRateLimiter(state)
+
+
+def make_async_gate(limiter: AsyncRateLimiter) -> AsyncConcurrencyGate:
+    """Build an :class:`AsyncConcurrencyGate` over ``limiter``'s shared state.
+
+    The gate and the limiter share ONE :class:`_RateLimiterState` cell, so the
+    gate's admission cap IS the limiter's live ``effective_concurrency`` — a 429
+    seen by any coroutine (which narrows the limiter) immediately tightens the
+    gate, and a clean completion's ``on_headroom`` widens it. The engine builds
+    the gate from the async sibling returned by :func:`make_rate_limiters`.
+    """
+    return AsyncConcurrencyGate(limiter.state)
 
 
 #: ContextVar seam threading an :class:`AsyncRateLimiter` to every concurrent
@@ -468,10 +684,12 @@ current_sync_rate_limiter: contextvars.ContextVar[SyncRateLimiter | None] = cont
 
 
 __all__ = [
+    "AsyncConcurrencyGate",
     "AsyncRateLimiter",
     "RateLimitBudget",
     "SyncRateLimiter",
     "current_async_rate_limiter",
     "current_sync_rate_limiter",
+    "make_async_gate",
     "make_rate_limiters",
 ]

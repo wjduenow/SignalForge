@@ -40,8 +40,10 @@ import httpx
 import pytest
 
 from signalforge.draft.models import CandidateColumn, CandidateSchema
+from signalforge.grade import engine as engine_module
 from signalforge.grade.config import GradeConfig
 from signalforge.grade.engine import _stable_artifact_pairs, grade_artifacts
+from signalforge.grade.errors import GradeIncompleteError
 from signalforge.grade.rubric import Criterion, Rubric
 from signalforge.llm import AnthropicClientProtocol
 from signalforge.llm import client as client_module
@@ -169,13 +171,20 @@ class _BurstAsyncMessages:
         self._lock = threading.Lock()
         self._create_count = 0
         self.observed_limiters: list[object] = []
+        self.observed_concurrency: list[int] = []
 
     async def count_tokens(self, **_kwargs: object) -> FakeCountTokensResponse:
         return FakeCountTokensResponse(input_tokens=1500)
 
     async def create(self, **kwargs: object) -> FakeMessage:
         # Record which limiter THIS coroutine sees (set by grade_artifacts).
-        self.observed_limiters.append(current_async_rate_limiter.get())
+        limiter = current_async_rate_limiter.get()
+        self.observed_limiters.append(limiter)
+        # Snapshot the live effective concurrency at each create so a test can
+        # prove the AIMD cap narrowed below max under the storm and widened
+        # back afterward (#202 QG-FIX-1).
+        if limiter is not None:
+            self.observed_concurrency.append(limiter.effective_concurrency)
         with self._lock:
             self._create_count += 1
             is_burst = self._create_count <= self._burst_429
@@ -239,6 +248,10 @@ class _BurstClient:
     @property
     def observed_limiters(self) -> list[object]:
         return self._async_messages.observed_limiters
+
+    @property
+    def observed_concurrency(self) -> list[int]:
+        return self._async_messages.observed_concurrency
 
 
 @pytest.fixture(autouse=True)
@@ -382,4 +395,120 @@ def test_contextvar_reset_even_when_run_degrades_over_budget(
     assert report.aggregate_complete is False
 
     # The limiter ContextVar reset cleanly on the timeout path too.
+    assert current_async_rate_limiter.get() is None
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 — the adaptive gate's cap narrows under a 429 storm and widens back
+# ---------------------------------------------------------------------------
+
+
+def test_adaptive_concurrency_narrows_under_storm_then_widens_back(tmp_path: Path) -> None:
+    """Under a 429 storm the AIMD effective concurrency (the gate's cap) narrows
+    BELOW ``max_concurrent_calls``; after clean completions it widens back
+    toward the cap. Every observed value stays within ``[1, max]`` — proving the
+    gate never admits more than ``max_concurrent_calls`` nor fewer than 1.
+    """
+    project_dir = tmp_path / "project"
+    (project_dir / ".signalforge").mkdir(parents=True, exist_ok=True)
+
+    model = _make_model()
+    candidate = _candidate()
+    rubric = _two_criteria()
+    max_concurrent = 4
+
+    client = _BurstClient(burst_429=max_concurrent)  # the first wave all 429s
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config(max_retries_429=8),  # max_concurrent_calls=4
+        client=cast(AnthropicClientProtocol, client),
+        project_dir=project_dir,
+    )
+
+    # The run recovered fully (the limiter paced the storm).
+    assert report.aggregate_complete is True
+
+    observed = client.observed_concurrency
+    assert observed, "expected the fan-out to observe the live concurrency"
+    # (a) + (c): every observation is bounded — never above max, never below 1.
+    assert all(1 <= c <= max_concurrent for c in observed)
+    # (a): the storm narrowed the cap strictly below max at some point.
+    assert min(observed) < max_concurrent, "a 429 storm must narrow concurrency below max"
+    # (b): after clean completions the AIMD probes back up to the ceiling. The
+    # ContextVar is reset post-run, so read the recovery off the observed
+    # snapshots: the widest cap seen during the run reached the max ceiling as
+    # headroom accrued across the successful retries.
+    assert max(observed) == max_concurrent, "clean completions widen concurrency back to max"
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 — the always-on sweep is wall-clock-bounded
+# ---------------------------------------------------------------------------
+
+
+def test_never_recovering_sweep_is_wall_clock_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A never-recovering transient (the LLM 429s forever) makes the main pass
+    degrade every pair transient; the always-on sweep would otherwise honour
+    long waits across rounds indefinitely. With ``sweep_budget_seconds`` tiny,
+    the sweep's ``asyncio.timeout`` trips, the sweep STOPS (does not raise), and
+    the pairs are left degraded — failing loud under the default
+    ``require_complete``.
+    """
+    project_dir = tmp_path / "project"
+    (project_dir / ".signalforge").mkdir(parents=True, exist_ok=True)
+
+    # Make the sweep cool-down sleep BURN the entire sweep budget on the first
+    # round so the timeout trips deterministically (the engine awaits
+    # ``_async_sleep(sweep_cooldown_seconds)`` inside the bounded scope). The
+    # override sleeps real time past the 0-second sweep budget.
+    real_sleep = asyncio.sleep
+
+    async def _slow_sweep_sleep(_seconds: float) -> None:
+        # Each inter-round cool-down burns 0.6s of REAL time; two of them blow
+        # the 1s sweep budget below so the timeout trips within ~1.2s.
+        await real_sleep(0.6)
+
+    monkeypatch.setattr(engine_module, "_async_sleep", _slow_sweep_sleep)
+
+    model = _make_model()
+    candidate = _candidate()
+    rubric = _two_criteria()
+    # Burst forever: 999 ensures every main-pass create + every sweep create
+    # 429s, so no pair ever recovers and the sweep keeps finding transients.
+    client = _BurstClient(burst_429=999)
+
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,  # exhaust immediately → transient degrade on every pair
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=60,
+        max_concurrent_calls=4,
+        cache_enabled=False,
+        sweep_max_rounds=100,  # would loop a long time if unbounded
+        sweep_cooldown_seconds=1.0,  # routed through the slow override above
+        sweep_budget_seconds=1,  # the bound under test
+    )
+
+    # The never-recovering transients survive the (bounded) sweep → fail loud.
+    with pytest.raises(GradeIncompleteError):
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=config,
+            client=cast(AnthropicClientProtocol, client),
+            project_dir=project_dir,
+        )
+
+    # The ContextVar reset cleanly even though the sweep timed out.
     assert current_async_rate_limiter.get() is None

@@ -303,6 +303,27 @@ class GradeConfig(BaseModel):
     through the test-overridable :data:`_async_sleep` module alias so the
     test suite runs instantly. Must be non-negative."""
 
+    sweep_budget_seconds: int = 300
+    """Wall-clock bound (seconds) on the ENTIRE bounded-sweep phase (#202
+    QG-FIX-2).
+
+    The always-on transient-recovery sweep (DEC-206) runs AFTER the main
+    pass's ``asyncio.timeout(effective_budget)`` scope has closed, so it was
+    previously wall-clock-UNBOUNDED — a degraded provider honouring long
+    ``retry-after`` / reset waits across rounds could spend many extra minutes
+    sweeping. This knob wraps the whole sweep loop in its own
+    ``asyncio.timeout(sweep_budget_seconds)``: on timeout the sweep STOPS (it
+    does NOT raise — the run continues to report assembly) and any still-
+    transient pairs are left degraded ``score=None``. Those then fail loud
+    under :attr:`require_complete` (the default), or surface as an honest
+    partial when ``require_complete=False``.
+
+    Default ``300`` (5 minutes) is a generous backstop sized for the sequential
+    (concurrency-1) sweep of a typical transient remnant — NOT a completion
+    target; the sweep almost always finishes its rounds long before this. It is
+    a runaway guard against a never-recovering degraded provider, mirroring the
+    main-pass ``effective_budget`` posture. Must be positive."""
+
     max_concurrent_calls: int = 10
     """Asyncio dispatch concurrency cap for the per-``(artifact, criterion)``
     judge calls (issue #186 DEC-003).
@@ -488,18 +509,26 @@ class GradeConfig(BaseModel):
             raise ValueError("must be a non-empty, non-whitespace string")
         return v
 
-    @field_validator("max_output_tokens", "budget_base_seconds", "budget_per_pair_seconds")
+    @field_validator(
+        "max_output_tokens",
+        "budget_base_seconds",
+        "budget_per_pair_seconds",
+        "sweep_budget_seconds",
+    )
     @classmethod
     def _positive(cls, v: int | float) -> int | float:
-        """Positive-only knobs (#198 DEC-001 split).
+        """Positive-only knobs (#198 DEC-001 split; #202 QG-FIX-2 adds the sweep).
 
         Covers :attr:`max_output_tokens` (zero/negative would make the LLM
         refuse output) plus the two always-on scaled-budget terms
         :attr:`budget_base_seconds` / :attr:`budget_per_pair_seconds` (a
         non-positive term would size the wall-clock backstop to ``0`` and
-        degrade every pair before any call). ``total_budget_seconds`` and the
-        three ``max_grade_*`` ceilings are now optional and live on the
-        separate :meth:`_optional_positive` validator below."""
+        degrade every pair before any call) and :attr:`sweep_budget_seconds`
+        (the sweep-phase wall-clock bound — a non-positive value would time the
+        sweep out before its first round, defeating the always-on recovery).
+        ``total_budget_seconds`` and the three ``max_grade_*`` ceilings are now
+        optional and live on the separate :meth:`_optional_positive` validator
+        below."""
         # Reject non-finite floats up front: ``yaml.safe_load`` parses
         # ``.nan`` / ``.inf``, and ``nan <= 0`` / ``inf <= 0`` are both
         # ``False`` so they would slip past the positivity check — a NaN

@@ -101,31 +101,47 @@ def _sync_limiter_set(limiter: object) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def test_burst_429_with_retry_after_no_longer_exhausts_budget() -> None:
-    """STAGE-1 ACCEPTANCE (#202 US-003).
+#: The shared burst input for the FIX-4 limiter-vs-baseline pair: the SAME
+#: sequence of three ``retry-after: 30`` 429s then a success, replayed against
+#: ``call_llm`` once WITH a limiter and once WITHOUT. Using one input is the
+#: load-bearing change (#202 QG-FIX-4) — the previous pair compared a 3×429
+#: limiter run against a DIFFERENT 4×429 baseline, so the budget-count alone
+#: drove the outcome and the test passed even without the limiter. With the
+#: same input, the limiter's effect is the only variable: it PACES the retry at
+#: the header value (30s) instead of the blind exponential ``2**attempt``.
+_BURST_RETRY_AFTER = "30"
+_BURST_429_COUNT = 3
 
-    Previously: a wave of 429s blind-backed-off and burst straight back into
-    the limit, exhausting the 3×429 retry budget and raising
-    :class:`LLMRateLimitError` (the thundering-herd storm). Now: with a
-    :class:`SyncRateLimiter` wired, each 429 carries ``retry-after`` so the
-    limiter paces AT the limit; the budget is NOT exhausted because the call
-    recovers on a later attempt within the SAME 3-retry budget.
 
-    The exhaustion scenario is the explicit baseline: 4 consecutive 429s with
-    the default ``max_retries_429=3`` is what raised before. Here we queue 3
-    paced 429s then a success — within budget — and assert it returns instead
-    of raising.
+def _queue_burst(fake: FakeAnthropicClient) -> None:
+    fake.expect_count_tokens(matching={}, returns=_ok_count())
+    for _ in range(_BURST_429_COUNT):
+        fake.expect_messages_create(
+            matching={}, returns=_rate_limit_error(retry_after=_BURST_RETRY_AFTER)
+        )
+    fake.expect_messages_create(matching={}, returns=_ok_message())
+
+
+def test_burst_429_with_limiter_paces_at_header_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """STAGE-1 ACCEPTANCE (#202 US-003 / QG-FIX-4).
+
+    The SAME burst input as the no-limiter baseline below (three
+    ``retry-after: 30`` 429s then a success). WITH a :class:`SyncRateLimiter`
+    wired, every retry sleeps AT the header value (30s) — pacing at the limit
+    instead of bursting back on the blind exponential backoff. The call
+    recovers within budget and the chosen sleeps are EXACTLY the header value,
+    which is the limiter's load-bearing effect (not merely the pass/fail
+    outcome, which the shared budget count drives identically on both arms).
     """
+    sleeps: list[float] = []
+    monkeypatch.setattr(client_module, "_sleep", sleeps.append)
+
     sync_limiter, _ = make_rate_limiters(max_concurrent_calls=10)
 
     fake = FakeAnthropicClient()
-    fake.expect_count_tokens(matching={}, returns=_ok_count())
-    # 3 retried 429s (each paced by the header) THEN a success — exactly the
-    # 3-retry budget, so the OLD blind path would have been on its last legs;
-    # the limiter makes the paced retries land the success.
-    for _ in range(3):
-        fake.expect_messages_create(matching={}, returns=_rate_limit_error(retry_after="2"))
-    fake.expect_messages_create(matching={}, returns=_ok_message())
+    _queue_burst(fake)
 
     with _sync_limiter_set(sync_limiter):
         result = call_llm(
@@ -140,20 +156,68 @@ def test_burst_429_with_retry_after_no_longer_exhausts_budget() -> None:
 
     assert result.response_text == "ok"
     fake.assert_all_expectations_met()
+    # The limiter paced EVERY retry at the header value — NOT the blind
+    # exponential ``[1, 2, 4]`` the baseline below produces from the SAME input.
+    assert sleeps == [30.0, 30.0, 30.0]
     # Three 429s drove the AIMD decrease 10 → 5 → 2 → 1.
     assert sync_limiter.effective_concurrency == 1
 
 
-def test_burst_429_baseline_without_limiter_still_exhausts() -> None:
-    """The previous-exhaustion baseline this fix targets: the SAME 4×429 burst
-    with NO limiter still exhausts the 3-retry budget (blind backoff, no
-    header pacing) — proving the limiter is what changes the outcome."""
+def test_burst_429_baseline_without_limiter_blind_backs_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-limiter baseline for the SAME burst input (#202 QG-FIX-4).
+
+    With NO limiter wired, the IDENTICAL three-429s-then-success sequence
+    ignores the ``retry-after: 30`` header entirely and blind-backs-off at the
+    historical ``2**attempt * jitter`` cadence (``[1, 2, 4]`` with the pinned
+    jitter). Same input, different pacing — proving the limiter is the only
+    thing that changes the retry timing. (Both arms recover, because the budget
+    count is what drives pass/fail; the limiter's contribution is the pacing,
+    which under real concurrency is what stops the thundering herd.)
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(client_module, "_sleep", sleeps.append)
+
+    fake = FakeAnthropicClient()
+    _queue_burst(fake)
+
+    result = call_llm(
+        system="sys",
+        cached_block="c",
+        dynamic_block="d",
+        model="claude-sonnet-4-6",
+        max_tokens=128,
+        prompt_version="v1",
+        client=fake,
+    )
+
+    assert result.response_text == "ok"
+    fake.assert_all_expectations_met()
+    # No limiter → header ignored → blind exponential backoff (pinned jitter
+    # 1.0): 2**0, 2**1, 2**2.
+    assert sleeps == [1.0, 2.0, 4.0]
+
+
+def test_burst_429_over_budget_still_exhausts_without_header_pacing() -> None:
+    """A burst that EXCEEDS the retry budget exhausts regardless of pacing.
+
+    The budget count — not the delay value — is what raises
+    :class:`LLMRateLimitError`. Four 429s against ``max_retries_429=3`` exhausts
+    even WITH a limiter wired, because header pacing changes the *wait*, not the
+    *count*. This pins the honest scope of the limiter: it paces the retries (the
+    thundering-herd fix under concurrency), it does not enlarge the per-call
+    budget.
+    """
+    sync_limiter, _ = make_rate_limiters(max_concurrent_calls=10)
     fake = FakeAnthropicClient()
     fake.expect_count_tokens(matching={}, returns=_ok_count())
     for _ in range(4):
-        fake.expect_messages_create(matching={}, returns=_rate_limit_error(retry_after="2"))
+        fake.expect_messages_create(
+            matching={}, returns=_rate_limit_error(retry_after=_BURST_RETRY_AFTER)
+        )
 
-    with pytest.raises(LLMRateLimitError) as exc_info:
+    with _sync_limiter_set(sync_limiter), pytest.raises(LLMRateLimitError) as exc_info:
         call_llm(
             system="sys",
             cached_block="c",
@@ -290,7 +354,9 @@ async def test_async_429_honours_retry_after_via_context_var(
 
     assert result.response_text == "ok"
     assert slept == [12.0]
-    assert async_limiter.effective_concurrency == 3  # 6 → 3 on the one 429
+    # 6 → 3 on the one 429, then +1 headroom on the clean completion (#202
+    # QG-FIX-1: a non-429 return now probes the AIMD concurrency back up).
+    assert async_limiter.effective_concurrency == 4
 
 
 @pytest.mark.asyncio

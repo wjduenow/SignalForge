@@ -141,6 +141,7 @@ from signalforge.grade.rubric import (
 from signalforge.llm import AnthropicClientProtocol
 from signalforge.llm._rate_limiter import (
     current_async_rate_limiter,
+    make_async_gate,
     make_rate_limiters,
 )
 from signalforge.llm.client import call_llm_async
@@ -643,7 +644,7 @@ def _write_event_or_abort(event: GradeEvent, *, audit_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Async core (issue #186, US-009 — TaskGroup + Semaphore + budget timeout)
+# Async core (issue #186, US-009 — TaskGroup + adaptive gate + budget timeout)
 # ---------------------------------------------------------------------------
 
 
@@ -668,12 +669,17 @@ async def _grade_artifacts_async_core(
 
     Replaces the sequential ``while iter_index < len(iterator)`` loop
     from the v0.1 ``grade_artifacts``. Orchestrates concurrent dispatch
-    via :class:`asyncio.TaskGroup` throttled by an
-    :class:`asyncio.Semaphore(max_concurrent_calls)`, bounded by
-    :func:`asyncio.timeout(effective_budget)` (the scaled wall-clock
-    backstop from :func:`_compute_effective_budget`, DEC-001). Each pair runs as a
-    coroutine; per-coroutine ``try/except`` isolates LLM-layer failures
-    so one bad pair doesn't abort siblings (DEC-004 retry isolation).
+    via :class:`asyncio.TaskGroup` throttled by an adaptive
+    :class:`signalforge.llm._rate_limiter.AsyncConcurrencyGate` (#202
+    QG-FIX-1) — admits at most the limiter's live ``effective_concurrency``
+    in-flight grade calls, narrowing on a 429 and probing back up toward
+    ``max_concurrent_calls`` on clean completions (replacing the fixed
+    ``asyncio.Semaphore(max_concurrent_calls)`` the engine used before),
+    bounded by :func:`asyncio.timeout(effective_budget)` (the scaled
+    wall-clock backstop from :func:`_compute_effective_budget`, DEC-001).
+    Each pair runs as a coroutine; per-coroutine ``try/except`` isolates
+    LLM-layer failures so one bad pair doesn't abort siblings (DEC-004
+    retry isolation).
 
     Cancellation attribution (DEC-008): when the budget trips, the
     enclosing ``asyncio.timeout`` cancels every in-flight task. Each
@@ -742,7 +748,6 @@ async def _grade_artifacts_async_core(
     else:
         results_by_index = [None] * total_pairs
 
-    semaphore = asyncio.Semaphore(resolved_config.max_concurrent_calls)
     # ``_budget_exceeded`` is the orchestrator-scope flag the per-task
     # ``except CancelledError`` arm reads (DEC-008). Closure capture
     # via a list mutable cell so the flag survives across nested
@@ -790,18 +795,28 @@ async def _grade_artifacts_async_core(
     # concurrency the whole wave probes from, so the fan-out runs AT the rate
     # limit instead of bursting past it.
     #
-    # The limiter PACES (decides the per-429 wait via ``retry-after`` headers,
-    # blind-backoff fallback when absent); the ``asyncio.Semaphore`` below CAPS
-    # raw concurrency; the ``asyncio.timeout(effective_budget)`` is the runaway
-    # backstop. The three are orthogonal — limiter waits legitimately count
-    # against the budget, so a genuinely over-budget run still degrades (the
-    # #198 behaviour is unchanged). The ContextVar is set here (inside the
-    # coroutine, which ``asyncio.run`` runs in its own copied context) and RESET
-    # in the ``finally`` below so it never leaks past this run.
+    # The limiter PACES (decides the per-429 wait via ``retry-after`` / reset
+    # headers, blind-backoff fallback when absent) AND now GOVERNS dispatch via
+    # the adaptive :class:`AsyncConcurrencyGate` below — which admits at most the
+    # limiter's live ``effective_concurrency`` in-flight grade calls (replacing
+    # the fixed ``asyncio.Semaphore(max_concurrent_calls)`` the engine used
+    # pre-#202-QG). The ``asyncio.timeout(effective_budget)`` stays the runaway
+    # backstop. The two are orthogonal — limiter waits legitimately count against
+    # the budget, so a genuinely over-budget run still degrades (the #198
+    # behaviour is unchanged). The ContextVar is set here (inside the coroutine,
+    # which ``asyncio.run`` runs in its own copied context) and RESET in the
+    # ``finally`` below so it never leaks past this run.
     # Only the async sibling is published — the grade fan-out runs exclusively
     # on the async path (``call_llm_async``); the sync limiter shares the same
     # AIMD state but has no consumer in this orchestrator, so it is discarded.
     _async_limiter = make_rate_limiters(resolved_config.max_concurrent_calls)[1]
+    # The gate shares the limiter's AIMD state, so its admission cap IS the
+    # live ``effective_concurrency``: a 429 (routed through the limiter on any
+    # coroutine's retry path) narrows the cap and the fan-out drains toward it;
+    # a clean completion's ``on_headroom`` (fired in ``call_llm_async``) widens
+    # it back toward ``max_concurrent_calls``. Floored at 1 so a fully-throttled
+    # run still admits one call and makes progress (never deadlocks).
+    gate = make_async_gate(_async_limiter)
     _limiter_token = current_async_rate_limiter.set(_async_limiter)
     try:
         # Opt-in cost/calls/tokens ceilings (US-004 / DEC-002/003/010/011).
@@ -851,7 +866,11 @@ async def _grade_artifacts_async_core(
         async def _one(
             index: int, artifact_id: str, artifact_text: str, criterion: Criterion
         ) -> None:
-            async with semaphore:
+            # Adaptive admission gate (#202 QG-FIX-1): admits at most the
+            # limiter's live ``effective_concurrency`` in-flight grade calls,
+            # not the fixed ``max_concurrent_calls``. ``__aexit__`` releases the
+            # slot (and notifies waiters) even on cancellation / failure.
+            async with gate:
                 # Each call gets its own ``timestamp`` so a forensic query
                 # can distinguish per-call latency. The sidecar carries
                 # ``started_at`` separately.
@@ -861,7 +880,7 @@ async def _grade_artifacts_async_core(
                 # --- Opt-in cost/calls/tokens ceilings (US-004) -------------
                 # CHECK-then-RESERVE with NO ``await`` between the read and the
                 # decision: this whole block runs synchronously inside the
-                # single event loop, immediately after the semaphore acquire
+                # single event loop, immediately after the gate admission
                 # and BEFORE the LLM ``await`` below, so the accumulator reads
                 # and the ``calls_made`` increment are race-free (DEC-003). A
                 # tripped ceiling degrades THIS un-started pair (DEC-002) with
@@ -1157,8 +1176,8 @@ async def _grade_artifacts_async_core(
             # ``counters["cancelled"]``). The TaskGroup's __aexit__ awaited
             # every cancelled task to finish before re-raising, so by the
             # time we land here every slot is populated UNLESS the task
-            # body had not yet entered (``async with semaphore`` was still
-            # pending) — in that case the slot is still ``None`` and we
+            # body had not yet entered (``async with gate`` admission was
+            # still pending) — in that case the slot is still ``None`` and we
             # synthesise a degraded result below.
             budget_state["exceeded"] = True
         except BaseExceptionGroup as group:
@@ -1182,7 +1201,7 @@ async def _grade_artifacts_async_core(
 
         # Fill any un-started slots with the budget-degrade shape. A slot is
         # ``None`` iff the task was cancelled BEFORE its body executed
-        # (i.e. while it was still awaiting the semaphore). Mirrors the v0.1
+        # (i.e. while it was still awaiting gate admission). Mirrors the v0.1
         # "iter_index past the trip" semantics.
         for index, (artifact_id, _artifact_text, criterion) in enumerate(pairs):
             if results_by_index[index] is not None:
@@ -1267,39 +1286,74 @@ async def _grade_artifacts_async_core(
         # The cool-down between rounds routes through the test-overridable
         # ``_async_sleep`` alias; ``sweep_cooldown_seconds == 0`` skips the
         # wait but the sweep itself stays always-on.
-        for sweep_round in range(1, resolved_config.sweep_max_rounds + 1):
-            transient_indices = [
-                idx
-                for idx, (_aid, _atext, _crit) in enumerate(pairs)
-                if (r := results_by_index[idx]) is not None
-                and r.score is None
-                and r.degrade_reason_type == "transient"
-            ]
-            if not transient_indices:
-                break
-            if resolved_config.sweep_cooldown_seconds > 0:
-                await _async_sleep(resolved_config.sweep_cooldown_seconds)
-            for idx in transient_indices:
-                artifact_id, artifact_text, criterion = pairs[idx]
-                await _sweep_one_pair(
-                    index=idx,
-                    artifact_id=artifact_id,
-                    artifact_text=artifact_text,
-                    criterion=criterion,
-                    sweep_round=sweep_round,
-                    resolved_config=resolved_config,
-                    resolved_audit_path=resolved_audit_path,
-                    async_client=async_client,
-                    run_id=run_id,
-                    rubric_hash=rubric_hash,
-                    template_hash=template_hash,
-                    rubric_block=rubric_block,
-                    crit_hash=crit_hash_by_id[criterion.id],
-                    model_unique_id=model_unique_id,
-                    results_by_index=results_by_index,
-                    cache_dir=cache_dir,
-                    artifact_text_hash_by_index=artifact_text_hash_by_index,
-                )
+        #
+        # WALL-CLOCK BOUND (#202 QG-FIX-2). The sweep runs AFTER the main
+        # pass's ``asyncio.timeout(effective_budget)`` scope has closed, so it
+        # was previously unbounded — a never-recovering degraded provider that
+        # honours long ``retry-after`` / reset waits across rounds could spend
+        # many extra minutes here. Wrap the WHOLE sweep loop in its own
+        # ``asyncio.timeout(sweep_budget_seconds)``. On ``TimeoutError`` we STOP
+        # sweeping (do NOT re-raise — the run continues to report assembly) and
+        # leave any remaining transient pairs degraded ``score=None``; they fail
+        # loud under ``require_complete`` or surface as an honest partial when
+        # ``require_complete=False``. A cancellation mid-pair leaves that pair's
+        # slot as-is (still degraded — the synchronous audit write inside
+        # ``_sweep_one_pair`` is past or not-yet-reached, never torn mid-fsync).
+        try:
+            async with asyncio.timeout(resolved_config.sweep_budget_seconds):
+                for sweep_round in range(1, resolved_config.sweep_max_rounds + 1):
+                    transient_indices = [
+                        idx
+                        for idx, (_aid, _atext, _crit) in enumerate(pairs)
+                        if (r := results_by_index[idx]) is not None
+                        and r.score is None
+                        and r.degrade_reason_type == "transient"
+                    ]
+                    if not transient_indices:
+                        break
+                    if resolved_config.sweep_cooldown_seconds > 0:
+                        await _async_sleep(resolved_config.sweep_cooldown_seconds)
+                    for idx in transient_indices:
+                        artifact_id, artifact_text, criterion = pairs[idx]
+                        await _sweep_one_pair(
+                            index=idx,
+                            artifact_id=artifact_id,
+                            artifact_text=artifact_text,
+                            criterion=criterion,
+                            sweep_round=sweep_round,
+                            resolved_config=resolved_config,
+                            resolved_audit_path=resolved_audit_path,
+                            async_client=async_client,
+                            run_id=run_id,
+                            rubric_hash=rubric_hash,
+                            template_hash=template_hash,
+                            rubric_block=rubric_block,
+                            crit_hash=crit_hash_by_id[criterion.id],
+                            model_unique_id=model_unique_id,
+                            results_by_index=results_by_index,
+                            cache_dir=cache_dir,
+                            artifact_text_hash_by_index=artifact_text_hash_by_index,
+                        )
+        except TimeoutError:
+            # The sweep wall-clock bound tripped. Stop sweeping; leave any
+            # remaining transient pairs degraded. One WARNING for forensics —
+            # lazy-format JSON per the ANSI-safe logger grep gate.
+            remaining_transient = sum(
+                1
+                for r in results_by_index
+                if r is not None and r.score is None and r.degrade_reason_type == "transient"
+            )
+            _LOGGER.warning(
+                "grade sweep budget exceeded: %s",
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "model_unique_id": model_unique_id,
+                        "sweep_budget_seconds": resolved_config.sweep_budget_seconds,
+                        "remaining_transient": remaining_transient,
+                    }
+                ),
+            )
     finally:
         # Reset the ContextVar so the shared limiter never leaks past this
         # run (belt-and-braces — ``asyncio.run`` already runs the coroutine
@@ -1336,10 +1390,12 @@ async def _sweep_one_pair(
 
     Runs SEQUENTIALLY from :func:`_grade_artifacts_async_core`'s sweep loop
     (concurrency 1 — no second thundering herd). Mirrors the happy-path
-    ``_one`` coroutine's post-grade discipline but without the semaphore,
-    ceiling accounting, or budget-cancellation machinery (the sweep is the
-    calm retry; it is not budget-bounded and is never cancelled by the main
-    pass's ``asyncio.timeout`` — that scope has already exited).
+    ``_one`` coroutine's post-grade discipline but without the adaptive gate,
+    ceiling accounting, or main-pass budget machinery (the sweep is the calm
+    retry; the main pass's ``asyncio.timeout`` has already exited). The sweep
+    LOOP as a whole IS wall-clock-bounded by its own
+    ``asyncio.timeout(sweep_budget_seconds)`` (#202 QG-FIX-2): a cancellation
+    arriving mid-pair simply leaves this pair's slot degraded.
 
     Each attempt appends a NEW ``sweep_round``-tagged audit record (the
     immutable-log posture — the original failure record is never rewritten).
@@ -1810,8 +1866,10 @@ def grade_artifacts(
     # 5. Iterate ``(criterion, artifact)`` pairs via the async core
     #    (issue #186, US-009 / DEC-002 + DEC-004). The async core wraps
     #    a ``TaskGroup`` in ``asyncio.timeout(effective_budget)``
-    #    and dispatches up to ``max_concurrent_calls`` coroutines via a
-    #    ``Semaphore``. Per-coroutine ``try/except`` handles LLM-layer
+    #    and dispatches coroutines through the adaptive
+    #    ``AsyncConcurrencyGate`` (admits at most the limiter's live
+    #    ``effective_concurrency``, ≤ ``max_concurrent_calls``).
+    #    Per-coroutine ``try/except`` handles LLM-layer
     #    failures and budget-cancellation; the public sync entry-point
     #    is preserved by wrapping in ``asyncio.run(...)``. The
     #    nested-event-loop guard (3a above) ensured this ``asyncio.run``

@@ -964,7 +964,7 @@ async def call_llm_async(
                 cause=exc,
             ) from exc
 
-    return _build_result_from_response(
+    result = _build_result_from_response(
         response,
         strategy=strategy,
         model=model,
@@ -973,6 +973,21 @@ async def call_llm_async(
         cached_block_tokens=cached_block_tokens,
         min_required=min_required,
     )
+
+    # Clean (non-429) completion → AIMD additive-increase on the shared limiter
+    # so the adaptive concurrency gate probes back up toward
+    # ``max_concurrent_calls`` (#202 QG-FIX-1). Gated on the limiter being
+    # present so the limiter-free path (the sync drafter never sets the async
+    # ContextVar; any async caller without a limiter) is unaffected. This runs
+    # AFTER the response-shape gate + result assembly inside
+    # ``_build_result_from_response``, so a truncation / safety-filter response
+    # (which raises ``LLMResponseFormatError`` there) does NOT count as headroom
+    # — only a genuinely clean grade widens the cap. The headroom probe is
+    # idempotent-safe and cheap (one clamped increment under the state lock).
+    if rate_limiter is not None:
+        rate_limiter.record_headroom()
+
+    return result
 
 
 __all__ = ("call_llm", "call_llm_async")
