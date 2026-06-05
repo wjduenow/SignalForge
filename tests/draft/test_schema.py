@@ -987,6 +987,7 @@ def test_public_api_imports_match_dec_020() -> None:
         "LLMServerError",
         "ModelPricing",
         "OpenAIProvider",
+        "RateLimitBudget",
         "UnknownProviderError",
         "UsageMetrics",
         "call_llm",

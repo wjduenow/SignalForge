@@ -75,6 +75,63 @@ class FakeCountTokensResponse:
     input_tokens: int
 
 
+@dataclass
+class _FakeResponseWithHeaders:
+    """Stand-in for the ``httpx.Response`` hung off an SDK exception /
+    success response (#202 US-002).
+
+    Carries only the ``headers`` attribute the rate-limit extractor reads —
+    a case-insensitive ``dict`` is enough because
+    :meth:`signalforge.llm.providers.AnthropicProvider._headers_from`
+    probes for any :class:`collections.abc.Mapping` and the neutral
+    parse helper does a plain ``.get(key)`` (the real ``httpx.Headers`` is
+    case-insensitive, but tests pass exact lowercased header names, so a
+    plain ``dict`` faithfully exercises the parse path).
+    """
+
+    headers: dict[str, str]
+
+
+class FakeRateLimitError(Exception):
+    """Test double for ``anthropic.RateLimitError`` (#202 US-002 / DEC-205).
+
+    The real SDK's ``RateLimitError`` (a 429) hangs its
+    ``retry-after`` + ``anthropic-ratelimit-*`` headers off
+    ``error.response.headers`` (an ``httpx.Response``). This fake reproduces
+    exactly that shape — ``self.response.headers`` is the supplied mapping —
+    so :meth:`signalforge.llm.providers.AnthropicProvider.extract_rate_limit_info`
+    walks the same ``exc.response.headers`` path it walks in production,
+    WITHOUT pulling in the real ``anthropic`` / ``httpx`` types.
+
+    Hand-rolled (not ``MagicMock``) for the same reason as
+    :class:`FakeAnthropicClient`: an auto-passing mock would silently mask a
+    wrong attribute path; an explicit double fails loud
+    (``testing-signal.md``).
+    """
+
+    def __init__(self, *, headers: dict[str, str] | None = None) -> None:
+        super().__init__("fake rate limit")
+        # ``headers=None`` models a 429 whose response surfaced no headers at
+        # all (the extractor degrades to an EMPTY budget). An empty dict models
+        # "response present, but no rate-limit headers".
+        self.response = _FakeResponseWithHeaders(headers=headers or {})
+
+
+@dataclass
+class FakeResponseWithHeaders:
+    """Test double for a SUCCESS response carrying rate-limit headers
+    (#202 US-002 / DEC-205).
+
+    Mirrors the ``response.headers`` surface a 200 ``messages.create`` reply
+    exposes (``self.headers`` directly, not nested under ``.response`` — the
+    success path the extractor probes via the direct form). Lets a test drive
+    :meth:`signalforge.llm.providers.AnthropicProvider.extract_rate_limit_info`'s
+    ``response=`` argument without the real SDK.
+    """
+
+    headers: dict[str, str]
+
+
 # A "matching" predicate is either a dict (subset match against the kwargs
 # dict the seam passes) or a callable returning bool.
 _Matcher = dict[str, Any] | Callable[[dict[str, Any]], bool]
@@ -296,6 +353,8 @@ __all__ = [
     "FakeAnthropicClient",
     "FakeCountTokensResponse",
     "FakeMessage",
+    "FakeRateLimitError",
+    "FakeResponseWithHeaders",
     "FakeTextBlock",
     "FakeUsage",
     "_StubAnthropicClient",
