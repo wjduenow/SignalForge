@@ -57,7 +57,7 @@ from typing import Final
 from signalforge import __version__ as _SIGNALFORGE_VERSION
 from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.grade.errors import GradeAuditRecordTooLargeError, GradeAuditWriteError
-from signalforge.grade.models import GradeEvent, GradingReport
+from signalforge.grade.models import DegradeReasonType, GradeEvent, GradingReport
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,6 +100,7 @@ def _build_grade_event(
     cache_creation_input_tokens: int = 0,
     cache_read_input_tokens: int = 0,
     cache_hit: bool = False,
+    degrade_reason_type: DegradeReasonType | None = None,
 ) -> GradeEvent:
     """Construct a :class:`GradeEvent` — the **single** construction seam.
 
@@ -113,10 +114,11 @@ def _build_grade_event(
 
     Stamps :attr:`signalforge.grade.models.GradeEvent.signalforge_version`
     from :data:`signalforge.__version__` so a reviewer can identify which
-    code shipped the receipt. ``audit_schema_version`` defaults to ``2``
+    code shipped the receipt. ``audit_schema_version`` defaults to ``3``
     on the production model (DEC-008 of #189 — widened from ``Literal[1]``
     to ``int`` for replay forward-compat, then bumped 1 → 2 for the
-    ``cache_hit`` field).
+    ``cache_hit`` field, then 2 → 3 in #202 US-001 for the
+    ``degrade_reason_type`` discriminator).
 
     The keyword-only ``cache_hit`` parameter (default ``False``, DEC-010
     of #189) is the audit signal for grade-cache rehydration. A cache-hit
@@ -125,6 +127,12 @@ def _build_grade_event(
     token counts. Both flow through this single seam, so the 6th AST
     scan in :file:`tests/test_audit_completeness.py` continues to gate
     every :class:`GradeEvent` construction.
+
+    The keyword-only ``degrade_reason_type`` parameter (default ``None``,
+    #202 US-001) is the structured degrade discriminator. ``None`` for a
+    scored record; one of ``"transient"`` / ``"budget"`` / ``"ceiling"``
+    for a degraded record — set by :func:`_build_degraded` from the
+    reason string so callers never string-match the prose.
     """
     return GradeEvent(
         signalforge_version=_SIGNALFORGE_VERSION,
@@ -137,6 +145,7 @@ def _build_grade_event(
         passed=passed,
         evidence=evidence,
         reasoning=reasoning,
+        degrade_reason_type=degrade_reason_type,
         rubric_hash=rubric_hash,
         prompt_version_template=prompt_version_template,
         criterion_prompt_hash=criterion_prompt_hash,

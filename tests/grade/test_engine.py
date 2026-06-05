@@ -514,6 +514,9 @@ def test_grade_artifacts_budget_exceeded_marks_remaining_pairs_score_none(
     assert all(
         r.reasoning == "grade budget exceeded (1s) before evaluation" for r in report.results
     )
+    # #202 US-001: the structured discriminator classifies the budget
+    # degrade WITHOUT re-parsing the prose above.
+    assert all(r.degrade_reason_type == "budget" for r in report.results)
 
 
 def test_grade_artifacts_budget_exceeded_aggregate_complete_is_false(
@@ -655,8 +658,12 @@ def test_grade_artifacts_one_criterion_retry_exhausted_does_not_fail_whole_repor
     degraded = [r for r in report.results if r.score is None]
     assert len(degraded) == 1
     assert "GradeLLMError" in degraded[0].reasoning
+    # #202 US-001: an LLM-layer failure classifies as "transient".
+    assert degraded[0].degrade_reason_type == "transient"
     scored = [r for r in report.results if r.score is not None]
     assert len(scored) == 7
+    # Scored pairs carry None for the discriminator.
+    assert all(r.degrade_reason_type is None for r in scored)
     assert report.aggregate_complete is False
 
 
@@ -723,6 +730,45 @@ def test_format_degrade_reasoning_preserves_bare_shape_for_non_response_format_c
 
     parser = GradeOutputError("bad json", violation_type="json_parse")
     assert _format_degrade_reasoning(parser) == "call failed: GradeOutputError"
+
+
+# ---------------------------------------------------------------------------
+# Structured degrade discriminator (#202 US-001 / DEC-203)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_degrade_reason_maps_all_three_causes() -> None:
+    """``_classify_degrade_reason`` maps each upstream reason string to its
+    structured discriminator — the centralised prose→type mapping callers
+    rely on instead of string-matching the reason text.
+    """
+    from signalforge.grade.engine import _classify_degrade_reason
+
+    # Transient: the two ``call failed: …`` shapes from
+    # ``_format_degrade_reasoning`` (LLM + parser failures).
+    assert _classify_degrade_reason("call failed: GradeLLMError") == "transient"
+    assert _classify_degrade_reason("call failed: GradeOutputError") == "transient"
+    assert (
+        _classify_degrade_reason("call failed: GradeLLMError: finish_reason=SAFETY") == "transient"
+    )
+
+    # Budget: the wall-clock backstop reason.
+    assert _classify_degrade_reason("grade budget exceeded (500s) before evaluation") == "budget"
+
+    # Ceiling: all three opt-in ceilings share the "ceiling exceeded" marker.
+    assert _classify_degrade_reason("grade call ceiling exceeded (200 calls)") == "ceiling"
+    assert _classify_degrade_reason("grade cost ceiling exceeded ($5.0)") == "ceiling"
+    assert _classify_degrade_reason("grade token ceiling exceeded (100000 tokens)") == "ceiling"
+
+
+def test_classify_degrade_reason_defaults_to_transient_on_unknown() -> None:
+    """An unrecognised reason defaults to ``"transient"`` (the conservative,
+    retriable classification) rather than crashing or mis-classifying.
+    """
+    from signalforge.grade.engine import _classify_degrade_reason
+
+    assert _classify_degrade_reason("some future reason string we never saw") == "transient"
+    assert _classify_degrade_reason("") == "transient"
 
 
 # ---------------------------------------------------------------------------
@@ -2100,6 +2146,10 @@ def test_grade_artifacts_max_grade_calls_ceiling_degrades_remaining(
     assert report.aggregate_complete is False
     for r in degraded:
         assert r.reasoning == f"grade call ceiling exceeded ({k} calls)"
+        # #202 US-001: ceiling degrades classify as "ceiling", and the
+        # scored pairs carry None — exercised end-to-end here.
+        assert r.degrade_reason_type == "ceiling"
+    assert all(r.degrade_reason_type is None for r in scored)
 
     warns = _ceiling_warns(caplog)
     assert len(warns) == 1

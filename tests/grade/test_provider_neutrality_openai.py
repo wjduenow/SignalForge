@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from signalforge.llm import AnthropicClientProtocol
 from signalforge.manifest.models import Column, Model
 from signalforge.prune.models import PruneResult
-from tests.grade.test_drift_detector import StrictGradeEventV2
+from tests.grade.test_drift_detector import StrictGradeEventV3
 from tests.llm._fake_openai import (
     FakeOpenAIChoice,
     FakeOpenAIClient,
@@ -291,7 +291,7 @@ def test_grade_artifacts_drives_openai_provider_end_to_end(
     #     extra="forbid" mirror (zero-cache events validate cleanly). ---
     for line in audit_path.read_text(encoding="utf-8").splitlines():
         if line.strip():
-            StrictGradeEventV2.model_validate_json(line)
+            StrictGradeEventV3.model_validate_json(line)
 
     # --- Sidecar JSON: present + round-trips through GradingReport. ---
     assert sidecar_path.exists()
