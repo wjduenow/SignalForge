@@ -171,6 +171,7 @@ Confirm `{release_version}` appears. Then install in a clean venv to smoke-test.
 rm -rf /tmp/sf-testpypi-check
 uv venv --python 3.11 /tmp/sf-testpypi-check
 uv pip install --python /tmp/sf-testpypi-check/bin/python --no-cache \
+  --index-strategy unsafe-best-match \
   --index-url https://test.pypi.org/simple/ \
   --extra-index-url https://pypi.org/simple/ \
   "signalforge-dbt=={release_version}"
@@ -178,6 +179,8 @@ uv pip install --python /tmp/sf-testpypi-check/bin/python --no-cache \
 ```
 
 Pin **3.11** (the `requires-python` floor) so the smoke test verifies installability on the *minimum* supported interpreter. `uv venv --python 3.11` auto-fetches 3.11 if it isn't already present, so this works regardless of the host's default `python3`.
+
+**`--index-strategy unsafe-best-match` is load-bearing now that `signalforge-dbt` exists on real PyPI.** By default `uv` only considers versions from the *first* index that contains a given package name (a dependency-confusion guard) — since the name is published on PyPI, `uv` pins to PyPI and never falls through to TestPyPI for the new `{release_version}`, failing with "no version of signalforge-dbt=={release_version} … your requirements are unsatisfiable" even though the artifact is live on TestPyPI. `--index-strategy unsafe-best-match` tells `uv` to consider all versions across both indexes, so the TestPyPI prerelease resolves while its dependencies (pydantic, anthropic, google-cloud-bigquery, …) still come from real PyPI. This is safe here because both indexes are first-party PyPI infrastructure. (`pip` does not need the flag — its `--extra-index-url` semantics already merge both indexes; the guard is `uv`-specific.)
 
 If the install fails with "Could not find a version that satisfies the requirement" right after a successful publish, it's almost always TestPyPI's simple-index (Fastly) cache lagging the upload by a minute or two — confirm the artifact exists via the per-version JSON (`curl -sf "https://test.pypi.org/pypi/signalforge-dbt/{release_version}/json"`), wait, and retry. (Distinguish this from the Python-version mismatch above: the version-mismatch error names "Requires-Python >=3.11" in the pip output; the cache-lag error just shows an older `(from versions: …)` list.)
 
