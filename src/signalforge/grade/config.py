@@ -434,31 +434,54 @@ class GradeConfig(BaseModel):
     ``extra="forbid"`` makes a typo such as ``require_complte:`` fail loud
     at config-load rather than silently leaving the contract armed."""
 
-    cache_enabled: bool = True
+    cache_enabled: bool = False
     """Master switch for the per-``(artifact, criterion)`` grade cache
-    (issue #189 DEC-016).
+    (issue #189 DEC-016; default flipped to ``False`` by issue #197).
 
-    Default ``True`` — content-addressed cache lookup + write run on
-    every grade pair. The cache key is a content-hash of the inputs
-    that genuinely determine the verdict (rubric criterion, artefact
-    payload, model + provider + prompt version, ...) so any change
-    that should invalidate a prior verdict invalidates the key by
-    construction — no TTL knob is needed in v0.1 (deferred to a future
-    ticket if demand emerges).
+    Default ``False`` as of issue #197. The cache is **cross-invocation
+    only** — it is read in the orchestrator's sync prefix BEFORE any
+    write of the current run, so it never reuses work *within* a single
+    grade run (intra-run speed comes entirely from the #186 asyncio
+    fan-out, not the cache). Its key mixes ``artifact_text_hash`` — a
+    hash of the drafted artefact text — so a full ``signalforge
+    generate`` re-run, whose drafter is a live non-deterministic LLM,
+    rotates the key and **misses on every pair** (measured in
+    ``docs/research/179-runtime-benchmark.md`` — 370 entries written,
+    zero read back). Left ``True`` it silently wrote hundreds of
+    never-hit ``.signalforge/grade-cache/*.json`` files on the common
+    path and implied a "re-run is fast" UX the architecture cannot
+    deliver, so the default is now off.
 
-    When ``False``, :func:`signalforge.grade.grade_artifacts` skips
-    BOTH the lookup AND the write — every pair routes through the
-    live LLM judge call. Operators reach for this knob to bypass the
-    cache for debugging, after a manual fixture edit, or during
-    calibration work. The CLI's ``signalforge generate --no-cache``
-    flag flips this field on a per-run copy via
+    The cache key is still correct — content-addressing on artefact
+    text means changed text *should* re-grade — so it stays in the code
+    (the keying is the already-correct half of a future "fast re-run"
+    feature that also caches the *draft*; see issue #197). It earns its
+    keep only on the narrow cross-run paths where the candidate text is
+    identical: re-grading a pinned/committed candidate in CI, a
+    ``--no-grade`` draft-once-then-grade-separately flow, or an
+    interrupted grade resumed over an identical draft. Operators on
+    those paths opt in via ``grade.cache_enabled: true`` in
+    ``signalforge.yml``.
+
+    When ``True``, :func:`signalforge.grade.grade_artifacts` runs the
+    content-addressed lookup + write on every grade pair. The cache key
+    is a content-hash of the inputs that genuinely determine the verdict
+    (rubric criterion, artefact payload, model + provider + prompt
+    version, ...) so any change that should invalidate a prior verdict
+    invalidates the key by construction — no TTL knob is needed in v0.1
+    (deferred to a future ticket if demand emerges).
+
+    The CLI's ``signalforge generate --no-cache`` flag flips this field
+    to ``False`` on a per-run copy via
     :meth:`pydantic.BaseModel.model_copy` so the on-disk
-    ``signalforge.yml`` is unaffected (US-007 wires the flag).
+    ``signalforge.yml`` is unaffected (US-007 wires the flag); with the
+    default now ``False`` the flag is a no-op unless the operator has
+    opted in via config.
 
     ``extra="forbid"`` makes a typo such as ``cache_enable:`` (missing
     the trailing ``d``) fail loud at config-load via
-    :class:`pydantic.ValidationError`, rather than silently leaving
-    the cache enabled."""
+    :class:`pydantic.ValidationError`, rather than silently ignoring an
+    operator's opt-in (or opt-out)."""
 
     @model_validator(mode="before")
     @classmethod

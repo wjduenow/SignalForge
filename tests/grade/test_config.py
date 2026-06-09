@@ -183,16 +183,21 @@ def test_load_grade_config_unknown_field_in_inner_block_fails_loud(
 # ----- Grade-cache master switch (#189 US-005 / DEC-016) -----
 
 
-def test_grade_config_cache_enabled_defaults_true() -> None:
-    """:attr:`GradeConfig.cache_enabled` defaults to ``True`` (#189 DEC-016).
+def test_grade_config_cache_enabled_defaults_false() -> None:
+    """:attr:`GradeConfig.cache_enabled` defaults to ``False`` (#189 DEC-016; flipped by #197).
 
-    The grade cache ships on-by-default so operators get the wall-clock
-    win without an opt-in step; ``signalforge generate --no-cache`` (US-007)
-    or ``grade.cache_enabled: false`` in ``signalforge.yml`` are the
-    explicit opt-outs.
+    The grade cache is cross-invocation only and its key mixes the
+    drafted-artefact-text hash, so a full ``signalforge generate`` re-run
+    (live, non-deterministic drafter) misses on every pair — measured in
+    ``docs/research/179-runtime-benchmark.md``. Issue #197 flipped the
+    default to ``False`` so the common path stops writing hundreds of
+    never-hit ``.signalforge/grade-cache/*.json`` files. Operators on the
+    narrow cross-run paths where it DOES hit (pinned-candidate CI,
+    ``--no-grade`` draft-then-grade) opt in via
+    ``grade.cache_enabled: true``.
     """
     cfg = GradeConfig()
-    assert cfg.cache_enabled is True
+    assert cfg.cache_enabled is False
 
 
 def test_grade_config_cache_enabled_accepts_explicit_false() -> None:
@@ -266,8 +271,10 @@ def test_grade_config_defaults_match_dec_023_to_027() -> None:
     assert cfg.rubric is None
     assert cfg.fail_on_below_threshold is False
     assert cfg.provider == "anthropic"
-    # #189 DEC-016: grade-cache master switch defaults on.
-    assert cfg.cache_enabled is True
+    # #189 DEC-016: grade-cache master switch. #197 flipped the default
+    # OFF — the cache is cross-invocation only and its artefact-text-keyed
+    # entries miss on every full `generate` re-run (live drafter).
+    assert cfg.cache_enabled is False
 
 
 # ----- Provider validator (issue #135 DEC-007) -----

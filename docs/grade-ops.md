@@ -257,7 +257,7 @@ grade:
   min_pass_rate: 0.7              # Aggregate threshold: fraction of passed criteria
   min_mean_score: 0.5             # Aggregate threshold: mean score across criteria
   fail_on_below_threshold: false  # opt-in hard-fail; default report-only
-  cache_enabled: true             # Per-pair grade cache; set false to bypass (or pass --no-cache)
+  cache_enabled: false            # Per-pair grade cache; OFF by default (#197) — opt in for pinned-candidate re-grades only
   # rubric:                       # Optional override; omitted = use DEFAULT_RUBRIC
   #   - id: clarity
   #     criterion: "..."
@@ -302,7 +302,7 @@ Field-by-field:
 - **`min_pass_rate`** — Floor on the fraction of `(artefact, criterion)` pairs that scored `passed=True` for the rubric to count as passed overall. Default `0.7`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_pass_rate`.
 - **`min_mean_score`** — Floor on the mean numeric score across non-null verdicts. Default `0.5`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_mean_score`.
 - **`fail_on_below_threshold`** — Hard-fail switch for the aggregate threshold check. Default `false` — v0.1 ships report-only posture by default. When `true`, `grade_artifacts(...)` raises `GradeBelowThresholdError` once the aggregate `GradingReport.passed` is `False` (`pass_rate < min_pass_rate` and/or `mean_score < min_mean_score`). The raise lands AFTER the sidecar JSON is durably persisted so the operator has a complete `grade.json` for diagnosis. See [Threshold-fail behaviour](#threshold-fail-behaviour) below for the full ordering invariant. Graduated from v0.2 reservation to v0.1 wiring in #9 (US-002).
-- **`cache_enabled`** — Master switch for the per-`(artifact, criterion)` grade cache (issue #189 DEC-016). Default `true` — content-addressed cache lookup + write run on every grade pair. The cache key is a content-hash of the inputs that genuinely determine the verdict (rubric criterion, artefact payload, model + provider + prompt version), so any change that should invalidate a prior verdict invalidates the key by construction — no TTL knob is needed in v0.1. Set `false` to skip BOTH lookup AND write for the run (every pair routes through the live LLM judge call); operators reach for this for debugging, after a manual fixture edit, or during calibration. The CLI's `signalforge generate --no-cache` flag flips this knob on a per-run copy (the on-disk `signalforge.yml` is unaffected). `extra="forbid"` makes a typo like `cache_enable:` (missing the trailing `d`) fail loud at config-load, rather than silently leaving the cache enabled.
+- **`cache_enabled`** — Master switch for the per-`(artifact, criterion)` grade cache (issue #189 DEC-016; **default flipped to `false` by issue #197**). The cache is **cross-invocation only** (read in the orchestrator's sync prefix before any write of the current run, so it never reuses work *within* one run — intra-run speed is the #186 asyncio fan-out, not the cache) and its key mixes a hash of the **drafted artefact text**. Because the drafter is a live, non-deterministic LLM, a full `signalforge generate` re-run rotates that hash and **misses on every pair** (measured: 370 entries written, 0 read back — `docs/research/179-runtime-benchmark.md`). Left on by default it silently wrote hundreds of never-hit `.signalforge/grade-cache/*.json` files and implied a "re-run is fast" UX the architecture can't deliver, so it now defaults `false`. The keying itself is **correct** (changed text *should* re-grade), so the cache stays in the code; set `cache_enabled: true` to opt in on the narrow cross-run paths where artefact text is identical — re-grading a pinned/committed candidate in CI, a `--no-grade` draft-then-grade flow, or a resumed grade over an unchanged draft. When `true`, the content-addressed lookup + write run on every pair (the five-part key invalidates by construction — no TTL knob). The CLI's `signalforge generate --no-cache` flag forces this off on a per-run copy (the on-disk `signalforge.yml` is unaffected); with the default now `false` the flag is a no-op unless config opted in. `extra="forbid"` makes a typo like `cache_enable:` (missing the trailing `d`) fail loud at config-load.
 - **`rubric`** — Optional rubric override. `None` (the default) means the orchestrator falls back to `DEFAULT_RUBRIC`. When provided, must be a non-empty list of mappings, each with non-empty `id` and `criterion` strings; duplicate `id` values raise `GradeRubricError`. Override is **wholesale**, not merge.
 
 Unknown keys under `grade:` raise `GradeConfigError` (Pydantic
@@ -315,10 +315,24 @@ The grade layer ships a **persistent, content-addressed cache** for
 per-`(artefact, criterion)` verdicts (issue #189). On a cache hit
 the LLM judge is **not** called — the prior verdict is reconstructed
 into a `GradingResult` and audit-logged with `cache_hit: true` on
-the corresponding `GradeEvent`. Across a typical multi-iteration
-session (drafter / prune tuning on the same model), cache hits
-amortise the grader's wall-clock and cost to near-zero on
-re-evaluated pairs.
+the corresponding `GradeEvent`.
+
+> **Default OFF as of issue #197.** The cache is **cross-invocation
+> only** — every lookup runs in the orchestrator's sync prefix
+> *before* any write of the current run, so it never reuses work
+> *within* a single grade run (intra-run speed is the #186 asyncio
+> fan-out, not the cache). Its key mixes a hash of the **drafted
+> artefact text**, and the drafter is a live, non-deterministic LLM —
+> so a full `signalforge generate` re-run rotates the key and **misses
+> on every pair** (measured: 370 entries written, 0 read back —
+> `docs/research/179-runtime-benchmark.md`). It therefore does **not**
+> make `generate` re-runs faster. The keying is nonetheless *correct*
+> (changed text should re-grade), so the cache stays in the code and is
+> opt-in (`grade.cache_enabled: true`) for the narrow cross-run paths
+> where the candidate text is genuinely identical — see
+> [When to expect cache hits](#when-to-expect-cache-hits). A future
+> "fast re-run" UX needs a *draft* cache to feed identical text in;
+> this grade cache is the already-correct second half of that.
 
 ### Cache layout
 
@@ -369,23 +383,24 @@ it does not live in the key, it should not invalidate the verdict.
 
 ```yaml
 grade:
-  cache_enabled: true   # default; set false to bypass cache entirely
+  cache_enabled: false   # default (#197); set true to opt in for pinned-candidate re-grades
 ```
 
-Setting `false` skips BOTH lookup AND write for every grade pair —
-each one routes through the live LLM judge call. The on-disk cache
-files are **not** deleted by flipping the knob; an operator wanting
-to wipe them runs `signalforge cache clear --grade` (see
-[`docs/cli-ops.md`](cli-ops.md#clear-the-grade-cache-signalforge-cache-clear-grade)).
+Default `false` (#197). With the default, every grade pair routes
+through the live LLM judge call and no `.signalforge/grade-cache/*.json`
+files are written. Set `true` only on the narrow cross-run paths where
+the candidate text is identical across runs (see
+[When to expect cache hits](#when-to-expect-cache-hits)); on the common
+`generate` re-run path the cache is pure overhead (writes that are never
+read). The on-disk cache files are **not** deleted by flipping the knob;
+an operator wanting to wipe them runs `signalforge cache clear --grade`
+(see [`docs/cli-ops.md`](cli-ops.md#clear-the-grade-cache-signalforge-cache-clear-grade)).
 
-The CLI's `signalforge generate --no-cache` flag flips this knob on
-a per-run copy of the resolved config — the on-disk
-`signalforge.yml` is unaffected and subsequent runs continue to
-honour whatever value is committed there. Reach for `--no-cache`
-for one-off debugging / calibration runs; reach for
-`cache_enabled: false` in `signalforge.yml` when an operator
-explicitly wants every run on a project to bypass cache (rare; the
-content-addressed key normally makes this unnecessary).
+The CLI's `signalforge generate --no-cache` flag forces this knob off on
+a per-run copy of the resolved config — the on-disk `signalforge.yml` is
+unaffected. With the default now `false` the flag is a no-op unless the
+operator has opted in via config; it remains useful to force a single
+run cold when `cache_enabled: true` is committed.
 
 `extra="forbid"` makes typos like `cache_enable:` (missing the `d`)
 fail loud at config-load — silent no-op would defeat the gate.
@@ -434,14 +449,24 @@ reserves namespace for them.
 
 ### When to expect cache hits
 
-- **Same model, same rubric, same provider / SKU, same prompt
-  version.** Re-running `signalforge generate <model>` after a
-  drafter / prune tuning iteration that left the artefact set
-  byte-identical hits cache on every pair.
-- **Drafter regenerated an artefact whose text didn't actually
-  change.** The artefact-text hash captures the actual byte content
-  of `extract_artifact_text(candidate, artifact_id)` — a drafter
-  retry that produces identical text hits cache.
+Only when the **same artefact text** is graded again under the same
+rubric / provider / SKU / prompt version. With a live drafter that
+means a re-run that does **not** re-draft:
+
+- **Re-grading a pinned / committed candidate** (e.g. a CI step that
+  reads a frozen candidate from disk and grades it, instead of
+  re-drafting via the LLM).
+- **A `--no-grade` draft-once-then-grade-separately flow** where the
+  drafted candidate is captured and a later, separate grade pass runs
+  over that identical text.
+- **A resumed / re-attempted grade over an unchanged draft** (same
+  candidate object, partial grade re-run).
+
+> A plain `signalforge generate <model>` re-run is **not** in this list:
+> it re-drafts via the live LLM, so the artefact text — and thus
+> `artefact_text_hash` — differs every run, missing on every pair. This
+> is the #197 finding; do not expect a "re-run is fast" speed-up from
+> this cache.
 
 ### When to expect cache misses
 
