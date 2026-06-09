@@ -74,6 +74,17 @@ the survivors, and render a diff against any existing `schema.yml`.
 > `prune.enabled: false` in `signalforge.yml` (see
 > [`docs/prune-ops.md`](prune-ops.md#configuration-signalforgeyml-prune-block)).
 
+> **Prerequisite — column-level tests need a `schema.yml`.** Column-level
+> tests (`not_null`, `unique`, `accepted_values`, per-column docs) are
+> drafted from the columns dbt records on the model, which it reads from
+> your schema `.yml` files. A model with no `schema.yml` (no `columns:`
+> list) yields only model-level variants (`row_count_between`, …) — so a
+> `generate` run that scores far fewer artifacts than expected usually
+> means the target model declares no columns. Scaffold a schema file with
+> [`dbt-codegen`](https://github.com/dbt-labs/dbt-codegen)'s
+> `generate_model_yaml` or by hand, then re-run `dbt parse`. Full how-to:
+> [`docs/manifest-loader-ops.md` § Column metadata](manifest-loader-ops.md#column-metadata-schema-files-are-the-prerequisite-for-column-level-tests).
+
 Positional argument:
 
 - `<model>` — Model under draft. Accepts a dbt `unique_id`

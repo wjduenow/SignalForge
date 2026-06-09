@@ -253,6 +253,17 @@ plus a single BigQuery `dryRun`). See
 [`docs/cli-ops.md`](docs/cli-ops.md) § `--estimate` for the full
 contract.
 
+> **Running against your own models?** Column-level tests (`not_null`,
+> `unique`, `accepted_values`, per-column docs) are drafted from the
+> columns dbt records on each model, which it reads from your schema
+> `.yml` files. A model with **no `schema.yml`** (no `columns:` list)
+> yields only model-level variants (`row_count_between`, …) — a small
+> fraction of the coverage a column-described model gives you. To unlock
+> column-level drafting, scaffold a schema file with
+> [`dbt-codegen`](https://github.com/dbt-labs/dbt-codegen)'s
+> `generate_model_yaml` or author one by hand, then re-run `dbt parse`.
+> Full how-to: [generating schema files](docs/manifest-loader-ops.md#column-metadata-schema-files-are-the-prerequisite-for-column-level-tests).
+
 ### 7. Expected output
 
 The diff lists drafted column descriptions and signal-bearing tests
@@ -573,15 +584,16 @@ Shipped:
 | v0.2    | 2026-05-21 | Ingest externally-authored `schema.yml`; `signalforge prune-existing` (no-LLM prune path); `signalforge init-demo` first-run UX; uv tooling; Python 3.11–3.13   |
 | v0.3    | 2026-05-27 | Snowflake warehouse adapter (full sampling, materialised-sample CTAS, `EXPLAIN`-based bytes estimation); custom business-rule tests (`custom_sql`, the 5th test type) — drafted from `meta.signalforge.business_rules` or LLM inference, then pruned like any other test |
 | v0.4    | 2026-05-28 | **Multi-provider LLM support** — OpenAI (#136) and Google Gemini (#137) behind the provider-neutral seam established in #135 (Anthropic remains the default). `--estimate` is provider-aware: Anthropic uses `messages.count_tokens` (live SDK call), OpenAI uses local `tiktoken`, Gemini uses native `client.models.count_tokens` |
+| v0.5    | 2026-05-30 | **Installable Claude Code skill** — `signalforge install-skill` ships a SKILL.md that teaches Claude to drive the CLI against your dbt project                  |
+| v0.6    | 2026-06-09 | **Three new test primitives** (`row_count_between`, `unique_combination`, `row_count_anomaly_by_period` + `--as-of` time-bound reproducibility); grade-stage asyncio orchestrator (~9× faster); persistent grade cache + `--no-grade` / `--no-cache`; grade-to-100% completeness + opt-in cost ceilings; wide-table safety audit; per-provider judge defaults; bulk `--select` shared cache prefix |
 
 Planned:
 
 | Version | Scope                                                                                                            |
 | ------- | ---------------------------------------------------------------------------------------------------------------- |
-| v0.5    | **Installable Claude Code skill** — `signalforge install-skill` ships a SKILL.md that teaches Claude to drive the CLI |
-| v0.6    | **Airflow operator** — drop SignalForge into a scheduled DAG for periodic schema drift / signal-rot detection    |
-| v0.7    | **GitHub Action** — PR-time invocation with inline comment integration (kept/dropped/flagged surfaced on the PR) |
-| v0.8    | **Rubric customization** — project-specific grading criteria; organization-wide style profiles                   |
+| v0.7    | **Airflow operator** — drop SignalForge into a scheduled DAG for periodic schema drift / signal-rot detection    |
+| v0.8    | **GitHub Action** — PR-time invocation with inline comment integration (kept/dropped/flagged surfaced on the PR) |
+| v0.9    | **Rubric customization** — project-specific grading criteria; organization-wide style profiles                   |
 | v1.0    | **dbt Fusion engine compatibility** — dbt MCP server consumption; first-class Fusion integration                 |
 
 Warehouse coverage beyond BigQuery + Snowflake — Postgres (stub today),
