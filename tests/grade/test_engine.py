@@ -138,6 +138,18 @@ def _config_no_audit_in_path(model_id: str = "claude-fake") -> GradeConfig:
     )
 
 
+def _config_cache_on(model_id: str = "claude-fake") -> GradeConfig:
+    """Fast-test :class:`GradeConfig` with the grade cache opted IN.
+
+    Issue #197 flipped ``GradeConfig.cache_enabled`` to default ``False``
+    (the cache is cross-invocation only and its artefact-text-keyed
+    entries miss on every full ``generate`` re-run). The cache-behaviour
+    tests below exercise the lookup/write paths, so they explicitly opt
+    in rather than relying on the (now-off) default.
+    """
+    return _config_no_audit_in_path(model_id).model_copy(update={"cache_enabled": True})
+
+
 # ---------------------------------------------------------------------------
 # _artifact_id_for canonical format (DEC-009)
 # ---------------------------------------------------------------------------
@@ -2712,7 +2724,7 @@ def test_grade_engine_cache_hit_skips_llm_call(tmp_path: Path) -> None:
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_cache_on(),
         client=fake,
         project_dir=project_dir,
     )
@@ -2746,7 +2758,7 @@ def test_grade_engine_cache_miss_writes_entry(tmp_path: Path) -> None:
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_cache_on(),
         client=fake,
         project_dir=project_dir,
     )
@@ -2862,7 +2874,7 @@ def test_grade_engine_artifact_text_change_invalidates_cache(tmp_path: Path) -> 
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_cache_on(),
         client=fake,
         project_dir=project_dir,
     )
@@ -2910,7 +2922,7 @@ def test_grade_engine_model_change_invalidates_cache(tmp_path: Path) -> None:
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(model_id="claude-fake-B"),
+        config=_config_cache_on(model_id="claude-fake-B"),
         client=fake,
         project_dir=project_dir,
     )
@@ -2966,7 +2978,7 @@ def test_grade_engine_provider_change_invalidates_cache(tmp_path: Path) -> None:
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_cache_on(),
         client=fake,
         project_dir=project_dir,
     )
@@ -3027,7 +3039,7 @@ def test_grade_engine_degraded_result_not_cached(tmp_path: Path) -> None:
         # require_complete=False: this test exercises the report-only
         # degrade-vs-cache contract; the unrecoverable transient pairs
         # would otherwise trip the #202 US-006 completeness raise.
-        config=_config_no_audit_in_path().model_copy(update={"require_complete": False}),
+        config=_config_cache_on().model_copy(update={"require_complete": False}),
         client=fake,
         project_dir=project_dir,
     )
@@ -3073,7 +3085,7 @@ def test_grade_engine_cache_write_failure_is_fail_soft(
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_cache_on(),
         client=fake,
         project_dir=project_dir,
     )
@@ -3168,7 +3180,7 @@ def test_grade_engine_cache_hit_event_has_zero_tokens(tmp_path: Path) -> None:
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_cache_on(),
         client=fake,
         project_dir=project_dir,
         audit_path=audit_path,
@@ -3261,6 +3273,8 @@ def test_grade_engine_cache_hit_dispatch_order_preserved_with_async_misses(
         max_retries_conn=0,
         total_budget_seconds=60,
         max_concurrent_calls=10,
+        # #197 flipped the default OFF; this test seeds a cache hit, so opt in.
+        cache_enabled=True,
     )
 
     audit_path = project_dir / ".signalforge" / "grade.jsonl"
@@ -3321,7 +3335,7 @@ def test_grade_artifacts_raises_grade_cache_path_error_on_symlinked_cache_dir(
             candidate,
             _empty_prune_result(model),
             rubric=rubric,
-            config=_config_no_audit_in_path(),
+            config=_config_cache_on(),
             client=fake,
             project_dir=project_dir,
         )
@@ -3429,7 +3443,7 @@ def test_cache_hit_grade_event_uses_live_run_hashes_not_stored_values(
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_cache_on(),
         client=fake,
         project_dir=project_dir,
         audit_path=audit_path,
@@ -3722,7 +3736,7 @@ def test_sweep_appends_sweep_round_tagged_audit_record_and_caches_recovery(
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        config=_config_cache_on(),
         client=FakeAnthropicClient(),
         project_dir=project_dir,
         audit_path=audit_path,
