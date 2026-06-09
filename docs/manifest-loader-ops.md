@@ -55,6 +55,57 @@ incantation for v9 / v10 / v11.
 Schema **v20** (Fusion engine) is tracked as future work and currently
 raises `UnsupportedManifestVersionError`.
 
+## Column metadata: schema files are the prerequisite for column-level tests
+
+SignalForge drafts **column-level** tests (`not_null`, `unique`,
+`accepted_values`, per-column `custom_sql`, …) from the columns dbt
+records on each model — i.e. `model.columns` in the manifest. dbt
+populates that dict from your **schema `.yml` files** (the `models:` →
+`columns:` blocks). The manifest is the source of truth for *what
+columns exist*; the `catalog.json` overlay (next section) only fills in
+the *type* of a column that is already declared — it never invents a
+column.
+
+**Consequence — a model with no schema `.yml` has zero columns.** `dbt
+parse` on a model that declares no `columns:` yields an empty
+`model.columns`, so:
+
+- the drafter has nothing to anchor column-level tests to, and
+- the ingest anchor check (`signalforge.ingest.anchor`) rejects any
+  candidate test that references a column absent from `model.columns` —
+  so even a hallucinated column test is dropped.
+
+What a schema-less model still produces is limited to **model-level**
+variants (e.g. `row_count_between`, `row_count_anomaly_by_period`) — a
+small fraction of the coverage a column-described model yields. If a
+`signalforge generate` run scores far fewer artifacts than you expected,
+first check that the target model actually declares its columns:
+
+```bash
+python -c "import json,sys; m=json.load(open('target/manifest.json')); \
+n=m['nodes']['model.<project>.<model>']; print(len(n['columns']), 'columns')"
+```
+
+### Generating schema files
+
+To unlock column-level drafting, give each model a schema `.yml` with a
+`columns:` list. Two common routes:
+
+| Route | Command / tool | Result |
+| ----- | -------------- | ------ |
+| Scaffold from the warehouse | [`dbt-codegen`](https://github.com/dbt-labs/dbt-codegen) `generate_model_yaml` — `dbt run-operation generate_model_yaml --args '{"model_names": ["my_model"]}'` | prints a ready-to-commit `models: … columns:` block (the model must be built so the macro can read its columns from the warehouse) |
+| By hand | author `_<dir>__models.yml` beside the model | full control over column descriptions, which also feed the drafter's prompt |
+
+Then re-run `dbt parse` so the new columns land in `manifest.json`.
+
+**Recommended follow-up: `dbt docs generate`.** Once the columns exist,
+running `dbt docs generate` writes a sibling `catalog.json` that
+SignalForge auto-merges to fill each column's real warehouse
+`data_type` (next section). Schema files give SignalForge the
+*columns*; `dbt docs generate` gives it the *types* — the two are
+complementary, and `dbt docs generate` is **not** a substitute for
+schema files (it cannot add a column the manifest doesn't already have).
+
 ## Column types from `catalog.json` (issue #159)
 
 `signalforge.manifest.load(project_dir)` automatically merges column

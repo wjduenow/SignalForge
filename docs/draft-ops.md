@@ -9,6 +9,14 @@ design record in
 
 ## Overview
 
+> **Prerequisite — the model must declare its columns.** Column-level
+> tests are drafted from `model.columns`, which dbt populates from your
+> schema `.yml` files. A model with no schema yml yields zero columns
+> and the drafter can only produce model-level variants. See
+> [`docs/manifest-loader-ops.md` § Column metadata is the prerequisite for
+> column-level tests](manifest-loader-ops.md#column-metadata-schema-files-are-the-prerequisite-for-column-level-tests)
+> for how to generate schema files (and `dbt docs generate` for types).
+
 The draft pipeline turns one dbt model into one `CandidateSchema` —
 the typed value the prune layer (#6) consumes — by issuing one LLM
 call. It sits **after** the safety layer (which produces the
