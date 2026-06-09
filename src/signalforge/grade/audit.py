@@ -57,7 +57,7 @@ from typing import Final
 from signalforge import __version__ as _SIGNALFORGE_VERSION
 from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.grade.errors import GradeAuditRecordTooLargeError, GradeAuditWriteError
-from signalforge.grade.models import GradeEvent, GradingReport
+from signalforge.grade.models import DegradeReasonType, GradeEvent, GradingReport
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -100,6 +100,8 @@ def _build_grade_event(
     cache_creation_input_tokens: int = 0,
     cache_read_input_tokens: int = 0,
     cache_hit: bool = False,
+    degrade_reason_type: DegradeReasonType | None = None,
+    sweep_round: int | None = None,
 ) -> GradeEvent:
     """Construct a :class:`GradeEvent` — the **single** construction seam.
 
@@ -113,10 +115,11 @@ def _build_grade_event(
 
     Stamps :attr:`signalforge.grade.models.GradeEvent.signalforge_version`
     from :data:`signalforge.__version__` so a reviewer can identify which
-    code shipped the receipt. ``audit_schema_version`` defaults to ``2``
+    code shipped the receipt. ``audit_schema_version`` defaults to ``3``
     on the production model (DEC-008 of #189 — widened from ``Literal[1]``
     to ``int`` for replay forward-compat, then bumped 1 → 2 for the
-    ``cache_hit`` field).
+    ``cache_hit`` field, then 2 → 3 in #202 US-001 for the
+    ``degrade_reason_type`` discriminator).
 
     The keyword-only ``cache_hit`` parameter (default ``False``, DEC-010
     of #189) is the audit signal for grade-cache rehydration. A cache-hit
@@ -125,7 +128,27 @@ def _build_grade_event(
     token counts. Both flow through this single seam, so the 6th AST
     scan in :file:`tests/test_audit_completeness.py` continues to gate
     every :class:`GradeEvent` construction.
+
+    The keyword-only ``degrade_reason_type`` parameter (default ``None``,
+    #202 US-001) is the structured degrade discriminator. ``None`` for a
+    scored record; one of ``"transient"`` / ``"budget"`` / ``"ceiling"``
+    for a degraded record — set by :func:`_build_degraded` from the
+    reason string so callers never string-match the prose.
+
+    The keyword-only ``sweep_round`` parameter (default ``None``, #202
+    US-005) tags a record written by the bounded transient-recovery sweep.
+    ``None`` for a main-pass record; ``1+`` for a sweep round-N record so
+    forensic queries can see sweep activity. Additive optional field — no
+    ``audit_schema_version`` bump (the version stays 3).
     """
+    # #202 US-005 contract: sweep_round is ``None`` (main pass) or a 1-based
+    # round index. Reject 0/negative at the single construction seam so a bad
+    # value can never be persisted and corrupt the sweep forensic semantics.
+    if sweep_round is not None and sweep_round < 1:
+        raise ValueError(
+            f"sweep_round must be >= 1 when provided (None for the main pass); got {sweep_round!r}"
+        )
+
     return GradeEvent(
         signalforge_version=_SIGNALFORGE_VERSION,
         run_id=run_id,
@@ -137,11 +160,13 @@ def _build_grade_event(
         passed=passed,
         evidence=evidence,
         reasoning=reasoning,
+        degrade_reason_type=degrade_reason_type,
         rubric_hash=rubric_hash,
         prompt_version_template=prompt_version_template,
         criterion_prompt_hash=criterion_prompt_hash,
         response_text_hash=response_text_hash,
         cache_hit=cache_hit,
+        sweep_round=sweep_round,
         model=model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,

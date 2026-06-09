@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from signalforge.llm import AnthropicClientProtocol
 from signalforge.manifest.models import Column, Model
 from signalforge.prune.models import PruneResult
-from tests.grade.test_drift_detector import StrictGradeEventV2
+from tests.grade.test_drift_detector import StrictGradeEventV3
 from tests.llm._fake_provider import (
     FAKE_NOCACHE_PROVIDER_NAME,
     FakeNoCacheProvider,
@@ -228,7 +228,7 @@ def test_grade_artifacts_drives_nocache_provider_end_to_end(
     #     extra="forbid" mirror (zero-cache events validate cleanly). ---
     for line in audit_path.read_text(encoding="utf-8").splitlines():
         if line.strip():
-            StrictGradeEventV2.model_validate_json(line)
+            StrictGradeEventV3.model_validate_json(line)
 
     # --- Sidecar JSON: present + round-trips through GradingReport. ---
     assert sidecar_path.exists()
@@ -272,7 +272,11 @@ def test_nocache_provider_builds_no_cache_marker_or_beta_header(
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_fast_config(),
+        # require_complete=False: this test inspects only the create-call
+        # kwargs (the no-cache-marker contract); the canned single-response
+        # client degrades the remaining pairs as transient, which would
+        # otherwise trip the #202 US-006 completeness raise.
+        config=_fast_config().model_copy(update={"require_complete": False}),
         client=cast("AnthropicClientProtocol", client),
         project_dir=project_dir,
         audit_path=project_dir / ".signalforge" / "grade.jsonl",

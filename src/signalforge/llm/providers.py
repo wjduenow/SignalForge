@@ -34,11 +34,13 @@ that shim's typed surface plus the pure helpers in
 from __future__ import annotations
 
 import abc
+from collections.abc import Mapping
 from enum import Enum
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict
 
+from signalforge.llm._rate_limiter import RateLimitBudget
 from signalforge.llm.errors import UnknownProviderError
 
 if TYPE_CHECKING:
@@ -213,6 +215,38 @@ class LLMProvider(abc.ABC):
     @abc.abstractmethod
     def classify_exception(self, exc: BaseException) -> ExceptionCategory:
         """Map a raised vendor exception to a neutral :class:`ExceptionCategory`."""
+
+    def extract_rate_limit_info(
+        self,
+        exc: BaseException,
+        *,
+        response: object | None = None,
+    ) -> RateLimitBudget:
+        """Extract a neutral :class:`RateLimitBudget` from a raised exception
+        and/or a success response (#202 US-002 / DEC-205).
+
+        The (later) shared rate limiter (US-003 / US-004) consumes this to read
+        the vendor's rate-limit signals — requests/tokens remaining, window
+        reset times, and a ``retry-after`` hint — without ever touching a
+        vendor SDK type. A provider returns ONLY the neutral
+        :class:`RateLimitBudget`; no ``anthropic.*`` / ``httpx.*`` value crosses
+        this seam (DEC-012 SDK-confinement extended to the rate-limit signal).
+
+        ``exc`` is the raised exception (e.g. a 429 whose response headers carry
+        the budget); ``response`` is an optional success response (a 200's
+        headers carry the same family, letting the limiter learn the current
+        window without waiting for a 429).
+
+        The **base default returns an EMPTY budget** (all fields ``None``).
+        Providers whose SDK does not expose these headers — OpenAI / Gemini —
+        inherit this default unchanged (graceful degradation, DEC-205). Only
+        :class:`AnthropicProvider` overrides it to populate the budget from the
+        ``retry-after`` + ``anthropic-ratelimit-*`` headers. Parsing MUST
+        tolerate present / absent / malformed header values without raising —
+        a malformed numeric leaves that field ``None``.
+        """
+        del exc, response  # the default surfaces no rate-limit signal
+        return RateLimitBudget()
 
     @abc.abstractmethod
     def is_clean_completion(self, response: object) -> bool:
@@ -596,6 +630,69 @@ class AnthropicProvider(LLMProvider):
                 return ExceptionCategory.NO_RETRY
             return ExceptionCategory.NO_RETRY
         return ExceptionCategory.NO_RETRY
+
+    def extract_rate_limit_info(
+        self,
+        exc: BaseException,
+        *,
+        response: object | None = None,
+    ) -> RateLimitBudget:
+        """Populate a :class:`RateLimitBudget` from Anthropic's response /
+        exception headers (#202 US-002 / DEC-205).
+
+        Reads ``retry-after`` plus the ``anthropic-ratelimit-*`` family. The
+        Anthropic SDK carries headers on ``RateLimitError.response.headers`` (a
+        429) and on a success response's ``.headers`` — both are
+        ``httpx.Headers`` (case-insensitive). This method reaches them purely by
+        duck-typed ``getattr`` (``exc.response.headers`` / ``response.headers``)
+        and hands the mapping to the vendor-neutral
+        :func:`signalforge.llm._rate_limiter._budget_from_headers` helper, so NO
+        ``anthropic.*`` / ``httpx.*`` type crosses this seam — the return is the
+        neutral :class:`RateLimitBudget` only (DEC-012 confinement upheld
+        without an ``import anthropic`` here).
+
+        A success ``response`` (when supplied) takes precedence over ``exc`` for
+        the header source — a 200 reports the live window, whereas the 429's
+        headers describe the window at the moment it was exhausted; both share
+        the same header names. When neither surfaces headers, an EMPTY budget is
+        returned.
+
+        Parsing is fully tolerant (DEC-205): a missing ``.response`` /
+        ``.headers`` attribute, a non-mapping headers object, or a malformed
+        numeric header value never raises — the affected field simply stays
+        ``None``.
+        """
+        from signalforge.llm._rate_limiter import _budget_from_headers
+
+        headers = self._headers_from(response)
+        if headers is None:
+            headers = self._headers_from(exc)
+        return _budget_from_headers(headers)
+
+    @staticmethod
+    def _headers_from(source: object | None) -> Mapping[str, object] | None:
+        """Pull a headers mapping off an exception or response, defensively.
+
+        The Anthropic SDK hangs headers on ``source.response.headers`` (for an
+        exception) and ``source.headers`` (for a success response). Walks both
+        shapes via ``getattr`` and returns the first mapping-shaped value found,
+        or ``None`` — never raising on a missing attribute or a non-mapping
+        value (#202 DEC-205 tolerant-parse posture). Returning a bare
+        :class:`collections.abc.Mapping` keeps the vendor ``httpx.Headers`` type
+        confined here (it satisfies ``Mapping`` structurally).
+        """
+        if source is None:
+            return None
+        # An exception carries headers under ``.response.headers``; a success
+        # response carries them directly under ``.headers``. Probe the nested
+        # form first, then the direct form.
+        nested = getattr(getattr(source, "response", None), "headers", None)
+        if isinstance(nested, Mapping):
+            return nested
+        direct = getattr(source, "headers", None)
+        if isinstance(direct, Mapping):
+            return direct
+        return None
 
     def estimate_input_tokens(
         self,
@@ -1476,6 +1573,7 @@ __all__ = (
     "GeminiProvider",
     "LLMProvider",
     "OpenAIProvider",
+    "RateLimitBudget",
     "UsageMetrics",
     "provider_for",
     "register_provider",

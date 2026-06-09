@@ -209,7 +209,7 @@ Every event and report model across the five stages uses Pydantic v2 `extra="ign
 - `AuditEvent.audit_schema_version: int = 4` (safety — bumped 1 → 2 in issue #54 for the `draft_skip_*` redaction reasons, 2 → 3 in issue #55 for the `policy_hash` recipe change, 3 → 4 in issue #185 for the v4 symbol-table redaction shape + chunk-correlation triple; pre-1.0 drop-v3 per DEC-005)
 - `LLMResponseEvent.audit_schema_version: int = 1` (draft)
 - `PruneEvent.audit_schema_version: int = 2` (prune — bumped 1 → 2 in issue #55 when `config_hash` migrated to the `blake2b-8` recipe)
-- `GradeEvent.audit_schema_version: Literal[1] = 1` (grade per-call)
+- `GradeEvent.audit_schema_version: int = 3` (grade per-call — widened `Literal[1]` → `int` and bumped 1 → 2 in issue #189 for the `cache_hit` field, 2 → 3 in issue #202 for the `degrade_reason_type` discriminator)
 - `GradingReport.grade_schema_version: Literal[1] = 1` (grade sidecar — separate field from the per-call event)
 - `DiffReport.schema_version: Literal[1] = 1` (diff sidecar overall) plus `DiffReport.audit_schema_version: Literal[3] = 3` (bumped 1 → 2 in issue #50 alongside the `kept-uncertain` tier literal, 2 → 3 in issue #116 alongside the `proposed_test_files` array for standalone `custom_sql` `.sql` test files)
 

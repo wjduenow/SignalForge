@@ -32,14 +32,18 @@ Design commitments operationalised here (``plans/super/7-quality-grader.md``):
   explicit opt-in, not the default), ``cache_ttl="1h"``,
   ``max_output_tokens=1024`` (#187 DEC-004 — raised from 256 so a one-line
   ``gemini-2.5-flash`` grade JSON is substantially less likely to
-  truncate), ``max_retries_429=3``, ``max_retries_5xx=1``,
+  truncate), ``max_retries_429=6`` (#202 US-008 / DEC-209 — raised from 3
+  as belt-and-braces over the #202 header-honoring rate limiter, which is
+  the primary 429 fix), ``max_retries_5xx=1``,
   ``max_retries_conn=1``, ``total_budget_seconds=None`` (reinterpreted by
   #198 DEC-001 as an *optional* absolute hard ceiling; ``None`` → use the
   scaled-budget formula via ``budget_base_seconds=60`` /
   ``budget_per_pair_seconds=20.0``), the three opt-in soft ceilings
   ``max_grade_calls=None`` / ``max_grade_cost_usd=None`` /
   ``max_grade_tokens=None`` (off), ``min_pass_rate=0.7``,
-  ``min_mean_score=0.5``, ``rubric=None``, ``fail_on_below_threshold=False``.
+  ``min_mean_score=0.5``, ``rubric=None``, ``fail_on_below_threshold=False``,
+  ``require_complete=True`` (#202 US-006 — fail loud on a non-exempt
+  ungraded pair after the bounded sweep).
 * **#187 US-002 / DEC-006** — when ``model`` is set explicitly, a
   SKU-prefix/provider mismatch (e.g. ``provider="openai"`` with
   ``model="claude-sonnet-4-6"``) fails loud at config-load. The
@@ -152,12 +156,28 @@ class GradeConfig(BaseModel):
     full-fixture scale (#158) and recommends 4096 for Gemini-heavy runs.
     Independent of :attr:`signalforge.draft.DraftConfig.max_output_tokens`."""
 
-    max_retries_429: int = 3
-    """Mirrors :attr:`signalforge.draft.DraftConfig.max_retries_429`.
-    The grader reuses the centralised :func:`signalforge.llm.call_llm`
-    seam (#5 DEC-012) so the retry taxonomy is the full clauditor
-    surface; this knob dials down the per-call attempt count for 429
-    responses without changing the global default."""
+    max_retries_429: int = 6
+    """Per-call retry budget for HTTP 429 (rate-limit) responses.
+
+    Default ``6`` (#202 US-008 / DEC-209 — raised from ``3``). The
+    load-bearing 429 fix is the #202 shared, header-honoring rate limiter
+    (DEC-205): the sync/async :class:`signalforge.llm._rate_limiter`
+    cooperating pair paces dispatch at the provider's advertised rate and
+    honours ``retry-after`` / ``anthropic-ratelimit-*`` headers, so under
+    normal load the grader rarely consumes a retry at all. This raised
+    default is *belt-and-braces* on top of that limiter: a wider per-call
+    429 budget gives the always-on transient-recovery sweep (#202 US-005)
+    even more headroom to drive every pair to a score before the
+    fail-loud ``require_complete`` check (#202 US-006) fires — consistent
+    with the bias-to-completion posture (DEC-210).
+
+    The grader reuses the centralised :func:`signalforge.llm.call_llm` /
+    :func:`signalforge.llm.call_llm_async` seam (#5 DEC-012) so the retry
+    taxonomy is the full clauditor surface; this knob dials the per-call
+    attempt count for 429 responses without changing the seam's own
+    keyword default (which still serves the drafter via ``DraftConfig``).
+    Set ``0`` for an aggressive batch posture where one retry-exhaustion is
+    preferable to a stalled call."""
 
     max_retries_5xx: int = 1
     """Mirrors :attr:`signalforge.draft.DraftConfig.max_retries_5xx`."""
@@ -255,6 +275,55 @@ class GradeConfig(BaseModel):
     (never raise). Whichever of the three ``max_grade_*`` ceilings trips
     first stops dispatch. Must be positive when set."""
 
+    sweep_max_rounds: int = 3
+    """Maximum number of bounded transient-recovery sweep rounds (#202 US-005 / DEC-206).
+
+    After the main concurrent grade pass completes, an ALWAYS-ON recovery
+    sweep re-grades any pair that degraded with
+    :attr:`signalforge.grade.models.GradingResult.degrade_reason_type` ==
+    ``"transient"`` — SEQUENTIALLY (concurrency 1, so there is no second
+    thundering herd) — until zero transient pairs remain OR this many sweep
+    rounds have run. ``"budget"`` and ``"ceiling"`` degrades are NEVER swept
+    (they are not retriable on a calmer pass). A recovered pair is written
+    to the grade cache like any other success.
+
+    Default ``3`` gives a transient LLM/network blip a few calmer retries to
+    recover so a run reaches 100% scored. ``0`` runs no sweep rounds (the
+    main pass stands alone). Must be non-negative — a negative value is an
+    operator misconfiguration; fail loud at config-load rather than silently
+    clamp."""
+
+    sweep_cooldown_seconds: float = 2.0
+    """Cool-down wait (seconds) between the main pass and the first sweep
+    round AND between successive sweep rounds (#202 US-005 / DEC-206).
+
+    Gives an overloaded provider a moment to recover before the sweep
+    re-touches the transient failures. ``0.0`` disables the wait (the sweep
+    itself stays always-on — only the pause is skipped). The sleep routes
+    through the test-overridable :data:`_async_sleep` module alias so the
+    test suite runs instantly. Must be non-negative."""
+
+    sweep_budget_seconds: int = 300
+    """Wall-clock bound (seconds) on the ENTIRE bounded-sweep phase (#202
+    QG-FIX-2).
+
+    The always-on transient-recovery sweep (DEC-206) runs AFTER the main
+    pass's ``asyncio.timeout(effective_budget)`` scope has closed, so it was
+    previously wall-clock-UNBOUNDED — a degraded provider honouring long
+    ``retry-after`` / reset waits across rounds could spend many extra minutes
+    sweeping. This knob wraps the whole sweep loop in its own
+    ``asyncio.timeout(sweep_budget_seconds)``: on timeout the sweep STOPS (it
+    does NOT raise — the run continues to report assembly) and any still-
+    transient pairs are left degraded ``score=None``. Those then fail loud
+    under :attr:`require_complete` (the default), or surface as an honest
+    partial when ``require_complete=False``.
+
+    Default ``300`` (5 minutes) is a generous backstop sized for the sequential
+    (concurrency-1) sweep of a typical transient remnant — NOT a completion
+    target; the sweep almost always finishes its rounds long before this. It is
+    a runaway guard against a never-recovering degraded provider, mirroring the
+    main-pass ``effective_budget`` posture. Must be positive."""
+
     max_concurrent_calls: int = 10
     """Asyncio dispatch concurrency cap for the per-``(artifact, criterion)``
     judge calls (issue #186 DEC-003).
@@ -323,6 +392,47 @@ class GradeConfig(BaseModel):
     The CLI (#9) maps the raise to a non-zero exit code so a
     ``signalforge generate`` invocation in CI can gate on threshold
     compliance — see ``docs/cli-ops.md`` for the exit-code tier."""
+
+    require_complete: bool = True
+    """Fail-loud switch for the grade-completeness contract (#202 US-006 /
+    DEC-204 + DEC-207).
+
+    Default ``True`` — after the always-on bounded transient-recovery
+    sweep (#202 US-005), :func:`signalforge.grade.grade_artifacts` raises
+    :class:`signalforge.grade.GradeIncompleteError` if any *non-exempt*
+    ``(artifact, criterion)`` pair is still ungraded (``score=None``). An
+    incomplete grade corpus is a structural failure the operator must see,
+    not a verdict to fold silently into ``aggregate_complete=False``.
+
+    The DEC-204 trip/exempt matrix branches on the
+    :attr:`signalforge.grade.GradingResult.degrade_reason_type`
+    discriminator (#202 US-001):
+
+    * ``"transient"`` → ALWAYS trips. A transient pair that survived the
+      sweep is an unrecovered LLM/network failure.
+    * ``"budget"`` AND :attr:`total_budget_seconds` is ``None`` (the
+      DEFAULT-scaled-budget formula) → trips. A default-scaled-budget
+      overrun is a Stage-1 sizing canary — the budget was sized for the
+      work, so the engine is at fault, not an operator ceiling.
+    * EXEMPT (never trip): ``"ceiling"`` degrades (an explicit
+      ``max_grade_*`` opt-in the operator chose); and ``"budget"`` degrades
+      when :attr:`total_budget_seconds` was set EXPLICITLY (a deliberate
+      operator time-ceiling — a curtailed run is the contract, not a
+      surprise).
+
+    The raise lands AFTER the fail-closed sidecar JSON write so the
+    operator has a complete ``grade.json`` on disk for diagnosis (mirrors
+    the :attr:`fail_on_below_threshold` raise-after-sidecar ordering), and
+    BEFORE the :attr:`fail_on_below_threshold` check — incomplete is
+    structural, below-threshold is verdictual.
+
+    When ``False``, the engine never raises on incompleteness; the
+    ungraded pairs surface via ``aggregate_complete=False`` (the v0.1
+    report-only posture). The CLI ``--require-complete`` flag (US-007,
+    a separate ticket) wires this field per-run.
+
+    ``extra="forbid"`` makes a typo such as ``require_complte:`` fail loud
+    at config-load rather than silently leaving the contract armed."""
 
     cache_enabled: bool = True
     """Master switch for the per-``(artifact, criterion)`` grade cache
@@ -399,18 +509,26 @@ class GradeConfig(BaseModel):
             raise ValueError("must be a non-empty, non-whitespace string")
         return v
 
-    @field_validator("max_output_tokens", "budget_base_seconds", "budget_per_pair_seconds")
+    @field_validator(
+        "max_output_tokens",
+        "budget_base_seconds",
+        "budget_per_pair_seconds",
+        "sweep_budget_seconds",
+    )
     @classmethod
     def _positive(cls, v: int | float) -> int | float:
-        """Positive-only knobs (#198 DEC-001 split).
+        """Positive-only knobs (#198 DEC-001 split; #202 QG-FIX-2 adds the sweep).
 
         Covers :attr:`max_output_tokens` (zero/negative would make the LLM
         refuse output) plus the two always-on scaled-budget terms
         :attr:`budget_base_seconds` / :attr:`budget_per_pair_seconds` (a
         non-positive term would size the wall-clock backstop to ``0`` and
-        degrade every pair before any call). ``total_budget_seconds`` and the
-        three ``max_grade_*`` ceilings are now optional and live on the
-        separate :meth:`_optional_positive` validator below."""
+        degrade every pair before any call) and :attr:`sweep_budget_seconds`
+        (the sweep-phase wall-clock bound — a non-positive value would time the
+        sweep out before its first round, defeating the always-on recovery).
+        ``total_budget_seconds`` and the three ``max_grade_*`` ceilings are now
+        optional and live on the separate :meth:`_optional_positive` validator
+        below."""
         # Reject non-finite floats up front: ``yaml.safe_load`` parses
         # ``.nan`` / ``.inf``, and ``nan <= 0`` / ``inf <= 0`` are both
         # ``False`` so they would slip past the positivity check — a NaN
@@ -468,10 +586,27 @@ class GradeConfig(BaseModel):
             raise ValueError("must be in the closed interval [1, 100]")
         return v
 
-    @field_validator("max_retries_429", "max_retries_5xx", "max_retries_conn")
+    @field_validator("max_retries_429", "max_retries_5xx", "max_retries_conn", "sweep_max_rounds")
     @classmethod
     def _non_negative(cls, v: int) -> int:
         if v < 0:
+            raise ValueError("must be non-negative")
+        return v
+
+    @field_validator("sweep_cooldown_seconds")
+    @classmethod
+    def _non_negative_finite_float(cls, v: float) -> float:
+        """Non-negative finite cool-down (#202 US-005 / DEC-206).
+
+        ``0.0`` is allowed — it disables the inter-round pause while leaving
+        the sweep itself always-on. A negative value is an operator
+        misconfiguration; a non-finite float (``.nan`` / ``.inf`` parses out
+        of ``yaml.safe_load``) would make the test-overridable
+        :func:`signalforge.grade.engine._async_sleep` wait forever / crash,
+        so reject it up-front (same rationale as :meth:`_positive`)."""
+        if not math.isfinite(v):
+            raise ValueError("must be a finite number")
+        if v < 0.0:
             raise ValueError("must be non-negative")
         return v
 

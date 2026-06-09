@@ -360,16 +360,17 @@ def test_grade_event_score_none_accepted_degraded_path() -> None:
     assert event.response_text_hash == ""
 
 
-def test_grade_event_audit_schema_version_defaults_to_two() -> None:
-    """``audit_schema_version`` defaults to ``2`` on production model.
+def test_grade_event_audit_schema_version_defaults_to_three() -> None:
+    """``audit_schema_version`` defaults to ``3`` on production model.
 
-    Per DEC-008 / DEC-009 of #189: the default bumped 1 → 2 in lockstep
-    with the new ``cache_hit`` field. The field stays typed ``int`` so
-    older v1 records still round-trip (see
+    Per #202 US-001 (DEC-203): the default bumped 2 → 3 in lockstep with
+    the new ``degrade_reason_type`` discriminator (the 1 → 2 bump in #189
+    added ``cache_hit``). The field stays typed ``int`` so older v1 / v2
+    records still round-trip (see
     :func:`tests.grade.test_drift_detector.test_v1_fixture_still_validates_against_production_grade_event`).
     """
     event = _make_event()
-    assert event.audit_schema_version == 2
+    assert event.audit_schema_version == 3
 
 
 def test_grade_event_audit_schema_version_is_int_typed() -> None:
@@ -485,7 +486,7 @@ def test_grade_event_cache_hit_true_round_trips_through_jsonl() -> None:
     reparsed = GradeEvent.model_validate_json(serialised)
     assert reparsed.cache_hit is True
     # Round-trip preserves every other reproducibility field too.
-    assert reparsed.audit_schema_version == 2
+    assert reparsed.audit_schema_version == 3
     assert reparsed.artifact_id == event.artifact_id
     assert reparsed.criterion_id == event.criterion_id
 

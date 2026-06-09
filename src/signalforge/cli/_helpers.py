@@ -99,6 +99,7 @@ from signalforge.grade import (
     GradeCacheWriteError,
     GradeConfigError,
     GradeError,
+    GradeIncompleteError,
     GradeLLMError,
     GradeNestedEventLoopError,
     GradeOutputError,
@@ -382,6 +383,14 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     GradeOutputError: 2,
     # Grade threshold-fail (graduated in US-002 of #9; CLI catches → 2).
     GradeBelowThresholdError: 2,
+    # Grade completeness contract (#202 US-006 / DEC-204 + DEC-207). A
+    # non-exempt (artifact, criterion) pair stayed ungraded after the
+    # bounded sweep AND ``require_complete=True``. Tier 2 (post-call
+    # invariant — input-validation tier, same as ``GradeBelowThresholdError``):
+    # an incomplete grade corpus is a structural failure the operator must
+    # see. Raised AFTER the sidecar write (mirrors the threshold-fail
+    # raise-after-sidecar ordering).
+    GradeIncompleteError: 2,
     # Diff boundary / input-shape errors.
     DiffCandidateModelMismatchError: 2,
     DiffPruneResultModelMismatchError: 2,

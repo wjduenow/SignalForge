@@ -152,6 +152,33 @@ Runtime knob flags:
   flag does not change the kept/dropped/flagged counts in the diff
   table — it only changes the aggregate verdict and (opt-in) exit
   code. Out-of-range values exit 2.
+- `--require-complete` / `--no-require-complete` — Override
+  `grade.require_complete` (default: from config, which itself
+  defaults to `true`). When armed, the grade engine raises
+  `GradeIncompleteError` (tier 2, **exit 2**) if any non-exempt
+  `(artifact, criterion)` pair is still ungraded (`score=None`)
+  after the always-on bounded transient-recovery sweep — the raise
+  lands AFTER the fail-closed `grade.json` sidecar write so the
+  operator has a complete corpus on disk for diagnosis. **Exempt**
+  (never trip): `"ceiling"` degrades (an explicit `max_grade_*`
+  opt-in the operator chose) and `"budget"` degrades when
+  `total_budget_seconds` was set **explicitly** (a deliberate
+  operator time-ceiling). **Trip**: `"transient"` degrades that
+  survived the sweep (an unrecovered LLM/network failure) and
+  default-scaled-budget overruns (`total_budget_seconds` unset — a
+  Stage-1 sizing canary). Precedence: explicit flag >
+  `grade.require_complete` in `signalforge.yml` > library default
+  (`true`). The `--no-require-complete` form reverts to the
+  report-only posture (ungraded pairs surface via
+  `aggregate_complete=false`). The flag uses an unset sentinel
+  (`default=None`): a bare run **never clobbers** a
+  `grade.require_complete: false` set in `signalforge.yml` with a
+  CLI default — only an explicit `--require-complete` /
+  `--no-require-complete` overrides the config value. Applied via
+  `GradeConfig.model_validate(...)` so validators re-run on the
+  override (mirrors `--min-score` and the prune `--scope` overlay).
+  See [Grade-completeness behaviour](#grade-completeness-behaviour)
+  for the stderr shape (DEC-208 of issue #202).
 - `--write` — Write the proposed `schema.yml` to disk under
   `<project_dir>/<model_dir>/schema.yml`. **Additionally** writes
   each proposed singular `.sql` business-rule test to its
@@ -831,7 +858,7 @@ canonical statement of the rule.
 | --- | --- | --- | --- |
 | `0` | success | Artifact written / printed; pipeline completed cleanly. | Happy path. |
 | `1` | load | Configuration / path / manifest / system not in a coherent state to start work. | `ManifestNotFoundError`, `ProfileNotFoundError`, `ConfigNotFoundError`, `DraftConfigInvalidError`, `DiffError`, `CliPathError`, the panic-path catch for unexpected exceptions. |
-| `2` | input | Caller-supplied data is wrong, OR a post-call invariant failed. | `ModelNotFoundError`, `LLMOutputAnchorContractError`, `TableNotFoundError` (DEC-012 — the model's table reference is wrong), `GradeBelowThresholdError` (DEC-011), `DiffCandidateModelMismatchError`, `CliInputError`. |
+| `2` | input | Caller-supplied data is wrong, OR a post-call invariant failed. | `ModelNotFoundError`, `LLMOutputAnchorContractError`, `TableNotFoundError` (DEC-012 — the model's table reference is wrong), `GradeBelowThresholdError` (DEC-011), `GradeIncompleteError` (DEC-208 of issue #202 — a non-exempt grade pair stayed ungraded after the bounded sweep with `grade.require_complete` armed), `DiffCandidateModelMismatchError`, `CliInputError`. |
 | `3` | API | External dependency unavailable. | `LLMRateLimitError`, `LLMAuthError`, `LLMServerError`, `WarehouseAuthError`, `BytesBilledExceededError`, `GradeLLMError`, `GradeAuditWriteError`, every fail-closed audit-write durability error. |
 
 Do NOT invent a fifth category. Do NOT collapse categories 2 and 3
@@ -1064,6 +1091,55 @@ renderer's `flagged` tier is driven by per-criterion
 aggregate threshold. Operators can have any combination of the three
 signals (per-criterion pass/fail in the diff, aggregate pass/fail in
 the report, exit-code consequence) without the others.
+
+## Grade-completeness behaviour
+
+The grade-completeness contract is a **structural** invariant, distinct
+from (and checked BEFORE) the verdictual threshold-fail check above.
+It operationalises the library's **bias-to-completion posture** (#202
+DEC-210): the grader drives **every pair to a score by default**, and a
+`<100%` result is legitimate ONLY when the operator intentionally limited
+cost/time (an explicit `max_grade_*` ceiling or an explicitly-set
+`total_budget_seconds`) — see
+[`docs/grade-ops.md` § Bias-to-completion posture](grade-ops.md#bias-to-completion-posture-grade-completeness)
+for the full taxonomy. After the always-on bounded transient-recovery
+sweep (issue #202 US-005), `grade_artifacts(...)` raises
+`GradeIncompleteError` if any non-exempt `(artifact, criterion)` pair is
+still ungraded (`score=None`) AND `grade.require_complete` is armed
+(`true`, the default). The CLI catches the typed error and exits **2** (input /
+invariant tier — DEC-208 of issue #202). The raise lands AFTER the
+fail-closed `grade.json` sidecar write so the complete corpus is on
+disk for diagnosis (mirrors the `GradeBelowThresholdError` ordering
+invariant), and BEFORE the `fail_on_below_threshold` check — incomplete
+is structural, below-threshold is verdictual.
+
+The trip / exempt matrix branches on each pair's
+`GradingResult.degrade_reason_type` discriminator (never on message
+text):
+
+- `"transient"` → **always trips**. A transient pair that survived the
+  sweep is an unrecovered LLM/network failure.
+- `"budget"` + `total_budget_seconds` unset (the default-scaled-budget
+  formula) → **trips**. A default-scaled-budget overrun is a Stage-1
+  sizing canary — the budget was sized for the work.
+- **Exempt** (never trip): `"ceiling"` degrades (an explicit
+  `max_grade_*` opt-in the operator chose); and `"budget"` degrades
+  when `total_budget_seconds` was set **explicitly** (a deliberate
+  operator time-ceiling — the curtailed run is the contract).
+
+The `--require-complete` / `--no-require-complete` CLI flag overrides
+`grade.require_complete` per-run, with the no-clobber sentinel
+semantics in the flag reference above (a bare run never re-arms a
+`grade.require_complete: false` set in `signalforge.yml`).
+
+Stderr shape (single-line tier-2 message; the still-ungraded pairs are
+named in the message itself, first ~20 then a bounded `… and N more`
+tail — the full list lives in the per-pair `grade.jsonl` audit):
+
+```text
+ERROR: Grade run incomplete: 2 non-exempt pairs remained ungraded (score=None) after the bounded sweep: ('orders.amount', 'accuracy'), ('orders.status', 'completeness') (aggregate_complete=False).
+  ↳ Remediation: ... re-run after the upstream issue clears, raise `grade.sweep_max_rounds` / widen the budget, or set `grade.require_complete: false` to revert to report-only posture ...
+```
 
 ## Environment variables
 

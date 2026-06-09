@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -45,6 +46,7 @@ from signalforge.grade.errors import (
     GradeAuditWriteError,
     GradeBelowThresholdError,
     GradeError,
+    GradeIncompleteError,
     GradePromptEnvelopeBreachError,
 )
 from signalforge.grade.models import GradeEvent, GradingReport
@@ -514,6 +516,9 @@ def test_grade_artifacts_budget_exceeded_marks_remaining_pairs_score_none(
     assert all(
         r.reasoning == "grade budget exceeded (1s) before evaluation" for r in report.results
     )
+    # #202 US-001: the structured discriminator classifies the budget
+    # degrade WITHOUT re-parsing the prose above.
+    assert all(r.degrade_reason_type == "budget" for r in report.results)
 
 
 def test_grade_artifacts_budget_exceeded_aggregate_complete_is_false(
@@ -640,7 +645,10 @@ def test_grade_artifacts_one_criterion_retry_exhausted_does_not_fail_whole_repor
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        # require_complete=False: this test pins the "one bad pair never
+        # aborts siblings" degrade-report contract; the unrecovered
+        # transient pair would otherwise trip the #202 US-006 raise.
+        config=_config_no_audit_in_path().model_copy(update={"require_complete": False}),
         client=fake,
         project_dir=project_dir,
     )
@@ -655,8 +663,12 @@ def test_grade_artifacts_one_criterion_retry_exhausted_does_not_fail_whole_repor
     degraded = [r for r in report.results if r.score is None]
     assert len(degraded) == 1
     assert "GradeLLMError" in degraded[0].reasoning
+    # #202 US-001: an LLM-layer failure classifies as "transient".
+    assert degraded[0].degrade_reason_type == "transient"
     scored = [r for r in report.results if r.score is not None]
     assert len(scored) == 7
+    # Scored pairs carry None for the discriminator.
+    assert all(r.degrade_reason_type is None for r in scored)
     assert report.aggregate_complete is False
 
 
@@ -723,6 +735,45 @@ def test_format_degrade_reasoning_preserves_bare_shape_for_non_response_format_c
 
     parser = GradeOutputError("bad json", violation_type="json_parse")
     assert _format_degrade_reasoning(parser) == "call failed: GradeOutputError"
+
+
+# ---------------------------------------------------------------------------
+# Structured degrade discriminator (#202 US-001 / DEC-203)
+# ---------------------------------------------------------------------------
+
+
+def test_classify_degrade_reason_maps_all_three_causes() -> None:
+    """``_classify_degrade_reason`` maps each upstream reason string to its
+    structured discriminator — the centralised prose→type mapping callers
+    rely on instead of string-matching the reason text.
+    """
+    from signalforge.grade.engine import _classify_degrade_reason
+
+    # Transient: the two ``call failed: …`` shapes from
+    # ``_format_degrade_reasoning`` (LLM + parser failures).
+    assert _classify_degrade_reason("call failed: GradeLLMError") == "transient"
+    assert _classify_degrade_reason("call failed: GradeOutputError") == "transient"
+    assert (
+        _classify_degrade_reason("call failed: GradeLLMError: finish_reason=SAFETY") == "transient"
+    )
+
+    # Budget: the wall-clock backstop reason.
+    assert _classify_degrade_reason("grade budget exceeded (500s) before evaluation") == "budget"
+
+    # Ceiling: all three opt-in ceilings share the "ceiling exceeded" marker.
+    assert _classify_degrade_reason("grade call ceiling exceeded (200 calls)") == "ceiling"
+    assert _classify_degrade_reason("grade cost ceiling exceeded ($5.0)") == "ceiling"
+    assert _classify_degrade_reason("grade token ceiling exceeded (100000 tokens)") == "ceiling"
+
+
+def test_classify_degrade_reason_defaults_to_transient_on_unknown() -> None:
+    """An unrecognised reason defaults to ``"transient"`` (the conservative,
+    retriable classification) rather than crashing or mis-classifying.
+    """
+    from signalforge.grade.engine import _classify_degrade_reason
+
+    assert _classify_degrade_reason("some future reason string we never saw") == "transient"
+    assert _classify_degrade_reason("") == "transient"
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +897,78 @@ def test_compute_effective_budget_cap_fractional_never_rounds_down() -> None:
     )
     assert result == 250
     assert isinstance(result, int)
+
+
+def test_default_scaled_budget_is_non_binding_at_representative_scale() -> None:
+    """DEC-210 guard: the DEFAULT scaled budget must NOT passively bind.
+
+    The load-bearing bias-to-completion assertion (#202 US-008 / DEC-210):
+    "the library biases toward completion — a default run must never
+    PASSIVELY produce a partial result." A ``<100%`` grade is legitimate
+    ONLY when the operator intentionally limited cost/time (an explicit
+    ``max_grade_*`` ceiling or an explicitly-set ``total_budget_seconds``).
+    The default scaled wall-clock budget survives only as a generous
+    runaway catch; at representative scales it must leave clear headroom
+    over a realistic limiter-paced completion time, so a default run never
+    trips the budget by accident (a trip would FAIL LOUD under
+    ``require_complete``, never silently ship a partial).
+
+    Deterministic: pure arithmetic on ``_compute_effective_budget`` with the
+    default config values — no sleeping, no LLM, no clock. Models a few
+    hundred pairs at the default ``max_concurrent_calls``; the expected
+    completion time is conservatively modelled from the #179 baseline
+    (Sonnet judge p50 ~10s/call) as ``waves * per_call_p50`` plus the
+    bounded sweep budget, which the default scaled budget must comfortably
+    exceed.
+    """
+    cfg = GradeConfig()  # all defaults: base=60, per_pair=20.0, conc=10,
+    #                       total_budget_seconds=None (scaled formula alone).
+    assert cfg.total_budget_seconds is None  # default path under test
+    max_concurrent = cfg.max_concurrent_calls
+
+    # A representative grade run: a few hundred (artifact, criterion) pairs.
+    # ~70 artifacts × 4 default criteria ≈ 280; take 300 for margin.
+    num_pairs = 300
+
+    effective_budget = engine_module._compute_effective_budget(
+        budget_base_seconds=cfg.budget_base_seconds,
+        budget_per_pair_seconds=cfg.budget_per_pair_seconds,
+        total_budget_seconds=cfg.total_budget_seconds,
+        num_pairs=num_pairs,
+        max_concurrent_calls=max_concurrent,
+    )
+
+    # Realistic limiter-paced completion model. With the #202 shared rate
+    # limiter pacing dispatch at the provider's advertised rate, normal
+    # completion is bounded by serial wave depth × per-call latency (the
+    # concurrency runs each wave in parallel under the semaphore).
+    waves = math.ceil(num_pairs / max_concurrent)
+    sonnet_p50_seconds = 10.0  # #179 baseline judge p50
+    expected_main_pass_seconds = waves * sonnet_p50_seconds
+    # The bounded sweep (#202 US-005) re-touches at most a handful of
+    # transients sequentially; model a generous flat allowance for it plus
+    # the inter-round cool-downs so the headroom claim survives the sweep.
+    sweep_allowance_seconds = (
+        cfg.sweep_max_rounds * cfg.sweep_cooldown_seconds
+        + cfg.sweep_max_rounds * sonnet_p50_seconds
+    )
+    expected_completion_seconds = expected_main_pass_seconds + sweep_allowance_seconds
+
+    # The default budget must COMFORTABLY exceed the realistic completion
+    # time — at least 1.5× headroom — so it is a runaway catch, never a
+    # passive throughput cap. (At 300 pairs the default computes 60 + 20*30
+    # = 660s against a ~336s modelled completion → ~1.96× headroom.)
+    assert effective_budget > expected_completion_seconds, (
+        f"default scaled budget {effective_budget}s does not exceed the modelled "
+        f"completion {expected_completion_seconds:.0f}s — a default run could "
+        f"passively bind on the budget, violating the bias-to-completion posture "
+        f"(DEC-210)."
+    )
+    assert effective_budget >= 1.5 * expected_completion_seconds, (
+        f"default scaled budget {effective_budget}s leaves under 1.5× headroom over "
+        f"the modelled completion {expected_completion_seconds:.0f}s; widen "
+        f"budget_base_seconds / budget_per_pair_seconds (never narrow) per DEC-210."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2100,6 +2223,10 @@ def test_grade_artifacts_max_grade_calls_ceiling_degrades_remaining(
     assert report.aggregate_complete is False
     for r in degraded:
         assert r.reasoning == f"grade call ceiling exceeded ({k} calls)"
+        # #202 US-001: ceiling degrades classify as "ceiling", and the
+        # scored pairs carry None — exercised end-to-end here.
+        assert r.degrade_reason_type == "ceiling"
+    assert all(r.degrade_reason_type is None for r in scored)
 
     warns = _ceiling_warns(caplog)
     assert len(warns) == 1
@@ -2306,10 +2433,14 @@ def test_grade_artifacts_no_ceiling_emits_no_ceiling_warning(
     assert _ceiling_warns(caplog) == []
 
 
+@pytest.mark.no_sweep_cooldown_patch
 def test_grade_artifacts_module_level_async_sleep_alias_present() -> None:
     """The ``_async_sleep`` alias is module-scoped and reassignable for
     deterministic budget tests, mirroring :data:`signalforge.llm.client._async_sleep`
     (DEC-011 of #186).
+
+    Opts out of the autouse sweep cool-down no-op patch (``tests/grade/
+    conftest.py``) so the import-time alias identity is observable.
     """
     assert engine_module._async_sleep is asyncio.sleep
 
@@ -2893,7 +3024,10 @@ def test_grade_engine_degraded_result_not_cached(tmp_path: Path) -> None:
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_config_no_audit_in_path(),
+        # require_complete=False: this test exercises the report-only
+        # degrade-vs-cache contract; the unrecoverable transient pairs
+        # would otherwise trip the #202 US-006 completeness raise.
+        config=_config_no_audit_in_path().model_copy(update={"require_complete": False}),
         client=fake,
         project_dir=project_dir,
     )
@@ -3314,3 +3448,712 @@ def test_cache_hit_grade_event_uses_live_run_hashes_not_stored_values(
     # _canonical_rubric_hash of the runtime rubric), NOT the stored
     # stale value. False provenance would be a real bug.
     assert hits[0]["rubric_hash"] != STALE_RUBRIC_HASH
+
+
+# ---------------------------------------------------------------------------
+# US-005 — Bounded transient-recovery sweep (Stage 2, #202 / DEC-206)
+# ---------------------------------------------------------------------------
+#
+# Pins the always-on, bounded recovery sweep folded into the async core so
+# the GradingReport reflects POST-sweep state:
+#
+# * N transient failures that recover on a later sweep round →
+#   aggregate_complete=True, 100% scored.
+# * sweep_max_rounds cap honoured (no infinite loop; pairs that keep
+#   failing stay score=None after the cap).
+# * "ceiling" / "budget" degrades are NEVER swept.
+# * Swept attempts append a sweep_round-tagged audit record; a recovered
+#   pair gets cached; the report aggregates reflect the post-sweep state.
+
+
+def _instant_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Override the sweep cool-down so the test runs instantly.
+
+    Mirrors the ``_async_sleep`` test-override seam (DEC-011 of #186). The
+    sweep's inter-round pause routes through ``engine_module._async_sleep``;
+    replacing it with a no-op coroutine keeps the sweep always-on while
+    skipping the wall-clock wait.
+    """
+
+    async def _noop(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(engine_module, "_async_sleep", _noop)
+
+
+class _StatefulGradeOne:
+    """Stateful stand-in for :func:`engine_module._grade_one_async`.
+
+    Records per-``(artifact_id, criterion_id)`` call counts. A target pair
+    raises :class:`GradeLLMError` (a transient failure) for its first
+    ``fail_times`` calls, then returns a scored verdict. Every other pair
+    succeeds on the first call. Drives BOTH the concurrent main pass AND the
+    sequential sweep through one code path so the recovery-on-retry contract
+    is exercised end-to-end.
+    """
+
+    def __init__(
+        self,
+        *,
+        target: tuple[str, str],
+        fail_times: int,
+        score: float = 0.9,
+    ) -> None:
+        self._target = target
+        self._fail_times = fail_times
+        self._score = score
+        self.calls: dict[tuple[str, str], int] = {}
+
+    async def __call__(
+        self,
+        *,
+        artifact_id: str,
+        criterion: Criterion,
+        sweep_round: int | None = None,
+        **_kw: Any,
+    ) -> tuple:
+        from signalforge.grade.audit import _build_grade_event
+        from signalforge.grade.errors import GradeLLMError
+        from signalforge.grade.models import GradingResult
+
+        key = (artifact_id, criterion.id)
+        self.calls[key] = self.calls.get(key, 0) + 1
+        if key == self._target and self.calls[key] <= self._fail_times:
+            raise GradeLLMError(
+                f"transient blip for {artifact_id!r}/{criterion.id!r}",
+                cause=Exception("simulated transient"),
+            )
+        result = GradingResult(
+            artifact_id=artifact_id,
+            criterion_id=criterion.id,
+            score=self._score,
+            passed=True,
+            evidence="ok",
+            reasoning="recovered",
+        )
+        event = _build_grade_event(
+            run_id="run",
+            timestamp=datetime.now(UTC),
+            model_unique_id="model.shop.orders",
+            artifact_id=artifact_id,
+            criterion_id=criterion.id,
+            score=self._score,
+            passed=True,
+            evidence="ok",
+            reasoning="recovered",
+            rubric_hash="0" * 16,
+            prompt_version_template="1" * 16,
+            criterion_prompt_hash="2" * 16,
+            response_text_hash="3" * 16,
+            model="claude-fake",
+            input_tokens=10,
+            output_tokens=5,
+            sweep_round=sweep_round,
+        )
+        return result, event
+
+
+def _simple_candidate() -> CandidateSchema:
+    """A 1-column / 0-test candidate → 4 artifacts; ×2 criteria = 8 pairs."""
+    return CandidateSchema(
+        name="orders",
+        description="d",
+        rationale="r",
+        columns=(CandidateColumn(name="order_id", description="pk", rationale="rat"),),
+        tests=(),
+    )
+
+
+def test_sweep_recovers_transient_failures_to_full_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient pair that fails the main pass + first sweep round but
+    succeeds on the second round → ``aggregate_complete=True``, 100% scored.
+
+    The report is built from POST-sweep results, so a recovery flips
+    ``aggregate_complete`` to True without any second results list.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()
+    target_aid = _stable_artifact_pairs(candidate)[0][0]
+    target = (target_aid, "clarity")
+    # Fail the main pass (1) + sweep round 1 (1) = 2 failures, recover on round 2.
+    stub = _StatefulGradeOne(target=target, fail_times=2)
+    monkeypatch.setattr(engine_module, "_grade_one_async", stub)
+    _instant_cooldown(monkeypatch)
+
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=FakeAnthropicClient(),
+        project_dir=project_dir,
+    )
+
+    assert report.aggregate_complete is True
+    assert all(r.score is not None for r in report.results)
+    assert report.pass_rate == 1.0
+    # The target pair was called 3 times total (main + 2 sweep rounds).
+    assert stub.calls[target] == 3
+    # Every other pair was called exactly once (sweep never re-touched them).
+    for key, count in stub.calls.items():
+        if key != target:
+            assert count == 1, f"{key} should not be swept; got {count} calls"
+
+
+def test_sweep_max_rounds_cap_is_honored_no_infinite_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pair that NEVER recovers stays ``score=None`` after the cap; the
+    sweep makes exactly ``sweep_max_rounds`` extra attempts (no infinite loop).
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()
+    target_aid = _stable_artifact_pairs(candidate)[0][0]
+    target = (target_aid, "clarity")
+    # Fail forever (more than any plausible round count).
+    stub = _StatefulGradeOne(target=target, fail_times=999)
+    monkeypatch.setattr(engine_module, "_grade_one_async", stub)
+    _instant_cooldown(monkeypatch)
+
+    # require_complete=False: a never-recovering transient pair is the
+    # point of this test; the #202 US-006 completeness raise would
+    # otherwise fire before the degrade-report assertions below.
+    config = _config_no_audit_in_path().model_copy(
+        update={"sweep_max_rounds": 3, "require_complete": False}
+    )
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=FakeAnthropicClient(),
+        project_dir=project_dir,
+    )
+
+    # The target stays degraded; everything else scored.
+    degraded = [r for r in report.results if r.score is None]
+    assert len(degraded) == 1
+    assert degraded[0].artifact_id == target_aid
+    assert degraded[0].degrade_reason_type == "transient"
+    assert report.aggregate_complete is False
+    # main pass (1) + 3 sweep rounds = 4 attempts on the target. No more.
+    assert stub.calls[target] == 4
+
+
+def test_sweep_never_touches_budget_or_ceiling_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``"budget"`` and ``"ceiling"`` degrades are NEVER swept.
+
+    A ``max_grade_calls`` ceiling trips during the main pass, degrading the
+    un-started pairs as ``"ceiling"``. The sweep must leave them alone — no
+    re-grade attempt is made for a non-transient degrade.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()  # 8 pairs
+    fake = FakeAnthropicClient()
+    # Allow only 3 calls; the rest degrade as "ceiling". Run sequentially so
+    # the trip is deterministic.
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+    _instant_cooldown(monkeypatch)
+
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=60,
+        max_concurrent_calls=1,
+        max_grade_calls=3,
+        sweep_max_rounds=3,
+    )
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=fake,
+        project_dir=project_dir,
+    )
+
+    ceiling_degrades = [r for r in report.results if r.degrade_reason_type == "ceiling"]
+    assert ceiling_degrades, "expected some ceiling degrades from the max_grade_calls trip"
+    # The sweep made NO additional LLM calls — the ceiling-degraded pairs
+    # were not re-graded. If the sweep had touched them, the fake would have
+    # raised on an unexpected (unqueued) call.
+    assert all(r.score is None for r in ceiling_degrades)
+    assert report.aggregate_complete is False
+
+
+def test_sweep_appends_sweep_round_tagged_audit_record_and_caches_recovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A swept attempt appends a NEW ``sweep_round``-tagged audit record
+    (immutable log — the original failure record is preserved), and a
+    recovered pair lands in the grade cache.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()
+    target_aid = _stable_artifact_pairs(candidate)[0][0]
+    target = (target_aid, "clarity")
+    # Fail once on the main pass; recover on sweep round 1.
+    stub = _StatefulGradeOne(target=target, fail_times=1)
+    monkeypatch.setattr(engine_module, "_grade_one_async", stub)
+    _instant_cooldown(monkeypatch)
+
+    audit_path = project_dir / ".signalforge" / "grade.jsonl"
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_no_audit_in_path(),
+        client=FakeAnthropicClient(),
+        project_dir=project_dir,
+        audit_path=audit_path,
+    )
+
+    assert report.aggregate_complete is True
+
+    rows = _read_jsonl(audit_path)
+    target_rows = [
+        r for r in rows if r["artifact_id"] == target_aid and r["criterion_id"] == "clarity"
+    ]
+    # Immutable log: the original main-pass failure (sweep_round=null,
+    # transient) AND the sweep-recovery (sweep_round=1, scored) both present.
+    main_rows = [r for r in target_rows if r.get("sweep_round") is None]
+    sweep_rows = [r for r in target_rows if r.get("sweep_round") == 1]
+    assert len(main_rows) == 1
+    assert main_rows[0]["score"] is None
+    assert main_rows[0]["degrade_reason_type"] == "transient"
+    assert len(sweep_rows) == 1
+    assert sweep_rows[0]["score"] is not None
+    assert sweep_rows[0]["degrade_reason_type"] is None
+
+    # The recovered pair was written to the grade cache.
+    cache_dir = project_dir / ".signalforge" / "grade-cache"
+    cache_files = list(cache_dir.glob("*.json")) if cache_dir.exists() else []
+    assert cache_files, "recovered sweep pair should be cached"
+
+
+def test_sweep_cooldown_uses_async_sleep_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cool-down between the main pass and the sweep routes through the
+    test-overridable ``_async_sleep`` seam with the configured duration.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()
+    target_aid = _stable_artifact_pairs(candidate)[0][0]
+    target = (target_aid, "clarity")
+    stub = _StatefulGradeOne(target=target, fail_times=1)
+    monkeypatch.setattr(engine_module, "_grade_one_async", stub)
+
+    slept: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(engine_module, "_async_sleep", _record_sleep)
+
+    config = _config_no_audit_in_path().model_copy(update={"sweep_cooldown_seconds": 1.5})
+    grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=FakeAnthropicClient(),
+        project_dir=project_dir,
+    )
+
+    # Exactly one cool-down fired (one sweep round had transient work) with
+    # the configured duration.
+    assert slept == [1.5]
+
+
+def test_sweep_cooldown_zero_disables_wait_but_sweep_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``sweep_cooldown_seconds=0`` skips the wait but the sweep is still
+    always-on and recovers transient failures.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()
+    target_aid = _stable_artifact_pairs(candidate)[0][0]
+    target = (target_aid, "clarity")
+    stub = _StatefulGradeOne(target=target, fail_times=1)
+    monkeypatch.setattr(engine_module, "_grade_one_async", stub)
+
+    slept: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(engine_module, "_async_sleep", _record_sleep)
+
+    config = _config_no_audit_in_path().model_copy(update={"sweep_cooldown_seconds": 0.0})
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=FakeAnthropicClient(),
+        project_dir=project_dir,
+    )
+
+    assert slept == []  # no cool-down wait fired
+    assert report.aggregate_complete is True  # sweep still recovered the pair
+
+
+def test_sweep_max_rounds_zero_runs_no_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``sweep_max_rounds=0`` runs the main pass alone — a transient pair
+    stays degraded (no sweep round executes).
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()
+    target_aid = _stable_artifact_pairs(candidate)[0][0]
+    target = (target_aid, "clarity")
+    stub = _StatefulGradeOne(target=target, fail_times=1)
+    monkeypatch.setattr(engine_module, "_grade_one_async", stub)
+    _instant_cooldown(monkeypatch)
+
+    # require_complete=False: with no sweep the single transient pair
+    # stays degraded; the #202 US-006 raise would otherwise fire.
+    config = _config_no_audit_in_path().model_copy(
+        update={"sweep_max_rounds": 0, "require_complete": False}
+    )
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=FakeAnthropicClient(),
+        project_dir=project_dir,
+    )
+
+    # No sweep: the single main-pass failure stays degraded.
+    assert report.aggregate_complete is False
+    assert stub.calls[target] == 1  # main pass only
+
+
+def test_sweep_config_validators_reject_negative_values() -> None:
+    """``sweep_max_rounds`` / ``sweep_cooldown_seconds`` reject negatives;
+    zero is allowed for both.
+    """
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    with _pytest.raises(ValidationError):
+        GradeConfig(model="claude-fake", sweep_max_rounds=-1)
+    with _pytest.raises(ValidationError):
+        GradeConfig(model="claude-fake", sweep_cooldown_seconds=-0.5)
+    # Zero is valid for both.
+    cfg = GradeConfig(model="claude-fake", sweep_max_rounds=0, sweep_cooldown_seconds=0.0)
+    assert cfg.sweep_max_rounds == 0
+    assert cfg.sweep_cooldown_seconds == 0.0
+
+
+# ---------------------------------------------------------------------------
+# require_complete / GradeIncompleteError (#202 US-006 — DEC-204 + DEC-207)
+# ---------------------------------------------------------------------------
+
+
+def test_require_complete_default_is_true() -> None:
+    """``require_complete`` defaults to ``True`` (fail-loud) — DEC-207."""
+    assert GradeConfig(model="claude-fake").require_complete is True
+
+
+def test_require_complete_trips_on_unrecovered_transient_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient pair that never recovers (even after the sweep) trips
+    ``GradeIncompleteError`` when ``require_complete=True`` (DEC-204)."""
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()
+    target_aid = _stable_artifact_pairs(candidate)[0][0]
+    target = (target_aid, "clarity")
+    # Fail forever — the sweep can't recover it; the pair stays transient.
+    stub = _StatefulGradeOne(target=target, fail_times=999)
+    monkeypatch.setattr(engine_module, "_grade_one_async", stub)
+    _instant_cooldown(monkeypatch)
+
+    # require_complete defaults to True; total_budget_seconds explicit so a
+    # spurious budget trip can't confound the transient signal.
+    config = _config_no_audit_in_path().model_copy(update={"sweep_max_rounds": 3})
+    with pytest.raises(GradeIncompleteError) as excinfo:
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=config,
+            client=FakeAnthropicClient(),
+            project_dir=project_dir,
+        )
+    err = excinfo.value
+    assert err.require_complete is True
+    assert err.aggregate_complete is False
+    # The error names exactly the unrecovered transient pair.
+    assert err.incomplete_pairs == ((target_aid, "clarity"),)
+
+
+def test_require_complete_trips_on_default_scaled_budget_degrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``"budget"`` degrade with ``total_budget_seconds is None`` (the
+    DEFAULT-scaled-budget formula) trips — a Stage-1 sizing canary (DEC-204).
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    # Force the wall-clock timeout to fire immediately even though the
+    # config uses the default scaled budget (total_budget_seconds=None):
+    # pin the EFFECTIVE budget to 1s and make every coroutine overrun it.
+    _stub_grade_one_async_slow(monkeypatch)
+    monkeypatch.setattr(engine_module, "_compute_effective_budget", lambda **_kw: 1)
+
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=None,  # DEFAULT-scaled budget → trips
+        max_concurrent_calls=2,
+        sweep_max_rounds=0,  # budget degrades are never swept anyway
+    )
+    with pytest.raises(GradeIncompleteError) as excinfo:
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=config,
+            client=fake,
+            project_dir=project_dir,
+        )
+    # Every pair is a budget degrade; all of them trip.
+    assert excinfo.value.incomplete_pairs  # non-empty
+    assert excinfo.value.aggregate_complete is False
+
+
+def test_require_complete_does_not_trip_on_explicit_budget_degrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``"budget"`` degrade is EXEMPT when ``total_budget_seconds`` was
+    set EXPLICITLY — a deliberate operator time-ceiling (DEC-204). The run
+    returns a partial report rather than raising.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _load_sample_candidate()
+    rubric = _two_criteria()
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+
+    _stub_grade_one_async_slow(monkeypatch)
+
+    # total_budget_seconds=1 is an EXPLICIT operator ceiling → budget
+    # degrades are exempt; require_complete defaults to True.
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=_config_tiny_budget(),
+        client=fake,
+        project_dir=project_dir,
+    )
+    assert report.aggregate_complete is False
+    assert all(r.degrade_reason_type == "budget" for r in report.results)
+
+
+def test_require_complete_does_not_trip_on_ceiling_degrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ``"ceiling"`` degrade (explicit ``max_grade_*`` opt-in) is EXEMPT
+    (DEC-204). The run returns a partial report rather than raising.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()  # 8 pairs
+    fake = FakeAnthropicClient()
+    expect_grade_responses(fake, rubric=rubric, candidate=candidate)
+    _instant_cooldown(monkeypatch)
+
+    config = GradeConfig(
+        model="claude-fake",
+        cache_ttl="1h",
+        max_output_tokens=64,
+        max_retries_429=0,
+        max_retries_5xx=0,
+        max_retries_conn=0,
+        total_budget_seconds=60,
+        max_concurrent_calls=1,
+        max_grade_calls=3,  # the rest degrade as "ceiling"
+        sweep_max_rounds=3,
+    )
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=fake,
+        project_dir=project_dir,
+    )
+    ceiling_degrades = [r for r in report.results if r.degrade_reason_type == "ceiling"]
+    assert ceiling_degrades, "expected ceiling degrades from the max_grade_calls trip"
+    assert report.aggregate_complete is False
+
+
+def test_require_complete_false_never_raises_on_transient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``require_complete=False`` restores report-only posture: an
+    unrecovered transient pair surfaces via ``aggregate_complete=False``,
+    never a raise.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()
+    target_aid = _stable_artifact_pairs(candidate)[0][0]
+    target = (target_aid, "clarity")
+    stub = _StatefulGradeOne(target=target, fail_times=999)
+    monkeypatch.setattr(engine_module, "_grade_one_async", stub)
+    _instant_cooldown(monkeypatch)
+
+    config = _config_no_audit_in_path().model_copy(
+        update={"sweep_max_rounds": 1, "require_complete": False}
+    )
+    report = grade_artifacts(
+        model,
+        candidate,
+        _empty_prune_result(model),
+        rubric=rubric,
+        config=config,
+        client=FakeAnthropicClient(),
+        project_dir=project_dir,
+    )
+    assert report.aggregate_complete is False
+    degraded = [r for r in report.results if r.score is None]
+    assert len(degraded) == 1
+    assert degraded[0].degrade_reason_type == "transient"
+
+
+def test_require_complete_writes_sidecar_before_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**Load-bearing DEC-204 ordering invariant.** Even when
+    ``grade_artifacts`` raises ``GradeIncompleteError``, the sidecar JSON
+    must be durably on disk — the operator needs ``grade.json`` to diagnose
+    which pairs stayed ungraded.
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()
+    target_aid = _stable_artifact_pairs(candidate)[0][0]
+    target = (target_aid, "clarity")
+    stub = _StatefulGradeOne(target=target, fail_times=999)
+    monkeypatch.setattr(engine_module, "_grade_one_async", stub)
+    _instant_cooldown(monkeypatch)
+
+    sidecar_path = project_dir / ".signalforge" / "grade.json"
+    audit_path = project_dir / ".signalforge" / "grade.jsonl"
+
+    with pytest.raises(GradeIncompleteError):
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=_config_no_audit_in_path().model_copy(update={"sweep_max_rounds": 1}),
+            client=FakeAnthropicClient(),
+            project_dir=project_dir,
+            sidecar_path=sidecar_path,
+            audit_path=audit_path,
+        )
+
+    assert sidecar_path.exists()
+    raw = sidecar_path.read_text(encoding="utf-8").strip()
+    round_tripped = GradingReport.model_validate_json(raw)
+    assert round_tripped.aggregate_complete is False
+    assert round_tripped.model_unique_id == model.unique_id
+
+
+def test_require_complete_checked_before_fail_on_below_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``require_complete`` is checked BEFORE ``fail_on_below_threshold``:
+    an incomplete run that is ALSO below threshold raises the structural
+    ``GradeIncompleteError``, not ``GradeBelowThresholdError`` (DEC-204).
+    """
+    project_dir = _project(tmp_path)
+    model = _make_model()
+    candidate = _simple_candidate()
+    rubric = _two_criteria()
+    target_aid = _stable_artifact_pairs(candidate)[0][0]
+    target = (target_aid, "clarity")
+    # Fail one pair forever (transient → incomplete); the rest score at 0.9
+    # so the aggregate is NOT below threshold from the scored subset alone.
+    # The ungraded pair makes aggregate_complete=False — but the incomplete
+    # check fires first regardless.
+    stub = _StatefulGradeOne(target=target, fail_times=999, score=0.9)
+    monkeypatch.setattr(engine_module, "_grade_one_async", stub)
+    _instant_cooldown(monkeypatch)
+
+    config = _config_no_audit_in_path().model_copy(
+        update={
+            "sweep_max_rounds": 1,
+            "require_complete": True,
+            "fail_on_below_threshold": True,
+            "min_pass_rate": 1.0,  # the incomplete pair would also fail this
+            "min_mean_score": 1.0,
+        }
+    )
+    with pytest.raises(GradeIncompleteError):
+        grade_artifacts(
+            model,
+            candidate,
+            _empty_prune_result(model),
+            rubric=rubric,
+            config=config,
+            client=FakeAnthropicClient(),
+            project_dir=project_dir,
+        )

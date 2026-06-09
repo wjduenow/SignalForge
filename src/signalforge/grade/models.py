@@ -43,6 +43,18 @@ from signalforge._common.timestamp import iso8601_z
 
 _BASE_CONFIG = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
+DegradeReasonType = Literal["transient", "budget", "ceiling"]
+"""Structured discriminator classifying *why* a pair degraded (#202 US-001).
+
+``None`` for a scored pair; one of the three literals for every degraded
+pair. The mapping from the human-readable ``reasoning`` string to this
+discriminator is centralised in
+:func:`signalforge.grade.engine._build_degraded` so the (later) sweep /
+``require_complete`` logic can classify degrades WITHOUT fragile
+string-matching on the reason text. Callers read this field, not the
+prose.
+"""
+
 _ONE_LINE_WHY_CAP: int = 120
 """Maximum characters surfaced by :attr:`GradingResult.one_line_why`.
 
@@ -82,6 +94,14 @@ class GradingResult(BaseModel):
     passed: bool
     evidence: str = ""
     reasoning: str = ""
+    degrade_reason_type: DegradeReasonType | None = None
+    """Structured degrade discriminator (#202 US-001).
+
+    ``None`` for a scored pair; ``"transient"`` / ``"budget"`` /
+    ``"ceiling"`` for every degraded pair. Set centrally in
+    :func:`signalforge.grade.engine._build_degraded`. Defaulted for
+    forward-compat so a pre-#202 audit record (no field) loads cleanly.
+    """
 
     @field_validator("score")
     @classmethod
@@ -325,7 +345,7 @@ class GradeEvent(BaseModel):
 
     model_config = _BASE_CONFIG
 
-    audit_schema_version: int = 2
+    audit_schema_version: int = 3
     signalforge_version: str
     run_id: str
     timestamp: datetime
@@ -336,11 +356,26 @@ class GradeEvent(BaseModel):
     passed: bool
     evidence: str = ""
     reasoning: str = ""
+    degrade_reason_type: DegradeReasonType | None = None
     rubric_hash: str
     prompt_version_template: str
     criterion_prompt_hash: str
     response_text_hash: str
     cache_hit: bool = False
+    sweep_round: int | None = None
+    """Bounded transient-recovery sweep round (#202 US-005 / DEC-206).
+
+    ``None`` for a main-pass record (the default — and the value a
+    pre-#202-US-005 audit record loads with via ``extra="ignore"``); ``1+``
+    for a record written by sweep round N. Forensic queries grep this field
+    to see sweep activity. A NEW immutable record is appended per swept
+    attempt (the original failure record is never rewritten), so a recovered
+    pair leaves both its main-pass ``sweep_round: null`` failure AND its
+    ``sweep_round: 1`` success in the JSONL.
+
+    Additive optional field on an ``extra="ignore"`` read-back model — no
+    ``audit_schema_version`` bump (matches how #202 US-001 handled
+    additive fields once the version landed at 3)."""
     model: str
     input_tokens: int
     output_tokens: int
@@ -411,6 +446,7 @@ class GradeEvent(BaseModel):
 
 
 __all__ = (
+    "DegradeReasonType",
     "GradeEvent",
     "GradingReport",
     "GradingResult",
