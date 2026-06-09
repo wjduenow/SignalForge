@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import math
 import threading
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -117,14 +118,19 @@ def _parse_float(value: object) -> float | None:
 
     Same tolerant posture as :func:`_parse_int` (#202 DEC-205); used for
     ``retry-after``, which may be fractional. A missing header, empty string,
-    or non-numeric string yields ``None``.
+    non-numeric string, OR a non-finite literal (``"nan"`` / ``"inf"``) yields
+    ``None`` — a non-finite wait would poison the retry/backoff arithmetic, so
+    it's treated as malformed (mirrors the config validators' finite-float gate).
     """
     if value is None:
         return None
     try:
-        return float(str(value).strip())
+        parsed = float(str(value).strip())
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(parsed):
+        return None
+    return parsed
 
 
 def _parse_str(value: object) -> str | None:

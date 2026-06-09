@@ -141,6 +141,14 @@ def _build_grade_event(
     forensic queries can see sweep activity. Additive optional field — no
     ``audit_schema_version`` bump (the version stays 3).
     """
+    # #202 US-005 contract: sweep_round is ``None`` (main pass) or a 1-based
+    # round index. Reject 0/negative at the single construction seam so a bad
+    # value can never be persisted and corrupt the sweep forensic semantics.
+    if sweep_round is not None and sweep_round < 1:
+        raise ValueError(
+            f"sweep_round must be >= 1 when provided (None for the main pass); got {sweep_round!r}"
+        )
+
     return GradeEvent(
         signalforge_version=_SIGNALFORGE_VERSION,
         run_id=run_id,

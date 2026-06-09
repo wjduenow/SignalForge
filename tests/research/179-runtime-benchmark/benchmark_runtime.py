@@ -402,9 +402,10 @@ def main(argv: list[str] | None = None) -> int:
         "signalforge supports it (dev only; prod 0.5.0 does not). The dev arm then "
         "exits non-zero (tier 2, GradeIncompleteError) naming every still-ungraded "
         "pair if the always-on sweep can't reach a complete grade corpus — the "
-        "explicit half of the #202 retest PASS condition. Off by default so a "
-        "default run still measures (the harness reports aggregate_complete + the "
-        "ungraded-pair list regardless).",
+        "explicit half of the #202 retest PASS condition. When omitted, the harness "
+        "does not force either value; behavior follows the project's "
+        "grade.require_complete config/default (the harness still reports "
+        "aggregate_complete + the ungraded-pair list regardless).",
     )
     args = parser.parse_args(argv)
 
@@ -458,7 +459,10 @@ def main(argv: list[str] | None = None) -> int:
     elif args.require_complete:
         require_note = "off (requested but unsupported by this release)"
     else:
-        require_note = "off (report-only; aggregate_complete still reported below)"
+        require_note = (
+            "default (not forced by CLI; follows project grade.require_complete "
+            "config/default — aggregate_complete still reported below)"
+        )
 
     print("\n=== #179 pipeline runtime benchmark ===")
     print(f"signalforge bin       : {bin_path}")

@@ -189,6 +189,16 @@ def test_anthropic_malformed_retry_after_stays_none(bad_value: str) -> None:
     assert budget.retry_after is None
 
 
+@pytest.mark.parametrize("bad_value", ["nan", "NaN", "inf", "-inf", "Infinity"])
+def test_anthropic_non_finite_retry_after_stays_none(bad_value: str) -> None:
+    """A non-finite ``retry-after`` (``nan`` / ``inf``) is treated as malformed —
+    ``float()`` would parse it, but a non-finite wait would poison the backoff
+    arithmetic, so the finite-guard in ``_parse_float`` returns ``None``."""
+    exc = FakeRateLimitError(headers={"retry-after": bad_value})
+    budget = AnthropicProvider().extract_rate_limit_info(exc)
+    assert budget.retry_after is None
+
+
 def test_anthropic_fractional_retry_after_parses_as_float() -> None:
     """``retry-after`` tolerates a fractional-second value some gateways emit."""
     exc = FakeRateLimitError(headers={"retry-after": "1.5"})

@@ -255,6 +255,12 @@ def test_grade_config_defaults_match_dec_023_to_027() -> None:
     assert cfg.max_grade_cost_usd is None
     assert cfg.max_grade_tokens is None
     assert cfg.max_concurrent_calls == 10
+    # #202 US-005/US-006: always-on sweep knobs + the fail-loud completeness
+    # contract. Pinned so default drift on the new #202 knobs fails loud here.
+    assert cfg.sweep_max_rounds == 3
+    assert cfg.sweep_cooldown_seconds == 2.0
+    assert cfg.sweep_budget_seconds == 300
+    assert cfg.require_complete is True
     assert cfg.min_pass_rate == 0.7
     assert cfg.min_mean_score == 0.5
     assert cfg.rubric is None
