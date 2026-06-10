@@ -4,6 +4,10 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 ## [Unreleased]
 
+_Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
+
+## [0.6.0] — 2026-06-10
+
 ### Added
 
 - **Grade stage drives to 100% scored — or fails loud — by default (#202).** A 10-way concurrent grade fan-out previously retried 429s with blind backoff and ignored rate-limit headers, bursting past the per-minute cap and degrading dozens of pairs to `GradeLLMError` (the #179 retest measured 70/408 and 34/220 ungraded). Three new mechanisms close this: (1) a **rate-limit-aware adaptive throttle** — a shared, header-honouring limiter (`retry-after` / `anthropic-ratelimit-*` via a SDK-confined `RateLimitBudget` provider seam, DEC-012) plus an `AsyncConcurrencyGate` whose cap tracks the limiter's effective concurrency (÷2 on a 429, +1 on a clean completion, bounded `[1, max_concurrent_calls]`, shared across the grade `TaskGroup` via a `ContextVar`); wired into both `call_llm` and `call_llm_async`. (2) An **always-on bounded transient-recovery sweep** — degraded `score=None` pairs are re-graded sequentially with cool-down under their own `asyncio.timeout(sweep_budget_seconds)`, reusing the #189 cache so only failures are re-touched (`sweep_max_rounds=3`, `sweep_budget_seconds=300`). (3) A **fail-loud completeness gate** — new `GradeConfig.require_complete: bool = True` plus the `--require-complete` / `--no-require-complete` CLI flag (no-clobber `default=None` sentinel; 6-surface parity). When a non-exempt pair survives recovery, the new tier-2 `GradeIncompleteError` names the exact ungraded pairs and exits 2. Only *intentional* operator ceilings (`max_grade_*`, an explicit `total_budget_seconds`) are exempt — a default-scaled-budget trip is never silently incomplete. The **bias-to-completion posture** (DEC-210) is now documented in `docs/grade-ops.md` + the rules: incompleteness is only ever a deliberate operator choice, never a passive default. Live metered retest (2026-06-05) reached 412/412 and 220/220 scored, `aggregate_complete=True`, and was *faster* than the non-adaptive pass (pacing the fan-out at the provider's rate cuts 429-retry churn).
@@ -178,7 +182,8 @@ signalforge --version
 - OSS-first, Core-friendly — no dbt Cloud dependency; runs against any dbt-core project, locally or in CI.
 - Explainable diffs — every kept/dropped/flagged artifact ships with a one-line "why"; every run produces a sidecar JSON with reproducibility hashes.
 
-[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.6.0
 [0.5.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.5.0
 [0.4.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.4.0
 [0.3.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.3.0

@@ -1,3 +1,3 @@
 """SignalForge: LLM-drafted, warehouse-pruned dbt artifacts."""
 
-__version__ = "0.6.0.dev1"
+__version__ = "0.7.0.dev0"
