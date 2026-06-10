@@ -492,6 +492,7 @@ class _Recipe(_RecipeRequired, total=False):
 
     terminal_width: int
     force_color: bool | None
+    truecolor: bool | None
     no_color_env: bool
     markdown_project_dir: str
 
@@ -606,6 +607,21 @@ CASES: dict[str, tuple[_Builder, _Recipe]] = {
             "markdown_project_dir": "<project_dir>",
         },
     ),
+    # 10c. truecolor_tiers.ansi — same inputs as full_with_grade, but the
+    # 24-bit brand-hex palette (issue #209). Pins the brand-tier SGR bytes
+    # (signal #2FCB7F / steel #4F90F7 / noise #FB5A60 / flag #F5A623) so a
+    # palette regression fails loud. `truecolor=True` makes this deterministic
+    # regardless of the ambient COLORTERM.
+    "truecolor_tiers.ansi": (
+        _full_with_grade_report,
+        {
+            "surface": "ansi",
+            "filename": "truecolor_tiers.ansi",
+            "terminal_width": 120,
+            "force_color": True,
+            "truecolor": True,
+        },
+    ),
     # 11. proposed_test_files.ansi — kept custom_sql standalone files (#116).
     "proposed_test_files.ansi": (
         _proposed_test_files_report,
@@ -661,6 +677,13 @@ def render_for_case(
         return renderer.render(report)
 
     # ansi surface.
+    #
+    # ``truecolor`` defaults to ``False`` here (issue #209) so every existing
+    # ANSI snapshot renders with the 16-colour palette DETERMINISTICALLY —
+    # independent of the ambient ``COLORTERM`` of whoever runs the suite or the
+    # regenerate script. The dedicated ``truecolor_tiers.ansi`` case opts in via
+    # ``"truecolor": True`` to pin the brand-hex palette.
+    truecolor = recipe.get("truecolor", False)
     if recipe.get("no_color_env"):
         # Defensive: if the caller already set NO_COLOR, leave it as is.
         had_prior = "NO_COLOR" in os.environ
@@ -670,6 +693,7 @@ def render_for_case(
             ansi = AnsiRenderer(
                 config=cfg,
                 force_color=recipe.get("force_color"),
+                truecolor=truecolor,
                 terminal_width=recipe.get("terminal_width"),
             )
             return ansi.render(report)
@@ -680,6 +704,7 @@ def render_for_case(
     ansi = AnsiRenderer(
         config=cfg,
         force_color=recipe.get("force_color"),
+        truecolor=truecolor,
         terminal_width=recipe.get("terminal_width"),
     )
     return ansi.render(report)

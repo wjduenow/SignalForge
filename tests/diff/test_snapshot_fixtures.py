@@ -121,11 +121,13 @@ def test_dec017_case_count() -> None:
     # DEC-017 enumerates 10 cases; case 10 has both .ansi and .md
     # surfaces, giving 11 on-disk artefacts. Issue #116 adds the
     # proposed-test-files case in both .ansi and .md surfaces (2 more)
-    # for 13 on-disk artefacts.
-    assert len(filenames) == 13, (
-        f"expected 13 snapshot fixture files (10 DEC-017 cases + the "
+    # for 13. Issue #209 adds the truecolor_tiers.ansi brand-palette
+    # case for 14 on-disk artefacts.
+    assert len(filenames) == 14, (
+        f"expected 14 snapshot fixture files (10 DEC-017 cases + the "
         f"injection_payloads markdown variant + the #116 proposed_test_files "
-        f"ansi/markdown variants), got {len(filenames)}: {sorted(filenames)}"
+        f"ansi/markdown variants + the #209 truecolor_tiers.ansi case), got "
+        f"{len(filenames)}: {sorted(filenames)}"
     )
 
 
