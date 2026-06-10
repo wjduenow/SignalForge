@@ -1203,20 +1203,34 @@ When the CLI is attached to an interactive terminal (both stderr AND
 stdout return `True` from `isatty()`), `cmd_generate` emits one
 stderr progress line per stage entry plus a paired `done in <X>`
 line at stage exit (DEC-014, DEC-026). Live values; no hardcoded
-duration hints. Example shape:
+duration hints.
+
+On a colour terminal each line carries the brand spark glyph `◆`
+(amber `#FFC24D` on a truecolor terminal, yellow on a 16-colour one),
+the stage label dimmed, and — on the `done` line — a right-aligned
+**fact** computed from objects in scope (the model id, the
+kept/dropped counts, the mean grade). Example shape:
 
 ```text
-[1/5] safety: building LLM request...
-[1/5] safety: done in 0.0s
-[2/5] draft: calling LLM (model claude-sonnet-4-6)...
-[2/5] draft: done in 41.7s
-[3/5] prune: running 12 candidate tests against warehouse...
-[3/5] prune: done in 18.4s
-[4/5] grade: scoring 8 artifacts × 4 criteria (32 calls)...
-[4/5] grade: done in 1m 12s
-[5/5] diff: rendering...
-[5/5] diff: done in 0.1s
+◆ [1/5] safety  building LLM request...
+◆ [1/5] safety  done in 0.0s
+◆ [2/5] draft   calling LLM (model claude-sonnet-4-6)...
+◆ [2/5] draft   done in 41.7s                       claude-sonnet-4-6
+◆ [3/5] prune   running 12 candidate tests against warehouse...
+◆ [3/5] prune   done in 18.4s                       8 kept · 4 dropped
+◆ [4/5] grade   scoring 8 artifacts × 4 criteria (32 calls)...
+◆ [4/5] grade   done in 1m 12s                              mean 0.91
+◆ [5/5] diff    rendering...
+◆ [5/5] diff    done in 0.1s
 ```
+
+When colour is **off** — a non-colour terminal, `NO_COLOR`, or
+`--no-color` — the glyph and fact are dropped and the classic plain
+form ships byte-for-byte (`[1/5] safety: building LLM request...`),
+so piped logs stay stable. The colour decision keys on stderr:
+`FORCE_COLOR` forces colour on, `NO_COLOR` forces it off, otherwise
+`sys.stderr.isatty()`. `--verbose` forces *progress* on but not
+colour (a `--verbose` run piped to a file stays plain).
 
 Non-TTY runs (piped, redirected, CI logs) emit no progress lines by
 default. `--quiet` suppresses regardless of TTY; `--verbose` forces

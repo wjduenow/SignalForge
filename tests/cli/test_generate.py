@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from signalforge._common.ansi_safety import strip_ansi_escapes
 from signalforge.cli import main
 from signalforge.diff import DiffConfig
 from signalforge.draft.errors import LLMOutputAnchorContractError
@@ -49,6 +50,25 @@ from tests.cli._factories import (
 # ---------------------------------------------------------------------------
 # Helpers — install all stage-entry patches at once
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolate_color_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset the colour-controlling env vars before each test (issue #210).
+
+    The ``--no-color`` flag mutates ``os.environ['NO_COLOR']`` and deliberately
+    does NOT restore it (DEC-023 — one-process-per-invocation; the OS reaps env
+    on exit). In-process ``main([...])`` test runs share the process, so a
+    ``--no-color`` test would otherwise leak ``NO_COLOR`` into every later test
+    and silently flip its progress / diff colour path. Clearing all three vars
+    via ``monkeypatch.delenv`` at setup both gives each test a clean colour
+    baseline AND tears down any in-test mutation, so tests that exercise the
+    glyph/colour path stay deterministic regardless of order. Tests that need a
+    specific colour state set it explicitly in their own body.
+    """
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("COLORTERM", raising=False)
 
 
 def _install_happy_patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, MagicMock]:
@@ -1083,35 +1103,91 @@ def test_generate_emits_progress_to_stderr_in_tty(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Default TTY: five `[N/5] <stage>: ...` entry lines and five
-    paired `done in <X>` lines on stderr (DEC-014 / DEC-026)."""
+    """Default colour TTY (issue #210 restyle of DEC-014 / DEC-026): five
+    glyphed ``◆ [N/5] <stage>  ...`` entry lines and five paired ``done in
+    <X>`` lines on stderr. Asserted palette-independent by stripping SGR and
+    checking the plain structure."""
     project_dir = make_fake_dbt_project(tmp_path)
     monkeypatch.chdir(project_dir)
     _install_happy_patches(monkeypatch)
     _force_tty(monkeypatch)
+    # Colour on: forced TTY + no NO_COLOR. The 24-bit-vs-16-colour palette is
+    # irrelevant here — we strip SGR and assert the plain structure.
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
 
     code = main(["generate", "model.shop.customers"])
     captured = capsys.readouterr()
     assert code == 0, f"stderr={captured.err}"
 
-    # One entry line per stage (5) + one done line per stage (5).
-    _stage_prefixes = ("[1/5]", "[2/5]", "[3/5]", "[4/5]", "[5/5]")
-    entry_lines = [line for line in captured.err.splitlines() if line.startswith(_stage_prefixes)]
-    done_lines = [line for line in entry_lines if "done in" in line]
-    body_lines = [line for line in entry_lines if "done in" not in line]
-    assert len(body_lines) == 5, f"expected 5 entry lines, got {body_lines}"
+    plain = strip_ansi_escapes(captured.err)
+    # The brand spark glyph prefixes every coloured progress line.
+    assert "◆" in plain
+    stage_lines = [ln for ln in plain.splitlines() if ln.lstrip().startswith("◆")]
+    done_lines = [ln for ln in stage_lines if "done in" in ln]
+    entry_lines = [ln for ln in stage_lines if "done in" not in ln]
+    assert len(entry_lines) == 5, f"expected 5 entry lines, got {entry_lines}"
     assert len(done_lines) == 5, f"expected 5 done lines, got {done_lines}"
 
-    # Stage names appear in documented order.
-    assert "safety:" in body_lines[0]
-    assert "draft:" in body_lines[1]
-    assert "prune:" in body_lines[2]
-    assert "grade:" in body_lines[3]
-    assert "diff:" in body_lines[4]
-    # Live values plumbed through.
-    joined = "\n".join(body_lines)
-    assert "criteria" in joined
-    assert "calls" in joined
+    # Counter + stage names in documented order (the ``:`` colon is dropped on
+    # the colour path in favour of the glyph + column spacing).
+    for n, stage in enumerate(("safety", "draft", "prune", "grade", "diff"), start=1):
+        assert f"[{n}/5] {stage}" in plain, f"missing [{n}/5] {stage} in:\n{plain}"
+    # Live values plumbed through the entry bodies.
+    assert "criteria" in plain
+    assert "calls" in plain
+    # The right-aligned done-line facts carry in-scope values (DEC-026).
+    assert "mean " in plain  # grade done fact
+    assert "kept" in plain and "dropped" in plain  # prune done fact
+
+
+def test_generate_progress_color_path_uses_spark_glyph_sgr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """On a truecolor TTY the ◆ glyph carries the brand spark-amber 24-bit SGR
+    (``#FFC24D`` → ``\\x1b[38;2;255;194;77m``) and the stage label is dim
+    (issue #210)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+    _force_tty(monkeypatch)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLORTERM", "truecolor")
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    # Spark-amber glyph + dim stage label (the renderer-owned trusted SGR).
+    assert "\x1b[38;2;255;194;77m◆\x1b[0m" in captured.err
+    assert "\x1b[2m" in captured.err  # dim stage label
+
+
+def test_generate_progress_plain_path_is_glyph_free_and_byte_stable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--verbose`` forces progress on even non-TTY; with colour off the lines
+    keep the pre-#210 plain ``[N/5] <stage>: <body>`` form — no glyph, no SGR
+    — so piped logs stay byte-stable (issue #210)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+    # Non-TTY (no _force_tty) + --verbose → progress on, colour off.
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    code = main(["generate", "model.shop.customers", "--verbose"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert "\x1b" not in captured.err, "plain path must carry no SGR escapes"
+    assert "◆" not in captured.err, "plain path must be glyph-free"
+    # The classic colon-bearing format survives byte-for-byte.
+    progress_lines = [ln for ln in captured.err.splitlines() if ln.startswith("[1/5] safety:")]
+    assert progress_lines, f"expected pre-#210 plain '[1/5] safety:' line in:\n{captured.err}"
 
 
 def test_generate_no_progress_in_non_tty(
@@ -1923,30 +1999,22 @@ def test_no_grade_progress_renumbers_to_4(
     captured = capsys.readouterr()
     assert code == 0, f"stderr={captured.err}"
 
-    # Every progress line uses the /4 denominator.
-    _expected_prefixes = ("[1/4]", "[2/4]", "[3/4]", "[4/4]")
-    entry_lines = [
-        line for line in captured.err.splitlines() if line.startswith(_expected_prefixes)
-    ]
-    body_lines = [line for line in entry_lines if "done in" not in line]
-    done_lines = [line for line in entry_lines if "done in" in line]
+    # Strip SGR so the assertions are palette-independent (issue #210).
+    plain = strip_ansi_escapes(captured.err)
+    stage_lines = [ln for ln in plain.splitlines() if ln.lstrip().startswith("◆")]
+    body_lines = [ln for ln in stage_lines if "done in" not in ln]
+    done_lines = [ln for ln in stage_lines if "done in" in ln]
     assert len(body_lines) == 4, f"expected 4 entry lines under --no-grade, got {body_lines}"
     assert len(done_lines) == 4, f"expected 4 done lines under --no-grade, got {done_lines}"
 
-    # No [X/5] anywhere — the pipeline must NOT report a stale total.
+    # Every progress line uses the /4 denominator; no stale [X/5] anywhere.
+    for n, stage in enumerate(("safety", "draft", "prune", "diff"), start=1):
+        assert f"[{n}/4] {stage}" in plain, f"missing [{n}/4] {stage} in:\n{plain}"
     for forbidden in ("[1/5]", "[2/5]", "[3/5]", "[4/5]", "[5/5]"):
-        assert forbidden not in captured.err, (
-            f"--no-grade must not emit {forbidden!r}; stderr={captured.err}"
-        )
+        assert forbidden not in plain, f"--no-grade must not emit {forbidden!r}; stderr={plain}"
 
-    # No "grade:" stage line — entirely suppressed.
-    assert "grade:" not in captured.err
-
-    # Stages in documented order; diff renumbered from 5 → 4.
-    assert "safety:" in body_lines[0]
-    assert "draft:" in body_lines[1]
-    assert "prune:" in body_lines[2]
-    assert "diff:" in body_lines[3]
+    # The grade stage is entirely suppressed — no progress line mentions it.
+    assert not any("grade" in ln for ln in stage_lines), f"unexpected grade line in {stage_lines}"
 
 
 def test_no_grade_exits_zero_on_success(

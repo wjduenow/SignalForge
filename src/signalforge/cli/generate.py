@@ -113,6 +113,7 @@ from signalforge.cli._helpers import (
     format_error_to_stderr,
     map_exception_to_exit_code,
     print_stderr,
+    resolve_progress_style,
     setup_logging,
     should_emit_progress,
 )
@@ -919,6 +920,11 @@ def _run_single_model(
     quiet = bool(getattr(args, "quiet", False))
     verbose = bool(getattr(args, "verbose", False))
     progress_on = should_emit_progress(quiet=quiet, verbose=verbose)
+    # Issue #210 — resolve the progress glyph/colour style once at startup and
+    # thread it through every emit call (mirrors how ``total`` is resolved once
+    # and threaded). When colour is off the style produces the byte-identical
+    # pre-#210 plain lines.
+    progress_style = resolve_progress_style(verbose)
 
     # US-007 of #189 / DEC-003 — when ``--no-grade`` is set, the pipeline
     # is honestly four stages (safety / draft / prune / diff) — drop the
@@ -939,7 +945,7 @@ def _run_single_model(
     # / quiet / verbose gating delegates to :func:`should_emit_progress`
     # — same rules as the stage-N progress lines that follow.
     if progress_on and batch_index is not None and batch_count is not None:
-        emit_batch_progress_entry(model.unique_id, batch_index, batch_count)
+        emit_batch_progress_entry(model.unique_id, batch_index, batch_count, style=progress_style)
 
     start = time.monotonic()
     try:
@@ -1060,7 +1066,9 @@ def _run_single_model(
         # the size of the work that's about to happen rather than a
         # stale estimate.
         if progress_on:
-            emit_progress_entry(1, "safety", "building LLM request...", total=total)
+            emit_progress_entry(
+                1, "safety", "building LLM request...", total=total, style=progress_style
+            )
         _t0 = time.monotonic()
         # Safety policy (the first stage in the documented pipeline
         # order — DEC-025 / CLAUDE.md "Pipeline shape"). US-006: apply
@@ -1072,7 +1080,9 @@ def _run_single_model(
         if mode_override is not None:
             policy = policy.with_mode(safety_module.SamplingMode(mode_override))
         if progress_on:
-            emit_progress_done(1, "safety", time.monotonic() - _t0, total=total)
+            emit_progress_done(
+                1, "safety", time.monotonic() - _t0, total=total, style=progress_style
+            )
 
         # ---- 2/5: draft -------------------------------------------------
         # DEC-006 of #135 — the CLI no longer constructs an Anthropic client
@@ -1097,7 +1107,11 @@ def _run_single_model(
             )
         if progress_on:
             emit_progress_entry(
-                2, "draft", f"calling LLM (model {draft_config.model})...", total=total
+                2,
+                "draft",
+                f"calling LLM (model {draft_config.model})...",
+                total=total,
+                style=progress_style,
             )
         _t0 = time.monotonic()
         draft_outcome = draft_module.draft_schema(
@@ -1109,7 +1123,14 @@ def _run_single_model(
             _client=None,
         )
         if progress_on:
-            emit_progress_done(2, "draft", time.monotonic() - _t0, total=total)
+            emit_progress_done(
+                2,
+                "draft",
+                time.monotonic() - _t0,
+                total=total,
+                fact=f"{draft_config.model}",
+                style=progress_style,
+            )
 
         # ---- 3/5: prune -------------------------------------------------
         # US-006 of #22 / DEC-011 / DEC-012 — apply ``--scope`` and
@@ -1165,6 +1186,7 @@ def _run_single_model(
                 "prune",
                 f"running {candidate_test_count} candidate tests against warehouse...",
                 total=total,
+                style=progress_style,
             )
         _t0 = time.monotonic()
         # US-013 of #171 / DEC-001 — ``--as-of`` threads through to the
@@ -1185,7 +1207,14 @@ def _run_single_model(
             as_of=getattr(args, "as_of", None),
         )
         if progress_on:
-            emit_progress_done(3, "prune", time.monotonic() - _t0, total=total)
+            emit_progress_done(
+                3,
+                "prune",
+                time.monotonic() - _t0,
+                total=total,
+                fact=f"{prune_result.kept_count} kept · {prune_result.dropped_count} dropped",
+                style=progress_style,
+            )
 
         # ---- 4/5: grade -------------------------------------------------
         # US-007 of #189 / DEC-001 — ``--no-grade`` skips the entire grade
@@ -1295,6 +1324,7 @@ def _run_single_model(
                         f"criteria ({total_calls} calls)..."
                     ),
                     total=total,
+                    style=progress_style,
                 )
             _t0 = time.monotonic()
             # DEC-006 of #135 — ``client=None`` lets ``grade_artifacts`` thread
@@ -1310,7 +1340,14 @@ def _run_single_model(
                 project_dir=project_dir,
             )
             if progress_on:
-                emit_progress_done(4, "grade", time.monotonic() - _t0, total=total)
+                emit_progress_done(
+                    4,
+                    "grade",
+                    time.monotonic() - _t0,
+                    total=total,
+                    fact=f"mean {grade_report.mean_score:.2f}",
+                    style=progress_style,
+                )
 
         # ---- 5/5: diff --------------------------------------------------
         # US-006 / DEC-020 — apply ``--format`` by re-validating the
@@ -1346,7 +1383,9 @@ def _run_single_model(
             output_path = (project_dir / model_relpath).parent / "schema.yml"
 
         if progress_on:
-            emit_progress_entry(_diff_stage_n, "diff", "rendering...", total=total)
+            emit_progress_entry(
+                _diff_stage_n, "diff", "rendering...", total=total, style=progress_style
+            )
         _t0 = time.monotonic()
         diff_report = diff_module.render_diff(
             model,
@@ -1359,7 +1398,13 @@ def _run_single_model(
             project_dir=project_dir,
         )
         if progress_on:
-            emit_progress_done(_diff_stage_n, "diff", time.monotonic() - _t0, total=total)
+            emit_progress_done(
+                _diff_stage_n,
+                "diff",
+                time.monotonic() - _t0,
+                total=total,
+                style=progress_style,
+            )
 
         # US-012 of #116 / DEC-010 / DEC-014 — on ``--write`` (NOT
         # ``--dry-run``), additionally materialise every proposed singular
