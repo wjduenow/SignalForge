@@ -1190,6 +1190,54 @@ def test_generate_progress_plain_path_is_glyph_free_and_byte_stable(
     assert progress_lines, f"expected pre-#210 plain '[1/5] safety:' line in:\n{captured.err}"
 
 
+def test_generate_footer_appears_in_tty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A successful TTY run emits the issue-#211 end-of-run footer on stderr:
+    a ``wrote …`` line naming the artifacts + a ``✓ done in <X>`` line. (Cost
+    degrades to no clause here — the mocked run writes no audit JSONLs.)"""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+    _force_tty(monkeypatch)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+
+    code = main(["generate", "model.shop.customers"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    plain_lines = strip_ansi_escapes(captured.err).splitlines()
+    assert any(ln.startswith("wrote ") for ln in plain_lines), f"no wrote line in {plain_lines}"
+    assert any(ln.startswith("✓ done in") for ln in plain_lines), f"no ✓ done in {plain_lines}"
+    # The default run (no --write, not --dry-run, graded) names the sidecars.
+    joined = "\n".join(plain_lines)
+    assert ".signalforge/diff.json" in joined
+    assert ".signalforge/grade.json" in joined
+    # The footer is on STDERR, never stdout (so `> diffs.txt` stays clean).
+    assert "✓ done in" not in captured.out
+
+
+def test_generate_footer_suppressed_under_quiet(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--quiet`` suppresses the end-of-run footer along with the progress."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+    _force_tty(monkeypatch)
+
+    code = main(["generate", "model.shop.customers", "--quiet"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    assert "wrote " not in captured.err
+    assert "✓" not in captured.err
+    assert "done in" not in captured.err
+
+
 def test_generate_no_progress_in_non_tty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

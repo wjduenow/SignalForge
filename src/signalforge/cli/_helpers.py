@@ -30,6 +30,7 @@ import logging
 import os
 import shutil
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -1006,6 +1007,110 @@ def emit_progress_done(
     fact_clean = strip_ansi_escapes(fact)
     pad = max(2, _progress_terminal_width() - len(left_plain) - len(fact_clean))
     print_stderr(f"{left}{' ' * pad}{_dim(fact_clean, style)}", flush=True, allow_sgr=True)
+
+
+# ---------------------------------------------------------------------------
+# End-of-run footer — ``wrote …`` + ``✓ done in <X> · $cost`` (issue #211)
+# ---------------------------------------------------------------------------
+
+# Human-facing provider display names for the cost clause. Keyed by the
+# canonical registry name (``signalforge.llm.providers``); an unmapped provider
+# falls back to its raw key so a future vendor still renders.
+_PROVIDER_DISPLAY: dict[str, str] = {
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+    "gemini": "Gemini",
+}
+
+
+def _check_glyph(style: ProgressStyle) -> str:
+    """Return the coloured ``✓`` success glyph + trailing space, or '' when
+    colour off. Signal-green (brand ``#2FCB7F`` truecolor / 16-colour green
+    fallback) — the same hue the diff renderer paints the ``kept`` tier."""
+    if not style.color:
+        return ""
+    code = palette.SIGNAL if style.truecolor else palette.GREEN
+    return f"{code}✓{palette.RESET} "
+
+
+def _format_usd(value: float) -> str:
+    """Format a USD figure for the cost clause.
+
+    ``$X.XX`` at or above one cent; ``<$0.01`` for a positive-but-sub-cent
+    figure (a two-decimal ``$0.00`` would read as free when it is not).
+    """
+    if 0.0 < value < 0.01:
+        return "<$0.01"
+    return f"${value:.2f}"
+
+
+def format_cost_clause(per_provider_usd: Mapping[str, float]) -> str:
+    """Format the per-provider LLM cost clause for the ``✓ done`` line.
+
+    ``{"anthropic": 0.13}`` → ``"$0.13 Anthropic"``; multiple providers join
+    with `` · `` in sorted-key order for determinism. Providers with a
+    zero/negative subtotal are omitted (a cache-only or no-call run shows no
+    cost clause rather than ``$0.00``). Returns ``""`` when nothing is billable
+    — the caller then emits a bare ``✓ done in <X>`` line.
+
+    Warehouse cost is deliberately NOT included: there is no
+    actual-bytes-scanned figure at end-of-run (only the ``--estimate``
+    planner preview), so the clause stays LLM-only rather than fabricating a
+    number (mirrors the supplementary-failure degrade of ``--estimate``,
+    `cli-layer.md` DEC-005).
+    """
+    parts: list[str] = []
+    for provider in sorted(per_provider_usd):
+        usd = per_provider_usd[provider]
+        if usd <= 0.0:
+            continue
+        display = _PROVIDER_DISPLAY.get(provider, provider)
+        parts.append(f"{_format_usd(usd)} {display}")
+    return " · ".join(parts)
+
+
+def build_run_footer(
+    *,
+    elapsed_seconds: float,
+    written: Sequence[str],
+    dry_run: bool,
+    cost_clause: str,
+    style: ProgressStyle,
+) -> str:
+    """Build the end-of-run footer (issue #211) for a single ``generate`` run.
+
+    Two lines on the colour path::
+
+        wrote schema.yml (8 kept) · .signalforge/diff.json · .signalforge/grade.json
+        ✓ done in 5m12s · $0.13 Anthropic
+
+    * The ``wrote`` line names the artifacts ACTUALLY written this run
+      (``written`` is built by the caller from the ``--write`` / ``--dry-run``
+      / grading state — honest, never a claim of a write that didn't happen).
+      Empty ``written`` under ``--dry-run`` renders ``dry run — no files
+      written``; empty otherwise omits the line.
+    * The ``✓ done`` line carries the wall-clock + the LLM ``cost_clause``
+      (omitted when empty).
+
+    Colour-gated like the progress lines (issue #210): the ``✓`` glyph + the
+    dim styling appear only when ``style.color``; the colour-off form is plain
+    text (no glyph, no SGR). The whole footer is gated by the caller behind
+    ``progress_on`` (so ``--quiet`` / non-TTY suppress it). Every fragment is
+    internally constructed (artifact names, formatted USD, provider display) —
+    no user-content interpolation — so it is safe to emit through
+    ``print_stderr(..., allow_sgr=True)``.
+    """
+    lines: list[str] = []
+    if written:
+        lines.append(f"wrote {_dim(' · '.join(written), style)}")
+    elif dry_run:
+        lines.append(_dim("dry run — no files written", style))
+    timing = f"done in {format_elapsed(elapsed_seconds)}"
+    done = f"{_check_glyph(style)}{timing}"
+    if cost_clause:
+        done = f"{done} · {_dim(cost_clause, style)}"
+    lines.append(done)
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

@@ -105,11 +105,13 @@ from signalforge import safety as safety_module
 from signalforge import warehouse as warehouse_module
 from signalforge.cli import _estimate as estimate_module
 from signalforge.cli._helpers import (
+    build_run_footer,
     canonicalise_user_path,
     emit_batch_progress_entry,
     emit_progress_done,
     emit_progress_entry,
     format_batch_summary,
+    format_cost_clause,
     format_error_to_stderr,
     map_exception_to_exit_code,
     print_stderr,
@@ -130,6 +132,7 @@ from signalforge.diff._test_file_writer import (
 from signalforge.diff.models import DiffReport, ProposedTestFile
 from signalforge.grade.rubric import DEFAULT_RUBRIC
 from signalforge.llm import AnthropicClientProtocol
+from signalforge.llm import cost as cost_module
 from signalforge.llm.providers import provider_for
 from signalforge.manifest import select_models
 from signalforge.manifest.errors import SelectorParseError
@@ -785,6 +788,13 @@ class _SingleModelOutcome:
       the trailing newline that ``print(rendered)`` produces). Empty
       string on failure so the dispatcher's ``if r.rendered_text`` check
       naturally skips it.
+    * ``footer_text`` — the issue-#211 end-of-run stderr footer (``wrote
+      …`` + ``✓ done in <X> · $cost``). Built ONLY for the single-model
+      success path with progress on; ``""`` on failure, under ``--quiet`` /
+      non-TTY, and for every per-model run inside a batch (the batch path
+      uses :func:`format_batch_summary` as its closing line instead). The
+      dispatcher emits it to stderr AFTER the stdout diff so it reads below
+      the table.
     * ``duration_seconds`` — wall-clock from ``_run_single_model`` entry
       to exit (success or failure).
     * ``exception_class_name`` — ``None`` on success; on failure, the
@@ -804,6 +814,7 @@ class _SingleModelOutcome:
     dropped_count: int
     flagged_count: int
     rendered_text: str
+    footer_text: str
     duration_seconds: float
     exception_class_name: str | None
 
@@ -1053,6 +1064,7 @@ def _run_single_model(
                 dropped_count=0,
                 flagged_count=0,
                 rendered_text="",
+                footer_text="",
                 duration_seconds=time.monotonic() - start,
                 exception_class_name=None,
             )
@@ -1432,6 +1444,44 @@ def _run_single_model(
         # so we pre-build the trailing newline here. ``print``'s default
         # ``end="\n"`` is what every existing snapshot test pins.
         rendered_text = f"{rendered}\n"
+
+        # 7. Build the end-of-run footer (issue #211). Single-model success
+        #    path only: a batch closes with :func:`format_batch_summary`, and a
+        #    per-model cost rollup would be cumulative (the audit JSONLs are
+        #    append-only across the batch). Gated by ``progress_on`` so
+        #    ``--quiet`` / non-TTY suppress it. The dispatcher emits it AFTER
+        #    the stdout diff so it reads below the table.
+        footer_text = ""
+        if progress_on and batch_index is None:
+            written: list[str] = []
+            if write:
+                written.append(f"schema.yml ({diff_report.kept_count} kept)")
+                n_tests = len(diff_report.proposed_test_files)
+                if n_tests:
+                    written.append(f"{n_tests} test file{'s' if n_tests != 1 else ''}")
+            if not dry_run:
+                written.append(".signalforge/diff.json")
+            if grade_report is not None:
+                written.append(".signalforge/grade.json")
+            # Cost is a SUPPLEMENTARY surface (cli-layer.md DEC-005): a rollup
+            # failure (missing audit, malformed record, unpriced SKU) must
+            # never fail the run — degrade to no cost clause.
+            cost_clause = ""
+            try:
+                cost_report = cost_module.rollup_audit_dir(project_dir)
+                cost_clause = format_cost_clause(
+                    {p: r.subtotal_usd for p, r in cost_report.per_provider.items()}
+                )
+            except Exception:  # noqa: BLE001 — supplementary; degrade silently
+                cost_clause = ""
+            footer_text = build_run_footer(
+                elapsed_seconds=time.monotonic() - start,
+                written=written,
+                dry_run=dry_run,
+                cost_clause=cost_clause,
+                style=progress_style,
+            )
+
         return _SingleModelOutcome(
             model_unique_id=model.unique_id,
             exit_code=0,
@@ -1439,6 +1489,7 @@ def _run_single_model(
             dropped_count=diff_report.dropped_count,
             flagged_count=diff_report.flagged_count,
             rendered_text=rendered_text,
+            footer_text=footer_text,
             duration_seconds=time.monotonic() - start,
             exception_class_name=None,
         )
@@ -1453,6 +1504,7 @@ def _run_single_model(
             dropped_count=0,
             flagged_count=0,
             rendered_text="",
+            footer_text="",
             duration_seconds=time.monotonic() - start,
             exception_class_name=type(exc).__name__,
         )
@@ -1812,6 +1864,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
         )
         if single_outcome.rendered_text:
             sys.stdout.write(single_outcome.rendered_text)
+        # Issue #211 — emit the end-of-run footer to STDERR after the stdout
+        # diff so it reads below the table (and ``> diffs.txt`` captures only
+        # the diff). ``footer_text`` is "" under --quiet / non-TTY / failure.
+        if single_outcome.footer_text:
+            sys.stdout.flush()
+            print_stderr(single_outcome.footer_text, allow_sgr=True, flush=True)
         return single_outcome.exit_code
 
     except Exception as exc:  # noqa: BLE001 — the boundary catch (DEC-016)

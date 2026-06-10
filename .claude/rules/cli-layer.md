@@ -133,6 +133,23 @@ Load-bearing details:
 - **Test determinism:** `tests/cli/test_generate.py` has an autouse fixture clearing `NO_COLOR`/`FORCE_COLOR`/`COLORTERM` per test — load-bearing because `--no-color` mutates `os.environ["NO_COLOR"]` and does NOT restore it (DEC-023), so an in-process `--no-color` test would otherwise leak the var into every later test and flip its colour path. Colour-path assertions strip SGR and check plain structure (palette-independent); a dedicated test pins the spark-amber SGR under `FORCE_COLOR`+`COLORTERM=truecolor`.
 - **Scope:** `prune-existing` progress stays on the plain path (passes no `style`) in v0.x — only `generate` got the glyph. `--no-grade` still renumbers to `[N/4]` on both surfaces.
 
+## End-of-run footer — `wrote …` + `✓ done in <X> · $cost` (issue #211)
+
+A successful **single-model** `generate` run closes with a two-line stderr footer, built by `build_run_footer(*, elapsed_seconds, written, dry_run, cost_clause, style)` in `_helpers.py`:
+
+```
+wrote schema.yml (8 kept) · .signalforge/diff.json · .signalforge/grade.json
+✓ done in 5m12s · $0.13 Anthropic
+```
+
+Load-bearing rules:
+
+- **Built in `_run_single_model`, emitted by the dispatcher AFTER the stdout diff.** The footer string is stored on `_SingleModelOutcome.footer_text` (`""` on failure / `--quiet` / non-TTY / batch). The dispatcher does `sys.stdout.write(rendered_text)` → `sys.stdout.flush()` → `print_stderr(footer_text, allow_sgr=True, flush=True)` so the footer reads *below* the table and `> diffs.txt` still captures only the diff (stdout). Building it in `_run_single_model` (which returns before stdout is written) and emitting from the dispatcher is the seam — don't emit it inline (it would print above the diff).
+- **Single-model only.** A batch closes with `format_batch_summary`; `_run_single_model` sets `footer_text=""` when `batch_index is not None`. The per-model cost rollup would be *cumulative* (the audit JSONLs are append-only across a `--select` batch), so a per-model `$cost` would mislead. Batch-total cost is a deferred follow-up.
+- **Cost is SUPPLEMENTARY — degrade, never fail (DEC-005).** `cost_module.rollup_audit_dir(project_dir)` is wrapped in a bare `except Exception` that degrades to an empty `cost_clause`. A missing/malformed audit, an unpriced SKU, anything — the run still exits 0 with a bare `✓ done in <X>`. `format_cost_clause(per_provider_usd)` joins providers with subtotal > 0 in sorted-key order; `_format_usd` renders `<$0.01` for a positive-but-sub-cent figure (a `$0.00` would read as free). **Warehouse cost is deliberately omitted** — there is no actual-bytes-scanned figure at end-of-run (only the `--estimate` planner preview), so the clause stays LLM-only rather than fabricating a number.
+- **`wrote` line is HONEST.** It names only artifacts actually written this run: `schema.yml (N kept)` + proposed `.sql` count under `--write`; `.signalforge/diff.json` unless `--dry-run`; `.signalforge/grade.json` when graded. Empty under `--dry-run` → `dry run — no files written`. Never claims a write that didn't happen.
+- **Colour-gated like the progress lines (#210).** The `✓` is signal-green (`palette.SIGNAL`/`GREEN`) — glyph + dim styling only when `style.color`; the colour-off form is plain text (no glyph, no SGR). Gated by `progress_on`, so `--quiet` / non-TTY suppress it. Every fragment is internally constructed (artifact names, formatted USD, provider display) so it's safe through `print_stderr(allow_sgr=True)`.
+
 ## Multi-source CLI commands degrade on supplementary failures (DEC-005 of #36)
 
 When a CLI command (e.g. `--estimate`) has multiple data sources where some are supplementary (e.g. `count_tokens` is load-bearing for cost preview; `adapter.estimate_query_bytes` is nice-to-have), supplementary failures must NOT propagate. Three rules:

@@ -14,9 +14,11 @@ import pytest
 from signalforge._common.ansi_safety import strip_ansi_escapes
 from signalforge.cli._helpers import (
     ProgressStyle,
+    build_run_footer,
     emit_batch_progress_entry,
     emit_progress_done,
     emit_progress_entry,
+    format_cost_clause,
     resolve_progress_style,
 )
 
@@ -163,3 +165,100 @@ def test_color_path_strips_user_content_escapes(capsys: pytest.CaptureFixture[st
     err = capsys.readouterr().err
     assert "\x1b[31mevil" not in err  # smuggled red stripped
     assert "evil.a" in strip_ansi_escapes(err)  # literal text survives
+
+
+# ---------------------------------------------------------------------------
+# End-of-run footer (issue #211): format_cost_clause + build_run_footer.
+# ---------------------------------------------------------------------------
+
+
+def test_cost_clause_single_provider() -> None:
+    assert format_cost_clause({"anthropic": 0.13}) == "$0.13 Anthropic"
+
+
+def test_cost_clause_sub_cent_uses_less_than() -> None:
+    assert format_cost_clause({"openai": 0.004}) == "<$0.01 OpenAI"
+
+
+def test_cost_clause_multi_provider_sorted() -> None:
+    # sorted-key order (anthropic before openai) for determinism.
+    clause = format_cost_clause({"openai": 0.50, "anthropic": 0.13})
+    assert clause == "$0.13 Anthropic · $0.50 OpenAI"
+
+
+def test_cost_clause_omits_zero_providers() -> None:
+    assert format_cost_clause({"anthropic": 0.0, "gemini": 0.0}) == ""
+
+
+def test_cost_clause_empty_when_no_providers() -> None:
+    assert format_cost_clause({}) == ""
+
+
+def test_cost_clause_unknown_provider_falls_back_to_key() -> None:
+    assert format_cost_clause({"acme": 1.0}) == "$1.00 acme"
+
+
+def test_footer_plain_path_byte_stable() -> None:
+    footer = build_run_footer(
+        elapsed_seconds=312.0,
+        written=["schema.yml (8 kept)", ".signalforge/diff.json"],
+        dry_run=False,
+        cost_clause="$0.13 Anthropic",
+        style=_PLAIN,
+    )
+    assert footer == (
+        "wrote schema.yml (8 kept) · .signalforge/diff.json\ndone in 5m 12s · $0.13 Anthropic"
+    )
+    assert "\x1b" not in footer
+    assert "✓" not in footer  # glyph is colour-only
+
+
+def test_footer_color_path_has_green_check_and_dim() -> None:
+    footer = build_run_footer(
+        elapsed_seconds=312.0,
+        written=[".signalforge/diff.json"],
+        dry_run=False,
+        cost_clause="$0.13 Anthropic",
+        style=_COLOR24,
+    )
+    # signal-green ✓ glyph (brand #2FCB7F).
+    assert "\x1b[38;2;47;203;127m✓\x1b[0m" in footer
+    assert "\x1b[2m" in footer  # dim artifacts + cost
+    plain = strip_ansi_escapes(footer)
+    assert plain.startswith("wrote .signalforge/diff.json")
+    assert "✓ done in 5m 12s · $0.13 Anthropic" in plain
+
+
+def test_footer_check_uses_16color_fallback() -> None:
+    footer = build_run_footer(
+        elapsed_seconds=1.0, written=[], dry_run=False, cost_clause="", style=_COLOR16
+    )
+    assert "\x1b[32m✓\x1b[0m" in footer  # 16-colour green
+
+
+def test_footer_dry_run_no_files() -> None:
+    plain = strip_ansi_escapes(
+        build_run_footer(
+            elapsed_seconds=5.2, written=[], dry_run=True, cost_clause="", style=_PLAIN
+        )
+    )
+    assert plain == "dry run — no files written\ndone in 5.2s"
+
+
+def test_footer_omits_cost_clause_when_empty() -> None:
+    footer = build_run_footer(
+        elapsed_seconds=1.0,
+        written=[".signalforge/diff.json"],
+        dry_run=False,
+        cost_clause="",
+        style=_PLAIN,
+    )
+    assert footer == "wrote .signalforge/diff.json\ndone in 1.0s"
+
+
+def test_footer_no_wrote_line_when_nothing_written_and_not_dry_run() -> None:
+    # Degenerate: not dry-run but caller passed no artifacts — only the done line.
+    footer = build_run_footer(
+        elapsed_seconds=1.0, written=[], dry_run=False, cost_clause="", style=_PLAIN
+    )
+    assert footer == "done in 1.0s"
