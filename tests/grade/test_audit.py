@@ -104,7 +104,7 @@ def test_write_grade_event_appends_one_jsonl_line(tmp_path: Path) -> None:
     assert len(lines) == 2
 
     payload = json.loads(lines[0])
-    assert payload["audit_schema_version"] == 1
+    assert payload["audit_schema_version"] == 3
     assert payload["model_unique_id"] == "model.test.x"
     assert payload["criterion_id"] == "grounded_in_sql"
 
@@ -271,7 +271,7 @@ def test_write_grade_event_short_write_loops_until_complete(tmp_path: Path) -> N
     lines = contents.splitlines()
     assert len(lines) == 1
     payload = json.loads(lines[0])
-    assert payload["audit_schema_version"] == 1
+    assert payload["audit_schema_version"] == 3
     assert call_count["n"] >= 2
 
 
@@ -440,3 +440,19 @@ def test_build_grade_event_preserves_none_score() -> None:
     event = _make_event(score=None, passed=False)
     assert event.score is None
     assert event.passed is False
+
+
+def test_build_grade_event_accepts_main_pass_and_sweep_round() -> None:
+    """``sweep_round`` is ``None`` for the main pass and a 1-based round index
+    on a sweep re-grade (#202 US-005)."""
+    assert _make_event().sweep_round is None
+    assert _make_event(sweep_round=1).sweep_round == 1
+    assert _make_event(sweep_round=3).sweep_round == 3
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_build_grade_event_rejects_non_positive_sweep_round(bad: int) -> None:
+    """The construction seam fails loud on ``sweep_round < 1`` so a bad value
+    can never be persisted and corrupt the sweep forensic semantics (#202 US-005)."""
+    with pytest.raises(ValueError, match="sweep_round must be >= 1"):
+        _make_event(sweep_round=bad)

@@ -9,6 +9,14 @@ design record in
 
 ## Overview
 
+> **Prerequisite — the model must declare its columns.** Column-level
+> tests are drafted from `model.columns`, which dbt populates from your
+> schema `.yml` files. A model with no schema yml yields zero columns
+> and the drafter can only produce model-level variants. See
+> [`docs/manifest-loader-ops.md` § Column metadata is the prerequisite for
+> column-level tests](manifest-loader-ops.md#column-metadata-schema-files-are-the-prerequisite-for-column-level-tests)
+> for how to generate schema files (and `dbt docs generate` for types).
+
 The draft pipeline turns one dbt model into one `CandidateSchema` —
 the typed value the prune layer (#6) consumes — by issuing one LLM
 call. It sits **after** the safety layer (which produces the
@@ -131,7 +139,8 @@ file open) → `mkdir -p` parent at `0o700` → `os.open` with
 | `output_tokens`                | integer               | Total output tokens billed.                                                                                                      |
 | `model`                        | string                | The Anthropic model id used (e.g. `claude-sonnet-4-6`).                                                                          |
 | `signalforge_version`          | PEP-440 version       | The package version that produced the record. Read from `signalforge.__version__` at write time.                                |
-| `audit_schema_version`         | integer               | Audit shape version. Currently `1`. Bump when the JSONL schema evolves; v0.2 readers gate on this.                                |
+| `audit_schema_version`         | integer               | Audit shape version. Currently `2`. Bumped `1 → 2` by #184 to carry the new `parser_reshaped` field. Stays typed `int` (not `Literal`) so v1 records still round-trip. v0.2 readers gate on this.                                |
+| `parser_reshaped`              | array of objects      | One `ReshapeRecord` per parser re-attach (#184); empty in the no-reshape happy path (the v1-compatible default). Each record: `{original_column, target_scope: "model", test_type, reason}`. See § [Parser re-attach for mis-scoped model-only variants](#parser-re-attach-for-mis-scoped-model-only-variants-issue-184). |
 
 Storing hashes (not cleartext) keeps individual records under the
 POSIX-atomic-append cap (`_RESPONSE_AUDIT_RECORD_LIMIT_BYTES = 4000`)
@@ -285,19 +294,24 @@ collapse to nothing, so an empty `meta` value emits no section.
 As of #163, each rule renders inside a numbered envelope rather than a
 bare bullet:
 
-```text
-## BUSINESS RULES
+<!-- Indented (not fenced) code block: a literal ATX `##` inside a
+mkdocs-rendered fence is still parsed as a heading by mkdocs's anchor
+generator, which silently breaks every H2 anchor downstream of this
+block (verified: 14 of 20 H2s in this doc went un-rendered before the
+indented-block switch — covers row_count_between and unique_combination
+inbound cross-doc links). The indented form defeats the heading scan. -->
 
-Operator-supplied business rules for this model. Draft one custom_sql
-test per rule below, using the rule ID as a reference:
+    ## BUSINESS RULES
 
-<BUSINESS_RULE id="1">
-  (model) total_amount must never be negative
-</BUSINESS_RULE>
-<BUSINESS_RULE id="2">
-  (column discount_pct) discount_pct stays between 0 and 100 inclusive
-</BUSINESS_RULE>
-```
+    Operator-supplied business rules for this model. Draft one custom_sql
+    test per rule below, using the rule ID as a reference:
+
+    <BUSINESS_RULE id="1">
+      (model) total_amount must never be negative
+    </BUSINESS_RULE>
+    <BUSINESS_RULE id="2">
+      (column discount_pct) discount_pct stays between 0 and 100 inclusive
+    </BUSINESS_RULE>
 
 IDs start at 1; bodies are indented 2 spaces and carry the existing
 `(model)` / `(column X)` scope prefix. The envelope gives the LLM
@@ -416,6 +430,234 @@ file in the diff (see
 [`docs/diff-ops.md`](diff-ops.md#sidecar-json-schema) and
 [`docs/cli-ops.md`](cli-ops.md#signalforge-generate-model)).
 
+## Row-count tests (`row_count_between`)
+
+The sixth test variant, `row_count_between` (issue #169), is a
+**model-level bounded-cardinality assertion**: the table's `COUNT(*)`
+(optionally narrowed by a `WHERE` filter) must lie within
+`[minimum, maximum]`. Either bound may be omitted (`None`); at least
+one must be set. It is the structured equivalent of
+`dbt_expectations.expect_table_row_count_to_be_between`, which a survey
+of the `intuit_airflow` project flagged as the single most-used dbt
+test type (~40% of declared tests). Without a first-class variant the
+drafter cannot reach this shape — `custom_sql` *could* express it, but
+as freeform LLM emission the grader has nothing structured to score and
+the diff has nothing typed to render.
+
+### What a `row_count_between` test is
+
+`CandidateTestRowCountBetween` carries:
+
+- **`minimum`** — `int | None`, must be non-negative when set.
+- **`maximum`** — `int | None`, must be non-negative and `>= minimum`
+  when both are set.
+- **`where`** — optional SQL predicate string. A bounded-window guard
+  (e.g. `"event_date >= '2024-01-01'"`) for "this table has between N
+  and M rows **in the recent window**" assertions.
+- **`rationale`** — optional one-line "why," surfaced in the diff.
+
+The Pydantic field names are `minimum` / `maximum` (matching the
+prefix-free precedent set by `values`, `to`, `field` on the other
+variants). The ingest parser maps inbound on `prune-existing`
+(`min_value` → `minimum`); the diff emitter maps outbound
+(`minimum` → `min_value`) into the `dbt_expectations` YAML shape — see
+[`docs/diff-ops.md`](diff-ops.md#row-count-yaml-emission) and
+[`docs/ingest-ops.md`](ingest-ops.md#recognition-of-expect_table_row_count_to_be_between).
+The variant is always model-level: there is no per-column `column:`
+field, because a `COUNT(*)` is a table-level fact.
+
+### When the drafter proposes it
+
+The system prompt's `_TEST_CATALOGUE_LINES` carries two JSON-shape
+illustrations for `row_count_between` — the no-`where` form (whole-table
+bound) and the with-`where` form (filtered bound) — so a cooperative LLM
+sees both shapes and picks the one that matches the model's intent.
+Alongside the illustrations, the system prompt carries a scope-instruction
+block (`_ROW_COUNT_BETWEEN_SCOPE_INSTRUCTION`, added in #183 to complete
+the #169 DEC-012 worked example) that teaches the bounded-aggregation
+heuristic below plus the `minimum`/`maximum`/`where` calibration guidance —
+the prompt-level steer that drives the drafter to propose the test in the
+first place. The drafter typically proposes `row_count_between` when:
+
+- The model SQL is a **bounded aggregation** (a `GROUP BY` with a date
+  window in the `WHERE` clause, or a pre-aggregated rollup) whose row
+  count is naturally bounded by upstream cardinality.
+- The model is a **daily / weekly partition** where a sudden empty day
+  is a real upstream-pipeline signal.
+- The model is a **monitoring-shaped report** (cost rollups, query-stats
+  summaries) where "we expected a row this week and got zero" is the
+  most actionable failure mode.
+
+Calibration is the LLM's responsibility: the prompt is permissive but
+the grader scores whether the bound is meaningful for the tests that
+actually survive prune. A bound like `minimum=1` on a daily rollup
+catches "upstream produced nothing today" — when the table IS empty
+the test surfaces as `kept` and reaches the grader, which scores the
+bound's calibration via the [`no-redundant` criterion](grade-ops.md#row-count-calibration).
+A fully vacuous bound like `minimum=0` with no `maximum` is
+**dropped by the prune layer as `always-passes`** before the grader
+sees it — the failing-rows CTE's `WHERE n < 0` predicate matches
+nothing, so `failures=0` routes to `always-passes`. Calibration
+scoring therefore applies to bounds the prune layer cannot dismiss on
+its own (borderline cases like a `minimum=1` that only catches empty
+tables, or a `maximum` so high it can't fire today but might rot).
+
+### Worked example
+
+The `intuit_airflow` survey that motivated #169 found a `weekly_query_cost`
+model — a `GROUP BY week + warehouse` rollup of Snowflake cost data —
+with an operator-declared `row_count_between(min=100)` annotation that
+the v0.4 drafter never proposed. As of #169 the same model now drafts
+the test as a structured candidate. The drafter emits roughly:
+
+```json
+{
+  "type": "row_count_between",
+  "minimum": 100,
+  "maximum": null,
+  "rationale": "weekly_query_cost rolls up per-warehouse cost over a week; fewer than 100 rows signals upstream Snowflake query-history loss"
+}
+```
+
+This candidate flows into the prune layer, which compiles it to a
+failing-rows CTE wrapping `COUNT(*)` and runs one cheap warehouse query
+— see [`docs/prune-ops.md`](prune-ops.md#row-count-cost-model). A
+warehouse with the expected ~250 rows/week returns zero failing rows →
+`always-passes` → dropped. A warehouse that returns 50 rows → one
+failing row → `kept` with a "row-count out of bounds" signal the
+reviewer can act on.
+
+The two paths to the same variant on a `prune-existing` run are
+documented in
+[`docs/ingest-ops.md`](ingest-ops.md#recognition-of-expect_table_row_count_to_be_between):
+a hand-authored `expect_table_row_count_to_be_between` in the operator's
+own `schema.yml` is promoted to the structured variant and pruned
+alongside drafted candidates, so the operator can grade existing
+declarations without re-drafting.
+
+### `exclude_tests` short-circuit
+
+Like the five other variants, `row_count_between` is a member of
+`VALID_TEST_TYPES` (US-002 of #169) and can be suppressed via
+`DraftConfig.exclude_tests`:
+
+```yaml
+llm:
+  exclude_tests: ["row_count_between"]
+```
+
+When `"row_count_between"` is excluded, `_render_system_prompt` drops
+the entry from the JSON-shape catalogue and from the `### SCOPE` line,
+so the LLM never proposes one; if it defies the prompt, the parser's
+anchor-contract check rejects the candidate (dual-defence — prompt
+filter + parser rejection). Use this when the model under draft has
+no meaningful row-count guarantee (e.g. a slowly-growing dim table
+where any positive count is fine).
+
+## Composite uniqueness (`unique_combination`)
+
+The seventh test variant, `unique_combination` (issue #170), is a
+**model-level composite-key uniqueness assertion**: the tuple
+`(columns[0], columns[1], ...)` must be unique across the model
+(optionally narrowed by a `where` filter). It is the structured
+equivalent of `dbt_utils.unique_combination_of_columns`, which the
+`intuit_airflow` survey flagged as covering ~10.5% of declared tests
+(15 of 143). Without a first-class variant the drafter could express it
+only as freeform `custom_sql` (`GROUP BY a, b HAVING COUNT(*) > 1`),
+which gives the grader no structured calibration and the diff no typed
+emission shape.
+
+### What a `unique_combination` test is
+
+`CandidateTestUniqueCombination` carries:
+
+- **`columns`** — `tuple[str, ...]`, **at least two columns**
+  (single-column uniqueness is the existing `unique` test type). The
+  Pydantic field validators reject `len < 2` and duplicate column names
+  at deserialise time.
+- **`where`** — optional SQL predicate string. Narrows the composite-key
+  scope (e.g. `"is_active = true"` for "every active row has a unique
+  `(user_id, day)`").
+- **`rationale`** — optional one-line "why," surfaced in the diff.
+
+The Pydantic field name is `columns`; the ingest parser maps inbound on
+`prune-existing` (`combination_of_columns` → `columns`), and the diff
+emitter maps outbound (`columns` → `combination_of_columns`) into the
+`dbt_utils` YAML shape. The variant is always model-level: there is no
+per-column `column:` field, because composite uniqueness is a
+table-level property.
+
+### When the drafter proposes it
+
+The system prompt's `_TEST_CATALOGUE_LINES` carries two JSON-shape
+illustrations for `unique_combination` — the no-`where` form
+(whole-table composite uniqueness) and the with-`where` form (filtered
+composite uniqueness) — so a cooperative LLM sees both shapes and picks
+the one that matches the model's intent. The drafter typically proposes
+`unique_combination` when:
+
+- The model is an **aggregate or rollup** whose natural grain is a
+  composite key — `(order_id, line_item_id)` on an order-line table,
+  `(user_id, day)` on a daily activity rollup, `(start_station_id,
+  end_station_id, trip_date)` on a trip-pairs aggregate.
+- The model has a **multi-column `GROUP BY`** whose result rows should
+  be unique by construction.
+- A `where` filter narrows the uniqueness to a sub-population (e.g.
+  "exactly one record per `(user_id, day)` for active users only").
+
+The system prompt carries a cautionary block (`_UNIQUE_COMBINATION_SCOPE_INSTRUCTION`)
+steering the drafter away from vacuously-unique tuples. A drafted
+`unique_combination(columns=[primary_key, anything])` is always unique
+by construction — the primary key alone guarantees it. The grade rubric's
+`no-redundant` criterion scores these low (and the prune engine catches
+the strict cases as `always-passes`), but the prompt-level steer is the
+primary defence — cheaper than relying on the grader to flag them.
+
+### Worked example
+
+A `fct_order_line_items` model with grain `(order_id, line_item_id)`
+ships natural composite uniqueness. The drafter emits roughly:
+
+```json
+{
+  "type": "unique_combination",
+  "columns": ["order_id", "line_item_id"],
+  "rationale": "fct_order_line_items has one row per order-line; the tuple (order_id, line_item_id) is the natural grain"
+}
+```
+
+This candidate flows into the prune layer, which compiles it to
+`SELECT order_id, line_item_id FROM <table> GROUP BY order_id, line_item_id HAVING COUNT(*) > 1`
+and runs one warehouse query — see [`docs/prune-ops.md` § `unique_combination`](prune-ops.md#unique_combination--same-engine-routing-group-by-shape-issue-170)
+for the engine routing (sample-mode bypassed to source — composite
+uniqueness on a sample is semantically approximate). A warehouse where
+the grain holds returns zero failing rows → `always-passes` → dropped.
+A warehouse with a duplicate `(order_id, line_item_id)` returns the
+duplicate rows → `kept` with a real grain-violation signal.
+
+The same variant on a `prune-existing` run flows through the ingest
+parser — see [`docs/ingest-ops.md` § Recognition of `dbt_utils.unique_combination_of_columns`](ingest-ops.md#recognition-of-dbt_utilsunique_combination_of_columns)
+for the inbound mapping. A hand-authored `dbt_utils.unique_combination_of_columns`
+in the operator's own `schema.yml` is promoted to the structured variant
+and pruned alongside drafted candidates, so the operator can grade
+existing declarations without re-drafting.
+
+### `exclude_tests` short-circuit
+
+Like the six other variants, `unique_combination` is a member of
+`VALID_TEST_TYPES` and can be suppressed via `DraftConfig.exclude_tests`:
+
+```yaml
+llm:
+  exclude_tests: ["unique_combination"]
+```
+
+When `"unique_combination"` is excluded, the drafter prompt drops the
+catalogue entry AND the cautionary SCOPE instruction block, so the LLM
+never proposes one; if it defies the prompt, the parser's anchor-contract
+check rejects the candidate (dual-defence — prompt filter + parser
+rejection).
+
 ## Cache behaviour
 
 Prompt caching is a **provider capability** (issue #135): the seam
@@ -475,6 +717,180 @@ have raised otherwise) yet the response reports
 `cache_creation_input_tokens == 0`, the seam emits a `WARNING` —
 this can happen on Anthropic load-balancer rerouting or partial cache
 miss, and surfaces so the operator knows the discount didn't land.
+
+## Bulk-mode shared cache (`--select` batches)
+
+Issue #188. When you run `signalforge generate` across **many models in
+one process** — the `--select <expr>` batch path — the drafter can share
+a single cached prompt prefix across every model in the batch instead of
+caching a different per-model block on each call. This is the
+`cache_scope="project"` mode, and it exists to fix a measured cost
+problem.
+
+### What it is and the problem it solves
+
+The default per-model cache scope (the "What's cached" behaviour above)
+caches *the model under draft + its direct refs/`depends_on`
+neighbours*. That block is **different for every model**, so across a
+`--select` batch nothing is byte-identical from one call to the next and
+**the Anthropic prompt-cache hit rate is 0%** — every call pays
+`cache_creation_input_tokens` from scratch and `cache_read_input_tokens`
+is always 0. (This was measured empirically: 14 consecutive drafter
+calls in a batch each paid 1,612–2,572 cache-creation tokens, zero
+reads.)
+
+Bulk-mode shared cache restructures the cached block so it is
+**byte-identical across the whole batch**. The first model pays the
+cache write once; every subsequent model reads the cached prefix at
+roughly **one-tenth the input-token price** — driving the cross-batch
+cache-hit rate from 0% to ~95% (models 2..N hit; model 1 is the write).
+
+### How it works
+
+In project scope the cached prefix is a **compressed, whole-project
+manifest summary**, not a per-model neighbour subgraph:
+
+- One line per manifest model, `name (N cols)` — no per-column detail.
+- Project-wide business rules (`meta.signalforge.business_rules`
+  aggregated across the project), in a deterministic total order.
+- The whole thing wrapped in a `<PROJECT_MANIFEST>…</PROJECT_MANIFEST>`
+  envelope with a boring-substring breach guard (the project summary
+  carries every model's name + column count plus any aggregated project
+  business rules, so the envelope is the injection boundary — a poisoned
+  model name or business rule can't escape the fence and reach the LLM as
+  instructions).
+
+Because the prefix does **not** depend on which model is under draft, it
+renders to the same bytes for every model in the batch — the load-bearing
+precondition for an Anthropic cache read. Anthropic caches the prefix =
+`system` + that shared block; on models 2..N the `system` + block must be
+byte-identical for a `cache_read` hit, and the deterministic ordering
+(`sorted(unique_id)`, columns by name, a single global 1-indexed business
+-rule counter) guarantees it.
+
+The **per-model detail still flows to the LLM** — it just moves into the
+*uncached dynamic block*: the model under draft, its full column /
+neighbour detail, its `<MODEL_SQL>` envelope, the sampled-rows / aggregate
+data section, and the model's own `<BUSINESS_RULE>` instructions. Draft
+quality is preserved; only the *placement* of the shared context changed.
+(The model-under-draft's own business rules appear in both the cached
+project context and its dynamic instruction block; the duplication is
+intentional and small — typically 1–3 rules.)
+
+The project-scope template carries a distinct `prompt_version` from the
+per-model template, so the two never collide in the response audit or in
+Anthropic's cache.
+
+### Automatic activation and operator override
+
+You do not have to opt in by hand for the common case:
+
+- **`--select` matching ≥ 2 models auto-promotes** the drafter's
+  `cache_scope` to `project`. The match count is known before the
+  per-model loop, so the batch driver overlays `cache_scope="project"`
+  on the per-model `DraftConfig` for every model in the run.
+- **Single-model runs stay `per-model`.** A positional
+  `signalforge generate <model>` (one model) keeps the default scope and
+  produces byte-identical output / cache behaviour to before this feature
+  landed — there is no sibling to amortise against.
+
+Override precedence, highest first:
+
+1. The `--cache-scope {per-model,project}` CLI flag (explicit operator
+   choice — wins over everything; see `docs/cli-ops.md` for the flag
+   reference).
+2. A non-default `llm.cache_scope` in `signalforge.yml`.
+3. The auto-promote on a `--select` ≥ 2 batch.
+
+So `--cache-scope per-model` forces per-model even on a large batch, and
+`--cache-scope project` forces project even on a single-model run.
+
+```yaml
+# signalforge.yml — pin project scope for every drafter run
+llm:
+  cache_scope: project
+```
+
+### Oversize fallback
+
+The shared project prefix is still subject to the 8000-input-token cap.
+On a very large project the compressed summary can exceed it. When that
+happens in project scope, the drafter **degrades that one model to
+per-model scope, logs one `INFO` line naming the model and the token
+count, and retries the call once** — the model still drafts, the batch
+continues, and the run exits 0. (Mechanically: `call_llm` raises
+`LLMCacheTooLargeError` at the cap; the drafter catches it *only when the
+scope was project*, re-renders the per-model cached block, and retries
+once. A per-model-scope oversize is a real error and re-raises — it
+signals genuine prompt bloat.) An envelope **breach** (a `</PROJECT_MANIFEST>`
+literal in manifest content) is a different signal: it fails closed, not
+fall-back, because it's a security problem the operator must fix.
+
+If the compressed prefix lands *below* the per-family minimum cacheable
+size (a tiny project), the existing marker-drop behaviour covers it — the
+marker is dropped, an `INFO` line logs, and the run is correct, just
+uncached. Auto-promote does not special-case tiny projects.
+
+### Cost model
+
+Anthropic's Sonnet pricing makes the lever concrete (per MTok):
+non-cached input `$3.00`, cache **write** `$3.75` (1.25× input), cache
+**read** `$0.30` (0.1× input). Opus and Haiku carry the same 1.25× /
+0.1× multipliers at their own base rates.
+
+So for a shared prefix of `T` input tokens across an `N`-model batch:
+
+| Scope | What you pay for the shared prefix |
+| --- | --- |
+| `per-model` (before #188) | `N × T` tokens at full input rate — every call re-sends and re-bills the whole block; 0% cache hit. |
+| `project` (#188) | `T` tokens at the 1.25× cache-**write** rate on model 1, then `T` tokens at the 0.1× cache-**read** rate on each of models 2..N. |
+
+The crossover is immediate: the shared block is read at ~10× cheaper than
+re-sending it at full input rate, and the single 1.25× write is recouped
+after roughly **two reads** (1.25 ≈ 0.1 + 0.1 + …; break-even at ~2
+subsequent models). On a batch of 15 models the shared-prefix portion of
+the input cost drops by an order of magnitude versus the per-model path
+(one write + 14 reads vs. 15 full-rate sends); on a 50-model batch the
+saving on that portion approaches the full ~10× ceiling (one write + 49
+reads). Only the *shared-prefix* tokens are affected — the per-model
+dynamic block (model SQL, sampled data, the model's own rules) is billed
+at full input rate in both scopes, so the realised total-cost saving
+depends on the prefix-to-dynamic ratio for your project.
+
+(The shared prefix is rendered and token-counted once per model — the same
+one-`count_tokens`-per-call profile as the per-model path, so this is not a
+new per-call cost. Batch-level memoisation of the render is a deferred
+follow-up.)
+
+### Provider & model applicability
+
+**Prompt caching is an Anthropic-only capability.** The `cache_scope`
+lever only delivers a cost saving on the **Anthropic** provider, because
+only Anthropic exposes the `cache_control` marker that the seam keys on
+(`AnthropicProvider.supports_prompt_caching = True`). The per-family
+minimum cacheable block sizes that gate the discount:
+
+| Anthropic family | Minimum cacheable block | Benefits from project scope? |
+| --- | --- | --- |
+| **Sonnet** (`claude-sonnet-*`) | 1024 input tokens | ✅ yes — above the minimum on any non-trivial project |
+| **Opus** (`claude-opus-*`) | 1024 input tokens | ✅ yes |
+| **Haiku** (`claude-haiku-*`) | 2048 input tokens | ✅ yes, but the prefix must clear the higher 2048 floor before the cache engages |
+
+(Below the family minimum the `cache_control` marker is dropped — see
+"Hard cap and pre-send check" above. An unknown Anthropic model id falls
+into the permissive 1024 bucket.)
+
+On the **OpenAI** and **Google Gemini** providers
+(`supports_prompt_caching = False`), there is **no cache and therefore no
+benefit — and no penalty.** When `cache_scope="project"` is in effect on
+a non-Anthropic provider the prompt is still restructured to the
+shared-prefix shape, but the seam emits no `cache_control` marker,
+reports `cache_creation_input_tokens = 0` / `cache_read_input_tokens =
+0`, and skips the cache-anomaly WARNING. The restructure is effectively a
+**no-op for the cost lever** on those providers: a `--select` batch runs
+correctly, just without the cross-batch discount. Operators drafting on
+OpenAI or Gemini should treat `cache_scope` as inert and tune cost via
+provider/model choice instead.
 
 ## Retry taxonomy
 
@@ -543,6 +959,24 @@ except LLMOutputAnchorContractError as exc:
     # exc.raw_text preserved for forensic replay
     raise
 ```
+
+### Parser re-attach for mis-scoped model-only variants (issue #184)
+
+`row_count_anomaly_by_period`, `row_count_between`, and `unique_combination` are **model-level-only** variants (type-level `column: None = None`). The drafter is steered toward model scope by `_ROW_COUNT_*_SCOPE_INSTRUCTION` prose, but on models carrying audit-timestamp columns (`creation_ts`, `update_ts`, `loaded_at`, `created_at`, `event_date`, `partition_date`, `LOAD_TIMESTAMP`) the LLM has historically over-anchored — emitting the variant *inside* the date column's `tests:` array (issue #184; reproduced 3/3 on the Phase B candidates of the #179 retest).
+
+Rather than fail loud with the confusing "model-level test references nonexistent column None" message, the parser **silently re-attaches** a column-scoped emission of a model-only variant to model scope, emits ONE operator-visible WARNING per re-attach, and records a `ReshapeRecord` in `LLMResponseEvent.parser_reshaped` for the forensic trail:
+
+```text
+WARNING signalforge.draft.parser:parser re-attach: {"from_scope": "column='creation_ts'", "model_unique_id": "model.acme.fct_orders", "reason": "model-only variant mis-scoped to column", "test_type": "row_count_anomaly_by_period", "to_scope": "<model-level>"}
+```
+
+The WARNING is always emitted (no `--quiet` suppression, no config flag) so the operator can see the LLM is mis-steering even when the run succeeds. A healthy prompt-side fix (#184 DEC-001) makes this WARNING rare; if you see it firing on every run, file an issue — the drafter prose has likely drifted.
+
+**`exclude_tests` kill-switch wins.** If you've set `exclude_tests: [<variant>]` in `signalforge.yml`, a column-scoped emission of that excluded variant is REJECTED with the standard exclude violation, NOT re-attached. The operator's opt-out is always honoured (DEC-003 of #184).
+
+**Audit field.** `LLMResponseEvent.parser_reshaped: tuple[ReshapeRecord, ...] = ()` carries one `ReshapeRecord` per re-attach with `original_column`, `target_scope="model"`, `test_type`, and a locked `reason` string. The audit-event schema is bumped from v1 to v2 (`audit_schema_version: int = 2`); v1 audit JSONLs still round-trip because the field defaults to an empty tuple and the version field stays typed `int`, not `Literal`. The drift detector at `tests/draft/test_drift_detector.py` validates both v1 and v2 fixtures.
+
+**Operator cleanup.** If you added `llm.exclude_tests: [row_count_anomaly_by_period]` to your `signalforge.yml` as a pre-#184 workaround, remove it now — the fix renders the workaround unnecessary, and leaving it in place would suppress a now-correct test variant.
 
 ## Type-coherence defence (issue #159)
 
@@ -693,7 +1127,7 @@ other stages and silently ignored by the draft loader.
 llm:
   provider: anthropic        # registry-validated; "anthropic" + "openai" + "gemini" are registered (see provider sections below)
   model: claude-sonnet-4-6
-  cheap_model: claude-haiku-4-5-20251001
+  cheap_model: claude-haiku-4-5
   max_output_tokens: 4096
   cache_ttl: 5m              # one of "5m" | "1h"
   max_retries_429: 3
@@ -716,7 +1150,9 @@ Field-by-field:
   Default `claude-sonnet-4-6`. Any string the SDK accepts is allowed.
 - **`cheap_model`** — informational; not selected automatically.
   The CLI (#9) flips on `--cheap` to swap `model` for this value.
-  Default `claude-haiku-4-5-20251001`.
+  Default `claude-haiku-4-5` (bare SKU — matches a `PRICES` key; it is
+  also the opt-in fast judge on the grade side per #187, though the grade
+  *default* stayed `claude-sonnet-4-6` after the #187 calibration gate).
 - **`max_output_tokens`** — Anthropic `max_tokens` ceiling. Must be
   positive (validator).
 - **`cache_ttl`** — `Literal["5m", "1h"]`. `"1h"` opts into the
@@ -724,11 +1160,12 @@ Field-by-field:
 - **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — see
   [§7 Retry taxonomy](#retry-taxonomy).
 - **`exclude_tests`** — list of dbt test types the drafter must not
-  propose (issue #54; extended to `custom_sql` in US-021 of #116).
-  Each entry must be one of the five `VALID_TEST_TYPES` — `not_null`,
-  `unique`, `accepted_values`, `relationships`, `custom_sql`; an
-  unknown value fails loud at config-load. Default `[]` (all five
-  allowed). When non-empty the system prompt's test catalogue +
+  propose (issue #54; extended to `custom_sql` in US-021 of #116;
+  extended to `row_count_between` in #169). Each entry must be one of
+  the six `VALID_TEST_TYPES` — `not_null`, `unique`, `accepted_values`,
+  `relationships`, `custom_sql`, `row_count_between`; an unknown value
+  fails loud at config-load. Default `[]` (all six allowed). When
+  non-empty the system prompt's test catalogue +
   `### SCOPE` line drop the excluded types (including `custom_sql`'s
   JSON-shape illustration) AND the parser rejects any defiant LLM
   output via `LLMOutputAnchorContractError`. Excluding every type is

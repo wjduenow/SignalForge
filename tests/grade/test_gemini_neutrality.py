@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     from signalforge.llm import AnthropicClientProtocol
 from signalforge.manifest.models import Column, Model
 from signalforge.prune.models import PruneResult
-from tests.grade.test_drift_detector import StrictGradeEvent
+from tests.grade.test_drift_detector import StrictGradeEventV3
 from tests.llm._fake_gemini import (
     FakeGeminiCandidate,
     FakeGeminiClient,
@@ -293,7 +293,7 @@ def test_grade_artifacts_drives_gemini_provider_end_to_end(
     #     extra="forbid" mirror. Catches a silent schema addition. ---
     for line in audit_path.read_text(encoding="utf-8").splitlines():
         if line.strip():
-            StrictGradeEvent.model_validate_json(line)
+            StrictGradeEventV3.model_validate_json(line)
 
     # --- Sidecar JSON: present + round-trips through GradingReport. ---
     assert sidecar_path.exists()
@@ -349,12 +349,23 @@ def test_grade_artifacts_safety_blocked_response_degrades_pair(
             returns=_gemini_response_with_json(payload),
         )
 
+    # Disable the #202 US-005 transient-recovery sweep for this test: it
+    # pins the MAIN-PASS degrade reasoning shape (issue #158 — the inner
+    # ``LLMResponseFormatError`` message survives). The always-on sweep
+    # would otherwise re-grade the transient safety-block degrade and
+    # overwrite the verdict; the sweep's own behaviour is covered by
+    # ``tests/grade/test_engine.py`` § US-005.
+    # require_complete=False: with the sweep disabled the safety-blocked
+    # transient pair stays degraded; the #202 US-006 completeness raise
+    # would otherwise fire before the degrade-reasoning assertions below.
+    config = _fast_config().model_copy(update={"sweep_max_rounds": 0, "require_complete": False})
+
     report = grade_artifacts(
         model,
         candidate,
         _empty_prune_result(model),
         rubric=rubric,
-        config=_fast_config(),
+        config=config,
         client=cast("AnthropicClientProtocol", fake_client),
         project_dir=project_dir,
         audit_path=audit_path,

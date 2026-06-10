@@ -180,6 +180,55 @@ def test_load_grade_config_unknown_field_in_inner_block_fails_loud(
         load_grade_config(tmp_path)
 
 
+# ----- Grade-cache master switch (#189 US-005 / DEC-016) -----
+
+
+def test_grade_config_cache_enabled_defaults_false() -> None:
+    """:attr:`GradeConfig.cache_enabled` defaults to ``False`` (#189 DEC-016; flipped by #197).
+
+    The grade cache is cross-invocation only and its key mixes the
+    drafted-artefact-text hash, so a full ``signalforge generate`` re-run
+    (live, non-deterministic drafter) misses on every pair — measured in
+    ``docs/research/179-runtime-benchmark.md``. Issue #197 flipped the
+    default to ``False`` so the common path stops writing hundreds of
+    never-hit ``.signalforge/grade-cache/*.json`` files. Operators on the
+    narrow cross-run paths where it DOES hit (pinned-candidate CI,
+    ``--no-grade`` draft-then-grade) opt in via
+    ``grade.cache_enabled: true``.
+    """
+    cfg = GradeConfig()
+    assert cfg.cache_enabled is False
+
+
+def test_grade_config_cache_enabled_accepts_explicit_false() -> None:
+    """An explicit ``cache_enabled=False`` parses cleanly (#189 DEC-016).
+
+    The engine surgery in US-006 reads this field at orchestrator entry to
+    short-circuit both lookup AND write — a regression here would silently
+    re-enable the cache on a run the operator asked to bypass it.
+    """
+    cfg = GradeConfig(cache_enabled=False)
+    assert cfg.cache_enabled is False
+
+
+def test_grade_config_typo_cache_enable_missing_d_fails_loud() -> None:
+    """``cache_enable`` (missing the trailing ``d``) MUST fail loud (#189 DEC-016).
+
+    ``GradeConfig`` is ``extra="forbid"`` — a typo on a security-adjacent
+    knob (silently leaving the cache enabled when the operator meant to
+    disable it) is exactly the silent-no-op failure mode the strict
+    validator exists to prevent.
+    """
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        # Deliberate typo: missing 'd' on the kwarg, exercising the
+        # ``extra="forbid"`` defence at runtime. The pyright suppression
+        # is load-bearing — without it, the test couldn't express the
+        # runtime contract.
+        GradeConfig(cache_enable=False)  # pyright: ignore[reportCallIssue]
+
+
 # ----- Defaults match DEC-023..DEC-027 verbatim -----
 
 
@@ -187,18 +236,45 @@ def test_grade_config_defaults_match_dec_023_to_027() -> None:
     """Regression guard: every locked default must match the plan. A
     drift here is a behaviour change masquerading as a refactor."""
     cfg = GradeConfig()
+    # #187 US-002 / DEC-004: ``model`` now defaults to the sentinel that
+    # resolves to the calling provider's default judge model. With the
+    # default provider (``anthropic``) that is ``claude-sonnet-4-6`` — the
+    # #187 calibration gate kept Sonnet the default (Haiku is opt-in).
     assert cfg.model == "claude-sonnet-4-6"
     assert cfg.cache_ttl == "1h"
-    assert cfg.max_output_tokens == 256
-    assert cfg.max_retries_429 == 3
+    # #187 DEC-004: raised from 256 to avoid one-line gemini-flash truncation.
+    assert cfg.max_output_tokens == 1024
+    # #202 US-008 / DEC-209: raised 3 -> 6 as belt-and-braces over the
+    # header-honoring rate limiter (the primary 429 fix).
+    assert cfg.max_retries_429 == 6
     assert cfg.max_retries_5xx == 1
     assert cfg.max_retries_conn == 1
-    assert cfg.total_budget_seconds == 300
+    # #198 DEC-001: total_budget_seconds is now an OPTIONAL absolute hard
+    # ceiling; None (the new default) routes the engine to the scaled formula.
+    assert cfg.total_budget_seconds is None
+    # #198 DEC-001: scaled-budget terms (always on).
+    assert cfg.budget_base_seconds == 60
+    assert cfg.budget_per_pair_seconds == 20.0
+    # #198 DEC-002: three opt-in soft ceilings, all default off (None).
+    assert cfg.max_grade_calls is None
+    assert cfg.max_grade_cost_usd is None
+    assert cfg.max_grade_tokens is None
+    assert cfg.max_concurrent_calls == 10
+    # #202 US-005/US-006: always-on sweep knobs + the fail-loud completeness
+    # contract. Pinned so default drift on the new #202 knobs fails loud here.
+    assert cfg.sweep_max_rounds == 3
+    assert cfg.sweep_cooldown_seconds == 2.0
+    assert cfg.sweep_budget_seconds == 300
+    assert cfg.require_complete is True
     assert cfg.min_pass_rate == 0.7
     assert cfg.min_mean_score == 0.5
     assert cfg.rubric is None
     assert cfg.fail_on_below_threshold is False
     assert cfg.provider == "anthropic"
+    # #189 DEC-016: grade-cache master switch. #197 flipped the default
+    # OFF — the cache is cross-invocation only and its artefact-text-keyed
+    # entries miss on every full `generate` re-run (live drafter).
+    assert cfg.cache_enabled is False
 
 
 # ----- Provider validator (issue #135 DEC-007) -----
@@ -268,6 +344,128 @@ def test_load_grade_config_unknown_provider_fails_loud(tmp_path: Path) -> None:
     assert "anthropic" in str(excinfo.value)
 
 
+# ----- Per-provider fast-model resolution (#187 US-002 / DEC-004) -----
+
+
+def test_grade_config_model_resolves_anthropic_default() -> None:
+    """The sentinel ``model=None`` (default) resolves to the anthropic
+    default judge model (``claude-sonnet-4-6``) via
+    :data:`PROVIDER_DEFAULT_MODELS`. Haiku is an explicit opt-in — the
+    #187 calibration gate found it grades stricter than Sonnet."""
+    assert GradeConfig().model == "claude-sonnet-4-6"
+
+
+def test_grade_config_model_resolves_openai_fast_default() -> None:
+    """With ``provider="openai"`` and no explicit model, resolution
+    yields the openai fast model."""
+    assert GradeConfig(provider="openai").model == "gpt-4o-mini"
+
+
+def test_grade_config_model_resolves_gemini_fast_default() -> None:
+    """With ``provider="gemini"`` and no explicit model, resolution
+    yields the gemini fast model."""
+    assert GradeConfig(provider="gemini").model == "gemini-2.5-flash"
+
+
+def test_grade_config_explicit_model_is_honoured_over_default() -> None:
+    """An explicit ``model:`` always wins over the per-provider default."""
+    assert GradeConfig(model="claude-sonnet-4-6").model == "claude-sonnet-4-6"
+
+
+def test_grade_config_resolved_model_is_never_none() -> None:
+    """After construction on the happy path, ``model`` is a concrete
+    string — the sentinel never leaks out."""
+    cfg = GradeConfig()
+    assert isinstance(cfg.model, str)
+    assert cfg.model.strip() != ""
+
+
+def test_grade_config_unknown_provider_not_masked_by_resolution() -> None:
+    """An unknown provider must still raise the typed provider error —
+    the model-resolution before-validator declines to inject (the
+    provider isn't in the fast-model table) so the provider
+    field-validator surfaces :class:`UnknownProviderError` rather than a
+    masked ``KeyError`` (#187 US-002 / DEC-004)."""
+    from signalforge.llm.errors import UnknownProviderError
+
+    with pytest.raises(UnknownProviderError) as excinfo:
+        GradeConfig(provider="bogus")
+    assert excinfo.value.name == "bogus"
+
+
+# ----- Model<->provider compatibility validator (#187 US-002 / DEC-006) -----
+
+
+def test_grade_config_provider_model_mismatch_rejected() -> None:
+    """A ``claude-`` model under ``provider="openai"`` is an operator
+    mistake — reject at config-load via the SKU-prefix compat check."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(provider="openai", model="claude-sonnet-4-6")
+
+
+def test_grade_config_provider_model_match_accepted() -> None:
+    """A ``gpt-`` model under ``provider="openai"`` passes the compat
+    check (the prefix matches the provider)."""
+    cfg = GradeConfig(provider="openai", model="gpt-4o")
+    assert cfg.provider == "openai"
+    assert cfg.model == "gpt-4o"
+
+
+def test_grade_config_whitespace_model_still_rejected() -> None:
+    """A whitespace-only explicit model must still trip the non-empty
+    guard — the sentinel resolution does not relax that defence."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(model="   ")
+
+
+def test_grade_config_max_output_tokens_default_is_1024() -> None:
+    """#187 DEC-004: the per-criterion cap default is raised to 1024."""
+    assert GradeConfig().max_output_tokens == 1024
+
+
+# ----- load_grade_config fast-model resolution + compat (#187 US-002) -----
+
+
+def test_load_grade_config_block_without_model_resolves_fast_model(
+    tmp_path: Path,
+) -> None:
+    """A ``grade:`` block that omits ``model:`` resolves the provider's
+    fast model at load time."""
+    (tmp_path / "signalforge.yml").write_text(
+        "grade:\n  provider: openai\n",
+        encoding="utf-8",
+    )
+    cfg = load_grade_config(tmp_path)
+    assert cfg.provider == "openai"
+    assert cfg.model == "gpt-4o-mini"
+
+
+def test_load_grade_config_block_with_model_honours_it(tmp_path: Path) -> None:
+    """An explicit ``model:`` in the ``grade:`` block is honoured."""
+    (tmp_path / "signalforge.yml").write_text(
+        "grade:\n  model: claude-sonnet-4-6\n",
+        encoding="utf-8",
+    )
+    cfg = load_grade_config(tmp_path)
+    assert cfg.model == "claude-sonnet-4-6"
+
+
+def test_load_grade_config_provider_model_mismatch_raises(tmp_path: Path) -> None:
+    """A mismatched provider/model in ``signalforge.yml`` surfaces as
+    :class:`GradeConfigError` at the loader boundary (the underlying
+    ``ValidationError`` is wrapped)."""
+    (tmp_path / "signalforge.yml").write_text(
+        "grade:\n  provider: openai\n  model: claude-sonnet-4-6\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GradeConfigError):
+        load_grade_config(tmp_path)
+
+
 # ----- Numeric validators -----
 
 
@@ -310,7 +508,8 @@ def test_grade_config_max_output_tokens_negative_rejected(tmp_path: Path) -> Non
 
 def test_grade_config_total_budget_seconds_zero_rejected(tmp_path: Path) -> None:
     """A zero total budget would route every criterion to the degraded
-    path before any LLM call; refuse at config-load time."""
+    path before any LLM call; refuse at config-load time. (#198 DEC-001:
+    the field is now optional, but a *present* value must still be positive.)"""
     config_path = tmp_path / "signalforge.yml"
     config_path.write_text(
         "grade:\n  total_budget_seconds: 0\n",
@@ -318,6 +517,144 @@ def test_grade_config_total_budget_seconds_zero_rejected(tmp_path: Path) -> None
     )
     with pytest.raises(GradeConfigError):
         load_grade_config(tmp_path)
+
+
+# ----- #198 DEC-001/DEC-002: scaled-budget + soft-ceiling validators -----
+
+
+def test_grade_config_total_budget_seconds_none_accepted() -> None:
+    """#198 DEC-001: ``None`` is the new default and means "use the scaled
+    formula" — the allow-None-or-positive validator passes it through."""
+    cfg = GradeConfig(total_budget_seconds=None)
+    assert cfg.total_budget_seconds is None
+
+
+def test_grade_config_total_budget_seconds_explicit_int_accepted() -> None:
+    """#198 DEC-001: an explicit int still validates — it acts as an absolute
+    hard cap (``min(scaled, total_budget_seconds)``), preserving v0.1 pinned
+    configs."""
+    cfg = GradeConfig(total_budget_seconds=600)
+    assert cfg.total_budget_seconds == 600
+
+
+def test_grade_config_budget_base_seconds_zero_rejected() -> None:
+    """#198 DEC-001: ``budget_base_seconds`` is an always-on scaled-budget
+    term; a non-positive value would size the wall-clock backstop to ~0 and
+    degrade every pair. Fail loud."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(budget_base_seconds=0)
+
+
+def test_grade_config_budget_per_pair_seconds_zero_rejected() -> None:
+    """#198 DEC-001: ``budget_per_pair_seconds`` must be positive (the
+    per-wave wall allowance can't be zero)."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(budget_per_pair_seconds=0.0)
+
+
+def test_grade_config_budget_per_pair_seconds_negative_rejected() -> None:
+    """#198 DEC-001: a negative per-wave allowance is rejected."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(budget_per_pair_seconds=-1.0)
+
+
+def test_grade_config_max_grade_calls_zero_rejected() -> None:
+    """#198 DEC-002: the opt-in soft ceilings accept ``None`` but reject a
+    present ``<= 0`` value (a zero ceiling would trip immediately and degrade
+    the whole run)."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(max_grade_calls=0)
+
+
+def test_grade_config_max_grade_cost_usd_zero_rejected() -> None:
+    """#198 DEC-002: a present ``max_grade_cost_usd`` must be positive."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(max_grade_cost_usd=0.0)
+
+
+def test_grade_config_max_grade_tokens_zero_rejected() -> None:
+    """#198 DEC-002: a present ``max_grade_tokens`` must be positive."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(max_grade_tokens=0)
+
+
+def test_grade_config_optional_positive_fields_reject_negative() -> None:
+    """#198 DEC-001/002: the optional-positive validator rejects a present
+    NEGATIVE value (not just zero) for every field it guards. Zero-rejection
+    alone would still pass if a future refactor slipped from ``<= 0`` to
+    ``== 0``/``!= 0`` while letting negatives through; pin negatives too."""
+    from pydantic import ValidationError
+
+    for kwargs in (
+        {"total_budget_seconds": -1},
+        {"budget_base_seconds": -1},
+        {"max_grade_calls": -1},
+        {"max_grade_cost_usd": -0.01},
+        {"max_grade_tokens": -1},
+    ):
+        with pytest.raises(ValidationError):
+            GradeConfig(**kwargs)  # pyright: ignore[reportArgumentType]
+
+
+def test_grade_config_float_fields_reject_non_finite() -> None:
+    """#198 (PR review): the float-bearing knobs reject NaN / +/-inf.
+
+    ``yaml.safe_load`` parses ``.nan`` / ``.inf``, and Pydantic floats allow
+    them by default. ``nan <= 0`` / ``inf <= 0`` are both ``False``, so without
+    an explicit finiteness guard a NaN ``budget_per_pair_seconds`` would slip
+    through and later crash ``math.ceil(nan)`` in ``_compute_effective_budget``;
+    ``max_grade_cost_usd: .inf`` would silently make the cost ceiling a no-op."""
+    from pydantic import ValidationError
+
+    for kwargs in (
+        {"budget_per_pair_seconds": float("nan")},
+        {"budget_per_pair_seconds": float("inf")},
+        {"budget_per_pair_seconds": float("-inf")},
+        {"max_grade_cost_usd": float("nan")},
+        {"max_grade_cost_usd": float("inf")},
+    ):
+        with pytest.raises(ValidationError):
+            GradeConfig(**kwargs)  # pyright: ignore[reportArgumentType]
+
+
+def test_grade_config_soft_ceilings_accept_none() -> None:
+    """#198 DEC-002: all three opt-in soft ceilings accept ``None`` (off) —
+    the explicit-None path mirrors the default."""
+    cfg = GradeConfig(max_grade_calls=None, max_grade_cost_usd=None, max_grade_tokens=None)
+    assert cfg.max_grade_calls is None
+    assert cfg.max_grade_cost_usd is None
+    assert cfg.max_grade_tokens is None
+
+
+def test_grade_config_soft_ceilings_accept_positive() -> None:
+    """#198 DEC-002: a present positive value for each soft ceiling
+    validates."""
+    cfg = GradeConfig(max_grade_calls=50, max_grade_cost_usd=1.25, max_grade_tokens=500_000)
+    assert cfg.max_grade_calls == 50
+    assert cfg.max_grade_cost_usd == 1.25
+    assert cfg.max_grade_tokens == 500_000
+
+
+def test_grade_config_typo_max_grade_cal_fails_loud() -> None:
+    """#198 / safety-layer.md DEC-015: ``extra="forbid"`` still rejects a typo
+    on a new ceiling key (``max_grade_cal`` missing ``ls``) rather than
+    silently leaving the ceiling off."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        GradeConfig(max_grade_cal=5)  # pyright: ignore[reportCallIssue]
 
 
 def test_grade_config_max_retries_negative_rejected(tmp_path: Path) -> None:
@@ -469,8 +806,12 @@ def test_load_grade_config_explicit_path_takes_precedence(tmp_path: Path) -> Non
 
 
 def test_load_grade_config_doc_example_round_trips(tmp_path: Path) -> None:
-    """The example YAML in docs/grade-ops.md round-trips through
-    load_grade_config without errors."""
+    """The committed example fixture (tests/fixtures/grade/example_config.yml)
+    round-trips through load_grade_config without errors. The fixture pins
+    EXPLICIT model/token values (not the #187 resolved defaults) to exercise
+    the explicit-override path — `claude-sonnet-4-6` under the default
+    `anthropic` provider is accepted by the model↔provider compat validator
+    (matching `claude-` prefix)."""
     fixture = Path(__file__).parent.parent / "fixtures" / "grade" / "example_config.yml"
     target = tmp_path / "signalforge.yml"
     target.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
@@ -483,6 +824,15 @@ def test_load_grade_config_doc_example_round_trips(tmp_path: Path) -> None:
     assert config.min_pass_rate == 0.7
     assert config.min_mean_score == 0.5
     assert config.fail_on_below_threshold is False
+    # #198: the fixture carries the two always-on scaled-budget terms; pin
+    # fixture<->loader parity explicitly (a fixture typo that happened to match
+    # another valid key would otherwise pass via the defaults test alone). The
+    # three opt-in ceilings are commented out in the fixture, so they load None.
+    assert config.budget_base_seconds == 60
+    assert config.budget_per_pair_seconds == 20.0
+    assert config.max_grade_calls is None
+    assert config.max_grade_cost_usd is None
+    assert config.max_grade_tokens is None
 
 
 def test_load_grade_config_full_well_formed_block(tmp_path: Path) -> None:
@@ -515,3 +865,75 @@ def test_load_grade_config_full_well_formed_block(tmp_path: Path) -> None:
     assert cfg.min_mean_score == 0.6
     assert cfg.fail_on_below_threshold is True
     assert cfg.rubric is None
+
+
+# ----- max_concurrent_calls range validator (issue #186 DEC-003) -----
+
+
+def test_grade_config_max_concurrent_calls_default_is_ten() -> None:
+    """Default ``max_concurrent_calls`` matches DEC-003 of #186."""
+    assert GradeConfig().max_concurrent_calls == 10
+
+
+def test_grade_config_max_concurrent_calls_field_range_lower_bound_accepted() -> None:
+    """``max_concurrent_calls=1`` is the v0.1-sequential-equivalent
+    floor and must validate."""
+    cfg = GradeConfig(max_concurrent_calls=1)
+    assert cfg.max_concurrent_calls == 1
+
+
+def test_grade_config_max_concurrent_calls_field_range_upper_bound_accepted() -> None:
+    """``max_concurrent_calls=100`` is the documented ceiling and must
+    validate (closed interval [1, 100])."""
+    cfg = GradeConfig(max_concurrent_calls=100)
+    assert cfg.max_concurrent_calls == 100
+
+
+def test_grade_config_max_concurrent_calls_zero_rejected() -> None:
+    """``max_concurrent_calls=0`` would dispatch nothing (semaphore
+    acquire deadlock); reject loud."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as excinfo:
+        GradeConfig(max_concurrent_calls=0)
+    # The message is locked verbatim by DEC-003 of #186.
+    assert "must be in the closed interval [1, 100]" in str(excinfo.value)
+
+
+def test_grade_config_max_concurrent_calls_above_ceiling_rejected() -> None:
+    """``max_concurrent_calls=101`` exceeds the documented ceiling and
+    must fail loud rather than silently invite rate-limit storms."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as excinfo:
+        GradeConfig(max_concurrent_calls=101)
+    assert "must be in the closed interval [1, 100]" in str(excinfo.value)
+
+
+def test_load_grade_config_max_concurrent_calls_out_of_range_wraps_as_grade_config_error(
+    tmp_path: Path,
+) -> None:
+    """Out-of-range values supplied via ``signalforge.yml`` route through
+    :func:`load_grade_config` and wrap as :class:`GradeConfigError`
+    (the standard loader-side wrapping; mirrors every other numeric
+    validator's loader-side test)."""
+    config_path = tmp_path / "signalforge.yml"
+    config_path.write_text(
+        "grade:\n  max_concurrent_calls: 0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GradeConfigError):
+        load_grade_config(tmp_path)
+
+
+def test_load_grade_config_max_concurrent_calls_round_trips_from_yaml(
+    tmp_path: Path,
+) -> None:
+    """A valid in-range override round-trips through the loader."""
+    config_path = tmp_path / "signalforge.yml"
+    config_path.write_text(
+        "grade:\n  max_concurrent_calls: 25\n",
+        encoding="utf-8",
+    )
+    cfg = load_grade_config(tmp_path)
+    assert cfg.max_concurrent_calls == 25

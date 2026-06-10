@@ -57,7 +57,7 @@ After install, the `signalforge` console script is registered via
 
 ## Subcommands
 
-The CLI exposes six subcommands: `generate`, `init-demo`,
+The CLI exposes seven subcommands: `cache`, `generate`, `init-demo`,
 `install-skill`, `lint`, `prune-existing`, `version`. `signalforge
 --help` prints the top-level help; each subcommand has its own
 `--help` page (e.g. `signalforge generate --help`).
@@ -73,6 +73,17 @@ the survivors, and render a diff against any existing `schema.yml`.
 > regardless of `safety.mode`. To skip the prune layer entirely, set
 > `prune.enabled: false` in `signalforge.yml` (see
 > [`docs/prune-ops.md`](prune-ops.md#configuration-signalforgeyml-prune-block)).
+
+> **Prerequisite — column-level tests need a `schema.yml`.** Column-level
+> tests (`not_null`, `unique`, `accepted_values`, per-column docs) are
+> drafted from the columns dbt records on the model, which it reads from
+> your schema `.yml` files. A model with no `schema.yml` (no `columns:`
+> list) yields only model-level variants (`row_count_between`, …) — so a
+> `generate` run that scores far fewer artifacts than expected usually
+> means the target model declares no columns. Scaffold a schema file with
+> [`dbt-codegen`](https://github.com/dbt-labs/dbt-codegen)'s
+> `generate_model_yaml` or by hand, then re-run `dbt parse`. Full how-to:
+> [`docs/manifest-loader-ops.md` § Column metadata](manifest-loader-ops.md#column-metadata-schema-files-are-the-prerequisite-for-column-level-tests).
 
 Positional argument:
 
@@ -152,6 +163,33 @@ Runtime knob flags:
   flag does not change the kept/dropped/flagged counts in the diff
   table — it only changes the aggregate verdict and (opt-in) exit
   code. Out-of-range values exit 2.
+- `--require-complete` / `--no-require-complete` — Override
+  `grade.require_complete` (default: from config, which itself
+  defaults to `true`). When armed, the grade engine raises
+  `GradeIncompleteError` (tier 2, **exit 2**) if any non-exempt
+  `(artifact, criterion)` pair is still ungraded (`score=None`)
+  after the always-on bounded transient-recovery sweep — the raise
+  lands AFTER the fail-closed `grade.json` sidecar write so the
+  operator has a complete corpus on disk for diagnosis. **Exempt**
+  (never trip): `"ceiling"` degrades (an explicit `max_grade_*`
+  opt-in the operator chose) and `"budget"` degrades when
+  `total_budget_seconds` was set **explicitly** (a deliberate
+  operator time-ceiling). **Trip**: `"transient"` degrades that
+  survived the sweep (an unrecovered LLM/network failure) and
+  default-scaled-budget overruns (`total_budget_seconds` unset — a
+  Stage-1 sizing canary). Precedence: explicit flag >
+  `grade.require_complete` in `signalforge.yml` > library default
+  (`true`). The `--no-require-complete` form reverts to the
+  report-only posture (ungraded pairs surface via
+  `aggregate_complete=false`). The flag uses an unset sentinel
+  (`default=None`): a bare run **never clobbers** a
+  `grade.require_complete: false` set in `signalforge.yml` with a
+  CLI default — only an explicit `--require-complete` /
+  `--no-require-complete` overrides the config value. Applied via
+  `GradeConfig.model_validate(...)` so validators re-run on the
+  override (mirrors `--min-score` and the prune `--scope` overlay).
+  See [Grade-completeness behaviour](#grade-completeness-behaviour)
+  for the stderr shape (DEC-208 of issue #202).
 - `--write` — Write the proposed `schema.yml` to disk under
   `<project_dir>/<model_dir>/schema.yml`. **Additionally** writes
   each proposed singular `.sql` business-rule test to its
@@ -228,6 +266,27 @@ Runtime knob flags:
   ANSI: coloured terminal output (default). Markdown:
   GitHub-friendly report. JSON: stdout receives the JSON
   sidecar's contents.
+- `--cache-scope {per-model,project}` — Override the prompt-cache
+  prefix scope for the drafter (default: from config, which itself
+  defaults to `per-model`). Precedence: explicit `--cache-scope`
+  flag > `llm.cache_scope` in `signalforge.yml` (when non-default)
+  > auto-promote. A `--select` batch matching ≥ 2 models
+  auto-promotes the per-model `DraftConfig` overlay to `project`
+  unless the operator has pinned a scope (DEC-002 / DEC-003 of
+  issue #188). Under `project` scope the drafter renders a
+  byte-identical project-level cached prefix shared across every
+  model in the batch: `cache_creation` is paid once on the first
+  model, and the ≈12× cheaper `cache_read` applies on models
+  2..N. Pass `--cache-scope per-model` to opt a multi-model batch
+  back out of project scope; pass `--cache-scope project` to force
+  it on a single-model run. Single-model positional runs default
+  to `per-model` and never auto-promote (preserving the existing
+  cache-stability snapshot byte-for-byte). Applied via
+  `DraftConfig.model_validate(...)` so validators re-run on the
+  override (mirrors `--mode`'s `SafetyPolicy.with_mode` and the
+  prune `--scope` / `--sample-strategy` overlay). Argparse rejects
+  unknown values → exit 2. See [Running across many
+  models](#running-across-many-models) for the batch cost model.
 - `--scope {sample,full}` — Override `prune.scope`
   (default: from config). `sample`: tests run against a
   100k-row deterministic sample. `full`: tests run against
@@ -243,6 +302,32 @@ Runtime knob flags:
   tables). Per-run override; the config-file value is the
   durable default. (DEC-011 of issue #22; see
   `docs/prune-ops.md` cost model section.)
+- `--as-of YYYY-MM-DD` — Evaluation date for the time-bound
+  `row_count_anomaly_by_period` test variant (issue #171 /
+  DEC-001). Drives both the partition-filter literal in the
+  compiled SQL (`<date_column> >= <as_of> - INTERVAL
+  <lookback_periods> <period>`) AND the "most-recent period"
+  bucket whose row count the engine compares against the
+  predicted band. When omitted, the prune engine resolves to
+  `date.today()` at prune time and emits one INFO log line
+  naming the resolved value (`as_of resolved to YYYY-MM-DD`),
+  then stamps the resolved value on every `PruneEvent.as_of`
+  audit record for after-the-fact reproducibility — re-run
+  with `--as-of <recorded value>` to reproduce the prior
+  decision. The same value applies to every model in a
+  multi-model `--select` batch (resolved once at the
+  orchestrator). Strict ISO parsing via `date.fromisoformat`;
+  a bad format like `not-a-date` raises argparse's usage
+  error → exit 2 (tier 2, input-validation). Inert when no
+  `row_count_anomaly_by_period` candidate is in play. The
+  flag is the **only** way to restore reproducibility on this
+  variant — every other primitive satisfies "same SQL + same
+  warehouse data → same prune decision" (Architectural
+  Commitment #5); `row_count_anomaly_by_period` is the
+  carve-out, and `--as-of` restores reproducibility at the
+  `(model, as_of)` granularity. See
+  [`docs/prune-ops.md` § `row_count_anomaly_by_period`](prune-ops.md#row_count_anomaly_by_period)
+  for the variant's full evaluation contract.
 
 Observability flags:
 
@@ -537,6 +622,7 @@ Flag reference:
 | `--tests-dir PATH` | no | `<project_dir>/tests` | Override the singular-test directory enumerated for model-level `tests/*.sql` files (US-014). Each `.sql` referencing this model is pruned alongside the schema.yml tests; unrelated files are ignored. The **default** directory is optional — when absent only the schema.yml tests are pruned; an **explicit** `--tests-dir` pointing at a missing directory fails loud (`IngestSchemaNotFoundError`). |
 | `--scope {sample,full}` | no | from config | Override `prune.scope`. Applied via `PruneConfig.model_validate` so validators re-run (DEC-002). |
 | `--sample-strategy {oneshot,materialised}` | no | from config | Override `prune.sample_strategy`. Applied via `PruneConfig.model_validate` (DEC-002). |
+| `--as-of YYYY-MM-DD` | no | resolves to `date.today()` at prune time | Evaluation date for the time-bound `row_count_anomaly_by_period` test variant (issue #171 / DEC-001). Drives both the partition-filter literal and the "most-recent period" bucket the engine evaluates against the predicted band. When omitted, the engine resolves to `date.today()` and emits one INFO log line naming the resolved value; the resolved value lands on every `PruneEvent.as_of` audit record for after-the-fact reproducibility (re-run with `--as-of <recorded value>` to reproduce). Threaded to `prune_tests` as the `as_of` kwarg. Strict ISO parsing via `date.fromisoformat`; a bad format → argparse usage error (exit 2, tier 2 input-validation). Inert when no `row_count_anomaly_by_period` candidate is in play. See [`docs/prune-ops.md` § `row_count_anomaly_by_period`](prune-ops.md#row_count_anomaly_by_period). |
 | `--format {ansi,markdown,json}` | no | `ansi` | Select the diff renderer. ANSI: coloured terminal output. Markdown: GitHub-friendly report. JSON: stdout receives the JSON sidecar's contents. |
 | `--dry-run` | no | off | Run ingest → prune → diff and print the diff to stdout, suppressing the default-on `.signalforge/diff.json` sidecar. The fail-closed `.signalforge/prune.jsonl` audit is **still written** (every prune run leaves a durable receipt — the cross-stage fail-closed invariant; mirrors `generate`). There is **no `--write`** (read-only w.r.t. your `schema.yml`). |
 | `--quiet` | no | off | Suppress per-stage stderr progress lines and the skipped-test report, and raise the log level to `WARNING`. Mutually exclusive with `--verbose`. |
@@ -685,6 +771,47 @@ surfaces share one source of truth (`signalforge.__version__` in
 `src/signalforge/__init__.py`); the flag uses argparse's
 `action="version"`, the subcommand prints directly.
 
+### `signalforge cache clear --grade`
+
+Remove the persistent grade cache at
+`<project_dir>/.signalforge/grade-cache/` recursively. Operator handle
+for "I edited the rubric / swapped grader provider / want to force
+re-grade on the next run" — the cache is content-addressed but
+removing it is the explicit purge.
+
+Positional / flag table:
+
+- `clear` — the only sub-action today; required.
+- `--grade` — required; names the cache to clear. (Forward-compat:
+  future siblings like `--drafter` will share the `clear` sub-action
+  via a mutex group.)
+- `--project-dir PATH` — absolute assertion that `PATH/dbt_project.yml`
+  exists. When supplied, the CLI does NOT walk up. Default: walk up
+  from the current working directory.
+
+Output: on success, one INFO line to stderr via the lazy-format JSON
+logger naming the resolved path; stdout is silent. The idempotent
+missing-dir case emits the same INFO shape with the same path —
+operators running it in a CI script can rely on exit 0 for both.
+
+Exit codes (per the four-tier taxonomy):
+
+- `0` — cache cleared OR was already absent (idempotent).
+- `1` — `GradeCachePathError` (symlink escape — the cache path
+  canonicalises outside the project tree OR outside the
+  `.signalforge/grade-cache` suffix) or `CliPathError`
+  (`--project-dir` does not contain `dbt_project.yml`). Tier 1.
+
+There is no `--confirm` flag (DEC-015) — the destructive scope is
+bounded by `.signalforge/grade-cache/` and the operator typed
+`--grade` explicitly. `rm -rf .signalforge/grade-cache` remains a
+manual escape hatch.
+
+The nested-subparser shape (`cache` + `clear` + `--grade`) is a
+documented deviation from `cli-layer.md` § "Subpackage layout — flat,
+per-subcommand modules" justified by forward-compat for a future
+`cache stats` / `cache list` family.
+
 ## Project-root discovery
 
 The CLI resolves the dbt project root before any pipeline work
@@ -742,7 +869,7 @@ canonical statement of the rule.
 | --- | --- | --- | --- |
 | `0` | success | Artifact written / printed; pipeline completed cleanly. | Happy path. |
 | `1` | load | Configuration / path / manifest / system not in a coherent state to start work. | `ManifestNotFoundError`, `ProfileNotFoundError`, `ConfigNotFoundError`, `DraftConfigInvalidError`, `DiffError`, `CliPathError`, the panic-path catch for unexpected exceptions. |
-| `2` | input | Caller-supplied data is wrong, OR a post-call invariant failed. | `ModelNotFoundError`, `LLMOutputAnchorContractError`, `TableNotFoundError` (DEC-012 — the model's table reference is wrong), `GradeBelowThresholdError` (DEC-011), `DiffCandidateModelMismatchError`, `CliInputError`. |
+| `2` | input | Caller-supplied data is wrong, OR a post-call invariant failed. | `ModelNotFoundError`, `LLMOutputAnchorContractError`, `TableNotFoundError` (DEC-012 — the model's table reference is wrong), `GradeBelowThresholdError` (DEC-011), `GradeIncompleteError` (DEC-208 of issue #202 — a non-exempt grade pair stayed ungraded after the bounded sweep with `grade.require_complete` armed), `DiffCandidateModelMismatchError`, `CliInputError`. |
 | `3` | API | External dependency unavailable. | `LLMRateLimitError`, `LLMAuthError`, `LLMServerError`, `WarehouseAuthError`, `BytesBilledExceededError`, `GradeLLMError`, `GradeAuditWriteError`, every fail-closed audit-write durability error. |
 
 Do NOT invent a fifth category. Do NOT collapse categories 2 and 3
@@ -907,6 +1034,36 @@ second fires when the existing file does NOT carry the marker
 named file is left untouched. New files (no existing target) write
 silently.
 
+### Grade cache write WARNING (issue #189 DEC-005)
+
+Source: `signalforge.grade.cache.write_cache` under any of four
+fail-soft conditions. The cache is derived/optional state; failures
+emit one WARNING and the live grade proceeds — the next run
+re-grades and re-attempts the write.
+
+Four single-line lazy-format JSON shapes:
+
+```text
+grade cache write skipped (oversize): {"key": "...", "size": 21042, "limit": 16000, "error_class": "GradeCacheRecordTooLargeError"}
+grade cache write failed (mkdir): {"key": "...", "error_class": "PermissionError", "errno": 13}
+grade cache write failed (open): {"key": "...", "error_class": "OSError", "errno": 28}
+grade cache write failed (write/fsync): {"key": "...", "error_class": "OSError", "errno": 28}
+```
+
+The first names the 16 KB record cap (DEC-006 — pre-write check, no
+on-disk artefact). The other three name the failing seam (`mkdir`,
+`os.open`, or `os.write`/`os.fsync`); the partial-file unlink
+cleanup runs after a mid-write failure so the next run sees a clean
+miss rather than a truncated entry.
+
+Recurrent WARNINGs (e.g. every run) → disk full / permission /
+read-only filesystem. Operator handles: set
+`grade.cache_enabled: false` in `signalforge.yml` to opt out of the
+cache entirely, OR `signalforge cache clear --grade` to wipe a
+corrupt/stale tree, OR `rm -rf .signalforge/grade-cache/` for the
+manual escape. The run still exits `0` — the cache is a
+performance optimisation, not a correctness gate.
+
 ## Threshold-fail behaviour
 
 By default, a below-threshold rubric is reported (the diff renderer
@@ -945,6 +1102,55 @@ renderer's `flagged` tier is driven by per-criterion
 aggregate threshold. Operators can have any combination of the three
 signals (per-criterion pass/fail in the diff, aggregate pass/fail in
 the report, exit-code consequence) without the others.
+
+## Grade-completeness behaviour
+
+The grade-completeness contract is a **structural** invariant, distinct
+from (and checked BEFORE) the verdictual threshold-fail check above.
+It operationalises the library's **bias-to-completion posture** (#202
+DEC-210): the grader drives **every pair to a score by default**, and a
+`<100%` result is legitimate ONLY when the operator intentionally limited
+cost/time (an explicit `max_grade_*` ceiling or an explicitly-set
+`total_budget_seconds`) — see
+[`docs/grade-ops.md` § Bias-to-completion posture](grade-ops.md#bias-to-completion-posture-grade-completeness)
+for the full taxonomy. After the always-on bounded transient-recovery
+sweep (issue #202 US-005), `grade_artifacts(...)` raises
+`GradeIncompleteError` if any non-exempt `(artifact, criterion)` pair is
+still ungraded (`score=None`) AND `grade.require_complete` is armed
+(`true`, the default). The CLI catches the typed error and exits **2** (input /
+invariant tier — DEC-208 of issue #202). The raise lands AFTER the
+fail-closed `grade.json` sidecar write so the complete corpus is on
+disk for diagnosis (mirrors the `GradeBelowThresholdError` ordering
+invariant), and BEFORE the `fail_on_below_threshold` check — incomplete
+is structural, below-threshold is verdictual.
+
+The trip / exempt matrix branches on each pair's
+`GradingResult.degrade_reason_type` discriminator (never on message
+text):
+
+- `"transient"` → **always trips**. A transient pair that survived the
+  sweep is an unrecovered LLM/network failure.
+- `"budget"` + `total_budget_seconds` unset (the default-scaled-budget
+  formula) → **trips**. A default-scaled-budget overrun is a Stage-1
+  sizing canary — the budget was sized for the work.
+- **Exempt** (never trip): `"ceiling"` degrades (an explicit
+  `max_grade_*` opt-in the operator chose); and `"budget"` degrades
+  when `total_budget_seconds` was set **explicitly** (a deliberate
+  operator time-ceiling — the curtailed run is the contract).
+
+The `--require-complete` / `--no-require-complete` CLI flag overrides
+`grade.require_complete` per-run, with the no-clobber sentinel
+semantics in the flag reference above (a bare run never re-arms a
+`grade.require_complete: false` set in `signalforge.yml`).
+
+Stderr shape (single-line tier-2 message; the still-ungraded pairs are
+named in the message itself, first ~20 then a bounded `… and N more`
+tail — the full list lives in the per-pair `grade.jsonl` audit):
+
+```text
+ERROR: Grade run incomplete: 2 non-exempt pairs remained ungraded (score=None) after the bounded sweep: ('orders.amount', 'accuracy'), ('orders.status', 'completeness') (aggregate_complete=False).
+  ↳ Remediation: ... re-run after the upstream issue clears, raise `grade.sweep_max_rounds` / widen the budget, or set `grade.require_complete: false` to revert to report-only posture ...
+```
 
 ## Environment variables
 
@@ -1016,6 +1222,12 @@ Non-TTY runs (piped, redirected, CI logs) emit no progress lines by
 default. `--quiet` suppresses regardless of TTY; `--verbose` forces
 progress on regardless of TTY (the operator explicitly opted in).
 
+When `--no-grade` is set, progress honestly re-numbers to `[N/4]`
+(no `[X/5] grade: skipped` line — the pipeline is genuinely four
+stages: safety, draft, prune, diff). See [Skip grading for fast
+iteration (`--no-grade`)](#skip-grading-for-fast-iteration---no-grade)
+for the cookbook entry.
+
 The `<fact>` field on each entry line is computed from objects
 already in scope (model id, candidate test count,
 `kept_count × criteria_count`) so the operator sees the size of the
@@ -1076,6 +1288,135 @@ the gated maintainer-only test that exercises the same flow lives
 at `tests/cli/test_e2e_bigquery_smoke.py` (run via
 `pytest -m e2e --no-cov`).
 
+## Skip grading for fast iteration (`--no-grade`)
+
+`signalforge generate <model> --no-grade` skips the grade stage
+entirely. Drafter + safety + prune + diff still run; the diff
+renders kept / kept-uncertain / dropped rows with no `flagged` tier
+(because grading never ran, so there's no per-criterion verdict to
+fall short of the rubric). The LLM judge is **not** invoked — zero
+grader API calls, zero grader tokens, zero `grade.jsonl` audit
+lines, no `grade.json` sidecar.
+
+```bash
+signalforge generate models/marts/customers.sql --no-grade
+```
+
+Reach for `--no-grade` when you're iterating on the drafter prompt,
+the prune scope, or the safety policy and the grader's signal would
+just slow the feedback loop. The flag composes with every other
+`generate` flag (`--write`, `--dry-run`, `--mode sample`,
+`--estimate`, `--select`); there is no mutex with anything.
+
+**Caveat for `--estimate` (#189 QG Pass 4 Finding 3):** the cost
+preview still projects the grade-stage tokens even when
+`--no-grade` is set — the estimate engine doesn't yet branch on the
+flag. The live run correctly skips grade calls (cost = zero); the
+preview overstates by the grade-stage figure. Track the live cost
+via the cost-rollup helper post-run; the preview is a calibration
+signal, not a billing guarantee. Future polish.
+
+Per DEC-003 of #189, the progress UX honestly re-numbers to four
+stages while `--no-grade` is set:
+
+```text
+[1/4] safety: ...
+[2/4] draft: ...
+[3/4] prune: ...
+[4/4] diff: ...
+```
+
+No `[X/5] grade: skipped` line — the pipeline is genuinely four
+stages here. (DEC-001 of #189 locks the flag's grammar.)
+
+## Bypass the grade cache for one run (`--no-cache`)
+
+`signalforge generate <model> --no-cache` bypasses the persistent
+grade cache for one invocation. Both the cache **read** (no lookup
+into `.signalforge/grade-cache/`) and the cache **write** (no new
+entries) are skipped; every `(artefact, criterion)` pair routes
+through the live LLM judge call. Existing cache files on disk are
+**not** deleted — `--no-cache` is a per-run bypass, not a wipe.
+
+```bash
+signalforge generate models/marts/customers.sql --no-cache
+```
+
+Reach for `--no-cache` when:
+
+- You're debugging a grader-emitted verdict and want to confirm the
+  current rubric / model / artefact set actually produces that
+  score, not a stale replay from an earlier run.
+- You manually edited a fixture and want the next grade to reflect
+  the new artefact text (the content-addressed cache key normally
+  picks this up automatically — `--no-cache` is the belt-and-braces
+  hammer if you don't trust the key recipe to fire).
+- You're running a calibration / concordance harness where every
+  pair must be a fresh sample from the judge.
+
+To wipe the existing entries on disk (not just bypass them for one
+run), use `signalforge cache clear --grade` (below).
+
+**Precedence when both flags are set.** Per DEC-002 of #189,
+`--no-grade` implicitly wins over `--no-cache` — when both are
+passed, the grade stage never runs, so the cache is never read or
+written regardless of `--no-cache`. Documented; no special argparse
+handling.
+
+## Clear the grade cache (`signalforge cache clear --grade`)
+
+`signalforge cache clear --grade` removes the entire persistent
+grade cache directory at
+`<project_dir>/.signalforge/grade-cache/`. Use it when:
+
+- Your rubric criteria changed and you want the next `generate` run
+  to re-grade every artefact against the new rubric. The cache key
+  already invalidates on rubric changes (the criterion text is
+  hashed into the key), so this case is belt-and-braces — but it
+  also keeps the cache size from accumulating stale entries.
+- You switched providers or models in a way the cache key doesn't
+  capture (it should, but `cache clear --grade` is the explicit
+  reset).
+- You want to bound disk usage and a wipe is cheaper than tuning
+  cache TTL knobs (there are none in v0.6 — the cache is purely
+  content-addressed).
+
+```bash
+signalforge cache clear --grade
+```
+
+Behaviour:
+
+- **Idempotent.** If the cache directory does not exist (fresh
+  project, or the operator just deleted it), the command logs an
+  INFO line and exits 0. No error, no warning.
+- **Symlink-hardened.** The handler canonicalises the cache dir
+  path via `Path.resolve(strict=False)` and refuses to remove
+  anything whose canonical form does not end with the conventional
+  `.signalforge/grade-cache` suffix. A symlinked
+  `.signalforge/grade-cache → /tmp` will raise
+  `GradeCachePathError` (tier 1 exit code 1) and `/tmp` will not be
+  touched.
+- **Exit 0** on success, including the idempotent missing-dir case.
+  Exit 1 on a symlink escape or a `--project-dir` that does not
+  contain `dbt_project.yml`.
+- **`--grade` is required.** Bare `signalforge cache clear` exits 2
+  via argparse — every `cache clear` invocation must name the
+  cache to clear explicitly. The flag exists so the subcommand can
+  grow siblings (e.g. `cache clear --drafter`) without changing
+  shape.
+
+There is **no** `--confirm` flag. The destructive scope is bounded
+to `.signalforge/grade-cache/` and the operator typed `--grade`
+explicitly. `rm -rf .signalforge/grade-cache` remains the manual
+escape hatch.
+
+(DEC-015 of #189 locks the subcommand grammar; the nested
+sub-action shape is a documented one-off deviation from the
+flat-per-subcommand convention, justified by forward-compat for a
+future `cache clear --drafter` / `cache stats` / `cache list`
+family.)
+
 ## Running across many models
 
 A typical dbt project has dozens or hundreds of models. SignalForge
@@ -1129,16 +1470,37 @@ Semantics:
   batch start, so `_active_session_id` and the rest of the BigQuery
   session state cannot bleed between iterations. Adds ~100-500ms BQ
   client init per model — acceptable vs. state-corruption risk.
-- **Anthropic prompt cache behavior** (DEC-015). The drafter's
-  explicitly cache-marked block is the manifest summary (model
-  under draft + its neighbours), which **changes per model** — so
-  the marked cache does NOT amortise across siblings in a batch.
-  Cost savings within one process come from Anthropic's automatic
-  caching of the static system prompt, which IS byte-stable across
-  iterations once it crosses the auto-cache size threshold. Net:
-  expect partial cache savings on system-prompt tokens; do not
-  expect the marked manifest-summary block to hit on subsequent
-  models.
+- **Anthropic prompt cache behavior** (DEC-015; updated by
+  issue #188 DEC-002 / DEC-003). The amortisation now depends on the
+  drafter's cache scope, set by `--cache-scope` (or `llm.cache_scope`
+  in `signalforge.yml`, or auto-promotion — see the precedence in the
+  [`--cache-scope` flag reference](#signalforge-generate-model)):
+  - **`cache_scope=project` (the auto-promoted default for a
+    `--select` batch matching ≥ 2 models).** The drafter renders a
+    byte-identical project-level cached prefix that is **shared
+    across every model in the batch**. `cache_creation` is paid once
+    on the first model; the ≈12× cheaper `cache_read` applies on
+    models 2..N. The per-model specifics (this model's SQL under the
+    `<MODEL_SQL>` envelope, its own rules, and its neighbour detail)
+    move into the dynamic block, so the shared prefix stays stable
+    and **does amortise across siblings**. This corrects the v0.2
+    caveat — under project scope the marked cache hits on subsequent
+    models in the batch.
+  - **`cache_scope=per-model` (the default for single-model
+    positional runs; opt-in for a batch via `--cache-scope
+    per-model`).** The explicitly cache-marked block is the manifest
+    summary (model under draft + its neighbours), which **changes per
+    model** — so the marked cache does NOT amortise across siblings.
+    Cost savings within one process then come only from Anthropic's
+    automatic caching of the static system prompt, which IS
+    byte-stable across iterations once it crosses the auto-cache size
+    threshold. Net under per-model scope: expect partial cache
+    savings on system-prompt tokens; do not expect the marked
+    manifest-summary block to hit on subsequent models.
+  - **Oversize fallback.** If a project-scope prefix still exceeds
+    the 8000-token cache cap for a given model, that one model
+    degrades to per-model scope (one INFO line) and the batch
+    completes (exit 0) — the other models keep the shared prefix.
 - **Per-model progress prefix.** When a TTY is attached and the
   batch driver runs, each iteration emits one stderr line
   `[i/N] <model_unique_id>` before that model's existing stage

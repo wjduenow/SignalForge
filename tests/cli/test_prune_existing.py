@@ -231,6 +231,7 @@ def test_choice_flags_reject_invalid(
     [
         ("scope", None),
         ("sample_strategy", None),
+        ("as_of", None),  # US-013 of #171 / DEC-001 — engine resolves None → today.
         ("format", "ansi"),
         ("dry_run", False),
         ("quiet", False),
@@ -279,6 +280,7 @@ def test_help_lists_every_flag(capsys: pytest.CaptureFixture[str]) -> None:
         "--profiles-dir",
         "--scope",
         "--sample-strategy",
+        "--as-of",
         "--format",
         "--dry-run",
         "--quiet",
@@ -366,7 +368,11 @@ def test_skipped_verbose_adds_detail(tmp_path: Path, capsys: pytest.CaptureFixtu
     err = capsys.readouterr().err
     assert code == 0
     assert "Skipped 2 unsupported tests:" in err
-    assert "dbt_utils.unique_combination_of_columns" in err
+    # Pre-#170 this was ``dbt_utils.unique_combination_of_columns``; #170
+    # promoted that macro to a first-class variant, so the fixture now uses
+    # ``dbt_utils.not_null_proportion`` to keep the namespaced-custom-skip
+    # behavioural pin.
+    assert "dbt_utils.not_null_proportion" in err
     assert "positive" in err
     assert "reason=custom-or-generic-test" in err
     assert "reason=unsupported-test-type" in err
@@ -907,3 +913,138 @@ def test_no_sql_file_written_read_only(tmp_path: Path, capsys: pytest.CaptureFix
     assert sql_path.read_text(encoding="utf-8") == before
     assert {p.name for p in (project_dir / "tests").glob("*.sql")} == before_files
     assert "Traceback" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# US-013 of #171 — --as-of flag (DEC-001)
+# ---------------------------------------------------------------------------
+
+
+def test_prune_existing_as_of_parses_iso_date() -> None:
+    """``--as-of 2026-05-01`` parses cleanly via ``date.fromisoformat``
+    and lands on ``args.as_of`` as a :class:`datetime.date` instance
+    (US-013 of #171 / DEC-001).
+    """
+    from datetime import date
+
+    from signalforge.cli import _build_parser
+
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "prune-existing",
+            "customers",
+            "--schema",
+            "schema.yml",
+            "--as-of",
+            "2026-05-01",
+        ]
+    )
+    assert args.as_of == date(2026, 5, 1)
+
+
+def test_prune_existing_as_of_default_is_none() -> None:
+    """Omitting ``--as-of`` leaves ``args.as_of`` at ``None``; the prune
+    engine resolves to ``date.today()`` at prune time (DEC-001).
+    """
+    from signalforge.cli import _build_parser
+
+    parser = _build_parser()
+    args = parser.parse_args(["prune-existing", "customers", "--schema", "schema.yml"])
+    assert args.as_of is None
+
+
+def test_prune_existing_as_of_bad_format_exits_2(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--as-of not-a-date`` raises ``ValueError`` inside
+    ``date.fromisoformat``; argparse wraps it as its usage error and
+    raises ``SystemExit(2)``. ``main`` returns 2 without printing a
+    traceback (cli-layer.md DEC-016 / tier-2 input-validation).
+    """
+    code = main(
+        [
+            "prune-existing",
+            "customers",
+            "--schema",
+            "schema.yml",
+            "--as-of",
+            "not-a-date",
+        ]
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "Traceback" not in captured.err
+
+
+def test_prune_existing_threads_as_of_to_prune_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--as-of 2026-05-01`` threads through to ``prune_tests`` as the
+    ``as_of`` kwarg (US-013 of #171 / DEC-001). The CLI passes the
+    parsed :class:`date` straight to the engine without mutation.
+    """
+    from datetime import date
+
+    project_dir, schema_path = _setup_project(tmp_path)
+    # Spy on prune_tests to capture the kwarg without replacing the real
+    # call (engineering minimum disruption to the rest of the orchestrator).
+    from typing import Any
+
+    from signalforge.cli import prune_existing as pe_mod
+
+    captured_kwargs: dict[str, Any] = {}
+    real = pe_mod.prune_module.prune_tests
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        captured_kwargs.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pe_mod.prune_module, "prune_tests", _spy)
+
+    argv = [*_base_argv(project_dir, schema_path), "--as-of", "2026-05-01"]
+    code = _run(argv)
+    assert code == 0, f"stderr={capsys.readouterr().err}"
+    assert captured_kwargs.get("as_of") == date(2026, 5, 1)
+
+
+def test_prune_existing_no_as_of_threads_none_to_prune_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without ``--as-of`` the CLI threads ``as_of=None`` to
+    ``prune_tests``; the engine then resolves to ``date.today()`` at
+    prune time (DEC-001). Pinned so the resolution stays in the engine,
+    NOT the CLI.
+    """
+    project_dir, schema_path = _setup_project(tmp_path)
+    from typing import Any
+
+    from signalforge.cli import prune_existing as pe_mod
+
+    captured_kwargs: dict[str, Any] = {}
+    real = pe_mod.prune_module.prune_tests
+
+    def _spy(*args: Any, **kwargs: Any) -> Any:
+        captured_kwargs.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pe_mod.prune_module, "prune_tests", _spy)
+
+    code = _run(_base_argv(project_dir, schema_path))
+    assert code == 0, f"stderr={capsys.readouterr().err}"
+    assert captured_kwargs.get("as_of") is None
+
+
+def test_prune_existing_help_text_lists_as_of_flag(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``signalforge prune-existing --help`` names the ``--as-of`` flag
+    and its metavar. Multi-surface parity (cli-layer.md): the argparse
+    help string is surface 1 of the 5-surface contract for US-013 of
+    #171.
+    """
+    code = main(["prune-existing", "--help"])
+    captured = capsys.readouterr()
+    assert code == 0
+    assert "--as-of" in captured.out
+    assert "YYYY-MM-DD" in captured.out

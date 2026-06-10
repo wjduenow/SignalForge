@@ -10,7 +10,14 @@ from __future__ import annotations
 def test_public_api_imports() -> None:
     """Every documented public name is importable from signalforge.prune."""
     from signalforge.prune import (
+        AnomalyTestStats,  # noqa: F401
         DropReason,  # noqa: F401
+        MadDowStats,  # noqa: F401
+        MadStats,  # noqa: F401
+        MinMaxDowStats,  # noqa: F401
+        MinMaxStats,  # noqa: F401
+        PercentileDowStats,  # noqa: F401
+        PercentileStats,  # noqa: F401
         PruneAuditRecordTooLargeError,  # noqa: F401
         PruneAuditWriteError,  # noqa: F401
         PruneConfig,  # noqa: F401
@@ -22,6 +29,8 @@ def test_public_api_imports() -> None:
         PruneTimeoutError,  # noqa: F401
         PruneTrustedModelNotFoundError,  # noqa: F401
         Scope,  # noqa: F401
+        ZscoreDowStats,  # noqa: F401
+        ZscoreStats,  # noqa: F401
         load_prune_config,
         prune_tests,
     )
@@ -45,6 +54,16 @@ def test_public_api_dunder_all_matches_imports() -> None:
         "DropReason",
         "Scope",
         "PruneEvent",
+        # Anomaly stats (issue #171, US-001)
+        "AnomalyTestStats",
+        "MadStats",
+        "ZscoreStats",
+        "PercentileStats",
+        "MinMaxStats",
+        "MadDowStats",
+        "ZscoreDowStats",
+        "PercentileDowStats",
+        "MinMaxDowStats",
         "PruneError",
         "PruneConfigError",
         "PruneTrustedModelNotFoundError",

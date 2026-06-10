@@ -43,9 +43,58 @@ def test_austin_manifest_loads_via_signalforge() -> None:
     assert len(model.columns) >= 1
 
 
-def test_austin_manifest_iter_models_yields_only_staging() -> None:
-    """The fixture has exactly one enabled model — the staging view."""
+def test_austin_manifest_iter_models_yields_staging_models() -> None:
+    """The fixture exposes the staging-layer models — at minimum the original
+    ``stg_bikeshare_trips`` plus the engineered ``stg_bikeshare_station_pairs``
+    that #170 added for the ``unique_combination`` drafter-steering e2e.
+    """
     manifest = load(_FIXTURE_DIR)
     models = list(manifest.iter_models())
-    assert len(models) == 1
-    assert models[0].name == "stg_bikeshare_trips"
+    names = sorted(m.name for m in models)
+    assert "stg_bikeshare_trips" in names
+    assert "stg_bikeshare_station_pairs" in names
+
+
+def test_austin_manifest_loads_station_pairs_model() -> None:
+    """The engineered ``stg_bikeshare_station_pairs`` model (US-011 of #170)
+    parses cleanly via :func:`signalforge.manifest.load`, carries the natural
+    multi-column ``GROUP BY`` pattern in its ``raw_code``, and declares the
+    composite-key columns the drafter will reason about when proposing
+    ``unique_combination``.
+
+    The hand-crafted manifest seed satisfies
+    ``.claude/rules/testing-signal.md`` § "Hand-crafted manifest seed when
+    workers can't run live tooling": Ralph workers in worktrees can't reach
+    live BigQuery, so we commit the parsed manifest entry alongside the new
+    model SQL and validate the seed survives Pydantic parsing here.
+    """
+    manifest = load(_FIXTURE_DIR)
+
+    model = manifest.get_model("model.signalforge_test_austin.stg_bikeshare_station_pairs")
+    assert model.name == "stg_bikeshare_station_pairs"
+    assert model.unique_id == "model.signalforge_test_austin.stg_bikeshare_station_pairs"
+    assert model.package_name == "signalforge_test_austin"
+    assert model.original_file_path == "models/staging/stg_bikeshare_station_pairs.sql"
+    # Source-as-model alias trick (DEC-005 of #170): the model's relation
+    # name resolves to the source table directly so the engineered fixture
+    # works without a live `dbt run`.
+    assert model.alias == "bikeshare_trips"
+
+    # raw_code survived parsing AND carries the multi-column GROUP BY shape
+    # that signals natural composite-key uniqueness to the drafter.
+    assert model.raw_code is not None
+    assert "GROUP BY" in model.raw_code
+    assert "start_station_id" in model.raw_code
+    assert "end_station_id" in model.raw_code
+    assert "subscriber_type" in model.raw_code
+
+    # The three composite-key columns plus the two aggregates round-trip
+    # from the manifest seed.
+    column_names = set(model.columns.keys())
+    assert {
+        "start_station_id",
+        "end_station_id",
+        "subscriber_type",
+        "trip_count",
+        "total_duration_minutes",
+    } <= column_names

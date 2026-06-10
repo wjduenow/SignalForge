@@ -1,0 +1,12 @@
+{
+  "model": "claude-sonnet-4-6",
+  "cheap_model": "claude-haiku-4-5",
+  "max_output_tokens": 4096,
+  "cache_ttl": "5m",
+  "cache_scope": "per-model",
+  "max_retries_429": 3,
+  "max_retries_5xx": 1,
+  "max_retries_conn": 1,
+  "provider": "anthropic",
+  "exclude_tests": []
+}

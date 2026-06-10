@@ -55,9 +55,14 @@ def test_cross_writer_timestamp_byte_parity() -> None:
             "model_unique_id": "model.x.y",
             "mode": "schema-only",
             "columns_sent": [],
-            "redactions": [],
+            # v4 shape (issue #185): replaced ``redactions: tuple[...]``
+            # with the symbol-table-by-reason + mapback pair; both must
+            # be present (empty dicts allowed) on a non-chunked event.
+            "redactions_by_reason": {},
+            "column_name_map": {},
             "signalforge_version": "0.0.0",
             "policy_hash": "0" * 16,
+            "policy_flags": [],
         }
     )
     response = LLMResponseEvent.model_validate(

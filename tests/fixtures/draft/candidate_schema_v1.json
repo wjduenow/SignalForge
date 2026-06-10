@@ -39,6 +39,9 @@
   ],
   "tests": [
     {"type": "unique", "column": "order_id", "rationale": "Re-asserts the per-order grain at the model level for explicit documentation."},
-    {"type": "custom_sql", "column": null, "sql": "SELECT order_id FROM {{ this }} WHERE amount < 0", "rationale": "Business rule: an order total may never be negative."}
+    {"type": "custom_sql", "column": null, "sql": "SELECT order_id FROM {{ this }} WHERE amount < 0", "rationale": "Business rule: an order total may never be negative."},
+    {"type": "row_count_between", "column": null, "minimum": 100, "maximum": 1000000, "where": "ordered_at >= '2024-01-01'", "rationale": "Bounded volume guardrail: at least 100 orders should land per loaded date window; an empty or runaway day is a pipeline failure."},
+    {"type": "unique_combination", "column": null, "columns": ["order_id", "customer_id"], "where": null, "rationale": "Composite uniqueness across (order_id, customer_id) — re-asserts per-order grain even if customer_id is denormalised onto multiple rows by a future upstream change."},
+    {"type": "row_count_anomaly_by_period", "column": null, "date_column": "ordered_at", "period": "day", "lookback_periods": 28, "method": "mad", "seasonality": "none", "threshold": 3.0, "min_samples_per_bucket": 3, "where": null, "rationale": "Per-day row-count anomaly guard against the rolling 28-day median; catches pipeline drops/spikes a static row_count_between band cannot."}
   ]
 }

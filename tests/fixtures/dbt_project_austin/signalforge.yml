@@ -11,4 +11,4 @@ grade:
   min_pass_rate: 0.95
   min_mean_score: 0.95
   fail_on_below_threshold: false
-  total_budget_seconds: 600  # default 300 is tight at p99 latency × ~12 calls.
+  total_budget_seconds: 600  # absolute hard cap; #198 default (None) uses the scaled formula.

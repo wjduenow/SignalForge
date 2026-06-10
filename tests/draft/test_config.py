@@ -39,7 +39,7 @@ def test_draft_config_defaults_match_dec_017() -> None:
     """DEC-017: every default field value matches the spec."""
     cfg = DraftConfig()
     assert cfg.model == "claude-sonnet-4-6"
-    assert cfg.cheap_model == "claude-haiku-4-5-20251001"
+    assert cfg.cheap_model == "claude-haiku-4-5"
     assert cfg.max_output_tokens == 4096
     assert cfg.cache_ttl == "5m"
     assert cfg.max_retries_429 == 3
@@ -111,6 +111,47 @@ def test_draft_config_provider_accepts_gemini() -> None:
     cfg = DraftConfig(provider="gemini", model="gemini-2.5-flash")
     assert cfg.provider == "gemini"
     assert cfg.model == "gemini-2.5-flash"
+
+
+def test_draft_config_exclude_tests_accepts_row_count_between() -> None:
+    """US-002 of #169: ``"row_count_between"`` round-trips through the
+    :attr:`DraftConfig.exclude_tests` validator without error — the
+    new sixth ``VALID_TEST_TYPES`` member is recognised at config load.
+    """
+    cfg = DraftConfig(exclude_tests=("row_count_between",))
+    assert cfg.exclude_tests == ("row_count_between",)
+
+
+def test_draft_config_exclude_tests_rejects_row_count_between_typo() -> None:
+    """US-002 of #169: a near-miss typo like ``"row_count_betwen"`` (missing
+    ``e``) is rejected with the "not a valid test type" error that lists
+    every member of :data:`VALID_TEST_TYPES`, including the new
+    ``"row_count_between"`` token. The "valid types: …" listing is what the
+    operator reads to find the right spelling."""
+    with pytest.raises(ValidationError) as excinfo:
+        DraftConfig(exclude_tests=("row_count_betwen",))
+    msg = str(excinfo.value)
+    assert "not a valid test type" in msg
+    assert "row_count_between" in msg
+
+
+def test_draft_config_cache_scope_defaults_to_per_model() -> None:
+    """DEC-001 of #188: ``cache_scope`` defaults to ``"per-model"`` so every
+    pre-#188 config and the single-model positional path keep their behaviour."""
+    assert DraftConfig().cache_scope == "per-model"
+
+
+def test_draft_config_cache_scope_accepts_project() -> None:
+    """DEC-001 of #188: the ``"project"`` value validates without error."""
+    cfg = DraftConfig(cache_scope="project")
+    assert cfg.cache_scope == "project"
+
+
+def test_draft_config_cache_scope_rejects_unknown() -> None:
+    """DEC-001 of #188: ``cache_scope`` is ``Literal["per-model", "project"]``;
+    any other value is rejected by the ``Literal``."""
+    with pytest.raises(ValidationError):
+        DraftConfig(cache_scope="global")  # type: ignore[arg-type]
 
 
 def test_draft_config_provider_rejects_unknown_with_available_keys() -> None:
@@ -210,6 +251,34 @@ def test_load_draft_config_unknown_provider_fails_loud(tmp_path: Path) -> None:
     with pytest.raises(UnknownProviderError) as excinfo:
         load_draft_config(tmp_path)
     assert "anthropic" in str(excinfo.value)
+
+
+def test_load_draft_config_cache_scope_round_trips_from_yaml(tmp_path: Path) -> None:
+    """DEC-001 of #188: ``llm.cache_scope`` round-trips from ``signalforge.yml``."""
+    (tmp_path / "signalforge.yml").write_text("llm:\n  cache_scope: project\n", encoding="utf-8")
+    cfg = load_draft_config(tmp_path)
+    assert cfg.cache_scope == "project"
+
+
+def test_load_draft_config_cache_scope_invalid_value_fails_loud(tmp_path: Path) -> None:
+    """DEC-001 of #188: an out-of-``Literal`` ``cache_scope`` value fails loud
+    via :class:`DraftConfigInvalidError` (wrapping the Pydantic
+    ``ValidationError`` on ``cause``)."""
+    (tmp_path / "signalforge.yml").write_text("llm:\n  cache_scope: per_model\n", encoding="utf-8")
+    with pytest.raises(DraftConfigInvalidError) as excinfo:
+        load_draft_config(tmp_path)
+    assert excinfo.value.cause is not None
+
+
+def test_load_draft_config_unknown_llm_sibling_key_fails_loud(tmp_path: Path) -> None:
+    """DEC-011 / DEC-001 of #188: an unknown sibling key under ``llm:`` (e.g.
+    a ``cache_scop`` typo) is rejected by ``DraftConfig``'s ``extra="forbid"``
+    and surfaces as :class:`DraftConfigInvalidError`."""
+    (tmp_path / "signalforge.yml").write_text("llm:\n  cache_scop: project\n", encoding="utf-8")
+    with pytest.raises(DraftConfigInvalidError) as excinfo:
+        load_draft_config(tmp_path)
+    assert excinfo.value.cause is not None
+    assert "cache_scop" in str(excinfo.value)
 
 
 def test_load_draft_config_explicit_path_miss_raises(tmp_path: Path) -> None:

@@ -265,7 +265,142 @@ def test_draft_from_request_writes_response_audit_record(
     assert len(record["response_text_hash"]) == 16
     assert len(record["parsed_schema_hash"]) == 16
     assert len(record["sent_sql_hash"]) == 16
-    assert record["audit_schema_version"] == 1
+    # Bumped 1 → 2 in #184 (DEC-005) to carry the new ``parser_reshaped``
+    # field. No-reshape happy-path writes an empty tuple (default value
+    # preserves byte-equality for the rest of the record).
+    assert record["audit_schema_version"] == 2
+    assert record["parser_reshaped"] == []
+
+
+def test_draft_from_request_threads_reshapes_to_audit_event(
+    model: Model,
+    manifest: Manifest,
+    config: DraftConfig,
+    tmp_path: Path,
+) -> None:
+    """US-004 (issue #184) — when the LLM emits a column-scoped
+    ``row_count_anomaly_by_period`` (the bug shape #184 fixes), the parser
+    re-attaches it to model scope AND appends one
+    :class:`signalforge.draft.audit.ReshapeRecord` to the collector list
+    that ``draft_from_request`` threads through. The orchestrator forwards
+    the populated tuple into ``_build_response_event(...)`` so the
+    corrective action lands durably in the response-audit JSONL alongside
+    the runtime WARNING (DEC-005).
+    """
+    from signalforge.draft.models import (
+        CandidateColumn,
+        CandidateSchema,
+        CandidateTestRowCountAnomalyByPeriod,
+    )
+
+    # Build a CandidateSchema where the model-only variant is nested
+    # under a column's ``tests`` list — the bug shape. Re-serialised to
+    # JSON so the fake LLM can return it as ``response_text``.
+    bug_shape = CandidateSchema(
+        name="fct_orders",
+        description="orders fact table",
+        columns=(
+            CandidateColumn(
+                name="ordered_at",
+                description="timestamp the order was placed",
+                tests=(
+                    CandidateTestRowCountAnomalyByPeriod(
+                        date_column="ordered_at",
+                    ),
+                ),
+            ),
+        ),
+        tests=(),
+    )
+    bug_response_text = bug_shape.model_dump_json()
+
+    request = LLMRequest(
+        model_unique_id=model.unique_id,
+        mode=SamplingMode.SCHEMA_ONLY,
+        columns_sent=("ordered_at",),
+        redactions=(),
+        sampled_rows=None,
+        aggregates=None,
+        schema=(("ordered_at", "TIMESTAMP"),),
+    )
+    anthropic_fake = FakeAnthropicClient()
+    _set_up_fake_anthropic(anthropic_fake, response_text=bug_response_text)
+
+    audit_path = tmp_path / "safety_audit.jsonl"
+    outcome = draft_from_request(
+        request,
+        model,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        _client=anthropic_fake,
+    )
+
+    # The parser re-attached the variant to model scope (post-parse
+    # invariant; this just guards that the bug-shape input was actually
+    # processed through the re-attach branch).
+    assert len(outcome.candidate.tests) == 1
+    assert outcome.candidate.tests[0].type == "row_count_anomaly_by_period"
+
+    # The reshape lands in the response-audit JSONL via the threaded
+    # ``parser_reshaped`` tuple.
+    response_audit = audit_path.with_name("llm_responses.jsonl")
+    record = json.loads(response_audit.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert record["audit_schema_version"] == 2
+    reshapes = record["parser_reshaped"]
+    assert len(reshapes) == 1
+    rec = reshapes[0]
+    assert rec["original_column"] == "ordered_at"
+    assert rec["target_scope"] == "model"
+    assert rec["test_type"] == "row_count_anomaly_by_period"
+    assert rec["reason"] == (
+        "model-only variant emitted at column scope; re-attached to model-level tests:"
+    )
+
+
+def test_draft_from_request_no_reshapes_writes_empty_tuple(
+    model: Model,
+    manifest: Manifest,
+    config: DraftConfig,
+    valid_response_text: str,
+    tmp_path: Path,
+) -> None:
+    """US-004 (issue #184) — when the LLM response triggers no re-attach
+    (the existing happy path), the audit JSONL record carries
+    ``parser_reshaped: []``. Pins byte-equality back-compat for v1-shape
+    consumers reading v2 fixtures: the default empty tuple serialises to
+    an empty JSON array, leaving the rest of the record byte-identical to
+    a pre-#184 line apart from the new field + the bumped version.
+    """
+    request = LLMRequest(
+        model_unique_id=model.unique_id,
+        mode=SamplingMode.SCHEMA_ONLY,
+        columns_sent=("order_id",),
+        redactions=(),
+        sampled_rows=None,
+        aggregates=None,
+        schema=(("order_id", "INT64"),),
+    )
+    anthropic_fake = FakeAnthropicClient()
+    _set_up_fake_anthropic(anthropic_fake, response_text=valid_response_text)
+
+    audit_path = tmp_path / "safety_audit.jsonl"
+    draft_from_request(
+        request,
+        model,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        _client=anthropic_fake,
+    )
+
+    response_audit = audit_path.with_name("llm_responses.jsonl")
+    record = json.loads(response_audit.read_text(encoding="utf-8").strip().splitlines()[0])
+    assert record["parser_reshaped"] == []
+    # Audit schema version stays at 2 regardless of whether the field is
+    # populated — the bump is a one-shot lift from US-002, not gated on
+    # the presence of a reshape.
+    assert record["audit_schema_version"] == 2
 
 
 def test_draft_from_request_audit_failure_drops_outcome(
@@ -462,6 +597,264 @@ def test_draft_from_request_bad_json_does_not_write_response_audit(
 
 
 # ---------------------------------------------------------------------------
+# Issue #188 US-004 — cache_scope threading + oversize catch-and-retry
+# ---------------------------------------------------------------------------
+
+
+def _build_request(model: Model) -> LLMRequest:
+    return LLMRequest(
+        model_unique_id=model.unique_id,
+        mode=SamplingMode.SCHEMA_ONLY,
+        columns_sent=("order_id", "customer_id", "amount", "ordered_at"),
+        redactions=(),
+        sampled_rows=None,
+        aggregates=None,
+        schema=(
+            ("order_id", "INT64"),
+            ("customer_id", "INT64"),
+            ("amount", "FLOAT64"),
+            ("ordered_at", "TIMESTAMP"),
+        ),
+    )
+
+
+def test_default_per_model_path_sends_per_model_cached_block(
+    model: Model,
+    manifest: Manifest,
+    config: DraftConfig,
+    valid_response_text: str,
+    tmp_path: Path,
+) -> None:
+    """The default ``cache_scope="per-model"`` path threads the per-model
+    summary into ``call_llm``: the cached block is the model + neighbours
+    summary, NOT a ``<PROJECT_MANIFEST>`` envelope, and ``prompt_version`` is
+    the per-model base (byte-identical to today)."""
+    from signalforge.draft.prompts import _PROMPT_VERSION_PER_MODEL
+
+    assert config.cache_scope == "per-model"
+    request = _build_request(model)
+    anthropic_fake = FakeAnthropicClient()
+    _set_up_fake_anthropic(anthropic_fake, response_text=valid_response_text)
+
+    outcome = draft_from_request(
+        request,
+        model,
+        manifest,
+        config=config,
+        audit_path=tmp_path / "safety_audit.jsonl",
+        _client=anthropic_fake,
+    )
+
+    assert isinstance(outcome, DraftOutcome)
+    assert outcome.result.prompt_version == _PROMPT_VERSION_PER_MODEL
+    # Exactly one create call; its cached block carries no project envelope.
+    create_kwargs = anthropic_fake.create_calls
+    assert len(create_kwargs) == 1
+    serialised = json.dumps(create_kwargs[0], default=str)
+    assert "<PROJECT_MANIFEST>" not in serialised
+    anthropic_fake.assert_all_expectations_met()
+
+
+def test_project_scope_under_cap_sends_project_cached_block(
+    model: Model,
+    manifest: Manifest,
+    valid_response_text: str,
+    tmp_path: Path,
+) -> None:
+    """``cache_scope="project"`` under the token cap sends the project
+    cached block (``<PROJECT_MANIFEST>`` envelope) and the project-base
+    ``prompt_version``."""
+    from signalforge.draft.prompts import _prompt_version_for
+
+    config = DraftConfig(model="claude-sonnet-4-6", cache_ttl="5m", cache_scope="project")
+    request = _build_request(model)
+    anthropic_fake = FakeAnthropicClient()
+    _set_up_fake_anthropic(anthropic_fake, response_text=valid_response_text)
+
+    outcome = draft_from_request(
+        request,
+        model,
+        manifest,
+        config=config,
+        audit_path=tmp_path / "safety_audit.jsonl",
+        _client=anthropic_fake,
+    )
+
+    # Project scope folds "|scope=project|exclude=[]" into the hash even when
+    # exclude_tests is empty — assert against the canonical helper, not the
+    # bare project base constant.
+    assert outcome.result.prompt_version == _prompt_version_for((), "project")
+    # Distinct from the per-model version — the two scopes cannot collide on
+    # the prompt cache.
+    assert outcome.result.prompt_version != _prompt_version_for((), "per-model")
+    create_kwargs = anthropic_fake.create_calls
+    assert len(create_kwargs) == 1
+    serialised = json.dumps(create_kwargs[0], default=str)
+    assert "<PROJECT_MANIFEST>" in serialised
+    anthropic_fake.assert_all_expectations_met()
+
+
+def test_project_scope_over_cap_falls_back_to_per_model(
+    model: Model,
+    manifest: Manifest,
+    valid_response_text: str,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``cache_scope="project"`` over the 8000-token cap: ``call_llm`` raises
+    ``LLMCacheTooLargeError`` on the first count_tokens probe; the drafter
+    catches it, re-renders per-model, retries ONCE, succeeds (exit-0 path),
+    emits exactly one INFO breadcrumb, and the per-model block is sent on the
+    retried create call."""
+    from signalforge.draft.prompts import _PROMPT_VERSION_PER_MODEL
+
+    config = DraftConfig(model="claude-sonnet-4-6", cache_ttl="5m", cache_scope="project")
+    request = _build_request(model)
+    anthropic_fake = FakeAnthropicClient()
+    # First call_llm: count_tokens reports an oversize cached block (>8000)
+    # → LLMCacheTooLargeError before any create.
+    anthropic_fake.expect_count_tokens(
+        matching=lambda kw: True,
+        returns=FakeCountTokensResponse(input_tokens=9000),
+    )
+    # Retry (per-model scope): count_tokens under cap, then a normal create.
+    anthropic_fake.expect_count_tokens(
+        matching=lambda kw: True,
+        returns=FakeCountTokensResponse(input_tokens=1500),
+    )
+    anthropic_fake.expect_messages_create(
+        matching=lambda kw: True,
+        returns=FakeMessage(
+            content=[FakeTextBlock(text=valid_response_text)],
+            usage=FakeUsage(
+                input_tokens=1700,
+                output_tokens=800,
+                cache_creation_input_tokens=1500,
+                cache_read_input_tokens=0,
+            ),
+            model="claude-sonnet-4-6",
+        ),
+    )
+
+    with caplog.at_level(logging.INFO, logger="signalforge.draft.schema"):
+        outcome = draft_from_request(
+            request,
+            model,
+            manifest,
+            config=config,
+            audit_path=tmp_path / "safety_audit.jsonl",
+            _client=anthropic_fake,
+        )
+
+    # Run succeeded on the retried per-model path.
+    assert isinstance(outcome, DraftOutcome)
+    assert outcome.result.prompt_version == _PROMPT_VERSION_PER_MODEL
+    # Exactly one create call (the retry); its cached block is per-model.
+    create_kwargs = anthropic_fake.create_calls
+    assert len(create_kwargs) == 1
+    serialised = json.dumps(create_kwargs[0], default=str)
+    assert "<PROJECT_MANIFEST>" not in serialised
+    anthropic_fake.assert_all_expectations_met()
+
+    # Exactly one INFO breadcrumb naming the fallback + the model.
+    fallback_records = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.INFO and "per-model cache scope" in r.getMessage()
+    ]
+    assert len(fallback_records) == 1
+    # The payload is lazy-format JSON (DEC-015) — parse the dumped dict out
+    # of the rendered message and confirm it names the model.
+    message = fallback_records[0].getMessage()
+    payload = json.loads(message[message.index("{") :])
+    assert payload["model_unique_id"] == model.unique_id
+    assert payload["fallback_cache_scope"] == "per-model"
+
+
+def test_project_scope_over_cap_fallback_writes_audit_once(
+    model: Model,
+    manifest: Manifest,
+    valid_response_text: str,
+    tmp_path: Path,
+) -> None:
+    """On the successful retried (per-model fallback) path the response audit
+    is written exactly once — not skipped, not double-written."""
+    config = DraftConfig(model="claude-sonnet-4-6", cache_ttl="5m", cache_scope="project")
+    request = _build_request(model)
+    anthropic_fake = FakeAnthropicClient()
+    anthropic_fake.expect_count_tokens(
+        matching=lambda kw: True,
+        returns=FakeCountTokensResponse(input_tokens=9000),
+    )
+    anthropic_fake.expect_count_tokens(
+        matching=lambda kw: True,
+        returns=FakeCountTokensResponse(input_tokens=1500),
+    )
+    anthropic_fake.expect_messages_create(
+        matching=lambda kw: True,
+        returns=FakeMessage(
+            content=[FakeTextBlock(text=valid_response_text)],
+            usage=FakeUsage(
+                input_tokens=1700,
+                output_tokens=800,
+                cache_creation_input_tokens=1500,
+                cache_read_input_tokens=0,
+            ),
+            model="claude-sonnet-4-6",
+        ),
+    )
+
+    audit_path = tmp_path / "safety_audit.jsonl"
+    draft_from_request(
+        request,
+        model,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        _client=anthropic_fake,
+    )
+
+    response_audit = audit_path.with_name("llm_responses.jsonl")
+    assert response_audit.exists()
+    lines = response_audit.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 1
+
+
+def test_per_model_scope_over_cap_propagates_unchanged(
+    model: Model,
+    manifest: Manifest,
+    config: DraftConfig,
+    tmp_path: Path,
+) -> None:
+    """``cache_scope="per-model"`` over the cap is a real error: the drafter
+    must NOT retry — ``LLMCacheTooLargeError`` propagates unchanged."""
+    from signalforge.llm import LLMCacheTooLargeError
+
+    assert config.cache_scope == "per-model"
+    request = _build_request(model)
+    anthropic_fake = FakeAnthropicClient()
+    anthropic_fake.expect_count_tokens(
+        matching=lambda kw: True,
+        returns=FakeCountTokensResponse(input_tokens=9000),
+    )
+
+    with pytest.raises(LLMCacheTooLargeError):
+        draft_from_request(
+            request,
+            model,
+            manifest,
+            config=config,
+            audit_path=tmp_path / "safety_audit.jsonl",
+            _client=anthropic_fake,
+        )
+
+    # No retry → no create call, no leftover count_tokens expectation consumed
+    # beyond the single one we queued.
+    assert anthropic_fake.create_calls == []
+    anthropic_fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
 # draft_schema wrapper
 # ---------------------------------------------------------------------------
 
@@ -594,6 +987,7 @@ def test_public_api_imports_match_dec_020() -> None:
         "LLMServerError",
         "ModelPricing",
         "OpenAIProvider",
+        "RateLimitBudget",
         "UnknownProviderError",
         "UsageMetrics",
         "call_llm",

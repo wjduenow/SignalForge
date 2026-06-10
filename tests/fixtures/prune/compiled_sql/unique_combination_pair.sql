@@ -1,0 +1,1 @@
+SELECT `customer_id`, `order_date` FROM `fake_project.dataset.orders` GROUP BY `customer_id`, `order_date` HAVING COUNT(*) > 1

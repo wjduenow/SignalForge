@@ -15,9 +15,10 @@ Design commitments operationalised here:
   read-back / response-shaped models which use ``extra="ignore"`` for
   forward-compat.
 * **DEC-017** — Defaults: ``model="claude-sonnet-4-6"``,
-  ``cheap_model="claude-haiku-4-5-20251001"``, ``max_output_tokens=4096``,
+  ``cheap_model="claude-haiku-4-5"``, ``max_output_tokens=4096``,
   ``cache_ttl="5m"``, ``max_retries_429=3``, ``max_retries_5xx=1``,
-  ``max_retries_conn=1``.
+  ``max_retries_conn=1``. The bare SKU (no date suffix) matches the
+  keys in :data:`signalforge.llm.pricing.PRICES`.
 * **DEC-027** — ``signalforge.yml`` top-level namespace key for this
   layer is ``llm:``. Other top-level keys (``safety:``, ``prune:``,
   ``grade:``, …) are reserved for other stages and silently ignored by
@@ -56,18 +57,35 @@ from signalforge.draft.errors import DraftConfigInvalidError, DraftConfigNotFoun
 _DEFAULT_CONFIG_FILENAME = "signalforge.yml"
 
 VALID_TEST_TYPES: Final[frozenset[str]] = frozenset(
-    {"not_null", "unique", "accepted_values", "relationships", "custom_sql"}
+    {
+        "not_null",
+        "unique",
+        "accepted_values",
+        "relationships",
+        "custom_sql",
+        "row_count_between",
+        "unique_combination",
+        "row_count_anomaly_by_period",
+    }
 )
 """The test types the drafter can propose (mirrors the system prompt's
 SCOPE section and the discriminated union in
 :mod:`signalforge.draft.models`). The four standard dbt schema tests
-(``not_null``, ``unique``, ``accepted_values``, ``relationships``) plus
-the ``custom_sql`` business-rule escape hatch (DEC-002). The
-:attr:`DraftConfig.exclude_tests` validator (issue #54) rejects anything
-outside this set so a typo like ``"not_nul"`` fails loud at config-load
-rather than silently passing the LLM call and showing up later as an
-anchor-contract violation; naming ``"custom_sql"`` suppresses the
-free-form business-rule variant from drafting."""
+(``not_null``, ``unique``, ``accepted_values``, ``relationships``), the
+``custom_sql`` business-rule escape hatch (DEC-002), the
+``row_count_between`` model-level row-count guard (DEC-001 of #169),
+the ``unique_combination`` model-level composite-uniqueness test
+(DEC-001 of #170), and the ``row_count_anomaly_by_period`` model-level
+per-period anomaly test (DEC-007 of #171) — eight variants in total.
+The :attr:`DraftConfig.exclude_tests` validator (issue #54) rejects
+anything outside this set so a typo like ``"not_nul"`` fails loud at
+config-load rather than silently passing the LLM call and showing up
+later as an anchor-contract violation; naming ``"custom_sql"`` suppresses
+the free-form business-rule variant from drafting, naming
+``"row_count_between"`` suppresses the row-count guard, naming
+``"unique_combination"`` suppresses the composite-uniqueness test, and
+naming ``"row_count_anomaly_by_period"`` suppresses the per-period
+anomaly test."""
 
 
 class DraftConfig(BaseModel):
@@ -88,11 +106,12 @@ class DraftConfig(BaseModel):
     model: str = "claude-sonnet-4-6"
     """Default Anthropic model. Any string the SDK accepts is allowed —
     the three blessed IDs are documented in the README; ``cheap_model``
-    holds the v0.1 Haiku ID."""
+    holds the bare Haiku SKU."""
 
-    cheap_model: str = "claude-haiku-4-5-20251001"
+    cheap_model: str = "claude-haiku-4-5"
     """Informational; not selected automatically. The CLI (#9) flips on
-    ``--cheap`` to swap ``model`` for this value."""
+    ``--cheap`` to swap ``model`` for this value. The bare SKU (no date
+    suffix) matches the keys in :data:`signalforge.llm.pricing.PRICES`."""
 
     max_output_tokens: int = 4096
     """Anthropic ``max_tokens`` ceiling. Must be positive (validator)."""
@@ -100,6 +119,26 @@ class DraftConfig(BaseModel):
     cache_ttl: Literal["5m", "1h"] = "5m"
     """Prompt-cache TTL. ``"1h"`` opts into the
     ``extended-cache-ttl-2025-04-11`` beta header at the LLM seam."""
+
+    cache_scope: Literal["per-model", "project"] = "per-model"
+    """Prompt-cache prefix scope for the drafter's cached block (issue #188).
+
+    * ``"per-model"`` (default) — the cached block carries the model under
+      draft plus its direct ``refs`` / ``depends_on`` neighbours. Single-model
+      positional runs keep this scope, which preserves the existing
+      prompt-cache-stability snapshot byte-for-byte.
+    * ``"project"`` — the cached block is restructured into a project-level
+      shared prefix that is byte-identical across every model in a
+      ``signalforge generate --select`` batch, so ``cache_creation`` is paid
+      once on the first model and the cheaper ``cache_read`` applies on
+      models 2..N. Per-model neighbour detail moves into the dynamic block.
+
+    **Auto-promote:** a ``--select`` batch matching >= 2 models auto-promotes
+    the per-model overlay to ``"project"`` (unless the operator has explicitly
+    pinned a scope via ``--cache-scope`` or a non-default ``llm.cache_scope``
+    in ``signalforge.yml``). The renderer / prompt-version / CLI-flag /
+    drafter wiring that consumes this field ships in the later #188 stories
+    (US-002 … US-008); this field is the foundation they read from."""
 
     max_retries_429: int = 3
     """429 (rate limit) retry budget."""
@@ -127,8 +166,10 @@ class DraftConfig(BaseModel):
     exclude_tests: tuple[str, ...] = ()
     """Test types to omit from drafting entirely (issue #54).
 
-    Each entry must be one of :data:`VALID_TEST_TYPES` (``"not_null"``,
-    ``"unique"``, ``"accepted_values"``, ``"relationships"``); unknown
+    Each entry must be one of :data:`VALID_TEST_TYPES` — the eight
+    drafter variants: ``"not_null"``, ``"unique"``, ``"accepted_values"``,
+    ``"relationships"``, ``"custom_sql"``, ``"row_count_between"``,
+    ``"unique_combination"``, ``"row_count_anomaly_by_period"``; unknown
     values fail loud at config-load via the field validator. When
     non-empty, the system prompt's test catalogue is filtered down to
     the remaining types AND the parser's anchor-contract validator

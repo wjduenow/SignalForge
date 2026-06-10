@@ -94,9 +94,14 @@ from signalforge.grade import (
     GradeAuditWriteError,
     GradeBelowThresholdError,
     GradeBudgetExceededError,
+    GradeCachePathError,
+    GradeCacheReadError,
+    GradeCacheWriteError,
     GradeConfigError,
     GradeError,
+    GradeIncompleteError,
     GradeLLMError,
+    GradeNestedEventLoopError,
     GradeOutputError,
     GradePromptEnvelopeBreachError,
     GradeRubricError,
@@ -126,6 +131,7 @@ from signalforge.llm.cost import (
     CostRollupMalformedRecordError,
     CostRollupUnknownModelError,
 )
+from signalforge.llm.errors import LLMProviderAsyncUnsupportedError
 from signalforge.manifest import (
     AmbiguousRefError,
     Manifest,
@@ -186,6 +192,7 @@ from signalforge.warehouse import (
     RowCountNotSupportedError,
     SamplingError,
     SamplingRequiresPartitionFilterError,
+    StatsQueryNotSupportedError,
     TableNotFoundError,
     UnknownTableSizeError,
     UnsupportedAuthMethodError,
@@ -269,6 +276,17 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     PruneConfigError: 1,
     GradeConfigError: 1,
     GradeRubricError: 1,
+    # Nested-event-loop guard at ``grade_artifacts`` sync entry
+    # (issue #186 DEC-009). Tier 1 — the operator's call site is wrong
+    # (re-entered from inside an asyncio loop); same tier as
+    # :class:`ManifestNotFoundError` (operator-environment-shape error).
+    GradeNestedEventLoopError: 1,
+    # Grade persistent-cache path-containment failure (issue #189 / DEC-017).
+    # Tier 1 — the `.signalforge/grade-cache/` directory resolved outside
+    # ``project_dir`` via a symlink. This is an operator-config problem
+    # (the project tree has a symlink pointing elsewhere); same tier as
+    # :class:`CliPathError` and :class:`ManifestNotFoundError`.
+    GradeCachePathError: 1,
     DiffError: 1,
     # CLI-layer load-shape errors.
     CliError: 1,
@@ -365,6 +383,14 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     GradeOutputError: 2,
     # Grade threshold-fail (graduated in US-002 of #9; CLI catches → 2).
     GradeBelowThresholdError: 2,
+    # Grade completeness contract (#202 US-006 / DEC-204 + DEC-207). A
+    # non-exempt (artifact, criterion) pair stayed ungraded after the
+    # bounded sweep AND ``require_complete=True``. Tier 2 (post-call
+    # invariant — input-validation tier, same as ``GradeBelowThresholdError``):
+    # an incomplete grade corpus is a structural failure the operator must
+    # see. Raised AFTER the sidecar write (mirrors the threshold-fail
+    # raise-after-sidecar ordering).
+    GradeIncompleteError: 2,
     # Diff boundary / input-shape errors.
     DiffCandidateModelMismatchError: 2,
     DiffPruneResultModelMismatchError: 2,
@@ -445,6 +471,15 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     LLMConnectionError: 3,
     LLMResponseFormatError: 3,
     LLMCacheTooLargeError: 3,
+    # Provider async-capability gate (issue #186 / US-002 / DEC-006;
+    # tightened by QG Pass 1 Concern #2): the configured LLM provider
+    # declares ``supports_async = False``. Raised at ``grade_artifacts``
+    # orchestrator entry **before** ``asyncio.run``, **regardless of
+    # ``grade.max_concurrent_calls``** (the engine consumes
+    # ``call_llm_async`` exclusively post-#186; cap=1 is not an escape
+    # hatch). An environment / configuration fact the operator must
+    # resolve (pick an async-capable provider), so tier 3.
+    LLMProviderAsyncUnsupportedError: 3,
     # Warehouse connectivity / quota (auth, query syntax that came back
     # from a real query, billing limit).
     WarehouseError: 3,
@@ -484,6 +519,12 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # its own ``prune.scope: full`` remediation. External-dep tier, like
     # the sibling ``*NotSupportedError`` adapter-capability signals.
     RowCountNotSupportedError: 3,
+    # Stats-query seam (issue #171 / US-011): the active adapter does not
+    # support the ``run_stats_query`` primitive the prune engine uses for
+    # the ``row_count_anomaly_by_period`` variant (any non-BigQuery
+    # adapter in v0.3). External-dep tier, like the sibling
+    # ``*NotSupportedError`` adapter-capability signals.
+    StatsQueryNotSupportedError: 3,
     # Audit-write durability across every fail-closed seam — when any of
     # these fire the disk hand-off didn't happen, which is an external-dep
     # state we couldn't recover.
@@ -496,6 +537,17 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     GradeBudgetExceededError: 3,
     GradeAuditWriteError: 3,
     GradeAuditRecordTooLargeError: 3,
+    # Grade persistent-cache disk-I/O errors (issue #189 / DEC-017).
+    # Both tier 3 (external dependency, disk I/O) — same family as the
+    # fail-closed audit-write durability errors above. ``GradeCacheReadError``
+    # propagates from the engine's catch-and-warn read path; ``GradeCacheWriteError``
+    # is registered for catch-and-warn diagnostics but never escapes
+    # ``grade_artifacts`` (fail-soft per DEC-005 — write failure → WARNING).
+    # ``GradeCacheRecordTooLargeError`` is a subclass of
+    # ``GradeCacheWriteError`` and inherits tier 3 via the MRO walk in
+    # :func:`map_exception_to_exit_code` — no explicit entry per DEC-017.
+    GradeCacheReadError: 3,
+    GradeCacheWriteError: 3,
     LLMResponseAuditWriteError: 3,
     LLMResponseAuditRecordTooLargeError: 3,
     DiffSidecarWriteError: 3,
@@ -650,7 +702,7 @@ def setup_logging(verbose: bool, quiet: bool) -> None:
 def format_error_to_stderr(exc: Exception) -> str:
     """Render a typed exception to the canonical CLI stderr shape.
 
-    Two shapes (DEC-008):
+    Three shapes (DEC-008 + DEC-007 of #186):
 
     * Tier 1 / 3 errors and most tier 2 errors render as a single
       ``ERROR: <message>`` line followed by an optional
@@ -662,6 +714,18 @@ def format_error_to_stderr(exc: Exception) -> str:
       message; the bullets carry the per-column / per-test detail. CI
       parsers rely on this two-shape contract — see clauditor's source
       rule.
+    * :class:`ExceptionGroup` (DEC-007 of #186) — belt-and-braces
+      defence for the grade asyncio orchestrator. Multi-exception groups
+      escaping the engine's ``BaseExceptionGroup`` unwrap (a hostile
+      non-grade-typed exception slipping through the per-coroutine
+      ``try/except``, or a fail-closed audit-write error pair) render as
+      a header line plus one ``  - <ExcClass>: <repr-safe-msg>`` bullet
+      per inner exception. Cap 10 bullets + ``  ... and K more``
+      overflow line. Each inner exception's text is routed through
+      :func:`repr` so ANSI / control bytes don't leak; the sink's
+      :func:`print_stderr` also strips ANSI, but the repr-quote is the
+      defence-in-depth layer (mirrors the safety / warehouse layers'
+      ``_format_value`` helpers).
 
     The ``↳ Remediation:`` line is rendered when the typed error's
     ``__str__`` already carries it (every stage error class produced by
@@ -686,6 +750,30 @@ def format_error_to_stderr(exc: Exception) -> str:
         if remediation:
             return f"{body}\n  ↳ Remediation: {remediation}"
         return body
+    # ExceptionGroup shape — DEC-007 of #186. Defence-in-depth for the
+    # grade asyncio orchestrator (US-009): the engine's inner
+    # ``BaseExceptionGroup`` unwrap re-raises single-exception groups as
+    # the inner typed exception, so any group reaching this branch
+    # carries two or more inner exceptions (typically a hostile
+    # non-grade-typed exception slipping through the per-coroutine
+    # ``try/except``, or paired fail-closed audit-write errors). Render
+    # as ``ERROR: ...N concurrent failures:`` header + ``  - <Class>:
+    # <repr(msg)>`` bullets, capped at 10 with an overflow line. NOTE:
+    # ``ExceptionGroup`` is a subclass of ``Exception`` (3.11+);
+    # ``BaseExceptionGroup`` (which also catches ``KeyboardInterrupt``
+    # children) inherits from ``BaseException`` and never reaches the
+    # ``cmd_<name>`` boundary catch — checking ``ExceptionGroup`` here
+    # is the correct narrow surface for this typed renderer signature.
+    if isinstance(exc, ExceptionGroup):
+        inners = exc.exceptions
+        n = len(inners)
+        plural = "s" if n != 1 else ""
+        header = f"ERROR: Grade orchestrator encountered {n} concurrent failure{plural}:"
+        cap = 10
+        bullet_lines = [f"  - {type(inner).__name__}: {repr(str(inner))}" for inner in inners[:cap]]
+        if n > cap:
+            bullet_lines.append(f"  ... and {n - cap} more")
+        return "\n".join([header] + bullet_lines)
     # Single-line shape — every other typed error. ``str(exc)`` already
     # includes the ``↳ Remediation:`` line (when set) thanks to the
     # uniform layer-base pattern.

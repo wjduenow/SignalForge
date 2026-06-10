@@ -62,14 +62,17 @@ Design commitments operationalised here (``plans/super/7-quality-grader.md``):
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import math
 import time
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import signalforge as _sf
 from signalforge._common.artifact_id import (
@@ -95,17 +98,31 @@ from signalforge.grade.audit import (
     write_grade_event,
     write_grading_report,
 )
+from signalforge.grade.cache import (
+    CacheRecord,
+    compute_cache_key,
+    lookup_cache,
+    write_cache,
+)
 from signalforge.grade.config import GradeConfig
 from signalforge.grade.errors import (
     GradeAuditRecordTooLargeError,
     GradeAuditWriteError,
     GradeBelowThresholdError,
+    GradeCachePathError,
     GradeError,
+    GradeIncompleteError,
     GradeLLMError,
+    GradeNestedEventLoopError,
     GradeOutputError,
     GradePromptEnvelopeBreachError,
 )
-from signalforge.grade.models import GradeEvent, GradingReport, GradingResult
+from signalforge.grade.models import (
+    DegradeReasonType,
+    GradeEvent,
+    GradingReport,
+    GradingResult,
+)
 from signalforge.grade.parser import parse_grade_response
 from signalforge.grade.prompts import (
     _SYSTEM_PROMPT,
@@ -122,8 +139,19 @@ from signalforge.grade.rubric import (
     validate_rubric,
 )
 from signalforge.llm import AnthropicClientProtocol
-from signalforge.llm.client import call_llm
-from signalforge.llm.errors import LLMError, LLMResponseFormatError
+from signalforge.llm._rate_limiter import (
+    current_async_rate_limiter,
+    make_async_gate,
+    make_rate_limiters,
+)
+from signalforge.llm.client import call_llm_async
+from signalforge.llm.errors import (
+    LLMError,
+    LLMProviderAsyncUnsupportedError,
+    LLMResponseFormatError,
+)
+from signalforge.llm.pricing import lookup as _lookup_pricing
+from signalforge.llm.providers import provider_for
 from signalforge.manifest.models import Model
 from signalforge.prune.models import PruneResult
 
@@ -136,6 +164,14 @@ _LOGGER = logging.getLogger(__name__)
 # that monkey-patch a slow stand-in to exercise budget paths, and for a
 # possible v0.2 inter-call pacing knob.
 _sleep = time.sleep
+
+# Async sibling alias (issue #186, US-009 / DEC-011). Mirrors
+# :data:`signalforge.llm.client._async_sleep`. Tests reassign this to a
+# fast-forwarding stand-in to drive the budget-cancellation path under
+# :func:`asyncio.timeout`. The orchestrator does NOT call ``_async_sleep``
+# on the happy path either; the alias is reserved for tests AND for
+# possible v0.2 inter-call pacing on the async core.
+_async_sleep = asyncio.sleep
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +304,42 @@ def _hash_response_text(response_text: str) -> str:
     return hashlib.blake2b(response_text.encode("utf-8"), digest_size=8).hexdigest()
 
 
-def _grade_one(
+def _resolve_async_client(client: AnthropicClientProtocol | None) -> object | None:
+    """Translate a test-injected sync-shaped client to its async surface.
+
+    The public :func:`grade_artifacts` signature accepts ``client:
+    AnthropicClientProtocol | None`` for back-compat — every existing
+    test passes a :class:`FakeAnthropicClient` (sync) and the production
+    contract pre-#186 only knew sync clients. The async refactor (US-009)
+    routes through :func:`signalforge.llm.client.call_llm_async`, which
+    expects an **async-shaped client** (its ``messages.create`` must be
+    awaitable).
+
+    The fakes from US-007 expose both surfaces on the same instance:
+    ``client.messages`` is sync; ``client.aio.messages`` is async; both
+    drain the same expectation queue (DEC-012 of #186). Tests therefore
+    pass the sync FakeAnthropicClient via ``client=fake`` and expect the
+    engine to route to ``fake.aio`` under the hood. Production callers
+    pass ``client=None`` and let :func:`call_llm_async` construct via
+    ``provider.make_async_client()``.
+
+    The detection is duck-typed on ``client.aio.messages``: a real
+    ``anthropic.Anthropic`` does NOT have ``.aio``, but it also never
+    flows through here because production callers don't inject a client.
+    A future async-shaped client passed directly is detected as
+    "already async" (no ``.aio`` namespace) and forwarded as-is.
+    """
+    if client is None:
+        return None
+    aio = getattr(client, "aio", None)
+    if aio is None:
+        # Already an async-shaped client (or a fake whose top-level
+        # ``messages`` is already async). Forward as-is.
+        return client
+    return aio
+
+
+async def _grade_one_async(
     *,
     artifact_id: str,
     artifact_text: str,
@@ -278,22 +349,26 @@ def _grade_one(
     rubric_hash: str,
     template_hash: str,
     crit_hash: str,
-    client: AnthropicClientProtocol | None,
+    client: object | None,
     run_id: str,
     timestamp: datetime,
     model_unique_id: str,
+    sweep_round: int | None = None,
 ) -> tuple[GradingResult, GradeEvent]:
-    """Issue one ``(artifact, criterion)`` LLM-judge call.
+    """Issue one ``(artifact, criterion)`` LLM-judge call (async).
 
-    Returns ``(result, event)`` on the happy path. On
-    :class:`GradePromptEnvelopeBreachError` propagation lands here ONLY
-    if the whole-run pre-flight scan was bypassed (e.g., a future
-    caller used :func:`_grade_one` directly without
-    :func:`grade_artifacts`); the orchestrator's normal flow has
-    already checked. ``GradePromptEnvelopeBreachError`` /
-    :class:`LLMError` / :class:`GradeOutputError` propagate to the
-    caller — :func:`grade_artifacts` converts them into degraded
+    Async sibling of :func:`_grade_one` (issue #186, US-009 / DEC-004).
+    The body is byte-equivalent except for ``await call_llm_async(...)``
+    instead of ``call_llm(...)``.
+
+    Returns ``(result, event)`` on the happy path.
+    ``GradePromptEnvelopeBreachError`` / :class:`LLMError` /
+    :class:`GradeOutputError` propagate to the caller —
+    :func:`_grade_artifacts_async_core` converts them into degraded
     results.
+
+    The ``client`` parameter is the **already-translated** async client
+    surface (see :func:`_resolve_async_client`).
     """
     # 1. Render the per-pair dynamic block. Raises
     #    GradePromptEnvelopeBreachError if the payload contains
@@ -302,8 +377,13 @@ def _grade_one(
 
     # 2. Issue the LLM call. Wrap LLMError -> GradeLLMError once at
     #    the seam (DEC-015 of #5 mirror: one-level adapter).
+    # ``config.model`` is invariantly a concrete string post-construction
+    # (#187 US-002: the sentinel ``None`` is resolved to the provider's fast
+    # model at config-load; an unknown provider raises before any consumer
+    # reads it). Narrow the static ``str | None`` once for this function.
+    assert config.model is not None
     try:
-        result = call_llm(
+        result = await call_llm_async(
             system=_SYSTEM_PROMPT,
             cached_block=rubric_block,
             dynamic_block=dynamic_block,
@@ -355,6 +435,7 @@ def _grade_one(
         output_tokens=result.output_tokens,
         cache_creation_input_tokens=result.cache_creation_input_tokens,
         cache_read_input_tokens=result.cache_read_input_tokens,
+        sweep_round=sweep_round,
     )
     return grading_result, event
 
@@ -383,6 +464,90 @@ def _format_degrade_reasoning(exc: BaseException) -> str:
     return base
 
 
+def _compute_effective_budget(
+    *,
+    budget_base_seconds: int,
+    budget_per_pair_seconds: float,
+    total_budget_seconds: int | None,
+    num_pairs: int,
+    max_concurrent_calls: int,
+) -> int:
+    """Scale the grade wall-clock budget with the work to be done (DEC-001).
+
+    The effective budget is a *runaway guard*, not a completion
+    constraint: it backstops 429 retry storms and pathological slow
+    calls rather than pacing normal completion.
+
+        scaled = budget_base_seconds
+                 + budget_per_pair_seconds * ceil(num_pairs / max_concurrent_calls)
+
+    ``ceil(num_pairs / max_concurrent_calls)`` is the number of
+    serial *waves* of LLM calls (each wave runs ``max_concurrent_calls``
+    pairs in parallel under the semaphore), so the per-pair term scales
+    with wall-clock depth, not raw pair count.
+
+    When ``total_budget_seconds`` is ``None`` the scaled value is
+    returned verbatim; when it is set it acts as an absolute hard
+    ceiling (``min(scaled, total_budget_seconds)``) — preserving the
+    exact v0.1 absolute-cap semantics for pinned configs (DEC-010).
+
+    Pure function: no asyncio, no I/O, no logging. Always returns a
+    finite ``int`` so the ``asyncio.timeout(...)`` site never receives
+    ``None``.
+
+    ``num_pairs == 0`` short-circuits to ``budget_base_seconds`` (no
+    work to scale). ``max_concurrent_calls`` is ``>= 1`` by the config
+    validator, but the zero-pair guard also sidesteps any division
+    concern defensively.
+    """
+    if num_pairs <= 0:
+        scaled: float = float(budget_base_seconds)
+    else:
+        waves = math.ceil(num_pairs / max_concurrent_calls)
+        scaled = budget_base_seconds + budget_per_pair_seconds * waves
+    # ``math.ceil`` (not ``int``) on the final conversion so a fractional
+    # ``budget_per_pair_seconds`` never rounds the wall-clock backstop DOWN
+    # (``int(121.5)`` would shave 0.5s and trip earlier than intended). The
+    # absolute-cap branch ceils the post-``min`` value for the same reason.
+    # Both are no-ops for the default integer-valued config.
+    if total_budget_seconds is None:
+        return math.ceil(scaled)
+    return math.ceil(min(scaled, total_budget_seconds))
+
+
+def _classify_degrade_reason(reasoning: str) -> DegradeReasonType:
+    """Map a degrade ``reasoning`` string to its structured discriminator.
+
+    Centralised here (#202 US-001) so the (later) sweep /
+    ``require_complete`` logic can classify degrades by reading
+    :attr:`GradingResult.degrade_reason_type` rather than fragile
+    string-matching the human-readable prose — callers never re-parse
+    the reason text.
+
+    The three reason shapes produced upstream
+    (:func:`_format_degrade_reasoning`, the budget synthesis pass, the
+    ceiling block) map as:
+
+    * ``"call failed: …"`` (LLM / parser failure) → ``"transient"``
+    * ``"grade budget exceeded …"`` (wall-clock backstop) → ``"budget"``
+    * ``"grade … ceiling exceeded …"`` (calls/cost/tokens) → ``"ceiling"``
+
+    Ceiling reasons share the ``"grade "`` prefix with the budget
+    reason, so the ``"ceiling exceeded"`` substring is checked first to
+    disambiguate. An unrecognised reason defaults to ``"transient"`` —
+    the most conservative classification (a transient cause is retriable
+    next run), so a future reason-string drift degrades safely rather
+    than crashing or mis-classifying as a hard budget/ceiling stop.
+    """
+    if reasoning.startswith("call failed:"):
+        return "transient"
+    if "ceiling exceeded" in reasoning:
+        return "ceiling"
+    if reasoning.startswith("grade budget exceeded"):
+        return "budget"
+    return "transient"
+
+
 def _build_degraded(
     *,
     artifact_id: str,
@@ -395,6 +560,7 @@ def _build_degraded(
     run_id: str,
     timestamp: datetime,
     model_unique_id: str,
+    sweep_round: int | None = None,
 ) -> tuple[GradingResult, GradeEvent]:
     """Construct the ``score=None`` degraded pair (DEC-015).
 
@@ -404,7 +570,15 @@ def _build_degraded(
     of the pair (the result returned to the caller AND the JSONL
     receipt) carry the same ``score=None`` / ``passed=False`` shape so
     a downstream replay round-trips cleanly.
+
+    The structured ``degrade_reason_type`` discriminator (#202 US-001) is
+    derived from ``reasoning`` via :func:`_classify_degrade_reason` here —
+    the single place the prose→discriminator mapping lives, so callers
+    classify degrades without string-matching the reason text.
     """
+    # ``config.model`` is invariantly concrete post-construction (#187 US-002).
+    assert config.model is not None
+    degrade_reason_type = _classify_degrade_reason(reasoning)
     grading_result = GradingResult(
         artifact_id=artifact_id,
         criterion_id=criterion.id,
@@ -412,6 +586,7 @@ def _build_degraded(
         passed=False,
         evidence="",
         reasoning=reasoning,
+        degrade_reason_type=degrade_reason_type,
     )
     event = _build_grade_event(
         run_id=run_id,
@@ -423,6 +598,7 @@ def _build_degraded(
         passed=False,
         evidence="",
         reasoning=reasoning,
+        degrade_reason_type=degrade_reason_type,
         rubric_hash=rubric_hash,
         prompt_version_template=template_hash,
         criterion_prompt_hash=crit_hash,
@@ -432,6 +608,7 @@ def _build_degraded(
         output_tokens=0,
         cache_creation_input_tokens=0,
         cache_read_input_tokens=0,
+        sweep_round=sweep_round,
     )
     return grading_result, event
 
@@ -464,6 +641,880 @@ def _write_event_or_abort(event: GradeEvent, *, audit_path: Path) -> None:
             "Failed to durably persist a grade-decision audit record.",
             cause=exc,
         ) from exc
+
+
+# ---------------------------------------------------------------------------
+# Async core (issue #186, US-009 — TaskGroup + adaptive gate + budget timeout)
+# ---------------------------------------------------------------------------
+
+
+async def _grade_artifacts_async_core(
+    *,
+    candidate: CandidateSchema,
+    resolved_rubric: Rubric,
+    resolved_config: GradeConfig,
+    resolved_audit_path: Path,
+    client: object | None,
+    run_id: str,
+    rubric_hash: str,
+    template_hash: str,
+    rubric_block: str,
+    crit_hash_by_id: dict[str, str],
+    model_unique_id: str,
+    prefilled_results: list[GradingResult | None] | None = None,
+    cache_dir: Path | None = None,
+    artifact_text_hash_by_index: dict[int, str] | None = None,
+) -> list[GradingResult]:
+    """Concurrent dispatch of every ``(criterion, artifact)`` pair (DEC-002).
+
+    Replaces the sequential ``while iter_index < len(iterator)`` loop
+    from the v0.1 ``grade_artifacts``. Orchestrates concurrent dispatch
+    via :class:`asyncio.TaskGroup` throttled by an adaptive
+    :class:`signalforge.llm._rate_limiter.AsyncConcurrencyGate` (#202
+    QG-FIX-1) — admits at most the limiter's live ``effective_concurrency``
+    in-flight grade calls, narrowing on a 429 and probing back up toward
+    ``max_concurrent_calls`` on clean completions (replacing the fixed
+    ``asyncio.Semaphore(max_concurrent_calls)`` the engine used before),
+    bounded by :func:`asyncio.timeout(effective_budget)` (the scaled
+    wall-clock backstop from :func:`_compute_effective_budget`, DEC-001).
+    Each pair runs as a coroutine; per-coroutine ``try/except`` isolates
+    LLM-layer failures so one bad pair doesn't abort siblings (DEC-004
+    retry isolation).
+
+    Cancellation attribution (DEC-008): when the budget trips, the
+    enclosing ``asyncio.timeout`` cancels every in-flight task. Each
+    coroutine catches :class:`asyncio.CancelledError` and consults the
+    orchestrator-scope ``_budget_exceeded`` flag — if set, the pair
+    degrades with the locked ``"grade budget exceeded ({N}s) before
+    evaluation"`` reasoning (preserves the existing audit-corpus shape
+    from v0.1); if unset, the cancellation is re-raised so an unrelated
+    parent-task death (``KeyboardInterrupt``, ``SystemExit``) propagates
+    intact to the CLI boundary.
+
+    Audit writes happen inside each coroutine via
+    ``await loop.run_in_executor(None, _write_event_or_abort, ...)``
+    (DEC-017): ``os.fsync`` still serialises at the OS level (no
+    wall-time win), but the event loop is free to schedule the next
+    coroutine's prompt-build during the fsync.
+
+    Returns the list of per-pair :class:`GradingResult`s in **iteration
+    order** (NOT arrival order) — caller-visible result ordering is
+    preserved across the refactor by storing each task's result at the
+    iterator-index slot. On-disk JSONL ordering becomes arrival-order
+    (per DEC-015); this is the deliberate concurrent-dispatch trade.
+
+    After the main pass an ALWAYS-ON bounded transient-recovery sweep
+    (#202 US-005 / DEC-206) re-grades the ``score is None`` /
+    ``degrade_reason_type == "transient"`` pairs SEQUENTIALLY (concurrency
+    1) for up to ``sweep_max_rounds`` rounds, mutating ``results_by_index``
+    in place. The returned list therefore carries POST-sweep state — the
+    caller builds the :class:`GradingReport` from it, so the report's
+    aggregates (``aggregate_complete`` / ``pass_rate`` / ``mean_score``)
+    reflect the sweep. ``"budget"`` / ``"ceiling"`` degrades are never
+    swept.
+    """
+    # Resolve the async-shaped client surface (US-009 docstring on
+    # :func:`_resolve_async_client`). Production callers pass
+    # ``client=None``; ``call_llm_async`` builds via
+    # ``provider.make_async_client()``. Tests pass a sync
+    # FakeAnthropicClient whose ``.aio`` namespace carries the async
+    # surface; we translate once here so the per-coroutine forwarding
+    # is a no-op.
+    async_client = _resolve_async_client(cast(AnthropicClientProtocol | None, client))
+
+    pairs = list(_iterate_artifacts(candidate, resolved_rubric))
+    total_pairs = len(pairs)
+    # Results land at their iterator-index slot so caller-visible
+    # ``report.results`` stays in (criterion-outer, artifact-inner)
+    # order even though tasks complete in arrival order on disk.
+    #
+    # ``prefilled_results`` carries cache-hit slots resolved by the sync
+    # prefix (#189 / DEC-013 of #189). Cache hits never enter the
+    # ``TaskGroup`` — they were already audit-written by the sync prefix
+    # and pre-populated here so the synthesis pass below correctly skips
+    # them. ``cache_dir`` is ``None`` when ``config.cache_enabled=False``
+    # OR the caller hasn't computed it; either way the post-grade
+    # cache-write path is short-circuited.
+    if prefilled_results is not None:
+        # Shallow copy so we own the list and can mutate freely.
+        results_by_index: list[GradingResult | None] = list(prefilled_results)
+        if len(results_by_index) != total_pairs:
+            # Defensive guard against caller misuse — the prefilled list
+            # MUST line up with the iterator order.
+            raise GradeError(
+                f"prefilled_results length {len(results_by_index)} "
+                f"does not match total_pairs {total_pairs}.",
+            )
+    else:
+        results_by_index = [None] * total_pairs
+
+    # ``_budget_exceeded`` is the orchestrator-scope flag the per-task
+    # ``except CancelledError`` arm reads (DEC-008). Closure capture
+    # via a list mutable cell so the flag survives across nested
+    # coroutines without resorting to ``nonlocal`` from a sibling.
+    budget_state: dict[str, bool] = {"exceeded": False}
+
+    # Per-pair category counters; populated as tasks finish.
+    # ``completed`` covers both happy-path scores AND LLM-layer per-pair
+    # degrades (DEC-015) — anything that ran to completion inside the
+    # coroutine, regardless of verdict. ``degraded`` is the synthesis-pass
+    # count of pairs that did NOT complete by budget-trip (whether they
+    # were in-flight or never started — the asyncio cancellation contract
+    # doesn't let us distinguish, per #186 QG Pass 1+3 triangulation).
+    counters: dict[str, int] = {
+        "completed": 0,  # scored (or LLM-layer-degraded — non-budget)
+        "degraded": 0,  # synthesis pass: un-completed at trip time → budget degrade
+    }
+    # Cache-hit slots resolved by the sync prefix (#189 / DEC-013) count
+    # toward the ``completed`` total so the budget-trip WARNING faithfully
+    # reflects the run's actual progress (a 100%-cache-hit run that
+    # never starts the async core should not WARN with completed=0).
+    if prefilled_results is not None:
+        counters["completed"] = sum(1 for r in prefilled_results if r is not None)
+
+    # Scale the wall-clock backstop with the work to be done (DEC-001).
+    # ``effective_budget`` is a finite int (never ``None``) so the
+    # ``asyncio.timeout(...)`` site below always receives a valid value.
+    effective_budget = _compute_effective_budget(
+        budget_base_seconds=resolved_config.budget_base_seconds,
+        budget_per_pair_seconds=resolved_config.budget_per_pair_seconds,
+        total_budget_seconds=resolved_config.total_budget_seconds,
+        num_pairs=total_pairs,
+        max_concurrent_calls=resolved_config.max_concurrent_calls,
+    )
+
+    # Shared rate limiter for the whole grade fan-out (#202 US-004 / DEC-205).
+    # Build ONE cooperating sync+async limiter pair over a single shared AIMD
+    # state cell, seeded with the configured ``max_concurrent_calls`` (the
+    # limiter's effective-concurrency ceiling AND starting point — see
+    # ``_RateLimiterState.__post_init__``). The async sibling is published on the
+    # ``current_async_rate_limiter`` ContextVar so EVERY coroutine dispatched in
+    # the ``TaskGroup`` (``_one`` → ``_grade_one_async`` → ``call_llm_async``)
+    # resolves the SAME limiter and paces its 429 retries against ONE shared
+    # budget — a 429 seen by any coroutine multiplicatively narrows the
+    # concurrency the whole wave probes from, so the fan-out runs AT the rate
+    # limit instead of bursting past it.
+    #
+    # The limiter PACES (decides the per-429 wait via ``retry-after`` / reset
+    # headers, blind-backoff fallback when absent) AND now GOVERNS dispatch via
+    # the adaptive :class:`AsyncConcurrencyGate` below — which admits at most the
+    # limiter's live ``effective_concurrency`` in-flight grade calls (replacing
+    # the fixed ``asyncio.Semaphore(max_concurrent_calls)`` the engine used
+    # pre-#202-QG). The ``asyncio.timeout(effective_budget)`` stays the runaway
+    # backstop. The two are orthogonal — limiter waits legitimately count against
+    # the budget, so a genuinely over-budget run still degrades (the #198
+    # behaviour is unchanged). The ContextVar is set here (inside the coroutine,
+    # which ``asyncio.run`` runs in its own copied context) and RESET in the
+    # ``finally`` below so it never leaks past this run.
+    # Only the async sibling is published — the grade fan-out runs exclusively
+    # on the async path (``call_llm_async``); the sync limiter shares the same
+    # AIMD state but has no consumer in this orchestrator, so it is discarded.
+    _async_limiter = make_rate_limiters(resolved_config.max_concurrent_calls)[1]
+    # The gate shares the limiter's AIMD state, so its admission cap IS the
+    # live ``effective_concurrency``: a 429 (routed through the limiter on any
+    # coroutine's retry path) narrows the cap and the fan-out drains toward it;
+    # a clean completion's ``on_headroom`` (fired in ``call_llm_async``) widens
+    # it back toward ``max_concurrent_calls``. Floored at 1 so a fully-throttled
+    # run still admits one call and makes progress (never deadlocks).
+    gate = make_async_gate(_async_limiter)
+    _limiter_token = current_async_rate_limiter.set(_async_limiter)
+    try:
+        # Opt-in cost/calls/tokens ceilings (US-004 / DEC-002/003/010/011).
+        # All three default ``None`` → off; a non-None value caps the
+        # respective accumulator and degrades un-started pairs once met.
+        #
+        # Semantics are SOFT / best-effort (DEC-003): every pair is dispatched
+        # into the one ``TaskGroup``; a tripped ceiling only stops *scheduling
+        # new LLM calls*, so up to ``max_concurrent_calls - 1`` in-flight calls
+        # may complete past the threshold. The accumulators are mutable closure
+        # cells (mirroring ``budget_state`` / ``counters``) so the per-pair
+        # ``_one`` coroutine reads + updates them; the single event loop makes
+        # check-then-reserve race-free as long as no ``await`` separates the
+        # read from the slot-reservation increment (DEC-003).
+        max_grade_calls = resolved_config.max_grade_calls
+        max_grade_cost_usd = resolved_config.max_grade_cost_usd
+        max_grade_tokens = resolved_config.max_grade_tokens
+        # Resolve the cost-ceiling pricing ONCE, up front, before any LLM call
+        # is dispatched. ``GradeConfig._validate_model_provider_compat`` only
+        # checks the SKU *prefix* (``claude-`` / ``gpt-`` / ``gemini-``), NOT
+        # membership in ``pricing.PRICES`` — so a prefix-valid-but-unpriced SKU
+        # (a newer Opus, a typo passing the prefix check) is accepted at
+        # config-load. Looking the price up per-pair inside the ``TaskGroup``
+        # would raise ``EstimateUnknownModelError`` from inside a coroutine —
+        # uncaught by the per-pair ``except`` below — aborting the whole run via
+        # a ``BaseExceptionGroup`` AFTER billable calls + audit writes. Resolving
+        # here fails fast at orchestrator entry (the typed error surfaces cleanly,
+        # CLI tier 2, with its remediation) and the resolved object is reused for
+        # every pair (no redundant per-pair lookup). ``None`` when no cost ceiling
+        # is configured.
+        cost_pricing = None
+        if max_grade_cost_usd is not None:
+            # ``resolved_config.model`` is invariantly concrete post-construction
+            # (#187 US-002); the lookup raises only on an unknown SKU.
+            assert resolved_config.model is not None
+            cost_pricing = _lookup_pricing(resolved_config.model)
+        # ``calls_made`` is the near-hard call counter: reserved (incremented)
+        # BEFORE the LLM await so it bounds dispatch tightly. ``cost_usd`` and
+        # ``tokens`` are soft accumulators updated only AFTER a successful call
+        # (their values are unknown until the response returns), so the cost /
+        # token ceilings degrade pairs that START after the accumulator already
+        # crossed the cap (DEC-003 bounded overshoot).
+        accumulators: dict[str, float] = {"calls_made": 0.0, "cost_usd": 0.0, "tokens": 0.0}
+        # Records the FIRST ceiling that tripped (DEC-007 WARNING source).
+        tripped: dict[str, object | None] = {"ceiling": None, "limit": None}
+
+        async def _one(
+            index: int, artifact_id: str, artifact_text: str, criterion: Criterion
+        ) -> None:
+            # Adaptive admission gate (#202 QG-FIX-1): admits at most the
+            # limiter's live ``effective_concurrency`` in-flight grade calls,
+            # not the fixed ``max_concurrent_calls``. ``__aexit__`` releases the
+            # slot (and notifies waiters) even on cancellation / failure.
+            async with gate:
+                # Each call gets its own ``timestamp`` so a forensic query
+                # can distinguish per-call latency. The sidecar carries
+                # ``started_at`` separately.
+                crit_hash = crit_hash_by_id[criterion.id]
+                per_call_ts = datetime.now(UTC)
+
+                # --- Opt-in cost/calls/tokens ceilings (US-004) -------------
+                # CHECK-then-RESERVE with NO ``await`` between the read and the
+                # decision: this whole block runs synchronously inside the
+                # single event loop, immediately after the gate admission
+                # and BEFORE the LLM ``await`` below, so the accumulator reads
+                # and the ``calls_made`` increment are race-free (DEC-003). A
+                # tripped ceiling degrades THIS un-started pair (DEC-002) with
+                # the locked reason (DEC-009), writes its audit record
+                # UNSHIELDED (no in-flight LLM await precedes it — the
+                # synchronous ``_write_event_or_abort_kw`` mirrors the
+                # synthesis pass), sets the slot (so the synthesis pass skips
+                # it — no double audit), counts it as ``completed`` (DEC-011),
+                # records the first ceiling that tripped, and returns without
+                # making the LLM call.
+                ceiling_reason: str | None = None
+                ceiling_name: str | None = None
+                ceiling_limit: object | None = None
+                if max_grade_calls is not None and accumulators["calls_made"] >= max_grade_calls:
+                    ceiling_reason = f"grade call ceiling exceeded ({max_grade_calls} calls)"
+                    ceiling_name = "calls"
+                    ceiling_limit = max_grade_calls
+                elif (
+                    max_grade_cost_usd is not None
+                    and accumulators["cost_usd"] >= max_grade_cost_usd
+                ):
+                    ceiling_reason = f"grade cost ceiling exceeded (${max_grade_cost_usd})"
+                    ceiling_name = "cost_usd"
+                    ceiling_limit = max_grade_cost_usd
+                elif max_grade_tokens is not None and accumulators["tokens"] >= max_grade_tokens:
+                    ceiling_reason = f"grade token ceiling exceeded ({max_grade_tokens} tokens)"
+                    ceiling_name = "tokens"
+                    ceiling_limit = max_grade_tokens
+
+                if ceiling_reason is not None:
+                    grading_result, event = _build_degraded(
+                        artifact_id=artifact_id,
+                        criterion=criterion,
+                        reasoning=ceiling_reason,
+                        config=resolved_config,
+                        rubric_hash=rubric_hash,
+                        template_hash=template_hash,
+                        crit_hash=crit_hash,
+                        run_id=run_id,
+                        timestamp=per_call_ts,
+                        model_unique_id=model_unique_id,
+                    )
+                    # Slot + counters FIRST (DEC-011: ceiling-degrades count as
+                    # completed), then the audit write — mirroring the happy-path
+                    # ordering so a cancellation during the write await leaves the
+                    # synthesis pass correctly skipping this index (no double audit).
+                    results_by_index[index] = grading_result
+                    counters["completed"] += 1
+                    if tripped["ceiling"] is None:
+                        tripped["ceiling"] = ceiling_name
+                        tripped["limit"] = ceiling_limit
+                    # Audit-write via the executor + shield (DEC-017), exactly like
+                    # the happy-path write below: this degrade runs INSIDE the
+                    # concurrent TaskGroup region (unlike the sequential synthesis
+                    # pass), so a synchronous fsync here would block the event loop
+                    # and stall sibling in-flight coroutines. The shield lets the
+                    # write finish even if a budget timeout cancels this task
+                    # mid-flight; on CancelledError we await the future so a
+                    # GradeAuditWriteError / GradeAuditRecordTooLargeError still
+                    # propagates and aborts the run (fail-closed, DEC-006).
+                    loop = asyncio.get_running_loop()
+                    ceiling_audit_future = loop.run_in_executor(
+                        None, _write_event_or_abort_kw, event, resolved_audit_path
+                    )
+                    try:
+                        await asyncio.shield(ceiling_audit_future)
+                    except asyncio.CancelledError:
+                        await ceiling_audit_future
+                        raise
+                    return
+
+                # Reserve a call slot for the near-hard ``max_grade_calls``
+                # ceiling BEFORE the LLM await (DEC-003). The check above
+                # already rejected the over-cap case, so this increment can
+                # only push ``calls_made`` up to exactly ``max_grade_calls``.
+                if max_grade_calls is not None:
+                    accumulators["calls_made"] += 1
+
+                try:
+                    grading_result, event = await _grade_one_async(
+                        artifact_id=artifact_id,
+                        artifact_text=artifact_text,
+                        criterion=criterion,
+                        config=resolved_config,
+                        rubric_block=rubric_block,
+                        rubric_hash=rubric_hash,
+                        template_hash=template_hash,
+                        crit_hash=crit_hash,
+                        client=async_client,
+                        run_id=run_id,
+                        timestamp=per_call_ts,
+                        model_unique_id=model_unique_id,
+                    )
+                except (
+                    GradeLLMError,
+                    GradeOutputError,
+                    GradePromptEnvelopeBreachError,
+                ) as exc:
+                    # Per-pair degrade — DEC-015. Do NOT let one
+                    # criterion's failure abort the whole run.
+                    grading_result, event = _build_degraded(
+                        artifact_id=artifact_id,
+                        criterion=criterion,
+                        reasoning=_format_degrade_reasoning(exc),
+                        config=resolved_config,
+                        rubric_hash=rubric_hash,
+                        template_hash=template_hash,
+                        crit_hash=crit_hash,
+                        run_id=run_id,
+                        timestamp=per_call_ts,
+                        model_unique_id=model_unique_id,
+                    )
+                # NOTE: deliberately NO ``except asyncio.CancelledError`` arm
+                # here. Pre-#186-QG the orchestrator's ``budget_state["exceeded"]``
+                # flag was set in ``except TimeoutError`` AFTER ``TaskGroup``'s
+                # ``__aexit__`` returned — but cancelled children's
+                # ``except CancelledError`` runs BEFORE that, so the flag was
+                # always ``False`` when checked here. The branch was dead code
+                # (QG Pass 1+3 triangulated). The synthesis pass below is now
+                # the single source of truth for "this pair was un-completed
+                # at trip time" — accurate by construction.
+
+                # In-memory slot assignment FIRST. Under the worst-case
+                # cancellation timing (timeout fires while the
+                # ``run_in_executor`` audit await is suspended), the executor
+                # thread keeps running and durably writes the audit record;
+                # without setting the slot first the coroutine raises
+                # ``CancelledError`` before line 691 runs, leaving the slot
+                # ``None`` — and the synthesis pass then writes a SECOND audit
+                # record for the same pair (QG Pass 1 BLOCKER). Setting the
+                # slot before the await closes the race: even if the await
+                # raises, the in-memory state is consistent with disk.
+                results_by_index[index] = grading_result
+                counters["completed"] += 1
+
+                # Update the soft cost / token accumulators from this call's
+                # actual usage (DEC-010). Read off ``event`` (the GradeEvent
+                # built from ``result.{input,output,cache_*}_tokens`` in
+                # ``_grade_one_async``; a degraded pair carries zeros — harmless
+                # to accumulate). ``tokens`` is ALL token movement (input +
+                # output + cache write + cache read); ``cost_usd`` is full USD
+                # incl. cache via the frozen pricing table. Cache-hit pairs
+                # (#189) bypass ``_one`` entirely so they're already excluded.
+                # The cost lookup uses ``resolved_config.model`` (the SKU the
+                # operator selected), never ``event.model`` — the live config
+                # is the single source of truth for which price table applies.
+                if max_grade_tokens is not None:
+                    accumulators["tokens"] += (
+                        event.input_tokens
+                        + event.output_tokens
+                        + event.cache_creation_input_tokens
+                        + event.cache_read_input_tokens
+                    )
+                if max_grade_cost_usd is not None:
+                    # ``cost_pricing`` was resolved once up front (an unpriced SKU
+                    # already failed fast at orchestrator entry), so reuse it here
+                    # rather than looking up per pair.
+                    assert cost_pricing is not None
+                    accumulators["cost_usd"] += (
+                        event.input_tokens * cost_pricing.input_per_mtok
+                        + event.output_tokens * cost_pricing.output_per_mtok
+                        + event.cache_creation_input_tokens * cost_pricing.cache_write_5m_per_mtok
+                        + event.cache_read_input_tokens * cost_pricing.cache_read_per_mtok
+                    ) / 1_000_000
+
+                # Audit-write per pair (DEC-006 fail-closed; DEC-017
+                # executor-wrap so the fsync doesn't block the loop). On
+                # GradeAuditRecordTooLargeError / GradeAuditWriteError we
+                # propagate; the run aborts.
+                #
+                # ``asyncio.shield`` ensures the audit-write completes even
+                # when the outer task is cancelled — the executor work is
+                # sync (cannot be killed mid-fsync); shielding lets it finish
+                # before the cancellation propagates back. The slot was set
+                # above so the synthesis pass will correctly skip this index.
+                #
+                # PR #190 review (CodeRabbit) refinement: capture the
+                # executor future explicitly so a cancellation arriving
+                # mid-shield doesn't silently swallow a downstream
+                # ``GradeAuditWriteError`` / ``GradeAuditRecordTooLargeError``.
+                # If the outer ``shield`` await raises ``CancelledError``,
+                # await the future directly so the writer's exception (if
+                # any) propagates to the TaskGroup as the run's abort signal
+                # — preserves the fail-closed contract under concurrent
+                # cancellation. On the happy path this is a no-op
+                # (``audit_future.done()`` is already True when the shield
+                # returns).
+                loop = asyncio.get_running_loop()
+                audit_future = loop.run_in_executor(
+                    None, _write_event_or_abort_kw, event, resolved_audit_path
+                )
+                try:
+                    await asyncio.shield(audit_future)
+                except asyncio.CancelledError:
+                    await audit_future
+                    raise
+
+                # Cache-write post-audit (#189 / DEC-005 / DEC-007). Fail-soft:
+                # write_cache catches OSError / oversize / EEXIST internally
+                # and surfaces them as WARNING lines — never raises. Skipped
+                # when (a) cache is disabled (cache_dir is None) OR (b) the
+                # result degraded (score is None — DEC-007 forbids caching
+                # transient LLM failures). ``CacheRecord`` is built from the
+                # GradeEvent's reproducibility fields so cache-hit re-runs
+                # rehydrate a byte-identical audit corpus (modulo timestamp
+                # + cache_hit=True).
+                if (
+                    cache_dir is not None
+                    and grading_result.score is not None
+                    and artifact_text_hash_by_index is not None
+                ):
+                    artifact_text_hash = artifact_text_hash_by_index.get(index)
+                    if artifact_text_hash is not None:
+                        # ``resolved_config.model`` is invariantly concrete
+                        # post-construction (#187 US-002) — same precondition
+                        # as the sync-prefix lookup loop at line ~1199.
+                        assert resolved_config.model is not None
+                        # PR #196 Copilot — use the LIVE config values (NOT
+                        # ``event.*``) for every cache-key axis so the write
+                        # and lookup paths source the same five inputs. The
+                        # sync-prefix lookup at line ~1186 uses
+                        # ``resolved_config.{provider,model}`` + ``crit_hash``
+                        # + ``template_hash``; mirroring those here keeps
+                        # the key-recomputation gate in ``lookup_cache``
+                        # (issue #189 QG Pass 1 Finding 1) aligned. In
+                        # practice ``event.model`` already equals
+                        # ``resolved_config.model`` (see line ~484), but a
+                        # future refactor or test stub that diverges them
+                        # would silently break the cache without this
+                        # symmetry. ``response_text_hash`` and
+                        # ``rubric_hash`` stay sourced from the live run's
+                        # GradeEvent — they're forensic (the LLM's actual
+                        # response, the full rubric in effect for this run).
+                        cache_record = CacheRecord(
+                            artifact_id=artifact_id,
+                            criterion_id=criterion.id,
+                            score=grading_result.score,
+                            passed=grading_result.passed,
+                            evidence=grading_result.evidence,
+                            reasoning=grading_result.reasoning,
+                            criterion_prompt_hash=crit_hash,
+                            artifact_text_hash=artifact_text_hash,
+                            provider=resolved_config.provider,
+                            model=resolved_config.model,
+                            prompt_version_template=template_hash,
+                            response_text_hash=event.response_text_hash,
+                            rubric_hash=rubric_hash,
+                            original_timestamp=per_call_ts,
+                        )
+                        cache_key = compute_cache_key(
+                            criterion_prompt_hash=crit_hash,
+                            artifact_text_hash=artifact_text_hash,
+                            provider=resolved_config.provider,
+                            model=resolved_config.model,
+                            prompt_version_template=template_hash,
+                        )
+                        # Fail-soft per DEC-005 — :func:`write_cache`
+                        # swallows OSError / oversize / EEXIST internally
+                        # and surfaces them as WARNING lines. The defensive
+                        # outer guard here is defence-in-depth: a future
+                        # refactor that violates the fail-soft contract, OR
+                        # a test stub that deliberately raises (see
+                        # ``test_grade_engine_cache_write_failure_is_fail_soft``)
+                        # MUST NOT abort the live grade. One lazy-format
+                        # JSON WARNING; the live run continues.
+                        try:
+                            write_cache(cache_dir, cache_key, cache_record)
+                        except Exception as cache_exc:
+                            _LOGGER.warning(
+                                "grade cache write failed (engine guard): %s",
+                                json.dumps(
+                                    {
+                                        "key": cache_key,
+                                        "error_class": type(cache_exc).__name__,
+                                    }
+                                ),
+                            )
+
+        try:
+            async with asyncio.timeout(effective_budget):
+                async with asyncio.TaskGroup() as tg:
+                    for index, (artifact_id, artifact_text, criterion) in enumerate(pairs):
+                        # Skip cache-hit slots already populated by the sync
+                        # prefix (#189 / DEC-013). The synthesis pass below
+                        # treats a non-None slot as "do not re-grade".
+                        if results_by_index[index] is not None:
+                            continue
+                        tg.create_task(_one(index, artifact_id, artifact_text, criterion))
+        except TimeoutError:
+            # The timeout fired. Tasks not yet completed at this point
+            # received CancelledError and routed through the budget-degrade
+            # branch above (which populated ``results_by_index`` and bumped
+            # ``counters["cancelled"]``). The TaskGroup's __aexit__ awaited
+            # every cancelled task to finish before re-raising, so by the
+            # time we land here every slot is populated UNLESS the task
+            # body had not yet entered (``async with gate`` admission was
+            # still pending) — in that case the slot is still ``None`` and we
+            # synthesise a degraded result below.
+            budget_state["exceeded"] = True
+        except BaseExceptionGroup as group:
+            # DEC-007 defence in depth — every per-coroutine grade-typed
+            # exception is caught inside the coroutine, so a
+            # ``BaseExceptionGroup`` here means a fail-closed audit-write
+            # error (``GradeAuditRecordTooLargeError`` /
+            # ``GradeAuditWriteError``) — or, more rarely, a non-grade
+            # exception slipping through. The audit error MUST abort the
+            # run AS THE ORIGINAL ERROR TYPE so the CLI / library callers
+            # can pattern-match on the typed exception they already know
+            # (mirrors the v0.1 sequential-loop ``raise`` semantics — the
+            # only fail-closed boundary in the engine). Unwrap a single
+            # representative exception via ``group.exceptions[0]`` (the
+            # canonical pattern for re-raising-after-TaskGroup).
+            # Multi-exception ExceptionGroups bubble unchanged to US-010's
+            # CLI-level renderer.
+            if len(group.exceptions) == 1:
+                raise group.exceptions[0] from group
+            raise
+
+        # Fill any un-started slots with the budget-degrade shape. A slot is
+        # ``None`` iff the task was cancelled BEFORE its body executed
+        # (i.e. while it was still awaiting gate admission). Mirrors the v0.1
+        # "iter_index past the trip" semantics.
+        for index, (artifact_id, _artifact_text, criterion) in enumerate(pairs):
+            if results_by_index[index] is not None:
+                continue
+            crit_hash = crit_hash_by_id[criterion.id]
+            per_call_ts = datetime.now(UTC)
+            grading_result, event = _build_degraded(
+                artifact_id=artifact_id,
+                criterion=criterion,
+                reasoning=(f"grade budget exceeded ({effective_budget}s) before evaluation"),
+                config=resolved_config,
+                rubric_hash=rubric_hash,
+                template_hash=template_hash,
+                crit_hash=crit_hash,
+                run_id=run_id,
+                timestamp=per_call_ts,
+                model_unique_id=model_unique_id,
+            )
+            _write_event_or_abort_kw(event, resolved_audit_path)
+            results_by_index[index] = grading_result
+            counters["degraded"] += 1
+
+        # Emit ONE WARNING on budget trip, field set locked per DEC-018.
+        # NB: ``cancelled_count`` was dropped in #186 QG (Pass 1 + Pass 3
+        # triangulation) — the asyncio cancellation contract doesn't let
+        # the engine distinguish "in-flight at trip" from "un-started at
+        # trip", so the field was always 0 in practice and ``degraded_count``
+        # carries everything-not-completed. The simpler invariant
+        # ``completed_count + degraded_count == total_pairs`` holds.
+        if budget_state["exceeded"]:
+            _LOGGER.warning(
+                "grade budget exceeded: %s",
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "model_unique_id": model_unique_id,
+                        "completed_count": counters["completed"],
+                        "degraded_count": counters["degraded"],
+                        "effective_budget_seconds": effective_budget,
+                    }
+                ),
+            )
+
+        # Emit ONE ceiling WARNING (distinct from the wall-clock budget
+        # WARNING above) when any opt-in cost/calls/tokens ceiling tripped
+        # (DEC-007). Locked field set: ``run_id``, ``model_unique_id``,
+        # ``ceiling`` (∈ {"calls","cost_usd","tokens"}), ``limit``,
+        # ``completed_count``, ``degraded_count``. Lazy-format JSON per the
+        # ANSI-safe logger grep gate — no f-string interpolation of
+        # user/config data into the logger call.
+        if tripped["ceiling"] is not None:
+            _LOGGER.warning(
+                "grade ceiling exceeded: %s",
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "model_unique_id": model_unique_id,
+                        "ceiling": tripped["ceiling"],
+                        "limit": tripped["limit"],
+                        "completed_count": counters["completed"],
+                        "degraded_count": counters["degraded"],
+                    }
+                ),
+            )
+
+        # Bounded transient-recovery sweep (#202 US-005 / DEC-206). ALWAYS-ON.
+        # After the main concurrent pass (and the WARNINGs above) the report
+        # is NOT yet built — it is assembled by the caller from the value this
+        # function returns, AFTER the sweep mutates ``results_by_index`` in
+        # place. ``results_by_index`` is the single source of truth the
+        # sidecar + report both read, so a recovered pair flips
+        # ``aggregate_complete`` to ``True`` without any second results list.
+        #
+        # The sweep re-grades ONLY pairs whose slot is degraded
+        # (``score is None``) AND classified ``"transient"`` — a transient LLM
+        # blip can recover on a calmer retry. ``"budget"`` and ``"ceiling"``
+        # degrades are NEVER swept (a hard wall-clock / opt-in cap is not
+        # retriable). Each round runs SEQUENTIALLY (concurrency 1) so there is
+        # no second thundering herd; the loop stops when zero transient pairs
+        # remain OR ``sweep_max_rounds`` is reached (no infinite loop).
+        #
+        # The cool-down between rounds routes through the test-overridable
+        # ``_async_sleep`` alias; ``sweep_cooldown_seconds == 0`` skips the
+        # wait but the sweep itself stays always-on.
+        #
+        # WALL-CLOCK BOUND (#202 QG-FIX-2). The sweep runs AFTER the main
+        # pass's ``asyncio.timeout(effective_budget)`` scope has closed, so it
+        # was previously unbounded — a never-recovering degraded provider that
+        # honours long ``retry-after`` / reset waits across rounds could spend
+        # many extra minutes here. Wrap the WHOLE sweep loop in its own
+        # ``asyncio.timeout(sweep_budget_seconds)``. On ``TimeoutError`` we STOP
+        # sweeping (do NOT re-raise — the run continues to report assembly) and
+        # leave any remaining transient pairs degraded ``score=None``; they fail
+        # loud under ``require_complete`` or surface as an honest partial when
+        # ``require_complete=False``. A cancellation mid-pair leaves that pair's
+        # slot as-is (still degraded — the synchronous audit write inside
+        # ``_sweep_one_pair`` is past or not-yet-reached, never torn mid-fsync).
+        try:
+            async with asyncio.timeout(resolved_config.sweep_budget_seconds):
+                for sweep_round in range(1, resolved_config.sweep_max_rounds + 1):
+                    transient_indices = [
+                        idx
+                        for idx, (_aid, _atext, _crit) in enumerate(pairs)
+                        if (r := results_by_index[idx]) is not None
+                        and r.score is None
+                        and r.degrade_reason_type == "transient"
+                    ]
+                    if not transient_indices:
+                        break
+                    if resolved_config.sweep_cooldown_seconds > 0:
+                        await _async_sleep(resolved_config.sweep_cooldown_seconds)
+                    for idx in transient_indices:
+                        artifact_id, artifact_text, criterion = pairs[idx]
+                        await _sweep_one_pair(
+                            index=idx,
+                            artifact_id=artifact_id,
+                            artifact_text=artifact_text,
+                            criterion=criterion,
+                            sweep_round=sweep_round,
+                            resolved_config=resolved_config,
+                            resolved_audit_path=resolved_audit_path,
+                            async_client=async_client,
+                            run_id=run_id,
+                            rubric_hash=rubric_hash,
+                            template_hash=template_hash,
+                            rubric_block=rubric_block,
+                            crit_hash=crit_hash_by_id[criterion.id],
+                            model_unique_id=model_unique_id,
+                            results_by_index=results_by_index,
+                            cache_dir=cache_dir,
+                            artifact_text_hash_by_index=artifact_text_hash_by_index,
+                        )
+        except TimeoutError:
+            # The sweep wall-clock bound tripped. Stop sweeping; leave any
+            # remaining transient pairs degraded. One WARNING for forensics —
+            # lazy-format JSON per the ANSI-safe logger grep gate.
+            remaining_transient = sum(
+                1
+                for r in results_by_index
+                if r is not None and r.score is None and r.degrade_reason_type == "transient"
+            )
+            _LOGGER.warning(
+                "grade sweep budget exceeded: %s",
+                json.dumps(
+                    {
+                        "run_id": run_id,
+                        "model_unique_id": model_unique_id,
+                        "sweep_budget_seconds": resolved_config.sweep_budget_seconds,
+                        "remaining_transient": remaining_transient,
+                    }
+                ),
+            )
+    finally:
+        # Reset the ContextVar so the shared limiter never leaks past this
+        # run (belt-and-braces — ``asyncio.run`` already runs the coroutine
+        # in a copied context, but a nested same-context re-entry would
+        # otherwise observe a stale limiter).
+        current_async_rate_limiter.reset(_limiter_token)
+
+    # By construction every slot is populated; the type-narrowing cast
+    # is safe.
+    return [cast(GradingResult, r) for r in results_by_index]
+
+
+async def _sweep_one_pair(
+    *,
+    index: int,
+    artifact_id: str,
+    artifact_text: str,
+    criterion: Criterion,
+    sweep_round: int,
+    resolved_config: GradeConfig,
+    resolved_audit_path: Path,
+    async_client: object | None,
+    run_id: str,
+    rubric_hash: str,
+    template_hash: str,
+    rubric_block: str,
+    crit_hash: str,
+    model_unique_id: str,
+    results_by_index: list[GradingResult | None],
+    cache_dir: Path | None,
+    artifact_text_hash_by_index: dict[int, str] | None,
+) -> None:
+    """Re-grade ONE transient-degraded pair on a sweep round (#202 US-005 / DEC-206).
+
+    Runs SEQUENTIALLY from :func:`_grade_artifacts_async_core`'s sweep loop
+    (concurrency 1 — no second thundering herd). Mirrors the happy-path
+    ``_one`` coroutine's post-grade discipline but without the adaptive gate,
+    ceiling accounting, or main-pass budget machinery (the sweep is the calm
+    retry; the main pass's ``asyncio.timeout`` has already exited). The sweep
+    LOOP as a whole IS wall-clock-bounded by its own
+    ``asyncio.timeout(sweep_budget_seconds)`` (#202 QG-FIX-2): a cancellation
+    arriving mid-pair simply leaves this pair's slot degraded.
+
+    Each attempt appends a NEW ``sweep_round``-tagged audit record (the
+    immutable-log posture — the original failure record is never rewritten).
+    The single source of truth ``results_by_index`` is updated in place so a
+    recovered pair flips ``score is None`` → a real score; a still-failing
+    pair stays degraded (with a fresh ``sweep_round``-tagged transient
+    record). On success the now-scored pair is written to the grade cache
+    via the same fail-soft path as the main pass — a still-degraded pair is
+    NEVER cached (DEC-007 of #189).
+    """
+    per_call_ts = datetime.now(UTC)
+    try:
+        grading_result, event = await _grade_one_async(
+            artifact_id=artifact_id,
+            artifact_text=artifact_text,
+            criterion=criterion,
+            config=resolved_config,
+            rubric_block=rubric_block,
+            rubric_hash=rubric_hash,
+            template_hash=template_hash,
+            crit_hash=crit_hash,
+            client=async_client,
+            run_id=run_id,
+            timestamp=per_call_ts,
+            model_unique_id=model_unique_id,
+            sweep_round=sweep_round,
+        )
+    except (
+        GradeLLMError,
+        GradeOutputError,
+        GradePromptEnvelopeBreachError,
+    ) as exc:
+        # Still degraded on this sweep round — append a fresh
+        # ``sweep_round``-tagged record (immutable log) and leave the slot
+        # degraded. The next sweep round (if any) re-touches it.
+        grading_result, event = _build_degraded(
+            artifact_id=artifact_id,
+            criterion=criterion,
+            reasoning=_format_degrade_reasoning(exc),
+            config=resolved_config,
+            rubric_hash=rubric_hash,
+            template_hash=template_hash,
+            crit_hash=crit_hash,
+            run_id=run_id,
+            timestamp=per_call_ts,
+            model_unique_id=model_unique_id,
+            sweep_round=sweep_round,
+        )
+
+    # Single source of truth — overwrite the prior degraded slot with this
+    # round's verdict (a recovery flips it to a real score; a repeat failure
+    # carries the new transient record's shape).
+    results_by_index[index] = grading_result
+
+    # Append the NEW audit record. The sweep runs sequentially, so a plain
+    # synchronous write (no executor/shield) is fine — there are no sibling
+    # in-flight coroutines for an fsync to stall (mirrors the synthesis
+    # pass's sync write). Fail-closed: a GradeAuditWriteError aborts the run.
+    _write_event_or_abort_kw(event, resolved_audit_path)
+
+    # Cache-write on recovery only (reuse the main-pass fail-soft path). A
+    # pair that stayed degraded (score is None) is never cached — DEC-007 of
+    # #189 forbids caching a transient failure, which would replay it forever.
+    if (
+        cache_dir is not None
+        and grading_result.score is not None
+        and artifact_text_hash_by_index is not None
+    ):
+        artifact_text_hash = artifact_text_hash_by_index.get(index)
+        if artifact_text_hash is not None:
+            assert resolved_config.model is not None
+            cache_record = CacheRecord(
+                artifact_id=artifact_id,
+                criterion_id=criterion.id,
+                score=grading_result.score,
+                passed=grading_result.passed,
+                evidence=grading_result.evidence,
+                reasoning=grading_result.reasoning,
+                criterion_prompt_hash=crit_hash,
+                artifact_text_hash=artifact_text_hash,
+                provider=resolved_config.provider,
+                model=resolved_config.model,
+                prompt_version_template=template_hash,
+                response_text_hash=event.response_text_hash,
+                rubric_hash=rubric_hash,
+                original_timestamp=per_call_ts,
+            )
+            cache_key = compute_cache_key(
+                criterion_prompt_hash=crit_hash,
+                artifact_text_hash=artifact_text_hash,
+                provider=resolved_config.provider,
+                model=resolved_config.model,
+                prompt_version_template=template_hash,
+            )
+            try:
+                write_cache(cache_dir, cache_key, cache_record)
+            except Exception as cache_exc:
+                _LOGGER.warning(
+                    "grade cache write failed (sweep guard): %s",
+                    json.dumps(
+                        {
+                            "key": cache_key,
+                            "error_class": type(cache_exc).__name__,
+                        }
+                    ),
+                )
+
+
+def _write_event_or_abort_kw(event: GradeEvent, audit_path: Path) -> None:
+    """Positional-arg shim so ``loop.run_in_executor`` can call the
+    keyword-only writer.
+
+    :func:`_write_event_or_abort` declares ``audit_path`` keyword-only
+    for symmetry with :func:`signalforge.grade.audit.write_grade_event`,
+    but :meth:`asyncio.AbstractEventLoop.run_in_executor` cannot bind
+    keyword arguments. The shim closes the impedance mismatch in one
+    line; no behavioural divergence.
+    """
+    _write_event_or_abort(event, audit_path=audit_path)
 
 
 # ---------------------------------------------------------------------------
@@ -506,9 +1557,10 @@ def grade_artifacts(
     4. Generate ``run_id`` (uuid4 hex, DEC-020). Compute the run's
        ``rubric_hash`` (DEC-014), ``prompt_version_template``,
        ``rubric_block`` (cached prefix for every call).
-    5. Iterate every ``(criterion, artifact)`` pair. At the top of
-       each loop iteration, check the wall-clock against
-       ``config.total_budget_seconds``; once exceeded, every
+    5. Iterate every ``(criterion, artifact)`` pair, bounded by the
+       scaled wall-clock backstop ``_compute_effective_budget(...)``
+       (DEC-001 — base + per-pair × waves, optionally capped by
+       ``config.total_budget_seconds``); once exceeded, every
        remaining pair lands as a degraded
        ``GradingResult(score=None, ...)`` plus matching
        :class:`GradeEvent` (DEC-015). Per-pair LLM failures
@@ -566,6 +1618,20 @@ def grade_artifacts(
         GradeAuditWriteError: any other I/O / encoding failure in
             either audit writer. Aborts the run; wraps the underlying
             exception on ``cause``.
+        GradeIncompleteError: raised when ``config.require_complete=True``
+            (the default) AND a non-exempt ``(artifact, criterion)`` pair
+            is still ungraded (``score=None``) after the bounded sweep.
+            Trips on ``degrade_reason_type == "transient"`` (always) and
+            on ``"budget"`` when ``total_budget_seconds is None`` (a
+            default-scaled-budget overrun — a Stage-1 sizing canary);
+            EXEMPT for ``"ceiling"`` and for ``"budget"`` when
+            ``total_budget_seconds`` was set explicitly (DEC-204). The
+            exception names the ungraded pairs (truncated) and carries
+            ``incomplete_pairs`` / ``require_complete`` /
+            ``aggregate_complete``. Raised AFTER ``write_grading_report``
+            (so the sidecar JSON lands on disk first) and BEFORE the
+            below-threshold check — incomplete is structural, below-threshold
+            is verdictual (#202 US-006 / DEC-204 + DEC-207).
         GradeBelowThresholdError: raised when
             ``config.fail_on_below_threshold=True`` AND the aggregate
             ``GradingReport.passed`` is False (i.e. ``pass_rate``
@@ -649,6 +1715,41 @@ def grade_artifacts(
     # 3. Whole-run pre-flight envelope-breach scan (DEC-013).
     _scan_envelope_breach(candidate)
 
+    # 3a. Async-pre-flight guards (issue #186, DEC-006 / DEC-009). These
+    #     fire BEFORE the iterator is materialised and BEFORE any future
+    #     ``asyncio.run(...)`` call lands (US-009 wires the async core).
+    #     They reject two operator-environment misconfigurations:
+    #       1. Nested event loop — calling ``grade_artifacts`` from
+    #          inside an already-running asyncio loop would cause the
+    #          forthcoming ``asyncio.run`` to raise ``RuntimeError``;
+    #          we surface a typed ``GradeNestedEventLoopError`` (CLI
+    #          tier 1) with a remediation pointing at the v0.4 follow-up.
+    #       2. Sync-only provider — when the configured provider has
+    #          ``supports_async=False`` we raise the typed
+    #          ``LLMProviderAsyncUnsupportedError`` (CLI tier 3) regardless
+    #          of ``max_concurrent_calls``. The async sibling
+    #          ``call_llm_async`` is the only LLM seam the engine consumes
+    #          post-#186, so even ``max_concurrent_calls=1`` would fail
+    #          per-pair with ``GradeLLMError`` and silently degrade every
+    #          pair (QG Pass 1 Concern #2: ``cap=1`` is NOT an escape hatch
+    #          on a sync-only provider — there's no path forward without
+    #          async). Fail loud at entry. Mirrors the project's
+    #          ``extra="forbid"`` posture.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise GradeNestedEventLoopError(model_unique_id=model.unique_id)
+
+    provider_strategy = provider_for(resolved_config.provider)
+    if not provider_strategy.supports_async:
+        raise LLMProviderAsyncUnsupportedError(
+            f"Provider {resolved_config.provider!r} does not support async dispatch, "
+            f"required by the grade engine since #186. "
+            f"Pick an async-capable provider for grading."
+        )
+
     # 4. Run-wide derived values.
     run_id = uuid.uuid4().hex
     started_at = datetime.now(UTC)
@@ -657,93 +1758,141 @@ def grade_artifacts(
     rubric_block = render_rubric_block(resolved_rubric)
     crit_hash_by_id: dict[str, str] = {c.id: criterion_prompt_hash(c) for c in resolved_rubric}
 
-    # 5. Iterate ``(criterion, artifact)`` pairs.
-    start_monotonic = time.monotonic()
-    total_budget_seconds = resolved_config.total_budget_seconds
+    # 4a. Resolve the grade cache (#189 / DEC-013, DEC-016). When
+    #     ``config.cache_enabled`` is True, canonicalise the cache
+    #     directory under ``<project>/.signalforge/grade-cache/`` and
+    #     iterate every ``(artifact, criterion)`` pair in the sync
+    #     prefix BEFORE the asyncio.TaskGroup. Cache hits resolve
+    #     immediately: the GradingResult is reconstructed from the
+    #     :class:`CacheRecord`, a ``cache_hit=True`` GradeEvent flows
+    #     through the SOLE construction seam
+    #     :func:`signalforge.grade.audit._build_grade_event`, and the
+    #     audit record lands via the existing fail-closed writer with
+    #     zero token counts. Cache hits NEVER acquire the async
+    #     semaphore — they're a sync resolution.
+    #
+    #     Cache misses fall through to the async core which dispatches
+    #     a live LLM call and (post-grade) writes a
+    #     :class:`CacheRecord` via :func:`write_cache` (fail-soft per
+    #     DEC-005).
+    cache_dir: Path | None = None
+    prefilled_results: list[GradingResult | None] | None = None
+    artifact_text_hash_by_index: dict[int, str] | None = None
+    if resolved_config.cache_enabled:
+        raw_cache_dir = resolved_project_dir / ".signalforge" / "grade-cache"
+        try:
+            cache_dir = canonicalise_path(raw_cache_dir, resolved_project_dir)
+        except PathContainmentError as exc:
+            raise GradeCachePathError(
+                f"Grade cache path {raw_cache_dir!r} failed symlink/containment validation.",
+            ) from exc
 
-    iterator = list(_iterate_artifacts(candidate, resolved_rubric))
-    results: list[GradingResult] = []
-    budget_exhausted = False
-    iter_index = 0
-    while iter_index < len(iterator):
-        artifact_id, artifact_text, criterion = iterator[iter_index]
+        # Build the pairs list once (re-used inside the async core via
+        # ``_iterate_artifacts``). Computing the hash map here keeps the
+        # sync-prefix lookup AND the post-grade write paths aligned on a
+        # single source of truth.
+        pairs = list(_iterate_artifacts(candidate, resolved_rubric))
+        artifact_text_hash_by_index = {}
+        for index, (_aid, atext, _crit) in enumerate(pairs):
+            artifact_text_hash_by_index[index] = hashlib.blake2b(
+                atext.encode("utf-8"), digest_size=8
+            ).hexdigest()
 
-        if not budget_exhausted and (time.monotonic() - start_monotonic) >= total_budget_seconds:
-            budget_exhausted = True
-            _LOGGER.warning(
-                "grade budget exceeded: %s",
-                json.dumps(
-                    {
-                        "run_id": run_id,
-                        "model_unique_id": model.unique_id,
-                        "evaluated": len(results),
-                        "remaining_pairs": len(iterator) - iter_index,
-                        "total_budget_seconds": total_budget_seconds,
-                    }
-                ),
+        prefilled_results = cast(list[GradingResult | None], [None] * len(pairs))
+        # ``config.model`` is invariantly concrete post-construction
+        # (#187 US-002).
+        assert resolved_config.model is not None
+        for index, (artifact_id, _atext, criterion) in enumerate(pairs):
+            artifact_text_hash = artifact_text_hash_by_index[index]
+            key = compute_cache_key(
+                criterion_prompt_hash=crit_hash_by_id[criterion.id],
+                artifact_text_hash=artifact_text_hash,
+                provider=resolved_config.provider,
+                model=resolved_config.model,
+                prompt_version_template=template_hash,
             )
-
-        crit_hash = crit_hash_by_id[criterion.id]
-        # Each call gets its own ``timestamp`` so a forensic query can
-        # distinguish per-call latency. The sidecar carries
-        # ``started_at`` separately.
-        per_call_ts = datetime.now(UTC)
-
-        if budget_exhausted:
-            grading_result, event = _build_degraded(
+            record = lookup_cache(cache_dir, key)
+            if record is None:
+                continue
+            # ``lookup_cache`` rejects ``score=None`` records via the
+            # :class:`CacheRecord` model validator (DEC-007), so any
+            # value here is a non-None finite float in [0.0, 1.0].
+            per_call_ts = datetime.now(UTC)
+            grading_result = GradingResult(
                 artifact_id=artifact_id,
-                criterion=criterion,
-                reasoning=(f"grade budget exceeded ({total_budget_seconds}s) before evaluation"),
-                config=resolved_config,
-                rubric_hash=rubric_hash,
-                template_hash=template_hash,
-                crit_hash=crit_hash,
+                criterion_id=criterion.id,
+                score=record.score,
+                passed=record.passed,
+                evidence=record.evidence,
+                reasoning=record.reasoning,
+            )
+            # PR #196 CodeRabbit — cache-hit GradeEvent records the
+            # LIVE run's authoritative hashes for the three axes that
+            # are PRESENT in the 5-part cache key (criterion_prompt,
+            # prompt_version_template) PLUS rubric_hash (which is NOT
+            # in the key — the cache key uses prompt_version_template
+            # not rubric_hash, so a sibling-criterion edit can change
+            # the full rubric_hash while leaving THIS criterion's key
+            # axes unchanged). Using ``record.rubric_hash`` would
+            # record FALSE provenance (the rubric the verdict was
+            # originally scored against, not the rubric in effect for
+            # this run). ``response_text_hash`` stays from the stored
+            # record — that IS the forensic trail of the original LLM
+            # response, which a cache-hit re-run never produced.
+            event = _build_grade_event(
                 run_id=run_id,
                 timestamp=per_call_ts,
                 model_unique_id=model.unique_id,
+                artifact_id=artifact_id,
+                criterion_id=criterion.id,
+                score=record.score,
+                passed=record.passed,
+                evidence=record.evidence,
+                reasoning=record.reasoning,
+                rubric_hash=rubric_hash,
+                prompt_version_template=template_hash,
+                criterion_prompt_hash=crit_hash_by_id[criterion.id],
+                response_text_hash=record.response_text_hash,
+                model=resolved_config.model,
+                input_tokens=0,
+                output_tokens=0,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+                cache_hit=True,
             )
-        else:
-            try:
-                grading_result, event = _grade_one(
-                    artifact_id=artifact_id,
-                    artifact_text=artifact_text,
-                    criterion=criterion,
-                    config=resolved_config,
-                    rubric_block=rubric_block,
-                    rubric_hash=rubric_hash,
-                    template_hash=template_hash,
-                    crit_hash=crit_hash,
-                    client=client,
-                    run_id=run_id,
-                    timestamp=per_call_ts,
-                    model_unique_id=model.unique_id,
-                )
-            except (
-                GradeLLMError,
-                GradeOutputError,
-                GradePromptEnvelopeBreachError,
-            ) as exc:
-                # Per-pair degrade — DEC-015. Do NOT let one
-                # criterion's failure abort the whole run.
-                grading_result, event = _build_degraded(
-                    artifact_id=artifact_id,
-                    criterion=criterion,
-                    reasoning=_format_degrade_reasoning(exc),
-                    config=resolved_config,
-                    rubric_hash=rubric_hash,
-                    template_hash=template_hash,
-                    crit_hash=crit_hash,
-                    run_id=run_id,
-                    timestamp=per_call_ts,
-                    model_unique_id=model.unique_id,
-                )
+            _write_event_or_abort(event, audit_path=resolved_audit_path)
+            prefilled_results[index] = grading_result
 
-        # Audit-write per pair (DEC-006 fail-closed). On
-        # GradeAuditRecordTooLargeError / GradeAuditWriteError we
-        # propagate; the run aborts.
-        _write_event_or_abort(event, audit_path=resolved_audit_path)
-        results.append(grading_result)
-        iter_index += 1
+    # 5. Iterate ``(criterion, artifact)`` pairs via the async core
+    #    (issue #186, US-009 / DEC-002 + DEC-004). The async core wraps
+    #    a ``TaskGroup`` in ``asyncio.timeout(effective_budget)``
+    #    and dispatches coroutines through the adaptive
+    #    ``AsyncConcurrencyGate`` (admits at most the limiter's live
+    #    ``effective_concurrency``, ≤ ``max_concurrent_calls``).
+    #    Per-coroutine ``try/except`` handles LLM-layer
+    #    failures and budget-cancellation; the public sync entry-point
+    #    is preserved by wrapping in ``asyncio.run(...)``. The
+    #    nested-event-loop guard (3a above) ensured this ``asyncio.run``
+    #    call is safe.
+    start_monotonic = time.monotonic()
+    results = asyncio.run(
+        _grade_artifacts_async_core(
+            candidate=candidate,
+            resolved_rubric=resolved_rubric,
+            resolved_config=resolved_config,
+            resolved_audit_path=resolved_audit_path,
+            client=client,
+            run_id=run_id,
+            rubric_hash=rubric_hash,
+            template_hash=template_hash,
+            rubric_block=rubric_block,
+            crit_hash_by_id=crit_hash_by_id,
+            model_unique_id=model.unique_id,
+            prefilled_results=prefilled_results,
+            cache_dir=cache_dir,
+            artifact_text_hash_by_index=artifact_text_hash_by_index,
+        )
+    )
 
     # 6. Build the aggregate :class:`GradingReport` and write sidecar.
     elapsed_seconds = time.monotonic() - start_monotonic
@@ -787,7 +1936,43 @@ def grade_artifacts(
         ),
     )
 
-    # 8. Threshold-fail graduation (#9 US-002 / DEC-021). When the
+    # 8. Completeness contract (#202 US-006 / DEC-204 + DEC-207). After
+    # the always-on bounded sweep (step 5) has had its recovery rounds,
+    # any non-exempt pair still at ``score=None`` is a structural failure
+    # the operator must see — not a verdict to fold silently into
+    # ``aggregate_complete=False``. Branch on the ``degrade_reason_type``
+    # discriminator (#202 US-001), never on message text:
+    #   * "transient"                              → always trips.
+    #   * "budget" AND total_budget_seconds is None (DEFAULT-scaled budget,
+    #     a Stage-1 sizing canary)                 → trips.
+    #   * "ceiling" (explicit max_grade_* opt-in)  → EXEMPT.
+    #   * "budget" with an EXPLICIT total_budget_seconds (a deliberate
+    #     operator time-ceiling)                   → EXEMPT.
+    # The raise lands AFTER the sidecar write (step 6) + INFO log (step 7),
+    # mirroring the fail_on_below_threshold ordering so the operator has a
+    # complete `grade.json` on disk; and BEFORE the below-threshold check
+    # (step 9) — incomplete is structural, below-threshold is verdictual.
+    if resolved_config.require_complete:
+        incomplete_pairs = tuple(
+            (r.artifact_id, r.criterion_id)
+            for r in report.results
+            if r.score is None
+            and (
+                r.degrade_reason_type == "transient"
+                or (
+                    r.degrade_reason_type == "budget"
+                    and resolved_config.total_budget_seconds is None
+                )
+            )
+        )
+        if incomplete_pairs:
+            raise GradeIncompleteError(
+                incomplete_pairs=incomplete_pairs,
+                require_complete=True,
+                aggregate_complete=report.aggregate_complete,
+            )
+
+    # 9. Threshold-fail graduation (#9 US-002 / DEC-021). When the
     # operator opts into hard-fail behaviour AND the aggregate verdict
     # falls below threshold, raise AFTER the sidecar JSON is durably
     # persisted (step 6 above) and AFTER the INFO log fires. Order is

@@ -76,7 +76,7 @@
         },
         "subscriber_type": {
           "name": "subscriber_type",
-          "description": "Membership classification of the rider who took the trip — typical values include `local monthly`, `walk-up`, `single trip`, `student membership`, `weekender`, etc. Useful for segmenting demand by user category. Free-form STRING (not enumerated in the source schema), so downstream consumers should expect long-tail values.",
+          "description": "Membership classification of the rider who took the trip \u2014 typical values include `local monthly`, `walk-up`, `single trip`, `student membership`, `weekender`, etc. Useful for segmenting demand by user category. Free-form STRING (not enumerated in the source schema), so downstream consumers should expect long-tail values.",
           "meta": {},
           "data_type": "STRING",
           "constraints": [],
@@ -94,7 +94,7 @@
         },
         "start_time": {
           "name": "start_time",
-          "description": "Timestamp marking when the trip began (the rider docked-out the bike). Stored as TIMESTAMP in UTC. This is the primary time dimension for the model and is reliably non-null in the source data — every trip has a recorded start time even when other fields are sparse.",
+          "description": "Timestamp marking when the trip began (the rider docked-out the bike). Stored as TIMESTAMP in UTC. This is the primary time dimension for the model and is reliably non-null in the source data \u2014 every trip has a recorded start time even when other fields are sparse.",
           "meta": {},
           "data_type": "TIMESTAMP",
           "constraints": [],
@@ -143,6 +143,146 @@
       "created_at": 0,
       "relation_name": "`bigquery-public-data`.`austin_bikeshare`.`bikeshare_trips`",
       "raw_code": "-- Source-as-model: alias overridden to `bikeshare_trips` so the model's\n-- relation_name resolves directly to the public source table. SignalForge\n-- runs against materialised tables; without `dbt run` against a writable\n-- billing project this is the v0.1 path that keeps the smoke test a single\n-- command (issue #10 Path A).\nSELECT\n    trip_id,\n    subscriber_type,\n    bike_id,\n    start_time,\n    start_station_id,\n    end_station_id,\n    duration_minutes\nFROM {{ source('austin_bikeshare', 'bikeshare_trips') }}\n",
+      "language": "sql",
+      "refs": [],
+      "sources": [
+        [
+          "austin_bikeshare",
+          "bikeshare_trips"
+        ]
+      ],
+      "metrics": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips"
+        ]
+      },
+      "compiled_path": null,
+      "contract": {
+        "enforced": false,
+        "alias_types": true,
+        "checksum": null
+      },
+      "access": "protected",
+      "constraints": [],
+      "version": null,
+      "latest_version": null,
+      "deprecation_date": null
+    },
+    "model.signalforge_test_austin.stg_bikeshare_station_pairs": {
+      "database": "bigquery-public-data",
+      "schema": "austin_bikeshare",
+      "name": "stg_bikeshare_station_pairs",
+      "resource_type": "model",
+      "package_name": "signalforge_test_austin",
+      "path": "staging/stg_bikeshare_station_pairs.sql",
+      "original_file_path": "models/staging/stg_bikeshare_station_pairs.sql",
+      "unique_id": "model.signalforge_test_austin.stg_bikeshare_station_pairs",
+      "fqn": [
+        "signalforge_test_austin",
+        "staging",
+        "stg_bikeshare_station_pairs"
+      ],
+      "alias": "bikeshare_trips",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": null,
+        "database": null,
+        "tags": [],
+        "meta": {},
+        "group": null,
+        "materialized": "view",
+        "incremental_strategy": null,
+        "persist_docs": {},
+        "post-hook": [],
+        "pre-hook": [],
+        "quoting": {},
+        "column_types": {},
+        "full_refresh": null,
+        "unique_key": null,
+        "on_schema_change": "ignore",
+        "on_configuration_change": "apply",
+        "grants": {},
+        "packages": [],
+        "docs": {
+          "show": true,
+          "node_color": null
+        },
+        "contract": {
+          "enforced": false,
+          "alias_types": true
+        },
+        "access": "protected"
+      },
+      "tags": [],
+      "description": "Source-as-model passthrough exposing a natural composite-key shape over the Austin Bikeshare public dataset's `bikeshare_trips` table. The SELECT body aggregates trips by the tuple `(start_station_id, end_station_id, subscriber_type)`, so each row represents one unique station-pair \u00d7 subscriber-type combination \u2014 a natural multi-column key the drafter should propose `unique_combination` against. Like its sibling `stg_bikeshare_trips`, the model's `alias` is overridden to `bikeshare_trips` so its `relation_name` resolves directly to `bigquery-public-data.austin_bikeshare.bikeshare_trips` (no `dbt run` needed). Used by the #170 e2e to verify the drafter emits the structured `unique_combination` test type rather than freeform `custom_sql`.",
+      "columns": {
+        "start_station_id": {
+          "name": "start_station_id",
+          "description": "Numeric identifier of the bikeshare station where each aggregated group of trips began. Combined with `end_station_id` and `subscriber_type` it forms the natural composite key for this model \u2014 every (start, end, subscriber_type) tuple appears exactly once. Joins to `austin_bikeshare.bikeshare_stations.station_id` to resolve station metadata. NULLs are possible when the source station record was deleted but trip records survived.",
+          "meta": {},
+          "data_type": "INT64",
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "end_station_id": {
+          "name": "end_station_id",
+          "description": "Identifier of the bikeshare station where each aggregated group of trips ended. Second component of the natural composite key `(start_station_id, end_station_id, subscriber_type)`. Same join semantics as `start_station_id`. Stored as STRING in the source despite being numeric in most rows.",
+          "meta": {},
+          "data_type": "STRING",
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "subscriber_type": {
+          "name": "subscriber_type",
+          "description": "Membership classification of the rider \u2014 typical values include `local monthly`, `walk-up`, `single trip`, `student membership`, `weekender`, etc. Third component of the natural composite key. Free-form STRING (not enumerated in the source schema), so downstream consumers should expect long-tail values.",
+          "meta": {},
+          "data_type": "STRING",
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "trip_count": {
+          "name": "trip_count",
+          "description": "Count of source-table rows that fall into this `(start_station_id, end_station_id, subscriber_type)` group. Computed via `COUNT(*)` in the SELECT body. Always positive (every group has at least one trip).",
+          "meta": {},
+          "data_type": "INT64",
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        },
+        "total_duration_minutes": {
+          "name": "total_duration_minutes",
+          "description": "Sum of `duration_minutes` across all trips in this group. Aggregated via `SUM(duration_minutes)` in the SELECT body. Useful for measuring rider engagement per station-pair \u00d7 subscriber-type combination.",
+          "meta": {},
+          "data_type": "INT64",
+          "constraints": [],
+          "quote": null,
+          "tags": []
+        }
+      },
+      "meta": {},
+      "group": null,
+      "docs": {
+        "show": true,
+        "node_color": null
+      },
+      "patch_path": null,
+      "build_path": null,
+      "unrendered_config": {
+        "materialized": "view"
+      },
+      "created_at": 0,
+      "relation_name": "`bigquery-public-data`.`austin_bikeshare`.`bikeshare_trips`",
+      "raw_code": "-- Source-as-model: the manifest aliases this model to `bikeshare_trips`\n-- so its relation_name resolves directly to the public source table\n-- (same trick as `stg_bikeshare_trips`). SignalForge runs queries against\n-- the materialised relation; without `dbt run` against a writable billing\n-- project this keeps the smoke test a single command (issue #10 Path A).\n--\n-- The natural multi-column GROUP BY pattern on\n-- `(start_station_id, end_station_id, subscriber_type)` advertises a\n-- composite natural-key shape to the drafter: each row in this model\n-- represents one unique station-pair \u00d7 subscriber-type combination from\n-- the source. The pattern is engineered to steer `claude-sonnet-4-6`\n-- toward proposing the structured `unique_combination` test (#170, AC-1)\n-- rather than a freeform `custom_sql GROUP BY HAVING COUNT(*) > 1`.\n--\n-- Real columns from the source table only \u2014 no engineered literal/COALESCE\n-- columns, because the source-as-model alias means the model's relation\n-- resolves to the source table itself, not a materialised view of this\n-- SELECT body. See `.claude/rules/testing-signal.md` \u00a7\n-- \"WHERE the always-pass column must live depends on whether the model\n-- is materialised\" for the gotcha that ruled out literal columns here.\nSELECT\n    start_station_id,\n    end_station_id,\n    subscriber_type,\n    COUNT(*) AS trip_count,\n    SUM(duration_minutes) AS total_duration_minutes\nFROM {{ source('austin_bikeshare', 'bikeshare_trips') }}\nGROUP BY\n    start_station_id,\n    end_station_id,\n    subscriber_type\n",
       "language": "sql",
       "refs": [],
       "sources": [
@@ -325,13 +465,18 @@
     "model.signalforge_test_austin.stg_bikeshare_trips": [
       "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips"
     ],
-    "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips": []
+    "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips": [],
+    "model.signalforge_test_austin.stg_bikeshare_station_pairs": [
+      "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips"
+    ]
   },
   "child_map": {
     "model.signalforge_test_austin.stg_bikeshare_trips": [],
     "source.signalforge_test_austin.austin_bikeshare.bikeshare_trips": [
+      "model.signalforge_test_austin.stg_bikeshare_station_pairs",
       "model.signalforge_test_austin.stg_bikeshare_trips"
-    ]
+    ],
+    "model.signalforge_test_austin.stg_bikeshare_station_pairs": []
   },
   "group_map": {},
   "saved_queries": {},

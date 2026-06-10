@@ -225,6 +225,82 @@ def test_format_value_helper_uses_repr() -> None:
     assert _format_value(None) == repr(None)
 
 
+# ---------------------------------------------------------------------------
+# US-004 of #185 — DEC-007 three-sentence remediation locked verbatim
+# ---------------------------------------------------------------------------
+
+_LOCKED_REMEDIATION_BASE = (
+    "Audit records must stay under 4000 bytes for atomic "
+    "concurrent appends. Mark non-critical columns with "
+    "meta.signalforge.skip_draft: true to omit them from the "
+    "audit entirely; this is distinct from PII opt-out and is "
+    "more effective for wide-table noise reduction. NOTE: "
+    "safety.mode: aggregate-only does NOT shrink the redactions "
+    "surface — do not use it as a workaround. For hyper-wide "
+    "tables that still over-cap, see the columns_sent roadmap "
+    "in docs/safety-ops.md."
+)
+
+_LOCKED_REMEDIATION_WITH_170 = (
+    "Model has 170 columns; after compression "
+    "and chunking the audit record is still 135 bytes "
+    "over the 4000 B atomic-append limit. "
+) + _LOCKED_REMEDIATION_BASE
+
+
+@pytest.mark.unit
+@pytest.mark.safety
+@pytest.mark.parametrize(
+    ("column_count", "size", "expected"),
+    [
+        (None, 4500, _LOCKED_REMEDIATION_BASE),
+        (170, 4135, _LOCKED_REMEDIATION_WITH_170),
+    ],
+    ids=["no_column_count", "column_count_170"],
+)
+def test_audit_record_too_large_default_remediation_locked(
+    column_count: int | None, size: int, expected: str
+) -> None:
+    """DEC-007 (#185 US-004): the default remediation is locked verbatim.
+
+    Two cases pin the contract: ``column_count=None`` emits the bare
+    three-sentence operator script; a non-None ``column_count`` prepends a
+    sentence naming the column count and the byte overage. Both forms
+    explicitly close the issue text's misleading ``safety.mode:
+    aggregate-only`` suggestion and point at the follow-up issue. Whitespace
+    matters — this assertion is byte-equal.
+    """
+    err = AuditRecordTooLargeError(size=size, limit=4000, column_count=column_count)
+    assert err.remediation == expected
+    assert err.size == size
+    assert err.limit == 4000
+    assert err.column_count == column_count
+
+
+@pytest.mark.unit
+@pytest.mark.safety
+def test_audit_record_too_large_explicit_remediation_overrides_default() -> None:
+    """An explicit ``remediation=`` kwarg overrides the parametric default,
+    even when ``column_count`` is provided."""
+    err = AuditRecordTooLargeError(
+        size=4500, limit=4000, column_count=170, remediation="custom hint"
+    )
+    assert err.remediation == "custom hint"
+    assert err.column_count == 170
+
+
+@pytest.mark.unit
+@pytest.mark.safety
+def test_audit_record_too_large_column_count_defaults_to_none() -> None:
+    """Positional ``size`` + ``limit`` only — ``column_count`` defaults to
+    None (back-compat with existing call sites)."""
+    err = AuditRecordTooLargeError(5000, 4000)
+    assert err.column_count is None
+    assert err.size == 5000
+    assert err.limit == 4000
+    assert err.remediation == _LOCKED_REMEDIATION_BASE
+
+
 @pytest.mark.unit
 @pytest.mark.safety
 def test_module_all_lists_all_classes() -> None:

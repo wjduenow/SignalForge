@@ -28,7 +28,7 @@ dependencies = [
 # Retained for `pip install -e ".[dev]"` back-compat. CI runs uv (`uv sync --dev`)
 # which consumes `[dependency-groups].dev` below; the two lists are kept in sync.
 # pyright pinned exactly: tool bumps are tested via deliberate maintainer upgrades, not CI surprise from a new release.
-dev = ["ruff", "pyright==1.1.409", "pytest", "dbt-core>=1.8,<2", "types-PyYAML>=6,<7", "pytest-cov>=5.0", "pytest-xdist>=3.6,<4", "snowflake-connector-python>=3,<4", "fakesnow>=0.9", "openai>=1.40,<3.0", "tiktoken>=0.7,<1.0", "google-genai>=0.5,<1", "sqlglot>=30,<31"]
+dev = ["ruff", "pyright==1.1.409", "pytest", "pytest-asyncio>=0.23,<1", "dbt-core>=1.8,<2", "types-PyYAML>=6,<7", "pytest-cov>=5.0", "pytest-xdist>=3.6,<4", "snowflake-connector-python>=3,<4", "fakesnow>=0.9", "openai>=1.40,<3.0", "tiktoken>=0.7,<1.0", "google-genai>=0.5,<1", "sqlglot>=30,<31"]
 # Optional warehouse extra: pulls the Snowflake SDK only when the operator
 # installs `signalforge-dbt[snowflake]`. The base install stays BigQuery-only.
 snowflake = ["snowflake-connector-python>=3,<4"]
@@ -61,6 +61,7 @@ dev = [
   "ruff",
   "pyright==1.1.409",
   "pytest",
+  "pytest-asyncio>=0.23,<1",
   "dbt-core>=1.8,<2",
   "types-PyYAML>=6,<7",
   "pytest-cov>=5.0",
@@ -119,6 +120,14 @@ target-version = "py311"
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 ignore = []
 
+[tool.ruff.lint.per-file-ignores]
+# Cache-stability snapshots carry an inline rubric-block golden whose lines
+# inevitably exceed the 100-char limit (long single-line criterion texts
+# render together on the wire). Refactoring the golden to wrap would change
+# the bytes the test is pinning. Same shape as the drafter-side snapshot's
+# golden — see ``tests/llm/test_prompt_cache_stability.py``.
+"tests/grade/test_prompt_cache_stability.py" = ["E501"]
+
 [tool.ruff.format]
 
 [tool.pyright]
@@ -135,7 +144,9 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery and not anthropic and not cli_subprocess and not e2e and not wheel_smoke and not snowflake and not openai and not gemini' --cov=signalforge --cov-report=xml --cov-report=term-missing --cov-fail-under=80"
 minversion = "7.0"
 strict_markers = true
+asyncio_mode = "strict"
 markers = [
+  "asyncio: async tests requiring pytest-asyncio",
   "unit: unit-level tests with no FS I/O beyond fixtures",
   "integration: tests exercising the full load() round-trip",
   "error: tests asserting an exception with its remediation",

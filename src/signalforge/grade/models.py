@@ -43,6 +43,18 @@ from signalforge._common.timestamp import iso8601_z
 
 _BASE_CONFIG = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
+DegradeReasonType = Literal["transient", "budget", "ceiling"]
+"""Structured discriminator classifying *why* a pair degraded (#202 US-001).
+
+``None`` for a scored pair; one of the three literals for every degraded
+pair. The mapping from the human-readable ``reasoning`` string to this
+discriminator is centralised in
+:func:`signalforge.grade.engine._build_degraded` so the (later) sweep /
+``require_complete`` logic can classify degrades WITHOUT fragile
+string-matching on the reason text. Callers read this field, not the
+prose.
+"""
+
 _ONE_LINE_WHY_CAP: int = 120
 """Maximum characters surfaced by :attr:`GradingResult.one_line_why`.
 
@@ -82,6 +94,14 @@ class GradingResult(BaseModel):
     passed: bool
     evidence: str = ""
     reasoning: str = ""
+    degrade_reason_type: DegradeReasonType | None = None
+    """Structured degrade discriminator (#202 US-001).
+
+    ``None`` for a scored pair; ``"transient"`` / ``"budget"`` /
+    ``"ceiling"`` for every degraded pair. Set centrally in
+    :func:`signalforge.grade.engine._build_degraded`. Defaulted for
+    forward-compat so a pre-#202 audit record (no field) loads cleanly.
+    """
 
     @field_validator("score")
     @classmethod
@@ -142,6 +162,21 @@ class GradingResult(BaseModel):
             f"criterion_id={self.criterion_id!r}, "
             f"score={self.score!r}, passed={self.passed!r})"
         )
+
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        """Pydantic v2 structured-repr hook (PR #196 CodeRabbit).
+
+        Mirrors the field set in :meth:`__repr__` so ``rich.print()``,
+        ``devtools.pretty()``, and ``pprint`` redact ``evidence`` /
+        ``reasoning`` too — see memory
+        ``pydantic-v2-repr-args-redaction-required``.
+        """
+        return [
+            ("artifact_id", self.artifact_id),
+            ("criterion_id", self.criterion_id),
+            ("score", self.score),
+            ("passed", self.passed),
+        ]
 
 
 class GradingReport(BaseModel):
@@ -256,6 +291,27 @@ class GradingReport(BaseModel):
             f"duration_seconds={self.duration_seconds!r})"
         )
 
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        """Pydantic v2 structured-repr hook (PR #196 CodeRabbit).
+
+        Mirrors the field set in :meth:`__repr__` so structured-repr
+        surfaces (``rich.print``, ``devtools.pretty``) don't iterate
+        through the ``results`` tuple and surface every nested
+        :class:`GradingResult`'s ``evidence`` / ``reasoning``. The
+        nested ``GradingResult.__repr_args__`` ALSO redacts, so this
+        is belt-and-braces — see memory
+        ``pydantic-v2-repr-args-redaction-required``.
+        """
+        return [
+            ("model_unique_id", self.model_unique_id),
+            ("results_count", len(self.results)),
+            ("pass_rate", self.pass_rate),
+            ("mean_score", self.mean_score),
+            ("passed", self.passed),
+            ("aggregate_complete", self.aggregate_complete),
+            ("duration_seconds", self.duration_seconds),
+        ]
+
 
 class GradeEvent(BaseModel):
     """One JSONL audit record per LLM-judge call.
@@ -289,7 +345,7 @@ class GradeEvent(BaseModel):
 
     model_config = _BASE_CONFIG
 
-    audit_schema_version: Literal[1] = 1
+    audit_schema_version: int = 3
     signalforge_version: str
     run_id: str
     timestamp: datetime
@@ -300,10 +356,26 @@ class GradeEvent(BaseModel):
     passed: bool
     evidence: str = ""
     reasoning: str = ""
+    degrade_reason_type: DegradeReasonType | None = None
     rubric_hash: str
     prompt_version_template: str
     criterion_prompt_hash: str
     response_text_hash: str
+    cache_hit: bool = False
+    sweep_round: int | None = None
+    """Bounded transient-recovery sweep round (#202 US-005 / DEC-206).
+
+    ``None`` for a main-pass record (the default — and the value a
+    pre-#202-US-005 audit record loads with via ``extra="ignore"``); ``1+``
+    for a record written by sweep round N. Forensic queries grep this field
+    to see sweep activity. A NEW immutable record is appended per swept
+    attempt (the original failure record is never rewritten), so a recovered
+    pair leaves both its main-pass ``sweep_round: null`` failure AND its
+    ``sweep_round: 1`` success in the JSONL.
+
+    Additive optional field on an ``extra="ignore"`` read-back model — no
+    ``audit_schema_version`` bump (matches how #202 US-001 handled
+    additive fields once the version landed at 3)."""
     model: str
     input_tokens: int
     output_tokens: int
@@ -333,8 +405,48 @@ class GradeEvent(BaseModel):
             raise ValueError(f"score must be in [0.0, 1.0] or None; got {value!r}")
         return value
 
+    def __repr__(self) -> str:
+        """Minimal repr — omits ``evidence`` and ``reasoning``.
+
+        Mirrors :meth:`GradingResult.__repr__` (DEC-022 of issue #6) at
+        the audit-record boundary. ``cache_hit`` is a non-sensitive
+        bool — it appears in the compact repr so operators reading log
+        lines can distinguish live-grade records from cache-rehydration
+        records at a glance. The full ``evidence`` / ``reasoning`` body
+        remains accessible via :meth:`pydantic.BaseModel.model_dump`.
+        """
+        return (
+            f"GradeEvent(run_id={self.run_id!r}, "
+            f"artifact_id={self.artifact_id!r}, "
+            f"criterion_id={self.criterion_id!r}, "
+            f"score={self.score!r}, passed={self.passed!r}, "
+            f"cache_hit={self.cache_hit!r})"
+        )
+
+    def __repr_args__(self) -> list[tuple[str | None, object]]:
+        """Pydantic v2 structured-repr hook (PR #196 Copilot).
+
+        ``rich.print()``, ``devtools.pretty()``, and (sometimes)
+        ``pprint`` use ``__repr_args__`` instead of ``__repr__`` to
+        compose their structured output. Without overriding this,
+        ``evidence`` and ``reasoning`` would leak through those
+        surfaces even though our :meth:`__repr__` redacts them.
+        Mirrors the same field set as :meth:`__repr__` so PII-bearing
+        LLM-emitted prose stays redacted across every repr path.
+        See memory ``pydantic-v2-repr-args-redaction-required``.
+        """
+        return [
+            ("run_id", self.run_id),
+            ("artifact_id", self.artifact_id),
+            ("criterion_id", self.criterion_id),
+            ("score", self.score),
+            ("passed", self.passed),
+            ("cache_hit", self.cache_hit),
+        ]
+
 
 __all__ = (
+    "DegradeReasonType",
     "GradeEvent",
     "GradingReport",
     "GradingResult",

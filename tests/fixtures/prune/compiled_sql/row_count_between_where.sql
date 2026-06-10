@@ -1,0 +1,1 @@
+SELECT n FROM (SELECT COUNT(*) AS n FROM `fake_project.dataset.orders` WHERE event_date >= '2024-01-01') AS rc WHERE n < 1 OR n > 1000000

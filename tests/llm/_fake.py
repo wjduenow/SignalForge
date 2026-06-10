@@ -75,6 +75,63 @@ class FakeCountTokensResponse:
     input_tokens: int
 
 
+@dataclass
+class _FakeResponseWithHeaders:
+    """Stand-in for the ``httpx.Response`` hung off an SDK exception /
+    success response (#202 US-002).
+
+    Carries only the ``headers`` attribute the rate-limit extractor reads —
+    a case-insensitive ``dict`` is enough because
+    :meth:`signalforge.llm.providers.AnthropicProvider._headers_from`
+    probes for any :class:`collections.abc.Mapping` and the neutral
+    parse helper does a plain ``.get(key)`` (the real ``httpx.Headers`` is
+    case-insensitive, but tests pass exact lowercased header names, so a
+    plain ``dict`` faithfully exercises the parse path).
+    """
+
+    headers: dict[str, str]
+
+
+class FakeRateLimitError(Exception):
+    """Test double for ``anthropic.RateLimitError`` (#202 US-002 / DEC-205).
+
+    The real SDK's ``RateLimitError`` (a 429) hangs its
+    ``retry-after`` + ``anthropic-ratelimit-*`` headers off
+    ``error.response.headers`` (an ``httpx.Response``). This fake reproduces
+    exactly that shape — ``self.response.headers`` is the supplied mapping —
+    so :meth:`signalforge.llm.providers.AnthropicProvider.extract_rate_limit_info`
+    walks the same ``exc.response.headers`` path it walks in production,
+    WITHOUT pulling in the real ``anthropic`` / ``httpx`` types.
+
+    Hand-rolled (not ``MagicMock``) for the same reason as
+    :class:`FakeAnthropicClient`: an auto-passing mock would silently mask a
+    wrong attribute path; an explicit double fails loud
+    (``testing-signal.md``).
+    """
+
+    def __init__(self, *, headers: dict[str, str] | None = None) -> None:
+        super().__init__("fake rate limit")
+        # ``headers=None`` models a 429 whose response surfaced no headers at
+        # all (the extractor degrades to an EMPTY budget). An empty dict models
+        # "response present, but no rate-limit headers".
+        self.response = _FakeResponseWithHeaders(headers=headers or {})
+
+
+@dataclass
+class FakeResponseWithHeaders:
+    """Test double for a SUCCESS response carrying rate-limit headers
+    (#202 US-002 / DEC-205).
+
+    Mirrors the ``response.headers`` surface a 200 ``messages.create`` reply
+    exposes (``self.headers`` directly, not nested under ``.response`` — the
+    success path the extractor probes via the direct form). Lets a test drive
+    :meth:`signalforge.llm.providers.AnthropicProvider.extract_rate_limit_info`'s
+    ``response=`` argument without the real SDK.
+    """
+
+    headers: dict[str, str]
+
+
 # A "matching" predicate is either a dict (subset match against the kwargs
 # dict the seam passes) or a callable returning bool.
 _Matcher = dict[str, Any] | Callable[[dict[str, Any]], bool]
@@ -111,14 +168,24 @@ def _matches(matcher: _Matcher, kwargs: dict[str, Any]) -> bool:
 
 @dataclass
 class _FakeMessages:
-    """Implements the ``messages`` namespace on the fake client."""
+    """Implements the ``messages`` namespace on the fake client.
+
+    Both the sync ``count_tokens`` / ``create`` methods AND the async siblings
+    on :class:`_FakeAsyncMessages` (reachable via ``client.aio.messages``)
+    consume from the SAME ``_count_queue`` / ``_create_queue``. Tests can mix
+    sync drains and async drains against one fake instance — the shared queue
+    is the proof that production sync (``call_llm``) and async
+    (``call_llm_async``) paths exercise identical expectation logic. Traces to
+    DEC-012 of ``plans/super/186-grade-asyncio-parallel.md``.
+    """
 
     _count_queue: list[_CountTokensExpectation] = field(default_factory=list)
     _create_queue: list[_MessagesCreateExpectation] = field(default_factory=list)
     _create_calls: list[dict[str, Any]] = field(default_factory=list)
     _count_calls: list[dict[str, Any]] = field(default_factory=list)
 
-    def count_tokens(self, **kwargs: Any) -> Any:
+    def _pop_count_tokens(self, kwargs: dict[str, Any]) -> Any:
+        """Shared queue-popping logic for sync + async ``count_tokens``."""
         self._count_calls.append(kwargs)
         if not self._count_queue:
             raise AssertionError(f"unexpected count_tokens call: {kwargs!r}")
@@ -133,7 +200,8 @@ class _FakeMessages:
             raise expectation.returns
         return expectation.returns
 
-    def create(self, **kwargs: Any) -> Any:
+    def _pop_create(self, kwargs: dict[str, Any]) -> Any:
+        """Shared queue-popping logic for sync + async ``create``."""
         self._create_calls.append(kwargs)
         if not self._create_queue:
             raise AssertionError(f"unexpected messages.create call: {kwargs!r}")
@@ -147,6 +215,43 @@ class _FakeMessages:
         if isinstance(expectation.returns, Exception):
             raise expectation.returns
         return expectation.returns
+
+    def count_tokens(self, **kwargs: Any) -> Any:
+        return self._pop_count_tokens(kwargs)
+
+    def create(self, **kwargs: Any) -> Any:
+        return self._pop_create(kwargs)
+
+
+@dataclass
+class _FakeAsyncMessages:
+    """Async sibling of :class:`_FakeMessages`, reachable via ``client.aio.messages``.
+
+    Both ``async create`` and ``async count_tokens`` delegate to the SAME
+    ``_FakeMessages`` instance's queue-popping helpers, so a single
+    :class:`FakeAnthropicClient` can be driven by the sync
+    :func:`signalforge.llm.client.call_llm` AND the async
+    :func:`signalforge.llm.client.call_llm_async` (US-006) interchangeably.
+    Traces to DEC-012.
+    """
+
+    _sync: _FakeMessages
+
+    async def count_tokens(self, **kwargs: Any) -> Any:
+        return self._sync._pop_count_tokens(kwargs)
+
+    async def create(self, **kwargs: Any) -> Any:
+        return self._sync._pop_create(kwargs)
+
+
+@dataclass
+class _FakeAioNamespace:
+    """The ``.aio`` namespace on :class:`FakeAnthropicClient` — exposes the
+    async messages surface. Mirrors Gemini's ``client.aio.models.*`` pattern
+    so all three fakes share one async-namespace shape (DEC-012).
+    """
+
+    messages: _FakeAsyncMessages
 
 
 class FakeAnthropicClient:
@@ -169,6 +274,11 @@ class FakeAnthropicClient:
         # backing object the ``expect_*`` helpers reach into.
         self._messages = _FakeMessages()
         self.messages = self._messages
+        # The ``.aio`` namespace carries the async sibling surface; both
+        # ``self.messages.create`` (sync) and ``self.aio.messages.create``
+        # (async) drain the SAME ``_messages._create_queue``. DEC-012 of
+        # ``plans/super/186-grade-asyncio-parallel.md``.
+        self.aio = _FakeAioNamespace(messages=_FakeAsyncMessages(_sync=self._messages))
 
     def expect_count_tokens(
         self,
@@ -243,6 +353,8 @@ __all__ = [
     "FakeAnthropicClient",
     "FakeCountTokensResponse",
     "FakeMessage",
+    "FakeRateLimitError",
+    "FakeResponseWithHeaders",
     "FakeTextBlock",
     "FakeUsage",
     "_StubAnthropicClient",

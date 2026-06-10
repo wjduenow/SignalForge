@@ -493,8 +493,13 @@ def test_generate_estimate_divergent_providers_fails_fast(
     providers_mod.register_provider(FakeNoCacheProvider())
     try:
         project_dir = make_fake_dbt_project(tmp_path)
+        # An explicit model is required for a custom provider (it's not in
+        # PROVIDER_DEFAULT_MODELS, so #187 won't guess its fast default); supply one
+        # so config LOADS and the test exercises the divergent-provider check
+        # (grade=fake-nocache vs draft=anthropic → tier-2 exit 2) rather than
+        # incidentally tripping the missing-model config-load error (tier 1).
         (project_dir / "signalforge.yml").write_text(
-            "grade:\n  provider: fake-nocache\n", encoding="utf-8"
+            "grade:\n  provider: fake-nocache\n  model: fake-judge\n", encoding="utf-8"
         )
         monkeypatch.chdir(project_dir)
         _install_estimate_patches(monkeypatch)

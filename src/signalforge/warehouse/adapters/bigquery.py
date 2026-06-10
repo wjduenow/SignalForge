@@ -985,6 +985,54 @@ class BigQueryAdapter(WarehouseAdapter):
         )
 
     # ------------------------------------------------------------------
+    # run_stats_query — #171 US-011 (anomaly stats vendor-neutral seam).
+    # ------------------------------------------------------------------
+
+    def run_stats_query(self, sql: str) -> tuple[dict[str, object], ...]:
+        """Run an anomaly stats SELECT and return every row as a dict.
+
+        Issues one ``client.query(sql, job_config=...)`` call (no wrap —
+        the stats SQL is the verbatim SELECT, not a failing-rows test) and
+        returns ``tuple(row_to_dict(r) for r in job.result())``. SDK /
+        network / quota failures route through
+        :func:`signalforge.warehouse.adapters._client.map_bq_exception` so
+        the prune engine catches them as any other :class:`WarehouseError`.
+
+        The session-thread (``self._active_session_id``) is honoured for
+        parity with :meth:`run_test_sql` — an anomaly test under a
+        materialised-sample session would route through the same temp
+        table. In practice the engine bypasses the substitution for
+        ``row_count_anomaly_by_period`` (the prune-engine source-override
+        helper routes it to the source qualified name), so the session
+        property is typically ``None`` on this path. Threading it anyway
+        preserves the parity guarantee.
+
+        ``sql`` is subject to the same cheap rejects as
+        :meth:`run_test_sql` via
+        :func:`signalforge.warehouse._sql_safety.validate_test_sql`. The
+        compiler already runs the same check at compose time; the
+        adapter-level call is defence-in-depth.
+        """
+        validate_test_sql(sql)
+
+        try:
+            job = self._get_client().query(
+                sql,
+                job_config=self._default_job_config(
+                    stage="warehouse_stats_query",
+                    session_id=self._active_session_id,
+                ),
+            )
+            rows = list(job.result())
+        except Exception as exc:
+            mapped = map_bq_exception(exc, context={"max_bytes_billed": self._max_bytes_billed})
+            if mapped is exc:
+                raise
+            raise mapped from exc
+
+        return tuple(row_to_dict(row) for row in rows)
+
+    # ------------------------------------------------------------------
     # estimate_query_bytes — US-002 of issue #36.
     # ------------------------------------------------------------------
 

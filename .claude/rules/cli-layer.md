@@ -19,6 +19,18 @@ src/signalforge/cli/
 
 One module per subcommand, no nested directories, no `__main__.py`. Every subcommand module exports exactly two public symbols: `add_parser(subparsers) -> None` and `cmd_<name>(args) -> int`. Top-level `main(argv: list[str] | None = None) -> int` accepts an explicit argv list — tests call `main([...])` directly and never spawn a subprocess.
 
+### Nested-subaction precedent — `cache clear` (#189 DEC-015)
+
+`signalforge cache clear --grade` introduced the FIRST nested-subparser shape in the codebase. The top-level `cache` subcommand carries an internal `add_subparsers()` for sub-actions; the only sub-action today is `clear`. This is a **documented deviation** from the "flat per-subcommand modules" rule, justified by forward-compat for a future `cache clear --drafter` / `cache stats` / `cache list` family. Alternatives (`cache-clear` hyphenated flat name; `clear-grade-cache` verb-first) lose the namespace claim and the `git remote add / remove` idiom.
+
+The deviation is bounded:
+- `cache` IS one module per top-level subcommand (`src/signalforge/cli/cache.py`); the nesting is purely on the argparse side via `add_subparsers()`.
+- `cmd_cache(args)` dispatches on `args.cache_subcommand`. Today's `clear` is hardcoded; future sub-actions extend the dispatch.
+- The skill-parity gate's `_subparser_flags` helper was extended to BFS over nested subparsers — `--grade` correctly validates as a flag on the nested `clear` parser. Mirror this BFS extension if a sibling subcommand grows its own nested action.
+- `--grade` on `clear` is `required=True` so a bare `signalforge cache clear` exits 2 via argparse. When a sibling flag like `--drafter` lands, the `required` constraint becomes a mutex group.
+
+When a future subcommand wants nested sub-actions, follow this shape; otherwise the flat convention still holds.
+
 ## Library-surface pattern: CLI handler wraps a public lib module at the boundary (issue #47)
 
 Subcommands with a useful programmatic surface ship as TWO layers — a public lib module (e.g. `signalforge.demo.copy_demo(...) -> Path`) and a thin CLI handler that wraps it. The split:
@@ -154,7 +166,9 @@ Plus optional failure block. Emits when `(matched ≥ 2 OR failed ≥ 1) AND NOT
 
 **Sidecar last-writer-wins (DEC-003).** `.signalforge/grade.json` and `.signalforge/diff.json` are `O_TRUNC` per call; in-process iteration overwrites per model — only the final model's sidecars persist. The four append-only JSONLs survive iteration (≤4000 bytes/record < `PIPE_BUF`). Operators wanting per-model sidecars use the shell-loop pattern in `docs/cli-ops.md § Running across many models`.
 
-**Anthropic cache caveat (DEC-015).** The drafter's explicitly cache-marked block changes per iteration, so it does NOT amortise across siblings. Savings within one process come from Anthropic's automatic caching of the static system prompt. Document honestly in the operator-facing cookbook.
+**Anthropic cache caveat (DEC-015) — CORRECTED by issue #188.** The original #37 claim ("the cache-marked block changes per iteration, so it does NOT amortise across siblings") held under the per-model cache scope only. Issue #188 added a **project cache scope** that the batch driver auto-promotes to on `--select` ≥ 2 models: the cache-marked block becomes a byte-identical project-level prefix, so it DOES amortise across siblings — `cache_creation` on model 1, `cache_read` (≈12× cheaper input-side) on models 2..N. Anthropic-only mechanic; OpenAI / Gemini batches see no cache benefit and no penalty. The cookbook claim must reflect the active project-scope amortisation, not the historic per-model no-amortise statement. See `llm-drafter.md` § "Project-scope cached prefix for `--select` batches" for the full contract.
+
+**Draft-config overlay + `--cache-scope` flag + auto-promote (issue #188 DEC-002/003/010).** `_run_single_model` gains a `draft_overrides: dict | None` kwarg applied as `DraftConfig.model_validate({**draft_config.model_dump(), **draft_overrides})` — the canonical overlay pattern (re-runs validators; mirrors prune/grade/diff and `SafetyPolicy.with_mode`). The pipeline previously loaded `DraftConfig` fresh with no overlay; this closes that gap. The `--cache-scope {per-model,project}` flag mirrors `--mode`/`--scope`/`--format` (full 5-surface parity). Precedence: explicit `--cache-scope` flag > non-default YAML `llm.cache_scope` > auto-promote (`_run_batch` overlays `cache_scope="project"` when `len(matched) >= 2` AND the operator hasn't pinned a scope). Single-model positional runs never auto-promote, preserving v0.1 output byte-for-byte.
 
 **5-surface parity test pattern (DEC-017).** For any new flag whose grammar/examples appear across multiple surfaces, ship a bespoke parity test that reads each surface and asserts the same example tokens appear (`tests/cli/test_5_surface_parity_select.py` is the precedent). Don't ship with `pytest.skip` branches for surfaces that haven't landed — those become dead code on merge.
 
@@ -187,6 +201,6 @@ Two more #105 conventions for a no-LLM stage CLI: (1) **audit each inherited fla
 
 ## Reference
 
-`plans/super/9-cli-entrypoint.md` — DEC-001 … DEC-027. `plans/super/37-multi-model-select.md` — DEC-001 … DEC-017. Issue #49 — `cmd_lint` `--model` bare-name resolver. `src/signalforge/cli/` — current implementation. `docs/cli-ops.md` — operational reference. `tests/test_audit_completeness.py::test_every_typed_error_is_in_exit_code_mapping_table` — 7th AST scan. `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate. `tests/cli/test_exit_codes.py` — parametrized exception → exit-code contract. `tests/cli/test_5_surface_parity_select.py` — 5-surface parity for `--select`. `tests/cli/test_lint.py::test_lint_resolves_model_*` — bare-name / unique_id / file-path forms.
+`plans/super/9-cli-entrypoint.md` — DEC-001 … DEC-027. `plans/super/37-multi-model-select.md` — DEC-001 … DEC-017. `plans/super/188-bulk-cache-prefix.md` — DEC-001 … DEC-015 (`--cache-scope` flag + `draft_overrides` overlay + auto-promote on `--select` ≥ 2; corrects the DEC-015 sibling-cache caveat). Issue #49 — `cmd_lint` `--model` bare-name resolver. `src/signalforge/cli/` — current implementation. `docs/cli-ops.md` — operational reference. `tests/test_audit_completeness.py::test_every_typed_error_is_in_exit_code_mapping_table` — 7th AST scan. `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate. `tests/cli/test_exit_codes.py` — parametrized exception → exit-code contract. `tests/cli/test_5_surface_parity_select.py` — 5-surface parity for `--select`. `tests/cli/test_lint.py::test_lint_resolves_model_*` — bare-name / unique_id / file-path forms.
 
 See-Also: clauditor's `.claude/rules/llm-cli-exit-code-taxonomy.md` — source of the four-tier rule.

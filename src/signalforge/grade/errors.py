@@ -34,6 +34,13 @@ The ten classes (DEC-028 + #9 US-002 graduation):
     graduated from v0.2 reservation to v0.1 wiring in #9 (US-002,
     DEC-021). Raised AFTER the sidecar is durably persisted so the
     operator has a complete ``grade.json`` for diagnosis.
+11. :class:`GradeIncompleteError` — default-on completeness contract
+    (#202 US-006, DEC-204 + DEC-207). Raised AFTER the sidecar write and
+    BEFORE the below-threshold check when a non-exempt
+    ``(artifact, criterion)`` pair stays ungraded past the bounded sweep.
+
+(Plus the cache + nested-event-loop classes added by later issues; this
+list summarises the historical core rather than enumerating every leaf.)
 
 See ``plans/super/7-quality-grader.md`` for the full design and
 ``plans/super/9-cli-entrypoint.md`` US-002 for the threshold-fail
@@ -375,6 +382,39 @@ class GradeAuditRecordTooLargeError(GradeError):
         super().__init__(message, remediation=remediation)
 
 
+class GradeNestedEventLoopError(GradeError):
+    """:func:`signalforge.grade.grade_artifacts` was invoked from inside a
+    running :mod:`asyncio` event loop.
+
+    Issue #186 DEC-009. The grade orchestrator's async core is dispatched
+    via :func:`asyncio.run` from the sync public entry point; that call
+    raises :exc:`RuntimeError` ("``asyncio.run()`` cannot be called from
+    a running event loop") when invoked re-entrantly from inside another
+    loop (e.g. a v0.4 cross-model batch parallelism wrapper). The grade
+    engine detects the running loop via
+    :func:`asyncio.get_running_loop` BEFORE the ``asyncio.run`` call and
+    raises this typed error so the operator sees a remediation-bearing
+    failure instead of a bare ``RuntimeError`` from the asyncio stdlib.
+
+    Mapped to CLI tier 1 (operator-configuration / environment problem;
+    same tier as :class:`signalforge.manifest.ManifestNotFoundError`):
+    the call site is wrong, not the warehouse or the LLM.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "v0.3 grade_artifacts is single-event-loop only. Call before entering an "
+        "event loop, or wait for v0.4 async sibling."
+    )
+
+    def __init__(self, model_unique_id: str, *, remediation: str | None = None) -> None:
+        self.model_unique_id = model_unique_id
+        message = (
+            f"grade_artifacts({_format_value(model_unique_id)}) was invoked from "
+            "inside a running asyncio event loop; refusing to nest asyncio.run()."
+        )
+        super().__init__(message, remediation=remediation)
+
+
 class GradeBelowThresholdError(GradeError):
     """The :class:`signalforge.grade.GradingReport` aggregate verdict
     fell below the configured ``min_pass_rate`` and/or ``min_mean_score``
@@ -450,15 +490,297 @@ class GradeBelowThresholdError(GradeError):
         super().__init__(message, remediation=remediation)
 
 
+class GradeIncompleteError(GradeError):
+    """A non-exempt ``(artifact, criterion)`` pair remained ungraded
+    (``score=None``) after the always-on bounded sweep, AND the operator
+    has not opted out of the fail-loud completeness contract by setting
+    :attr:`signalforge.grade.GradeConfig.require_complete` to ``False``.
+
+    Issue #202 US-006 (DEC-204 + DEC-207). The grade engine's Stage-2
+    bounded sweep (#202 US-005) re-grades every ``"transient"`` degrade
+    SEQUENTIALLY for a few calmer rounds before the report is assembled.
+    By the time this check fires, a pair that is *still* ``score=None``
+    is a structural failure the operator must see — not a verdict to
+    quietly fold into ``aggregate_complete=False``.
+
+    The DEC-204 trip/exempt matrix (branch on the
+    :attr:`signalforge.grade.GradingResult.degrade_reason_type`
+    discriminator — #202 US-001 — never on message text):
+
+    * ``"transient"`` → ALWAYS trips. A transient pair that survived the
+      sweep is an unrecovered LLM/network failure; shipping it silently
+      hides a real gap in the grade corpus.
+    * ``"budget"`` + ``total_budget_seconds`` is ``None`` (the
+      DEFAULT-scaled-budget formula) → trips. A default-scaled-budget
+      degrade is a Stage-1-failure canary: the work overran a budget
+      that was *sized for the work*, so the engine is the thing at fault,
+      not an operator ceiling.
+    * EXEMPT (never trip): ``"ceiling"`` (an explicit ``max_grade_*``
+      opt-in the operator chose); and ``"budget"`` when
+      ``total_budget_seconds`` was set EXPLICITLY (a deliberate operator
+      time-ceiling — the operator asked for the cap, so a curtailed run
+      is the contract, not a surprise).
+
+    Raised AFTER the fail-closed sidecar JSON write so the operator has a
+    complete ``grade.json`` on disk for diagnosis (mirrors the
+    :class:`GradeBelowThresholdError` raise-after-sidecar ordering
+    invariant). ``require_complete`` is checked BEFORE
+    ``fail_on_below_threshold`` — an incomplete run is a structural
+    failure, distinct from (and prior to) a below-threshold verdict.
+
+    Carries:
+
+    * ``incomplete_pairs: tuple[tuple[str, str], ...]`` — the still-ungraded
+      pairs that tripped, each ``(artifact_id, criterion_id)``. The
+      human-facing message names the first ~20 then ``… and N more``
+      (the full list lives in the per-pair JSONL audit on disk).
+    * ``require_complete: bool`` — the config field value that armed the
+      raise (always ``True`` when this error is raised).
+    * ``aggregate_complete: bool`` — the report's aggregate-complete flag,
+      so a caller catching the error can render a diagnostic without
+      reaching back to the report (which is on disk at the sidecar path).
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The grade run left one or more non-exempt (artifact, criterion) "
+        "pairs ungraded (score=None) after the bounded transient-recovery "
+        "sweep, and `require_complete=True` opted into the fail-loud "
+        "completeness contract. The complete sidecar JSON has been written "
+        "to disk — inspect <project_dir>/.signalforge/grade.json (or the "
+        "explicit `sidecar_path`) and the per-pair `grade.jsonl` audit for "
+        "the full ungraded list and each pair's failure reason. Common "
+        "causes: a persistent LLM/network outage exhausting the sweep "
+        "rounds (transient), or a default-scaled budget overrun "
+        "(total_budget_seconds unset — a Stage-1 sizing canary). Either "
+        "re-run after the upstream issue clears, raise `grade.sweep_max_rounds` "
+        "/ widen the budget, or set `grade.require_complete: false` to revert "
+        "to report-only posture (the ungraded pairs then surface via "
+        "`aggregate_complete=False`)."
+    )
+
+    # First N pairs named verbatim in the message; the remainder collapse
+    # to a single ``… and K more`` line (the full list lives in the JSONL
+    # audit). Mirrors the failure-list-cap precedent in the CLI batch
+    # summary (`_BATCH_SUMMARY_FAILURE_CAP`).
+    _PAIR_DISPLAY_CAP: ClassVar[int] = 20
+
+    def __init__(
+        self,
+        *,
+        incomplete_pairs: tuple[tuple[str, str], ...],
+        require_complete: bool,
+        aggregate_complete: bool,
+        remediation: str | None = None,
+    ) -> None:
+        self.incomplete_pairs = incomplete_pairs
+        self.require_complete = require_complete
+        self.aggregate_complete = aggregate_complete
+        total = len(incomplete_pairs)
+        # Name the first ~20 pairs (repr-quoted via ``_format_value`` so
+        # adversarial artifact/criterion ids can't smuggle control bytes
+        # into the message), then bound the tail with ``… and N more``.
+        shown = incomplete_pairs[: self._PAIR_DISPLAY_CAP]
+        named = ", ".join(f"({_format_value(aid)}, {_format_value(cid)})" for aid, cid in shown)
+        overflow = total - len(shown)
+        suffix = f" … and {overflow} more" if overflow > 0 else ""
+        plural = "s" if total != 1 else ""
+        message = (
+            f"Grade run incomplete: {total} non-exempt pair{plural} remained "
+            f"ungraded (score=None) after the bounded sweep: {named}{suffix} "
+            f"(aggregate_complete={aggregate_complete})."
+        )
+        super().__init__(message, remediation=remediation)
+
+
+class GradeCacheReadError(GradeError):
+    """The persistent grade cache file is present but unreadable or
+    unparseable.
+
+    Issue #189 / DEC-017. **Reserved-but-currently-inert** (PR #196
+    Copilot — joins the ``GradeBudgetExceededError`` precedent from
+    `grade-layer.md` § "Schema-version surfaces"). The grade cache
+    (``<project_dir>/.signalforge/grade-cache/``) is derived/optional
+    state: a hit lets the engine skip a live LLM call; a miss falls
+    through to the normal grade path. ``signalforge.grade.cache.lookup_cache``
+    handles every degenerate path (corrupt JSON, schema mismatch,
+    permission denied, key-hash mismatch) by returning ``None`` + INFO
+    log — no live code path currently raises this class. The class
+    stays exported and registered in ``_EXCEPTION_TO_EXIT_CODE`` at
+    tier 3 so a future engine refactor that wants typed visibility on
+    a recurrent read-failure surface (e.g. metric counter for cache
+    corruption) can graduate it without growing the exit-code table.
+    **The live grade run is NEVER aborted by a read failure** — fail-soft
+    is the load-bearing posture (DEC-005 of #189).
+
+    Mapped to CLI tier 3 (external dependency, disk I/O) — same tier as
+    the fail-closed audit-write durability errors. The operator-visible
+    remediation names the cache-clear command and the
+    ``--no-cache`` / ``cache_enabled: false`` opt-out paths.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The grade cache file is present but unreadable or unparseable. Delete "
+        "the cache file or run `signalforge cache clear --grade` to drop the "
+        "entire cache directory; the next grade run will re-grade and "
+        "re-populate. Cache reads are best-effort — a read failure NEVER "
+        "aborts the live grade."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: BaseException,
+        remediation: str | None = None,
+    ) -> None:
+        self.cause = cause
+        super().__init__(message, remediation=remediation)
+        # Chain the underlying I/O cause so ``raise GradeCacheReadError(...)``
+        # exposes ``exc.__cause__`` for callers that want the OS-level detail
+        # (mirrors ``raise X from cause`` and the GradeAuditWriteError /
+        # GradeLLMError precedents).
+        self.__cause__ = cause
+
+
+class GradeCacheWriteError(GradeError):
+    """The persistent grade cache writer could not durably persist a
+    record.
+
+    Issue #189 / DEC-005 / DEC-017. Unlike the fail-closed audit writers
+    (DEC-006 of #7), the cache writer is **fail-soft**: a write failure
+    NEVER propagates from :func:`signalforge.grade.grade_artifacts`.
+    The engine catches any escaping ``OSError`` / oversize /
+    concurrent-write conflict and routes it to a single WARNING line
+    via the lazy-format JSON logger (mirrors the
+    ``warehouse-adapters.md`` cleanup-boundary fail-soft pattern). The
+    next run will re-grade the affected pair and attempt the cache
+    write again.
+
+    The class still exists (and is registered in
+    :data:`signalforge.cli._helpers._EXCEPTION_TO_EXIT_CODE` at tier 3)
+    so the catch-and-warn site can name the failure type, and so the
+    7th AST scan in :mod:`tests.test_audit_completeness` finds the
+    type registration. **In production, a user will not see this
+    exception escape** — it surfaces only as a WARNING line.
+
+    Mapped to CLI tier 3 (external dependency, disk I/O) — same tier
+    family as :class:`GradeCacheReadError`.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The grade cache write failed (disk full, permission denied, oversize "
+        "record, or a concurrent-write conflict). The live grade run is NOT "
+        "aborted — cache writes are fail-soft per DEC-005; the next run will "
+        "re-grade this pair and attempt the cache write again. To suppress the "
+        "warning, fix the underlying I/O issue or set `grade.cache_enabled: "
+        "false` in signalforge.yml."
+    )
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        cause: BaseException,
+        remediation: str | None = None,
+    ) -> None:
+        self.cause = cause
+        super().__init__(message, remediation=remediation)
+        # Chain the underlying I/O cause — mirrors GradeAuditWriteError.
+        self.__cause__ = cause
+
+
+class GradeCachePathError(GradeError):
+    """The persistent grade cache directory resolved outside the
+    project directory via a symlink.
+
+    Issue #189 / DEC-017. The grade engine canonicalises
+    ``<project_dir>/.signalforge/grade-cache/`` via
+    :func:`signalforge._common.path_safety.canonicalise_path` at
+    orchestrator entry (load-time). A symlink that resolves outside the
+    project tree raises :class:`signalforge._common.path_safety.PathContainmentError`,
+    which the engine wraps into this typed error so the CLI's exit-code
+    table can route it to tier 1 (load-time / parse-layer; same tier as
+    :class:`signalforge.cli.errors.CliPathError` and
+    :class:`signalforge.manifest.ManifestNotFoundError`).
+
+    Mapped to CLI tier 1 (operator-config problem; the project tree's
+    ``.signalforge/`` has a symlink pointing elsewhere — fix the
+    symlink, re-run).
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The grade cache directory (`<project_dir>/.signalforge/grade-cache/`) "
+        "resolved outside the project directory via a symlink. This is the "
+        "symlink-containment gate refusing to read or write outside the "
+        "project tree. Inspect the `.signalforge/grade-cache` path; remove "
+        "any symlinks that point elsewhere, then re-run."
+    )
+
+
+class GradeCacheRecordTooLargeError(GradeCacheWriteError):
+    """A persistent grade cache record would exceed the per-record
+    byte cap.
+
+    Issue #189 / DEC-006 / DEC-017. ``_GRADE_CACHE_RECORD_LIMIT_BYTES``
+    is 16 KB — deliberately distinct from the 4 KB POSIX-atomic-append
+    limit on audit JSONL records, because cache files are *not*
+    concurrent-append targets. A typical cache record is ~500–2000
+    bytes; the 16 KB headroom accommodates unusually verbose
+    ``evidence`` / ``reasoning`` fields without forcing a fail-soft
+    skip.
+
+    Subclasses :class:`GradeCacheWriteError` (NOT :class:`GradeError`
+    directly) so the orchestrator's fail-soft catch on Write also
+    catches oversize, and so the MRO walk in
+    :func:`signalforge.cli._helpers.map_exception_to_exit_code`
+    resolves to Write's tier without an explicit entry in
+    :data:`_EXCEPTION_TO_EXIT_CODE`.
+
+    Raised BEFORE any file is opened (mirrors the audit-record-too-large
+    precedent), so an oversize record leaves no on-disk artefact.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "The grade cache record exceeded the 16 KB per-record budget. This is "
+        "the cache-record cap, distinct from the 4 KB POSIX-atomic-append "
+        "limit on audit JSONL records (cache files are not concurrent-append "
+        "targets). Common cause: an unusually large `evidence` or `reasoning` "
+        "field in the LLM response — the live grade still succeeds; only the "
+        "cache write is skipped."
+    )
+
+    def __init__(
+        self,
+        size: int,
+        limit: int,
+        *,
+        remediation: str | None = None,
+    ) -> None:
+        self.size = size
+        self.limit = limit
+        message = f"Grade cache record size {size} exceeds per-record limit {limit}."
+        # Skip GradeCacheWriteError.__init__ (which requires cause=) by
+        # going straight to the GradeError base — there's no underlying
+        # OS-level cause for an oversize record; the writer detects the
+        # cap-breach in-memory before any os.open.
+        GradeError.__init__(self, message, remediation=remediation)
+
+
 # Sorted alphabetically (mirrors safety / draft / prune / warehouse error modules).
 __all__ = [
     "GradeAuditRecordTooLargeError",
     "GradeAuditWriteError",
     "GradeBelowThresholdError",
     "GradeBudgetExceededError",
+    "GradeCachePathError",
+    "GradeCacheReadError",
+    "GradeCacheRecordTooLargeError",
+    "GradeCacheWriteError",
     "GradeConfigError",
     "GradeError",
+    "GradeIncompleteError",
     "GradeLLMError",
+    "GradeNestedEventLoopError",
     "GradeOutputError",
     "GradeOutputViolationType",
     "GradePromptEnvelopeBreachError",

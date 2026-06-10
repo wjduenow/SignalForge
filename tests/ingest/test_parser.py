@@ -9,14 +9,23 @@ on a real regression (``.claude/rules/testing-signal.md``).
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any, cast
+
+import yaml
+
 from signalforge.draft.models import (
     CandidateTestAcceptedValues,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
-from signalforge.ingest.models import SkippedTest
+from signalforge.ingest.models import SkippedTest, SkipReason
 from signalforge.ingest.parser import parse_test_entry
+
+_FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "ingest"
 
 # --- bare strings ---------------------------------------------------------
 
@@ -142,14 +151,19 @@ def test_accepted_values_with_interleaved_config_keys() -> None:
 
 
 def test_dbt_utils_namespaced_test_is_custom_skip() -> None:
+    # Use a sibling dbt_utils macro that is NOT promoted to a first-class
+    # variant. ``unique_combination_of_columns`` was the original example
+    # before #170 promoted it to ``CandidateTestUniqueCombination``; pick
+    # another widely-used dbt_utils generic for the namespaced-custom-skip
+    # behavioural pin.
     result = parse_test_entry(
-        {"dbt_utils.unique_combination_of_columns": {"combination_of_columns": ["a", "b"]}},
-        column=None,
+        {"dbt_utils.not_null_proportion": {"at_least": 0.95}},
+        column="status",
     )
     assert isinstance(result, SkippedTest)
     assert result.reason == "custom-or-generic-test"
-    assert result.test_name == "dbt_utils.unique_combination_of_columns"
-    assert result.column is None
+    assert result.test_name == "dbt_utils.not_null_proportion"
+    assert result.column == "status"
 
 
 def test_dbt_expectations_namespaced_test_is_custom_skip() -> None:
@@ -303,3 +317,470 @@ def test_model_level_relationships_skips_malformed() -> None:
     assert result.reason == "malformed-supported-test"
     assert result.column is None
     assert result.test_name == "relationships"
+
+
+# --- row_count_between (US-005 of #169) -----------------------------------
+
+_RCB_NAME = "dbt_expectations.expect_table_row_count_to_be_between"
+
+
+def test_row_count_between_inline_bounds_maps_to_variant() -> None:
+    """Valid inline ``min_value`` + ``max_value`` map to the variant with the
+    inbound name translation (DEC-008): ``min_value`` → ``minimum``,
+    ``max_value`` → ``maximum``."""
+    result = parse_test_entry({_RCB_NAME: {"min_value": 100, "max_value": 10000}}, column=None)
+    assert isinstance(result, CandidateTestRowCountBetween)
+    assert result.minimum == 100
+    assert result.maximum == 10000
+    assert result.where is None
+    # The variant is model-level only.
+    assert result.column is None
+
+
+def test_row_count_between_with_where_carries_where_field() -> None:
+    """``where`` is a first-class arg for this variant (NOT stripped as a
+    generic test-config passthrough). The parser must carry it onto the
+    variant verbatim."""
+    result = parse_test_entry(
+        {
+            _RCB_NAME: {
+                "min_value": 100,
+                "max_value": 10000,
+                "where": "event_date >= '2024-01-01'",
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, CandidateTestRowCountBetween)
+    assert result.where == "event_date >= '2024-01-01'"
+
+
+def test_row_count_between_under_arguments_dbt_18() -> None:
+    """The dbt 1.8+ ``arguments:`` nested shape is recognised (mirrors
+    accepted_values / relationships precedent)."""
+    result = parse_test_entry(
+        {
+            _RCB_NAME: {
+                "arguments": {
+                    "min_value": 1,
+                    "max_value": 1_000_000,
+                    "where": "ordered_at >= '2024-01-01'",
+                }
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, CandidateTestRowCountBetween)
+    assert result.minimum == 1
+    assert result.maximum == 1_000_000
+    assert result.where == "ordered_at >= '2024-01-01'"
+
+
+def test_row_count_between_only_min_value_is_valid() -> None:
+    """At-least-one-bound suffices; ``max_value`` may be omitted."""
+    result = parse_test_entry({_RCB_NAME: {"min_value": 1}}, column=None)
+    assert isinstance(result, CandidateTestRowCountBetween)
+    assert result.minimum == 1
+    assert result.maximum is None
+
+
+def test_row_count_between_only_max_value_is_valid() -> None:
+    """At-least-one-bound suffices; ``min_value`` may be omitted."""
+    result = parse_test_entry({_RCB_NAME: {"max_value": 1_000_000}}, column=None)
+    assert isinstance(result, CandidateTestRowCountBetween)
+    assert result.minimum is None
+    assert result.maximum == 1_000_000
+
+
+def test_row_count_between_missing_both_bounds_is_malformed() -> None:
+    """Both bounds absent → malformed-supported-test (a no-bound test
+    carries no signal; mirrors the model-level Pydantic invariant)."""
+    result = parse_test_entry({_RCB_NAME: {"where": "1=1"}}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == _RCB_NAME
+    assert result.column is None
+    assert "min_value" in result.detail or "max_value" in result.detail
+
+
+def test_row_count_between_min_greater_than_max_is_malformed() -> None:
+    """``min_value > max_value`` is empty-range → malformed-supported-test."""
+    result = parse_test_entry({_RCB_NAME: {"min_value": 5000, "max_value": 100}}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert "min_value" in result.detail and "max_value" in result.detail
+
+
+def test_row_count_between_non_int_min_is_malformed() -> None:
+    """Non-int bound (e.g. a float / string) → malformed-supported-test."""
+    result = parse_test_entry({_RCB_NAME: {"min_value": "100", "max_value": 10000}}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_row_count_between_non_int_max_is_malformed() -> None:
+    result = parse_test_entry({_RCB_NAME: {"min_value": 100, "max_value": 1.5}}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_row_count_between_negative_min_is_malformed() -> None:
+    """Negative bounds are nonsensical for a row-count → malformed-supported-test."""
+    result = parse_test_entry({_RCB_NAME: {"min_value": -1}}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_row_count_between_bool_min_is_malformed() -> None:
+    """``isinstance(True, int) is True`` in Python — the parser must not
+    silently coerce a bool to 0/1, which is rarely what the operator wrote."""
+    result = parse_test_entry({_RCB_NAME: {"min_value": True, "max_value": 10000}}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_row_count_between_non_string_where_is_malformed() -> None:
+    """``where`` must be a non-empty string when set."""
+    result = parse_test_entry(
+        {_RCB_NAME: {"min_value": 100, "max_value": 10000, "where": 42}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_row_count_between_empty_string_where_is_malformed() -> None:
+    """Whitespace-only ``where`` is unhelpful (mirrors the model-level
+    Pydantic invariant) → malformed-supported-test."""
+    result = parse_test_entry(
+        {_RCB_NAME: {"min_value": 100, "max_value": 10000, "where": "   "}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_row_count_between_column_scoped_is_malformed() -> None:
+    """The variant is model-level only — a column-scoped usage routes to a
+    structured skip with a descriptive ``detail`` rather than leaking a
+    Pydantic ValidationError."""
+    result = parse_test_entry({_RCB_NAME: {"min_value": 100, "max_value": 10000}}, column="amount")
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == _RCB_NAME
+    assert result.column == "amount"
+    assert "model-level" in result.detail
+
+
+def test_row_count_between_non_dict_body_is_malformed() -> None:
+    """A non-dict body has no args → no bounds → malformed-supported-test."""
+    result = parse_test_entry({_RCB_NAME: "not-a-mapping"}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == _RCB_NAME
+
+
+# Sibling macros stay in custom-or-generic-test (no behaviour change).
+
+
+def test_expect_table_row_count_to_equal_is_custom_skip() -> None:
+    """A *different* dbt-expectations macro is NOT promoted to the variant —
+    it falls through to the existing namespaced custom-or-generic skip."""
+    result = parse_test_entry(
+        {"dbt_expectations.expect_table_row_count_to_equal": {"value": 1000}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "custom-or-generic-test"
+    assert result.test_name == "dbt_expectations.expect_table_row_count_to_equal"
+
+
+def test_row_count_between_bare_string_no_body_is_malformed() -> None:
+    """A bare-string ``dbt_expectations.expect_table_row_count_to_be_between``
+    (no body) is recognised by the dispatch arm, but with no body it has no
+    bounds → malformed-supported-test (NOT the generic custom skip — the
+    arm has already matched the macro name)."""
+    result = parse_test_entry(_RCB_NAME, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+# SkipReason taxonomy is the closed 3-value Literal (DEC-011 of #169).
+
+
+def test_skip_reason_literal_remains_three_values() -> None:
+    """Adding a 4th skip cause requires explicit extension; #169 must NOT
+    grow the closed taxonomy."""
+    from typing import get_args
+
+    values = get_args(SkipReason)
+    assert set(values) == {
+        "unsupported-test-type",
+        "custom-or-generic-test",
+        "malformed-supported-test",
+    }
+    assert len(values) == 3
+
+
+# Fixture round-trip — the parser drives the fixture file's test entries.
+
+
+def test_row_count_between_fixture_round_trips() -> None:
+    """The fixture at ``tests/fixtures/ingest/row_count_between_schema.yml``
+    exercises every documented kept + skipped case. Drive each model-level
+    entry through ``parse_test_entry(..., column=None)`` and pin the
+    classifications."""
+    fixture = _FIXTURE_DIR / "row_count_between_schema.yml"
+    data = yaml.safe_load(fixture.read_text(encoding="utf-8"))
+    # Locate the `orders` model + its model-level tests.
+    orders = next(m for m in data["models"] if m["name"] == "orders")
+    entries = orders["tests"]
+    # Drive each entry; assert one classification per entry.
+    classifications: list[tuple[str, str | None]] = []
+    for entry in entries:
+        result = parse_test_entry(cast(Any, entry), column=None)
+        if isinstance(result, CandidateTestRowCountBetween):
+            classifications.append(("kept", None))
+        elif isinstance(result, SkippedTest):
+            classifications.append(("skipped", result.reason))
+        else:
+            raise AssertionError(f"unexpected result type: {type(result).__name__}")
+    assert classifications == [
+        ("kept", None),  # inline bounds
+        ("kept", None),  # arguments:-nested + where
+        ("skipped", "malformed-supported-test"),  # missing both bounds
+        ("skipped", "malformed-supported-test"),  # min > max
+        ("skipped", "custom-or-generic-test"),  # sibling expect_table_row_count_to_equal
+    ]
+
+
+# --- unique_combination (US-007 of #170) ---------------------------------
+
+_UC_NAME = "dbt_utils.unique_combination_of_columns"
+
+
+def test_unique_combination_inline_two_columns_maps_to_variant() -> None:
+    """Valid inline ``combination_of_columns`` with two entries maps to the
+    variant (DEC-008): YAML key ``combination_of_columns`` ↔ Pydantic
+    ``columns``. The variant is model-level only (``column = None``)."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["order_id", "line_item_id"]}},
+        column=None,
+    )
+    assert isinstance(result, CandidateTestUniqueCombination)
+    assert result.columns == ("order_id", "line_item_id")
+    assert result.where is None
+    assert result.column is None
+
+
+def test_unique_combination_with_where_carries_where_field() -> None:
+    """``where`` is a first-class arg for this variant (NOT stripped as a
+    generic test-config passthrough). The parser must carry it onto the
+    variant verbatim."""
+    result = parse_test_entry(
+        {
+            _UC_NAME: {
+                "combination_of_columns": ["order_id", "line_item_id"],
+                "where": "ordered_at >= '2024-01-01'",
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, CandidateTestUniqueCombination)
+    assert result.columns == ("order_id", "line_item_id")
+    assert result.where == "ordered_at >= '2024-01-01'"
+
+
+def test_unique_combination_three_columns_is_valid() -> None:
+    """A 3-tuple is a perfectly valid composite-uniqueness shape — e.g.
+    one row per ``(query_signature, query_type, query_date)``."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["query_signature", "query_type", "query_date"]}},
+        column=None,
+    )
+    assert isinstance(result, CandidateTestUniqueCombination)
+    assert result.columns == ("query_signature", "query_type", "query_date")
+
+
+def test_unique_combination_under_arguments_dbt_18() -> None:
+    """The dbt 1.8+ ``arguments:`` nested shape is recognised (mirrors
+    accepted_values / relationships / row_count_between precedent)."""
+    result = parse_test_entry(
+        {
+            _UC_NAME: {
+                "arguments": {
+                    "combination_of_columns": ["order_id", "line_item_id"],
+                    "where": "is_active",
+                }
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, CandidateTestUniqueCombination)
+    assert result.columns == ("order_id", "line_item_id")
+    assert result.where == "is_active"
+
+
+def test_unique_combination_missing_key_is_malformed() -> None:
+    """A body with no ``combination_of_columns`` key → malformed-supported-test
+    (the variant cannot be constructed without the column tuple)."""
+    result = parse_test_entry({_UC_NAME: {"where": "1=1"}}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == _UC_NAME
+    assert result.column is None
+    assert "combination_of_columns" in result.detail
+
+
+def test_unique_combination_single_column_is_malformed() -> None:
+    """A single-column ``combination_of_columns`` is just ``unique`` and
+    carries no new signal → malformed-supported-test (mirrors the
+    Pydantic-side cardinality invariant)."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["order_id"]}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == _UC_NAME
+
+
+def test_unique_combination_empty_list_is_malformed() -> None:
+    """An empty-list ``combination_of_columns`` is structurally meaningless
+    → malformed-supported-test."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": []}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_unique_combination_duplicate_columns_is_malformed() -> None:
+    """A tuple with a repeated entry → malformed-supported-test (mirrors the
+    Pydantic-side no-duplicates invariant). The LLM/operator almost
+    certainly meant something else."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["order_id", "order_id"]}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert "duplicate" in result.detail.lower()
+
+
+def test_unique_combination_non_string_items_is_malformed() -> None:
+    """Each entry in ``combination_of_columns`` must be a string identifier;
+    a non-string item (e.g. an int) → malformed-supported-test."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["order_id", 42]}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_unique_combination_non_list_value_is_malformed() -> None:
+    """``combination_of_columns`` must be a list — a scalar string under the
+    key (a common operator typo) → malformed-supported-test."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": "order_id"}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_unique_combination_column_scoped_is_malformed() -> None:
+    """The variant is model-level only — a column-scoped usage routes to a
+    structured skip with a descriptive ``detail`` rather than leaking a
+    Pydantic ValidationError."""
+    result = parse_test_entry(
+        {_UC_NAME: {"combination_of_columns": ["order_id", "line_item_id"]}},
+        column="order_id",
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == _UC_NAME
+    assert result.column == "order_id"
+    assert "model-level" in result.detail
+
+
+def test_unique_combination_non_string_where_is_malformed() -> None:
+    """``where`` must be a non-empty string when set."""
+    result = parse_test_entry(
+        {
+            _UC_NAME: {
+                "combination_of_columns": ["order_id", "line_item_id"],
+                "where": 42,
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_unique_combination_empty_string_where_is_malformed() -> None:
+    """A whitespace-only ``where`` is unhelpful (mirrors the Pydantic-side
+    invariant) → malformed-supported-test."""
+    result = parse_test_entry(
+        {
+            _UC_NAME: {
+                "combination_of_columns": ["order_id", "line_item_id"],
+                "where": "   ",
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+
+
+def test_unique_combination_non_dict_body_is_malformed() -> None:
+    """A non-dict body has no args → no ``combination_of_columns`` →
+    malformed-supported-test."""
+    result = parse_test_entry({_UC_NAME: "not-a-mapping"}, column=None)
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "malformed-supported-test"
+    assert result.test_name == _UC_NAME
+
+
+def test_unique_combination_config_keys_are_ignored() -> None:
+    """dbt config keys interleaved with args (severity, tags, name,
+    error_if, warn_if, description) are stripped before the required-arg
+    check (DEC mirroring #169 + ``.claude/rules/ingest-layer.md`` §
+    "dbt syntax tolerance"). The valid args still produce the variant."""
+    result = parse_test_entry(
+        {
+            _UC_NAME: {
+                "combination_of_columns": ["order_id", "line_item_id"],
+                "severity": "warn",
+                "tags": ["uniqueness"],
+                "name": "orders_unique_combo",
+                "error_if": ">10",
+                "warn_if": ">0",
+                "config": {"store_failures": True},
+            }
+        },
+        column=None,
+    )
+    assert isinstance(result, CandidateTestUniqueCombination)
+    assert result.columns == ("order_id", "line_item_id")
+
+
+# Sibling macros stay in custom-or-generic-test (no behaviour change).
+
+
+def test_unique_combination_sibling_macro_is_custom_skip() -> None:
+    """A *different* dbt_utils macro (e.g. ``unique_combination_of_columns_quoted``,
+    a hypothetical sibling) is NOT promoted to the variant — it falls
+    through to the existing namespaced custom-or-generic skip. Only the
+    one specific macro name is recognised."""
+    result = parse_test_entry(
+        {"dbt_utils.unique_where_count": {"combination_of_columns": ["a", "b"]}},
+        column=None,
+    )
+    assert isinstance(result, SkippedTest)
+    assert result.reason == "custom-or-generic-test"
+    assert result.test_name == "dbt_utils.unique_where_count"

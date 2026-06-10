@@ -41,6 +41,21 @@
 # NOT invoked by CI. Maintainer-only step; the committed manifest is what CI
 # and the in-process loads test (`tests/manifest/test_austin_fixture_loads.py`)
 # consume.
+#
+# DEC-010 of plans/super/170-unique-combination.md (US-011 — the engineered
+# `stg_bikeshare_station_pairs` fixture model): Ralph workers in worktrees
+# cannot reach live BigQuery, so the entry for the new model was added to
+# `target/manifest.json` (and the catalog) by hand following the
+# `testing-signal.md` § "Hand-crafted manifest seed when workers can't run
+# live tooling" convention. A maintainer with live credentials can re-run
+# this script to refresh BOTH the existing `stg_bikeshare_trips` entry AND
+# the engineered `stg_bikeshare_station_pairs` entry from the .sql sources
+# in one shot — `dbt parse` reads every file under `models/` so the
+# regenerated manifest naturally covers the new model. Spot-check the
+# diff after regen: the hand-crafted columns/descriptions are educated
+# guesses (real dbt parse will pull richer types from the warehouse), so
+# expect a non-trivial diff on the engineered model's columns block but
+# the structural shape (refs/depends_on/sources/raw_code) should match.
 
 set -euo pipefail
 

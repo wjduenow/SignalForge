@@ -55,7 +55,10 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountAnomalyByPeriod,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 
 
@@ -99,6 +102,66 @@ def model_test_args_hash(test: CandidateTest) -> str:
             "type": test.type,
             "column": test.column,
             "sql": test.sql,
+        }
+    elif isinstance(test, CandidateTestRowCountBetween):
+        # Identifying args are the bounds + optional ``where`` clause.
+        # ``column`` is always ``None`` (model-level only) but included
+        # for shape-parity with the other arms. Two row_count_between
+        # tests with identical ``(minimum, maximum, where)`` triples
+        # collide deterministically; differing any field rotates the
+        # hash so the artifact_id join stays unique.
+        payload = {
+            "type": test.type,
+            "column": test.column,
+            "minimum": test.minimum,
+            "maximum": test.maximum,
+            "where": test.where,
+        }
+    elif isinstance(test, CandidateTestRowCountAnomalyByPeriod):
+        # Identifying args are the eight scalar/literal fields that
+        # parameterise the anomaly recipe: ``(method, seasonality,
+        # period, lookback_periods, threshold, min_samples_per_bucket,
+        # date_column, where)``. ``column`` is hard-coded to ``None``
+        # (model-level only) but included for shape-parity with the
+        # other arms. ``rationale`` is the drafter-emitted prose
+        # justification (mirrors the precedent on every other variant)
+        # and is NOT identifying — two tests differing only by
+        # ``rationale`` describe the same constraint and collide
+        # deterministically.
+        #
+        # All scalar args (no tuples); no sort needed. ``unique_combination``
+        # sorts its ``columns`` tuple (#170 DEC-011) because
+        # ``(a, b)`` and ``(b, a)`` describe the same composite
+        # uniqueness constraint (GROUP BY result-row identity is
+        # order-invariant); this variant has only scalars + literals,
+        # so sorting is N/A.
+        payload = {
+            "type": test.type,
+            "column": test.column,
+            "method": test.method,
+            "seasonality": test.seasonality,
+            "period": test.period,
+            "lookback_periods": test.lookback_periods,
+            "threshold": test.threshold,
+            "min_samples_per_bucket": test.min_samples_per_bucket,
+            "date_column": test.date_column,
+            "where": test.where,
+        }
+    elif isinstance(test, CandidateTestUniqueCombination):
+        # Identifying args are the column tuple + optional ``where``.
+        # ``columns`` is **SORTED** before serialisation (DEC-011 of
+        # #170, load-bearing): ``(a, b)`` and ``(b, a)`` describe the
+        # same GROUP BY result-row identity (composite uniqueness is
+        # order-invariant), so a single artifact_id → single warehouse
+        # call → stable cache reuse. Mirrors the
+        # ``accepted_values.values`` sort precedent above. ``column``
+        # is always ``None`` (model-level only) but included for
+        # shape-parity with the other arms.
+        payload = {
+            "type": test.type,
+            "column": test.column,
+            "columns": sorted(test.columns),
+            "where": test.where,
         }
     else:  # pragma: no cover - exhaustive dispatch over the closed union
         raise ValueError(

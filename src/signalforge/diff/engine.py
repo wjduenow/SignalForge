@@ -57,6 +57,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -806,6 +807,7 @@ def render_diff(
     sidecar_path: Path | None = None,
     write_sidecar: bool = True,
     project_dir: Path | None = None,
+    as_of: date | None = None,
 ) -> DiffReport:
     """Build and render a :class:`DiffReport` for ``model``.
 
@@ -870,6 +872,15 @@ def render_diff(
             symlink-hardened path canonicalisation for ``output_path``
             and ``sidecar_path``. ``None`` resolves to
             :func:`pathlib.Path.cwd`.
+        as_of: optional evaluation date for the
+            ``row_count_anomaly_by_period`` violation query baked into
+            the emitted singular ``tests/*.sql`` file (#171 US-014).
+            ``None`` resolves per-decision: the engine-set
+            ``decision.as_of`` (US-009) when available, else
+            :func:`date.today`. Pass an explicit date when the operator
+            wants the generated test bound to a different evaluation
+            date (e.g. backfill). The kwarg is silently ignored when
+            no kept anomaly tests are in scope.
 
     Returns:
         A fully-populated :class:`DiffReport` carrying the rendered
@@ -941,7 +952,19 @@ def render_diff(
     # surfaces each KEPT ``custom_sql`` test as a standalone ``.sql``
     # proposal carried on ``DiffReport.proposed_test_files``.
     proposed_yaml = emit_proposed_yaml(candidate, prune_result)
-    proposed_test_files = emit_proposed_test_files(candidate, prune_result)
+    # ``model`` + ``as_of`` are required only when a kept
+    # ``row_count_anomaly_by_period`` test is in scope (#171 US-014); the
+    # emitter recompiles the violation query against
+    # ``TableRef.from_model(model)`` + ``BIGQUERY_DIALECT`` (default) +
+    # ``as_of``. The dialect is BigQuery-pinned for v0.x — v0.3
+    # multi-warehouse callers should override via a thread-through
+    # ``dialect=`` kwarg sourced from the adapter.
+    proposed_test_files = emit_proposed_test_files(
+        candidate,
+        prune_result,
+        model=model,
+        as_of=as_of,
+    )
 
     # 5. Compute unified diff.
     existing_text = existing_schema if existing_schema is not None else ""

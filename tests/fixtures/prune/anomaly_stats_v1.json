@@ -1,0 +1,41 @@
+[
+  {
+    "method": "mad",
+    "median": 12500.0,
+    "mad": 850.0,
+    "n_periods": 28
+  },
+  {
+    "method": "zscore",
+    "mu": 12450.5,
+    "sigma": 920.3,
+    "n_periods": 28
+  },
+  {
+    "method": "percentile",
+    "p_lo": 10800.0,
+    "p_hi": 14200.0,
+    "n_periods": 28
+  },
+  {
+    "method": "min_max",
+    "minimum": 9800.0,
+    "maximum": 15100.0,
+    "n_periods": 28
+  },
+  {
+    "method": "mad",
+    "median": 12500.0,
+    "mad": 850.0,
+    "n_periods": 28,
+    "per_dow": {
+      "0": {"median": 13100.0, "mad": 420.0, "n_periods": 4},
+      "1": {"median": 13050.0, "mad": 510.0, "n_periods": 4},
+      "2": {"median": 12950.0, "mad": 380.0, "n_periods": 4},
+      "3": {"median": 12880.0, "mad": 460.0, "n_periods": 4},
+      "4": {"median": 12700.0, "mad": 520.0, "n_periods": 4},
+      "5": {"median": 11200.0, "mad": 680.0, "n_periods": 4},
+      "6": {"median": 10800.0, "mad": 720.0, "n_periods": 4}
+    }
+  }
+]

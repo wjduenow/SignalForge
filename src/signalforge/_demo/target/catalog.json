@@ -62,6 +62,50 @@
       },
       "stats": {},
       "unique_id": "model.signalforge_test_austin.stg_bikeshare_trips"
+    },
+    "model.signalforge_test_austin.stg_bikeshare_station_pairs": {
+      "metadata": {
+        "type": "BASE TABLE",
+        "schema": "austin_bikeshare",
+        "name": "bikeshare_trips",
+        "database": "bigquery-public-data",
+        "comment": null,
+        "owner": null
+      },
+      "columns": {
+        "start_station_id": {
+          "type": "INT64",
+          "index": 1,
+          "name": "start_station_id",
+          "comment": null
+        },
+        "end_station_id": {
+          "type": "STRING",
+          "index": 2,
+          "name": "end_station_id",
+          "comment": null
+        },
+        "subscriber_type": {
+          "type": "STRING",
+          "index": 3,
+          "name": "subscriber_type",
+          "comment": null
+        },
+        "trip_count": {
+          "type": "INT64",
+          "index": 4,
+          "name": "trip_count",
+          "comment": null
+        },
+        "total_duration_minutes": {
+          "type": "INT64",
+          "index": 5,
+          "name": "total_duration_minutes",
+          "comment": null
+        }
+      },
+      "stats": {},
+      "unique_id": "model.signalforge_test_austin.stg_bikeshare_station_pairs"
     }
   },
   "sources": {},

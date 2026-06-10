@@ -45,6 +45,130 @@ User-facing tagline: **every drafted artefact that ships is scored;
 every scored artefact has a durable receipt; partial runs surface as
 partial, not silent.**
 
+## Bias-to-completion posture (grade-completeness)
+
+**The library biases toward completion.** By default it drives **every
+`(artifact, criterion)` pair to a score.** A `<100%` / incomplete grade
+result is legitimate **ONLY when the operator intentionally limited
+cost/time** — an explicit `max_grade_*` ceiling or an explicitly-set
+`total_budget_seconds`. Incompleteness must **never** be a *passive
+by-product* of a default guard. The default scaled wall-clock budget
+survives only as a **generous runaway catch**; if it ever trips on a
+default run it **FAILS LOUD** (via `require_complete`, below) — it does
+**not** silently ship a partial. (#202 DEC-210.)
+
+This posture rests on three always-on mechanisms that, together, take a
+default run to 100% scored:
+
+1. **A shared, header-honoring rate limiter (#202 US-002/003/004 /
+   DEC-205).** The sync/async limiter pair paces dispatch at the
+   provider's advertised rate and honours `retry-after` /
+   `anthropic-ratelimit-*` headers, so the original concurrency↔rate-limit
+   collision (which produced ~70 degradations on the full Austin fixture)
+   no longer arises. The default `max_retries_429: 6` (#202 DEC-209,
+   raised from 3) is belt-and-braces on top of it.
+2. **A bounded transient-recovery sweep (#202 US-005 / DEC-206).** After
+   the main concurrent pass, any pair that degraded as **transient** is
+   re-graded sequentially (concurrency 1 — no second herd), up to
+   `sweep_max_rounds` (default 3) with a `sweep_cooldown_seconds` (default
+   2.0) pause between rounds. A recovered pair is cached like any other
+   success. `budget` and `ceiling` degrades are **never** swept. The whole
+   sweep phase is wall-clock-bounded by `sweep_budget_seconds` (default 300,
+   #202 QG-FIX-2): on timeout the sweep stops (it does **not** raise) and any
+   still-transient pairs are left degraded — they then fail loud under
+   `require_complete` or surface as an honest partial when it is `false`.
+3. **A fail-loud completeness check (#202 US-006/007 / DEC-204).** With
+   `require_complete: true` (the **default**), `grade_artifacts(...)`
+   raises `GradeIncompleteError` (CLI exit 2) when a **non-exempt** pair is
+   still ungraded after the sweep — see [Grade-completeness
+   contract](#grade-completeness-contract-require_complete) below.
+
+### How to opt into a limit (the deliberate, documented act)
+
+A partial grade is only legitimate when the operator **chose** to cap
+cost or time. Limiting is therefore an explicit, documented act — set one
+or more of these knobs in `signalforge.yml`:
+
+| Knob | Effect | Trips `require_complete`? |
+|---|---|---|
+| `max_grade_calls: <N>` | Stop scheduling new pairs after N judge calls; rest degrade (`ceiling`). | **No — exempt.** |
+| `max_grade_cost_usd: <X>` | Stop once accumulated USD ≥ X; rest degrade (`ceiling`). | **No — exempt.** |
+| `max_grade_tokens: <N>` | Stop once total token movement ≥ N; rest degrade (`ceiling`). | **No — exempt.** |
+| `total_budget_seconds: <S>` (explicit int) | Absolute wall-clock cap `min(scaled, S)`; on trip rest degrade (`budget`). | **No — exempt** (a deliberate operator time-ceiling). |
+
+```yaml
+grade:
+  # Opt into a cost ceiling — a deliberate partial is now legitimate:
+  max_grade_cost_usd: 1.50
+  # …and/or an explicit absolute wall-clock cap:
+  total_budget_seconds: 300
+```
+
+A run that trips one of these opt-in limits is a **legitimate partial**:
+the operator asked for it. `require_complete` does **not** fire on these
+degrades (they are exempt).
+
+### A default-scaled-budget trip fails loud — never a silent partial
+
+When `total_budget_seconds` is left at its default `None`, the engine
+sizes the wall-clock budget from the work via the scaled formula
+(`budget_base_seconds + budget_per_pair_seconds × ceil(num_pairs /
+max_concurrent_calls)`). This is a **runaway catch sized for ample
+headroom**, not a throughput cap — at representative scales (a few hundred
+pairs at the default `max_concurrent_calls: 10`) it leaves clear margin
+over a realistic limiter-paced completion time (pinned by
+`tests/grade/test_engine.py::test_default_scaled_budget_is_non_binding_at_representative_scale`).
+If the **default** scaled budget ever trips, that is treated as a
+**Stage-1 sizing regression, not a legitimate partial**: per DEC-204 the
+resulting `budget` degrades trip `require_complete` and the run **fails
+loud** rather than silently shipping a `<100%` corpus. The remedy is to
+fix the regression (or, if a partial is genuinely wanted, set
+`total_budget_seconds` explicitly to make the cap a deliberate choice) —
+never to lower the default budget.
+
+### Three degrade classes
+
+The completeness contract distinguishes three classes of degrade — they
+are NOT interchangeable, and only the operator-ceiling class is a
+legitimate partial:
+
+| Class | `degrade_reason_type` | What it is | Posture |
+|---|---|---|---|
+| **Transient-recoverable** | `"transient"` | An LLM/network blip, retry-exhaustion, parser failure, or non-clean `finish_reason`. Retriable on a calmer pass. | **Swept** (US-005) to recover it; any survivor of the sweep is **unrecovered** and **fails loud** under `require_complete`. |
+| **Operator-ceiling** | `"ceiling"`, or `"budget"` with an **explicit** `total_budget_seconds` | The operator deliberately capped calls / cost / tokens / time. | **Legitimate partial.** Exempt from `require_complete`; surfaces via `aggregate_complete: false`. The ONLY way `<100%` is acceptable by design. |
+| **Unrecoverable** | `"transient"` surviving the sweep, OR `"budget"` on the **default** scaled budget | A failure the recovery machinery could not clear, OR a default-budget overrun (a Stage-1 canary). | **Fails loud** under `require_complete` (exit 2, named pairs). Never a silent partial. |
+
+> **"Partial is acceptable" is scoped to the operator-ceiling class
+> ONLY.** Every other path drives to 100% or fails loud.
+
+### Grade-completeness contract (`require_complete`)
+
+`require_complete: bool = True` (the default). After the always-on sweep,
+`grade_artifacts(...)` raises `GradeIncompleteError` (tier-2; CLI exit 2)
+if any **non-exempt** pair is still ungraded (`score=None`). The trip /
+exempt matrix branches on each pair's `GradingResult.degrade_reason_type`
+discriminator (never on message text):
+
+- `"transient"` → **always trips** (an unrecovered LLM/network failure).
+- `"budget"` AND `total_budget_seconds is None` (the default-scaled
+  budget) → **trips** (a Stage-1 sizing canary — the budget was sized for
+  the work, so the engine is at fault, not an operator ceiling).
+- **Exempt — never trips:** `"ceiling"` degrades (an explicit `max_grade_*`
+  opt-in), and `"budget"` degrades when `total_budget_seconds` was set
+  **explicitly** (a deliberate operator time-ceiling — the curtailed run
+  is the contract, not a surprise).
+
+The raise lands **AFTER** the fail-closed `grade.json` sidecar write (so
+the operator has the complete corpus on disk for diagnosis — mirrors the
+`GradeBelowThresholdError` ordering invariant) and **BEFORE** the
+`fail_on_below_threshold` check (incomplete is *structural*;
+below-threshold is *verdictual*). Set `require_complete: false` in
+`signalforge.yml` (or pass `--no-require-complete`) to revert to the v0.1
+report-only posture, where ungraded pairs surface only via
+`aggregate_complete: false`. The CLI exposes `--require-complete` /
+`--no-require-complete` (US-007); see
+[`docs/cli-ops.md`](cli-ops.md#grade-completeness-behaviour).
+
 ## Public API
 
 Import from `signalforge.grade`. The 18 names exported by `__all__`:
@@ -93,7 +217,7 @@ on a `↳ Remediation:` line by `__str__`.
 - **`GradeConfigError`** — `signalforge.yml` `grade:` block failed parse or schema validation.
 - **`GradeRubricError`** — Rubric YAML structurally invalid (duplicate `id`, empty rubric, malformed criterion entry).
 - **`GradeLLMError`** — One-level adapter wrapping `signalforge.llm.LLMError`. The original error is preserved on `__cause__` and exposed via the `cause` attribute.
-- **`GradeBudgetExceededError`** — `total_budget_seconds` tripped before any criterion was graded (a hard "the run did nothing" failure). A partial run completes normally with a `GradingReport` whose `aggregate_complete` flag is `False`.
+- **`GradeBudgetExceededError`** — **Reserved; NOT raised in v0.1.** The engine never raises on budget exhaustion: every un-evaluated pair degrades (`score=None`) and a partial run completes normally with a `GradingReport` whose `aggregate_complete` flag is `False`. The class is reserved for a future hard "the run did nothing" failure (the budget trips *before the first pair* is graded) — see `.claude/rules/grade-layer.md` § "Schema-version surfaces".
 - **`GradePromptEnvelopeBreachError`** — Artefact payload contained the literal `</ARTIFACT>` close tag. Refuses to render rather than ship a degraded envelope. Mirrors the drafter's `PromptEnvelopeBreachError` (#5 DEC-007).
 - **`GradeOutputError`** — LLM-judge response failed parse or anchor-contract validation. Carries `violation_type: GradeOutputViolationType`.
 - **`GradeAuditWriteError`** — Fail-closed audit-write failure (`OSError` / `PermissionError` / encoding / `fsync` / symlink containment). Aborts the run; original cause exposed via `.cause` and `__cause__`.
@@ -107,25 +231,33 @@ DEC-020 — every pipeline stage gets one top-level key). Sibling keys
 (`safety:`, `llm:`, `prune:`, future `diff:` …) are reserved for other
 stages and silently ignored by the grade loader.
 
-The full schema (every knob, every default, all v0.1 types), mirroring
-`tests/fixtures/grade/example_config.yml` (exercised by
-`test_load_grade_config_doc_example_round_trips` so the example and the
-loader cannot drift):
+The full schema (every knob, every default, all v0.1 types). The
+companion fixture `tests/fixtures/grade/example_config.yml` (exercised by
+`test_load_grade_config_doc_example_round_trips`) pins that the loader
+accepts a representative `grade:` block; both this example and the fixture
+load cleanly through `load_grade_config`:
 
 ```yaml
-# signalforge.yml — grade stage configuration (v0.1)
+# signalforge.yml — grade stage configuration
 grade:
   provider: anthropic             # registry-validated; "anthropic" + "openai" + "gemini" are registered (see provider sections below)
-  model: claude-sonnet-4-6        # model id (default)
+  # model: claude-haiku-4-5       # omit to auto-resolve to the provider's default judge (anthropic -> claude-sonnet-4-6); set claude-haiku-4-5 to opt into the faster/stricter Haiku judge
   cache_ttl: 1h                   # Prompt-cache TTL ('5m' or '1h')
-  max_output_tokens: 256          # Per-criterion JSON response cap
-  max_retries_429: 3              # Rate-limit retry budget
+  max_output_tokens: 1024         # Per-criterion JSON response cap (default 1024)
+  max_retries_429: 6              # Rate-limit (429) retry budget; default 6 (#202)
   max_retries_5xx: 1
   max_retries_conn: 1
-  total_budget_seconds: 300       # Wall-clock budget across the whole run
+  budget_base_seconds: 60         # scaled-budget constant term (#198)
+  budget_per_pair_seconds: 20.0   # scaled-budget per concurrency-wave allowance (#198)
+  # total_budget_seconds: 300     # OPTIONAL absolute hard cap; omit (default None) to use the scaled formula alone, set to cap via min(scaled, this)
+  # max_grade_calls: 500          # opt-in soft ceiling: stop scheduling new pairs after N judge calls (rest degrade)
+  # max_grade_cost_usd: 1.50      # opt-in soft ceiling: stop once accumulated USD meets/exceeds this (rest degrade)
+  # max_grade_tokens: 2000000     # opt-in soft ceiling: stop once total token movement meets/exceeds this (rest degrade)
+  max_concurrent_calls: 10        # In-flight LLM calls (range [1, 100]); 1 = v0.1 sequential
   min_pass_rate: 0.7              # Aggregate threshold: fraction of passed criteria
   min_mean_score: 0.5             # Aggregate threshold: mean score across criteria
   fail_on_below_threshold: false  # opt-in hard-fail; default report-only
+  cache_enabled: false            # Per-pair grade cache; OFF by default (#197) — opt in for pinned-candidate re-grades only
   # rubric:                       # Optional override; omitted = use DEFAULT_RUBRIC
   #   - id: clarity
   #     criterion: "..."
@@ -158,19 +290,197 @@ grade:
 Field-by-field:
 
 - **`provider`** — The LLM provider strategy name (issue #135 DEC-007), resolved against the `signalforge.llm.providers` registry and threaded into `call_llm` from the per-criterion judge call, independently of the drafter's `DraftConfig.provider`. Default `"anthropic"`. An unknown value fails loud at config-load, listing the registered provider names. Deliberately a registry-validated `str`, not a `Literal` — the provider registry is a forward-looking plugin point. Today `anthropic`, `openai`, and `gemini` are registered; see [OpenAI provider](#openai-provider) and [Gemini provider](#gemini-provider) below for the non-default options.
-- **`model`** — The model id used by every per-pair judge call. Default `claude-sonnet-4-6`. Mirrors `DraftConfig.model` default. Haiku 4.5 is documented as a v0.2 cost-conscious option but not exposed in v0.1.
+- **`model`** — The model id used by every per-pair judge call. **Default resolves per-provider at config-load** (#187): when `model:` is omitted, the loader injects the calling provider's default judge model from `signalforge.llm.providers.PROVIDER_DEFAULT_MODELS` — `anthropic` → `claude-sonnet-4-6`, `openai` → `gpt-4o-mini`, `gemini` → `gemini-2.5-flash`. **Anthropic defaults to Sonnet:** the #187 calibration gate found `claude-haiku-4-5` grades the rubric stricter than Sonnet (~77–82% concordance, below the 85% bar — see `docs/research/187-haiku-calibration.md`), so Haiku is an explicit opt-in (`grade.model: claude-haiku-4-5`), not the default. An explicit `model:` is honoured verbatim. A SKU-prefix/provider mismatch (e.g. `provider: openai` with a `claude-` model) fails loud at config-load via the model↔provider compat validator (reusing `signalforge.llm.providers.PROVIDER_SKU_PREFIXES`).
 - **`cache_ttl`** — `Literal["5m", "1h"]`. Default `"1h"` (vs. the drafter's `"5m"`) because 60 sequential per-criterion calls under retry backoff can stretch beyond a 5-minute window; `"1h"` gives margin at no extra cost (cache writes are one-shot regardless of TTL).
-- **`max_output_tokens`** — Per-criterion judge response cap. Default `256`. The expected JSON response is ~150 tokens; 256 gives 2× safety. Independent of `DraftConfig.max_output_tokens`.
-- **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised, provider-neutral `signalforge.llm.call_llm` seam (#5 DEC-012; #135 DEC-005). Defaults `3 / 1 / 1` mirror `DraftConfig`; dial down for batch CLI mode where one retry-exhaustion is preferable to dozens of stalled calls.
-- **`total_budget_seconds`** — Whole-run wall-clock budget. Default `300` (5 minutes — ~3× safety on 60 calls × 1s p50). Mirrors `PruneConfig.total_budget_seconds` semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped. **Crucially** the LLM-layer retry budget does NOT count against this — `total_budget_seconds` is a top-of-loop wall-clock check; an in-flight call is allowed to complete before the next iteration's check fires.
+- **`max_output_tokens`** — Per-criterion judge response cap. Default `1024` (#187 — raised from 256 to substantially reduce truncation risk for a verbose one-line `gemini-2.5-flash` grade JSON; the expected JSON response is still ~150 tokens, so the larger ceiling costs nothing on the happy path). 1024 reduces but does not fully eliminate Gemini truncation at scale — see the per-provider floors below; Gemini-heavy runs may want `4096`. Independent of `DraftConfig.max_output_tokens`.
+- **`max_retries_429` / `max_retries_5xx` / `max_retries_conn`** — Per-call retry budgets at the centralised, provider-neutral `signalforge.llm.call_llm` / `call_llm_async` seam (#5 DEC-012; #135 DEC-005). Defaults `6 / 1 / 1`. **`max_retries_429` was raised `3 → 6` in #202 (DEC-209)** as *belt-and-braces* over the primary 429 fix — the #202 shared, header-honoring rate limiter (DEC-205), which paces dispatch at the provider's advertised rate and honours `retry-after` / `anthropic-ratelimit-*` headers so the grader rarely consumes a retry under normal load. The wider 429 budget gives the always-on transient-recovery sweep (#202 US-005) more headroom to drive every pair to a score before the fail-loud `require_complete` check fires, consistent with the [bias-to-completion posture](#bias-to-completion-posture-grade-completeness). Dial down (e.g. `max_retries_429: 0`) for an aggressive batch posture where one retry-exhaustion is preferable to dozens of stalled calls. The grade defaults are independent of the seam's own keyword defaults (which still serve the drafter via `DraftConfig`).
+- **`budget_base_seconds`** — Fixed constant term in the scaled wall-clock formula (issue #198, default `60`). Covers per-run setup (config resolution, cache priming, the first concurrency wave's ramp) that does not scale with the number of pairs. Must be positive.
+- **`budget_per_pair_seconds`** — Per concurrency-*wave* wall allowance in the scaled formula (issue #198, default `20.0`). The formula multiplies this by `ceil(num_pairs / max_concurrent_calls)` — the number of concurrency waves, not the raw pair count — so it is the wall-clock allowance per wave of `max_concurrent_calls` in-flight judge calls. The default is grounded in the #179 baseline (Sonnet judge p50 ~10s/call; 220 pairs at concurrency 10 → `60 + 20.0 × ceil(220/10) = 500s` against a measured 222.9s — ~2.25× headroom). It is a **runaway backstop** sized to tolerate 429 retry storms, **NOT** a completion target; the ticket-literal `2.0` would compute 104s and degrade ~half the pairs, recreating the failure this scaling fixes. Must be positive.
+- **`total_budget_seconds`** — **Optional** absolute hard ceiling on the whole-run wall-clock budget (issue #198 DEC-001; reinterpreted from the flat pre-#198 default of `300`). **Default `None`.** When `None`, the engine sizes the budget from the work via the scaled formula `effective = budget_base_seconds + budget_per_pair_seconds × ceil(num_pairs / max_concurrent_calls)` — a backstop that grows with model width and concurrency rather than a flat 300s the pre-#186 sequential era was sized for. When set to an int, the effective budget is `min(scaled, total_budget_seconds)` — i.e. an explicit value still acts as a hard cap on top of the scaled estimate, preserving exact v0.1 absolute-cap semantics for pinned `signalforge.yml` files (an operator who set `total_budget_seconds: 600` keeps that 600s ceiling). Mirrors `PruneConfig.total_budget_seconds` degrade semantics: when the budget trips, every remaining `(artefact, criterion)` pair lands as a degraded `GradingResult(score=None)` rather than silently dropped (DEC-015). Under the asyncio orchestrator (issue #186) the budget is enforced via `asyncio.timeout(effective)` wrapping the `TaskGroup`; on trip, un-completed pairs are filled in by a synthesis pass with `reasoning="grade budget exceeded ({effective}s) before evaluation"`. Tests inject deterministic timing via the module-level `_async_sleep` alias (mirrors the `_sleep` injection pattern from `llm-drafter.md` DEC-004).
+- **`max_grade_calls` / `max_grade_cost_usd` / `max_grade_tokens`** — Three **opt-in soft ceilings** on the grade run (issue #198 DEC-002). **All default `None` (off).** When set, whichever ceiling trips *first* stops scheduling **new** `(artefact, criterion)` pairs; the remaining pairs **DEGRADE** (`score=None`, never raise — mirroring the DEC-015 conservative-degrade contract) with a `reasoning` string naming the tripped ceiling. **Accounting:** `max_grade_calls` counts LLM judge calls only (cache hits make no call → never counted); `max_grade_cost_usd` accumulates the full per-call USD incl. cache-read/write economics, computed from per-call token usage via `signalforge.llm.pricing`; `max_grade_tokens` accumulates all token movement (input + output + cache-creation + cache-read). Each must be positive when set. **Soft / best-effort overshoot:** because every pair is dispatched into the one `TaskGroup` and cost/tokens are known only *after* a call returns, the cost/token ceilings stop only *un-started* pairs — up to `max_concurrent_calls − 1` in-flight calls may complete past the threshold. `max_grade_calls` is near-hard: it reserves a dispatch slot (increments a shared counter immediately, before the LLM `await`) so it stops at most one call over the limit in practice.
+- **`max_concurrent_calls`** — Number of in-flight `(artifact × criterion)` LLM calls allowed concurrently (issue #186). Default `10` matches the typical Anthropic-tier throughput sweet-spot; bounded `[1, 100]` with `@field_validator` rejecting `< 1` or `> 100` at config-load. Setting `1` yields v0.1 sequential behaviour bit-for-bit (semaphore-of-1 serialises in dispatch order, preserving `(criterion, artifact)` JSONL ordering). Under concurrent dispatch the audit JSONL lands in **arrival order** (`audit_schema_version` unchanged at `Literal[1]`); the `tests/grade/_helpers.py::_sort_grade_events(lines)` helper restores deterministic ordering for tests that snapshot the file. CLI does not expose a `--max-concurrent-calls` flag (mirrors `min_pass_rate` / `min_mean_score` config-file-only convention).
 - **`min_pass_rate`** — Floor on the fraction of `(artefact, criterion)` pairs that scored `passed=True` for the rubric to count as passed overall. Default `0.7`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_pass_rate`.
 - **`min_mean_score`** — Floor on the mean numeric score across non-null verdicts. Default `0.5`. Bounded `[0.0, 1.0]`. Mirrors `GradeThresholds.min_mean_score`.
 - **`fail_on_below_threshold`** — Hard-fail switch for the aggregate threshold check. Default `false` — v0.1 ships report-only posture by default. When `true`, `grade_artifacts(...)` raises `GradeBelowThresholdError` once the aggregate `GradingReport.passed` is `False` (`pass_rate < min_pass_rate` and/or `mean_score < min_mean_score`). The raise lands AFTER the sidecar JSON is durably persisted so the operator has a complete `grade.json` for diagnosis. See [Threshold-fail behaviour](#threshold-fail-behaviour) below for the full ordering invariant. Graduated from v0.2 reservation to v0.1 wiring in #9 (US-002).
+- **`cache_enabled`** — Master switch for the per-`(artifact, criterion)` grade cache (issue #189 DEC-016; **default flipped to `false` by issue #197**). The cache is **cross-invocation only** (read in the orchestrator's sync prefix before any write of the current run, so it never reuses work *within* one run — intra-run speed is the #186 asyncio fan-out, not the cache) and its key mixes a hash of the **drafted artefact text**. Because the drafter is a live, non-deterministic LLM, a full `signalforge generate` re-run rotates that hash and **misses on every pair** (measured: 370 entries written, 0 read back — `docs/research/179-runtime-benchmark.md`). Left on by default it silently wrote hundreds of never-hit `.signalforge/grade-cache/*.json` files and implied a "re-run is fast" UX the architecture can't deliver, so it now defaults `false`. The keying itself is **correct** (changed text *should* re-grade), so the cache stays in the code; set `cache_enabled: true` to opt in on the narrow cross-run paths where artefact text is identical — re-grading a pinned/committed candidate in CI, a `--no-grade` draft-then-grade flow, or a resumed grade over an unchanged draft. When `true`, the content-addressed lookup + write run on every pair (the five-part key invalidates by construction — no TTL knob). The CLI's `signalforge generate --no-cache` flag forces this off on a per-run copy (the on-disk `signalforge.yml` is unaffected); with the default now `false` the flag is a no-op unless config opted in. `extra="forbid"` makes a typo like `cache_enable:` (missing the trailing `d`) fail loud at config-load.
 - **`rubric`** — Optional rubric override. `None` (the default) means the orchestrator falls back to `DEFAULT_RUBRIC`. When provided, must be a non-empty list of mappings, each with non-empty `id` and `criterion` strings; duplicate `id` values raise `GradeRubricError`. Override is **wholesale**, not merge.
 
 Unknown keys under `grade:` raise `GradeConfigError` (Pydantic
 `extra="forbid"`). Typos like `mdoel:` or `total_budget_secnds:` fail
 loud at load time rather than silently no-op'ing.
+
+## Grade cache
+
+The grade layer ships a **persistent, content-addressed cache** for
+per-`(artefact, criterion)` verdicts (issue #189). On a cache hit
+the LLM judge is **not** called — the prior verdict is reconstructed
+into a `GradingResult` and audit-logged with `cache_hit: true` on
+the corresponding `GradeEvent`.
+
+> **Default OFF as of issue #197.** The cache is **cross-invocation
+> only** — every lookup runs in the orchestrator's sync prefix
+> *before* any write of the current run, so it never reuses work
+> *within* a single grade run (intra-run speed is the #186 asyncio
+> fan-out, not the cache). Its key mixes a hash of the **drafted
+> artefact text**, and the drafter is a live, non-deterministic LLM —
+> so a full `signalforge generate` re-run rotates the key and **misses
+> on every pair** (measured: 370 entries written, 0 read back —
+> `docs/research/179-runtime-benchmark.md`). It therefore does **not**
+> make `generate` re-runs faster. The keying is nonetheless *correct*
+> (changed text should re-grade), so the cache stays in the code and is
+> opt-in (`grade.cache_enabled: true`) for the narrow cross-run paths
+> where the candidate text is genuinely identical — see
+> [When to expect cache hits](#when-to-expect-cache-hits). A future
+> "fast re-run" UX needs a *draft* cache to feed identical text in;
+> this grade cache is the already-correct second half of that.
+
+### Cache layout
+
+```text
+<project_dir>/.signalforge/grade-cache/<cache_key>.json
+```
+
+where `<cache_key>` is a 16-hex `blake2b-8` digest. Single-level
+flat directory; one file per `(artefact, criterion)` verdict. File
+mode `0o600` (owner-only read/write) at `os.open` time — mirrors
+every other fail-closed writer in the project. Cache files may
+quote LLM-emitted `evidence` / `reasoning` text, so the mode is
+load-bearing for PII posture.
+
+A `CacheRecord` JSON document (the on-disk shape) duplicates the
+fields a reader needs without wrapping a nested `GradingResult` —
+operator UX favours `jq '.score' cache.json` over `jq
+'.result.score'`. See `signalforge.grade.cache.CacheRecord` for the
+exact field set (DEC-011 of #189).
+
+### Five-part cache key recipe
+
+The cache key is invalidated by any change to the five inputs that
+genuinely determine the verdict:
+
+```python
+cache_key = blake2b(
+    criterion_prompt_hash    + "\x00" +   # changes when criterion text changes
+    artifact_text_hash       + "\x00" +   # changes when artefact text changes
+    provider                 + "\x00" +   # changes on provider swap (anthropic / openai / gemini)
+    model                    + "\x00" +   # changes on model SKU swap (claude-sonnet-4-6 -> claude-haiku-4-5, etc.)
+    prompt_version_template,              # changes when system prompt / rubric list / envelope tags change
+    digest_size=8,
+).hexdigest()  # 16 hex chars
+```
+
+NUL-byte separators prevent id/text concatenation collisions
+(mirrors the existing `criterion_prompt_hash` recipe). Five clean
+invalidation axes — no implicit TTL, no time-based eviction. If a
+change should invalidate a prior verdict, it lives in the key; if
+it does not live in the key, it should not invalidate the verdict.
+
+(Full recipe + every contributing source: DEC-004 of #189.)
+
+### `grade.cache_enabled` knob
+
+`signalforge.yml` carries one knob:
+
+```yaml
+grade:
+  cache_enabled: false   # default (#197); set true to opt in for pinned-candidate re-grades
+```
+
+Default `false` (#197). With the default, every grade pair routes
+through the live LLM judge call and no `.signalforge/grade-cache/*.json`
+files are written. Set `true` only on the narrow cross-run paths where
+the candidate text is identical across runs (see
+[When to expect cache hits](#when-to-expect-cache-hits)); on the common
+`generate` re-run path the cache is pure overhead (writes that are never
+read). The on-disk cache files are **not** deleted by flipping the knob;
+an operator wanting to wipe them runs `signalforge cache clear --grade`
+(see [`docs/cli-ops.md`](cli-ops.md#clear-the-grade-cache-signalforge-cache-clear-grade)).
+
+The CLI's `signalforge generate --no-cache` flag forces this knob off on
+a per-run copy of the resolved config — the on-disk `signalforge.yml` is
+unaffected. With the default now `false` the flag is a no-op unless the
+operator has opted in via config; it remains useful to force a single
+run cold when `cache_enabled: true` is committed.
+
+`extra="forbid"` makes typos like `cache_enable:` (missing the `d`)
+fail loud at config-load — silent no-op would defeat the gate.
+
+### Degraded results never land in the cache
+
+Per the conservative score-and-degrade taxonomy (DEC-007 of #189,
+mirrors `grade-layer.md` § DEC-015), a degraded verdict
+(`score=None` — LLM retry exhausted, parser failure, envelope-breach,
+budget exceeded) is **never** written to the cache. Caching that
+record would silently replay the failure forever, preventing
+recovery from a transient LLM / network blip. Cache writes are gated
+on `result.score is not None`.
+
+Cache reads never construct a degraded `GradingResult` either — a
+malformed on-disk cache file (e.g. a `score: null` injected by an
+attacker or a corrupted record) routes to a cache miss + INFO log
+(`grade cache validation failed`, `grade cache malformed json`,
+`grade cache read failed`, or `grade cache key mismatch` depending
+on the failure mode). The live LLM judge runs and re-populates the
+entry. INFO (not WARNING) because cache miss is a normal
+non-actionable outcome — `--quiet` raises the floor to WARNING and
+correctly suppresses these.
+
+A key-recomputation gate (added by #189 QG Pass 1 Finding 1)
+defends against cache poisoning: `lookup_cache` recomputes the
+5-part cache key from the loaded record's stored hashes and
+compares to the lookup key. On mismatch (a hostile or corrupt file
+whose body lies about its forensic hashes), the read silently
+misses with `grade cache key mismatch` INFO + a `key` /
+`recomputed` payload, so the next run writes a canonical record on
+top.
+
+### `signalforge cache clear --grade` subcommand
+
+Removes `<project_dir>/.signalforge/grade-cache/` recursively.
+Symlink-hardened, idempotent on a missing directory, exits 0 on
+success. Documented in
+[`docs/cli-ops.md`](cli-ops.md#clear-the-grade-cache-signalforge-cache-clear-grade)
+with the full operator-facing behaviour, exit codes, and rationale
+for the absence of a `--confirm` flag. (DEC-015 of #189.)
+
+Future siblings (`cache clear --drafter`, `cache stats`, `cache
+list`) are out of scope for #189; the nested-subcommand shape
+reserves namespace for them.
+
+### When to expect cache hits
+
+Only when the **same artefact text** is graded again under the same
+rubric / provider / SKU / prompt version. With a live drafter that
+means a re-run that does **not** re-draft:
+
+- **Re-grading a pinned / committed candidate** (e.g. a CI step that
+  reads a frozen candidate from disk and grades it, instead of
+  re-drafting via the LLM).
+- **A `--no-grade` draft-once-then-grade-separately flow** where the
+  drafted candidate is captured and a later, separate grade pass runs
+  over that identical text.
+- **A resumed / re-attempted grade over an unchanged draft** (same
+  candidate object, partial grade re-run).
+
+> A plain `signalforge generate <model>` re-run is **not** in this list:
+> it re-drafts via the live LLM, so the artefact text — and thus
+> `artefact_text_hash` — differs every run, missing on every pair. This
+> is the #197 finding; do not expect a "re-run is fast" speed-up from
+> this cache.
+
+### When to expect cache misses
+
+- **Rubric criterion text changed** (`criterion_prompt_hash` flips).
+- **System prompt / rubric list / envelope tags changed**
+  (`prompt_version_template` flips — bumped in lockstep when the
+  grade `_SYSTEM_PROMPT` or any `DEFAULT_RUBRIC` criterion text
+  changes; see [Reproducibility hash fields](#reproducibility-hash-fields)).
+- **Provider or model swapped.** `provider: openai` ↔ `provider:
+  anthropic`; `model: claude-sonnet-4-6` ↔ `model:
+  claude-haiku-4-5`. Each combination scopes its own cache entries.
+- **Artefact text actually changed.** Drafter rewrote a column
+  description, prune dropped a test (changing which tests reach
+  grade), etc.
 
 ## Threshold-fail behaviour
 
@@ -232,6 +542,31 @@ The CLI (#9) wires the raise into its `INPUT` exit-code tier (exit 2);
 see [`docs/cli-ops.md`](cli-ops.md) for the full exit-code table once
 US-009 lands.
 
+## Concurrency (asyncio orchestrator)
+
+Issue #186 graduated the grade layer from sequential per-`(artifact × criterion)` LLM calls to an `asyncio.TaskGroup`-orchestrated concurrent dispatch with a configurable cap. Default `max_concurrent_calls = 10` cuts grade wall-clock from ~280 s sequential to ~30 s concurrent on a **typical ~280-pair model** (~70 artifacts × 4 default criteria) — measured ~9× speedup, close to the Amdahl ceiling at concurrency=10 (the small synchronous prefix + per-call tail latencies leave a few seconds of irreducible serial work). Operators tune via `signalforge.yml`; setting `1` reverts to v0.1 sequential behaviour bit-for-bit.
+
+The public `grade_artifacts(...)` signature is unchanged — sync prefix → `asyncio.run(_grade_artifacts_async_core(...))` → sync suffix. From the caller's perspective the grade layer still looks synchronous; the concurrency lives entirely inside.
+
+### Typed errors at orchestrator entry
+
+Two pre-flight guards run BEFORE `asyncio.run`, both fail loud:
+
+- **`GradeNestedEventLoopError`** (CLI tier 1) raises if `grade_artifacts(...)` is called from within a running event loop. The v0.3 grader is single-event-loop only — wrapping in an outer event loop (e.g. for cross-model batch parallelism) is a v0.4 follow-up. Remediation: `"v0.3 grade_artifacts is single-event-loop only. Call before entering an event loop, or wait for v0.4 async sibling."`
+- **`LLMProviderAsyncUnsupportedError`** (CLI tier 3) raises if the configured provider's `supports_async` is `False`, **regardless of `max_concurrent_calls`** (the grade engine consumes `call_llm_async` exclusively post-#186, so cap=1 is NOT an escape hatch — every per-pair call would degrade to `GradeLLMError` silently). All three v0.3 providers (Anthropic, OpenAI, Gemini) set `supports_async = True`; this guard exists for v0.4+ providers that may ship sync-only. Remediation: `"Pick an async-capable provider for grading (Anthropic / OpenAI / Gemini all support async)."` — fail loud rather than silent-clamp (mirrors the project's `extra="forbid"` posture).
+
+### Cost expectations under concurrency
+
+Anthropic prompt caching pays the cache-write premium on the first call and the read discount on subsequent calls. Under concurrent dispatch, calls 1..N start *before* any response returns, so each of the first `max_concurrent_calls` calls pays the write premium (~1.25× input cost on the cached rubric block) instead of the read discount (~0.10×). For the default cap of 10 and the ~445-token rubric block, that's ~4 450 extra input-token-equivalents per model run — absolute cost ~$0.003–$0.005 per typical model. Operators cost-sensitive enough to care can set `grade.max_concurrent_calls: 1` to recover the v0.1 cost profile (trading off ~9× wall-clock reduction). OpenAI and Gemini do not support prompt caching, so concurrent dispatch carries no additional cost penalty on those providers.
+
+### Concurrent-append atomicity assumption
+
+The fail-closed audit writer (`write_grade_event`) caps individual JSONL records at `_GRADE_AUDIT_RECORD_LIMIT_BYTES = 4000`. POSIX guarantees that an `O_APPEND` `write(2)` syscall **atomically seeks to end-of-file and writes** — concurrent appenders never overwrite each other's bytes within a single syscall. **Caveat:** unlike the well-known `PIPE_BUF` guarantee (which applies strictly to pipes/FIFOs, not regular files), POSIX does NOT specify a per-write atomic-byte ceiling for regular-file writes. In practice on Linux, the kernel writes a small buffer (≤ 4 000 bytes ≪ typical page size) in one syscall — but the `write()` syscall is permitted to return short, and our short-write loop (`while written < len(encoded): n = os.write(fd, encoded[written:])`) handles that by issuing additional `write()` calls. If a short write occurs mid-record, a concurrent appender's record can interleave between the two writes. The probability is low for small (< 4 KiB) records on Linux's ext4 / btrfs / xfs, but it is not zero. SignalForge's CI matrix is Linux-only; users who need stricter byte-level atomicity guarantees (and the macOS/BSD users where the same caveat applies) should set `max_concurrent_calls: 1` (which serialises writes by construction).
+
+### JSONL arrival ordering
+
+Under concurrent dispatch, `.signalforge/grade.jsonl` lands in **arrival order**, not the `(criterion, artifact)` iteration order from the sequential path. The record shape is unchanged (`audit_schema_version` still `Literal[1]`); external sidecar consumers that need stable order should sort by `(artifact_id, criterion_id)` post-load (the SignalForge test suite uses `tests/grade/_helpers.py::_sort_grade_events(...)` for the same purpose). Setting `max_concurrent_calls: 1` preserves v0.1 ordering for byte-identity workflows.
+
 ## Decision matrix
 
 Per-pair scoring is a `[0.0, 1.0]` float plus an explicit
@@ -271,6 +606,122 @@ silently lower the `pass_rate` of the criteria that did run
 successfully — but `aggregate_complete` flips to `False`, so the diff
 renderer flags the report as partial.
 
+## Row-count calibration
+
+The sixth test variant, `row_count_between` (issue #169; see
+[`docs/draft-ops.md`](draft-ops.md#row-count-tests-row_count_between)
+and [`docs/prune-ops.md`](prune-ops.md#row-count-cost-model)), carries
+two **numeric bounds** that an LLM can satisfy trivially. A drafted
+`row_count_between(minimum=0, maximum=None)` passes every Pydantic
+check (at least one bound is set), runs against the warehouse, and
+always drops as `always-passes` — the bound is so loose nothing can
+violate it. **The fully-vacuous case is therefore caught by prune,
+not the grader** — the failing-rows CTE's `WHERE n < 0` predicate
+matches nothing, `failures=0`, and the test routes to `always-passes`
+before any grade call.
+
+The grader's calibration value applies to bounds that survive prune
+because they were violated: a `minimum=1, maximum=None` on a model
+where the table happens to be empty (kept — caught the empty-table
+case), or a `minimum=10000, maximum=20000` on a 5K-row table (kept —
+real out-of-bounds signal). For those kept tests the prune layer can't
+distinguish "the LLM picked `minimum=1` thoughtfully because the
+rollup truly should have at least one row per day" from "the LLM
+picked the lowest valid non-vacuous number to satisfy
+at least one bound." That distinction is what the calibration prose
+teaches the judge to score.
+
+**Where the calibration lives.** As of #169, the existing
+`no-redundant` criterion in `DEFAULT_RUBRIC` carries language scoring
+whether a numeric bound is a meaningful guardrail vs. a vacuous one:
+
+> Are any tests redundant — semantically identical to another test,
+> already dropped by the prune layer as always-passing, or trivially
+> satisfiable? For tests carrying numeric bounds (e.g.
+> `row_count_between`), is each bound a meaningful guardrail
+> calibrated to the model's expected size, rather than a vacuous floor
+> or ceiling (`minimum=0` with no `maximum`, or a `maximum` so high it
+> cannot fire)?
+
+The criterion was extended rather than added as a fifth — a 5th
+criterion would have cost ~25% more LLM round-trips per artifact
+without adding load-bearing signal. "Trivially satisfiable" already
+covered the conceptual territory; the extension makes it concrete for
+the bound shape. Locked verbatim per DEC-016 of #7; rotation history
+is recorded in `src/signalforge/grade/rubric.py`.
+
+**Routing.** A borderline-calibrated bound that survived prune is
+low-signal, not a degrade trigger. The judge scores the artifact
+normally, the score lands low (typically `0.0`–`0.2`), `passed` flips
+to `False`, and the diff renderer routes the row to **`flagged`** —
+the operator sees the test ships but the calibration is suspect. It
+does **not** route to `kept-uncertain` (that tier is for prune-side
+"could not evaluate" origins, not grade-side weakness) and it does
+**not** route through the conservative degrade path (that path is the
+DEC-015 sentinel for `score=None`). Note: this routing applies to
+**kept** row_count_between tests where the bound was violated; a fully
+vacuous `minimum=0, maximum=None` would already be `always-passes` /
+`dropped` at the prune layer and never reach the grader.
+
+**The 3-trigger degrade taxonomy stays locked.** A vacuous bound is a
+real grade, not a degraded one. The three causes for `score=None,
+passed=False, reasoning="..."` are unchanged:
+
+1. `LLMError` retries exhausted (including a provider-specific safety-
+   filter / no-content response routed via `LLMResponseFormatError`).
+2. `GradeOutputError` (parser failure or anchor-contract failure).
+3. The effective wall-clock budget (scaled formula, optionally capped by
+   `total_budget_seconds`) exceeded.
+
+(The opt-in `max_grade_calls` / `max_grade_cost_usd` / `max_grade_tokens`
+ceilings — issue #198 — also degrade un-started pairs, but they are a
+separate operator-chosen surface, not a fourth automatic trigger; they
+degrade with a `reasoning` naming the tripped ceiling and emit a distinct
+`grade ceiling exceeded` WARNING — see [Debugging](#debugging).)
+
+A fourth trigger for "vacuous bound" would conflate "we could not
+evaluate" with "we evaluated and the result was weak" — two different
+operator-actions. The score-and-pass field already carries the weak
+verdict; adding a degrade slot would hide it.
+
+**`_PROMPT_VERSION` rotation.** The criterion-text change rotates the
+grade-side `_PROMPT_VERSION` and the grade-prompt cache-stability
+snapshot moves in lockstep (US-009 of #169). This is distinct from the
+drafter-side `_PROMPT_VERSION` — the two cache prefixes are independent.
+
+### Composite-key calibration (`unique_combination`)
+
+As of issue #170, the existing `no-redundant` criterion extends to the
+seventh test variant, `unique_combination` (see
+[`docs/draft-ops.md`](draft-ops.md#composite-uniqueness-unique_combination)
+and [`docs/drafter-catalogue.md`](drafter-catalogue.md)). The criterion
+text now scores whether a composite-key tuple is a **meaningful grain**
+(e.g. `(order_id, line_item_id)` on an order-line table) vs. a
+vacuously-unique shape like `(primary_key, anything)` — the latter is
+always unique by construction because the primary key alone guarantees
+it, so the test adds no signal beyond the existing single-column
+`unique` test.
+
+The routing is the same as `row_count_between` vacuous-bound
+calibration: a borderline-meaningful tuple that survived prune (because
+it caught real duplicates) is scored low (`0.0`–`0.2`), `passed` flips
+to `False`, and the diff renderer routes the row to **`flagged`** —
+the operator sees the test ships but the grain is suspect. The strictly
+vacuous shape (a tuple containing a known unique column) is caught by
+the prune layer as `always-passes` before reaching the grader; the
+calibration value applies to the borderline cases prune cannot dismiss.
+
+The criterion was extended rather than added as a fifth — keeping the
+rubric at four criteria avoids the ~25% per-artifact round-trip cost a
+new criterion would introduce. "Trivially satisfiable" already covered
+the conceptual territory; the extension makes it concrete for both the
+numeric-bound shape (`row_count_between`) AND the composite-key shape
+(`unique_combination`). Locked verbatim per DEC-007 of #170 (extending
+DEC-016 of #7); rotation history is recorded in
+`src/signalforge/grade/rubric.py`. The grade-side `_PROMPT_VERSION`
+rotated under #170 (US-008 + US-009) in lockstep with the criterion-text
+change.
+
 ## Audit JSONL schema
 
 > **Consumer guide.** For cross-stage joins (including grade JSONL ↔
@@ -291,7 +742,7 @@ convention across the codebase — mirrors `signalforge.safety.audit`,
 
 | Field                          | Type                              | Meaning                                                                                          |
 | ------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `audit_schema_version`         | integer (`Literal[1]`)            | Audit shape version. Currently `1`. Bump only on shape change; `extra="ignore"` handles additions. |
+| `audit_schema_version`         | integer (`int`)                   | Audit shape version. Currently `3` (widened `Literal[1]` → `int` and bumped 1 → 2 in #189 for `cache_hit`, 2 → 3 in #202 for `degrade_reason_type`). Bump only on shape change; `extra="ignore"` handles additions. |
 | `signalforge_version`          | PEP-440 version string            | Package version that produced the record.                                                        |
 | `run_id`                       | 32-hex-char string                | Single `uuid4().hex` per `grade_artifacts` invocation (DEC-020). Repeated on every JSONL record AND on the sidecar so JSONL → sidecar correlation never depends on timestamp ranges. |
 | `timestamp`                    | ISO-8601 UTC datetime             | When the per-call decision was finalised. Distinct from the sidecar's `started_at`.              |
@@ -302,6 +753,7 @@ convention across the codebase — mirrors `signalforge.safety.audit`,
 | `passed`                       | bool                              | The judge's own pass/fail call. `False` for every degraded record by construction.               |
 | `evidence`                     | string                            | The judge's quoted-fragment evidence pulled from the artefact text. Empty for degraded records.  |
 | `reasoning`                    | string                            | The judge's free-text rationale. Empty for degraded records other than the leading "call failed" / "grade budget exceeded" descriptor. |
+| `degrade_reason_type`          | `"transient"` / `"budget"` / `"ceiling"` / `null` | Structured degrade discriminator (#202). `null` for a scored record; one of the three literals for a degraded record. Set centrally in `_build_degraded` from the reason string so consumers classify degrades WITHOUT string-matching the prose. |
 | `rubric_hash`                  | 16 hex chars                      | `blake2b(canonical_rubric_json, digest_size=8).hexdigest()` (DEC-010). Carried on every record AND the sidecar. |
 | `prompt_version_template`      | 16 hex chars                      | `blake2b-8` of the system prompt + cached rubric block + envelope tag. Constant across all criteria of one run. |
 | `criterion_prompt_hash`        | 16 hex chars                      | `blake2b-8` of the per-criterion prompt fragment. Stable across artefacts of one run.            |
@@ -398,7 +850,7 @@ validates against the fixture. Adding a field to `GradeEvent` /
 `GradingReport` / `GradingResult` without updating the strict mirror
 OR the fixture breaks the test loudly. Don't bypass.
 
-## Reproducibility / hash fields
+## Reproducibility hash fields
 
 Three hash fields land on every `GradeEvent`, all 16-hex-char `blake2b`
 with `digest_size=8`. The cross-stage hash domain is consistent — a
@@ -456,6 +908,28 @@ specifically. See
 § "Measured baseline (2026-05-29)" for the full-suite rollup
 ($1.38/run across the three providers).
 
+**Per-provider default judge models (#187).** When `grade.model:` is omitted
+the loader resolves to the calling provider's default judge
+(`signalforge.llm.providers.PROVIDER_DEFAULT_MODELS`). Anthropic defaults to
+**Sonnet** (the #187 calibration gate kept it the default — Haiku grades
+stricter, below the 85% bar); OpenAI/Gemini default to their fast judges
+(explicit operator choices of a cheaper provider). The rows below pair each
+default with its per-MTok USD list price from `signalforge.llm.pricing`
+(pricing-table version `2026-05-28`) and an *estimated* per-model grade cost
+(estimate, not a measured run, except where noted):
+
+| Provider × default judge         | Input $/MTok | Output $/MTok | Est. per-model grade cost | Notes                                                                                  |
+|----------------------------------|--------------|---------------|---------------------------|----------------------------------------------------------------------------------------|
+| Anthropic `claude-sonnet-4-6`    | $3.00        | $15.00        | ~$0.38 (measured)         | The default grade judge (calibration baseline). `claude-haiku-4-5` ($0.80/$4.00, ~$0.10, ~3.75× cheaper) is the opt-in fast judge — stricter, see the calibration writeup. |
+| OpenAI `gpt-4o-mini`             | $0.15        | $0.60         | ~$0.013                   | ~16.7× cheaper than `gpt-4o` per token; the default when `provider: openai`.            |
+| Gemini `gemini-2.5-flash`        | $0.30        | $2.50         | ~$0.045                   | Already the documented mid-tier default; the measured figure above is this same SKU.    |
+
+For completeness, the registered Anthropic SKUs span `claude-haiku-4-5`
+($0.80 / $4.00 per MTok), `claude-sonnet-4-6` ($3.00 / $15.00), and
+`claude-opus-4-7` ($15.00 / $75.00) — opting into the Haiku judge
+(`grade.model: claude-haiku-4-5`) cuts the per-token grade cost ~3.75× vs the
+Sonnet default, at the cost of stricter grading (#187 calibration).
+
 **Fan-out comparison vs the batched alternative:**
 
 - The per-criterion fan-out (one LLM call per `(criterion × artefact)`)
@@ -482,20 +956,53 @@ DEC-004 of the plan):
    ordering, exactly the kind of loose-contract surface the safety /
    draft layers' anchor contracts exist to avoid.
 
-**Cost-control knobs.** Three levers operators can pull when the
+**Cost-control knobs.** Levers operators can pull when the
 default fan-out is too expensive for their use case:
 
-- **`total_budget_seconds`** (default `300`) — Whole-run wall-clock
-  cap. Tripping this routes every remaining pair to the degraded path
-  rather than billing for the whole rubric × every artefact. A
-  `GradeBudgetExceededError` only fires if the budget trips before
-  ANY criterion runs (a hard "the run did nothing" failure); a partial
-  run completes with `aggregate_complete: false`.
-- **`max_output_tokens`** (default `256`) — Per-call output cap. The
-  expected JSON response is ~150 tokens; tightening to 192 trims ~25%
-  off the output-token bill at marginal risk of truncated JSON
-  (handled by `GradeOutputError(violation_type="json_parse")` and the
-  degraded path).
+- **`budget_base_seconds` / `budget_per_pair_seconds`** (defaults `60` /
+  `20.0`) — The two terms of the scaled wall-clock backstop (issue #198):
+  `effective = budget_base_seconds + budget_per_pair_seconds × ceil(num_pairs / max_concurrent_calls)`.
+  The backstop grows with model width and concurrency. It is a **generous
+  runaway catch, NOT a completion target** (ample headroom over the #179
+  baseline — pinned non-binding at representative scales by
+  `test_default_scaled_budget_is_non_binding_at_representative_scale`).
+  **Do not lower these defaults** — the bias-to-completion posture
+  (DEC-210) requires the default budget never passively bind; widen them
+  only if a retest shows the limiter-paced wall-clock has grown.
+- **`total_budget_seconds`** (**default `None`** since #198) — Optional
+  absolute hard cap on top of the scaled formula. `None` → use the scaled
+  budget alone; set to an int → `effective = min(scaled, total_budget_seconds)`.
+  Setting it explicitly is the **deliberate, documented way to opt into a
+  wall-clock partial** — those `budget` degrades are exempt from
+  `require_complete` (see [Bias-to-completion
+  posture](#bias-to-completion-posture-grade-completeness)). A trip of the
+  **default** scaled budget (`total_budget_seconds is None`) is **not** a
+  legitimate partial: per DEC-204 it **fails loud** under `require_complete`
+  (a Stage-1 sizing canary), never a silent `aggregate_complete: false`.
+  (`GradeBudgetExceededError` stays reserved for a future hard "the run did
+  nothing" failure where the budget trips before ANY criterion runs.)
+- **`max_grade_calls` / `max_grade_cost_usd` / `max_grade_tokens`**
+  (**all default `None` = off**, issue #198) — Opt-in soft ceilings on
+  judge calls / USD / token movement. Whichever trips first stops
+  scheduling **new** pairs; the rest **degrade** (never raise) with a
+  `reasoning` naming the ceiling, and the run emits one distinct
+  `grade ceiling exceeded` WARNING. USD/token ceilings are best-effort
+  (up to `max_concurrent_calls − 1` in-flight calls may complete past the
+  threshold because cost/tokens are known only post-call); `max_grade_calls`
+  is near-hard via pre-call slot reservation. Cache-hit pairs (#189) make
+  no LLM call and never count against any ceiling. See the field-by-field
+  [Configuration](#configuration-signalforgeyml-grade-block) above for the
+  accounting detail.
+- **`max_output_tokens`** (default `1024`) — Per-call output cap. The
+  expected JSON response is ~150 tokens, so the cap is a truncation
+  guard, not a target; the default was raised from 256 to 1024 in #187
+  to substantially reduce truncation of a verbose one-line
+  `gemini-2.5-flash` grade JSON (1024 reduces but does not fully
+  eliminate it at the full-fixture scale — the per-provider floors below
+  recommend `4096` for Gemini-heavy runs).
+  Tightening it trims the output-token bill at the cost of truncation
+  risk (handled by `GradeOutputError(violation_type="json_parse")` and
+  the degraded path); see the per-provider floors below before lowering it.
 - **`cache_ttl: "1h"`** (default) — Cache-read economics. Prompt
   caching is a **provider capability** (issue #135): the `cache_control`
   marker, the extended-cache-ttl beta header, and the pre-send
@@ -558,7 +1065,7 @@ Issue #136 registered `OpenAIProvider` as the second
 ```yaml
 grade:
   provider: openai
-  model: gpt-4o            # default judge model for the OpenAI provider; any model id the SDK accepts is allowed
+  model: gpt-4o            # explicit override; omit `model:` to auto-resolve to the OpenAI fast default `gpt-4o-mini` (#187). Any model id the SDK accepts is allowed.
   # cache_ttl, max_retries_*, total_budget_seconds, thresholds — same shape as the anthropic provider
 ```
 
@@ -717,7 +1224,9 @@ logging.getLogger("signalforge.grade").setLevel(logging.DEBUG)
 Levels:
 
 - **INFO** — One line per `grade_artifacts` invocation at the end of the run, lazy-format JSON per DEC-027 (`run_id`, `model_unique_id`, `pass_rate`, `mean_score`, `passed`, `aggregate_complete`, `duration_seconds`, `results`). Mirrors `safety-layer.md` DEC-022 / `llm-drafter.md` DEC-011 / `prune-engine.md` DEC-017 — never f-string-interpolate user-controlled strings into a logger call.
-- **WARNING** — One line when `total_budget_seconds` trips, JSON-encoded `{run_id, model_unique_id, evaluated, remaining_pairs, total_budget_seconds}`. Plus the inherited `signalforge.llm` retry warnings (one per retry attempt at the LLM seam).
+- **WARNING (wall-clock budget)** — One line when the effective wall-clock budget trips, JSON-encoded `{run_id, model_unique_id, completed_count, degraded_count, effective_budget_seconds}`. The field is `effective_budget_seconds` (renamed from `total_budget_seconds` in #198 DEC-008) — it carries the *computed effective* budget actually passed to `asyncio.timeout`, i.e. the scaled formula optionally capped by `total_budget_seconds`.
+- **WARNING (ceiling)** — One line when any opt-in `max_grade_calls` / `max_grade_cost_usd` / `max_grade_tokens` ceiling trips (issue #198 DEC-007), distinct from the wall-clock budget WARNING. JSON-encoded `{run_id, model_unique_id, ceiling, limit, completed_count, degraded_count}` where `ceiling ∈ {"calls", "cost_usd", "tokens"}` (the first ceiling to trip) and `limit` is its configured value.
+- Plus the inherited `signalforge.llm` retry warnings (one per retry attempt at the LLM seam).
 - **DEBUG** — Reserved for future per-criterion latency observability; v0.1 emits no DEBUG from the engine.
 
 The grade layer never logs full evidence / reasoning content. The
@@ -743,7 +1252,7 @@ as `.cause` and on `__cause__`. Common causes:
 | `GradeConfigError`                 | `signalforge.yml` `grade:` block failed parse / schema validation (`extra="forbid"`, out-of-range knob, malformed rubric override). | `load_grade_config`                                | Inspect the `grade:` block. Typos like `mdoel:` are caught here.                                 |
 | `GradeRubricError`                 | The resolved rubric is empty or carries duplicate `id` values.                           | `validate_rubric` (called at `grade_artifacts` entry and inside `load_grade_config`'s rubric validator) | Provide at least one criterion; ensure every `id` is unique.                                     |
 | `GradeLLMError`                    | One-level wrap of `signalforge.llm.LLMError`. Retry budget exhausted, auth failure, server error, malformed cache block. | `_grade_one` per pair (degraded by orchestrator); only escapes if the entire run can't recover. | Inspect `.cause` / `__cause__` for the underlying LLM-layer detail. Common: missing `ANTHROPIC_API_KEY`, rate-limit exhaustion. |
-| `GradeBudgetExceededError`         | `total_budget_seconds` tripped before ANY criterion was graded (a "the run did nothing" failure). | `grade_artifacts` (rare — the normal budget path is per-pair degrade). | Raise `total_budget_seconds`, narrow the candidate set, or reduce the rubric's criterion count. |
+| `GradeBudgetExceededError`         | **Reserved; NOT raised in v0.1.** Budget exhaustion always degrades per-pair (`aggregate_complete=False`); this class is held for a future hard "the run did nothing" failure (budget trips before the first pair). | _Not currently raised._ | If a partial run (`aggregate_complete=False`) is undesirable, raise `budget_base_seconds` / `budget_per_pair_seconds` (or lift the `total_budget_seconds` cap if set), narrow the candidate set, or reduce the rubric's criterion count. |
 | `GradePromptEnvelopeBreachError`   | An artefact payload contains the literal `</ARTIFACT>` close tag.                        | Whole-run pre-flight `_scan_envelope_breach`; per-call defence-in-depth in `render_dynamic_block`. | Inspect the offending artefact (`exc.artifact_id`); remove the literal tag from the column description / rationale. |
 | `GradeOutputError`                 | LLM-judge response failed parse / anchor-contract validation. Carries `violation_type`.  | `parse_grade_response` per pair (degraded by orchestrator).                  | Pattern-match on `.violation_type` (`json_parse`, `criterion_id_mismatch`, `score_out_of_range`, …). Re-running typically resolves transient JSON failures; structural mismatches usually point at a prompt-template regression. |
 | `GradeAuditWriteError`             | Fail-closed audit / sidecar write failure (`OSError`, `PermissionError`, encoding, `fsync`, symlink containment). DEC-006 / DEC-012. | `write_grade_event` / `write_grading_report` (wrapped at the orchestrator's audit-write seams). | Verify `<project_dir>/.signalforge/` is writable, has disk space, and is not a symlink escaping the project tree. Fix the I/O issue and re-run. |

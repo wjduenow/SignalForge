@@ -51,7 +51,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 import signalforge as _sf
-from signalforge.draft.audit import _build_response_event, write_response_event
+from signalforge.draft.audit import ReshapeRecord, _build_response_event, write_response_event
 from signalforge.draft.config import DraftConfig
 from signalforge.draft.errors import (
     LLMResponseAuditRecordTooLargeError,
@@ -60,7 +60,7 @@ from signalforge.draft.errors import (
 from signalforge.draft.models import CandidateSchema
 from signalforge.draft.parser import _LLMResultMeta, parse_draft_response
 from signalforge.draft.prompts import _read_business_rules, render_prompt
-from signalforge.llm import AnthropicClientProtocol
+from signalforge.llm import AnthropicClientProtocol, LLMCacheTooLargeError
 from signalforge.llm.client import call_llm
 from signalforge.llm.models import LLMResult
 from signalforge.manifest.models import Manifest, Model
@@ -178,25 +178,84 @@ def draft_from_request(
     # Issue #54: thread DraftConfig.exclude_tests through so the system
     # prompt's test catalogue is filtered AND the prompt-version hash
     # rotates per exclusion set (cache-invalidation contract).
+    # Issue #188 (US-004, DEC-006): thread DraftConfig.cache_scope through.
+    # The default ``"per-model"`` scope is byte-identical to the pre-#188
+    # render; ``"project"`` swaps the cached block for the shared compressed
+    # project summary so Anthropic's prompt cache hits across a batch.
     system, cached, dynamic, prompt_version = render_prompt(
-        model, request, manifest, exclude_tests=config.exclude_tests
+        model,
+        request,
+        manifest,
+        exclude_tests=config.exclude_tests,
+        cache_scope=config.cache_scope,
     )
 
     # 2. Issue the LLM call through the seam.
-    result = call_llm(
-        system=system,
-        cached_block=cached,
-        dynamic_block=dynamic,
-        model=config.model,
-        max_tokens=config.max_output_tokens,
-        cache_ttl=config.cache_ttl,
-        prompt_version=prompt_version,
-        max_retries_429=config.max_retries_429,
-        max_retries_5xx=config.max_retries_5xx,
-        max_retries_conn=config.max_retries_conn,
-        provider=config.provider,
-        client=_client,
-    )
+    #
+    # Issue #188 oversize fallback (DEC-006): the pre-send 8000-token gate in
+    # ``call_llm`` raises ``LLMCacheTooLargeError`` when ``system + cached_block``
+    # exceeds the cap. ``call_llm`` cannot render prompts (layering), so the
+    # fallback lives here: ONLY when ``cache_scope == "project"`` we re-render
+    # the cached block in per-model scope and retry ``call_llm`` exactly once.
+    # A per-model-scope oversize is a real error and propagates unchanged (no
+    # retry). The successful retried path falls through to the single audit
+    # write below — the audit is written exactly once regardless of fallback.
+    try:
+        result = call_llm(
+            system=system,
+            cached_block=cached,
+            dynamic_block=dynamic,
+            model=config.model,
+            max_tokens=config.max_output_tokens,
+            cache_ttl=config.cache_ttl,
+            prompt_version=prompt_version,
+            max_retries_429=config.max_retries_429,
+            max_retries_5xx=config.max_retries_5xx,
+            max_retries_conn=config.max_retries_conn,
+            provider=config.provider,
+            client=_client,
+        )
+    except LLMCacheTooLargeError:
+        if config.cache_scope != "project":
+            # Per-model scope: the cached block is genuinely too large.
+            # Nothing to fall back to — re-raise the real error.
+            raise
+        # Project scope: re-render the model's own per-model cached block
+        # (smaller — model + direct neighbours only) and retry ONCE. Emit one
+        # INFO breadcrumb. Lazy-format JSON per DEC-015 — never f-string
+        # interpolate user-controlled values into a logger call.
+        _LOGGER.info(
+            "project cache prefix exceeded the token cap; falling back to "
+            "per-model cache scope: %s",
+            json.dumps(
+                {
+                    "model_unique_id": model.unique_id,
+                    "model": config.model,
+                    "fallback_cache_scope": "per-model",
+                }
+            ),
+        )
+        system, cached, dynamic, prompt_version = render_prompt(
+            model,
+            request,
+            manifest,
+            exclude_tests=config.exclude_tests,
+            cache_scope="per-model",
+        )
+        result = call_llm(
+            system=system,
+            cached_block=cached,
+            dynamic_block=dynamic,
+            model=config.model,
+            max_tokens=config.max_output_tokens,
+            cache_ttl=config.cache_ttl,
+            prompt_version=prompt_version,
+            max_retries_429=config.max_retries_429,
+            max_retries_5xx=config.max_retries_5xx,
+            max_retries_conn=config.max_retries_conn,
+            provider=config.provider,
+            client=_client,
+        )
 
     # 3. Parse + anchor-validate. Parse errors propagate BEFORE any
     #    audit write — a malformed response leaves no receipt.
@@ -221,6 +280,14 @@ def draft_from_request(
     # the rule strings (with their ``(model)`` / ``(column X)`` prefixes)
     # that the LLM saw.
     business_rules: tuple[str, ...] = tuple(_read_business_rules(model))
+    # Issue #184 DEC-005 — collect any parser re-attaches of mis-scoped
+    # model-only variants (``row_count_anomaly_by_period`` / ``row_count_between``
+    # / ``unique_combination``) so the corrective action lands in the
+    # response-audit JSONL alongside the runtime WARNING. The parser appends
+    # one ``ReshapeRecord`` per re-attach when this list is supplied.
+    # ``model_unique_id`` rides through to the parser's WARNING payload so a
+    # multi-model batch can be reconciled at audit-replay time.
+    reshapes_collected: list[ReshapeRecord] = []
     candidate = parse_draft_response(
         result.response_text,
         model_columns,
@@ -229,6 +296,8 @@ def draft_from_request(
         model_columns_by_type=model_columns_by_type,
         dialect_name="bigquery",
         business_rules=business_rules,
+        reshapes_collected=reshapes_collected,
+        model_unique_id=model.unique_id,
     )
 
     # 4. Write the response-audit record. Fail-closed (DEC-011):
@@ -249,6 +318,7 @@ def draft_from_request(
         result=result,
         prompt_version=prompt_version,
         signalforge_version=_sf.__version__,
+        parser_reshaped=tuple(reshapes_collected),
     )
     try:
         write_response_event(event, audit_path=response_audit_path)

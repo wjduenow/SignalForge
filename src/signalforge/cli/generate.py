@@ -92,6 +92,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import cast
 
@@ -162,6 +163,13 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
     ``-- signalforge:generated``-marked ``.sql`` test file is overwritten.
     Hand-authored (unmarked) files are never overwritten, even with
     ``--force``. No-op without ``--write``.
+
+    US-013 of #171 adds ``--as-of YYYY-MM-DD`` (DEC-001): evaluation
+    date for time-bound anomaly tests. ``type=date.fromisoformat`` —
+    bad-format input lands at argparse's usage error (exit 2).
+    Default ``None`` lets :func:`signalforge.prune.prune_tests`
+    resolve to ``date.today()`` at prune time. In ``--select`` batch
+    mode, the same value applies to every matched model.
     """
     parser = subparsers.add_parser(
         "generate",
@@ -273,6 +281,38 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "NOT enable fail-on-below-threshold by itself."
         ),
     )
+    # US-007 of #202 / DEC-208 — grade-completeness contract surface.
+    # ``argparse.BooleanOptionalAction`` registers BOTH ``--require-complete``
+    # and ``--no-require-complete``. ``default=None`` is the no-clobber
+    # sentinel: when neither form is passed, ``cmd_generate`` leaves the
+    # file-loaded ``grade.require_complete`` untouched (so a
+    # ``grade.require_complete: false`` set in ``signalforge.yml`` is NOT
+    # silently re-armed by a CLI default). Only an explicit ``--require-complete``
+    # (→ True) or ``--no-require-complete`` (→ False) overrides the config,
+    # via :meth:`GradeConfig.model_validate` so validators re-run — mirrors
+    # the ``--min-score`` overlay above and the prune ``--scope`` overlay.
+    parser.add_argument(
+        "--require-complete",
+        dest="require_complete",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Override grade.require_complete (default: from config, which "
+            "itself defaults to true). When armed, the grade engine raises "
+            "GradeIncompleteError (exit 2) if any non-exempt (artifact, "
+            "criterion) pair is still ungraded after the bounded "
+            "transient-recovery sweep. Exempt (never trip): ceiling degrades "
+            "(an explicit max_grade_* opt-in) and budget degrades when "
+            "total_budget_seconds was set explicitly. Trip: transient "
+            "degrades that survived the sweep, and default-scaled-budget "
+            "overruns (total_budget_seconds unset). Failure exits 2 naming "
+            "the still-ungraded pairs in stderr. Precedence: flag > "
+            "grade.require_complete in signalforge.yml > library default "
+            "(true). Pass --no-require-complete to revert to the report-only "
+            "posture (ungraded pairs surface via aggregate_complete=False). "
+            "Applied via GradeConfig.model_validate so validators re-run."
+        ),
+    )
     # US-006 / DEC-002 / DEC-010 — write/dry-run mutex. Argparse rejects
     # the both-flags combination with its own usage error → exit 2.
     write_group = parser.add_mutually_exclusive_group()
@@ -375,6 +415,56 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "PruneConfig.model_validate so validators re-run."
         ),
     )
+    # US-005 of #188 / DEC-002 / DEC-003 — prompt-cache prefix scope.
+    # Argparse-level ``choices`` rejection produces exit 2 (the argparse
+    # default). ``default=None`` is the sentinel that distinguishes "the
+    # operator pinned a scope" (override) from "no flag" (config-file
+    # value applies, and ``--select`` >= 2 models may auto-promote to
+    # 'project'). Precedence: explicit ``--cache-scope`` flag > YAML
+    # ``llm.cache_scope`` (when non-default) > auto-promote. Applied via
+    # :meth:`DraftConfig.model_validate` so validators re-run — mirrors
+    # :meth:`SafetyPolicy.with_mode` (DEC-018 of ``safety-layer.md``) and
+    # the prune ``--scope`` / ``--sample-strategy`` overlay (DEC-012 of
+    # #22). The single-model positional path passes the flag's value (or
+    # nothing) and NEVER auto-promotes.
+    parser.add_argument(
+        "--cache-scope",
+        dest="cache_scope",
+        choices=("per-model", "project"),
+        default=None,
+        help=(
+            "Override the prompt-cache prefix scope for the drafter "
+            "(default: from config). Precedence: flag > llm.cache_scope "
+            "in signalforge.yml (when non-default) > auto-promote. A "
+            "--select batch matching >= 2 models auto-promotes to "
+            "'project' so cache_creation is paid once and the cheaper "
+            "cache_read applies on models 2..N; pass --cache-scope "
+            "per-model to opt out. Applied via DraftConfig.model_validate "
+            "so validators re-run."
+        ),
+    )
+    # US-013 of #171 / DEC-001 — time-bound anomaly-test reference date.
+    # ``type=date.fromisoformat`` accepts strict ISO ``YYYY-MM-DD`` only;
+    # a bad format raises ``ValueError`` which argparse converts to its
+    # usage error → ``SystemExit(2)`` (maps cleanly to tier 2,
+    # input-validation, in the four-tier exit-code taxonomy). Default
+    # ``None`` lets :func:`signalforge.prune.prune_tests` resolve to
+    # ``date.today()`` at prune time (operator-friendly default; the
+    # resolved value is recorded on every ``PruneEvent.as_of`` audit
+    # record for after-the-fact reproducibility — DEC-001).
+    parser.add_argument(
+        "--as-of",
+        dest="as_of",
+        type=date.fromisoformat,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "Evaluation date (YYYY-MM-DD) for time-bound anomaly tests. "
+            "When omitted, resolves to today at prune time. Same value "
+            "applies to every model in a multi-model --select batch. See "
+            "#171 DEC-001."
+        ),
+    )
     # US-007 / DEC-014 / DEC-016 — observability flags. ``--quiet`` and
     # ``--verbose`` are mutually exclusive at argparse time (combining
     # them is a usage error → exit 2). ``--no-color`` flips the
@@ -407,6 +497,47 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "Strip ANSI colour codes from stdout. Sets NO_COLOR=1 in the "
             "current process environment so the AnsiRenderer's existing "
             "precedence chain emits plain text."
+        ),
+    )
+    # US-007 of #189 / DEC-001 — skip the grade stage entirely for fast
+    # iteration. ``grade_artifacts`` is never invoked; ``grading_report``
+    # defaults to ``None`` and ``render_diff`` already accepts that
+    # (``diff-renderer.md`` § "Tier classification with no-grading-report
+    # degrade" — the ``flagged`` tier only fires when
+    # ``grading_report is not None``). No ``grade.jsonl`` /
+    # ``grade.json`` side files are produced. Progress renumbers from
+    # ``[N/5]`` to ``[N/4]`` (DEC-003) so the operator sees an honest
+    # stage count. Bare boolean; mutex with nothing — combines with
+    # ``--write``, ``--dry-run``, ``--mode``, ``--estimate``.
+    parser.add_argument(
+        "--no-grade",
+        dest="no_grade",
+        action="store_true",
+        help=(
+            "Skip the grade stage entirely (no LLM-as-judge calls). The "
+            "diff still renders kept/kept-uncertain/dropped tiers; no "
+            "flagged tier appears. Progress renumbers to [N/4]. Useful "
+            "for fast iteration where the grader's signal is not "
+            "needed. No grade.jsonl / grade.json side files. (DEC-001 "
+            "of #189.)"
+        ),
+    )
+    # US-007 of #189 / DEC-002 — bypass the persistent grade cache for
+    # one run. Skips BOTH the cache read (no lookup) AND the cache
+    # write (no entry persisted). Cache files from prior runs are NOT
+    # deleted — use ``signalforge cache clear --grade`` for that.
+    # Precedence: ``--no-grade`` implicitly wins when both are set
+    # (no grade calls = no cache reads or writes).
+    parser.add_argument(
+        "--no-cache",
+        dest="no_cache",
+        action="store_true",
+        help=(
+            "Bypass the persistent grade cache for one run (no read, "
+            "no write). Existing cache files are NOT removed; use "
+            "`signalforge cache clear --grade` to wipe them. "
+            "`--no-grade` implicitly wins when both flags are set "
+            "(no grade calls = no cache I/O). (DEC-002 of #189.)"
         ),
     )
     parser.set_defaults(func=cmd_generate)
@@ -715,6 +846,7 @@ def _run_single_model(
     project_dir: Path,
     batch_index: int | None = None,
     batch_count: int | None = None,
+    draft_overrides: dict[str, str] | None = None,
 ) -> _SingleModelOutcome:
     """Run the full safety → draft → prune → grade → diff pipeline for one model.
 
@@ -743,14 +875,62 @@ def _run_single_model(
     their default ``None`` so the prefix is suppressed and the v0.1
     capsys-pinned stderr shape is preserved byte-for-byte.
 
+    ``draft_overrides`` (US-005 of #188 / DEC-010) carries the resolved
+    draft-config overrides — currently just ``cache_scope`` (from the
+    explicit ``--cache-scope`` flag or :func:`_run_batch`'s auto-promote).
+    When non-``None`` / non-empty, it is applied via
+    :meth:`DraftConfig.model_validate` (NOT ``model_copy(update=...)``) so
+    every Pydantic validator re-runs — mirrors the prune ``--scope`` /
+    ``--sample-strategy`` overlay (DEC-012 of #22). ``None`` / empty leaves
+    the loaded :class:`DraftConfig` untouched so the no-override path keeps
+    the config-file value verbatim and the single-model positional output
+    stays byte-identical to v0.1.
+
     Inherits :func:`cmd_generate`'s per-flag override precedence and the
     ``--estimate`` short-circuit (DEC-009 of #36) — see
     :func:`cmd_generate`'s docstring for the full rules; this helper
     consumes the resulting ``args`` namespace verbatim.
+
+    ``--no-grade`` (US-007 / DEC-001 of #189) wraps the entire
+    grade-stage block in ``if not no_grade:`` so the LLM judge is never
+    called; ``grade_report`` stays ``None`` and the diff renders without
+    a ``flagged`` tier (``diff-renderer.md``). The progress count
+    renumbers from ``[N/5]`` to ``[N/4]`` (DEC-003) via the ``total``
+    threaded through every ``emit_progress_*`` call. ``--no-cache``
+    (DEC-002) flips ``grade_config.cache_enabled=False`` for one run so
+    both the cache lookup AND the post-grade write are skipped;
+    existing cache files on disk are untouched. ``--no-grade``
+    implicitly wins over ``--no-cache`` (no grade block runs → no cache
+    code runs); no explicit mutex.
+
+    ``--require-complete`` / ``--no-require-complete`` (US-007 of #202 /
+    DEC-208) overlays ``grade_config.require_complete`` via
+    :meth:`GradeConfig.model_validate` (validators re-run) ONLY when the
+    operator passed an explicit flag — ``default=None`` is the no-clobber
+    sentinel, so a bare run leaves the file-loaded value untouched and a
+    ``grade.require_complete: false`` in ``signalforge.yml`` is NOT
+    re-armed. Precedence: flag > config > library default (``True``). When
+    armed, :func:`signalforge.grade.grade_artifacts` raises
+    :class:`signalforge.grade.GradeIncompleteError` (tier 2, exit 2) AFTER
+    the fail-closed sidecar write if any non-exempt pair stayed ungraded
+    after the bounded sweep; the boundary catch below maps it via the
+    exit-code table and the stderr message names the still-ungraded pairs.
     """
     quiet = bool(getattr(args, "quiet", False))
     verbose = bool(getattr(args, "verbose", False))
     progress_on = should_emit_progress(quiet=quiet, verbose=verbose)
+
+    # US-007 of #189 / DEC-003 — when ``--no-grade`` is set, the pipeline
+    # is honestly four stages (safety / draft / prune / diff) — drop the
+    # grade entry and renumber diff from 5 → 4. The orchestrator resolves
+    # ``total`` ONCE here and threads it through every progress call so
+    # the count line says ``[N/4]`` end-to-end. Diff's stage number is
+    # also computed once below (``_diff_stage_n``) so the entry / done
+    # pair stay in lockstep.
+    no_grade = bool(getattr(args, "no_grade", False))
+    no_cache = bool(getattr(args, "no_cache", False))
+    total = 4 if no_grade else 5
+    _diff_stage_n = 4 if no_grade else 5
 
     # US-005 / DEC-014 — per-model progress prefix. Only fires when this
     # helper is invoked from :func:`_run_batch` (both kwargs non-``None``);
@@ -880,7 +1060,7 @@ def _run_single_model(
         # the size of the work that's about to happen rather than a
         # stale estimate.
         if progress_on:
-            emit_progress_entry(1, "safety", "building LLM request...")
+            emit_progress_entry(1, "safety", "building LLM request...", total=total)
         _t0 = time.monotonic()
         # Safety policy (the first stage in the documented pipeline
         # order — DEC-025 / CLAUDE.md "Pipeline shape"). US-006: apply
@@ -892,7 +1072,7 @@ def _run_single_model(
         if mode_override is not None:
             policy = policy.with_mode(safety_module.SamplingMode(mode_override))
         if progress_on:
-            emit_progress_done(1, "safety", time.monotonic() - _t0)
+            emit_progress_done(1, "safety", time.monotonic() - _t0, total=total)
 
         # ---- 2/5: draft -------------------------------------------------
         # DEC-006 of #135 — the CLI no longer constructs an Anthropic client
@@ -902,8 +1082,23 @@ def _run_single_model(
         # registry-validated config field, DEC-007). Tests inject a fake by
         # patching the provider's ``make_client`` rather than a CLI helper.
         draft_config = draft_module.load_draft_config(project_dir)
+        # US-005 of #188 / DEC-010 — apply the draft-config overlay
+        # (currently just ``cache_scope`` from the ``--cache-scope`` flag
+        # or :func:`_run_batch`'s auto-promote). ``model_validate`` (NOT
+        # ``model_copy(update=...)``) so every Pydantic validator re-runs —
+        # mirrors the prune ``--scope`` / ``--sample-strategy`` overlay
+        # (DEC-012 of #22) and :meth:`SafetyPolicy.with_mode` (DEC-018 of
+        # ``safety-layer.md``). When ``draft_overrides`` is ``None`` /
+        # empty the loaded config flows through unchanged so the
+        # single-model positional output stays byte-identical to v0.1.
+        if draft_overrides:
+            draft_config = draft_module.DraftConfig.model_validate(
+                {**draft_config.model_dump(), **draft_overrides}
+            )
         if progress_on:
-            emit_progress_entry(2, "draft", f"calling LLM (model {draft_config.model})...")
+            emit_progress_entry(
+                2, "draft", f"calling LLM (model {draft_config.model})...", total=total
+            )
         _t0 = time.monotonic()
         draft_outcome = draft_module.draft_schema(
             model,
@@ -914,7 +1109,7 @@ def _run_single_model(
             _client=None,
         )
         if progress_on:
-            emit_progress_done(2, "draft", time.monotonic() - _t0)
+            emit_progress_done(2, "draft", time.monotonic() - _t0, total=total)
 
         # ---- 3/5: prune -------------------------------------------------
         # US-006 of #22 / DEC-011 / DEC-012 — apply ``--scope`` and
@@ -969,8 +1164,17 @@ def _run_single_model(
                 3,
                 "prune",
                 f"running {candidate_test_count} candidate tests against warehouse...",
+                total=total,
             )
         _t0 = time.monotonic()
+        # US-013 of #171 / DEC-001 — ``--as-of`` threads through to the
+        # engine; when ``None``, ``prune_tests`` resolves it to
+        # ``date.today()`` at prune time and stamps the resolved value on
+        # every ``PruneEvent.as_of`` audit record. The kwarg flows
+        # uniformly: the same ``args.as_of`` reaches every per-model call
+        # in batch mode (``_run_batch`` re-invokes this helper per match,
+        # so the operator's single ``--as-of`` value applies to every
+        # model in a ``--select`` run).
         prune_result = prune_module.prune_tests(
             model,
             adapter,
@@ -978,70 +1182,135 @@ def _run_single_model(
             manifest,
             config=prune_config,
             project_dir=project_dir,
+            as_of=getattr(args, "as_of", None),
         )
         if progress_on:
-            emit_progress_done(3, "prune", time.monotonic() - _t0)
+            emit_progress_done(3, "prune", time.monotonic() - _t0, total=total)
 
         # ---- 4/5: grade -------------------------------------------------
-        # US-006 / DEC-004 — apply ``--min-score`` by re-validating the
-        # frozen :class:`GradeConfig` with the override. Reporting-only:
-        # we do NOT flip ``fail_on_below_threshold`` — the operator's
-        # ``signalforge.yml`` owns that knob (DEC-011 path through the
-        # grader's :class:`GradeBelowThresholdError`).
-        grade_config = grade_module.load_grade_config(project_dir)
-        min_score_override = getattr(args, "min_score", None)
-        if min_score_override is not None:
-            grade_config = grade_module.GradeConfig.model_validate(
-                {**grade_config.model_dump(), "min_mean_score": min_score_override}
+        # US-007 of #189 / DEC-001 — ``--no-grade`` skips the entire grade
+        # stage. ``grade_report`` stays ``None`` and ``render_diff`` already
+        # accepts that path (``diff-renderer.md`` § "Tier classification with
+        # no-grading-report degrade") — the resulting diff renders kept /
+        # kept-uncertain / dropped without any ``flagged`` tier. The
+        # ``[4/5] grade: ...`` progress lines are also suppressed; the diff
+        # progress below renumbers to ``[4/4]`` via ``_diff_stage_n`` /
+        # ``total``. DEC-002 — ``--no-cache`` flips
+        # ``grade_config.cache_enabled = False`` via ``model_copy(update=...)``
+        # so the engine skips both the persistent-cache lookup AND the
+        # post-grade write for this run (existing cache files on disk are
+        # NOT touched; use ``signalforge cache clear --grade`` for that).
+        # Precedence: ``--no-grade`` implicitly wins when both are set
+        # because the entire block — including the
+        # ``cache_enabled=False`` mutation — is skipped.
+        grade_report = None
+        if no_grade:
+            # PR #196 CodeRabbit — remove stale grade artefacts from a
+            # prior run so the operator can't mistake them for current
+            # output. Both files live in ``<project>/.signalforge/``;
+            # ``missing_ok=True`` keeps this idempotent on the
+            # first-run / clean-tree case. The grade-jsonl audit and
+            # the grade.json sidecar are derived state; their absence
+            # under ``--no-grade`` honestly reflects "the grade stage
+            # did not run". ``.signalforge/grade-cache/`` is NOT
+            # touched — cached entries from previous runs remain
+            # available to a subsequent default run.
+            for _stale in (
+                project_dir / ".signalforge" / "grade.json",
+                project_dir / ".signalforge" / "grade.jsonl",
+            ):
+                _stale.unlink(missing_ok=True)
+        if not no_grade:
+            # US-006 / DEC-004 — apply ``--min-score`` by re-validating the
+            # frozen :class:`GradeConfig` with the override. Reporting-only:
+            # we do NOT flip ``fail_on_below_threshold`` — the operator's
+            # ``signalforge.yml`` owns that knob (DEC-011 path through the
+            # grader's :class:`GradeBelowThresholdError`).
+            grade_config = grade_module.load_grade_config(project_dir)
+            min_score_override = getattr(args, "min_score", None)
+            if min_score_override is not None:
+                grade_config = grade_module.GradeConfig.model_validate(
+                    {**grade_config.model_dump(), "min_mean_score": min_score_override}
+                )
+            # US-007 of #202 / DEC-208 — apply ``--require-complete`` /
+            # ``--no-require-complete`` by re-validating the frozen
+            # :class:`GradeConfig` with the override. ``default=None`` is the
+            # no-clobber sentinel: only an EXPLICIT flag (True or False)
+            # overrides the file-loaded value, so a
+            # ``grade.require_complete: false`` set in ``signalforge.yml`` is
+            # NOT silently re-armed by a CLI default. ``model_validate`` (NOT
+            # ``model_copy(update=...)``) so every Pydantic validator re-runs —
+            # mirrors the ``--min-score`` overlay above, the prune ``--scope``
+            # overlay (DEC-012 of #22), and :meth:`SafetyPolicy.with_mode`.
+            require_complete_override = getattr(args, "require_complete", None)
+            if require_complete_override is not None:
+                grade_config = grade_module.GradeConfig.model_validate(
+                    {
+                        **grade_config.model_dump(),
+                        "require_complete": require_complete_override,
+                    }
+                )
+            # US-007 of #189 / DEC-002 — per-run cache bypass. Flip
+            # ``cache_enabled=False`` so the engine's sync-prefix lookup and
+            # post-grade write are both no-ops for this run. ``model_copy``
+            # is acceptable here (no validator side-effect depends on the
+            # field — it's a plain bool the engine reads at lookup time);
+            # the safety-layer ``with_mode`` rule (DEC-018 of
+            # ``safety-layer.md``) governs cases where validators MUST
+            # re-run, which is not the case for this knob.
+            if no_cache:
+                grade_config = grade_config.model_copy(update={"cache_enabled": False})
+            # Count artifacts the grader will actually iterate over. The
+            # grade engine's ``_stable_artifact_pairs`` (DEC-018) yields one
+            # entry per (column.description, column.rationale,
+            # model.description, model.rationale, column-scoped test
+            # rationale, model-scoped test rationale) — independent of which
+            # tests prune kept. Earlier CLI versions used
+            # ``prune_result.kept_count`` here, which conflated "tests
+            # surviving prune" with "artifacts visible to the grader" and
+            # emitted "0 artifacts" runs when prune dropped everything
+            # (issue #10 follow-up).
+            candidate = draft_outcome.candidate
+            artifact_count = (
+                2 * len(candidate.columns)  # column description + rationale per column
+                + 2  # model description + rationale
+                + sum(len(c.tests) for c in candidate.columns)  # column-scoped test rationales
+                + len(candidate.tests)  # model-scoped test rationales
             )
-        # Count artifacts the grader will actually iterate over. The
-        # grade engine's ``_stable_artifact_pairs`` (DEC-018) yields one
-        # entry per (column.description, column.rationale, model.description,
-        # model.rationale, column-scoped test rationale, model-scoped test
-        # rationale) — independent of which tests prune kept. Earlier CLI
-        # versions used ``prune_result.kept_count`` here, which conflated
-        # "tests surviving prune" with "artifacts visible to the grader"
-        # and emitted "0 artifacts" runs when prune dropped everything
-        # (issue #10 follow-up).
-        candidate = draft_outcome.candidate
-        artifact_count = (
-            2 * len(candidate.columns)  # column description + rationale per column
-            + 2  # model description + rationale
-            + sum(len(c.tests) for c in candidate.columns)  # column-scoped test rationales
-            + len(candidate.tests)  # model-scoped test rationales
-        )
-        # Honour ``GradeConfig.rubric`` overrides — the operator may
-        # ship a custom rubric in ``signalforge.yml grade:`` (or via
-        # ``--config``) that has a different criterion count than the
-        # default. ``rubric is None`` means "use DEFAULT_RUBRIC" per
-        # ``grade-layer.md`` DEC-016, so the progress count matches the
-        # rubric the LLM judge will actually iterate over.
-        active_rubric = grade_config.rubric or DEFAULT_RUBRIC
-        criteria_count = len(active_rubric)
-        total_calls = artifact_count * criteria_count
-        if progress_on:
-            emit_progress_entry(
-                4,
-                "grade",
-                (
-                    f"scoring {artifact_count} artifacts × {criteria_count} "
-                    f"criteria ({total_calls} calls)..."
-                ),
+            # Honour ``GradeConfig.rubric`` overrides — the operator may
+            # ship a custom rubric in ``signalforge.yml grade:`` (or via
+            # ``--config``) that has a different criterion count than the
+            # default. ``rubric is None`` means "use DEFAULT_RUBRIC" per
+            # ``grade-layer.md`` DEC-016, so the progress count matches the
+            # rubric the LLM judge will actually iterate over.
+            active_rubric = grade_config.rubric or DEFAULT_RUBRIC
+            criteria_count = len(active_rubric)
+            total_calls = artifact_count * criteria_count
+            if progress_on:
+                emit_progress_entry(
+                    4,
+                    "grade",
+                    (
+                        f"scoring {artifact_count} artifacts × {criteria_count} "
+                        f"criteria ({total_calls} calls)..."
+                    ),
+                    total=total,
+                )
+            _t0 = time.monotonic()
+            # DEC-006 of #135 — ``client=None`` lets ``grade_artifacts`` thread
+            # it into ``call_llm``, which lazy-builds via the provider resolved
+            # from ``grade_config.provider`` (independent of the drafter's
+            # provider).
+            grade_report = grade_module.grade_artifacts(
+                model,
+                draft_outcome.candidate,
+                prune_result,
+                config=grade_config,
+                client=None,
+                project_dir=project_dir,
             )
-        _t0 = time.monotonic()
-        # DEC-006 of #135 — ``client=None`` lets ``grade_artifacts`` thread it
-        # into ``call_llm``, which lazy-builds via the provider resolved from
-        # ``grade_config.provider`` (independent of the drafter's provider).
-        grade_report = grade_module.grade_artifacts(
-            model,
-            draft_outcome.candidate,
-            prune_result,
-            config=grade_config,
-            client=None,
-            project_dir=project_dir,
-        )
-        if progress_on:
-            emit_progress_done(4, "grade", time.monotonic() - _t0)
+            if progress_on:
+                emit_progress_done(4, "grade", time.monotonic() - _t0, total=total)
 
         # ---- 5/5: diff --------------------------------------------------
         # US-006 / DEC-020 — apply ``--format`` by re-validating the
@@ -1077,7 +1346,7 @@ def _run_single_model(
             output_path = (project_dir / model_relpath).parent / "schema.yml"
 
         if progress_on:
-            emit_progress_entry(5, "diff", "rendering...")
+            emit_progress_entry(_diff_stage_n, "diff", "rendering...", total=total)
         _t0 = time.monotonic()
         diff_report = diff_module.render_diff(
             model,
@@ -1090,7 +1359,7 @@ def _run_single_model(
             project_dir=project_dir,
         )
         if progress_on:
-            emit_progress_done(5, "diff", time.monotonic() - _t0)
+            emit_progress_done(_diff_stage_n, "diff", time.monotonic() - _t0, total=total)
 
         # US-012 of #116 / DEC-010 / DEC-014 — on ``--write`` (NOT
         # ``--dry-run``), additionally materialise every proposed singular
@@ -1149,6 +1418,54 @@ def _run_single_model(
 # ---------------------------------------------------------------------------
 
 
+def _resolve_batch_draft_overrides(
+    args: argparse.Namespace,
+    project_dir: Path,
+    *,
+    matched_count: int,
+) -> dict[str, str] | None:
+    """Resolve the draft-config overlay for a ``--select`` batch (DEC-002 / DEC-003).
+
+    Precedence for ``cache_scope`` (highest first):
+
+    1. **Explicit ``--cache-scope`` flag** — the operator pinned a scope;
+       honour it verbatim (``per-model`` on a >= 2 batch is the documented
+       opt-out of auto-promote — the flag wins).
+    2. **YAML ``llm.cache_scope`` when non-default** — the operator pinned
+       it in ``signalforge.yml``; we must NOT silently override their
+       choice with auto-promote. Return ``None`` so the loaded config flows
+       through unchanged.
+    3. **Auto-promote** — when >= 2 models matched AND neither (1) nor (2)
+       applies, overlay ``cache_scope="project"`` so the cached prefix is
+       byte-identical across the batch (``cache_creation`` paid once,
+       cheaper ``cache_read`` on models 2..N).
+
+    Returns the overlay dict (``{"cache_scope": ...}``) to thread through
+    to every per-model :func:`_run_single_model` call, or ``None`` when no
+    overlay should apply (cases 2-without-promote and the < 2 match
+    no-flag case).
+    """
+    cache_scope_flag = getattr(args, "cache_scope", None)
+    if cache_scope_flag is not None:
+        # (1) explicit flag wins over both YAML and auto-promote.
+        return {"cache_scope": cache_scope_flag}
+
+    # (2) Read the YAML value to decide whether the operator pinned a scope
+    # there. ``model_fields`` carries the field default ("per-model"); a
+    # loaded value that differs means the operator set it explicitly.
+    draft_config = draft_module.load_draft_config(project_dir)
+    default_scope = draft_module.DraftConfig.model_fields["cache_scope"].default
+    if draft_config.cache_scope != default_scope:
+        # Operator pinned a non-default scope in signalforge.yml — honour
+        # it; do NOT auto-promote on top of an explicit YAML choice.
+        return None
+
+    # (3) Auto-promote when >= 2 models matched and nothing was pinned.
+    if matched_count >= 2:
+        return {"cache_scope": "project"}
+    return None
+
+
 def _run_batch(
     manifest: Manifest,
     profile: warehouse_module.DbtProfileTarget,
@@ -1199,6 +1516,24 @@ def _run_batch(
         raise CliSelectorNoMatchError(expr=expr)
 
     total = len(matched)
+
+    # US-005 of #188 / DEC-002 / DEC-003 — resolve the draft-config
+    # overlay once for the whole batch. Precedence:
+    #
+    #   1. explicit ``--cache-scope`` flag  (operator pinned a scope)
+    #   2. YAML ``llm.cache_scope`` when non-default  (operator pinned it
+    #      in signalforge.yml — we must NOT override it)
+    #   3. auto-promote to "project" when >= 2 models matched
+    #
+    # The same resolved overlay is passed to every per-model
+    # :func:`_run_single_model` call so the cached prefix is byte-identical
+    # across the batch (the project-scope amortisation contract). The
+    # config is loaded here purely to read its ``cache_scope`` for the
+    # precedence check; each per-model call re-loads + re-validates the
+    # config itself (with this overlay) so the loader stays the single
+    # source of truth and we never thread a partially-built config object.
+    draft_overrides = _resolve_batch_draft_overrides(args, project_dir, matched_count=total)
+
     outcomes: list[_SingleModelOutcome] = []
     for index, model in enumerate(matched, start=1):
         outcome = _run_single_model(
@@ -1209,6 +1544,7 @@ def _run_batch(
             project_dir=project_dir,
             batch_index=index,
             batch_count=total,
+            draft_overrides=draft_overrides,
         )
         outcomes.append(outcome)
 
@@ -1266,10 +1602,40 @@ def cmd_generate(args: argparse.Namespace) -> int:
 
     * ``--mode`` > ``safety.mode`` in ``signalforge.yml`` > library default.
     * ``--min-score`` > ``grade.min_mean_score`` > library default.
+    * ``--require-complete`` / ``--no-require-complete`` (US-007 of #202 /
+      DEC-208) > ``grade.require_complete`` in ``signalforge.yml`` > library
+      default (``True``). ``default=None`` is the no-clobber sentinel:
+      ONLY an explicit flag overrides the file value — a bare run preserves
+      a ``grade.require_complete: false`` set in ``signalforge.yml`` (no CLI
+      default clobbers it). When armed (``True``), the grade engine raises
+      :class:`signalforge.grade.GradeIncompleteError` (tier 2, exit 2) AFTER
+      the fail-closed sidecar write if any non-exempt
+      ``(artifact, criterion)`` pair is still ungraded after the bounded
+      transient-recovery sweep; the stderr message names the still-ungraded
+      pairs. Exempt (never trip): ``"ceiling"`` degrades and ``"budget"``
+      degrades when ``total_budget_seconds`` was set EXPLICITLY. Trip:
+      ``"transient"`` degrades surviving the sweep and default-scaled-budget
+      overruns (``total_budget_seconds`` unset). Applied via
+      :meth:`GradeConfig.model_validate` so validators re-run.
     * ``--format`` > ``diff.render_kind`` > library default (``"ansi"``).
     * ``--scope`` > ``prune.scope`` > library default (``"sample"``).
     * ``--sample-strategy`` > ``prune.sample_strategy`` > library default
       (``"materialised"``).
+    * ``--cache-scope`` (US-005 of #188 / DEC-002 / DEC-003) >
+      ``llm.cache_scope`` in ``signalforge.yml`` (when non-default) >
+      auto-promote. A ``--select`` batch matching >= 2 models
+      auto-promotes the draft overlay to ``cache_scope="project"`` unless
+      the operator pinned a scope via the flag or a non-default YAML
+      value; the single-model positional path NEVER auto-promotes (it
+      reflects only an explicit flag). Applied via
+      :meth:`DraftConfig.model_validate` so validators re-run (DEC-010).
+    * ``--as-of YYYY-MM-DD`` (US-013 of #171 / DEC-001) — evaluation
+      date for time-bound anomaly tests; threaded to
+      :func:`signalforge.prune.prune_tests` as the ``as_of`` kwarg.
+      Default ``None`` lets the engine resolve to ``date.today()`` at
+      prune time. The same value applies to every model in a
+      multi-model ``--select`` batch (resolved once at the orchestrator
+      and re-passed per-model).
 
     The prune overrides apply via :meth:`PruneConfig.model_validate`
     (NOT ``model_copy(update=...)``) so every Pydantic validator
@@ -1379,8 +1745,26 @@ def cmd_generate(args: argparse.Namespace) -> int:
         # Single-model path. ``manifest.get_model`` may raise
         # :class:`signalforge.manifest.errors.ModelNotFoundError` (tier 2);
         # the outer try catches it.
+        #
+        # US-005 of #188 / DEC-002 / DEC-003 — the single-model positional
+        # path reflects ONLY an explicit ``--cache-scope`` flag in its
+        # draft overlay; it NEVER auto-promotes (auto-promote is a batch
+        # affordance). With no flag, ``draft_overrides`` is ``None`` so the
+        # loaded config flows through unchanged and the v0.1 output shape
+        # is preserved byte-for-byte.
+        cache_scope_flag = getattr(args, "cache_scope", None)
+        single_overrides = (
+            {"cache_scope": cache_scope_flag} if cache_scope_flag is not None else None
+        )
         model = manifest.get_model(args.model)
-        single_outcome = _run_single_model(model, manifest, profile, args, project_dir=project_dir)
+        single_outcome = _run_single_model(
+            model,
+            manifest,
+            profile,
+            args,
+            project_dir=project_dir,
+            draft_overrides=single_overrides,
+        )
         if single_outcome.rendered_text:
             sys.stdout.write(single_outcome.rendered_text)
         return single_outcome.exit_code

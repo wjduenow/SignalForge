@@ -38,6 +38,13 @@ Pin the tool version in dev-deps for the *latest* schema only — older versions
 
 When a derived identifier needs to land in a snapshot fixture, prefer **seeded determinism** — `blake2b(stable_inputs, digest_size=N).hex()` over inputs that should produce the same output across runs — over post-hoc regex normalisation. The seeded path makes raw bytes stable; the normalisation path becomes a maintenance burden the moment the regex shape evolves. Reach for the hash recipe before reaching for `re.sub` in tests.
 
+## Cross-model byte-identity for a shared cached prefix (issue #188)
+
+When a feature's correctness depends on a rendered block being **byte-identical across inputs** (the prompt-cache hit precondition for issue #188's project-scope prefix — see `llm-drafter.md` § "Project-scope cached prefix"), pin it with TWO complementary tests, not one:
+
+- **A second cache-stability golden.** `tests/llm/test_prompt_cache_stability.py` gains `_EXPECTED_PROMPT_VERSION_PROJECT` + `_CACHED_BLOCK_GOLDEN_PROJECT` alongside the unchanged per-model pair. Each version constant rotates independently (per-model on `_MANIFEST_SUMMARY_TEMPLATE`/system-prompt change; project on `_PROJECT_SUMMARY_TEMPLATE`/project-variant-system-prompt change — DEC-014 rotation independence). The test asserts `project_version != per_model_version` so a copy-paste that collapsed the two bases fails loud.
+- **A cross-model byte-identity assertion.** Render the project cached block for **two different models** in the same fixture manifest and assert the two outputs are byte-equal (and equal the golden). A single-model golden certifies the shape; only the cross-model assertion certifies the *invariant the cache depends on* — a non-deterministic ordering bug (dict-insertion / selector order) renders correctly for one model and passes a single-golden test while silently differing across the batch. Mirrors the engineered-determinism lesson below: pin the property the feature relies on, not just a representative output.
+
 ## Drift detection via one-off `extra="forbid"` model
 
 If a parser uses `extra="ignore"` in production (forward-compat), pair it with a test that constructs a one-off `StrictModel(BaseModel)` with `extra="forbid"` and validates a known-current fixture against it. Adding a key to the fixture without updating the model breaks the test loudly.
@@ -53,6 +60,8 @@ Several rule files mandate that a "fail-closed audit event" class is constructed
 A bare-name-only visitor is trivially bypassable and provides **false confidence**. `tests/test_audit_completeness.py::_QualifiedNameCallFinder` is the canonical implementation; reuse for any new gated-construction scan. `getattr(module, "Target")(...)` is acceptable to leave unprotected — too dynamic for AST gating, and any reviewer reading `getattr` should already be on alert.
 
 Each new scan also needs a planted-violation regression test exercising all three patterns.
+
+**Total project AST scans: 12 as of #186** (was 10). Scan 3b (`anthropic.AsyncAnthropic` only in `_anthropic_client.py`) and Scan 9b (`openai.AsyncOpenAI` only in `_openai_client.py`) were added as siblings to the existing Scan 3 (Anthropic sync) and Scan 9 (OpenAI sync) per `llm-drafter.md` DEC-012's one-shim-per-vendor confinement rule. Gemini's async surface lives on the existing `genai.Client` via the `.aio` namespace, so Scan 10 was untouched — **the scan-count graduation rule is "one new scan per new vendor SDK class name to confine"**, not "one new scan per async-graduating vendor". When a v0.4 vendor lands whose async surface is a distinct class, add a sibling scan; if it's a namespace on an existing class, the existing scan still pins it. Per `signalforge-async-seam-confinement` memory.
 
 ## Source-scan gates: AST over per-line regex (issue #45)
 
@@ -152,6 +161,13 @@ When an assertion depends on what the LLM drafts (non-deterministic across runs)
 
 The austin BigQuery fixture (`tests/fixtures/dbt_project_austin`) and the TPCH Snowflake seed (`tests/fixtures/snowflake`) are both the source-as-model shape and both rely on **natural NOT NULL columns** — match that when adding a third warehouse's e2e. Do NOT copy a literal-column trick onto a source-as-model fixture.
 
+**Dispatch-order-agnostic assertions under asyncio (#186).** When a stage iterates `(criterion, artifact)` pairs (or any analogous Cartesian product) sequentially in v0.x and graduates to `asyncio.TaskGroup`-based concurrent dispatch in v0.(x+1), arrival order on disk becomes non-deterministic. Two patterns make tests order-agnostic:
+
+- **Sort-before-snapshot.** `tests/grade/_helpers.py::_sort_grade_events(lines)` sorts grade-audit JSONL records by `(artifact_id, criterion_id)` before comparison. Idempotent + stable for ties + defensive against missing keys. **Tests that snapshot the audit JSONL post-async must sort via this helper** rather than relying on iteration order. The orchestrator does NOT sort before writing — that would buffer and break per-decision fail-closed durability (DEC-015 of #186). The sort is purely a read-time concern; on-disk shape is unchanged.
+- **Pair-identity predicates on fake clients.** Instead of "fail the Nth call" (FIFO-dependent on dispatch order), use `expect_messages_create(matching=lambda kw: extract_pair_identity(kw) == ("column.X.description", "clarity"), returns=LLMRateLimitError(...))` so the injected failure targets a SPECIFIC `(artifact_id, criterion_id)` pair regardless of dispatch order. The dynamic block content carries the pair identity; parse it from `kw["messages"]`.
+
+When a v0.5 stage adopts asyncio (e.g. prune's eventual graduation per `prune-engine.md` DEC-028), copy both patterns. Snapshot tests fail loudly under arrival-order JSONL if the sort helper isn't used. Per `signalforge-asyncio-orchestrator-pattern` memory.
+
 ### Hand-crafted manifest seed when workers can't run live tooling
 
 When a fixture depends on `dbt parse` against a live warehouse (or any tool requiring credentials Ralph workers don't have), ship: (1) a regen script documenting the maintainer-only full-reproduction command; (2) a hand-crafted minimal seed, validated by an in-process loads test (no env vars). The seed must satisfy `signalforge.manifest.load(fixture_dir)` — test via a loads-only test that ships in the same commit (DEC-004 of #10).
@@ -197,6 +213,25 @@ grep -c "rate limit" pytest-stderr.log
 
 **Markers that STAY serial — do NOT pass `-n` to these.** `cli_subprocess` and `wheel_smoke` invocations shell out to a single installed console-script / build a single wheel into shared `dist/`, so parallel workers would collide on the artefact. Run them as documented in `python-build.md` / `cli-layer.md`: `uv run pytest -m cli_subprocess --no-cov` and `uv run pytest -m wheel_smoke --no-cov`, sequential, no `-n`.
 
+## Gated calibration / concordance harness as a research-test pattern (issue #187)
+
+When a behaviour change swaps a default whose *correctness* depends on live-model behaviour (the #187 grade-default flip from Sonnet to Haiku), the empirical gate is a **calibration harness**: pin a baseline sample as committed data, re-grade it live with the new default, and assert a concordance threshold. The `tests/research/187-haiku-calibration/` precedent ships:
+
+- A **pinned baseline + substrate** as committed data (`sonnet_baseline_sample.json` — the prior model's per-`(artifact_id, criterion_id)` pass/fail verdicts; `_substrate.py` — the candidate/model builders). Per § "Engineered determinism for LLM-driven assertions", the *only* live variable is the new model's re-grade; everything it joins against is committed bytes, so the comparison is reproducible.
+- **Belt-and-suspenders gating, same as the e2e tests** (§ "Belt-and-suspenders gating"): `pytestmark = pytest.mark.anthropic` (deselected by the default `addopts` `-m 'not anthropic ...'`, so default CI never collects it) PLUS a runtime `_skip_reason()` → `pytest.skip(...)` when the live key is unset. CI can't run live API; the harness is a **maintainer-run decision gate** — the maintainer runs `pytest -m anthropic --no-cov tests/research/187-haiku-calibration/`, reads the printed breakdown, and transcribes the result into the writeup (`docs/research/187-haiku-calibration.md`).
+- The harness **prints the breakdown regardless of pass/fail** (the discordance list, the rates) so a sub-threshold run still surfaces *why* it fell short — the gate's value is the diagnostic, not just the boolean.
+
+When a future ticket swaps a default that only live behaviour can validate (a drafter model flip, a new provider's fast default, a rubric-text change), copy this shape: committed baseline + substrate, dual gating (marker + runtime skip), maintainer-run, printed diagnostics. Mirror the e2e-gated conventions above rather than inventing a parallel gate; reuse an existing live-API marker (`anthropic` / `openai` / `gemini`) rather than minting a new one.
+
+## Concordance-gate denominator hygiene (issue #187)
+
+A concordance/agreement metric over an LLM eval computes `agreements / comparable`. Two denominator traps, both pinned in `tests/research/187-haiku-calibration/test_haiku_calibration.py`:
+
+1. **Exclude degraded (`score=None`) pairs from the denominator — but do NOT let a degraded-dominated run masquerade as signal.** A degraded pair (`GradingResult.score is None` — the DEC-015 conservative degrade) could not be positively evaluated, so it is neither a concordance nor a discordance; folding it into the denominator would understate agreement. *However*, a run where degraded pairs DOMINATE has too small/biased a comparable set to trust — a high rate over a handful of survivors is not a real signal. The gate therefore asserts both `comparable >= 1` (something was actually compared) AND `comparable >= degraded` (the comparable set is the majority); a run that fails the second assertion fails loud with a remediation (raise `max_output_tokens` or investigate the degradations) rather than reporting a flattering percentage over noise.
+2. **Coverage assertion before the rate.** The harness asserts every `artifact_id` the engine grades is present in the committed baseline (`engine_ids - baseline_ids == set()`) BEFORE computing concordance, and never silently folds an unmatched verdict into the rate (`if key not in baseline: continue`). A silent coverage gap would otherwise inflate or deflate the denominator invisibly.
+
+Generalise this to any agreement/precision/recall gate computed over an LLM eval where some pairs can degrade to "not evaluated": exclude the un-evaluated pairs from the denominator, but require the evaluated subset to be the majority (or some explicit floor) so the metric is computed over enough signal to mean anything — and assert baseline coverage up-front so the denominator is the set you think it is.
+
 ## Reference
 
-`plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `plans/super/27-codecov-coverage.md` — DEC-001, DEC-004, DEC-009. `plans/super/10-e2e-bigquery-smoke.md` — DEC-001, DEC-002, DEC-004, DEC-008, DEC-010, DEC-022. `plans/super/157-e2e-cost-and-parallel.md` — DEC-001 … DEC-010 (parallel-safe e2e, `signalforge.llm.cost.rollup_audit_dir`, pricing-table-version parity gate). `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh`, `tests/cli/_e2e_helpers.py`, `tests/cli/test_e2e_bigquery_smoke.py`, `tests/test_contributing_e2e_enumeration_parity.py`, `src/signalforge/llm/cost/`.
+`plans/super/1-project-scaffolding.md` — DEC-010. `plans/super/2-manifest-loader.md` — DEC-005, DEC-009, DEC-012, DEC-017. `plans/super/27-codecov-coverage.md` — DEC-001, DEC-004, DEC-009. `plans/super/10-e2e-bigquery-smoke.md` — DEC-001, DEC-002, DEC-004, DEC-008, DEC-010, DEC-022. `plans/super/157-e2e-cost-and-parallel.md` — DEC-001 … DEC-010 (parallel-safe e2e, `signalforge.llm.cost.rollup_audit_dir`, pricing-table-version parity gate). `plans/super/187-fast-grade-defaults.md` — DEC-005 (gated calibration/concordance harness, maintainer-run decision gate). `plans/super/188-bulk-cache-prefix.md` — DEC-007/DEC-014 (second cache-stability golden + cross-model byte-identity test for the project-scope shared cached prefix). `tests/test_smoke.py`, `tests/manifest/`, `tests/fixtures/regenerate.sh`, `tests/cli/_e2e_helpers.py`, `tests/cli/test_e2e_bigquery_smoke.py`, `tests/test_contributing_e2e_enumeration_parity.py`, `tests/research/187-haiku-calibration/`, `src/signalforge/llm/cost/`.

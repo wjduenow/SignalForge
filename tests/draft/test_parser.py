@@ -29,7 +29,10 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountAnomalyByPeriod,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 from signalforge.draft.parser import (
     _check_custom_sql_type_coherence,  # noqa: PLC2701  # private helper under test (#159 coverage)
@@ -1389,3 +1392,1179 @@ def test_cardinality_gate_collect_all_with_other_violations() -> None:
         "CandidateColumn references nonexistent column 'hallucinated'" in v for v in violations
     )
     assert any("Expected" in v and "custom_sql" in v and "got 0" in v for v in violations)
+
+
+# ---------------------------------------------------------------------------
+# Issue #169 — row_count_between anchor-contract arm (US-004)
+#
+# The 6th variant is model-level only (``column`` is hard-coded to ``None``
+# by the Pydantic model) and carries an optional ``where`` clause. The
+# parser arm threads the existing ``model_columns_by_type`` and reuses
+# sqlglot through ``_check_row_count_between_where`` for column-existence
+# + type-coherence on the where clause (DEC-004, DEC-006). The
+# ``exclude_tests`` dual-defence backstop also applies (DEC-013).
+# ---------------------------------------------------------------------------
+
+
+def _row_count_between_candidate(
+    *,
+    column_names: tuple[str, ...],
+    minimum: int | None = 1,
+    maximum: int | None = 1000,
+    where: str | None = None,
+) -> CandidateSchema:
+    """Build a synthetic CandidateSchema carrying one model-level
+    ``row_count_between`` test."""
+    return CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=tuple(CandidateColumn(name=n, description="...", tests=()) for n in column_names),
+        tests=(
+            CandidateTestRowCountBetween(
+                minimum=minimum,
+                maximum=maximum,
+                where=where,
+            ),
+        ),
+    )
+
+
+def test_row_count_between_valid_no_where() -> None:
+    """A row_count_between with both bounds and no ``where`` is the
+    canonical model-level shape — no violations."""
+    candidate = _row_count_between_candidate(
+        column_names=("user_id", "amount"),
+        minimum=100,
+        maximum=10000,
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"user_id", "amount"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(user_id="INT64", amount="FLOAT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_row_count_between_valid_where_known_column() -> None:
+    """A ``where`` referencing a real column passes."""
+    candidate = _row_count_between_candidate(
+        column_names=("user_id", "amount"),
+        minimum=100,
+        where="user_id > 100",
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"user_id", "amount"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(user_id="INT64", amount="FLOAT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_row_count_between_where_unknown_column_rejected() -> None:
+    """A ``where`` referencing a column that is not on the model
+    appends a violation (the row_count_between equivalent of the
+    structural ``test references nonexistent column`` check)."""
+    candidate = _row_count_between_candidate(
+        column_names=("user_id",),
+        minimum=100,
+        where="phantom_col > 1",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64"),
+        )
+    assert any(
+        "row_count_between where references nonexistent column 'phantom_col'" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_between_where_subquery_skipped() -> None:
+    """A subquery in the WHERE silently skips per DEC-006
+    (skip-when-uncertain). The warehouse-side bytes cap is the safety
+    net; the parser does not try to reason inside subqueries."""
+    candidate = _row_count_between_candidate(
+        column_names=("user_id",),
+        minimum=100,
+        where="(SELECT 1 FROM foo) > 0",
+    )
+    raw = candidate.model_dump_json()
+    # No raise — ``foo`` is inside a subquery; we don't flag it.
+    result = parse_draft_response(
+        raw,
+        frozenset({"user_id"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(user_id="INT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_row_count_between_excluded_type_rejected() -> None:
+    """``exclude_tests=("row_count_between",)`` rejects a drafted
+    row_count_between via the dual-defence backstop (DEC-013).
+
+    The prompt-builder filter (US-003) is the primary defence; this
+    parser-side check catches an LLM that ignores the prompt."""
+    candidate = _row_count_between_candidate(
+        column_names=("user_id",),
+        minimum=100,
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            exclude_tests=frozenset({"row_count_between"}),
+        )
+    assert any(
+        "model-level" in v and "'row_count_between'" in v and "exclude_tests" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_between_collect_all_with_other_violation() -> None:
+    """Collect-all preserved: a candidate with an unknown-column
+    ``where`` AND another test type's violation (a hallucinated column
+    on a CandidateColumn) produces BOTH violations in one error."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="hallucinated",
+                description="LLM made this up",
+                tests=(),
+            ),
+        ),
+        tests=(
+            CandidateTestRowCountBetween(
+                minimum=100,
+                where="phantom_col > 1",
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64"),
+        )
+    violations = excinfo.value.violations
+    assert any(
+        "CandidateColumn references nonexistent column 'hallucinated'" in v for v in violations
+    )
+    assert any(
+        "row_count_between where references nonexistent column 'phantom_col'" in v
+        for v in violations
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #170 — unique_combination anchor-contract arm (US-004)
+#
+# The 7th variant is model-level only (``column`` is hard-coded to ``None``
+# by the Pydantic model) and carries a tuple of >=2 column names plus an
+# optional ``where`` clause. The parser arm checks each ``columns[i]`` for
+# membership in ``model_columns`` and reuses the sqlglot WHERE-clause
+# helper for column-existence + type-coherence on ``where`` (DEC-014,
+# DEC-015, DEC-016). The ``exclude_tests`` dual-defence backstop also
+# applies (DEC-013).
+# ---------------------------------------------------------------------------
+
+
+def _unique_combination_candidate(
+    *,
+    column_names: tuple[str, ...],
+    columns: tuple[str, ...],
+    where: str | None = None,
+) -> CandidateSchema:
+    """Build a synthetic CandidateSchema carrying one model-level
+    ``unique_combination`` test."""
+    return CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=tuple(CandidateColumn(name=n, description="...", tests=()) for n in column_names),
+        tests=(
+            CandidateTestUniqueCombination(
+                columns=columns,
+                where=where,
+            ),
+        ),
+    )
+
+
+def test_unique_combination_valid_pair_no_where() -> None:
+    """A unique_combination over two real columns with no ``where`` is the
+    canonical model-level shape — no violations."""
+    candidate = _unique_combination_candidate(
+        column_names=("user_id", "day"),
+        columns=("user_id", "day"),
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"user_id", "day"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(user_id="INT64", day="DATE"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_unique_combination_valid_three_columns_with_where() -> None:
+    """A unique_combination over three real columns with a ``where`` that
+    references a real column of a coercible type passes."""
+    candidate = _unique_combination_candidate(
+        column_names=("order_id", "line_no", "tenant_id"),
+        columns=("order_id", "line_no", "tenant_id"),
+        where="tenant_id > 0",
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"order_id", "line_no", "tenant_id"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(order_id="INT64", line_no="INT64", tenant_id="INT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_unique_combination_hallucinated_column_in_tuple_rejected() -> None:
+    """A unique_combination tuple containing a column absent from the
+    model appends one violation per missing column. Collect-all: a single
+    missing entry produces a single violation that names the entry."""
+    candidate = _unique_combination_candidate(
+        column_names=("user_id", "day"),
+        columns=("user_id", "phantom_col"),
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id", "day"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64", day="DATE"),
+        )
+    assert any(
+        "unique_combination references nonexistent column 'phantom_col'" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_unique_combination_hallucinated_column_in_where_rejected() -> None:
+    """A ``where`` referencing a column that is not on the model appends
+    a violation (mirrors the row_count_between behaviour — sqlglot walks
+    the WHERE and flags bare-Column operands not in ``model_columns``)."""
+    candidate = _unique_combination_candidate(
+        column_names=("user_id", "day"),
+        columns=("user_id", "day"),
+        where="phantom_col > 1",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id", "day"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64", day="DATE"),
+        )
+    assert any(
+        "unique_combination where references nonexistent column 'phantom_col'" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_unique_combination_type_incoherent_where_rejected() -> None:
+    """A ``where`` that compares two columns of incompatible types is
+    rejected by the sqlglot type-coherence pass (DEC-015, reuse of the
+    #159 / #169 sqlglot machinery)."""
+    candidate = _unique_combination_candidate(
+        column_names=("user_id", "day", "name"),
+        columns=("user_id", "day"),
+        where="user_id = name",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id", "day", "name"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64", day="DATE", name="STRING"),
+        )
+    assert any(
+        "unique_combination where references column" in v
+        and "'user_id'" in v
+        and "'name'" in v
+        and "incompatible" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_unique_combination_excluded_type_rejected() -> None:
+    """``exclude_tests=("unique_combination",)`` rejects a drafted
+    unique_combination via the dual-defence backstop (DEC-013).
+
+    The prompt-builder filter is the primary defence; this parser-side
+    check catches an LLM that ignores the prompt."""
+    candidate = _unique_combination_candidate(
+        column_names=("user_id", "day"),
+        columns=("user_id", "day"),
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id", "day"}),
+            llm_result_meta=_meta(),
+            exclude_tests=frozenset({"unique_combination"}),
+        )
+    assert any(
+        "model-level" in v and "'unique_combination'" in v and "exclude_tests" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_unique_combination_collect_all_multi_violation() -> None:
+    """Collect-all preserved: a candidate with a hallucinated column in
+    the tuple AND a hallucinated column in the ``where`` AND an unrelated
+    CandidateColumn-level violation surfaces ALL violations in one
+    ``LLMOutputAnchorContractError`` (DEC-022 of #5)."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="hallucinated",
+                description="LLM made this up",
+                tests=(),
+            ),
+        ),
+        tests=(
+            CandidateTestUniqueCombination(
+                columns=("user_id", "phantom_tuple_col"),
+                where="phantom_where_col > 1",
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64"),
+        )
+    violations = excinfo.value.violations
+    assert any(
+        "CandidateColumn references nonexistent column 'hallucinated'" in v for v in violations
+    )
+    assert any(
+        "unique_combination references nonexistent column 'phantom_tuple_col'" in v
+        for v in violations
+    )
+    assert any(
+        "unique_combination where references nonexistent column 'phantom_where_col'" in v
+        for v in violations
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #171 — row_count_anomaly_by_period anchor-contract arm (US-006)
+#
+# The 8th variant is model-level only (``column`` is hard-coded to ``None``
+# by the Pydantic model per DEC-007). It carries a ``date_column`` (the
+# required bucketing field; must exist on the model) and an optional
+# ``where`` SQL fragment. The parser arm threads ``model_columns_by_type``
+# and reuses the ``_check_where_clause`` sqlglot helper for column-existence
+# + type-coherence on the ``where`` — "reuse, don't fork" per DEC-005 of
+# #169. The ``exclude_tests`` dual-defence backstop applies.
+# ---------------------------------------------------------------------------
+
+
+def _row_count_anomaly_candidate(
+    *,
+    column_names: tuple[str, ...],
+    date_column: str = "ordered_at",
+    where: str | None = None,
+) -> CandidateSchema:
+    """Build a synthetic CandidateSchema carrying one model-level
+    ``row_count_anomaly_by_period`` test."""
+    return CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=tuple(CandidateColumn(name=n, description="...", tests=()) for n in column_names),
+        tests=(
+            CandidateTestRowCountAnomalyByPeriod(
+                date_column=date_column,
+                where=where,
+            ),
+        ),
+    )
+
+
+def test_row_count_anomaly_valid_no_where() -> None:
+    """Canonical model-level shape — valid ``date_column``, no ``where``;
+    no violations. Also pins the load-bearing ``column=None``
+    early-out: the generic ``test.column not in model_columns`` arm
+    would otherwise fire "model-level test references nonexistent
+    column None"."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at", "amount"),
+        date_column="ordered_at",
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"ordered_at", "amount"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(ordered_at="TIMESTAMP", amount="FLOAT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_row_count_anomaly_valid_where_known_column() -> None:
+    """A ``where`` referencing a real column passes."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at", "amount"),
+        date_column="ordered_at",
+        where="amount > 0",
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"ordered_at", "amount"}),
+        llm_result_meta=_meta(),
+        model_columns_by_type=_types_map(ordered_at="TIMESTAMP", amount="FLOAT64"),
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+def test_row_count_anomaly_date_column_unknown_rejected() -> None:
+    """A hallucinated ``date_column`` (absent from ``model_columns``) is
+    surfaced as a violation. The message names the variant, the field,
+    and the available columns so the operator can correct."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("amount",),
+        date_column="loaded_at",  # phantom — only `amount` exists
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"amount"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(amount="FLOAT64"),
+        )
+    assert any(
+        "row_count_anomaly_by_period: date_column 'loaded_at' not in model columns" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_anomaly_where_unknown_column_rejected() -> None:
+    """A ``where`` referencing a column that is not on the model appends
+    a violation via the shared ``_check_where_clause`` helper —
+    mirrors the row_count_between / unique_combination behaviour."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at",),
+        date_column="ordered_at",
+        where="phantom_col > 1",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"ordered_at"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(ordered_at="TIMESTAMP"),
+        )
+    assert any(
+        "row_count_anomaly_by_period where references nonexistent column 'phantom_col'" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_anomaly_type_incoherent_where_rejected() -> None:
+    """A ``where`` comparing two columns of incompatible types is
+    rejected by the sqlglot type-coherence pass (reuse of the #159 /
+    #169 / #170 sqlglot machinery)."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at", "user_id", "name"),
+        date_column="ordered_at",
+        where="user_id = name",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"ordered_at", "user_id", "name"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(
+                ordered_at="TIMESTAMP", user_id="INT64", name="STRING"
+            ),
+        )
+    assert any(
+        "row_count_anomaly_by_period where references column" in v
+        and "'user_id'" in v
+        and "'name'" in v
+        and "incompatible" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_anomaly_collect_all_date_column_and_where() -> None:
+    """Collect-all preserved (DEC-022 of #5): a candidate with BOTH a
+    hallucinated ``date_column`` AND an unknown-column ``where``
+    surfaces BOTH violations in one ``LLMOutputAnchorContractError`` —
+    never short-circuits on the first violation."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("user_id",),
+        date_column="phantom_date_col",
+        where="phantom_where_col > 1",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64"),
+        )
+    violations = excinfo.value.violations
+    assert any(
+        "row_count_anomaly_by_period: date_column 'phantom_date_col' not in model columns" in v
+        for v in violations
+    )
+    assert any(
+        "row_count_anomaly_by_period where references nonexistent column 'phantom_where_col'" in v
+        for v in violations
+    )
+
+
+def test_row_count_anomaly_collect_all_with_unrelated_violation() -> None:
+    """Collect-all across variants: a hallucinated CandidateColumn AND a
+    bad row_count_anomaly_by_period ``date_column`` AND an unknown
+    ``where`` column all surface together. The collect-all contract is
+    the foundation for the operator's "fix everything wrong in one
+    round" UX."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(CandidateColumn(name="hallucinated", description="LLM made this up", tests=()),),
+        tests=(
+            CandidateTestRowCountAnomalyByPeriod(
+                date_column="phantom_date_col",
+                where="phantom_where_col > 1",
+            ),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"user_id"}),
+            llm_result_meta=_meta(),
+            model_columns_by_type=_types_map(user_id="INT64"),
+        )
+    violations = excinfo.value.violations
+    assert any(
+        "CandidateColumn references nonexistent column 'hallucinated'" in v for v in violations
+    )
+    assert any(
+        "row_count_anomaly_by_period: date_column 'phantom_date_col' not in model columns" in v
+        for v in violations
+    )
+    assert any(
+        "row_count_anomaly_by_period where references nonexistent column 'phantom_where_col'" in v
+        for v in violations
+    )
+
+
+def test_row_count_anomaly_excluded_type_rejected() -> None:
+    """``exclude_tests=("row_count_anomaly_by_period",)`` rejects a
+    drafted row_count_anomaly_by_period via the dual-defence backstop
+    (the prompt-builder filter from US-005 is the primary defence; this
+    parser-side check catches an LLM that ignores the prompt)."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at",),
+        date_column="ordered_at",
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"ordered_at"}),
+            llm_result_meta=_meta(),
+            exclude_tests=frozenset({"row_count_anomaly_by_period"}),
+        )
+    assert any(
+        "model-level" in v and "'row_count_anomaly_by_period'" in v and "exclude_tests" in v
+        for v in excinfo.value.violations
+    )
+
+
+def test_row_count_anomaly_column_none_does_not_trigger_generic_arm() -> None:
+    """Regression test for the model-level early-out (load-bearing per
+    DEC-007 of #171). Without the explicit ``elif test.type ==
+    "row_count_anomaly_by_period"`` arm ahead of the generic
+    ``test.column not in model_columns`` fallthrough, the validator
+    would emit "model-level test references nonexistent column None"
+    on every well-formed candidate.
+
+    The test ALSO omits ``model_columns_by_type`` to pin the inactive-
+    type-arm path: even without the type map, the ``date_column``
+    existence check + the ``column=None`` early-out must hold."""
+    candidate = _row_count_anomaly_candidate(
+        column_names=("ordered_at",),
+        date_column="ordered_at",
+        where=None,
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"ordered_at"}),
+        llm_result_meta=_meta(),
+        # Deliberately omit model_columns_by_type to exercise the
+        # inactive-type-arm path (DEC-006 — column-existence still runs).
+    )
+    assert isinstance(result, CandidateSchema)
+
+
+# ---------------------------------------------------------------------------
+# Issue #184 US-003 — column-scoped model-only variant re-attach (DEC-002,
+# DEC-003, DEC-004, DEC-006, DEC-010). When the LLM emits a model-only
+# variant (`row_count_anomaly_by_period` / `row_count_between` /
+# `unique_combination`) nested inside a column's `tests:` array, the
+# parser silently RE-ATTACHES it to model scope, emits a WARNING, and
+# appends one `ReshapeRecord` to the caller-supplied collector. The
+# `exclude_tests` kill-switch (DEC-003) beats re-attach.
+# ---------------------------------------------------------------------------
+
+
+def _column_scoped_anomaly_candidate(
+    *,
+    column_names: tuple[str, ...],
+    nested_under: str,
+    date_column: str = "ordered_at",
+    where: str | None = None,
+) -> CandidateSchema:
+    """Build a CandidateSchema where a `row_count_anomaly_by_period` is
+    nested inside a column's `tests:` list (the bug shape #184 fixes).
+
+    Pydantic v2's discriminated union accepts the variant inside
+    ``CandidateColumn.tests`` — the variant's ``column: None = None``
+    constraint makes ``test.column`` ``None`` regardless of where it's
+    nested. The re-attach branch detects the mis-nesting by checking
+    ``test.type in _MODEL_ONLY_TEST_TYPES`` during the per-column
+    iteration.
+    """
+    return CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=tuple(
+            CandidateColumn(
+                name=n,
+                description="...",
+                tests=(
+                    (
+                        CandidateTestRowCountAnomalyByPeriod(
+                            date_column=date_column,
+                            where=where,
+                        ),
+                    )
+                    if n == nested_under
+                    else ()
+                ),
+            )
+            for n in column_names
+        ),
+        tests=(),
+    )
+
+
+def test_row_count_anomaly_column_scoped_reattaches_to_model_level() -> None:
+    """Bug shape from the original ticket: drafter emits a
+    ``CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at", ...)``
+    nested inside ``CandidateColumn(name="ordered_at").tests``. After
+    parse, the anomaly is moved to ``candidate.tests`` (model-level,
+    ``column=None``) and ``candidate.columns[i].tests`` no longer
+    contains it."""
+    candidate = _column_scoped_anomaly_candidate(
+        column_names=("ordered_at", "amount"),
+        nested_under="ordered_at",
+        date_column="ordered_at",
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"ordered_at", "amount"}),
+        llm_result_meta=_meta(),
+    )
+    assert isinstance(result, CandidateSchema)
+    # The re-attached test now lives at model scope.
+    assert len(result.tests) == 1
+    assert result.tests[0].type == "row_count_anomaly_by_period"
+    # No column carries the anomaly anymore.
+    for column in result.columns:
+        assert all(t.type != "row_count_anomaly_by_period" for t in column.tests)
+
+
+def test_row_count_between_column_scoped_reattaches_to_model_level() -> None:
+    """Same shape as the anomaly bug but for ``row_count_between``: a
+    column-nested ``CandidateTestRowCountBetween(minimum=1, maximum=1000)``
+    is re-attached to model scope. Covers DEC-004 (all three model-only
+    variants share the re-attach path)."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="amount",
+                description="...",
+                tests=(CandidateTestRowCountBetween(minimum=1, maximum=1000),),
+            ),
+        ),
+        tests=(),
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"amount"}),
+        llm_result_meta=_meta(),
+    )
+    assert len(result.tests) == 1
+    assert result.tests[0].type == "row_count_between"
+    for column in result.columns:
+        assert all(t.type != "row_count_between" for t in column.tests)
+
+
+def test_unique_combination_column_scoped_reattaches_to_model_level() -> None:
+    """Same shape for ``unique_combination``: a column-nested
+    ``CandidateTestUniqueCombination(columns=("order_id", "customer_id"))``
+    is re-attached to model scope. Closes the latent bug class for the
+    third sibling variant per DEC-004."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="...",
+                tests=(CandidateTestUniqueCombination(columns=("order_id", "customer_id")),),
+            ),
+            CandidateColumn(name="customer_id", description="..."),
+        ),
+        tests=(),
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"order_id", "customer_id"}),
+        llm_result_meta=_meta(),
+    )
+    assert len(result.tests) == 1
+    assert result.tests[0].type == "unique_combination"
+    for column in result.columns:
+        assert all(t.type != "unique_combination" for t in column.tests)
+
+
+def test_reattach_emits_one_warning_per_event(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DEC-006 — every re-attach emits exactly one ``_LOGGER.warning``
+    with lazy-format JSON. The payload (the second arg to the
+    ``"parser re-attach: %s"`` template) carries the 5 expected keys:
+    ``test_type`` / ``from_scope`` / ``to_scope`` / ``model_unique_id``
+    / ``reason``."""
+    import json as _json
+    import logging as _logging
+
+    candidate = _column_scoped_anomaly_candidate(
+        column_names=("ordered_at",),
+        nested_under="ordered_at",
+        date_column="ordered_at",
+    )
+    raw = candidate.model_dump_json()
+    with caplog.at_level(_logging.WARNING, logger="signalforge.draft.parser"):
+        parse_draft_response(
+            raw,
+            frozenset({"ordered_at"}),
+            llm_result_meta=_meta(),
+            model_unique_id="model.test_pkg.fct_test",
+        )
+    reattach_records = [r for r in caplog.records if r.message.startswith("parser re-attach: ")]
+    assert len(reattach_records) == 1, (
+        f"expected exactly one re-attach WARNING, got {len(reattach_records)}"
+    )
+    # The second positional arg is the JSON payload (lazy-format %s).
+    args = reattach_records[0].args
+    assert isinstance(args, tuple) and isinstance(args[0], str)
+    payload_str: str = args[0]
+    payload = _json.loads(payload_str)
+    assert payload == {
+        "test_type": "row_count_anomaly_by_period",
+        "from_scope": "column='ordered_at'",
+        "to_scope": "<model-level>",
+        "model_unique_id": "model.test_pkg.fct_test",
+        "reason": "model-only variant mis-scoped to column",
+    }
+
+
+def test_reattach_appends_to_reshapes_collected_when_provided() -> None:
+    """DEC-005 — when the caller passes ``reshapes_collected=[]``, one
+    :class:`ReshapeRecord` is appended per re-attach with the locked
+    ``reason`` text and ``target_scope="model"``."""
+    from signalforge.draft.audit import ReshapeRecord
+
+    candidate = _column_scoped_anomaly_candidate(
+        column_names=("ordered_at",),
+        nested_under="ordered_at",
+        date_column="ordered_at",
+    )
+    raw = candidate.model_dump_json()
+    collected: list[ReshapeRecord] = []
+    parse_draft_response(
+        raw,
+        frozenset({"ordered_at"}),
+        llm_result_meta=_meta(),
+        reshapes_collected=collected,
+    )
+    assert len(collected) == 1
+    rec = collected[0]
+    assert rec.original_column == "ordered_at"
+    assert rec.target_scope == "model"
+    assert rec.test_type == "row_count_anomaly_by_period"
+    assert rec.reason == (
+        "model-only variant emitted at column scope; re-attached to model-level tests:"
+    )
+
+
+def test_reattach_warning_lazy_format_json_shape(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DEC-006 pin — the WARNING uses the literal template ``"parser
+    re-attach: %s"`` with the JSON payload as the second positional arg.
+    Belt-and-suspenders with the test_reattach_emits_one_warning_per_event
+    test: this one pins the call SHAPE (template + lazy-format arg
+    positioning), the other pins the payload CONTENT."""
+    import logging as _logging
+
+    candidate = _column_scoped_anomaly_candidate(
+        column_names=("amount",),
+        nested_under="amount",
+        date_column="amount",
+    )
+    raw = candidate.model_dump_json()
+    with caplog.at_level(_logging.WARNING, logger="signalforge.draft.parser"):
+        parse_draft_response(
+            raw,
+            frozenset({"amount"}),
+            llm_result_meta=_meta(),
+        )
+    reattach_records = [r for r in caplog.records if r.message.startswith("parser re-attach: ")]
+    assert len(reattach_records) == 1
+    rec = reattach_records[0]
+    # The lazy-format template is the literal first positional arg.
+    assert rec.msg == "parser re-attach: %s"
+    # The payload is a single positional arg, a JSON-encoded string.
+    assert isinstance(rec.args, tuple)
+    assert len(rec.args) == 1
+    assert isinstance(rec.args[0], str)
+
+
+def test_reattach_respects_exclude_tests_gate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DEC-003 — the operator's ``exclude_tests`` kill-switch beats the
+    re-attach convenience. A column-scoped emission of an excluded
+    variant falls through to the standard exclude-violation path
+    (raises :class:`LLMOutputAnchorContractError`) and NO WARNING is
+    emitted."""
+    import logging as _logging
+
+    candidate = _column_scoped_anomaly_candidate(
+        column_names=("ordered_at",),
+        nested_under="ordered_at",
+        date_column="ordered_at",
+    )
+    raw = candidate.model_dump_json()
+    with (
+        caplog.at_level(_logging.WARNING, logger="signalforge.draft.parser"),
+        pytest.raises(LLMOutputAnchorContractError) as excinfo,
+    ):
+        parse_draft_response(
+            raw,
+            frozenset({"ordered_at"}),
+            llm_result_meta=_meta(),
+            exclude_tests=frozenset({"row_count_anomaly_by_period"}),
+        )
+    # The exclude-violation surfaces (DEC-003: operator opt-out wins).
+    assert any(
+        "'row_count_anomaly_by_period'" in v and "exclude_tests" in v
+        for v in excinfo.value.violations
+    )
+    # No re-attach WARNING was emitted.
+    reattach_records = [r for r in caplog.records if r.message.startswith("parser re-attach: ")]
+    assert len(reattach_records) == 0
+
+
+def test_reattach_plus_hallucinated_column_collects_all() -> None:
+    """Collect-all preserved (DEC-022 of #5): a candidate with BOTH a
+    re-attachable column-scoped anomaly AND an unrelated hallucinated
+    ``CandidateColumn`` name surfaces the hallucinated-column violation
+    in :class:`LLMOutputAnchorContractError` AND the re-attach still
+    happens. The re-attach is non-fatal; it never blocks collect-all
+    on unrelated violations."""
+    from signalforge.draft.audit import ReshapeRecord
+
+    # One real column with a column-scoped anomaly nested under it +
+    # one hallucinated column whose name is not in model_columns. The
+    # hallucinated column triggers a `CandidateColumn references
+    # nonexistent column` violation; the anomaly nested under the real
+    # column gets re-attached.
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="ordered_at",
+                description="...",
+                tests=(CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at"),),
+            ),
+            CandidateColumn(name="phantom_col", description="LLM made this up", tests=()),
+        ),
+        tests=(),
+    )
+    raw = candidate.model_dump_json()
+    collected: list[ReshapeRecord] = []
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(
+            raw,
+            frozenset({"ordered_at"}),
+            llm_result_meta=_meta(),
+            reshapes_collected=collected,
+        )
+    # Hallucinated-column violation surfaced (collect-all).
+    assert any(
+        "CandidateColumn references nonexistent column 'phantom_col'" in v
+        for v in excinfo.value.violations
+    )
+    # Re-attach still happened (collect-all of the non-fatal carve-out).
+    assert len(collected) == 1
+    assert collected[0].original_column == "ordered_at"
+    assert collected[0].test_type == "row_count_anomaly_by_period"
+
+
+def test_reattach_does_not_dedupe_against_existing_model_level_form() -> None:
+    """DEC-010 — when the LLM emits the SAME variant twice (once at
+    column scope, once at model scope), the parser re-attaches the
+    column-scoped form, producing two equivalent model-level tests. No
+    dedupe pass in v0.1 (downstream diff + prune handle redundant tests
+    gracefully). This test documents the chosen behaviour so a future
+    change to add dedupe fails loudly here first."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="ordered_at",
+                description="...",
+                tests=(CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at"),),
+            ),
+        ),
+        tests=(
+            # An already-valid model-level emission of the same variant.
+            CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at"),
+        ),
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(
+        raw,
+        frozenset({"ordered_at"}),
+        llm_result_meta=_meta(),
+    )
+    # Both forms land at model scope; no dedupe (DEC-010).
+    anomaly_tests = [t for t in result.tests if t.type == "row_count_anomaly_by_period"]
+    assert len(anomaly_tests) == 2
+
+
+def test_reattach_threads_model_unique_id_into_warning_payload(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DEC-006 — ``model_unique_id`` rides in the WARNING payload so a
+    multi-model drafter run produces forensically traceable signal. When
+    omitted, defaults to the empty string (back-compat with existing
+    direct unit-test callers that don't thread it)."""
+    import json as _json
+    import logging as _logging
+
+    candidate = _column_scoped_anomaly_candidate(
+        column_names=("ordered_at",),
+        nested_under="ordered_at",
+        date_column="ordered_at",
+    )
+    raw = candidate.model_dump_json()
+
+    # First: without model_unique_id → empty string in payload.
+    with caplog.at_level(_logging.WARNING, logger="signalforge.draft.parser"):
+        parse_draft_response(
+            raw,
+            frozenset({"ordered_at"}),
+            llm_result_meta=_meta(),
+        )
+    reattach_records = [r for r in caplog.records if r.message.startswith("parser re-attach: ")]
+    assert len(reattach_records) == 1
+    args1 = reattach_records[0].args
+    assert isinstance(args1, tuple) and isinstance(args1[0], str)
+    payload = _json.loads(args1[0])
+    assert payload["model_unique_id"] == ""
+
+    caplog.clear()
+
+    # Second: with model_unique_id → threaded through verbatim.
+    with caplog.at_level(_logging.WARNING, logger="signalforge.draft.parser"):
+        parse_draft_response(
+            raw,
+            frozenset({"ordered_at"}),
+            llm_result_meta=_meta(),
+            model_unique_id="model.my_pkg.my_fct_table",
+        )
+    reattach_records = [r for r in caplog.records if r.message.startswith("parser re-attach: ")]
+    assert len(reattach_records) == 1
+    args2 = reattach_records[0].args
+    assert isinstance(args2, tuple) and isinstance(args2[0], str)
+    payload = _json.loads(args2[0])
+    assert payload["model_unique_id"] == "model.my_pkg.my_fct_table"
+
+
+# ---------------------------------------------------------------------------
+# QG Pass 1 fixes (#184) — re-attached test args must be validated against
+# model_columns; sibling tests on the same column must survive the rebuild.
+# ---------------------------------------------------------------------------
+
+
+def test_reattach_validates_anomaly_date_column_against_model_columns() -> None:
+    """A re-attached ``row_count_anomaly_by_period`` whose ``date_column``
+    references a hallucinated column MUST surface as an anchor-contract
+    violation — NOT silently ship through re-attach and degrade to
+    ``kept-without-evidence`` at prune. Pins the #184 QG Pass 1 fix:
+    re-validate model-only test args after re-attach."""
+    candidate = _column_scoped_anomaly_candidate(
+        column_names=("ordered_at", "amount"),
+        nested_under="ordered_at",
+        date_column="phantom_col",
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(raw, frozenset({"ordered_at", "amount"}), llm_result_meta=_meta())
+    violations = excinfo.value.violations
+    assert any(
+        "row_count_anomaly_by_period" in v and "date_column" in v and "phantom_col" in v
+        for v in violations
+    ), violations
+
+
+def test_reattach_validates_row_count_between_where_against_model_columns() -> None:
+    """A re-attached ``row_count_between`` whose ``where`` clause references
+    a hallucinated column MUST surface as an anchor-contract violation."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="amount",
+                description="...",
+                tests=(
+                    CandidateTestRowCountBetween(
+                        minimum=1,
+                        maximum=1000,
+                        where="phantom_col > 0",
+                    ),
+                ),
+            ),
+        ),
+        tests=(),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(raw, frozenset({"amount"}), llm_result_meta=_meta())
+    violations = excinfo.value.violations
+    assert any("row_count_between" in v and "phantom_col" in v for v in violations), violations
+
+
+def test_reattach_validates_unique_combination_columns_against_model_columns() -> None:
+    """A re-attached ``unique_combination`` whose ``columns`` reference
+    hallucinated columns MUST surface as anchor-contract violations
+    (one per missing column, collect-all preserved)."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="order_id",
+                description="...",
+                tests=(
+                    CandidateTestUniqueCombination(
+                        columns=("order_id", "phantom_a", "phantom_b"),
+                    ),
+                ),
+            ),
+        ),
+        tests=(),
+    )
+    raw = candidate.model_dump_json()
+    with pytest.raises(LLMOutputAnchorContractError) as excinfo:
+        parse_draft_response(raw, frozenset({"order_id"}), llm_result_meta=_meta())
+    violations = excinfo.value.violations
+    assert any("unique_combination" in v and "phantom_a" in v for v in violations), violations
+    assert any("unique_combination" in v and "phantom_b" in v for v in violations), violations
+
+
+def test_reattach_preserves_sibling_tests_on_same_column() -> None:
+    """When a column has BOTH a re-attachable model-only variant AND a
+    valid sibling test (e.g. ``not_null``), the rebuild must drop ONLY
+    the re-attached test from ``column.tests`` and preserve the
+    sibling. Pins the #184 QG Pass 1 Finding 2 (sibling-test preservation
+    in ``_apply_reattach_actions`` was previously unpinned)."""
+    candidate = CandidateSchema(
+        name="fct_test",
+        description="...",
+        columns=(
+            CandidateColumn(
+                name="ordered_at",
+                description="...",
+                tests=(
+                    CandidateTestNotNull(column="ordered_at"),
+                    CandidateTestRowCountAnomalyByPeriod(date_column="ordered_at"),
+                ),
+            ),
+        ),
+        tests=(),
+    )
+    raw = candidate.model_dump_json()
+    result = parse_draft_response(raw, frozenset({"ordered_at"}), llm_result_meta=_meta())
+    # Re-attached variant landed at model scope.
+    assert len(result.tests) == 1
+    assert result.tests[0].type == "row_count_anomaly_by_period"
+    # Sibling ``not_null`` survived on ``ordered_at``.
+    assert len(result.columns) == 1
+    assert len(result.columns[0].tests) == 1
+    assert result.columns[0].tests[0].type == "not_null"

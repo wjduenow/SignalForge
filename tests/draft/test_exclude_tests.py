@@ -96,10 +96,25 @@ def test_exclude_tests_rejects_non_list_non_tuple() -> None:
 def test_valid_test_types_constant_matches_known_set() -> None:
     """Pin the canonical set so adding a new test type without updating
     VALID_TEST_TYPES (and the prompt catalogue) fails loud here. The four
-    standard dbt schema tests plus the ``custom_sql`` business-rule
-    variant (DEC-002)."""
+    standard dbt schema tests, the ``custom_sql`` business-rule variant
+    (DEC-002), the ``row_count_between`` model-level row-count guard
+    (DEC-001 of #169), the ``unique_combination`` model-level
+    composite-uniqueness variant (DEC-001 of #170), and the
+    ``row_count_anomaly_by_period`` model-level per-period anomaly
+    variant (DEC-007 of #171)."""
     assert (
-        frozenset({"not_null", "unique", "accepted_values", "relationships", "custom_sql"})
+        frozenset(
+            {
+                "not_null",
+                "unique",
+                "accepted_values",
+                "relationships",
+                "custom_sql",
+                "row_count_between",
+                "unique_combination",
+                "row_count_anomaly_by_period",
+            }
+        )
         == VALID_TEST_TYPES
     )
 
@@ -123,23 +138,56 @@ def test_render_system_prompt_drops_excluded_from_catalogue() -> None:
 
 
 def test_render_system_prompt_updates_scope_line() -> None:
-    prompt = _render_system_prompt(("accepted_values", "relationships"))
+    prompt = _render_system_prompt(
+        (
+            "accepted_values",
+            "relationships",
+            "row_count_between",
+            "unique_combination",
+            "row_count_anomaly_by_period",
+        )
+    )
     # SCOPE line names only the surviving standard types; custom_sql (still
     # allowed) is appended via the "plus" clause.
     assert "Propose only `not_null` and `unique`, plus `custom_sql` tests" in prompt
     assert "accepted_values" not in prompt
     assert "relationships" not in prompt
+    assert "row_count_between" not in prompt
+    assert "unique_combination" not in prompt
+    assert "row_count_anomaly_by_period" not in prompt
 
 
 def test_render_system_prompt_single_remaining_type_uses_bare_form() -> None:
-    prompt = _render_system_prompt(("unique", "accepted_values", "relationships"))
+    prompt = _render_system_prompt(
+        (
+            "unique",
+            "accepted_values",
+            "relationships",
+            "row_count_between",
+            "unique_combination",
+            "row_count_anomaly_by_period",
+        )
+    )
     assert "Propose only `not_null`, plus `custom_sql` tests" in prompt
 
 
 def test_render_system_prompt_excluding_all_four_standard_keeps_custom_sql() -> None:
-    # Excluding the four standard types leaves custom_sql, which is enough
-    # for the drafter to propose (issue #116 — custom_sql is a valid type).
-    prompt = _render_system_prompt(("not_null", "unique", "accepted_values", "relationships"))
+    # Excluding the seven standard types leaves custom_sql, which is enough
+    # for the drafter to propose (issue #116 — custom_sql is a valid type;
+    # issue #169 — row_count_between joined the standard set;
+    # issue #170 — unique_combination joined the standard set;
+    # issue #171 — row_count_anomaly_by_period joined the standard set).
+    prompt = _render_system_prompt(
+        (
+            "not_null",
+            "unique",
+            "accepted_values",
+            "relationships",
+            "row_count_between",
+            "unique_combination",
+            "row_count_anomaly_by_period",
+        )
+    )
     assert "Propose only `custom_sql` tests" in prompt
     assert '"type": "custom_sql"' in prompt
     assert '"type": "not_null"' not in prompt
@@ -148,7 +196,16 @@ def test_render_system_prompt_excluding_all_four_standard_keeps_custom_sql() -> 
 def test_render_system_prompt_excluding_everything_raises() -> None:
     with pytest.raises(ValueError) as exc:
         _render_system_prompt(
-            ("not_null", "unique", "accepted_values", "relationships", "custom_sql")
+            (
+                "not_null",
+                "unique",
+                "accepted_values",
+                "relationships",
+                "row_count_between",
+                "unique_combination",
+                "row_count_anomaly_by_period",
+                "custom_sql",
+            )
         )
     assert "at least one type must remain" in str(exc.value)
 

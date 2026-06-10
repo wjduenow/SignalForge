@@ -20,12 +20,22 @@ Public surface:
   verbatim without coupling the e2e fixture to the ``init-demo`` parity
   tree (``tests/test_demo_fixture_parity.py``) — the rules are injected
   into the per-run ``tmp_path`` copy, never the committed fixture.
+* :func:`inject_model_anomaly_rules` — thin specialisation of
+  :func:`inject_model_business_rules` for the ``row_count_anomaly_by_period``
+  e2e (issue #171 / US-017). Same on-disk mutation surface
+  (``config.meta.signalforge.business_rules``); the helper exists to
+  keep the anomaly e2e self-documenting at the call site (the rule prose
+  steers the drafter toward the structured anomaly variant rather than
+  freeform ``custom_sql``).
 * :func:`apply_provider_override` — overlays per-test ``grade:`` block
-  knobs (``provider`` / ``model`` / ``max_output_tokens``) onto a copied
-  fixture's ``signalforge.yml`` (issue #155 / US-004 / DEC-012). The
-  canonical seam the multi-provider e2e smokes (BigQuery+Anthropic /
-  +OpenAI / +Gemini) use to swap the grader without maintaining N
-  near-duplicate fixtures.
+  knobs (``provider`` / ``model`` / ``max_output_tokens`` /
+  ``max_concurrent_calls``) onto a copied fixture's ``signalforge.yml``
+  (issue #155 / US-004 / DEC-012; ``max_concurrent_calls`` extension
+  added by issue #186 / US-012 / DEC-020 for the async live smokes).
+  The canonical seam the multi-provider e2e smokes (BigQuery+Anthropic /
+  +OpenAI / +Gemini, plus the three async per-provider smokes from
+  #186) use to swap the grader and tune concurrency without maintaining
+  N near-duplicate fixtures.
 
 Used only by the gated e2e smokes (``tests/cli/test_e2e_*.py``) plus the
 helper's own unit tests under ``tests/cli/test_e2e_helpers.py``. Not
@@ -188,20 +198,75 @@ def inject_model_business_rules(
     manifest_path.write_text(json.dumps(manifest))
 
 
+def inject_model_anomaly_rules(
+    project_dir: Path,
+    model_unique_id: str,
+    rules: Sequence[str],
+) -> None:
+    """Inject anomaly-shaped business rules into a manifest model node.
+
+    Issue #171 / US-017. The ``row_count_anomaly_by_period`` variant is
+    model-level and time-bound: the drafter does NOT learn the variant
+    from a column's data type alone; it needs an operator hint that this
+    model has a per-period row-count baseline worth monitoring. The
+    canonical seam for that hint is the existing
+    ``meta.signalforge.business_rules`` surface (drafter precedent from
+    #116 / #163) — the variant catalogue + the drafter prompt steer
+    Sonnet 4.6 to propose a structured :class:`CandidateTestRowCountAnomalyByPeriod`
+    candidate rather than a freeform ``custom_sql`` ``GROUP BY``.
+
+    The helper is a thin specialisation of
+    :func:`inject_model_business_rules` — the mutation surface is
+    identical (``config.meta.signalforge.business_rules`` +
+    ``meta.signalforge.business_rules`` in lockstep), but exists as a
+    distinct name so the anomaly e2e reads self-documentingly at the
+    call site (mirrors the #169 ``inject_model_business_rules`` /
+    ``inject_model_anomaly_rules`` distinction in spirit — same on-disk
+    bytes, different intent).
+
+    Args:
+        project_dir: a copied project root (use
+            :func:`copy_fixture_to_tmp` first — NEVER call against a
+            committed fixture).
+        model_unique_id: the dbt ``unique_id`` of the model node to
+            patch (e.g. ``"model.signalforge_test_austin.stg_bikeshare_trips"``).
+        rules: the natural-language anomaly rules to inject. Each is a
+            prose business rule that should steer the drafter toward
+            proposing one or more structured
+            :class:`CandidateTestRowCountAnomalyByPeriod` candidates
+            against the named date column (mention the date column +
+            the per-period baseline explicitly so the drafter doesn't
+            fall back to ``custom_sql``).
+
+    Raises:
+        KeyError: if ``model_unique_id`` is not present in the
+            manifest's ``nodes`` map (a typo in the unique_id surfaces
+            loud rather than silently injecting nothing).
+    """
+    inject_model_business_rules(project_dir, model_unique_id, rules)
+
+
 def apply_provider_override(
     project_dir: Path,
     *,
     grade_provider: str | None = None,
     grade_model: str | None = None,
     grade_max_output_tokens: int | None = None,
+    grade_max_concurrent_calls: int | None = None,
 ) -> None:
     """Overlay ``grade:`` block provider config onto an existing ``signalforge.yml``.
 
-    Issue #155 / US-004 / DEC-012. The multi-provider e2e smokes
-    (BigQuery+Anthropic baseline, +OpenAI, +Gemini) share the committed
-    Austin fixture and swap only the grader's provider/model. This helper
-    is the canonical seam: read the per-run ``signalforge.yml``, set the
-    three ``grade:`` knobs whose argument is non-``None``, write back.
+    Issue #155 / US-004 / DEC-012 (initial provider/model/tokens shape).
+    Issue #186 / US-012 / DEC-020 added the
+    ``grade_max_concurrent_calls`` kwarg for the async per-provider live
+    smokes (additive — ``None`` default preserves byte-equality with
+    every existing caller).
+
+    The multi-provider e2e smokes (BigQuery+Anthropic baseline, +OpenAI,
+    +Gemini) share the committed Austin fixture and swap only the
+    grader's provider/model. This helper is the canonical seam: read the
+    per-run ``signalforge.yml``, set the ``grade:`` knobs whose argument
+    is non-``None``, write back.
 
     Non-destructive — unset knobs (default ``None``) are left untouched, so
     existing thresholds (``min_pass_rate``, ``min_mean_score``,
@@ -222,6 +287,12 @@ def apply_provider_override(
         grade_max_output_tokens: optional override for
             ``grade.max_output_tokens`` (e.g. ``2048`` for Gemini to
             avoid mid-response truncation per #155).
+        grade_max_concurrent_calls: optional override for
+            ``grade.max_concurrent_calls`` (issue #186 / DEC-020;
+            small values like ``3`` exercise the concurrent dispatch
+            path against a real provider while keeping live-call cost
+            bounded). ``1`` reproduces the v0.1 sequential ordering
+            bit-for-bit (semaphore serialises in dispatch order).
 
     Raises:
         FileNotFoundError: if ``<project_dir>/signalforge.yml`` is
@@ -237,4 +308,6 @@ def apply_provider_override(
         grade_block["model"] = grade_model
     if grade_max_output_tokens is not None:
         grade_block["max_output_tokens"] = grade_max_output_tokens
+    if grade_max_concurrent_calls is not None:
+        grade_block["max_concurrent_calls"] = grade_max_concurrent_calls
     config_path.write_text(yaml.safe_dump(data, sort_keys=False))

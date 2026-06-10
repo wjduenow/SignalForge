@@ -38,7 +38,10 @@ from signalforge.draft.models import (
     CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
+    CandidateTestRowCountAnomalyByPeriod,
+    CandidateTestRowCountBetween,
     CandidateTestUnique,
+    CandidateTestUniqueCombination,
 )
 from signalforge.grade.engine import (
     _artifact_id_for as _grade_artifact_id_for,
@@ -335,6 +338,312 @@ def test_custom_sql_cross_stage_parity() -> None:
     assert artifact_id_for(scope="model", test=cs_model) == (
         _grade_artifact_id_for(scope="model", test=cs_model)
     )
+
+
+# ---------------------------------------------------------------------------
+# row_count_between variant (US-006 of #169) — args-hash domain
+# ---------------------------------------------------------------------------
+
+
+def test_row_count_between_identical_args_same_hash() -> None:
+    """Two ``row_count_between`` tests with identical ``(minimum, maximum,
+    where)`` triples hash identically (deterministic collision)."""
+    rcb1 = CandidateTestRowCountBetween(minimum=100, maximum=1000, where="status = 'active'")
+    rcb2 = CandidateTestRowCountBetween(minimum=100, maximum=1000, where="status = 'active'")
+    assert _model_test_args_hash(rcb1) == _model_test_args_hash(rcb2)
+
+
+def test_row_count_between_distinct_minimum_distinct_hash() -> None:
+    """Differing ``minimum`` rotates the hash."""
+    rcb1 = CandidateTestRowCountBetween(minimum=100, maximum=1000)
+    rcb2 = CandidateTestRowCountBetween(minimum=200, maximum=1000)
+    h1 = _model_test_args_hash(rcb1)
+    h2 = _model_test_args_hash(rcb2)
+    assert h1 != h2
+    assert len(h1) == 8
+    assert all(c in "0123456789abcdef" for c in h1)
+
+
+def test_row_count_between_distinct_where_distinct_hash() -> None:
+    """Differing ``where`` (``None`` vs a non-empty clause) rotates the hash.
+
+    Without ``where`` in the hash domain, two row_count_between tests with
+    identical bounds but different ``where`` clauses would silently collide
+    on the artifact_id join.
+    """
+    rcb_no_where = CandidateTestRowCountBetween(minimum=100, maximum=1000)
+    rcb_with_where = CandidateTestRowCountBetween(minimum=100, maximum=1000, where="x > 1")
+    assert _model_test_args_hash(rcb_no_where) != _model_test_args_hash(rcb_with_where)
+
+
+# ---------------------------------------------------------------------------
+# unique_combination variant (US-006 of #170) — args-hash domain
+# ---------------------------------------------------------------------------
+
+
+def test_unique_combination_columns_sorted_before_hashing() -> None:
+    """**Load-bearing DEC-011 pin.** Two ``unique_combination`` tests with
+    the SAME columns in different order hash identically — ``columns`` is
+    SORTED before canonical JSON serialisation.
+
+    Rationale: ``(a, b)`` and ``(b, a)`` describe the same GROUP BY
+    result-row identity (composite uniqueness is order-invariant); a
+    single artifact_id → single warehouse call → stable cache reuse.
+    Mirrors the ``accepted_values.values`` sort precedent in the same
+    module.
+    """
+    uc_ab = CandidateTestUniqueCombination(columns=("a", "b"))
+    uc_ba = CandidateTestUniqueCombination(columns=("b", "a"))
+    assert _model_test_args_hash(uc_ab) == _model_test_args_hash(uc_ba)
+
+
+def test_unique_combination_three_columns_permutation_same_hash() -> None:
+    """The sort invariant generalises beyond two columns — any permutation
+    of the same set hashes identically."""
+    uc1 = CandidateTestUniqueCombination(columns=("a", "b", "c"))
+    uc2 = CandidateTestUniqueCombination(columns=("c", "a", "b"))
+    uc3 = CandidateTestUniqueCombination(columns=("b", "c", "a"))
+    h1 = _model_test_args_hash(uc1)
+    h2 = _model_test_args_hash(uc2)
+    h3 = _model_test_args_hash(uc3)
+    assert h1 == h2 == h3
+
+
+def test_unique_combination_distinct_columns_distinct_hash() -> None:
+    """Different column sets rotate the hash. ``(a, b)`` and ``(a, b, c)``
+    describe different uniqueness constraints; they must NOT collide on
+    the artifact_id join."""
+    uc1 = CandidateTestUniqueCombination(columns=("a", "b"))
+    uc2 = CandidateTestUniqueCombination(columns=("a", "b", "c"))
+    h1 = _model_test_args_hash(uc1)
+    h2 = _model_test_args_hash(uc2)
+    assert h1 != h2
+    assert len(h1) == 8
+    assert all(c in "0123456789abcdef" for c in h1)
+
+
+def test_unique_combination_distinct_where_distinct_hash() -> None:
+    """Differing ``where`` (``None`` vs a non-empty clause) rotates the
+    hash. Same columns under different filters describe different
+    constraints; collision would silently lose signal in the join."""
+    uc_no_where = CandidateTestUniqueCombination(columns=("a", "b"))
+    uc_with_where = CandidateTestUniqueCombination(columns=("a", "b"), where="x > 1")
+    assert _model_test_args_hash(uc_no_where) != _model_test_args_hash(uc_with_where)
+
+
+def test_unique_combination_collision_distinct_columns_get_distinct_suffixes() -> None:
+    """Two model-level ``unique_combination`` tests with different
+    ``columns`` collide on ``test.type`` and get distinct 8-hex
+    ``_model_test_args_hash`` suffixes via :func:`compute_args_hashes`.
+
+    Without disambiguation, both would render as
+    ``test.model.unique_combination`` and the
+    ``(run_id, artifact_id, criterion_id)`` triple would collide in the
+    diff-side join.
+    """
+    uc1 = CandidateTestUniqueCombination(columns=("a", "b"))
+    uc2 = CandidateTestUniqueCombination(columns=("c", "d"))
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(CandidateColumn(name="a", description="x"),),
+        tests=(uc1, uc2),
+    )
+    hashes = compute_args_hashes(candidate)
+    h1 = hashes[id(uc1)]
+    h2 = hashes[id(uc2)]
+    assert h1 is not None
+    assert h2 is not None
+    assert h1 != h2
+    assert len(h1) == 8
+    assert len(h2) == 8
+    assert all(c in "0123456789abcdef" for c in h1)
+    assert all(c in "0123456789abcdef" for c in h2)
+
+    aid1 = artifact_id_for(scope="model", test=uc1, args_hash=h1)
+    aid2 = artifact_id_for(scope="model", test=uc2, args_hash=h2)
+    assert aid1 != aid2
+    assert aid1.startswith("test.model.unique_combination.")
+    assert aid2.startswith("test.model.unique_combination.")
+
+
+def test_unique_combination_exact_duplicate_gets_ordinal_suffix() -> None:
+    """Two ``unique_combination`` tests with identical ``columns`` + ``where``
+    produce the same base blake2b-4 hash; the second occurrence gets a
+    ``:1`` ordinal suffix via :func:`compute_args_hashes` so artifact_ids
+    stay globally unique even when a candidate carries semantically
+    identical tests."""
+    uc1 = CandidateTestUniqueCombination(columns=("a", "b"))
+    uc2 = CandidateTestUniqueCombination(columns=("a", "b"))
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(CandidateColumn(name="a", description="x"),),
+        tests=(uc1, uc2),
+    )
+    hashes = compute_args_hashes(candidate)
+    h1 = hashes[id(uc1)]
+    h2 = hashes[id(uc2)]
+    assert h1 is not None
+    assert h2 is not None
+    assert ":" not in h1
+    assert h2 == f"{h1}:1"
+
+
+def test_unique_combination_cross_stage_parity() -> None:
+    """The grade engine's hash + formatter agree byte-for-byte on the
+    ``unique_combination`` variant (defence-in-depth alongside the
+    function-identity test, which guarantees parity by construction
+    after issue #42)."""
+    uc = CandidateTestUniqueCombination(columns=("a", "b"))
+    assert _model_test_args_hash(uc) == _grade_model_test_args_hash(uc)
+    assert artifact_id_for(scope="model", test=uc) == (
+        _grade_artifact_id_for(scope="model", test=uc)
+    )
+
+
+# ---------------------------------------------------------------------------
+# row_count_anomaly_by_period variant (US-004 of #171) — args-hash domain
+# ---------------------------------------------------------------------------
+
+
+def _make_anomaly_test(**overrides: object) -> CandidateTestRowCountAnomalyByPeriod:
+    """Build a minimal valid anomaly test with sensible defaults; let
+    callers override one field at a time to pin each identifying-arg
+    rotation."""
+    base: dict[str, object] = {"date_column": "ordered_at"}
+    base.update(overrides)
+    return CandidateTestRowCountAnomalyByPeriod(**base)  # type: ignore[arg-type]
+
+
+def test_row_count_anomaly_identical_args_same_hash() -> None:
+    """Two anomaly tests with identical identifying args hash identically
+    (deterministic collision). Regression — guards against a spurious
+    hash input (e.g. ``rationale``) silently rotating the hash."""
+    a1 = _make_anomaly_test()
+    a2 = _make_anomaly_test()
+    assert _model_test_args_hash(a1) == _model_test_args_hash(a2)
+
+
+def test_row_count_anomaly_distinct_method_distinct_hash() -> None:
+    """Differing ``method`` rotates the hash. Two anomaly tests on the
+    same model differing only by ``method`` get distinct artifact_ids."""
+    a1 = _make_anomaly_test(method="mad")
+    a2 = _make_anomaly_test(method="zscore")
+    h1 = _model_test_args_hash(a1)
+    h2 = _model_test_args_hash(a2)
+    assert h1 != h2
+    assert len(h1) == 8
+    assert all(c in "0123456789abcdef" for c in h1)
+
+
+def test_row_count_anomaly_distinct_seasonality_distinct_hash() -> None:
+    """Differing ``seasonality`` rotates the hash."""
+    a1 = _make_anomaly_test(seasonality="none")
+    a2 = _make_anomaly_test(seasonality="dow")
+    assert _model_test_args_hash(a1) != _model_test_args_hash(a2)
+
+
+def test_row_count_anomaly_distinct_period_distinct_hash() -> None:
+    """Differing ``period`` rotates the hash."""
+    a1 = _make_anomaly_test(period="day")
+    a2 = _make_anomaly_test(period="hour")
+    assert _model_test_args_hash(a1) != _model_test_args_hash(a2)
+
+
+def test_row_count_anomaly_distinct_lookback_periods_distinct_hash() -> None:
+    """Differing ``lookback_periods`` rotates the hash."""
+    a1 = _make_anomaly_test(lookback_periods=28)
+    a2 = _make_anomaly_test(lookback_periods=14)
+    assert _model_test_args_hash(a1) != _model_test_args_hash(a2)
+
+
+def test_row_count_anomaly_distinct_threshold_distinct_hash() -> None:
+    """Differing ``threshold`` rotates the hash."""
+    a1 = _make_anomaly_test(threshold=3.0)
+    a2 = _make_anomaly_test(threshold=2.5)
+    assert _model_test_args_hash(a1) != _model_test_args_hash(a2)
+
+
+def test_row_count_anomaly_distinct_min_samples_per_bucket_distinct_hash() -> None:
+    """Differing ``min_samples_per_bucket`` rotates the hash."""
+    a1 = _make_anomaly_test(min_samples_per_bucket=3)
+    a2 = _make_anomaly_test(min_samples_per_bucket=5)
+    assert _model_test_args_hash(a1) != _model_test_args_hash(a2)
+
+
+def test_row_count_anomaly_distinct_date_column_distinct_hash() -> None:
+    """Differing ``date_column`` rotates the hash."""
+    a1 = _make_anomaly_test(date_column="ordered_at")
+    a2 = _make_anomaly_test(date_column="created_at")
+    assert _model_test_args_hash(a1) != _model_test_args_hash(a2)
+
+
+def test_row_count_anomaly_distinct_where_distinct_hash() -> None:
+    """Differing ``where`` (``None`` vs a non-empty clause) rotates the
+    hash. Without ``where`` in the hash domain, two anomaly tests with
+    identical recipe parameters but different ``where`` clauses would
+    silently collide on the artifact_id join."""
+    a_no_where = _make_anomaly_test()
+    a_with_where = _make_anomaly_test(where="status = 'active'")
+    assert _model_test_args_hash(a_no_where) != _model_test_args_hash(a_with_where)
+
+
+def test_row_count_anomaly_rationale_not_in_hash() -> None:
+    """``rationale`` is drafter-emitted prose, NOT an identifying arg.
+    Two anomaly tests differing ONLY by ``rationale`` hash identically;
+    they describe the same constraint. Mirrors the precedent on every
+    other variant — :class:`CandidateTestCustomSQL`,
+    :class:`CandidateTestRowCountBetween`, etc. — where ``rationale``
+    is excluded from the hash domain."""
+    a1 = _make_anomaly_test(rationale="day-over-day load monitoring")
+    a2 = _make_anomaly_test(rationale="catches incremental refresh failures")
+    assert _model_test_args_hash(a1) == _model_test_args_hash(a2)
+
+
+def test_row_count_anomaly_collision_distinct_methods_get_distinct_suffixes() -> None:
+    """Two model-level anomaly tests with different ``method`` collide on
+    ``test.type`` and get distinct 8-hex ``_model_test_args_hash``
+    suffixes via :func:`compute_args_hashes`.
+
+    Without disambiguation, both would render as
+    ``test.model.row_count_anomaly_by_period`` and the
+    ``(run_id, artifact_id, criterion_id)`` triple would collide in the
+    diff-side join.
+    """
+    a1 = _make_anomaly_test(method="mad")
+    a2 = _make_anomaly_test(method="zscore")
+    candidate = CandidateSchema(
+        name="m",
+        description="d",
+        columns=(CandidateColumn(name="ordered_at", description="x"),),
+        tests=(a1, a2),
+    )
+    hashes = compute_args_hashes(candidate)
+    h1 = hashes[id(a1)]
+    h2 = hashes[id(a2)]
+    assert h1 is not None
+    assert h2 is not None
+    assert h1 != h2
+    assert len(h1) == 8
+    assert len(h2) == 8
+    assert all(c in "0123456789abcdef" for c in h1)
+    assert all(c in "0123456789abcdef" for c in h2)
+
+    aid1 = artifact_id_for(scope="model", test=a1, args_hash=h1)
+    aid2 = artifact_id_for(scope="model", test=a2, args_hash=h2)
+    assert aid1 != aid2
+    assert aid1.startswith("test.model.row_count_anomaly_by_period.")
+    assert aid2.startswith("test.model.row_count_anomaly_by_period.")
+
+
+def test_row_count_anomaly_cross_stage_parity() -> None:
+    """The grade engine's hash + formatter agree byte-for-byte on the
+    ``row_count_anomaly_by_period`` variant (defence-in-depth alongside
+    the function-identity test)."""
+    a = _make_anomaly_test()
+    assert _model_test_args_hash(a) == _grade_model_test_args_hash(a)
+    assert artifact_id_for(scope="model", test=a) == (_grade_artifact_id_for(scope="model", test=a))
 
 
 # ---------------------------------------------------------------------------

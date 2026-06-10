@@ -49,6 +49,7 @@ import argparse
 import collections
 import os
 import time
+from datetime import date
 from pathlib import Path
 
 from signalforge import diff as diff_module
@@ -97,6 +98,11 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
     * ``--scope {sample,full}`` — overrides ``PruneConfig.scope``.
     * ``--sample-strategy {oneshot,materialised}`` — overrides
       ``PruneConfig.sample_strategy``.
+    * ``--as-of YYYY-MM-DD`` (US-013 of #171 / DEC-001) — evaluation
+      date for time-bound anomaly tests; threaded as the
+      :func:`prune_tests` ``as_of`` kwarg. Default ``None`` resolves
+      to ``date.today()`` at prune time. ``type=date.fromisoformat`` —
+      bad format → argparse usage error (exit 2).
     * ``--format {ansi,markdown,json}`` (default ``ansi``) — selects the
       diff renderer.
     * ``--dry-run`` — suppresses the sidecar; there is **no** ``--write``
@@ -206,6 +212,25 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "Precedence: flag > prune.sample_strategy in signalforge.yml "
             "> library default ('materialised'). Applied via "
             "PruneConfig.model_validate so validators re-run."
+        ),
+    )
+    # US-013 of #171 / DEC-001 — time-bound anomaly-test reference date.
+    # ``type=date.fromisoformat`` accepts strict ISO ``YYYY-MM-DD`` only;
+    # a bad format raises ``ValueError`` which argparse converts to its
+    # usage error → ``SystemExit(2)`` (tier 2, input-validation).
+    # Default ``None`` lets :func:`signalforge.prune.prune_tests` resolve
+    # to ``date.today()`` at prune time and stamp the resolved value on
+    # every ``PruneEvent.as_of`` audit record (DEC-001).
+    parser.add_argument(
+        "--as-of",
+        dest="as_of",
+        type=date.fromisoformat,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "Evaluation date (YYYY-MM-DD) for time-bound anomaly tests. "
+            "When omitted, resolves to today at prune time. See "
+            "#171 DEC-001."
         ),
     )
     parser.add_argument(
@@ -507,7 +532,10 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
     9. Build the warehouse adapter via :func:`_make_warehouse_adapter`
        (DEC-009); ``prune_tests`` owns the ``with adapter:`` block, so the
        adapter is passed un-entered.
-    10. ``prune_tests(model, adapter, result.candidate, manifest, ...)``.
+    10. ``prune_tests(model, adapter, result.candidate, manifest,
+        as_of=args.as_of, ...)`` — ``--as-of`` (US-013 of #171 /
+        DEC-001) threads through; ``None`` lets the engine resolve to
+        ``date.today()`` at prune time.
     11. Read the ``--schema`` text (UTF-8) for ``existing_schema``
         (DEC-004).
     12. Load + override :class:`DiffConfig` (``--format`` via
@@ -621,6 +649,11 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
                 total=_TOTAL_STAGES,
             )
         _t0 = time.monotonic()
+        # US-013 of #171 / DEC-001 — ``--as-of`` threads through to the
+        # engine; ``None`` lets ``prune_tests`` resolve to ``date.today()``
+        # at prune time. The resolved value is stamped on every
+        # ``PruneEvent.as_of`` audit record for after-the-fact
+        # reproducibility.
         prune_result = prune_module.prune_tests(
             model,
             adapter,
@@ -628,6 +661,7 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
             manifest,
             config=prune_config,
             project_dir=project_dir,
+            as_of=getattr(args, "as_of", None),
         )
         if progress_on:
             emit_progress_done(2, "prune", time.monotonic() - _t0, total=_TOTAL_STAGES)

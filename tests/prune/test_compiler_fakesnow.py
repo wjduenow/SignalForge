@@ -296,6 +296,9 @@ def test_relationships_all_matched_returns_zero() -> None:
 _SNOWFLAKE_FIXTURES_DIR = (
     Path(__file__).parent.parent / "fixtures" / "prune" / "compiled_sql" / "snowflake"
 )
+_ANOMALY_SF_FIXTURES_DIR = (
+    Path(__file__).parent.parent / "fixtures" / "prune" / "compiled_sql" / "anomaly" / "snowflake"
+)
 
 _ALL_SNOWFLAKE_FIXTURES = [
     "not_null.sql",
@@ -309,6 +312,27 @@ _ALL_SNOWFLAKE_FIXTURES = [
     "custom_sql.sql",
     "custom_sql_sample.sql",
     "custom_sql_fullscan.sql",
+    # #170 US-005a — unique_combination snapshots. The sqlglot Snowflake-
+    # dialect parse-guard is the load-bearing certification for these
+    # fixtures (mirrors the #121 lesson: snapshot equality certifies
+    # shape, not validity — a parser/executor in the loop is what
+    # catches reserved-keyword / quoting regressions).
+    "unique_combination_pair.sql",
+    "unique_combination_with_where.sql",
+    "unique_combination_three_columns.sql",
+]
+
+# #171 US-008 — row_count_anomaly_by_period snapshots. Each (method,
+# seasonality) shape ships TWO fixtures (stats + violation) under
+# ``anomaly/snowflake/`` — 4 methods × 2 seasonality × 2 query types = 16
+# fixtures. The Snowflake parse-guard is the same load-bearing surface as
+# for the other Snowflake fixtures: snapshot equality certifies shape,
+# parser-in-the-loop certifies validity.
+_ANOMALY_SNOWFLAKE_FIXTURES = [
+    f"{method}_{seasonality}_{query}.sql"
+    for method in ("mad", "zscore", "percentile", "min_max")
+    for seasonality in ("none", "dow")
+    for query in ("stats", "violation")
 ]
 
 
@@ -325,5 +349,27 @@ def test_every_snowflake_fixture_parses_under_snowflake_dialect(fixture_name: st
 
     sql = (_SNOWFLAKE_FIXTURES_DIR / fixture_name).read_text(encoding="utf-8")
     # Raises sqlglot.errors.ParseError on invalid Snowflake syntax.
+    parsed = sqlglot.parse_one(sql, dialect="snowflake")
+    assert parsed is not None
+
+
+@pytest.mark.parametrize("fixture_name", _ANOMALY_SNOWFLAKE_FIXTURES)
+def test_every_anomaly_snowflake_fixture_parses_under_snowflake_dialect(
+    fixture_name: str,
+) -> None:
+    """#171 US-008 — every row-count-anomaly Snowflake fixture (stats + violation,
+    all 4 methods × 2 seasonality = 16 fixtures total) must parse under
+    sqlglot's Snowflake dialect.
+
+    The compiler emits ``DATE_TRUNC('DAY', col)`` (Snowflake arg-order),
+    ``'…'::DATE`` cast literals, ``INTERVAL '28 DAY'`` quoted-payload form,
+    ``EXTRACT(DOW FROM …)`` part-name, and ``PERCENTILE_CONT(p) WITHIN GROUP
+    (ORDER BY expr)`` standard aggregate form — all read from
+    :class:`Dialect` (DEC-011), never hard-coded. A parse failure here
+    means a template field is mis-shaped for the Snowflake dialect.
+    """
+    import sqlglot
+
+    sql = (_ANOMALY_SF_FIXTURES_DIR / fixture_name).read_text(encoding="utf-8")
     parsed = sqlglot.parse_one(sql, dialect="snowflake")
     assert parsed is not None

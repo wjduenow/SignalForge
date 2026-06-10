@@ -249,6 +249,32 @@ class UnknownProviderError(LLMError):
         super().__init__(message, remediation=remediation)
 
 
+class LLMProviderAsyncUnsupportedError(LLMError):
+    """The configured LLM provider does not support async dispatch, which is
+    required by the grade engine since #186.
+
+    Raised by :func:`signalforge.grade.engine.grade_artifacts` at orchestrator
+    entry — **before** ``asyncio.run`` — when
+    :attr:`signalforge.llm.providers.LLMProvider.supports_async` is ``False``
+    on the active provider (issue #186, US-002 / DEC-006; tightened by QG
+    Pass 1 Concern #2). ``max_concurrent_calls=1`` is **not** an escape hatch:
+    the engine consumes ``call_llm_async`` exclusively post-#186, so a
+    sync-only provider would degrade every pair to ``GradeLLMError`` silently
+    — failing loud at orchestrator entry is the correct posture.
+
+    The CLI maps this to tier 3 (external-dep / runtime resource) because the
+    provider's capability gap is an environment / configuration fact the
+    operator must resolve (pick another provider — or wait for v0.4 where a
+    sync-fallback path may land). Mirrors the project's ``extra="forbid"``
+    fail-loud posture.
+    """
+
+    default_remediation: ClassVar[str] = (
+        "Pick an async-capable provider for grading "
+        "(Anthropic / OpenAI / Gemini all support async)."
+    )
+
+
 class LLMCacheTooLargeError(LLMError):
     """Pre-send token-count check (DEC-024) reported the cached block is
     above the SignalForge cap (DEC-009 — 8000 input tokens).
@@ -291,6 +317,7 @@ __all__ = [
     "LLMConnectionError",
     "LLMError",
     "LLMHelperError",
+    "LLMProviderAsyncUnsupportedError",
     "LLMRateLimitError",
     "LLMResponseFormatError",
     "LLMServerError",

@@ -1,0 +1,17 @@
+{
+  "cache_schema_version": 1,
+  "artifact_id": "column.email.description",
+  "criterion_id": "clarity",
+  "score": 0.8,
+  "passed": true,
+  "evidence": "The description states 'Email address of the customer at the time of order'.",
+  "reasoning": "The description is clear and specific about which email is captured.",
+  "criterion_prompt_hash": "1111222233334444",
+  "artifact_text_hash": "aaaabbbbccccdddd",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "prompt_version_template": "fedcba9876543210",
+  "response_text_hash": "5555666677778888",
+  "rubric_hash": "0123456789abcdef",
+  "original_timestamp": "2026-05-01T17:42:13.123456Z"
+}

@@ -78,11 +78,18 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import date
 from pathlib import Path
 
 from signalforge import __version__ as _SIGNALFORGE_VERSION
 from signalforge._common.path_safety import PathContainmentError, canonicalise_path
-from signalforge.draft.models import CandidateSchema, CandidateTest
+from signalforge.draft.models import (
+    CandidateSchema,
+    CandidateTest,
+    CandidateTestRowCountAnomalyByPeriod,
+    CandidateTestRowCountBetween,
+    CandidateTestUniqueCombination,
+)
 from signalforge.manifest.models import Manifest, Model
 from signalforge.prune.audit import (
     _build_prune_event,
@@ -103,9 +110,20 @@ from signalforge.prune.errors import (
     PruneTrustedModelNotFoundError,
 )
 from signalforge.prune.models import PruneDecision, PruneResult, Scope
+from signalforge.prune.stats import (
+    AnomalyTestStats,
+    MadDowStats,
+    MadStats,
+    MinMaxDowStats,
+    MinMaxStats,
+    PercentileDowStats,
+    PercentileStats,
+    ZscoreDowStats,
+    ZscoreStats,
+)
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import WarehouseError
-from signalforge.warehouse.models import TableRef, TestResult
+from signalforge.warehouse.models import Dialect, TableRef, TestResult
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -175,6 +193,61 @@ def _why_kept_without_evidence_budget(budget_seconds: int) -> str:
     return f"Total prune budget ({budget_seconds}s) exceeded before evaluation."
 
 
+def _why_kept_without_evidence_cold_start(n_periods: int, min_required: int) -> str:
+    """``why`` text for the anomaly cold-start path (#171 US-011 / DEC-005).
+
+    Format mirrors the other ``kept-without-evidence`` why-text helpers: a
+    short prose sentence the diff renderer surfaces verbatim. The structured
+    payload (``n_periods`` / ``min_required``) appears literally in the text
+    so a reviewer reading ``prune.jsonl`` can correlate without consulting
+    the ``stats`` field.
+    """
+    return f"insufficient history for anomaly evaluation: {n_periods}/{min_required} periods"
+
+
+def _decide_anomaly_cold_start(
+    *,
+    test: CandidateTest,
+    test_anchor: str,
+    stats: AnomalyTestStats,
+    min_required: int,
+    compiled_sql: str,
+    compiled_sql_hash: str,
+    elapsed_ms: int,
+    scope: Scope,
+    as_of: date | None,
+) -> PruneDecision:
+    """Build a :class:`PruneDecision` for an anomaly test whose stats
+    query returned fewer than ``min_samples_per_bucket`` periods (#171
+    US-011 / DEC-005).
+
+    Routed to ``kept-without-evidence`` (decision="kept") per the
+    conservative-bias contract — the test references real columns and is
+    well-formed, but the lookback window has not accumulated enough
+    history to derive a meaningful band. Carries the parsed
+    :class:`AnomalyTestStats` on the decision (and through to the
+    audit-of-record :class:`PruneEvent`) so a reviewer / downstream
+    grader can see the partial state. The compiled stats SQL is preserved
+    on the decision for provenance; the violation SQL was never issued.
+    """
+    return PruneDecision(
+        test_anchor=test_anchor,
+        test=test,
+        decision="kept",
+        reason="kept-without-evidence",
+        failures=0,
+        sampled_rows=None,
+        scope=scope,
+        elapsed_ms=elapsed_ms,
+        compiled_sql_hash=compiled_sql_hash,
+        compiled_sql=compiled_sql,
+        why=_why_kept_without_evidence_cold_start(stats.n_periods, min_required),
+        sample_failures=None,
+        stats=stats,
+        as_of=as_of,
+    )
+
+
 def _why_materialisation_failed(exc: WarehouseError) -> str:
     """DEC-005 of issue #22 — ``why`` field shape on the materialisation
     failure path.
@@ -233,6 +306,191 @@ def _why_prune_disabled() -> str:
     return "prune disabled in signalforge.yml"
 
 
+def _normalize_dow_to_posix(raw_dow: int, dialect: Dialect) -> int:
+    """Normalise a dialect-emitted DOW integer to the POSIX convention used
+    by Python's ``date.weekday()`` (Monday=0, …, Sunday=6).
+
+    Dialects emit different conventions: BigQuery's ``EXTRACT(DAYOFWEEK FROM
+    d)`` returns ``1..7`` with Sunday=1; Snowflake's ``EXTRACT(DOW FROM d)``
+    returns ``0..6`` with Sunday=0 (depending on session ``WEEK_START``;
+    SignalForge assumes the default Sunday-anchored convention). The
+    ``per_dow`` mapping on :class:`AnomalyTestStats` is documented as POSIX
+    so consumers can `dict.get(date.weekday())` directly — without this
+    normalisation step the key space differs across dialects (#171 CodeRabbit
+    finding #10).
+
+    Recipe: ``(raw_dow - dialect.dow_sunday_index - 1) % 7``. Verifies on
+    both dialects:
+
+    * BQ (sunday_index=1): raw=1 (Sun) → ``(1 - 1 - 1) % 7 = 6`` ✓;
+      raw=2 (Mon) → ``0`` ✓.
+    * Snowflake (sunday_index=0): raw=0 (Sun) → ``(0 - 0 - 1) % 7 = 6`` ✓;
+      raw=1 (Mon) → ``0`` ✓.
+    """
+    return (raw_dow - dialect.dow_sunday_index - 1) % 7
+
+
+def _parse_anomaly_stats(
+    rows: tuple[dict[str, object], ...],
+    test: CandidateTestRowCountAnomalyByPeriod,
+    dialect: Dialect,
+) -> AnomalyTestStats:
+    """Parse the raw rows returned by ``adapter.run_stats_query`` into the
+    typed :class:`AnomalyTestStats` discriminated-union member for
+    ``test.method`` (#171 US-011 / DEC-005).
+
+    Result shapes (one row per dialect call when ``seasonality="none"``;
+    one row per observed DOW when ``seasonality="dow"``):
+
+    * ``method="mad"``     → ``{median, mad, n}`` (plus ``dow`` when seasonal)
+    * ``method="zscore"``  → ``{mean, stddev, n}`` (plus ``dow`` when seasonal)
+    * ``method="percentile"`` → ``{p_lo, p_hi, n}`` (plus ``dow`` when seasonal)
+    * ``method="min_max"`` → ``{min_cnt, max_cnt, n}`` (plus ``dow`` when seasonal)
+
+    The column names are dictated by the compiler's SELECT aliases (see
+    :mod:`signalforge.prune.compiler` § ``_compile_anomaly_stats_query``);
+    drift between the SELECT alias and the parser key here breaks the
+    round-trip at construction (``KeyError`` surfaces as
+    :class:`PruneError`).
+
+    For the seasonal shape, the parser aggregates the per-DOW rows into the
+    top-level fields by selecting the row with the most periods as the
+    "representative" baseline and populating ``per_dow`` with the full
+    breakdown. The engine ultimately uses the per-DOW breakdown for the
+    violation comparison; the top-level fields are kept for read-back-stable
+    JSON shape (every variant carries the same headline fields regardless
+    of seasonality).
+
+    An empty ``rows`` tuple — possible when the history window is empty —
+    routes through with ``n_periods=0`` to the cold-start path.
+    """
+    method = test.method
+    seasonal = test.seasonality == "dow"
+
+    def _float(row: dict[str, object], key: str) -> float:
+        return float(row[key])  # type: ignore[arg-type]
+
+    def _int(row: dict[str, object], key: str) -> int:
+        return int(row[key])  # type: ignore[arg-type]
+
+    # Empty history (no rows in the lookback window). Yield a zero-periods
+    # stats object so the cold-start gate catches it; the per-method
+    # zero-value fields don't matter (the gate triggers before any band
+    # comparison).
+    if not rows:
+        if method == "mad":
+            return MadStats(median=0.0, mad=0.0, n_periods=0, per_dow={} if seasonal else None)
+        if method == "zscore":
+            return ZscoreStats(mu=0.0, sigma=0.0, n_periods=0, per_dow={} if seasonal else None)
+        if method == "percentile":
+            return PercentileStats(
+                p_lo=0.0,
+                p_hi=0.0,
+                n_periods=0,
+                per_dow={} if seasonal else None,
+            )
+        # min_max
+        return MinMaxStats(minimum=0.0, maximum=0.0, n_periods=0, per_dow={} if seasonal else None)
+
+    if not seasonal:
+        # Single-row stats; trust the compiler's one-row contract.
+        row = rows[0]
+        if method == "mad":
+            return MadStats(
+                median=_float(row, "median"),
+                mad=_float(row, "mad"),
+                n_periods=_int(row, "n"),
+            )
+        if method == "zscore":
+            return ZscoreStats(
+                mu=_float(row, "mean"),
+                sigma=_float(row, "stddev"),
+                n_periods=_int(row, "n"),
+            )
+        if method == "percentile":
+            return PercentileStats(
+                p_lo=_float(row, "p_lo"),
+                p_hi=_float(row, "p_hi"),
+                n_periods=_int(row, "n"),
+            )
+        # min_max
+        return MinMaxStats(
+            minimum=_float(row, "min_cnt"),
+            maximum=_float(row, "max_cnt"),
+            n_periods=_int(row, "n"),
+        )
+
+    # Seasonal — one row per DOW. The engine cold-start gate (DEC-005) and
+    # the DOW-degrade gate (DEC-003) both consult ``stats.n_periods`` and
+    # the ``per_dow`` mapping respectively. Pick the largest-n row as the
+    # representative top-level baseline (a deterministic, defensible choice
+    # — the band with the most history is the most trustworthy headline).
+    if method == "mad":
+        per_dow_mad: dict[int, MadDowStats] = {
+            _normalize_dow_to_posix(_int(row, "dow"), dialect): MadDowStats(
+                median=_float(row, "median"),
+                mad=_float(row, "mad"),
+                n_periods=_int(row, "n"),
+            )
+            for row in rows
+        }
+        rep_mad = max(per_dow_mad.values(), key=lambda s: s.n_periods)
+        return MadStats(
+            median=rep_mad.median,
+            mad=rep_mad.mad,
+            n_periods=sum(s.n_periods for s in per_dow_mad.values()),
+            per_dow=per_dow_mad,
+        )
+    if method == "zscore":
+        per_dow_z: dict[int, ZscoreDowStats] = {
+            _normalize_dow_to_posix(_int(row, "dow"), dialect): ZscoreDowStats(
+                mu=_float(row, "mean"),
+                sigma=_float(row, "stddev"),
+                n_periods=_int(row, "n"),
+            )
+            for row in rows
+        }
+        rep_z = max(per_dow_z.values(), key=lambda s: s.n_periods)
+        return ZscoreStats(
+            mu=rep_z.mu,
+            sigma=rep_z.sigma,
+            n_periods=sum(s.n_periods for s in per_dow_z.values()),
+            per_dow=per_dow_z,
+        )
+    if method == "percentile":
+        per_dow_p: dict[int, PercentileDowStats] = {
+            _normalize_dow_to_posix(_int(row, "dow"), dialect): PercentileDowStats(
+                p_lo=_float(row, "p_lo"),
+                p_hi=_float(row, "p_hi"),
+                n_periods=_int(row, "n"),
+            )
+            for row in rows
+        }
+        rep_p = max(per_dow_p.values(), key=lambda s: s.n_periods)
+        return PercentileStats(
+            p_lo=rep_p.p_lo,
+            p_hi=rep_p.p_hi,
+            n_periods=sum(s.n_periods for s in per_dow_p.values()),
+            per_dow=per_dow_p,
+        )
+    # min_max
+    per_dow_mm: dict[int, MinMaxDowStats] = {
+        _normalize_dow_to_posix(_int(row, "dow"), dialect): MinMaxDowStats(
+            minimum=_float(row, "min_cnt"),
+            maximum=_float(row, "max_cnt"),
+            n_periods=_int(row, "n"),
+        )
+        for row in rows
+    }
+    rep_mm = max(per_dow_mm.values(), key=lambda s: s.n_periods)
+    return MinMaxStats(
+        minimum=rep_mm.minimum,
+        maximum=rep_mm.maximum,
+        n_periods=sum(s.n_periods for s in per_dow_mm.values()),
+        per_dow=per_dow_mm,
+    )
+
+
 def _validate_trusted_models(config: PruneConfig, manifest: Manifest) -> None:
     """Validate every ``config.trusted_models`` entry exists in the
     manifest (DEC-008).
@@ -246,6 +504,81 @@ def _validate_trusted_models(config: PruneConfig, manifest: Manifest) -> None:
     for unique_id in config.trusted_models:
         if unique_id not in manifest.nodes:
             raise PruneTrustedModelNotFoundError(unique_id=unique_id)
+
+
+def _test_requires_source_table(
+    test: CandidateTest,
+    sample_strategy: str | None,
+) -> bool:
+    """Return ``True`` when ``test`` is a metadata-aggregate variant that
+    MUST be evaluated against the source production table (never a
+    sampled / materialised temp table) under the given sample strategy.
+
+    Per #171 DEC-009 / DEC-010 — the single source of truth for the
+    per-variant bypass routing the engine consults at BOTH the
+    ``all_bypass_to_source`` short-circuit AND the per-test
+    ``per_test_table_ref`` override. Centralises the rule so a future
+    metadata-aggregate variant lands in ONE place, and the two engine
+    sites can never drift out of lockstep.
+
+    Behaviour matrix (DEC-010):
+
+      +-----------------------------------------+-----------------+----------+-----------+
+      | Variant                                 | ``materialised``| ``oneshot``| ``None``  |
+      +-----------------------------------------+-----------------+----------+-----------+
+      | :class:`CandidateTestRowCountAnomaly`   | True            | True     | False     |
+      | :class:`CandidateTestRowCountBetween`   | True            | True     | False     |
+      | :class:`CandidateTestUniqueCombination` | True            | True     | False     |
+      | every other variant                     | False           | False    | False     |
+      +-----------------------------------------+-----------------+----------+-----------+
+
+    Rationale:
+      * **row_count_between / row_count_anomaly_by_period** —
+        ``COUNT(*)`` against a sampled table returns the sample size,
+        not the model's true row count. Any bound / anomaly check is
+        meaningless on a sampled COUNT.
+      * **unique_combination** — composite uniqueness on a bucket-mod'd
+        subset has false-negative risk; a duplicate pair may straddle
+        the sampled and unsampled rows, so a sample-mode verdict carries
+        false-negative risk.
+
+    ``sample_strategy=None`` represents "no sampling at all" (the
+    engine's prune ``scope="full"`` path, where ``compile_table_ref``
+    already resolves to the source). In that case there is no temp
+    table to bypass and the helper returns ``False`` for every variant
+    — the per-test override becomes a no-op, preserving byte-equal
+    routing on the scope=full code path.
+
+    **DEC-010 codification (behaviour change for #169 + #170 under
+    ``oneshot``).** Pre-#171, the inline ``isinstance`` checks at both
+    engine sites fired regardless of strategy — semantically correct for
+    the ``materialised`` path, structurally aligned (but never explicitly
+    pinned by a sample_strategy-gated test) for the ``oneshot`` path.
+    Centralising the rule here makes the ``oneshot`` bypass an explicit
+    contract rather than emergent behaviour; a future change to the
+    per-test override that accidentally narrowed the gate would now
+    fail loud against the unit tests of THIS helper.
+
+    Adding a future metadata-aggregate variant: extend the
+    ``isinstance(...)`` tuple here AND add a row to the matrix
+    docstring above. No other engine edit is required — both sites
+    consult the helper. The compiler-arm + ``_common.artifact_id`` +
+    diff-emitter + ingest dispatch sites still need their own arm
+    (see ``.claude/rules/business-rule-tests.md`` § "The 6 production
+    dispatch sites") — this helper covers the prune-engine arm only.
+    """
+    if sample_strategy is None:
+        # ``scope="full"`` — no sampling; ``compile_table_ref`` already
+        # resolves to source. No bypass needed.
+        return False
+    return isinstance(
+        test,
+        (
+            CandidateTestRowCountAnomalyByPeriod,
+            CandidateTestRowCountBetween,
+            CandidateTestUniqueCombination,
+        ),
+    )
 
 
 def _iter_candidate_tests(
@@ -328,6 +661,8 @@ def _decide_from_test_result(
     scope: Scope,
     is_trusted: bool,
     capture_failure_rows: int,
+    stats: AnomalyTestStats | None = None,
+    as_of: date | None = None,
 ) -> PruneDecision:
     """Route a successful :class:`TestResult` into a :class:`PruneDecision`.
 
@@ -358,6 +693,8 @@ def _decide_from_test_result(
             compiled_sql=compiled_sql,
             why=_why_always_passes(sampled_rows, scope),
             sample_failures=None,
+            stats=stats,
+            as_of=as_of,
         )
     if is_trusted:
         return PruneDecision(
@@ -373,6 +710,8 @@ def _decide_from_test_result(
             compiled_sql=compiled_sql,
             why=_why_failed_on_known_clean_data(failure_count, sampled_rows),
             sample_failures=sample_failures if capture_failure_rows > 0 else None,
+            stats=stats,
+            as_of=as_of,
         )
     return PruneDecision(
         test_anchor=test_anchor,
@@ -387,6 +726,8 @@ def _decide_from_test_result(
         compiled_sql=compiled_sql,
         why=_why_kept(failure_count, sampled_rows, scope),
         sample_failures=sample_failures if capture_failure_rows > 0 else None,
+        stats=stats,
+        as_of=as_of,
     )
 
 
@@ -464,6 +805,8 @@ def _decide_kept_without_evidence_warehouse_error(
     compiled_sql_hash: str,
     elapsed_ms: int,
     scope: Scope,
+    stats: AnomalyTestStats | None = None,
+    as_of: date | None = None,
 ) -> PruneDecision:
     """Build a :class:`PruneDecision` for a test that raised a typed
     :class:`WarehouseError` during execution.
@@ -487,6 +830,8 @@ def _decide_kept_without_evidence_warehouse_error(
         compiled_sql=compiled_sql,
         why=_why_kept_without_evidence_warehouse_error(exc),
         sample_failures=None,
+        stats=stats,
+        as_of=as_of,
     )
 
 
@@ -649,6 +994,28 @@ def _resolve_sample_bucket(
     return max(num_rows // sample_size, 1)
 
 
+def _any_dow_bucket_thin(
+    stats: AnomalyTestStats,
+    min_required: int,
+) -> bool:
+    """Return ``True`` when ``stats`` is seasonal AND at least one observed
+    DOW bucket has fewer than ``min_required`` periods (#171 DEC-003).
+
+    The DOW-degrade gate: when the stats query partitioned by day-of-week
+    but the per-DOW history is too thin for at least one weekday, the
+    engine falls back to a non-seasonal band rather than scoring against an
+    under-sampled DOW. A weekday with NO observed periods at all is
+    silently absent from the dict — that's also a thin signal, but we
+    don't synthesise a phantom 0-period entry here; the dict-presence
+    check is "any observed bucket below the floor". A fully-missing
+    weekday surfaces via the headline ``n_periods`` aggregate at the
+    cold-start gate.
+    """
+    if stats.per_dow is None:
+        return False
+    return any(b.n_periods < min_required for b in stats.per_dow.values())
+
+
 def prune_tests(
     model: Model,
     adapter: WarehouseAdapter,
@@ -658,6 +1025,7 @@ def prune_tests(
     config: PruneConfig | None = None,
     audit_path: Path | None = None,
     project_dir: Path | None = None,
+    as_of: date | None = None,
 ) -> PruneResult:
     """Drop always-pass and known-clean-fail candidate tests.
 
@@ -762,6 +1130,21 @@ def prune_tests(
             project-relative resolution so the prune audit lands in the
             right place regardless of which sub-directory the CLI
             invokes from.
+        as_of: optional reference date for the
+            :class:`CandidateTestRowCountAnomalyByPeriod` variant (#171
+            DEC-001). When ``None`` AND any candidate is an anomaly
+            variant, resolves to :meth:`datetime.date.today`; otherwise
+            uses the supplied value verbatim. A single INFO log line
+            ("anomaly: as_of resolved") fires at resolution time —
+            **only** when an anomaly candidate is present, so runs
+            without anomaly variants stay log-silent. The resolved
+            value threads into :func:`_compile_test` via a kwarg;
+            variants that do not consume ``as_of`` ignore it. The
+            two-query split, the source-table bypass helper, the
+            cold-start routing, and the
+            :class:`AnomalyTestStats` wiring all land in US-010 /
+            US-011 / US-012; US-009 (this seam) is the minimal
+            threading layer.
 
     Returns:
         A :class:`PruneResult` carrying every per-test
@@ -837,6 +1220,33 @@ def prune_tests(
     pairs = _iter_candidate_tests(candidates)
     decisions: list[PruneDecision] = []
     start_ms = _now_monotonic_ms()
+
+    # US-009 of issue #171 — ``as_of`` resolution for the
+    # ``row_count_anomaly_by_period`` variant (DEC-001). Resolve to
+    # ``date.today()`` ONLY when the caller didn't supply one AND at
+    # least one candidate is an anomaly variant — runs without anomaly
+    # candidates stay log-silent and pay zero per-call cost. The INFO
+    # line uses lazy-format JSON per the layer-wide DEC-017 logger
+    # gate; never f-string-interpolate. The resolved value threads
+    # into :func:`_compile_test` via the ``as_of`` kwarg below;
+    # variants that don't consume it (the other seven) ignore the
+    # kwarg. The two-query split / cold-start routing / source-table
+    # bypass helper land in US-010 / US-011.
+    has_anomaly_candidate = any(
+        isinstance(test, CandidateTestRowCountAnomalyByPeriod) for _, test in pairs
+    )
+    if has_anomaly_candidate:
+        if as_of is None:
+            as_of = date.today()
+        # One INFO line per resolution path (default OR caller-supplied)
+        # so the audit trail records what reference date the anomaly
+        # tests used. Fires only when an anomaly candidate is present —
+        # runs without anomaly variants stay log-silent (zero impact on
+        # the existing variants per the AC's clean-degrade contract).
+        _LOGGER.info(
+            "anomaly: as_of resolved: %s",
+            json.dumps({"as_of": as_of.isoformat(), "model_unique_id": model.unique_id}),
+        )
 
     # DEC-001/DEC-002/DEC-003/DEC-007 of issue #35 — operator-chosen
     # disable short-circuit. Fires AFTER audit-path symlink-hardening
@@ -964,7 +1374,40 @@ def prune_tests(
         sample_bucket: int | None
         compile_partition_filter = resolved_config.partition_filter
 
-        if resolved_config.sample_strategy == "materialised" and scope == "sample":
+        # CodeRabbit #176 fix (Thread PRRT_kwDOSNbUmM6F_w2h): when every
+        # candidate is a metadata-aggregate variant (``row_count_between``
+        # / ``unique_combination`` / ``row_count_anomaly_by_period``),
+        # the per-test override below routes all of them to
+        # ``source_table_ref``. Skip the ``materialise_sample`` call AND
+        # the ``_resolve_sample_bucket`` call — both are wasted work in
+        # this case, and either failing on the adapter would spuriously
+        # route every test to ``kept-without-evidence`` even though they
+        # could have run directly against the source. Mirrors the
+        # empty-candidate short-circuit (#105) at a lower-tier: same
+        # "no warehouse pre-work needed" reasoning, narrower trigger.
+        #
+        # The bypass predicate is centralised in
+        # :func:`_test_requires_source_table` (#171 DEC-009 / DEC-010) so
+        # this site and the per-test ``per_test_table_ref`` override
+        # below stay in lockstep. Under ``scope="full"`` the helper
+        # receives ``sample_strategy=None`` and returns ``False`` for
+        # every variant — the short-circuit is dormant on the full path
+        # (compile_table_ref already resolves to source), preserving the
+        # ``else`` branch's byte-equal routing.
+        bypass_strategy: str | None = resolved_config.sample_strategy if scope == "sample" else None
+        all_bypass_to_source = bool(pairs) and all(
+            _test_requires_source_table(test, bypass_strategy) for _, test in pairs
+        )
+
+        if all_bypass_to_source:
+            compile_table_ref = source_table_ref
+            # ``row_count_between``'s compiler ignores scope / sample_size
+            # / sample_bucket / partition_filter; "full" is the natural
+            # value to thread through for any decision-level audit fields.
+            compile_scope = "full"
+            sample_bucket = None
+            compile_partition_filter = None
+        elif resolved_config.sample_strategy == "materialised" and scope == "sample":
             try:
                 materialised_ref = adapter.materialise_sample(
                     source_table_ref,
@@ -1075,12 +1518,54 @@ def prune_tests(
                 decisions.append(decision)
                 continue
 
+            # Per-test table-ref override for metadata-aggregate variants
+            # (``row_count_between`` — #169 US-007a QG fix / DEC-003
+            # corrected; ``unique_combination`` — #170 US-005b / DEC-006;
+            # ``row_count_anomaly_by_period`` — #171 DEC-010). A COUNT(*)
+            # / MAX / aggregate against a sampled or materialised temp
+            # returns figures derived from the sample, NOT the model's
+            # true row count — any bound / anomaly verdict is meaningless.
+            # Composite uniqueness on a bucket-mod'd subset has
+            # false-negative risk because a duplicate pair may straddle
+            # the sampled and unsampled rows. Route every metadata-
+            # aggregate variant past the substitution to
+            # ``source_table_ref`` so the verdict is correct at the
+            # default config (``scope=sample`` +
+            # ``sample_strategy=materialised``) AND under
+            # ``sample_strategy=oneshot``. The aggregate scan against the
+            # source remains bounded by ``maximum_bytes_billed``. All
+            # other variants continue to consume the substituted
+            # ``compile_table_ref`` per the #22 materialised-sample
+            # contract.
+            #
+            # The predicate lives in :func:`_test_requires_source_table`
+            # (#171 DEC-009 / DEC-010) — single source of truth shared
+            # with the ``all_bypass_to_source`` short-circuit above. The
+            # two sites must agree at runtime; the helper guarantees
+            # they cannot drift. Under ``scope="full"`` the helper
+            # receives ``sample_strategy=None`` and returns ``False`` for
+            # every variant: the override becomes a no-op and
+            # ``per_test_table_ref = compile_table_ref = source_table_ref``
+            # (byte-equal pre-#171 routing on the full path).
+            per_test_table_ref = (
+                source_table_ref
+                if _test_requires_source_table(test, bypass_strategy)
+                else compile_table_ref
+            )
+
             # Compile the candidate test to failing-rows SQL. Returns
             # either a string (the SELECT), a ``_RequiresFutureData``
             # sentinel, or an ``_InvalidIdentifier`` sentinel.
+            #
+            # ``as_of`` threads through for the
+            # ``row_count_anomaly_by_period`` variant (#171 US-009 /
+            # DEC-001); the other seven variants ignore it. The compiler
+            # arm itself lands in US-008; at US-009 the kwarg is passed
+            # so US-008's arm consumes it without further plumbing
+            # changes when it merges.
             compile_result = _compile_test(
                 test,
-                compile_table_ref,
+                per_test_table_ref,
                 dialect,
                 manifest,
                 model=model,
@@ -1088,6 +1573,7 @@ def prune_tests(
                 sample_size=(resolved_config.sample_size if compile_scope == "sample" else None),
                 sample_bucket=sample_bucket,
                 partition_filter=compile_partition_filter,
+                as_of=as_of,
             )
             if isinstance(compile_result, _RequiresFutureData):
                 decision = _decide_requires_future_data(
@@ -1113,6 +1599,278 @@ def prune_tests(
                     sentinel=compile_result,
                     elapsed_ms=0,
                     scope=scope,
+                )
+                _write_audit_or_abort(
+                    decision,
+                    model_unique_id=model.unique_id,
+                    config_hash=config_hash,
+                    audit_path=resolved_audit_path,
+                )
+                decisions.append(decision)
+                continue
+
+            if isinstance(compile_result, tuple):
+                # #171 US-011 — ``row_count_anomaly_by_period`` compiles
+                # into ``(stats_sql, violation_sql)`` per DEC-008. Two-query
+                # split handling:
+                #
+                #   1. Run the stats query (Query 1) via
+                #      :meth:`adapter.run_stats_query`. Parse the row(s)
+                #      into the typed :class:`AnomalyTestStats` discriminated-
+                #      union member matching ``test.method``.
+                #   2. Cold-start gate (DEC-005): if
+                #      ``stats.n_periods < test.min_samples_per_bucket``,
+                #      route to ``kept-without-evidence`` with structured
+                #      ``why`` and SKIP Query 2 entirely (no warehouse
+                #      call). ``stats`` populated on decision + audit.
+                #   3. DOW degrade (DEC-003): if seasonality="dow" AND
+                #      any per-DOW bucket below the floor, recompile the
+                #      stats query WITHOUT DOW partitioning, emit ONE
+                #      WARNING, proceed with the non-seasonal stats. The
+                #      degrade fires BEFORE the cold-start gate's
+                #      reconsultation on the new stats.
+                #   4. Otherwise (Query 2): run ``violation_sql`` via the
+                #      standard :meth:`adapter.run_test_sql` path.
+                #      :class:`PruneDecision` carries ``stats`` + the
+                #      standard ``failure_count`` routing per the
+                #      decision matrix.
+                #
+                # All three routing paths populate
+                # :attr:`PruneDecision.stats` and (via
+                # ``_build_prune_event``) :attr:`PruneEvent.stats` per
+                # DEC-006 / DEC-013. The fail-closed audit invariant
+                # holds: exactly one ``PruneEvent`` per candidate, even
+                # when the stats query fails or the cold-start path skips
+                # the violation query.
+                assert isinstance(test, CandidateTestRowCountAnomalyByPeriod), (
+                    "compiler returned a tuple for a non-anomaly variant — "
+                    "the two-query split contract is anomaly-specific"
+                )
+                stats_sql, violation_sql = compile_result
+                stats_sql_active = stats_sql
+                anomaly_test_active = test
+                test_start_ms = _now_monotonic_ms()
+
+                # --- Step 1: stats query (Query 1). -----------------------
+                try:
+                    stats_rows = adapter.run_stats_query(stats_sql_active)
+                except WarehouseError as exc:
+                    elapsed_ms = max(0, _now_monotonic_ms() - test_start_ms)
+                    _LOGGER.warning(
+                        "kept-without-evidence: %s",
+                        json.dumps(
+                            {
+                                "model_unique_id": model.unique_id,
+                                "test_anchor": test_anchor,
+                                "error_class": type(exc).__name__,
+                                "phase": "anomaly_stats_query",
+                            }
+                        ),
+                    )
+                    decision = _decide_kept_without_evidence_warehouse_error(
+                        test=test,
+                        test_anchor=test_anchor,
+                        exc=exc,
+                        compiled_sql=stats_sql_active,
+                        compiled_sql_hash=_build_compiled_sql_hash_or_empty(stats_sql_active),
+                        elapsed_ms=elapsed_ms,
+                        scope=scope,
+                        as_of=as_of,
+                    )
+                    _write_audit_or_abort(
+                        decision,
+                        model_unique_id=model.unique_id,
+                        config_hash=config_hash,
+                        audit_path=resolved_audit_path,
+                    )
+                    decisions.append(decision)
+                    continue
+
+                stats = _parse_anomaly_stats(stats_rows, anomaly_test_active, dialect)
+
+                # --- Step 2: DOW degrade (DEC-003). -----------------------
+                # When seasonality="dow" AND ANY per-DOW bucket is below
+                # the floor, recompute the stats query WITHOUT DOW
+                # partitioning. Emit ONE WARNING line. This is the
+                # operator-actionable signal: the test was authored as
+                # seasonal but the history doesn't support per-DOW
+                # bands, so the engine fell back to a non-seasonal band
+                # rather than scoring against thin per-weekday samples.
+                if anomaly_test_active.seasonality == "dow" and _any_dow_bucket_thin(
+                    stats, anomaly_test_active.min_samples_per_bucket
+                ):
+                    _LOGGER.warning(
+                        "anomaly: DOW degraded to non-seasonal due to thin per-DOW history: %s",
+                        json.dumps(
+                            {
+                                "model_unique_id": model.unique_id,
+                                "test_anchor": test_anchor,
+                                "min_samples_per_bucket": (
+                                    anomaly_test_active.min_samples_per_bucket
+                                ),
+                                "per_dow_counts": (
+                                    {str(d): b.n_periods for d, b in (stats.per_dow or {}).items()}
+                                ),
+                            }
+                        ),
+                    )
+                    # Re-run the stats query against a degraded
+                    # ``seasonality="none"`` variant. ``model_copy`` is
+                    # safe here: the variant is frozen, but ``model_copy``
+                    # returns a NEW instance — the original ``test``
+                    # carried on the decision/audit is unchanged.
+                    anomaly_test_active = anomaly_test_active.model_copy(
+                        update={"seasonality": "none"}
+                    )
+                    degrade_compile = _compile_test(
+                        anomaly_test_active,
+                        per_test_table_ref,
+                        dialect,
+                        manifest,
+                        model=model,
+                        scope=compile_scope,
+                        sample_size=(
+                            resolved_config.sample_size if compile_scope == "sample" else None
+                        ),
+                        sample_bucket=sample_bucket,
+                        partition_filter=compile_partition_filter,
+                        as_of=as_of,
+                    )
+                    # The degraded test still compiles to a (stats, violation)
+                    # tuple — same variant, different seasonality. Use the
+                    # degraded stats SQL going forward; the violation SQL
+                    # is unchanged (today's bucket is today's bucket
+                    # regardless of seasonality), so we keep the original
+                    # ``violation_sql``.
+                    if isinstance(degrade_compile, tuple):
+                        stats_sql_active = degrade_compile[0]
+                        try:
+                            stats_rows = adapter.run_stats_query(stats_sql_active)
+                        except WarehouseError as exc:
+                            elapsed_ms = max(0, _now_monotonic_ms() - test_start_ms)
+                            _LOGGER.warning(
+                                "kept-without-evidence: %s",
+                                json.dumps(
+                                    {
+                                        "model_unique_id": model.unique_id,
+                                        "test_anchor": test_anchor,
+                                        "error_class": type(exc).__name__,
+                                        "phase": "anomaly_stats_query_degraded",
+                                    }
+                                ),
+                            )
+                            decision = _decide_kept_without_evidence_warehouse_error(
+                                test=test,
+                                test_anchor=test_anchor,
+                                exc=exc,
+                                compiled_sql=stats_sql_active,
+                                compiled_sql_hash=_build_compiled_sql_hash_or_empty(
+                                    stats_sql_active
+                                ),
+                                elapsed_ms=elapsed_ms,
+                                scope=scope,
+                                stats=stats,
+                                as_of=as_of,
+                            )
+                            _write_audit_or_abort(
+                                decision,
+                                model_unique_id=model.unique_id,
+                                config_hash=config_hash,
+                                audit_path=resolved_audit_path,
+                            )
+                            decisions.append(decision)
+                            continue
+                        stats = _parse_anomaly_stats(stats_rows, anomaly_test_active, dialect)
+                    # else: degrade compile produced a sentinel (very
+                    # unlikely — the seasonality flip cannot change the
+                    # identifier-shape outcome). Fall through with the
+                    # original seasonal stats; the downstream cold-start
+                    # gate still consults ``stats.n_periods``.
+
+                # --- Step 3: cold-start gate (DEC-005). -------------------
+                min_required = anomaly_test_active.min_samples_per_bucket
+                if stats.n_periods < min_required:
+                    elapsed_ms = max(0, _now_monotonic_ms() - test_start_ms)
+                    # Audit + compiled-SQL preservation for cold-start:
+                    # the stats SQL is the SQL that informed the decision
+                    # (Query 2 was never issued).
+                    decision = _decide_anomaly_cold_start(
+                        test=test,
+                        test_anchor=test_anchor,
+                        stats=stats,
+                        min_required=min_required,
+                        compiled_sql=stats_sql_active,
+                        compiled_sql_hash=_build_compiled_sql_hash_or_empty(stats_sql_active),
+                        elapsed_ms=elapsed_ms,
+                        scope=scope,
+                        as_of=as_of,
+                    )
+                    _write_audit_or_abort(
+                        decision,
+                        model_unique_id=model.unique_id,
+                        config_hash=config_hash,
+                        audit_path=resolved_audit_path,
+                    )
+                    decisions.append(decision)
+                    continue
+
+                # --- Step 4: violation query (Query 2). -------------------
+                violation_sql_hash = _build_compiled_sql_hash_or_empty(violation_sql)
+                try:
+                    test_result = adapter.run_test_sql(
+                        violation_sql,
+                        capture_failures=resolved_config.capture_failure_rows,
+                    )
+                except WarehouseError as exc:
+                    elapsed_ms = max(0, _now_monotonic_ms() - test_start_ms)
+                    _LOGGER.warning(
+                        "kept-without-evidence: %s",
+                        json.dumps(
+                            {
+                                "model_unique_id": model.unique_id,
+                                "test_anchor": test_anchor,
+                                "error_class": type(exc).__name__,
+                                "phase": "anomaly_violation_query",
+                            }
+                        ),
+                    )
+                    decision = _decide_kept_without_evidence_warehouse_error(
+                        test=test,
+                        test_anchor=test_anchor,
+                        exc=exc,
+                        compiled_sql=violation_sql,
+                        compiled_sql_hash=violation_sql_hash,
+                        elapsed_ms=elapsed_ms,
+                        scope=scope,
+                        stats=stats,
+                        as_of=as_of,
+                    )
+                    _write_audit_or_abort(
+                        decision,
+                        model_unique_id=model.unique_id,
+                        config_hash=config_hash,
+                        audit_path=resolved_audit_path,
+                    )
+                    decisions.append(decision)
+                    continue
+
+                elapsed_ms = max(0, _now_monotonic_ms() - test_start_ms)
+                # ``sampled_rows`` is None for anomaly variants — they
+                # always route to source (per ``_test_requires_source_table``)
+                # so there is no sample size to record.
+                decision = _decide_from_test_result(
+                    test=test,
+                    test_anchor=test_anchor,
+                    test_result=test_result,
+                    compiled_sql=violation_sql,
+                    compiled_sql_hash=violation_sql_hash,
+                    elapsed_ms=elapsed_ms,
+                    sampled_rows=None,
+                    scope=scope,
+                    is_trusted=is_trusted,
+                    capture_failure_rows=resolved_config.capture_failure_rows,
+                    stats=stats,
+                    as_of=as_of,
                 )
                 _write_audit_or_abort(
                     decision,

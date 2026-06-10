@@ -67,12 +67,49 @@ class StrictCandidateTestCustomSQL(BaseModel):
     rationale: str | None = None
 
 
+class StrictCandidateTestRowCountBetween(BaseModel):
+    model_config = _STRICT_BASE
+    type: Literal["row_count_between"] = "row_count_between"
+    column: None = None
+    minimum: int | None = None
+    maximum: int | None = None
+    where: str | None = None
+    rationale: str | None = None
+
+
+class StrictCandidateTestUniqueCombination(BaseModel):
+    model_config = _STRICT_BASE
+    type: Literal["unique_combination"] = "unique_combination"
+    column: None = None
+    columns: tuple[str, ...]
+    where: str | None = None
+    rationale: str | None = None
+
+
+class StrictCandidateTestRowCountAnomalyByPeriod(BaseModel):
+    model_config = _STRICT_BASE
+    type: Literal["row_count_anomaly_by_period"] = "row_count_anomaly_by_period"
+    column: None = None
+    date_column: str
+    period: Literal["hour", "day", "week"] = "day"
+    lookback_periods: int = 28
+    method: Literal["mad", "zscore", "percentile", "min_max"] = "mad"
+    seasonality: Literal["none", "dow"] = "none"
+    threshold: float = 3.0
+    min_samples_per_bucket: int = 3
+    where: str | None = None
+    rationale: str | None = None
+
+
 _StrictCandidateTest = Annotated[
     StrictCandidateTestNotNull
     | StrictCandidateTestUnique
     | StrictCandidateTestAcceptedValues
     | StrictCandidateTestRelationships
-    | StrictCandidateTestCustomSQL,
+    | StrictCandidateTestCustomSQL
+    | StrictCandidateTestRowCountBetween
+    | StrictCandidateTestUniqueCombination
+    | StrictCandidateTestRowCountAnomalyByPeriod,
     Field(discriminator="type"),
 ]
 
@@ -108,8 +145,23 @@ class StrictCandidateSchema(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# StrictLLMResponseEvent — mirrors src/signalforge/draft/audit.py
+# StrictReshapeRecord + StrictLLMResponseEvent — mirror src/signalforge/draft/audit.py
 # ---------------------------------------------------------------------------
+
+
+class StrictReshapeRecord(BaseModel):
+    """Mirror of production :class:`signalforge.draft.audit.ReshapeRecord`
+    with ``extra="forbid"``.
+
+    If you add a field to ``ReshapeRecord``, update this mirror AND any
+    fixture row that exercises the reshape path (issue #184 DEC-005).
+    """
+
+    model_config = _STRICT_BASE
+    original_column: str
+    target_scope: Literal["model"] = "model"
+    test_type: str
+    reason: str
 
 
 class StrictLLMResponseEvent(BaseModel):
@@ -123,6 +175,10 @@ class StrictLLMResponseEvent(BaseModel):
     2. Update ``tests/fixtures/draft/llm_response_audit_sample.jsonl``
        (regenerated via ``tests/fixtures/draft/regenerate.sh`` once US-015
        lands).
+
+    ``audit_schema_version`` typed ``int`` (NOT ``Literal[2]``) so older v1
+    audit JSONLs still round-trip — mirrors the production field's posture
+    per the safety-layer ``audit_schema_version`` convention.
     """
 
     model_config = _STRICT_BASE
@@ -138,7 +194,45 @@ class StrictLLMResponseEvent(BaseModel):
     output_tokens: int
     model: str
     signalforge_version: str
-    audit_schema_version: int = 1
+    audit_schema_version: int = 2
+    parser_reshaped: tuple[StrictReshapeRecord, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# StrictDraftConfig — mirrors src/signalforge/draft/config.py (issue #188)
+# ---------------------------------------------------------------------------
+
+
+class StrictDraftConfig(BaseModel):
+    """Mirror of production :class:`signalforge.draft.config.DraftConfig`
+    with ``extra="forbid"``.
+
+    ``DraftConfig`` is config-shaped and already uses ``extra="forbid"`` in
+    production (DEC-011 / safety-layer.md DEC-015), so a YAML typo already
+    fails loud at config load. This strict mirror is the *field-set* drift
+    gate: if you add a field to ``DraftConfig``, you MUST:
+
+    1. Add it here, AND
+    2. Update ``tests/fixtures/draft/draft_config_v1.json``.
+
+    The ``cache_scope`` field was added by issue #188 (DEC-001); this mirror
+    grew alongside it. The mirror deliberately omits the production field
+    validators (``provider`` registry check, ``exclude_tests`` coercion,
+    ``max_output_tokens`` positivity) — it exists to pin the field SET, not
+    to re-test the validators (those live in ``tests/draft/test_config.py``).
+    """
+
+    model_config = _STRICT_BASE
+    model: str = "claude-sonnet-4-6"
+    cheap_model: str = "claude-haiku-4-5"
+    max_output_tokens: int = 4096
+    cache_ttl: Literal["5m", "1h"] = "5m"
+    cache_scope: Literal["per-model", "project"] = "per-model"
+    max_retries_429: int = 3
+    max_retries_5xx: int = 1
+    max_retries_conn: int = 1
+    provider: str = "anthropic"
+    exclude_tests: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -149,6 +243,8 @@ class StrictLLMResponseEvent(BaseModel):
 _FIXTURE_DIR = Path(__file__).resolve().parent.parent / "fixtures" / "draft"
 _CANDIDATE_SCHEMA_FIXTURE = _FIXTURE_DIR / "candidate_schema_v1.json"
 _LLM_RESPONSE_FIXTURE = _FIXTURE_DIR / "llm_response_audit_sample.jsonl"
+_DRAFT_CONFIG_FIXTURE = _FIXTURE_DIR / "draft_config_v1.json"
+_LLM_RESPONSE_V2_RESHAPE_FIXTURE = _FIXTURE_DIR / "llm_response_with_reshape_v2.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -209,11 +305,31 @@ def test_llm_response_event_extra_forbid_against_fixture() -> None:
     """Validate the committed audit-record fixture against the strict
     model. Failure means production grew a field without updating either
     the fixture or :class:`StrictLLMResponseEvent` above.
+
+    The v1 fixture (``llm_response_audit_sample.jsonl``) carries
+    ``audit_schema_version: 1`` and no ``parser_reshaped`` field — both
+    must continue to validate so older audit JSONLs still round-trip
+    after #184's schema bump.
     """
     line = _LLM_RESPONSE_FIXTURE.read_text(encoding="utf-8").strip()
     assert line, f"expected one JSON line in {_LLM_RESPONSE_FIXTURE}"
     payload = json.loads(line)
     StrictLLMResponseEvent.model_validate(payload)
+
+
+def test_llm_response_event_v2_reshape_fixture_validates_against_strict_model() -> None:
+    """Validate the v2 reshape-fixture against the strict model. Carries
+    ``audit_schema_version: 2`` and a populated ``parser_reshaped`` tuple
+    so the round-trip path for #184's new audit field is pinned.
+    """
+    line = _LLM_RESPONSE_V2_RESHAPE_FIXTURE.read_text(encoding="utf-8").strip()
+    assert line, f"expected one JSON line in {_LLM_RESPONSE_V2_RESHAPE_FIXTURE}"
+    payload = json.loads(line)
+    event = StrictLLMResponseEvent.model_validate(payload)
+    assert event.audit_schema_version == 2
+    assert len(event.parser_reshaped) == 1
+    assert event.parser_reshaped[0].target_scope == "model"
+    assert event.parser_reshaped[0].test_type == "row_count_anomaly_by_period"
 
 
 def test_llm_response_event_drift_detector_rejects_unknown_field() -> None:
@@ -241,3 +357,92 @@ def test_llm_response_event_strict_model_field_set_matches_production() -> None:
         f"StrictLLMResponseEvent has fields absent from LLMResponseEvent: "
         f"{extra}. Remove or add to LLMResponseEvent."
     )
+
+
+# ---------------------------------------------------------------------------
+# DraftConfig drift (issue #188) — fixture + field-set + typo-fails-loud
+# ---------------------------------------------------------------------------
+
+
+def test_draft_config_extra_forbid_against_fixture() -> None:
+    """Validate the committed draft-config fixture against the strict
+    model. Failure means production grew a field without updating either
+    the fixture or :class:`StrictDraftConfig` above (issue #188).
+    """
+    payload = json.loads(_DRAFT_CONFIG_FIXTURE.read_text(encoding="utf-8"))
+    StrictDraftConfig.model_validate(payload)
+
+
+def test_draft_config_drift_detector_rejects_unknown_field() -> None:
+    """A YAML typo like ``cache_scop`` (instead of ``cache_scope``) is a
+    stray key the strict mirror rejects — the same fail-loud guarantee
+    production's ``extra="forbid"`` gives at config load (issue #188)."""
+    payload = json.loads(_DRAFT_CONFIG_FIXTURE.read_text(encoding="utf-8"))
+    payload["cache_scop"] = "project"  # near-miss typo for cache_scope
+    with pytest.raises(ValidationError):
+        StrictDraftConfig.model_validate(payload)
+
+
+def test_draft_config_strict_model_field_set_matches_production() -> None:
+    """Production :class:`DraftConfig` and :class:`StrictDraftConfig` must
+    declare the same field set — so adding ``cache_scope`` (or any future
+    field) to production without mirroring it here breaks loudly."""
+    from signalforge.draft.config import DraftConfig
+
+    prod_fields = set(DraftConfig.model_fields.keys())
+    strict_fields = set(StrictDraftConfig.model_fields.keys())
+    missing = prod_fields - strict_fields
+    extra = strict_fields - prod_fields
+    assert not missing, (
+        f"StrictDraftConfig missing fields present in DraftConfig: "
+        f"{missing}. Update StrictDraftConfig to match."
+    )
+    assert not extra, (
+        f"StrictDraftConfig has fields absent from DraftConfig: "
+        f"{extra}. Remove from StrictDraftConfig or add to DraftConfig."
+    )
+
+
+def test_draft_config_cache_scope_default_is_per_model() -> None:
+    """DEC-001 of #188: ``cache_scope`` defaults to ``"per-model"`` so all
+    pre-#188 behaviour is preserved."""
+    from signalforge.draft.config import DraftConfig
+
+    assert DraftConfig().cache_scope == "per-model"
+
+
+def test_reshape_record_strict_model_field_set_matches_production() -> None:
+    """Production :class:`ReshapeRecord` and :class:`StrictReshapeRecord`
+    must declare the same field set."""
+    from signalforge.draft.audit import ReshapeRecord
+
+    prod_fields = set(ReshapeRecord.model_fields.keys())
+    strict_fields = set(StrictReshapeRecord.model_fields.keys())
+    missing = prod_fields - strict_fields
+    extra = strict_fields - prod_fields
+    assert not missing, (
+        f"StrictReshapeRecord missing fields present in ReshapeRecord: "
+        f"{missing}. Update StrictReshapeRecord to match."
+    )
+    assert not extra, (
+        f"StrictReshapeRecord has fields absent from ReshapeRecord: "
+        f"{extra}. Remove or add to ReshapeRecord."
+    )
+
+
+def test_reshape_record_extra_forbid_rejects_unknown_field() -> None:
+    """Planted-violation self-check (mirrors ``testing-signal.md`` § "Drift
+    detection via one-off ``extra="forbid"`` model"). Confirms the strict
+    mirror's ``extra="forbid"`` posture is wired so a forward-compat field
+    addition to production ``ReshapeRecord`` without updating the strict
+    mirror breaks the test loudly.
+    """
+    payload = {
+        "original_column": "creation_ts",
+        "target_scope": "model",
+        "test_type": "row_count_anomaly_by_period",
+        "reason": ("model-only variant emitted at column scope; re-attached to model-level tests:"),
+        "bogus_field": "z",
+    }
+    with pytest.raises(ValidationError):
+        StrictReshapeRecord.model_validate(payload)

@@ -54,6 +54,10 @@ _DOCUMENTED_PUBLIC = (
     "LLMProvider",
     "register_provider",
     "provider_for",
+    # Rate-limit value object (US-002 of #202 — DEC-205). Neutral budget the
+    # (later) shared rate limiter consumes from
+    # ``LLMProvider.extract_rate_limit_info``.
+    "RateLimitBudget",
     # Anthropic strategy (US-002 of #135) — registered at import time.
     "AnthropicProvider",
     # OpenAI strategy (US-002 of #136) — registered at import time.
@@ -100,6 +104,7 @@ def test_each_public_name_is_importable_via_from_signalforge_llm() -> None:
         LLMServerError,
         ModelPricing,
         OpenAIProvider,
+        RateLimitBudget,
         UnknownProviderError,
         UsageMetrics,
         call_llm,

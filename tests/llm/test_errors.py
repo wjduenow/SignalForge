@@ -38,6 +38,7 @@ _CONSTRUCT_KWARGS: dict[str, dict[str, object]] = {
     "LLMConnectionError": {"message": "connection reset"},
     "LLMResponseFormatError": {"message": "missing content block"},
     "LLMCacheTooLargeError": {"cached_block_tokens": 9000},
+    "LLMProviderAsyncUnsupportedError": {"message": "provider lacks async dispatch"},
     "EstimateUnknownModelError": {"model": "fake-model-id"},
     "UnknownProviderError": {"name": "bogus", "available": ("anthropic",)},
 }
@@ -56,20 +57,22 @@ def test_llm_error_renders_remediation() -> None:
 @pytest.mark.unit
 @pytest.mark.llm
 def test_all_is_sorted_and_complete() -> None:
-    """``__all__`` is alphabetically sorted and lists 10 classes total
-    (LLMError + 9 subclasses)."""
+    """``__all__`` is alphabetically sorted and lists 11 classes total
+    (LLMError + 10 subclasses)."""
     assert errors_module.__all__ == sorted(errors_module.__all__)
     # 1 base (LLMError) + 1 umbrella (LLMHelperError) + 5 helper subclasses
     # (Auth/RateLimit/Server/Connection/ResponseFormat) + 1 cache-size
     # subclass (TooLarge) + 1 estimate subclass (EstimateUnknownModelError,
     # US-001 of #36) + 1 provider-registry subclass (UnknownProviderError,
-    # US-001 of #135) = 10 classes. (LLMCacheTooSmallError was dropped
-    # in #10's follow-up — Anthropic silently no-ops a sub-minimum cache
-    # marker, so the production code drops the marker and continues
-    # rather than raising.)
-    assert len(errors_module.__all__) == 10, (
-        "US-003 + US-001 of #36 + US-001 of #135 enumerate 9 typed subclasses "
-        "+ 1 base; update tests and __all__ together if this changes."
+    # US-001 of #135) + 1 async-capability subclass
+    # (LLMProviderAsyncUnsupportedError, US-002 of #186) = 11 classes.
+    # (LLMCacheTooSmallError was dropped in #10's follow-up — Anthropic
+    # silently no-ops a sub-minimum cache marker, so the production code
+    # drops the marker and continues rather than raising.)
+    assert len(errors_module.__all__) == 11, (
+        "US-003 + US-001 of #36 + US-001 of #135 + US-002 of #186 enumerate "
+        "10 typed subclasses + 1 base; update tests and __all__ together if "
+        "this changes."
     )
 
 
@@ -165,6 +168,32 @@ def test_llm_cache_too_large_error_carries_block_size_and_cap() -> None:
     # Cap can be overridden (e.g. for test fixtures pinning a smaller cap).
     err_custom = LLMCacheTooLargeError(cached_block_tokens=200, cap=100)
     assert err_custom.cap == 100
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_llm_provider_async_unsupported_error_remediation_text() -> None:
+    """Issue #186 US-002 / DEC-006 (refined by QG Pass 1 Concern #2): the
+    remediation text is locked verbatim so the operator-facing message is
+    consistent across versions and so a silent rewrite would fail loud here
+    rather than slip past review.
+
+    Post-QG: ``cap=1`` is NOT an escape hatch on a sync-only provider —
+    the engine consumes ``call_llm_async`` exclusively, so the remediation
+    points at picking an async-capable provider rather than at clamping
+    the cap.
+    """
+    from signalforge.llm.errors import LLMProviderAsyncUnsupportedError
+
+    assert LLMProviderAsyncUnsupportedError.default_remediation == (
+        "Pick an async-capable provider for grading "
+        "(Anthropic / OpenAI / Gemini all support async)."
+    )
+    # Rendered ``__str__`` includes both the message body and the
+    # remediation line — the umbrella ``LLMError.__str__`` contract.
+    rendered = str(LLMProviderAsyncUnsupportedError("provider X has no async"))
+    assert "provider X has no async" in rendered
+    assert "async-capable provider" in rendered
 
 
 @pytest.mark.unit

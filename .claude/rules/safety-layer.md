@@ -8,8 +8,8 @@ The safety layer sits between the warehouse adapter (#3) and the LLM-drafting pi
 
 Any exception inside `audit.write` propagates as `AuditWriteError` from `build_llm_request`. The function never returns an `LLMRequest` whose audit record didn't durably hit disk.
 
-- `audit.write` opens with `O_APPEND | O_CREAT | 0o600`, writes one JSONL line, calls `os.fsync`, closes. Catches **no** exceptions internally — `OSError` / `PermissionError` / `IOError` / encoding failures all propagate.
-- Size cap (`_AUDIT_RECORD_LIMIT_BYTES = 4000`) is checked **before** any file open, so an oversize record leaves no artifact.
+- `audit.write` opens with `O_APPEND | O_CREAT | 0o600`, writes one JSONL line **per chunk** (see § "Audit chunking (issue #185)" below — a logical event is 1 line when it fits ≤4000 B, otherwise N ≥ 2 chunks correlated by `audit_id`), calls `os.fsync` after each chunk, closes. Catches **no** exceptions internally — `OSError` / `PermissionError` / `IOError` / encoding failures all propagate.
+- Size cap (`_AUDIT_RECORD_LIMIT_BYTES = 4000`) is checked **before** any file open for EVERY chunk; if any chunk would over-cap, the writer raises `AuditRecordTooLargeError` and leaves no on-disk artefact. The 4000 B cap stays load-bearing for `PIPE_BUF` atomic-append; reach to wide-table models is extended by symbol-table compression + chunking, not by raising the cap.
 - `build_llm_request` calls `audit.write` AFTER constructing the request but BEFORE returning it. If audit fails, the partial request is dropped.
 
 An unaudited LLM call is, by definition, PII leaving the warehouse without a receipt — exactly the failure mode this layer exists to prevent. The propagation IS the defence.
@@ -30,9 +30,9 @@ Every `AuditEvent` carries three fields that look minor but are load-bearing:
 
 - `signalforge_version: str` — read from `signalforge.__version__` at write time.
 - `policy_hash: str` — 16-hex `blake2b(digest_size=8)` of the resolved `SafetyPolicy.model_dump_json` (sorted keys, canonical form via `_compute_policy_hash`). Migrated from `SHA-256[:16]` by issue #55 so the audit corpus reads one recipe across every writer (`safety.jsonl` / `llm_responses.jsonl` / `prune.jsonl` / `grade.jsonl` / `diff.json` all use `blake2b-8` over canonical JSON).
-- `audit_schema_version: int` — frozen at the writer's `_AUDIT_SCHEMA_VERSION` constant; currently `3` (bumped 1→2 by #54 for `draft_skip_*` reasons, 2→3 by #55 for the `policy_hash` recipe change). Typed `int` (not `Literal`) so older audit JSONLs still round-trip across version bumps — audit replay is a real requirement.
+- `audit_schema_version: int` — frozen at the writer's `_AUDIT_SCHEMA_VERSION` constant; currently `4` (bumped 1→2 by #54 for `draft_skip_*` reasons, 2→3 by #55 for the `policy_hash` recipe change, 3→4 by #185 for the v4 symbol-table redaction shape + chunk-correlation triple). Typed `int` (not `Literal`) so older audit JSONLs still round-trip across version bumps — audit replay is a real requirement. **Note:** the #185 change dropped v3 read-back compatibility deliberately (library is pre-1.0, no corpus to migrate); the field remains `int` so future bumps stay round-trippable but the v3 `redactions: tuple[RedactionRecord, ...]` shape is gone from `AuditEvent` and the strict drift mirror.
 
-The drift-detector test pairs production `AuditEvent` (`extra="ignore"`) with a one-off `StrictAuditEvent` (`extra="forbid"`) validated against the committed JSONL fixture. Adding a field to production without updating the strict model OR the fixture breaks the test loudly.
+The drift-detector test pairs production `AuditEvent` (`extra="ignore"`) with a one-off `StrictAuditEvent` (`extra="forbid"`) validated against the committed JSONL fixture. Adding a field to production without updating the strict model OR the fixture breaks the test loudly. As of #185 the fixture has three lines exercising all three legal v4 record shapes (non-chunked / chunk header / chunk continuation) and the strict mirror carries the same `@model_validator(mode="after")` shape rules that production enforces (see § "Audit chunking (issue #185)" below).
 
 ## Canonical timestamp shape across writers (issue #56)
 
@@ -105,6 +105,63 @@ Regression test: `tests/safety/test_models.py::test_importing_safety_models_emit
 
 When a future Pydantic field-name shadow surfaces (an audit-log contract is the same kind of "renaming would break consumers" pin), match this shape verbatim — don't reach for a global filter, and don't rename the field.
 
+## Audit chunking (issue #185)
+
+Wide-table dbt models (~66+ columns) produce audit events whose serialised byte size exceeds the 4000 B `PIPE_BUF` cap even after the v4 symbol-table compression (DEC-014 history). The cap stays — it's load-bearing for atomic concurrent appends. Instead, `audit.write` chunks the event across multiple ≤4000 B JSONL lines correlated by a deterministic `audit_id`.
+
+### v4 redaction shape (issue #185)
+
+The v3 `AuditEvent.redactions: tuple[RedactionRecord, ...]` field is GONE. Two new fields replace it:
+
+- `redactions_by_reason: dict[RedactionReason, tuple[str, ...]] | None` — keyed by reason; values are sorted tuples of hashed names for deterministic snapshot stability.
+- `column_name_map: dict[str, str] | None` — every hashed name appearing in any `redactions_by_reason` value has a `{hashed_name: real_column_name}` entry, so a reviewer can map back.
+
+`RedactionRecord` the class still exists in `signalforge.safety.models` — it's used internally by `build_llm_request` during column classification. The fold from `tuple[RedactionRecord, ...]` to the two-dict shape happens at AuditEvent construction time. The custom `AuditEvent.__repr__` omits `column_name_map` per DEC-022 — the real column names are potentially PII-bearing.
+
+### Layout
+
+A chunked event is N ≥ 2 JSONL lines. The Pydantic `@model_validator(mode="after")` on `AuditEvent` enforces the three legal shapes:
+
+- **Non-chunked** (`audit_id=None, chunk_index=None, chunk_count=None`): all metadata required; `redactions_by_reason` + `column_name_map` carry the full payload.
+- **Chunk header** (`audit_id=<16-hex>, chunk_index=0, chunk_count=N≥2`): all metadata required; `redactions_by_reason={}` and `column_name_map={}` are empty.
+- **Chunk continuation** (`audit_id` matches header, `chunk_index ∈ {1, …, N-1}`, `chunk_count=N`): metadata fields are `None`; `redactions_by_reason` and `column_name_map` carry slices.
+
+`audit_id = blake2b(model_unique_id + "\x00" + timestamp.isoformat() + "\x00" + signalforge_version, digest_size=8).hexdigest()` — deterministic across runs of the same event.
+
+### Writer contract
+
+`audit.write` pre-computes all chunks in memory, then verifies EACH chunk ≤ `_AUDIT_RECORD_LIMIT_BYTES` BEFORE `os.open`. If any chunk would over-cap (pathological — e.g., a single column name > 4000 chars), raises `AuditRecordTooLargeError` with no on-disk artefact (fail-closed preserved). Otherwise: `mkdir -p` → `os.open(O_APPEND | O_CREAT | O_WRONLY, 0o600)` → single `try / finally` (close-only) → for-loop emitting each chunk + per-chunk `os.fsync`. Header writes FIRST so a mid-write crash leaves a parseable "header + < N chunks" partial that the reader can detect.
+
+Scan 8 (`_FAIL_CLOSED_WRITER_MODULES`) is preserved — the chunk loop lives inside ONE `Try` block; individual `os.write` and `os.fsync` calls remain unguarded. When extending this pattern to a future stage's fail-closed multi-line writer, mirror exactly: pre-compute all chunks, size-check every chunk pre-open, single `Try` wrapping the per-chunk write+fsync loop.
+
+### Reader contract — `read_audit_events(path)`
+
+Returns `Iterator[AuditEvent]`. Non-chunked rows pass through unchanged. Chunked rows accumulate by `audit_id`; when chunk count is reached, the helper merges all chunks' `redactions_by_reason` (key-wise concat, then re-sort the tuples for determinism) + `column_name_map` (dict update), takes metadata from the header, **clears the chunk-correlation triple to `None`** so the reassembled event round-trips through the non-chunked validator branch, and yields the result. End-of-stream incomplete groups surface a `WARNING` via the standard ANSI-safe lazy-format JSON logger and are skipped — never raise (read-back path is fail-soft, distinct from the fail-closed write path).
+
+The reader rejects adversarial / corrupt chunks where `chunk_index < 0` or `chunk_index >= chunk_count` with a one-line `audit chunk out-of-range` WARNING and skips the offending chunk. Without this guard the accumulator's length-only completion check could silently drop a genuine missing chunk on reassembly (the writer never produces out-of-range indices; the threat model is file corruption or external tampering). Pre-#185 v3 records (`redactions: tuple[RedactionRecord, ...]` shape) raise `pydantic.ValidationError` from `AuditEvent.model_validate` rather than skip — the drop-v3 design choice per DEC-005; documented in the reader's docstring.
+
+### Empirical ceilings (operator-visible)
+
+Measured against the shipped `_chunk_event` implementation, NOT the plan's optimistic redactions-only estimates:
+
+- **Single-line ceiling:** ~65 columns. `columns_sent` (the full column-name tuple) ships in the header chunk, eating most of the 4000 B budget — the single-line case has no `audit_id`/`chunk_index`/`chunk_count` overhead but `columns_sent` alone scales as ~22 B per column.
+- **Chunkable range:** ~66 → ~243 columns. Within this range the writer succeeds via chunking; a 170-col model produces ~3 chunks.
+- **Hard ceiling:** ~243 columns. Beyond that, the header chunk alone overflows the cap (because `columns_sent` itself becomes oversize, independent of `redactions_by_reason`) and `AuditRecordTooLargeError` is raised. Operator workaround: `meta.signalforge.skip_draft: true` on noise columns to bring the model under the ceiling — this also drops the column from `columns_sent`, which is the binding constraint.
+
+The plan's design-time single-line estimate at 170 columns (3,865 B) measured `redactions_by_reason` alone; including `columns_sent` + metadata, the real ceiling is much lower. If a future ticket reshapes the header to omit or slice `columns_sent` across continuation chunks (reassembled at read time from `column_name_map`), the ceilings move up substantially — out of scope for #185 because reshaping touches every downstream consumer of the audit corpus.
+
+### Anti-pattern: `safety.mode: aggregate-only`
+
+`aggregate-only` mode does NOT shrink `redactions_by_reason`. All three sampling modes (`schema-only`, `aggregate-only`, `sample`) build the same redaction set in `build_llm_request` — `aggregate-only` only changes what's sent to the LLM, not what's recorded in the audit. Don't suggest it as a workaround for the wide-table cap. The `AuditRecordTooLargeError` remediation text explicitly closes this misleading hint (locked verbatim by `tests/safety/test_errors.py`).
+
+### `AuditRecordTooLargeError` parametric remediation
+
+Signature: `__init__(self, size: int, limit: int, column_count: int | None = None, *, remediation: str | None = None)`. `column_count` is the exact redacted-column count derived from `len(event.column_name_map)` at the writer's raise site — every entry in any `redactions_by_reason` value list also appears in `column_name_map` by construction in `request.py`, so the map size is the single source of truth (early QG draft double-counted both surfaces and was corrected before merge).
+
+Default remediation is a three-sentence operator script: (1) names the column count + bytes over cap when `column_count is not None`; (2) suggests `meta.signalforge.skip_draft: true` on noise columns and clarifies it's distinct from PII opt-out; (3) explicitly closes the `safety.mode: aggregate-only` anti-pattern (the mode does NOT shrink the redactions surface) and points at the `columns_sent` roadmap in `docs/safety-ops.md`. Locked verbatim — pinned by `tests/safety/test_errors.py::test_audit_record_too_large_default_remediation_locked` (parametrized `None` + `170`).
+
+Stays CLI tier 3 in `_EXCEPTION_TO_EXIT_CODE` — error semantics post-#185 are "compression + chunking attempted, recovery exhausted" rather than "input shape problem," which aligns with the external-dependency tier.
+
 ## Fail-closed writer shape — Scan 8 covers all five writers (issue #38)
 
 `tests/test_audit_completeness.py::test_fail_closed_writers_have_no_except_around_write_fsync` and `test_fail_closed_writers_use_short_write_loop` are the eighth AST scan in the project. They walk every fail-closed writer module — `signalforge.{safety,draft,prune,grade}.audit` and `signalforge.diff._sidecar` — and assert: (a) no `except` handler may wrap a `Try` whose body issues `os.write` / `os.fsync` (only `try / finally` around `os.close(fd)` is permitted); (b) every writer function uses a `while` loop around `os.write` so short writes (`EINTR`, pathological short returns) don't produce partial JSONL records.
@@ -125,4 +182,4 @@ The config file's top level is `{ safety: { ... } }`. Other top-level keys (`llm
 
 ## Reference
 
-`plans/super/4-pii-safety.md` — DEC-001 … DEC-026. `src/signalforge/safety/` — current implementation. `tests/safety/_fake_adapter.py` — `FakeAdapter` + `expect_*` API. `docs/safety-ops.md` — operational reference. `tests/fixtures/safety/manifest_with_pii_meta.json` — fixture exercising all four opt-out signals.
+`plans/super/4-pii-safety.md` — DEC-001 … DEC-026. `plans/super/185-wide-table-audit.md` — DEC-001 … DEC-008 (v4 symbol-table compression + chunking; drop-v3 pre-1.0 simplification). `src/signalforge/safety/` — current implementation. `tests/safety/_fake_adapter.py` — `FakeAdapter` + `expect_*` API. `docs/safety-ops.md` — operational reference. `tests/fixtures/safety/manifest_with_pii_meta.json` — fixture exercising all four opt-out signals. `tests/safety/test_wide_table.py` — wide-table integration tests pinning the chunking ceilings.

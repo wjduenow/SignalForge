@@ -141,12 +141,44 @@ class GradeThresholds(BaseModel):
 Rubric: TypeAlias = tuple[Criterion, ...]
 
 
-# DEC-016: the four locked default criteria. The IDs and the exact
-# criterion text are load-bearing — every change here is a rubric_hash
-# change, which means every audit row written under v0.1 is no longer
-# reproducible. Bump ``audit_schema_version`` (DEC-014 of #4) before
-# changing any of this in v0.2; the verbatim-match test in
+# DEC-016 + DEC-009 of #169: the four locked default criteria. The IDs
+# and the exact criterion text are load-bearing — every change here is
+# a rubric_hash change, which means every audit row written under v0.1
+# is no longer reproducible. Bump ``audit_schema_version`` (DEC-014 of
+# #4) before changing any of this in v0.2; the verbatim-match test in
 # ``tests/grade/test_rubric.py`` is the regression guard.
+#
+# Rotation history:
+# - #7 (initial) — clarity / consistency / rationale / no-redundant
+#   locked verbatim per DEC-016.
+# - #169 (DEC-009) — ``no-redundant`` extended with calibration prose
+#   for numeric-bounded tests (``row_count_between``): vacuous bounds
+#   (``minimum=0``+no ``maximum``, or a too-high ``maximum``) score low
+#   on this criterion → existing ``passed: bool`` threshold → ship as
+#   ``flagged``. The grader's 3-trigger degrade taxonomy (LLMError /
+#   GradeOutputError / total budget) stays locked — a vacuous bound is
+#   a low score, NOT a 4th degrade trigger (DEC-011). The
+#   ``no-redundant`` criterion was chosen over a 5th criterion to
+#   avoid the +25% LLM cost; the calibration intent sits naturally
+#   under "redundant or trivially satisfiable."
+# - #170 (DEC-007) — ``no-redundant`` extended with calibration prose
+#   for composite-key tests (``unique_combination``): a tuple whose
+#   members include an already-unique primary key (``(pk, anything)``)
+#   is vacuously unique by construction and carries no grain signal.
+#   Same routing as the row_count_between extension: low score → fails
+#   the existing ``passed: bool`` threshold → ships as ``flagged``. No
+#   5th criterion (DEC-007 picked Option A — extend the existing
+#   criterion — for the same +25% LLM-cost reason as #169).
+# - #171 (DEC-004) — ``no-redundant`` extended with calibration prose
+#   for per-period anomaly tests (``row_count_anomaly_by_period``): is
+#   the ``(method, seasonality, threshold)`` combination tight enough
+#   to catch the failure mode (anomalously small/empty period) but
+#   loose enough not to fire on legitimate weekday/weekend or seasonal
+#   swings? Same routing as the #169 / #170 extensions: low score →
+#   fails the existing ``passed: bool`` threshold → ships as
+#   ``flagged``. No 5th criterion (DEC-004 picked Option A — extend
+#   the existing criterion — for the same +25% LLM-cost reason as
+#   #169 / #170).
 DEFAULT_RUBRIC: Final[Rubric] = (
     Criterion(
         id="clarity",
@@ -175,7 +207,25 @@ DEFAULT_RUBRIC: Final[Rubric] = (
         id="no-redundant",
         criterion=(
             "Are any tests redundant — semantically identical to another "
-            "test, or already dropped by the prune layer as always-passing?"
+            "test, already dropped by the prune layer as always-passing, "
+            "or trivially satisfiable? For tests carrying numeric bounds "
+            "(e.g. `row_count_between`), is each bound a meaningful "
+            "guardrail calibrated to the model's expected size, rather "
+            "than a vacuous floor or ceiling (`minimum=0` with no `maximum`, "
+            "or a `maximum` so high it cannot fire)? For composite-key "
+            "tests (e.g. `unique_combination`), is the column tuple a "
+            "meaningful grain (e.g. `(order_id, line_item_id)`), or "
+            "vacuously unique because one member is already a primary "
+            "key on its own? A tuple of the shape `(primary_key, "
+            "anything)` is unique by construction and adds no signal. "
+            "For per-period anomaly tests (e.g. "
+            "`row_count_anomaly_by_period`), score CALIBRATION: is the "
+            "`(method, seasonality, threshold)` combination tight enough "
+            "to catch the failure mode (anomalously small/empty period) "
+            "but loose enough not to fire on legitimate weekday/weekend "
+            'or seasonal swings? `method="zscore"` with `threshold=3.0` '
+            'on a weekday-heavy model without `seasonality="dow"` will '
+            "likely fire every Saturday — that's a calibration failure."
         ),
     ),
 )

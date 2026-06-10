@@ -104,8 +104,15 @@ def test_llm_response_event_round_trip_via_fixture() -> None:
     assert event.signalforge_version == "0.1.0.dev0"
 
 
-def test_llm_response_event_audit_schema_version_default_1() -> None:
-    """``audit_schema_version`` defaults to 1 when omitted at construction."""
+def test_llm_response_event_audit_schema_version_default_2() -> None:
+    """``audit_schema_version`` defaults to 2 when omitted at construction.
+
+    Bumped 1 → 2 in #184 (DEC-005) to carry the new ``parser_reshaped``
+    audit field. The field stays typed ``int`` (NOT ``Literal[2]``) so older
+    v1 audit JSONLs still round-trip — see the v1 fixture round-trip test
+    above, which still asserts ``== 1`` because the JSON literal carries
+    ``"audit_schema_version":1``.
+    """
     event = LLMResponseEvent(
         timestamp=datetime(2026, 4, 29, tzinfo=UTC),
         model_unique_id="model.x.y",
@@ -120,7 +127,11 @@ def test_llm_response_event_audit_schema_version_default_1() -> None:
         model="claude-haiku",
         signalforge_version="0.1.0.dev0",
     )
-    assert event.audit_schema_version == 1
+    assert event.audit_schema_version == 2
+    # And the new audit field defaults to an empty tuple — preserves
+    # byte-equality for the no-reshape happy path (load-bearing for v1
+    # fixture round-trip per #184 DEC-005).
+    assert event.parser_reshaped == ()
 
 
 # --------------------------------------------------------------------------- #
