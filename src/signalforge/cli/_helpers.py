@@ -1064,7 +1064,11 @@ def format_cost_clause(per_provider_usd: Mapping[str, float]) -> str:
         usd = per_provider_usd[provider]
         if usd <= 0.0:
             continue
-        display = _PROVIDER_DISPLAY.get(provider, provider)
+        # The known display names are literals, but the fallback echoes the
+        # raw provider KEY from the audit JSONL — strip ANSI defensively since
+        # the footer is emitted through ``print_stderr(allow_sgr=True)`` (the
+        # emitter pre-strips every user-content fragment, cli-layer.md #210).
+        display = strip_ansi_escapes(_PROVIDER_DISPLAY.get(provider, provider))
         parts.append(f"{_format_usd(usd)} {display}")
     return " · ".join(parts)
 

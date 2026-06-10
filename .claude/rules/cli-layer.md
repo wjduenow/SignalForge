@@ -137,7 +137,7 @@ Load-bearing details:
 
 A successful **single-model** `generate` run closes with a two-line stderr footer, built by `build_run_footer(*, elapsed_seconds, written, dry_run, cost_clause, style)` in `_helpers.py`:
 
-```
+```text
 wrote schema.yml (8 kept) · .signalforge/diff.json · .signalforge/grade.json
 ✓ done in 5m12s · $0.13 Anthropic
 ```

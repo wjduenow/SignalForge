@@ -1238,6 +1238,33 @@ def test_generate_footer_suppressed_under_quiet(
     assert "done in" not in captured.err
 
 
+def test_generate_footer_dry_run_says_no_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Under ``--dry-run`` the footer reports no deliverables — the
+    ``dry run — no files written`` line, never a ``wrote .signalforge/…``
+    claim (the footer honours the dry-run contract)."""
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    _install_happy_patches(monkeypatch)
+    _force_tty(monkeypatch)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+
+    code = main(["generate", "model.shop.customers", "--dry-run"])
+    captured = capsys.readouterr()
+    assert code == 0, f"stderr={captured.err}"
+    plain = strip_ansi_escapes(captured.err)
+    assert "dry run — no files written" in plain
+    assert ".signalforge/diff.json" not in plain
+    assert ".signalforge/grade.json" not in plain
+    assert "wrote " not in plain
+    # The ✓ done line still closes the run.
+    assert any(ln.startswith("✓ done in") for ln in plain.splitlines())
+
+
 def test_generate_no_progress_in_non_tty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

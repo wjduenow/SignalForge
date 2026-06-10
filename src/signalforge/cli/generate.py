@@ -1461,8 +1461,12 @@ def _run_single_model(
                     written.append(f"{n_tests} test file{'s' if n_tests != 1 else ''}")
             if not dry_run:
                 written.append(".signalforge/diff.json")
-            if grade_report is not None:
-                written.append(".signalforge/grade.json")
+                # grade.json is a deliverable sidecar; under --dry-run the
+                # footer reports no deliverables (honours the documented
+                # dry-run contract) even though the grade stage's own sidecar
+                # write is not yet dry-run-aware (pre-existing; out of #211).
+                if grade_report is not None:
+                    written.append(".signalforge/grade.json")
             # Cost is a SUPPLEMENTARY surface (cli-layer.md DEC-005): a rollup
             # failure (missing audit, malformed record, unpriced SKU) must
             # never fail the run — degrade to no cost clause.
