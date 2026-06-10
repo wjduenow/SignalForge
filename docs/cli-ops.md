@@ -1242,6 +1242,35 @@ stages: safety, draft, prune, diff). See [Skip grading for fast
 iteration (`--no-grade`)](#skip-grading-for-fast-iteration---no-grade)
 for the cookbook entry.
 
+### End-of-run footer
+
+A successful single-model run closes with a two-line footer on stderr,
+printed below the diff:
+
+```text
+wrote schema.yml (8 kept) · .signalforge/diff.json · .signalforge/grade.json
+✓ done in 5m12s · $0.13 Anthropic
+```
+
+- The **`wrote`** line names the artifacts actually written this run —
+  `schema.yml (N kept)` only under `--write`, `.signalforge/diff.json`
+  unless `--dry-run`, `.signalforge/grade.json` when the grade stage
+  ran. Under `--dry-run` it reads `dry run — no files written`.
+- The **`✓ done`** line carries the wall-clock plus the LLM cost,
+  summed per provider from the run's audit JSONLs
+  (`.signalforge/llm_responses.jsonl` + `grade.jsonl`). A sub-cent
+  figure renders `<$0.01`. Warehouse cost is not shown — there is no
+  actual-bytes-scanned figure at end of run (use `--estimate` for a
+  pre-run planner preview). If the cost can't be computed the run still
+  succeeds with a bare `✓ done in <X>` (the cost is a nice-to-have, not
+  load-bearing).
+
+Like the progress lines, the footer is on stderr (so `> diffs.txt`
+captures only the diff), the `✓` glyph + colour appear only on a colour
+terminal, and `--quiet` / non-TTY suppress it. In a `--select` batch the
+per-model footer is replaced by the aggregate
+[batch summary](#running-across-many-models).
+
 The `<fact>` field on each entry line is computed from objects
 already in scope (model id, candidate test count,
 `kept_count × criteria_count`) so the operator sees the size of the
