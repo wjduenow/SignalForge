@@ -27,7 +27,10 @@ its 6th directory in this story.
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING
@@ -38,6 +41,7 @@ if TYPE_CHECKING:
     # private ``_BatchOutcome`` dataclass shape only at type-check time.
     from signalforge.cli.generate import _BatchOutcome
 
+from signalforge._common import palette
 from signalforge._common.ansi_safety import strip_ansi_escapes
 from signalforge._common.path_safety import PathContainmentError, canonicalise_path
 from signalforge.cli.errors import (
@@ -780,7 +784,9 @@ def format_error_to_stderr(exc: Exception) -> str:
     return f"ERROR: {exc}"
 
 
-def print_stderr(message: str, *, end: str = "\n", flush: bool = False) -> None:
+def print_stderr(
+    message: str, *, end: str = "\n", flush: bool = False, allow_sgr: bool = False
+) -> None:
     """Write ``message`` to stderr after stripping ANSI CSI escapes.
 
     Single stderr-write sink for ``signalforge.cli``. Mirrors the diff
@@ -798,6 +804,15 @@ def print_stderr(message: str, *, end: str = "\n", flush: bool = False) -> None:
     :func:`format_batch_summary`); pass ``flush=True`` for progress-line
     callsites that need an immediate flush.
 
+    ``allow_sgr=True`` (issue #210) SKIPS the strip — the narrow exception for
+    the progress emitters, which compose a line from already-stripped
+    user-content sub-parts wrapped in renderer-OWNED SGR codes (the spark
+    glyph, the dim stage label). A caller passing ``allow_sgr=True`` MUST have
+    stripped every user-controlled fragment itself before composing; the
+    trusted SGR is then the only escape sequence that survives. Default
+    ``False`` preserves the strip-everything contract for every other sink
+    (the panic-path error renderer, the batch summary, lint output, ...).
+
     This helper is the only place in :mod:`signalforge.cli` that
     writes to ``sys.stderr``. The AST scan at
     ``tests/cli/test_no_direct_stderr_print.py`` rejects every
@@ -805,7 +820,8 @@ def print_stderr(message: str, *, end: str = "\n", flush: bool = False) -> None:
     ``sys.stderr.write(...)`` / ``sys.stderr.flush()`` — anywhere
     else in :mod:`signalforge.cli`. Issue #60.
     """
-    print(strip_ansi_escapes(message), file=sys.stderr, end=end, flush=flush)
+    text = message if allow_sgr else strip_ansi_escapes(message)
+    print(text, file=sys.stderr, end=end, flush=flush)
 
 
 # ---------------------------------------------------------------------------
@@ -831,6 +847,83 @@ def should_emit_progress(quiet: bool, verbose: bool) -> bool:
         return False
 
 
+# Spark-diamond glyph prefixing every COLOURED progress line — the brand
+# "forged signal" mark (issue #210). Emitted only on the colour path; the plain
+# path stays glyph-free and byte-identical to the pre-#210 output.
+_PROGRESS_GLYPH = "◆"
+# Stage labels pad to this width so the bodies line up in a column. ``safety``
+# (6) is the longest of safety / draft / prune / grade / diff.
+_STAGE_LABEL_WIDTH = 6
+# Fallback width for right-aligning the done-line fact when the real terminal
+# width can't be read.
+_PROGRESS_FALLBACK_WIDTH = 80
+
+
+@dataclass(frozen=True)
+class ProgressStyle:
+    """Resolved styling for the ``generate`` progress lines (issue #210).
+
+    ``color`` — whether the ◆ glyph + brand colour are emitted at all.
+    ``truecolor`` — whether the spark glyph uses the 24-bit brand amber
+    (``#FFC24D``) vs the 16-colour yellow fallback.
+    """
+
+    color: bool
+    truecolor: bool
+
+
+def resolve_progress_style(verbose: bool) -> ProgressStyle:
+    """Decide once whether progress lines carry the brand glyph + colour.
+
+    Progress writes to STDERR, so the colour gate keys on stderr (not stdout):
+    ``FORCE_COLOR`` forces on; ``NO_COLOR`` forces off; otherwise
+    ``sys.stderr.isatty()``. ``--verbose`` forces *progress* on (DEC-026) but
+    NOT colour — a ``--verbose`` run piped to a file stays plain, so the bool
+    is accepted for symmetry with :func:`should_emit_progress` but only the
+    env/TTY signals decide colour. When colour is on, the brand palette is used
+    iff ``COLORTERM`` advertises truecolor (issue #209's detection, shared via
+    ``_common.palette``).
+
+    Mirrors the diff renderer's precedence (``FORCE_COLOR`` beats ``NO_COLOR``)
+    so the two surfaces agree on when colour ships.
+    """
+    _ = verbose  # progress-on signal, not a colour signal (see docstring)
+    if os.environ.get("FORCE_COLOR"):
+        color = True
+    elif "NO_COLOR" in os.environ:
+        color = False
+    else:
+        try:
+            color = bool(sys.stderr.isatty())
+        except (AttributeError, ValueError):  # pragma: no cover — defensive
+            color = False
+    truecolor = palette.colorterm_is_truecolor() if color else False
+    return ProgressStyle(color=color, truecolor=truecolor)
+
+
+def _spark_glyph(style: ProgressStyle) -> str:
+    """Return the coloured ◆ glyph + trailing space, or '' when colour off."""
+    if not style.color:
+        return ""
+    code = palette.SPARK if style.truecolor else palette.YELLOW
+    return f"{code}{_PROGRESS_GLYPH}{palette.RESET} "
+
+
+def _dim(text: str, style: ProgressStyle) -> str:
+    """Wrap ``text`` in the dim SGR when colour is on; else return as-is."""
+    if not style.color:
+        return text
+    return f"{palette.DIM}{text}{palette.RESET}"
+
+
+def _progress_terminal_width() -> int:
+    """Best-effort terminal width for right-aligning the done-line fact."""
+    try:
+        return shutil.get_terminal_size().columns
+    except (ValueError, OSError):  # pragma: no cover — defensive
+        return _PROGRESS_FALLBACK_WIDTH
+
+
 def format_elapsed(elapsed_seconds: float) -> str:
     """Format a wall-clock duration for the ``done in <X>`` progress
     line. ``X.Xs`` below 60s; ``Xm Ys`` at or above 60s (DEC-026).
@@ -846,30 +939,73 @@ def format_elapsed(elapsed_seconds: float) -> str:
     return f"{minutes}m {seconds}s"
 
 
-def emit_progress_entry(stage_n: int, stage_name: str, body: str, *, total: int = 5) -> None:
-    """Emit a single ``[N/<total>] <stage>: <body>`` line to stderr.
+def emit_progress_entry(
+    stage_n: int,
+    stage_name: str,
+    body: str,
+    *,
+    total: int = 5,
+    style: ProgressStyle | None = None,
+) -> None:
+    """Emit a single stage-entry progress line to stderr.
 
-    Callers are responsible for the TTY gate via
-    :func:`should_emit_progress`; this helper unconditionally writes when
-    invoked. The callsite-level gate keeps the helper trivial and lets
-    the orchestrator make a single decision once at startup.
+    Two surfaces (issue #210). When ``style`` is ``None`` or ``style.color``
+    is ``False`` (no TTY / ``NO_COLOR``), the plain ``[N/<total>] <stage>:
+    <body>`` form ships — byte-identical to the pre-#210 output, so piped logs
+    and existing tests are unchanged. When colour is on, the brand form ships:
+    a spark-amber ``◆`` glyph, the ``[N/<total>]`` counter, a dim stage label
+    padded to a column, then the body. ``body`` is ANSI-stripped on the colour
+    path (it may carry a model id / path) before the trusted SGR is added.
 
-    ``total`` defaults to ``5`` (the ``generate`` pipeline's stage count)
-    so the v0.1 callers stay byte-identical. The ``prune-existing``
-    subcommand passes ``total=3`` for its ``ingest → prune → diff``
-    progress (DEC-010 of ``plans/super/105-prune-existing-cli.md``).
+    Callers own the TTY gate via :func:`should_emit_progress`; this helper
+    writes unconditionally when invoked. ``total`` defaults to ``5`` (the
+    ``generate`` pipeline's stage count); ``prune-existing`` passes ``total=3``
+    for its ``ingest → prune → diff`` progress (DEC-010 of
+    ``plans/super/105-prune-existing-cli.md``).
     """
-    print_stderr(f"[{stage_n}/{total}] {stage_name}: {body}", flush=True)
+    if style is None or not style.color:
+        print_stderr(f"[{stage_n}/{total}] {stage_name}: {body}", flush=True)
+        return
+    glyph = _spark_glyph(style)
+    stage = _dim(stage_name.ljust(_STAGE_LABEL_WIDTH), style)
+    body_clean = strip_ansi_escapes(body)
+    print_stderr(f"{glyph}[{stage_n}/{total}] {stage}  {body_clean}", flush=True, allow_sgr=True)
 
 
 def emit_progress_done(
-    stage_n: int, stage_name: str, elapsed_seconds: float, *, total: int = 5
+    stage_n: int,
+    stage_name: str,
+    elapsed_seconds: float,
+    *,
+    total: int = 5,
+    fact: str = "",
+    style: ProgressStyle | None = None,
 ) -> None:
-    """Emit the paired ``[N/<total>] <stage>: done in <X>`` line."""
-    print_stderr(
-        f"[{stage_n}/{total}] {stage_name}: done in {format_elapsed(elapsed_seconds)}",
-        flush=True,
-    )
+    """Emit the paired stage-done line to stderr.
+
+    Plain path (colour off) is byte-identical to pre-#210:
+    ``[N/<total>] <stage>: done in <X>`` — no glyph, no fact. The colour path
+    prefixes the spark ``◆`` glyph and, when ``fact`` is non-empty, appends it
+    right-aligned to the terminal width — a dim one-glance summary (the model
+    id, the mean grade, the kept/dropped counts) the caller computes from
+    objects already in scope, never a hardcoded hint (DEC-026). ``fact`` is
+    ANSI-stripped before styling.
+    """
+    timing = f"done in {format_elapsed(elapsed_seconds)}"
+    if style is None or not style.color:
+        print_stderr(f"[{stage_n}/{total}] {stage_name}: {timing}", flush=True)
+        return
+    glyph = _spark_glyph(style)
+    stage_padded = stage_name.ljust(_STAGE_LABEL_WIDTH)
+    # Visible (SGR-free) left segment, used only to measure the right-align pad.
+    left_plain = f"{_PROGRESS_GLYPH} [{stage_n}/{total}] {stage_padded}  {timing}"
+    left = f"{glyph}[{stage_n}/{total}] {_dim(stage_padded, style)}  {timing}"
+    if not fact:
+        print_stderr(left, flush=True, allow_sgr=True)
+        return
+    fact_clean = strip_ansi_escapes(fact)
+    pad = max(2, _progress_terminal_width() - len(left_plain) - len(fact_clean))
+    print_stderr(f"{left}{' ' * pad}{_dim(fact_clean, style)}", flush=True, allow_sgr=True)
 
 
 # ---------------------------------------------------------------------------
@@ -952,16 +1088,29 @@ def format_batch_summary(outcome: _BatchOutcome) -> str:
     return "\n".join(lines) + "\n"
 
 
-def emit_batch_progress_entry(model_unique_id: str, batch_index: int, batch_count: int) -> None:
-    """Emit a single ``[i/N] <model_unique_id>`` line to stderr.
+def emit_batch_progress_entry(
+    model_unique_id: str,
+    batch_index: int,
+    batch_count: int,
+    *,
+    style: ProgressStyle | None = None,
+) -> None:
+    """Emit a single ``[i/N] <model_unique_id>`` batch-progress line to stderr.
 
-    Callers are responsible for the TTY gate via
-    :func:`should_emit_progress`; this helper unconditionally writes when
-    invoked, mirroring :func:`emit_progress_entry`'s contract. The
-    callsite-level gate keeps the helper trivial and lets the batch
-    driver make a single decision once at startup.
+    Plain path (``style`` ``None`` / colour off) is byte-identical to pre-#210;
+    the colour path prefixes the spark ``◆`` glyph (issue #210).
+    ``model_unique_id`` is ANSI-stripped on the colour path.
+
+    Callers own the TTY gate via :func:`should_emit_progress`; this helper
+    writes unconditionally when invoked, mirroring
+    :func:`emit_progress_entry`'s contract.
     """
-    print_stderr(f"[{batch_index}/{batch_count}] {model_unique_id}", flush=True)
+    if style is None or not style.color:
+        print_stderr(f"[{batch_index}/{batch_count}] {model_unique_id}", flush=True)
+        return
+    glyph = _spark_glyph(style)
+    mid = strip_ansi_escapes(model_unique_id)
+    print_stderr(f"{glyph}[{batch_index}/{batch_count}] {mid}", flush=True, allow_sgr=True)
 
 
 def _safe_excepthook(

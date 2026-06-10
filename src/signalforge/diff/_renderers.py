@@ -82,6 +82,8 @@ import shutil
 import sys
 from typing import TYPE_CHECKING
 
+from signalforge._common import palette
+from signalforge._common.palette import colorterm_is_truecolor
 from signalforge.diff._ansi_safety import strip_ansi_escapes
 from signalforge.diff._markdown_safety import escape_markdown_scalar
 from signalforge.diff.config import DiffConfig
@@ -91,48 +93,18 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# ANSI SGR sequences — internal-only constants used by AnsiRenderer.
+# ANSI SGR sequences. The brand palette + 24-bit primitives live in the shared
+# ``signalforge._common.palette`` module (issue #210) so the CLI's progress
+# lines and this renderer's verdict-tier table read the SAME bytes from one
+# source. Values are unchanged from #209, so every diff snapshot remains
+# byte-identical. Aliased to the historical ``_RESET`` / ``_TC_*`` names so the
+# renderer body is untouched.
 # ---------------------------------------------------------------------------
 
-_RESET = "\x1b[0m"
-_BOLD = "\x1b[1m"
-_GREEN = "\x1b[32m"
-_RED = "\x1b[31m"
-_YELLOW = "\x1b[33m"
-_CYAN = "\x1b[36m"
-_DIM = "\x1b[2m"
-
-
-# ---------------------------------------------------------------------------
-# Brand-hex truecolor palette (issue #209).
-#
-# The verdict vocabulary (kept / kept-uncertain / dropped / flagged) is "the
-# heart of the brand" — the SignalForge Design System assigns each tier a
-# specific hue (``tokens/colors.css``). When the terminal advertises 24-bit
-# colour, AnsiRenderer paints the tiers in those exact brand hues; otherwise it
-# falls back to the 16-colour SGR codes above. The capability tier sits ABOVE
-# 16-colour and never below the NO_COLOR / colour-off decision — the brand
-# palette is a *refinement* of "colour is on", never a way to turn colour on.
-# ---------------------------------------------------------------------------
-
-
-def _truecolor(r: int, g: int, b: int) -> str:
-    """Return a 24-bit foreground SGR escape for an RGB triple.
-
-    ``\\x1b[38;2;R;G;Bm`` is the ISO 6429 / ECMA-48 direct-colour form
-    supported by truecolor terminals. The renderer emits these only when
-    :meth:`AnsiRenderer._should_emit_truecolor` resolves true.
-    """
-    return f"\x1b[38;2;{r};{g};{b}m"
-
-
-# Brand hex → truecolor SGR (mirrors ``tokens/colors.css`` of the Design
-# System). Each value is the foreground colour for its verdict tier.
-_TC_SIGNAL = _truecolor(0x2F, 0xCB, 0x7F)  # signal green #2FCB7F — kept
-_TC_STEEL = _truecolor(0x4F, 0x90, 0xF7)  # steel blue   #4F90F7 — kept-uncertain
-_TC_NOISE = _truecolor(0xFB, 0x5A, 0x60)  # noise red    #FB5A60 — dropped
-_TC_FLAG = _truecolor(0xF5, 0xA6, 0x23)  # flag amber   #F5A623 — flagged
-
+_RESET, _BOLD, _DIM = palette.RESET, palette.BOLD, palette.DIM
+_GREEN, _RED, _YELLOW, _CYAN = palette.GREEN, palette.RED, palette.YELLOW, palette.CYAN
+_TC_SIGNAL, _TC_STEEL = palette.SIGNAL, palette.STEEL
+_TC_NOISE, _TC_FLAG = palette.NOISE, palette.FLAG
 
 # Tier → SGR maps. The 16-colour map preserves the pre-#209 bytes exactly
 # (kept=green, kept-uncertain=cyan, dropped=red, flagged=yellow); the
@@ -150,9 +122,6 @@ _TIER_CODES_TRUECOLOR: dict[str, str] = {
     "dropped": _TC_NOISE,
     "flagged": _TC_FLAG,
 }
-
-# Truecolor terminal advertisement values for ``COLORTERM`` (lower-cased).
-_TRUECOLOR_COLORTERM_VALUES = frozenset({"truecolor", "24bit"})
 
 
 # ---------------------------------------------------------------------------
@@ -419,9 +388,7 @@ class AnsiRenderer(Renderer):
         Conservative by design: an unknown / unset ``COLORTERM`` degrades to
         the 16-colour codes, which every ANSI terminal renders correctly.
         """
-        if self._truecolor is not None:
-            return self._truecolor
-        return os.environ.get("COLORTERM", "").lower() in _TRUECOLOR_COLORTERM_VALUES
+        return colorterm_is_truecolor(self._truecolor)
 
     @staticmethod
     def _tier_codes(truecolor: bool) -> dict[str, str]:
