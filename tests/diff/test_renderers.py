@@ -105,6 +105,21 @@ def default_config() -> DiffConfig:
     return DiffConfig()
 
 
+@pytest.fixture(autouse=True)
+def _deterministic_colorterm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear ``COLORTERM`` so colour-palette assertions are deterministic
+    regardless of the runner's terminal (issue #209).
+
+    The 16-colour palette is the baseline the bulk of this module's
+    colour assertions expect; without this, a maintainer whose shell
+    exports ``COLORTERM=truecolor`` would see the brand-hex palette and
+    the 16-colour assertions would spuriously fail. Tests that exercise
+    the truecolor path call ``monkeypatch.setenv("COLORTERM", ...)`` in
+    their own body, which overrides this autouse default.
+    """
+    monkeypatch.delenv("COLORTERM", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # 1. Renderer ABC contract.
 # ---------------------------------------------------------------------------
@@ -343,6 +358,140 @@ def test_color_precedence_isatty_is_terminal_signal(
     renderer = AnsiRenderer(config=default_config, force_color=None, terminal_width=200)
     output = renderer.render(_make_report(entries=(_kept_entry(),)))
     assert "\x1b[" not in output
+
+
+# ---------------------------------------------------------------------------
+# 4b. Brand-hex truecolor palette (issue #209).
+# ---------------------------------------------------------------------------
+
+# Brand-hex 24-bit SGR codes (tokens/colors.css). Asserted as literal bytes so
+# a palette regression — wrong hex, wrong tier mapping — fails loud.
+_TC_KEPT = "\x1b[38;2;47;203;127m"  # signal green #2FCB7F
+_TC_UNCERTAIN = "\x1b[38;2;79;144;247m"  # steel blue #4F90F7
+_TC_DROPPED = "\x1b[38;2;251;90;96m"  # noise red #FB5A60
+_TC_FLAGGED = "\x1b[38;2;245;166;35m"  # flag amber #F5A623
+
+
+def _all_tiers_report() -> DiffReport:
+    """A report carrying one entry of every verdict tier."""
+    entries = (
+        _kept_entry(),
+        DiffEntry(
+            artifact_id="test.column.email.unique",
+            test_type="unique",
+            tier="kept-uncertain",
+            drop_reason=None,
+            why="warehouse unreachable",
+            score=None,
+            passed=None,
+        ),
+        _dropped_entry(),
+        DiffEntry(
+            artifact_id="column.email.description",
+            test_type=None,
+            tier="flagged",
+            drop_reason=None,
+            why="below threshold",
+            score=0.40,
+            passed=False,
+        ),
+    )
+    return _make_report(entries=entries)
+
+
+def test_truecolor_palette_used_when_colorterm_advertises(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """COLORTERM=truecolor → the four verdict tiers paint in brand hex,
+    not the 16-colour codes (issue #209 auto-detection)."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    renderer = AnsiRenderer(config=default_config, force_color=True, terminal_width=200)
+    output = renderer.render(_all_tiers_report())
+    assert _TC_KEPT in output
+    assert _TC_UNCERTAIN in output
+    assert _TC_DROPPED in output
+    assert _TC_FLAGGED in output
+    # The 16-colour tier codes must NOT appear when truecolor is active.
+    assert "\x1b[32m" not in output
+    assert "\x1b[36m" not in output
+
+
+def test_truecolor_detected_for_24bit_colorterm(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """COLORTERM=24bit is the other recognised truecolor advertisement."""
+    monkeypatch.setenv("COLORTERM", "24bit")
+    renderer = AnsiRenderer(config=default_config, force_color=True, terminal_width=200)
+    output = renderer.render(_all_tiers_report())
+    assert _TC_KEPT in output
+
+
+def test_sixteen_color_fallback_when_colorterm_unset(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No COLORTERM advertisement → the 16-colour palette (byte-identical
+    to the pre-#209 output) is used, never the 24-bit codes."""
+    monkeypatch.delenv("COLORTERM", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    renderer = AnsiRenderer(config=default_config, force_color=True, terminal_width=200)
+    output = renderer.render(_all_tiers_report())
+    assert "\x1b[32m" in output  # green kept
+    assert "\x1b[36m" in output  # cyan kept-uncertain
+    assert "38;2" not in output  # no truecolor escapes
+
+
+def test_truecolor_kwarg_true_overrides_detection(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``truecolor=True`` forces the brand palette even with COLORTERM unset."""
+    monkeypatch.delenv("COLORTERM", raising=False)
+    renderer = AnsiRenderer(
+        config=default_config, force_color=True, truecolor=True, terminal_width=200
+    )
+    output = renderer.render(_all_tiers_report())
+    assert _TC_KEPT in output
+    assert "\x1b[32m" not in output
+
+
+def test_truecolor_kwarg_false_overrides_detection(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``truecolor=False`` forces the 16-colour fallback even when the
+    terminal advertises COLORTERM=truecolor."""
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    renderer = AnsiRenderer(
+        config=default_config, force_color=True, truecolor=False, terminal_width=200
+    )
+    output = renderer.render(_all_tiers_report())
+    assert "\x1b[32m" in output
+    assert "38;2" not in output
+
+
+def test_truecolor_not_emitted_when_color_off(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The brand palette refines 'colour on' — it never turns colour on.
+    With colour forced OFF, no SGR ships regardless of ``truecolor=True``."""
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    renderer = AnsiRenderer(
+        config=default_config, force_color=False, truecolor=True, terminal_width=200
+    )
+    output = renderer.render(_all_tiers_report())
+    assert "\x1b[" not in output
+
+
+def test_truecolor_header_counts_use_brand_palette(
+    default_config: DiffConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The summary header's per-tier counts use the same brand hues as the
+    table tier cells (issue #209) so the two surfaces stay consistent."""
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    renderer = AnsiRenderer(config=default_config, force_color=True, terminal_width=200)
+    output = renderer.render(_all_tiers_report())
+    header = output.splitlines()[0]
+    assert f"{_TC_KEPT}kept=1" in header
+    assert f"{_TC_DROPPED}dropped=1" in header
 
 
 # ---------------------------------------------------------------------------

@@ -114,11 +114,41 @@ In-process `main(argv)` testing is the primary pattern but cannot catch `[projec
 
 When adding a subcommand, add a parallel `--help` smoke under the same marker (with a subcommand-unique token in stdout + the no-traceback floor) rather than introducing a second gated marker — the single **marker** is the source of truth for "the wheel actually exposes the script."
 
-## Progress to stderr UX (DEC-014, DEC-026)
+## Progress to stderr UX (DEC-014, DEC-026; brand glyph #210)
 
-`cmd_generate` emits one stderr progress line per stage entry plus a paired `done in <X>` line at exit. The `<fact>` field is computed from objects already in scope (model id, candidate test count) — never a hardcoded duration hint; stale estimates rot.
+`cmd_generate` emits one stderr progress line per stage entry plus a paired `done in <X>` line at exit. The `<fact>` field is computed from objects already in scope (model id, candidate test count, kept/dropped counts, mean grade) — never a hardcoded duration hint; stale estimates rot.
 
 TTY-gated: `should_emit_progress(quiet, verbose)` returns `True` only when both stderr and stdout are TTYs. `--quiet` suppresses; `--verbose` forces on. The orchestrator decides once at startup and threads the bool through stages — don't introspect TTY-ness mid-pipeline.
+
+**Two-surface progress (issue #210) — plain path is byte-identical to pre-#210; the brand glyph is colour-only.** The progress emitters (`emit_progress_entry` / `emit_progress_done` / `emit_batch_progress_entry` in `_helpers.py`) take a `ProgressStyle | None` resolved ONCE by `resolve_progress_style(verbose)` and threaded like `progress_on`. Two surfaces:
+
+- **Colour off** (`style is None`, or `style.color is False`): the exact pre-#210 line — `[N/total] <stage>: <body>` / `[N/total] <stage>: done in <X>` — no glyph, no colour, no fact. Piped logs and every pre-#210 test stay byte-stable. This is the contract: *adding the glyph must not change a single byte of the non-colour path.*
+- **Colour on**: `◆ [N/total] <stage>  <body>` (entry) and `◆ [N/total] <stage>  done in <X>            <fact>` (done, fact right-aligned to the terminal width). The `◆` is spark-amber (`palette.SPARK` = `#FFC24D` truecolor / `palette.YELLOW` 16-colour fallback); the stage label + fact are dim; the colon is dropped in favour of column spacing. Decisions D3/D4 (#208): the `safety` line and the `[N/total]` counter are BOTH kept.
+
+Load-bearing details:
+
+- **Colour decision keys on STDERR, not stdout** (progress is a stderr surface). `resolve_progress_style`: `FORCE_COLOR` forces on; `NO_COLOR` forces off; else `sys.stderr.isatty()`. `--verbose` forces *progress* on but NOT colour (a `--verbose` run piped to a file stays plain). Truecolor via `palette.colorterm_is_truecolor()` only when colour is on. Mirrors the diff renderer's `FORCE_COLOR > NO_COLOR` precedence so the two surfaces agree.
+- **Trusted SGR rides through `print_stderr(..., allow_sgr=True)`** — the narrow exception to the #60 strip-at-the-sink rule. The emitter strips every user-content fragment (model id, path) itself BEFORE wrapping it in renderer-owned SGR; `allow_sgr=True` then skips the sink's strip so the trusted glyph/dim codes survive. Default `allow_sgr=False` keeps the strip-everything contract for every other stderr write (panic-path error renderer, batch summary, lint). The AST scan `test_no_direct_stderr_print.py` is unaffected — the write still goes through `print_stderr`.
+- **Brand palette is shared, not CLI-local** — `signalforge._common.palette` (the same module the diff renderer reads, issue #209→#210). Don't duplicate brand hex or the `COLORTERM` check in the CLI.
+- **Test determinism:** `tests/cli/test_generate.py` has an autouse fixture clearing `NO_COLOR`/`FORCE_COLOR`/`COLORTERM` per test — load-bearing because `--no-color` mutates `os.environ["NO_COLOR"]` and does NOT restore it (DEC-023), so an in-process `--no-color` test would otherwise leak the var into every later test and flip its colour path. Colour-path assertions strip SGR and check plain structure (palette-independent); a dedicated test pins the spark-amber SGR under `FORCE_COLOR`+`COLORTERM=truecolor`.
+- **Scope:** `prune-existing` progress stays on the plain path (passes no `style`) in v0.x — only `generate` got the glyph. `--no-grade` still renumbers to `[N/4]` on both surfaces.
+
+## End-of-run footer — `wrote …` + `✓ done in <X> · $cost` (issue #211)
+
+A successful **single-model** `generate` run closes with a two-line stderr footer, built by `build_run_footer(*, elapsed_seconds, written, dry_run, cost_clause, style)` in `_helpers.py`:
+
+```text
+wrote schema.yml (8 kept) · .signalforge/diff.json · .signalforge/grade.json
+✓ done in 5m12s · $0.13 Anthropic
+```
+
+Load-bearing rules:
+
+- **Built in `_run_single_model`, emitted by the dispatcher AFTER the stdout diff.** The footer string is stored on `_SingleModelOutcome.footer_text` (`""` on failure / `--quiet` / non-TTY / batch). The dispatcher does `sys.stdout.write(rendered_text)` → `sys.stdout.flush()` → `print_stderr(footer_text, allow_sgr=True, flush=True)` so the footer reads *below* the table and `> diffs.txt` still captures only the diff (stdout). Building it in `_run_single_model` (which returns before stdout is written) and emitting from the dispatcher is the seam — don't emit it inline (it would print above the diff).
+- **Single-model only.** A batch closes with `format_batch_summary`; `_run_single_model` sets `footer_text=""` when `batch_index is not None`. The per-model cost rollup would be *cumulative* (the audit JSONLs are append-only across a `--select` batch), so a per-model `$cost` would mislead. Batch-total cost is a deferred follow-up.
+- **Cost is SUPPLEMENTARY — degrade, never fail (DEC-005).** `cost_module.rollup_audit_dir(project_dir)` is wrapped in a bare `except Exception` that degrades to an empty `cost_clause`. A missing/malformed audit, an unpriced SKU, anything — the run still exits 0 with a bare `✓ done in <X>`. `format_cost_clause(per_provider_usd)` joins providers with subtotal > 0 in sorted-key order; `_format_usd` renders `<$0.01` for a positive-but-sub-cent figure (a `$0.00` would read as free). **Warehouse cost is deliberately omitted** — there is no actual-bytes-scanned figure at end-of-run (only the `--estimate` planner preview), so the clause stays LLM-only rather than fabricating a number.
+- **`wrote` line is HONEST.** It names only artifacts actually written this run: `schema.yml (N kept)` + proposed `.sql` count under `--write`; `.signalforge/diff.json` unless `--dry-run`; `.signalforge/grade.json` when graded. Empty under `--dry-run` → `dry run — no files written`. Never claims a write that didn't happen.
+- **Colour-gated like the progress lines (#210).** The `✓` is signal-green (`palette.SIGNAL`/`GREEN`) — glyph + dim styling only when `style.color`; the colour-off form is plain text (no glyph, no SGR). Gated by `progress_on`, so `--quiet` / non-TTY suppress it. Every fragment is internally constructed (artifact names, formatted USD, provider display) so it's safe through `print_stderr(allow_sgr=True)`.
 
 ## Multi-source CLI commands degrade on supplementary failures (DEC-005 of #36)
 

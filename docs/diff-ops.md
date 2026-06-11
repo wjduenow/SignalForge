@@ -176,6 +176,22 @@ renderer's own colour codes get emitted on top. A drafted column
 description containing `\x1b[31mevil` cannot inject colour into the
 rendered output regardless of the operator's terminal setting.
 
+**Brand-hex truecolor palette (issue #209).** Once the precedence chain
+resolves "colour ON", a second, orthogonal decision picks the *palette*:
+when the terminal advertises 24-bit colour (`COLORTERM=truecolor` or
+`COLORTERM=24bit`), the four verdict tiers paint in the SignalForge
+Design-System hues — `kept` signal-green `#2FCB7F`, `kept-uncertain`
+steel-blue `#4F90F7`, `dropped` noise-red `#FB5A60`, `flagged`
+flag-amber `#F5A623` — in both the summary header counts and the table
+tier cells. Without that advertisement the renderer falls back to the
+16-colour codes (green / cyan / red / yellow), byte-identical to the
+pre-#209 output. The capability tier sits **above** 16-colour and never
+below the colour-OFF decision — the brand palette is a refinement of
+"colour is on", never a way to turn colour on (`NO_COLOR` still wins).
+The `AnsiRenderer(truecolor=...)` constructor kwarg (`True` / `False` /
+`None`) overrides detection for tests and future wiring; there is no
+CLI flag in v0.x — detection is automatic.
+
 The `MarkdownRenderer` escapes Markdown-injection vectors in table
 cells (DEC-008): triple-backticks, pipe (`|`), backslash (`\`). Raw
 HTML (`<...>`) is HTML-entity-encoded for table cells. **Inside the
@@ -315,10 +331,10 @@ points to that stage's input changing.
 
 | Tier             | Source                                                                                                                                                                                                                                                                                                                                                                            | One-line `why` example                                              | Display in `ansi` renderer            |
 | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- | ------------------------------------- |
-| `kept`           | `PruneDecision.decision == "kept"` AND `PruneDecision.reason == "kept"` (positive prune evidence). No grading report OR grading passed.                                                                                                                                                                                                                                              | "kept by prune; clarity 0.85, consistency 0.90"                     | green, full row                       |
-| `kept-uncertain` | `PruneDecision.decision == "kept"` AND `PruneDecision.reason == "kept-without-evidence"` (issue #50). The prune layer could not positively evaluate the test — total budget exhausted, identifier rejected by SQL safety check, warehouse call raised, `prune.enabled: false`, or sample materialisation failed. **Origin dominates over grading** — never collapses to `flagged`. | "total prune budget exceeded before evaluation"                     | cyan, full row, no score              |
-| `dropped`        | `PruneDecision.decision == "dropped"`. `drop_reason` carries the prune layer's `DropReason` literal.                                                                                                                                                                                                                                                                                | "always-passes (sample of 10000 rows; 0 failing rows)"              | red, dimmed row                       |
-| `flagged`        | Kept by prune (with positive evidence) AND grading is below threshold (any criterion failed OR `score=None` degraded sentinel).                                                                                                                                                                                                                                                    | "passed prune; clarity 0.30 (failed)"                               | yellow, full row with score badge     |
+| `kept`           | `PruneDecision.decision == "kept"` AND `PruneDecision.reason == "kept"` (positive prune evidence). No grading report OR grading passed.                                                                                                                                                                                                                                              | "kept by prune; clarity 0.85, consistency 0.90"                     | green (brand signal `#2FCB7F` on truecolor), full row |
+| `kept-uncertain` | `PruneDecision.decision == "kept"` AND `PruneDecision.reason == "kept-without-evidence"` (issue #50). The prune layer could not positively evaluate the test — total budget exhausted, identifier rejected by SQL safety check, warehouse call raised, `prune.enabled: false`, or sample materialisation failed. **Origin dominates over grading** — never collapses to `flagged`. | "total prune budget exceeded before evaluation"                     | cyan (brand steel `#4F90F7` on truecolor), full row, no score |
+| `dropped`        | `PruneDecision.decision == "dropped"`. `drop_reason` carries the prune layer's `DropReason` literal.                                                                                                                                                                                                                                                                                | "always-passes (sample of 10000 rows; 0 failing rows)"              | red (brand noise `#FB5A60` on truecolor), dimmed row |
+| `flagged`        | Kept by prune (with positive evidence) AND grading is below threshold (any criterion failed OR `score=None` degraded sentinel).                                                                                                                                                                                                                                                    | "passed prune; clarity 0.30 (failed)"                               | yellow (brand flag `#F5A623` on truecolor), full row with score badge |
 
 `flagged` is set only when `grading_report is not None` AND the entry's
 grading is below threshold AND the prune decision had positive evidence.

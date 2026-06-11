@@ -1203,20 +1203,34 @@ When the CLI is attached to an interactive terminal (both stderr AND
 stdout return `True` from `isatty()`), `cmd_generate` emits one
 stderr progress line per stage entry plus a paired `done in <X>`
 line at stage exit (DEC-014, DEC-026). Live values; no hardcoded
-duration hints. Example shape:
+duration hints.
+
+On a colour terminal each line carries the brand spark glyph `◆`
+(amber `#FFC24D` on a truecolor terminal, yellow on a 16-colour one),
+the stage label dimmed, and — on the `done` line — a right-aligned
+**fact** computed from objects in scope (the model id, the
+kept/dropped counts, the mean grade). Example shape:
 
 ```text
-[1/5] safety: building LLM request...
-[1/5] safety: done in 0.0s
-[2/5] draft: calling LLM (model claude-sonnet-4-6)...
-[2/5] draft: done in 41.7s
-[3/5] prune: running 12 candidate tests against warehouse...
-[3/5] prune: done in 18.4s
-[4/5] grade: scoring 8 artifacts × 4 criteria (32 calls)...
-[4/5] grade: done in 1m 12s
-[5/5] diff: rendering...
-[5/5] diff: done in 0.1s
+◆ [1/5] safety  building LLM request...
+◆ [1/5] safety  done in 0.0s
+◆ [2/5] draft   calling LLM (model claude-sonnet-4-6)...
+◆ [2/5] draft   done in 41.7s                       claude-sonnet-4-6
+◆ [3/5] prune   running 12 candidate tests against warehouse...
+◆ [3/5] prune   done in 18.4s                       8 kept · 4 dropped
+◆ [4/5] grade   scoring 8 artifacts × 4 criteria (32 calls)...
+◆ [4/5] grade   done in 1m 12s                              mean 0.91
+◆ [5/5] diff    rendering...
+◆ [5/5] diff    done in 0.1s
 ```
+
+When colour is **off** — a non-colour terminal, `NO_COLOR`, or
+`--no-color` — the glyph and fact are dropped and the classic plain
+form ships byte-for-byte (`[1/5] safety: building LLM request...`),
+so piped logs stay stable. The colour decision keys on stderr:
+`FORCE_COLOR` forces colour on, `NO_COLOR` forces it off, otherwise
+`sys.stderr.isatty()`. `--verbose` forces *progress* on but not
+colour (a `--verbose` run piped to a file stays plain).
 
 Non-TTY runs (piped, redirected, CI logs) emit no progress lines by
 default. `--quiet` suppresses regardless of TTY; `--verbose` forces
@@ -1227,6 +1241,35 @@ When `--no-grade` is set, progress honestly re-numbers to `[N/4]`
 stages: safety, draft, prune, diff). See [Skip grading for fast
 iteration (`--no-grade`)](#skip-grading-for-fast-iteration---no-grade)
 for the cookbook entry.
+
+### End-of-run footer
+
+A successful single-model run closes with a two-line footer on stderr,
+printed below the diff:
+
+```text
+wrote schema.yml (8 kept) · .signalforge/diff.json · .signalforge/grade.json
+✓ done in 5m12s · $0.13 Anthropic
+```
+
+- The **`wrote`** line names the artifacts actually written this run —
+  `schema.yml (N kept)` only under `--write`, `.signalforge/diff.json`
+  unless `--dry-run`, `.signalforge/grade.json` when the grade stage
+  ran. Under `--dry-run` it reads `dry run — no files written`.
+- The **`✓ done`** line carries the wall-clock plus the LLM cost,
+  summed per provider from the run's audit JSONLs
+  (`.signalforge/llm_responses.jsonl` + `grade.jsonl`). A sub-cent
+  figure renders `<$0.01`. Warehouse cost is not shown — there is no
+  actual-bytes-scanned figure at end of run (use `--estimate` for a
+  pre-run planner preview). If the cost can't be computed the run still
+  succeeds with a bare `✓ done in <X>` (the cost is a nice-to-have, not
+  load-bearing).
+
+Like the progress lines, the footer is on stderr (so `> diffs.txt`
+captures only the diff), the `✓` glyph + colour appear only on a colour
+terminal, and `--quiet` / non-TTY suppress it. In a `--select` batch the
+per-model footer is replaced by the aggregate
+[batch summary](#running-across-many-models).
 
 The `<fact>` field on each entry line is computed from objects
 already in scope (model id, candidate test count,

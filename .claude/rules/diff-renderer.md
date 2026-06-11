@@ -83,6 +83,28 @@ Both `AnsiRenderer` and `MarkdownRenderer` invoke this on every user-content fie
 
 Does NOT cover OSC (`\x1b]...`), DCS (`\x1bP...`), or other non-CSI escapes — out of scope for v0.1; broaden only on a real-world incident.
 
+## Brand-hex truecolor palette is a SECOND axis below the colour-on decision (issue #209)
+
+The verdict vocabulary (`kept` / `kept-uncertain` / `dropped` / `flagged`) is the heart of the brand, so `AnsiRenderer` paints the four tiers in the SignalForge Design-System hues when the terminal supports 24-bit colour. **This is a refinement of "colour is on", a strictly separate axis from the DEC-021 ON/OFF chain — never a way to turn colour on.** Two methods, two questions:
+
+- `_should_emit_color()` (DEC-021) — *is colour on at all?* Unchanged. `NO_COLOR` / `FORCE_COLOR` / `--no-color` / `isatty` resolve here.
+- `_should_emit_truecolor()` (issue #209) — *given colour is on, which palette?* Resolved in `render()` as `truecolor = emit_color and self._should_emit_truecolor()`, so the truecolor branch is dead when colour is off. Resolution: explicit `truecolor` constructor kwarg (`True`/`False`) wins; else `COLORTERM ∈ {truecolor, 24bit}` (case-insensitive, via `_TRUECOLOR_COLORTERM_VALUES`). Unset / unknown `COLORTERM` → the 16-colour fallback.
+
+Load-bearing invariants:
+
+- **Brand hex lives in ONE shared module** — `signalforge._common.palette` (promoted out of `_renderers` by issue #210 so the CLI's `generate` progress glyph reads the SAME bytes; see `cli-layer.md` § "Progress to stderr UX"). `palette.SIGNAL`/`STEEL`/`NOISE`/`FLAG`/`SPARK`/`FORGE` = `#2FCB7F`/`#4F90F7`/`#FB5A60`/`#F5A623`/`#FFC24D`/`#FF6A3D`, built via `palette.truecolor_sgr(r,g,b) -> "\x1b[38;2;r;g;bm"`; `COLORTERM` detection is `palette.colorterm_is_truecolor(override)`. `_renderers` imports these (aliased to the historical `_TC_*` names) and keeps only the two tier→SGR maps (`_TIER_CODES_16`, `_TIER_CODES_TRUECOLOR`) selected by the static `_tier_codes(truecolor)`. The header counts, the table tier cells, AND the proposed-test-files `+++` header (kept-tier hue) all read the same map so the surfaces stay consistent — don't hardcode a tier colour anywhere else, and don't duplicate the brand hex in a consumer.
+- **16-colour output is byte-identical to pre-#209.** The fallback map reuses the historic `_GREEN`/`_CYAN`/`_RED`/`_YELLOW` codes; every existing `*.ansi` snapshot regenerates unchanged. The new `truecolor_tiers.ansi` golden (case-count `13 → 14` in `test_snapshot_fixtures.py`) pins the brand-hex bytes.
+- **Determinism over ambient env.** Snapshot recipes pass `truecolor` explicitly (`render_for_case` defaults ANSI cases to `False`; the truecolor case sets `True`), and `tests/diff/test_renderers.py` has an autouse fixture clearing `COLORTERM`. A maintainer whose shell exports `COLORTERM=truecolor` must not flip the 16-colour goldens/assertions — any new test asserting a specific 16-colour code MUST pin `truecolor=False` or rely on that fixture; any test asserting brand hex MUST `setenv COLORTERM` or pass `truecolor=True`.
+- **No CLI flag, no `DiffConfig` field in v0.x.** Detection is automatic; the `truecolor` kwarg exists for tests + a future `--color-mode` wiring point. The orchestrator's `_build_renderer` constructs `AnsiRenderer(config=config)` (no override), so a live truecolor terminal gets brand hues for free. If a future ticket adds a `--color-mode {auto,truecolor,16,none}` flag, follow the 5-surface parity rule (`cli-layer.md`).
+
+## Table is SIX columns; em-dash for N/A score; no emoji (issue #212)
+
+Three brand-output decisions, deliberately locked:
+
+- **The wide-TTY table keeps SIX columns — `TIER · ARTIFACT · TEST · REASON · SCORE · WHY` (DEC-013 / `_render_table_header`).** The brand Design System's CLI mockup shows a 5-column layout that folds `REASON` into `WHY`; SignalForge does **not** adopt that fold (issue #212, decision D2). `REASON` carries the `DropReason` literal verbatim (`always-passes` / `failed-on-known-clean-data` / `requires-future-data` / …) — load-bearing reviewer signal that answers "*why* dropped" at a glance, distinct from the prose `WHY`. The mockup's 5-column form is illustrative density, not a spec. Narrow-TTY compact mode still drops `WHY` (DEC-013), never `REASON`. A future fold would rotate every `*.ansi` + `*.md` + `*.json` snapshot and the GFM table shape — don't do it without a fresh decision.
+- **N/A score renders as `—` (em-dash), not blank** — `score_text = "—" if entry.score is None else f"{entry.score:.2f}"` in both `AnsiRenderer._render_table_row` and `MarkdownRenderer._render_table_row`. Pinned by `tests/diff/test_renderers.py::test_score_none_renders_em_dash`.
+- **No emoji anywhere in rendered output** (README §2 brand voice). Terminal texture comes from the glyph set `◆ ✓ — · … → └─ ↳` only. The gate is `tests/test_brand_no_emoji.py` — a rendered-output scan (NOT a source-literal scan) over every diff snapshot case + the CLI progress/footer surfaces, keyed on emoji/pictographic codepoint ranges that exclude the BMP symbol glyphs the brand legitimately uses (`✓` U+2713, `→` U+2192, `◆` U+25C6, …) and accented Latin user content. Carries a planted-violation self-check (the predicate must catch 🐰/✨ AND pass `✓`/`◆`/`café`) per `testing-signal.md`. When a future surface emits a new glyph, add it to the brand set in the test's allow-reasoning, never reach for an emoji.
+
 ## Markdown table-cell escape with HTML entities, raw passthrough inside fenced diff (DEC-008)
 
 `signalforge.diff._markdown_safety.escape_markdown_scalar(text, in_table_cell=False)`:

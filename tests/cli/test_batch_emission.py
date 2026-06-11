@@ -72,6 +72,7 @@ def _make_outcome(
         dropped_count=dropped,
         flagged_count=flagged,
         rendered_text="rendered\n" if exit_code == 0 else "",
+        footer_text="",
         duration_seconds=duration,
         exception_class_name=exc_class,
     )

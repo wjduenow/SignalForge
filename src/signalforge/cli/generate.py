@@ -105,14 +105,17 @@ from signalforge import safety as safety_module
 from signalforge import warehouse as warehouse_module
 from signalforge.cli import _estimate as estimate_module
 from signalforge.cli._helpers import (
+    build_run_footer,
     canonicalise_user_path,
     emit_batch_progress_entry,
     emit_progress_done,
     emit_progress_entry,
     format_batch_summary,
+    format_cost_clause,
     format_error_to_stderr,
     map_exception_to_exit_code,
     print_stderr,
+    resolve_progress_style,
     setup_logging,
     should_emit_progress,
 )
@@ -129,6 +132,7 @@ from signalforge.diff._test_file_writer import (
 from signalforge.diff.models import DiffReport, ProposedTestFile
 from signalforge.grade.rubric import DEFAULT_RUBRIC
 from signalforge.llm import AnthropicClientProtocol
+from signalforge.llm import cost as cost_module
 from signalforge.llm.providers import provider_for
 from signalforge.manifest import select_models
 from signalforge.manifest.errors import SelectorParseError
@@ -784,6 +788,13 @@ class _SingleModelOutcome:
       the trailing newline that ``print(rendered)`` produces). Empty
       string on failure so the dispatcher's ``if r.rendered_text`` check
       naturally skips it.
+    * ``footer_text`` — the issue-#211 end-of-run stderr footer (``wrote
+      …`` + ``✓ done in <X> · $cost``). Built ONLY for the single-model
+      success path with progress on; ``""`` on failure, under ``--quiet`` /
+      non-TTY, and for every per-model run inside a batch (the batch path
+      uses :func:`format_batch_summary` as its closing line instead). The
+      dispatcher emits it to stderr AFTER the stdout diff so it reads below
+      the table.
     * ``duration_seconds`` — wall-clock from ``_run_single_model`` entry
       to exit (success or failure).
     * ``exception_class_name`` — ``None`` on success; on failure, the
@@ -803,6 +814,7 @@ class _SingleModelOutcome:
     dropped_count: int
     flagged_count: int
     rendered_text: str
+    footer_text: str
     duration_seconds: float
     exception_class_name: str | None
 
@@ -919,6 +931,11 @@ def _run_single_model(
     quiet = bool(getattr(args, "quiet", False))
     verbose = bool(getattr(args, "verbose", False))
     progress_on = should_emit_progress(quiet=quiet, verbose=verbose)
+    # Issue #210 — resolve the progress glyph/colour style once at startup and
+    # thread it through every emit call (mirrors how ``total`` is resolved once
+    # and threaded). When colour is off the style produces the byte-identical
+    # pre-#210 plain lines.
+    progress_style = resolve_progress_style(verbose)
 
     # US-007 of #189 / DEC-003 — when ``--no-grade`` is set, the pipeline
     # is honestly four stages (safety / draft / prune / diff) — drop the
@@ -939,7 +956,7 @@ def _run_single_model(
     # / quiet / verbose gating delegates to :func:`should_emit_progress`
     # — same rules as the stage-N progress lines that follow.
     if progress_on and batch_index is not None and batch_count is not None:
-        emit_batch_progress_entry(model.unique_id, batch_index, batch_count)
+        emit_batch_progress_entry(model.unique_id, batch_index, batch_count, style=progress_style)
 
     start = time.monotonic()
     try:
@@ -1047,6 +1064,7 @@ def _run_single_model(
                 dropped_count=0,
                 flagged_count=0,
                 rendered_text="",
+                footer_text="",
                 duration_seconds=time.monotonic() - start,
                 exception_class_name=None,
             )
@@ -1060,7 +1078,9 @@ def _run_single_model(
         # the size of the work that's about to happen rather than a
         # stale estimate.
         if progress_on:
-            emit_progress_entry(1, "safety", "building LLM request...", total=total)
+            emit_progress_entry(
+                1, "safety", "building LLM request...", total=total, style=progress_style
+            )
         _t0 = time.monotonic()
         # Safety policy (the first stage in the documented pipeline
         # order — DEC-025 / CLAUDE.md "Pipeline shape"). US-006: apply
@@ -1072,7 +1092,9 @@ def _run_single_model(
         if mode_override is not None:
             policy = policy.with_mode(safety_module.SamplingMode(mode_override))
         if progress_on:
-            emit_progress_done(1, "safety", time.monotonic() - _t0, total=total)
+            emit_progress_done(
+                1, "safety", time.monotonic() - _t0, total=total, style=progress_style
+            )
 
         # ---- 2/5: draft -------------------------------------------------
         # DEC-006 of #135 — the CLI no longer constructs an Anthropic client
@@ -1097,7 +1119,11 @@ def _run_single_model(
             )
         if progress_on:
             emit_progress_entry(
-                2, "draft", f"calling LLM (model {draft_config.model})...", total=total
+                2,
+                "draft",
+                f"calling LLM (model {draft_config.model})...",
+                total=total,
+                style=progress_style,
             )
         _t0 = time.monotonic()
         draft_outcome = draft_module.draft_schema(
@@ -1109,7 +1135,14 @@ def _run_single_model(
             _client=None,
         )
         if progress_on:
-            emit_progress_done(2, "draft", time.monotonic() - _t0, total=total)
+            emit_progress_done(
+                2,
+                "draft",
+                time.monotonic() - _t0,
+                total=total,
+                fact=f"{draft_config.model}",
+                style=progress_style,
+            )
 
         # ---- 3/5: prune -------------------------------------------------
         # US-006 of #22 / DEC-011 / DEC-012 — apply ``--scope`` and
@@ -1165,6 +1198,7 @@ def _run_single_model(
                 "prune",
                 f"running {candidate_test_count} candidate tests against warehouse...",
                 total=total,
+                style=progress_style,
             )
         _t0 = time.monotonic()
         # US-013 of #171 / DEC-001 — ``--as-of`` threads through to the
@@ -1185,7 +1219,14 @@ def _run_single_model(
             as_of=getattr(args, "as_of", None),
         )
         if progress_on:
-            emit_progress_done(3, "prune", time.monotonic() - _t0, total=total)
+            emit_progress_done(
+                3,
+                "prune",
+                time.monotonic() - _t0,
+                total=total,
+                fact=f"{prune_result.kept_count} kept · {prune_result.dropped_count} dropped",
+                style=progress_style,
+            )
 
         # ---- 4/5: grade -------------------------------------------------
         # US-007 of #189 / DEC-001 — ``--no-grade`` skips the entire grade
@@ -1295,6 +1336,7 @@ def _run_single_model(
                         f"criteria ({total_calls} calls)..."
                     ),
                     total=total,
+                    style=progress_style,
                 )
             _t0 = time.monotonic()
             # DEC-006 of #135 — ``client=None`` lets ``grade_artifacts`` thread
@@ -1310,7 +1352,14 @@ def _run_single_model(
                 project_dir=project_dir,
             )
             if progress_on:
-                emit_progress_done(4, "grade", time.monotonic() - _t0, total=total)
+                emit_progress_done(
+                    4,
+                    "grade",
+                    time.monotonic() - _t0,
+                    total=total,
+                    fact=f"mean {grade_report.mean_score:.2f}",
+                    style=progress_style,
+                )
 
         # ---- 5/5: diff --------------------------------------------------
         # US-006 / DEC-020 — apply ``--format`` by re-validating the
@@ -1346,7 +1395,9 @@ def _run_single_model(
             output_path = (project_dir / model_relpath).parent / "schema.yml"
 
         if progress_on:
-            emit_progress_entry(_diff_stage_n, "diff", "rendering...", total=total)
+            emit_progress_entry(
+                _diff_stage_n, "diff", "rendering...", total=total, style=progress_style
+            )
         _t0 = time.monotonic()
         diff_report = diff_module.render_diff(
             model,
@@ -1359,7 +1410,13 @@ def _run_single_model(
             project_dir=project_dir,
         )
         if progress_on:
-            emit_progress_done(_diff_stage_n, "diff", time.monotonic() - _t0, total=total)
+            emit_progress_done(
+                _diff_stage_n,
+                "diff",
+                time.monotonic() - _t0,
+                total=total,
+                style=progress_style,
+            )
 
         # US-012 of #116 / DEC-010 / DEC-014 — on ``--write`` (NOT
         # ``--dry-run``), additionally materialise every proposed singular
@@ -1387,6 +1444,48 @@ def _run_single_model(
         # so we pre-build the trailing newline here. ``print``'s default
         # ``end="\n"`` is what every existing snapshot test pins.
         rendered_text = f"{rendered}\n"
+
+        # 7. Build the end-of-run footer (issue #211). Single-model success
+        #    path only: a batch closes with :func:`format_batch_summary`, and a
+        #    per-model cost rollup would be cumulative (the audit JSONLs are
+        #    append-only across the batch). Gated by ``progress_on`` so
+        #    ``--quiet`` / non-TTY suppress it. The dispatcher emits it AFTER
+        #    the stdout diff so it reads below the table.
+        footer_text = ""
+        if progress_on and batch_index is None:
+            written: list[str] = []
+            if write:
+                written.append(f"schema.yml ({diff_report.kept_count} kept)")
+                n_tests = len(diff_report.proposed_test_files)
+                if n_tests:
+                    written.append(f"{n_tests} test file{'s' if n_tests != 1 else ''}")
+            if not dry_run:
+                written.append(".signalforge/diff.json")
+                # grade.json is a deliverable sidecar; under --dry-run the
+                # footer reports no deliverables (honours the documented
+                # dry-run contract) even though the grade stage's own sidecar
+                # write is not yet dry-run-aware (pre-existing; out of #211).
+                if grade_report is not None:
+                    written.append(".signalforge/grade.json")
+            # Cost is a SUPPLEMENTARY surface (cli-layer.md DEC-005): a rollup
+            # failure (missing audit, malformed record, unpriced SKU) must
+            # never fail the run — degrade to no cost clause.
+            cost_clause = ""
+            try:
+                cost_report = cost_module.rollup_audit_dir(project_dir)
+                cost_clause = format_cost_clause(
+                    {p: r.subtotal_usd for p, r in cost_report.per_provider.items()}
+                )
+            except Exception:  # noqa: BLE001 — supplementary; degrade silently
+                cost_clause = ""
+            footer_text = build_run_footer(
+                elapsed_seconds=time.monotonic() - start,
+                written=written,
+                dry_run=dry_run,
+                cost_clause=cost_clause,
+                style=progress_style,
+            )
+
         return _SingleModelOutcome(
             model_unique_id=model.unique_id,
             exit_code=0,
@@ -1394,6 +1493,7 @@ def _run_single_model(
             dropped_count=diff_report.dropped_count,
             flagged_count=diff_report.flagged_count,
             rendered_text=rendered_text,
+            footer_text=footer_text,
             duration_seconds=time.monotonic() - start,
             exception_class_name=None,
         )
@@ -1408,6 +1508,7 @@ def _run_single_model(
             dropped_count=0,
             flagged_count=0,
             rendered_text="",
+            footer_text="",
             duration_seconds=time.monotonic() - start,
             exception_class_name=type(exc).__name__,
         )
@@ -1767,6 +1868,12 @@ def cmd_generate(args: argparse.Namespace) -> int:
         )
         if single_outcome.rendered_text:
             sys.stdout.write(single_outcome.rendered_text)
+        # Issue #211 — emit the end-of-run footer to STDERR after the stdout
+        # diff so it reads below the table (and ``> diffs.txt`` captures only
+        # the diff). ``footer_text`` is "" under --quiet / non-TTY / failure.
+        if single_outcome.footer_text:
+            sys.stdout.flush()
+            print_stderr(single_outcome.footer_text, allow_sgr=True, flush=True)
         return single_outcome.exit_code
 
     except Exception as exc:  # noqa: BLE001 — the boundary catch (DEC-016)

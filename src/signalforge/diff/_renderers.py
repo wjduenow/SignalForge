@@ -82,6 +82,8 @@ import shutil
 import sys
 from typing import TYPE_CHECKING
 
+from signalforge._common import palette
+from signalforge._common.palette import colorterm_is_truecolor
 from signalforge.diff._ansi_safety import strip_ansi_escapes
 from signalforge.diff._markdown_safety import escape_markdown_scalar
 from signalforge.diff.config import DiffConfig
@@ -91,16 +93,35 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
-# ANSI SGR sequences — internal-only constants used by AnsiRenderer.
+# ANSI SGR sequences. The brand palette + 24-bit primitives live in the shared
+# ``signalforge._common.palette`` module (issue #210) so the CLI's progress
+# lines and this renderer's verdict-tier table read the SAME bytes from one
+# source. Values are unchanged from #209, so every diff snapshot remains
+# byte-identical. Aliased to the historical ``_RESET`` / ``_TC_*`` names so the
+# renderer body is untouched.
 # ---------------------------------------------------------------------------
 
-_RESET = "\x1b[0m"
-_BOLD = "\x1b[1m"
-_GREEN = "\x1b[32m"
-_RED = "\x1b[31m"
-_YELLOW = "\x1b[33m"
-_CYAN = "\x1b[36m"
-_DIM = "\x1b[2m"
+_RESET, _BOLD, _DIM = palette.RESET, palette.BOLD, palette.DIM
+_GREEN, _RED, _YELLOW, _CYAN = palette.GREEN, palette.RED, palette.YELLOW, palette.CYAN
+_TC_SIGNAL, _TC_STEEL = palette.SIGNAL, palette.STEEL
+_TC_NOISE, _TC_FLAG = palette.NOISE, palette.FLAG
+
+# Tier → SGR maps. The 16-colour map preserves the pre-#209 bytes exactly
+# (kept=green, kept-uncertain=cyan, dropped=red, flagged=yellow); the
+# truecolor map carries the brand hues. :meth:`AnsiRenderer._tier_codes`
+# selects between them per the resolved colour capability.
+_TIER_CODES_16: dict[str, str] = {
+    "kept": _GREEN,
+    "kept-uncertain": _CYAN,
+    "dropped": _RED,
+    "flagged": _YELLOW,
+}
+_TIER_CODES_TRUECOLOR: dict[str, str] = {
+    "kept": _TC_SIGNAL,
+    "kept-uncertain": _TC_STEEL,
+    "dropped": _TC_NOISE,
+    "flagged": _TC_FLAG,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +251,14 @@ class AnsiRenderer(Renderer):
             :attr:`DiffConfig.respect_no_color_env`. The kwarg exists
             so a caller (CLI / test) can override the config value
             without rebuilding a :class:`DiffConfig`.
+        truecolor: Three-state brand-palette override (issue #209).
+            ``True`` forces the 24-bit brand hues for the verdict tiers,
+            ``False`` forces the 16-colour fallback, ``None`` (the
+            default) auto-detects from the ``COLORTERM`` env var
+            (``truecolor`` / ``24bit``). Orthogonal to the colour
+            ON/OFF chain above — only consulted once colour is on; when
+            colour is off no SGR ships regardless of this value. Tests
+            inject an explicit value for deterministic snapshots.
         terminal_width: Optional terminal-width override for the
             narrow-TTY compact mode (DEC-013). When ``None`` (the
             default), the renderer reads :func:`shutil.get_terminal_size`
@@ -243,6 +272,7 @@ class AnsiRenderer(Renderer):
         config: DiffConfig,
         force_color: bool | None = None,
         respect_no_color_env: bool | None = None,
+        truecolor: bool | None = None,
         terminal_width: int | None = None,
     ) -> None:
         self._config = config
@@ -255,6 +285,11 @@ class AnsiRenderer(Renderer):
             if respect_no_color_env is not None
             else config.respect_no_color_env
         )
+        # Three-state brand-palette override (issue #209). ``True`` forces the
+        # 24-bit brand hues, ``False`` forces the 16-colour fallback, ``None``
+        # auto-detects via ``COLORTERM``. Orthogonal to the colour ON/OFF
+        # decision: only consulted when colour is already on.
+        self._truecolor = truecolor
         self._terminal_width = terminal_width
 
     def render(self, report: DiffReport) -> str:
@@ -274,20 +309,28 @@ class AnsiRenderer(Renderer):
         narrow-TTY (DEC-013) semantics.
         """
         emit_color = self._should_emit_color()
+        # Brand-palette refinement (issue #209): only meaningful once colour
+        # is on. ``truecolor`` selects the 24-bit brand hues vs the 16-colour
+        # fallback for the verdict-tier cells / counts.
+        truecolor = emit_color and self._should_emit_truecolor()
         width = self._effective_width()
         narrow = width < self._config.narrow_terminal_threshold
 
         chunks: list[str] = []
-        chunks.append(self._render_header(report, emit_color=emit_color))
+        chunks.append(self._render_header(report, emit_color=emit_color, truecolor=truecolor))
         chunks.append("")
-        chunks.append(self._render_table(report, narrow=narrow, emit_color=emit_color))
+        chunks.append(
+            self._render_table(report, narrow=narrow, emit_color=emit_color, truecolor=truecolor)
+        )
         chunks.append("")
         chunks.append(self._render_diff_section(report))
         # Issue #116 — proposed standalone ``.sql`` test files (kept
         # ``custom_sql`` business-rule tests). Only appended when the
         # report carries any, so prune-only / schema-only renders stay
         # byte-identical to the pre-#116 output.
-        test_files_section = self._render_test_files_section(report, emit_color=emit_color)
+        test_files_section = self._render_test_files_section(
+            report, emit_color=emit_color, truecolor=truecolor
+        )
         if test_files_section:
             chunks.append("")
             chunks.append(test_files_section)
@@ -330,6 +373,28 @@ class AnsiRenderer(Renderer):
         except (AttributeError, ValueError):  # pragma: no cover — defensive
             return False
 
+    def _should_emit_truecolor(self) -> bool:
+        """Resolve whether to use the 24-bit brand palette (issue #209).
+
+        Only consulted by :meth:`render` AFTER :meth:`_should_emit_color`
+        resolves true — the brand palette refines "colour is on"; it never
+        turns colour on. Resolution:
+
+        1. The explicit ``truecolor`` constructor kwarg wins when not ``None``.
+        2. Otherwise auto-detect via ``COLORTERM`` — ``truecolor`` / ``24bit``
+           (case-insensitive) advertise 24-bit support. Any other value (or an
+           unset var) selects the 16-colour fallback.
+
+        Conservative by design: an unknown / unset ``COLORTERM`` degrades to
+        the 16-colour codes, which every ANSI terminal renders correctly.
+        """
+        return colorterm_is_truecolor(self._truecolor)
+
+    @staticmethod
+    def _tier_codes(truecolor: bool) -> dict[str, str]:
+        """Return the active tier→SGR map for the resolved colour capability."""
+        return _TIER_CODES_TRUECOLOR if truecolor else _TIER_CODES_16
+
     # ------------------------------------------------------------------
     # Terminal-width detection (DEC-013).
     # ------------------------------------------------------------------
@@ -362,28 +427,37 @@ class AnsiRenderer(Renderer):
             return text
         return f"{code}{text}{_RESET}"
 
-    def _render_header(self, report: DiffReport, *, emit_color: bool) -> str:
+    def _render_header(self, report: DiffReport, *, emit_color: bool, truecolor: bool) -> str:
         """Render the one-line header above the table.
 
         Surfaces the model under render and the three count aggregates.
         ``model_unique_id`` runs through :func:`strip_ansi_escapes`
         UNCONDITIONALLY (DEC-007) — even though manifest unique_ids
         rarely carry escapes, the input boundary is the same defence
-        as the prose ``why`` cell.
+        as the prose ``why`` cell. The per-tier count colours come from
+        the active palette (issue #209) so the brand hues paint the
+        summary line and the table tier cells identically.
         """
+        codes = self._tier_codes(truecolor)
         clean_id = strip_ansi_escapes(report.model_unique_id)
         title = self._color(f"diff: {clean_id}", _BOLD, emit_color=emit_color)
-        kept = self._color(f"kept={report.kept_count}", _GREEN, emit_color=emit_color)
+        kept = self._color(f"kept={report.kept_count}", codes["kept"], emit_color=emit_color)
         kept_uncertain = self._color(
             f"kept-uncertain={report.kept_uncertain_count}",
-            _CYAN,
+            codes["kept-uncertain"],
             emit_color=emit_color,
         )
-        dropped = self._color(f"dropped={report.dropped_count}", _RED, emit_color=emit_color)
-        flagged = self._color(f"flagged={report.flagged_count}", _YELLOW, emit_color=emit_color)
+        dropped = self._color(
+            f"dropped={report.dropped_count}", codes["dropped"], emit_color=emit_color
+        )
+        flagged = self._color(
+            f"flagged={report.flagged_count}", codes["flagged"], emit_color=emit_color
+        )
         return f"{title}  {kept}  {kept_uncertain}  {dropped}  {flagged}"
 
-    def _render_table(self, report: DiffReport, *, narrow: bool, emit_color: bool) -> str:
+    def _render_table(
+        self, report: DiffReport, *, narrow: bool, emit_color: bool, truecolor: bool
+    ) -> str:
         """Render the kept/dropped/flagged table.
 
         Wide mode: 6 columns (tier, artifact_id, test_type, drop_reason,
@@ -397,7 +471,11 @@ class AnsiRenderer(Renderer):
         lines: list[str] = []
         lines.append(self._render_table_header(narrow=narrow, emit_color=emit_color))
         for entry in report.entries:
-            lines.append(self._render_table_row(entry, narrow=narrow, emit_color=emit_color))
+            lines.append(
+                self._render_table_row(
+                    entry, narrow=narrow, emit_color=emit_color, truecolor=truecolor
+                )
+            )
             if narrow:
                 follow = self._render_follow_up_why(entry)
                 if follow:
@@ -423,7 +501,9 @@ class AnsiRenderer(Renderer):
         line = "  ".join(cells)
         return self._color(line, _BOLD, emit_color=emit_color)
 
-    def _render_table_row(self, entry: DiffEntry, *, narrow: bool, emit_color: bool) -> str:
+    def _render_table_row(
+        self, entry: DiffEntry, *, narrow: bool, emit_color: bool, truecolor: bool
+    ) -> str:
         """Render one row of the table.
 
         Every user-content cell — ``artifact_id``, the prose ``why``,
@@ -439,15 +519,13 @@ class AnsiRenderer(Renderer):
         clean_drop_reason = strip_ansi_escapes(entry.drop_reason) if entry.drop_reason else ""
         clean_test_type = strip_ansi_escapes(entry.test_type or "")
 
-        # Tier cell — coloured per-tier via the renderer's own codes.
-        # Issue #50: ``kept-uncertain`` paints cyan to distinguish it
-        # from the green ``kept`` tier (positive prune evidence).
-        tier_colour = {
-            "kept": _GREEN,
-            "kept-uncertain": _CYAN,
-            "dropped": _RED,
-            "flagged": _YELLOW,
-        }.get(entry.tier, _RESET)
+        # Tier cell — coloured per-tier via the active palette. Issue #50:
+        # ``kept-uncertain`` is distinct from the green ``kept`` tier
+        # (positive prune evidence). Issue #209: the brand-hex palette paints
+        # the tier in its Design-System hue when truecolor is active; the
+        # 16-colour map (kept=green/uncertain=cyan/dropped=red/flagged=yellow)
+        # is the fallback.
+        tier_colour = self._tier_codes(truecolor).get(entry.tier, _RESET)
         tier_cell = self._color(_pad(entry.tier, _COL_TIER), tier_colour, emit_color=emit_color)
 
         score_text = "—" if entry.score is None else f"{entry.score:.2f}"
@@ -496,7 +574,9 @@ class AnsiRenderer(Renderer):
         clean_lines = [strip_ansi_escapes(line) for line in body.splitlines()]
         return "\n".join(clean_lines)
 
-    def _render_test_files_section(self, report: DiffReport, *, emit_color: bool) -> str:
+    def _render_test_files_section(
+        self, report: DiffReport, *, emit_color: bool, truecolor: bool
+    ) -> str:
         """Render the proposed standalone ``.sql`` test-file section (#116).
 
         Empty string when ``report.proposed_test_files`` is empty so the
@@ -511,11 +591,14 @@ class AnsiRenderer(Renderer):
         lines: list[str] = []
         heading = self._color("proposed test files:", _BOLD, emit_color=emit_color)
         lines.append(heading)
+        kept_code = self._tier_codes(truecolor)["kept"]
         for proposed in report.proposed_test_files:
             clean_path = strip_ansi_escapes(proposed.path)
-            # ``+++`` new-file header (mirrors the unified-diff +++ shape
-            # so the operator reads it as "this file would be created").
-            header = self._color(f"+++ {clean_path}", _GREEN, emit_color=emit_color)
+            # ``+++`` new-file header (mirrors the unified-diff +++ shape so
+            # the operator reads it as "this file would be created"). Uses the
+            # kept-tier colour (signal green / brand-hex) — a proposed file is
+            # an addition, the same semantic as a kept artifact (issue #209).
+            header = self._color(f"+++ {clean_path}", kept_code, emit_color=emit_color)
             lines.append("")
             lines.append(header)
             for sql_line in proposed.sql.splitlines():
