@@ -4,6 +4,10 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 ## [Unreleased]
 
+_Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
+
+## [0.6.1] — 2026-06-11
+
 ### Added
 
 - **Brand Design-System styling for `signalforge generate` terminal output (#208 epic; #209–#212).** A from-scratch visual identity for the product's primary surface — the CLI — where the verdict vocabulary (kept / kept-uncertain / dropped / flagged) is rendered in real ANSI. Four slices land together, all sharing one `signalforge._common.palette` module and all byte-identical on the colour-off / `NO_COLOR` / non-TTY path:
@@ -188,7 +192,8 @@ signalforge --version
 - OSS-first, Core-friendly — no dbt Cloud dependency; runs against any dbt-core project, locally or in CI.
 - Explainable diffs — every kept/dropped/flagged artifact ships with a one-line "why"; every run produces a sidecar JSON with reproducibility hashes.
 
-[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/wjduenow/SignalForge/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/wjduenow/SignalForge/releases/tag/v0.6.1
 [0.6.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.6.0
 [0.5.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.5.0
 [0.4.0]: https://github.com/wjduenow/SignalForge/releases/tag/v0.4.0
