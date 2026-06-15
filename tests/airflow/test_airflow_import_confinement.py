@@ -128,7 +128,11 @@ def test_scan_flags_planted_import_violation() -> None:
         '"""A stub operator module that wrongly imports airflow at module scope."""\n'
         "from __future__ import annotations\n"
         "\n"
-        "from airflow.models import BaseOperator  # type: ignore[import-not-found]\n"
+        # Deliberately NO `# type: ignore` comment here: this planted line must be
+        # caught by the AST import-detection branch ALONE, so a regression isolated
+        # to that branch fails this test. The comment-scan branch is pinned
+        # independently by test_scan_flags_planted_type_ignore_violation.
+        "from airflow.models import BaseOperator\n"
         "\n"
         "\n"
         "class Bad(BaseOperator):\n"

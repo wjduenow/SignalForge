@@ -66,7 +66,7 @@ class _BaseHookProtocol(Protocol):
     def get_conn(self) -> Any: ...
 
 
-def make_base_operator() -> type:
+def make_base_operator() -> type:  # pragma: no cover - requires the [airflow] extra
     """Lazily import and return Apache Airflow's ``BaseOperator`` class.
 
     The ``from airflow ...`` import is confined to this function body (DEC-007)
@@ -85,10 +85,10 @@ def make_base_operator() -> type:
     return BaseOperator  # type: ignore[no-any-return]
 
 
-def make_base_hook() -> type:
+def make_base_hook() -> type:  # pragma: no cover - requires the [airflow] extra
     """Lazily import and return Apache Airflow's ``BaseHook`` class.
 
-    Async/lazy sibling of :func:`make_base_operator` for hooks. The
+    Lazy sibling of :func:`make_base_operator` for hooks. The
     ``from airflow ...`` import is confined to this function body (DEC-007); an
     implementing child calls this to build a real ``BaseHook`` subclass at
     runtime rather than at module scope (DEC-004).
