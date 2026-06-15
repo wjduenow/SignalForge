@@ -91,7 +91,12 @@ def _run_generate(**context: object) -> dict[str, object]:
         "json",
     ]
     print(f"[signalforge] running: {' '.join(cmd)}")
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # Bound the external call so a hung CLI / warehouse / LLM can't tie up a worker
+    # slot indefinitely. 1h is generous for a single model; tune for your fleet.
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    except subprocess.TimeoutExpired as exc:
+        raise AirflowFailException("signalforge generate timed out after 3600s") from exc
     print(f"[signalforge] exit={proc.returncode}")
     if proc.stderr:
         print("[signalforge] stderr tail:\n" + "\n".join(proc.stderr.splitlines()[-10:]))
@@ -132,11 +137,17 @@ def _gate(**context: object) -> None:
     if threshold is None:
         print("[signalforge] no flagged-count gate set (signalforge_max_flagged) — report only.")
         return
-    if flagged > int(threshold):
+    try:
+        max_flagged = int(threshold)
+    except ValueError as exc:
         raise AirflowFailException(
-            f"SignalForge gate: {flagged} flagged artifact(s) > threshold {threshold}"
+            "SignalForge config invalid: signalforge_max_flagged / SF_MAX_FLAGGED must be an int"
+        ) from exc
+    if flagged > max_flagged:
+        raise AirflowFailException(
+            f"SignalForge gate: {flagged} flagged artifact(s) > threshold {max_flagged}"
         )
-    print(f"[signalforge] gate passed: {flagged} flagged ≤ threshold {threshold}")
+    print(f"[signalforge] gate passed: {flagged} flagged ≤ threshold {max_flagged}")
 
 
 with DAG(

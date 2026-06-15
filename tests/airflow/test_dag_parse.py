@@ -67,7 +67,9 @@ def _live_skip_reason() -> str | None:
     return f"live Airflow e2e needs: {', '.join(missing)}" if missing else None
 
 
-def test_generate_task_runs_live_against_demo(tmp_path: Path) -> None:
+def test_generate_task_runs_live_against_demo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """LIVE: the `generate` task runs the real pipeline against an init-demo project.
 
     Gated by SF_RUN_AIRFLOW + ANTHROPIC_API_KEY + GOOGLE_CLOUD_PROJECT + SF_RUN_BQ
@@ -82,8 +84,8 @@ def test_generate_task_runs_live_against_demo(tmp_path: Path) -> None:
     from signalforge.demo import copy_demo
 
     project_dir = copy_demo(tmp_path / "demo")
-    os.environ["SF_PROJECT_DIR"] = str(project_dir)
-    os.environ["SF_MODEL"] = "models/staging/stg_bikeshare_trips.sql"
+    monkeypatch.setenv("SF_PROJECT_DIR", str(project_dir))
+    monkeypatch.setenv("SF_MODEL", "models/staging/stg_bikeshare_trips.sql")
 
     dag = _load_example_dag()
     result = dag.get_task("generate").python_callable()  # type: ignore[attr-defined]
