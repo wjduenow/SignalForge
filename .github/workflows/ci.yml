@@ -107,11 +107,12 @@ jobs:
           CONSTRAINTS="https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.airflow-version }}/constraints-${{ matrix.python-version }}.txt"
           uv venv
           uv pip install "apache-airflow==${{ matrix.airflow-version }}" --constraint "$CONSTRAINTS"
-          # `-e .` until the skeleton child (epic #228) ships the `[airflow]` extra,
-          # then `-e ".[airflow]"`. The --constraint is load-bearing: without it uv
-          # upgrades protobuf 4->5 (+ pydantic) over Airflow 2.10.4's pins and risks
-          # breaking it; with it, signalforge resolves cleanly inside those pins.
-          uv pip install -e . --constraint "$CONSTRAINTS"
+          # `-e ".[airflow]"` — the `[airflow]` optional extra now exists (shipped by
+          # the epic #228 skeleton child #230). The --constraint is load-bearing:
+          # without it uv upgrades protobuf 4->5 (+ pydantic) over Airflow 2.10.4's
+          # pins and risks breaking it; with it, signalforge resolves cleanly inside
+          # those pins.
+          uv pip install -e '.[airflow]' --constraint "$CONSTRAINTS"
           # Test tooling under the same constraints — the `[airflow]` extra carries no
           # test deps, so without pytest-cov the `--no-cov` flag is unrecognised.
           uv pip install pytest pytest-cov pytest-asyncio --constraint "$CONSTRAINTS"
