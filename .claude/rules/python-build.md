@@ -73,6 +73,16 @@ The canonical dev install is `uv sync --dev`. `uv.lock` is committed; the lockfi
 
 The old "quote the `".[dev]"` — `[dev]` is a glob in zsh" gotcha drops away — `uv sync --dev` takes no glob-fragile argument.
 
+### Deliberate exception: a heavy/isolated optional extra is NOT mirrored into the dev group (issue #230)
+
+The "every optional extra also appears in `[dependency-groups].dev`" convention has ONE deliberate exception: the **`[airflow]` extra** (`apache-airflow>=2.8,<3`, epic #228). It lives in `[project.optional-dependencies]` ONLY — **not** in `[dependency-groups].dev` — so a default `uv sync --dev` (and therefore every default CI lint-test + pyright run) stays Apache-Airflow-free. Three load-bearing reasons:
+
+1. **The acceptance contract is "green WITHOUT Airflow installed."** `signalforge.airflow` types against duck-typed protocols in its one shim (`_airflow_compat`), so `uv run pyright` + the default `uv run pytest` must pass with no airflow present (`tests/airflow` is also excluded from pyright). Mirroring airflow into the dev group would import the heavy, tightly-version-pinned tree into the default env and break that contract.
+2. **#229 isolates Airflow on purpose.** Airflow is installed into a separate constraints-pinned `.venv-airflow` (Apache constraints file, certified 2.10.4/py3.11) — NOT through the project's unified resolution. The gated `airflow` pytest marker + the label-gated CI job run there; the gate tests (import-confinement, no-eager-import, wheel-deps) run UNGATED in the default suite and never import airflow.
+3. **`uv.lock` still carries the extra (purely additively).** `uv lock` resolves the `[airflow]` extra into the committed lock — verified additive, with NO version downgrades to any default-env package — so the lock stays in sync with `pyproject.toml` while `uv sync --dev` (no `--frozen`) installs none of the airflow tree.
+
+The general rule: when an optional extra is heavy, tightly version-pinned, or must be installable only under a vendor constraints file, keep it OUT of the dev group, document the deviation here, and back it with a no-eager-import gate + a wheel-deps assertion that the base wheel never vendors it. Don't reflexively mirror every extra into `[dependency-groups].dev`.
+
 ## Python version: advertised floor matches the tested floor (issue #46, uv migration)
 
 `pyproject.toml` declares `requires-python = ">=3.11"`; `[tool.pyright].pythonVersion` is `"3.11"`; `.github/workflows/ci.yml` runs a `python-version: ["3.11", "3.12"]` matrix. **All three agree on the floor** — what we advertise (`>=3.11`) is what we type-check (`3.11`) is what we test as the *floor of the matrix* (`3.11`). The 3.12 iteration runs pytest only; pyright is gated on `matrix.python-version == '3.11'` so the type-check pins to the advertised floor.
