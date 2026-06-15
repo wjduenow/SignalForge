@@ -42,6 +42,13 @@ openai = ["openai>=1.40,<3.0", "tiktoken>=0.7,<1.0"]
 # Optional LLM-provider extra: pulls the Google Gen AI SDK only when the operator
 # installs `signalforge-dbt[gemini]`. The base install stays Anthropic-only.
 gemini = ["google-genai>=0.5,<1"]
+# Optional Airflow integration extra: pulls Apache Airflow only when the operator
+# installs `signalforge-dbt[airflow]`. Deliberately NOT mirrored into
+# `[dependency-groups].dev` (the documented deviation from python-build.md) —
+# Airflow is heavy + version-pinned and lives in the #229 isolated, constraints-
+# pinned `.venv-airflow`; the default dev env stays Airflow-free. v0.7 floor per
+# #229 DEC-1: certified against 2.10.4/py3.11; 3.x deferred.
+airflow = ["apache-airflow>=2.8,<3"]
 
 [dependency-groups]
 # uv-native dependency groups (PEP 735).
