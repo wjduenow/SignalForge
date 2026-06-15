@@ -6,8 +6,20 @@
 - **Epic:** #228 (Airflow operator, v0.7 roadmap)
 - **Depends on:** #229 (Airflow local + CI test-environment spike — landed, commit `258f731`)
 - **Branch / worktree:** `feature/230-airflow-skeleton` @ `../worktrees/SignalForge/230-airflow-skeleton`
-- **Phase:** detailing (awaiting approval)
+- **Phase:** devolved
 - **Sessions:** 1 (2026-06-15)
+
+### Beads Manifest
+
+- **Epic:** `bd_1-scaffolding-763`
+- **Tasks:**
+  - `bd_1-scaffolding-763.1` — US-001 (extra + CI flip) — *ready*
+  - `bd_1-scaffolding-763.2` — US-002 (skeleton) — blocked on .1
+  - `bd_1-scaffolding-763.3` — US-003 (errors + registries, serial) — blocked on .2
+  - `bd_1-scaffolding-763.4` — US-004 (gate tests) — blocked on .2, .3
+  - `bd_1-scaffolding-763.5` — US-005 (Quality Gate) — blocked on .1–.4
+  - `bd_1-scaffolding-763.6` — US-006 (Patterns & Memory, P4) — blocked on .5
+- **Worktree:** `../worktrees/SignalForge/230-airflow-skeleton` (`feature/230-airflow-skeleton`)
 
 ---
 
