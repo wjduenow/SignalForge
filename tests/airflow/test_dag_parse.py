@@ -42,6 +42,9 @@ def test_spike_dag_parses_without_import_errors() -> None:
     bag = DagBag(dag_folder=str(_EXAMPLES_DIR), include_examples=False)
 
     assert bag.import_errors == {}, f"DAG import errors: {bag.import_errors}"
-    dag = bag.get_dag("signalforge_spike")
-    assert dag is not None
+    # Read the in-memory parsed-DAG dict, NOT bag.get_dag(): get_dag() consults the
+    # metadata DB (DagModel.get_current), which requires `airflow db init`. The parse
+    # certification must not need a DB — bag.dags is populated purely from parsing.
+    assert "signalforge_spike" in bag.dags, f"parsed dags: {list(bag.dags)}"
+    dag = bag.dags["signalforge_spike"]
     assert "placeholder_generate" in dag.task_ids

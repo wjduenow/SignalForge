@@ -102,11 +102,19 @@ which self-skips without `SF_RUN_AIRFLOW=1` plus the existing warehouse/LLM env 
 | `AIRFLOW_HOME`, `AIRFLOW__CORE__DAGS_FOLDER` | point standalone Airflow at `examples/airflow` |
 
 **In-process vs. subprocess (decision input for the operator children):** the **fast
-default is `dag.test()` / `DagBag`** — in-process, no scheduler, no metadata DB. It is what
-the gated CI job runs and the right call for parse + fake-backed legs. A subprocess
+default is `DagBag` (parse) / `dag.test()` (execute)** — in-process, no scheduler. It is
+what the gated CI job runs and the right call for parse + fake-backed legs. A subprocess
 `airflow standalone` is only for a maintainer eyeballing the DAG in the UI; the live E2E
 child decides whether its real-credential leg also wants a subprocess (likely not —
 `dag.test()` executes a full DAG end-to-end in one process).
+
+> **DB-init split (certification finding, see below).** The **parse** leg needs **no
+> metadata DB** — read `DagBag(...).import_errors` + the in-memory `DagBag(...).dags`
+> dict. Do **not** use `bag.get_dag(dag_id)` for the parse leg: `get_dag()` consults the
+> ORM (`DagModel.get_current`), which requires `airflow db init` and fails with
+> `sqlite3.OperationalError: no such table: dag` in a fresh venv. The **execute** leg
+> (`dag.test()`) does initialise/need a backend — that's the live E2E child's concern,
+> not the parse certification's.
 
 ---
 
@@ -192,6 +200,10 @@ SHAs below are the repo's already-pinned versions (`ci-supply-chain.md`):
           CONSTRAINTS="https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.airflow-version }}/constraints-${{ matrix.python-version }}.txt"
           uv pip install --system "apache-airflow==${{ matrix.airflow-version }}" --constraint "$CONSTRAINTS"
           uv pip install --system -e ".[airflow]"
+          # Test tooling, pinned by the same constraints file. Required because the
+          # `[airflow]` extra is a runtime extra (no test deps); without pytest-cov the
+          # `--no-cov` flag below is unrecognised, and the run errors before collection.
+          uv pip install --system pytest pytest-cov pytest-asyncio --constraint "$CONSTRAINTS"
       - name: Airflow operator + DAG-parse tests (gated marker)
         run: uv run --no-sync pytest -m airflow --no-cov
 ```
@@ -221,6 +233,27 @@ Load-bearing CI notes:
 - The `[airflow]` optional extra + `signalforge.airflow` package skeleton (*skeleton* child).
 - Real operators, the result→task-state/XCom contract, the connection hook, drift mode.
 - The live E2E DAG + `docs/airflow-ops.md` + MkDocs nav (*test+docs* child).
+
+## Certification results (2026-06-15, py3.11)
+
+Certified live on an isolated `uv venv .venv-airflow --python 3.11`:
+
+- ✅ **DEC-2 install** — `apache-airflow==2.10.4` installs cleanly under
+  `constraints-2.10.4/constraints-3.11.txt` (no resolution breakage).
+- ✅ **Parse** — `examples/airflow/signalforge_spike_dag.py` parses with
+  `DagBag(...).import_errors == {}`; `signalforge_spike` + its `placeholder_generate`
+  task appear in `DagBag(...).dags`.
+- ✅ **Gated test** — `pytest -m airflow --no-cov tests/airflow/` → `1 passed` under
+  real Airflow 2.10.4.
+- 🔧 **Finding (folded in):** the parse leg must read `bag.dags`, not `bag.get_dag()`
+  (the latter needs `airflow db init`) — see the DB-init note in DEC-5; the test was
+  fixed accordingly.
+- 🔧 **Finding (folded in):** the airflow env needs pytest/pytest-cov/pytest-asyncio
+  installed for `--no-cov` to be a valid flag — added to the CI install step.
+- ⚠️ **Benign:** Airflow's constraints pin an older pytest (7.x) that emits
+  `PytestConfigWarning: Unknown config option: strict_markers`. Harmless — the
+  `--strict-markers` *flag* in `addopts` still applies; only the pytest-9 `strict_markers`
+  *ini bool* is unread on the older pytest.
 
 ## Maintainer certification checklist
 
