@@ -30,16 +30,19 @@ Two load-bearing design rules govern this subpackage:
    ``# pyright: ignore``. A standalone line-scan confinement test (US-004)
    enforces this.
 
-Error classes (``AirflowIntegrationError`` / ``AirflowConfigError``) land in the
-NEXT bead (US-003); they are pure-Python and Airflow-free, so they will be
-**eager** re-exports here (only operators/hooks stay lazy). This skeleton bead
-ships the lazy operator/hook seam only.
+Error classes (``AirflowIntegrationError`` / ``AirflowConfigError``) are
+pure-Python and Airflow-free (``signalforge.airflow.errors`` carries no
+``from airflow ...`` import), so they are **eager** re-exports here (only the
+operator/hook names stay lazy — DEC-003 / DEC-006). Importing them does not
+violate the no-eager-import gate.
 """
 
 from __future__ import annotations
 
 from importlib import import_module
 from typing import TYPE_CHECKING
+
+from signalforge.airflow.errors import AirflowConfigError, AirflowIntegrationError
 
 if TYPE_CHECKING:
     # Type-checker-only imports: pyright resolves the public names for callers
@@ -58,6 +61,8 @@ _LAZY_NAMES: dict[str, str] = {
 }
 
 __all__ = [
+    "AirflowConfigError",
+    "AirflowIntegrationError",
     "SignalForgeGenerateOperator",
     "SignalForgeHook",
 ]

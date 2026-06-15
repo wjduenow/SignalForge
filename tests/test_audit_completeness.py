@@ -798,6 +798,19 @@ _EXCEPTION_MAPPING_EXCLUDED_BASES: frozenset[str] = frozenset(
         # because it does NOT subclass ``GradeAuditWriteError`` (both
         # are direct ``GradeError`` siblings).
         "GradeCacheRecordTooLargeError",
+        # ``AirflowIntegrationError`` (issue #230 / DEC-003) — abstract
+        # base of the ``signalforge.airflow`` typed-error hierarchy (the
+        # 14th per-stage ``errors.py``). v0.7 ships exactly one concrete
+        # (``AirflowConfigError`` → tier 2, individually mapped in
+        # ``_EXCEPTION_TO_EXIT_CODE``). Like ``DemoError`` / ``IngestError``
+        # / ``SkillError``, the base gets NO single fallback-tier entry —
+        # it lives only here in the excluded set; a forgotten future
+        # concrete falls through to tier 1 and the AST scan catches the
+        # missing per-class entry at test time. NOTE: these errors surface
+        # through Airflow's own task runner (``AirflowFailException``), not
+        # the ``signalforge`` CLI panic path, so the registration is
+        # defensive / scan-7 compliance (the tier is notional).
+        "AirflowIntegrationError",
     }
 )
 
@@ -924,17 +937,20 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
     ``errors.py`` in the project. If a future stage forgets to ship
     ``errors.py`` the scan would still pass (because there'd be nothing
     to walk for that stage); this test pins the expected set of
-    thirteen modules.
+    fourteen modules.
 
     Issue #157 / DEC-002 of US-001 added the first sub-stage
     ``errors.py`` (``llm/cost/errors.py`` — the cost-rollup layer); the
     glob was extended to depth-2 in lockstep so the expected count
     bumped 11 → 12. Issue #141 / US-002 / DEC-009 added the
-    ``signalforge.skill`` package and bumped 12 → 13.
+    ``signalforge.skill`` package and bumped 12 → 13. Issue #230 / US-003
+    / DEC-003 added the ``signalforge.airflow`` package and bumped
+    13 → 14.
     """
     paths = _enumerate_error_module_paths()
     rel_names = sorted(p.relative_to(_SIGNALFORGE_DIR).as_posix() for p in paths)
     assert rel_names == [
+        "airflow/errors.py",
         "cli/errors.py",
         "demo/errors.py",
         "diff/errors.py",
@@ -949,10 +965,10 @@ def test_scan_7_discovers_every_per_stage_errors_module() -> None:
         "skill/errors.py",
         "warehouse/errors.py",
     ], (
-        "Expected exactly thirteen per-stage errors.py modules (one per "
+        "Expected exactly fourteen per-stage errors.py modules (one per "
         "stage; demo added in #47, ingest in #104, llm/cost added in "
-        f"#157, skill added in #141); got: {rel_names}. If this "
-        "changes, update Scan 7's expected set."
+        "#157, skill added in #141, airflow added in #230); got: "
+        f"{rel_names}. If this changes, update Scan 7's expected set."
     )
 
 
