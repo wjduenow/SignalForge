@@ -7,7 +7,7 @@
 - **Depends on:** #230 (skeleton — CLOSED), #229 (local + CI test env — landed)
 - **Branch:** `feature/231-result-task-state`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/231-result-task-state`
-- **Phase:** detailing
+- **Phase:** published (PR #240, awaiting approval)
 - **Sessions:** 1 (2026-06-15)
 
 ### Beads Manifest
