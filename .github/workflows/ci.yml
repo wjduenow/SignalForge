@@ -78,7 +78,12 @@ jobs:
     # via a per-(airflow, python) constraints file, too costly to carry on every
     # job. Runs only on PRs labelled `airflow` or via manual workflow_dispatch.
     # Full contract: docs/research/airflow-test-environment.md.
-    if: contains(github.event.pull_request.labels.*.name, 'airflow') || github.event_name == 'workflow_dispatch'
+    # Guard the label check behind an explicit pull_request event so the
+    # `github.event.pull_request` reference is never evaluated on push events.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       contains(github.event.pull_request.labels.*.name, 'airflow'))
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true

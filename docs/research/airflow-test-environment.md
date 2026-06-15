@@ -67,7 +67,7 @@ doesn't re-resolve and clobber the hand-built constraints-pinned Airflow venv.
 `tests/airflow/` is also added to `[tool.pyright].exclude`: Airflow is deliberately not a
 typecheck dependency, so the default `uv run pyright` stays green without installing it.
 
-### DEC-4 — CI gating: a separate, path-filtered job (not in `lint-test`)
+### DEC-4 — CI gating: a separate, label-gated job (not in `lint-test`)
 
 A dedicated `airflow` job in `.github/workflows/ci.yml`, sibling to `lint-test`, **opt-in**
 so it doesn't run on every push. Trigger: PRs carrying the `airflow` label **or**
@@ -283,4 +283,4 @@ gated CI job from this doc." To certify (one-time, on a machine with Python 3.11
 - [ ] Run [Local setup A](#a-constraints-pinned-local-airflow-isolated-venv) — install succeeds under the constraints file.
 - [ ] Run [C](#c-headless-dag-parse-certification-the-acceptance-signal) — `tests/airflow/` passes (zero import errors, `signalforge_generate` parses).
 - [ ] Optionally run [B](#b-run-airflow-standalone-eyeball-a-dag-in-the-ui) — `signalforge_generate` shows in the UI.
-- [ ] Wire the [CI job](#ci) into `.github/workflows/ci.yml` (can land with the skeleton child).
+- [x] Wire the [CI job](#ci) into `.github/workflows/ci.yml` — **done** (label-gated `airflow` job + `workflow_dispatch`; certified green).

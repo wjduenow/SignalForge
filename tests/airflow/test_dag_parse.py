@@ -26,13 +26,9 @@ import pytest
 
 pytestmark = pytest.mark.airflow
 
-# Gate: skip (don't error) when Airflow isn't importable in this interpreter.
-pytest.importorskip(
-    "airflow",
-    reason="Apache Airflow not installed (run inside the constraints-pinned airflow venv)",
-)
-
 _EXAMPLES_DIR = Path(__file__).resolve().parents[2] / "examples" / "airflow"
+
+_AIRFLOW_SKIP = "Apache Airflow not installed (run inside the constraints-pinned airflow venv)"
 
 
 def _load_example_dag():
@@ -53,6 +49,9 @@ def test_example_dag_parses_without_import_errors() -> None:
     Acceptance signal for the Airflow example: the DAG authored against the
     chosen Airflow floor parses in-process with both tasks present.
     """
+    # Runtime gate (inside the test, not at module scope) so a default
+    # `uv run pytest` collection never imports Airflow even when deselected.
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
     dag = _load_example_dag()
     assert set(dag.task_ids) == {"generate", "gate"}
     # `generate` feeds `gate` — the result→task-state + XCom contract the example teaches.
@@ -75,6 +74,7 @@ def test_generate_task_runs_live_against_demo(tmp_path: Path) -> None:
     (belt-and-suspenders with the marker). Spends real Anthropic + BigQuery budget.
     Exercises the example's exit-code handling + XCom shape end-to-end.
     """
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
     reason = _live_skip_reason()
     if reason:
         pytest.skip(reason)
