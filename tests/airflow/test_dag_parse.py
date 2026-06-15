@@ -67,6 +67,14 @@ def _live_skip_reason() -> str | None:
     return f"live Airflow e2e needs: {', '.join(missing)}" if missing else None
 
 
+# External-service + subprocess markers (per testing-signal.md). Stacks with the
+# module-level `airflow` marker; the `-m airflow` CI job still selects this test
+# (it self-skips without the live env). Applied per-function so the parse test,
+# which needs no credentials, stays `airflow`-only.
+@pytest.mark.e2e
+@pytest.mark.anthropic
+@pytest.mark.bigquery
+@pytest.mark.cli_subprocess
 def test_generate_task_runs_live_against_demo(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
