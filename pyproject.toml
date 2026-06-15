@@ -132,6 +132,12 @@ ignore = []
 
 [tool.pyright]
 include = ["src", "tests"]
+# `tests/airflow` imports Apache Airflow, which is deliberately NOT a dev/typecheck
+# dependency (it ships behind the `[airflow]` extra under a constraints file — see
+# docs/research/airflow-test-environment.md). Excluding it keeps the default
+# `uv run pyright` green without installing Airflow's heavy tree. `examples/` is
+# already outside the include set.
+exclude = ["tests/airflow"]
 pythonVersion = "3.11"
 typeCheckingMode = "standard"
 reportMissingImports = "error"
@@ -141,7 +147,7 @@ testpaths = ["tests"]
 # `--import-mode=importlib` lets us share basenames across test dirs (e.g.
 # tests/manifest/test_errors.py and tests/warehouse/test_errors.py) without
 # adding tests/__init__.py — keeps `testing-signal.md`'s no-init rule intact.
-addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery and not anthropic and not cli_subprocess and not e2e and not wheel_smoke and not snowflake and not openai and not gemini' --cov=signalforge --cov-report=xml --cov-report=term-missing --cov-fail-under=80"
+addopts = "-ra --strict-markers --import-mode=importlib -m 'not bigquery and not anthropic and not cli_subprocess and not e2e and not wheel_smoke and not snowflake and not openai and not gemini and not airflow' --cov=signalforge --cov-report=xml --cov-report=term-missing --cov-fail-under=80"
 minversion = "7.0"
 strict_markers = true
 asyncio_mode = "strict"
@@ -161,4 +167,5 @@ markers = [
   "snowflake: maintainer-only; offline compiled-SQL validation via fakesnow AND the gated live EXPLAIN-estimate certification (run with --no-cov; live tests self-skip without SF_RUN_SNOWFLAKE + connection env vars)",
   "openai: real-API smoke test against OpenAI (requires SF_RUN_OPENAI=1 + OPENAI_API_KEY; excluded from default CI)",
   "gemini: real-API smoke test against Gemini (requires SF_RUN_GEMINI=1 + GOOGLE_API_KEY; excluded from default CI)",
+  "airflow: requires Apache Airflow installed under its constraints file (excluded from default CI; run in the gated `airflow` job or locally with `uv run --no-sync pytest -m airflow --no-cov`; DAG-parse + operator legs run unconditionally, the live-DAG leg self-skips without SF_RUN_AIRFLOW=1 + warehouse/LLM env). See docs/research/airflow-test-environment.md.",
 ]
