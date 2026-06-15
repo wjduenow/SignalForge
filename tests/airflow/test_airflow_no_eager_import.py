@@ -79,6 +79,11 @@ def test_resolving_lazy_names_does_not_import_airflow_in_process() -> None:
     for name in list(sys.modules):
         if name == "airflow" or name.startswith("airflow."):
             del sys.modules[name]
+        # Also drop cached signalforge.airflow* so the import below genuinely
+        # re-runs the PEP 562 __getattr__ lazy-resolution path rather than
+        # short-circuiting on a prior test's cached package.
+        if name == "signalforge.airflow" or name.startswith("signalforge.airflow."):
+            del sys.modules[name]
 
     from signalforge.airflow import SignalForgeGenerateOperator, SignalForgeHook
 

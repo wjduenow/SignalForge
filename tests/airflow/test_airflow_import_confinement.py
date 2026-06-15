@@ -79,7 +79,13 @@ def _airflow_seam_lines(source: str) -> list[tuple[int, str]]:
         if "type: ignore" not in lowered_comment and "pyright: ignore" not in lowered_comment:
             continue
         line_text = lines[tok.start[0] - 1]
-        if "airflow" in line_text.lower():
+        # Gate on the COMMENT token, not the full line: a benign
+        # ``from signalforge.airflow ...  # type: ignore[...]`` mentions "airflow"
+        # in the (import) code, not in the comment — that import is caught (or
+        # correctly ignored as intra-package) by the AST branch above. This
+        # branch exists only to catch an airflow-mentioning type-ignore that is
+        # NOT on an import line, so the comment payload must mention airflow.
+        if "airflow" in lowered_comment:
             hits[tok.start[0]] = line_text.strip()
 
     return sorted(hits.items())

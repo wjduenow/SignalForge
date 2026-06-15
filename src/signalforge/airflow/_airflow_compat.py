@@ -98,9 +98,12 @@ def make_base_hook() -> type:  # pragma: no cover - requires the [airflow] extra
     return BaseHook  # type: ignore[no-any-return]
 
 
+# Only the factory functions are public API. The ``_Base*Protocol`` types stay
+# ``_``-prefixed internals (still directly importable for tests / implementing
+# children) and are deliberately NOT listed in ``__all__`` — per the convention
+# that a subpackage's public contract is its ``__all__`` and ``_``-prefixed names
+# are internal.
 __all__ = [
-    "_BaseHookProtocol",
-    "_BaseOperatorProtocol",
     "make_base_hook",
     "make_base_operator",
 ]

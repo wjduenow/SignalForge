@@ -30,7 +30,7 @@ class SignalForgeGenerateOperator:
     later epic-#228 child.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
         raise NotImplementedError(
             "SignalForgeGenerateOperator is a skeleton placeholder; the operator "
             "lands in a later epic #228 child. #230 ships the package skeleton only."

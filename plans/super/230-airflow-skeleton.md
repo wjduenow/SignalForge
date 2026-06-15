@@ -6,7 +6,7 @@
 - **Epic:** #228 (Airflow operator, v0.7 roadmap)
 - **Depends on:** #229 (Airflow local + CI test-environment spike — landed, commit `258f731`)
 - **Branch / worktree:** `feature/230-airflow-skeleton` @ `../worktrees/SignalForge/230-airflow-skeleton`
-- **Phase:** devolved
+- **Phase:** complete — implemented, in review (PR #239)
 - **Sessions:** 1 (2026-06-15)
 
 ### Beads Manifest

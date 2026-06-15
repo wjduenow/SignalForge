@@ -15,6 +15,7 @@ in the default coverage env) and are marked ``# pragma: no cover``, mirroring
 
 from __future__ import annotations
 
+import importlib
 import sys
 
 import pytest
@@ -26,13 +27,28 @@ from signalforge.airflow.errors import _format_value
 def test_importing_shim_does_not_import_airflow() -> None:
     """Importing the shim defines its protocols/factories WITHOUT pulling the
     real ``airflow`` package into ``sys.modules`` (the import is lazy, confined
-    to the factory bodies)."""
-    assert "airflow" not in sys.modules and not any(
-        m == "airflow" or m.startswith("airflow.") for m in sys.modules
-    ), "importing _airflow_compat must not import the real airflow package"
+    to the factory bodies).
+
+    Scrub any pre-existing ``airflow`` entries and reload the shim first, so the
+    assertion measures what importing ``_airflow_compat`` *itself* does rather
+    than depending on test order / a prior import (mirrors the snowflake-shim
+    precedent ``tests/warehouse/test_snowflake_client.py``)."""
+    for name in list(sys.modules):
+        if name == "airflow" or name.startswith("airflow."):
+            del sys.modules[name]
+        if name == "signalforge.airflow._airflow_compat":
+            del sys.modules[name]
+    # Fresh import (not reload — a sibling test may have scrubbed the module from
+    # sys.modules, and reload requires it to still be present). This measures
+    # what importing _airflow_compat itself does, order-independently.
+    mod = importlib.import_module("signalforge.airflow._airflow_compat")
+
+    assert not any(m == "airflow" or m.startswith("airflow.") for m in sys.modules), (
+        "importing _airflow_compat must not import the real airflow package"
+    )
     # Factories are present and callable (their bodies stay lazy / SDK-gated).
-    assert callable(_airflow_compat.make_base_operator)
-    assert callable(_airflow_compat.make_base_hook)
+    assert callable(mod.make_base_operator)
+    assert callable(mod.make_base_hook)
 
 
 def test_operator_protocol_is_runtime_checkable() -> None:

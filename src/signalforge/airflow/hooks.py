@@ -29,7 +29,7 @@ class SignalForgeHook:
     later epic-#228 child.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
         raise NotImplementedError(
             "SignalForgeHook is a skeleton placeholder; the hook lands in a later "
             "epic #228 child. #230 ships the package skeleton only."
