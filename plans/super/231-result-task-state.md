@@ -7,12 +7,19 @@
 - **Depends on:** #230 (skeleton — CLOSED), #229 (local + CI test env — landed)
 - **Branch:** `feature/231-result-task-state`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/231-result-task-state`
-- **Phase:** published (PR #240, awaiting approval)
+- **Phase:** devolved (beads created; PR #240)
 - **Sessions:** 1 (2026-06-15)
 
 ### Beads Manifest
 
-_(filled on devolve)_
+- **Epic:** `bd_1-scaffolding-2ci`
+- **US-001** `bd_1-scaffolding-2ci.1` — result.py (deps: none) ← READY
+- **US-002** `bd_1-scaffolding-2ci.2` — runner.py (deps: .1)
+- **US-003** `bd_1-scaffolding-2ci.3` — airflow translation + wiring (deps: .1, .2)
+- **US-004** `bd_1-scaffolding-2ci.4` — docs + example DAG (deps: .1, .2, .3)
+- **US-005** `bd_1-scaffolding-2ci.5` — Quality Gate (deps: .1–.4)
+- **US-006** `bd_1-scaffolding-2ci.6` — Patterns & Memory (deps: .5)
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/231-result-task-state`
 
 ---
 
