@@ -153,7 +153,7 @@ export AIRFLOW__CORE__DAGS_FOLDER="$(pwd)/examples/airflow"
 .venv-airflow/bin/airflow standalone   # prints the admin password; UI on :8080
 ```
 
-`examples/airflow/signalforge_spike_dag.py` should appear as `signalforge_spike`.
+`examples/airflow/signalforge_generate_dag.py` should appear as `signalforge_generate`.
 
 ### C. Headless DAG-parse certification (the acceptance signal)
 
@@ -164,7 +164,7 @@ export AIRFLOW__CORE__DAGS_FOLDER="$(pwd)/examples/airflow"
 ```
 
 `tests/airflow/test_dag_parse.py` loads `examples/airflow/` via `DagBag`, asserts zero
-import errors, and that `signalforge_spike` parses with its placeholder task — proving the
+import errors, and that `signalforge_generate` parses with its `generate`/`gate` tasks — proving the
 constraints-pinned install and our DAG-authoring pattern are compatible.
 
 ### D. Operator unit test (no scheduler, no warehouse — the *skeleton*/operator children)
@@ -233,8 +233,9 @@ Load-bearing CI notes:
 - This doc — the recorded decisions + reproducible local/CI steps.
 - The `airflow` marker registered in `pyproject.toml` (gated out of default `addopts`),
   and `tests/airflow` excluded from pyright.
-- `examples/airflow/signalforge_spike_dag.py` — trivial DAG + inline placeholder operator
-  proving the authoring pattern.
+- `examples/airflow/signalforge_generate_dag.py` — the shipped example DAG (a `PythonOperator`
+  wrapping `signalforge generate`, exit-code→task-state, XCom tier counts, a `gate` task).
+  Promoted from the spike's original inline-placeholder DAG; see `docs/airflow-ops.md`.
 - `tests/airflow/test_dag_parse.py` — the gated `DagBag` parse certification.
 
 ## What it does NOT ship (later children)
@@ -249,9 +250,9 @@ Certified live on an isolated `uv venv .venv-airflow --python 3.11`:
 
 - ✅ **DEC-2 install** — `apache-airflow==2.10.4` installs cleanly under
   `constraints-2.10.4/constraints-3.11.txt` (no resolution breakage).
-- ✅ **Parse** — `examples/airflow/signalforge_spike_dag.py` parses with
-  `DagBag(...).import_errors == {}`; `signalforge_spike` + its `placeholder_generate`
-  task appear in `DagBag(...).dags`.
+- ✅ **Parse** — `examples/airflow/signalforge_generate_dag.py` parses with
+  `DagBag(...).import_errors == {}`; `signalforge_generate` + its `generate`/`gate`
+  tasks appear in `DagBag(...).dags`.
 - ✅ **Gated test** — `pytest -m airflow --no-cov tests/airflow/` → `1 passed` under
   real Airflow 2.10.4.
 - 🔧 **Finding (folded in):** the parse leg must read `bag.dags`, not `bag.get_dag()`
@@ -280,6 +281,6 @@ The acceptance bar for #229 is "a maintainer can reproduce a local Airflow run a
 gated CI job from this doc." To certify (one-time, on a machine with Python 3.11):
 
 - [ ] Run [Local setup A](#a-constraints-pinned-local-airflow-isolated-venv) — install succeeds under the constraints file.
-- [ ] Run [C](#c-headless-dag-parse-certification-the-acceptance-signal) — `tests/airflow/` passes (zero import errors, `signalforge_spike` parses).
-- [ ] Optionally run [B](#b-run-airflow-standalone-eyeball-a-dag-in-the-ui) — `signalforge_spike` shows in the UI.
+- [ ] Run [C](#c-headless-dag-parse-certification-the-acceptance-signal) — `tests/airflow/` passes (zero import errors, `signalforge_generate` parses).
+- [ ] Optionally run [B](#b-run-airflow-standalone-eyeball-a-dag-in-the-ui) — `signalforge_generate` shows in the UI.
 - [ ] Wire the [CI job](#ci) into `.github/workflows/ci.yml` (can land with the skeleton child).
