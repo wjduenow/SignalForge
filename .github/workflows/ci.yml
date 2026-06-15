@@ -5,6 +5,9 @@ on:
     branches: [main, dev, "release/*"]
   push:
     branches: [main, dev, "release/*"]
+  # Manual trigger for the gated `airflow` job (heavy, constraints-pinned — not run
+  # on every push). See docs/research/airflow-test-environment.md.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -68,6 +71,49 @@ jobs:
           fail_ci_if_error: false
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  airflow:
+    # Gated Apache Airflow integration tests. Opt-in — NOT part of the default
+    # 3.11/3.12/3.13 lint-test matrix: Airflow's tree is heavy and version-pinned
+    # via a per-(airflow, python) constraints file, too costly to carry on every
+    # job. Runs only on PRs labelled `airflow` or via manual workflow_dispatch.
+    # Full contract: docs/research/airflow-test-environment.md.
+    if: contains(github.event.pull_request.labels.*.name, 'airflow') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        # Certified floor (issue #229). Add "3.0.x" when the Airflow 3.x story
+        # is decided — one-line change, no other edits needed.
+        airflow-version: ["2.10.4"]
+        python-version: ["3.11"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+        with:
+          persist-credentials: false  # read-only; never pushes
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: false  # no shared cache across PR trust boundary
+      - name: Install Airflow + SignalForge under constraints
+        run: |
+          CONSTRAINTS="https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.airflow-version }}/constraints-${{ matrix.python-version }}.txt"
+          uv venv
+          uv pip install "apache-airflow==${{ matrix.airflow-version }}" --constraint "$CONSTRAINTS"
+          # `-e .` until the skeleton child (epic #228) ships the `[airflow]` extra,
+          # then `-e ".[airflow]"`. The --constraint is load-bearing: without it uv
+          # upgrades protobuf 4->5 (+ pydantic) over Airflow 2.10.4's pins and risks
+          # breaking it; with it, signalforge resolves cleanly inside those pins.
+          uv pip install -e . --constraint "$CONSTRAINTS"
+          # Test tooling under the same constraints — the `[airflow]` extra carries no
+          # test deps, so without pytest-cov the `--no-cov` flag is unrecognised.
+          uv pip install pytest pytest-cov pytest-asyncio --constraint "$CONSTRAINTS"
+      - name: Airflow operator + DAG-parse tests (gated marker)
+        # Run in the env we just populated (NOT `uv run`, which targets a fresh sync).
+        # `--no-cov` because `--cov-fail-under` in addopts fails marker-only runs.
+        run: .venv/bin/python -m pytest -m airflow --no-cov
 
   docs-build:
     # Read-only "does the site still build?" gate. Runs on every PR and

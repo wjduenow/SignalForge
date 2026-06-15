@@ -133,7 +133,12 @@ uv venv .venv-airflow --python ${PYTHON_VERSION}
 uv pip install --python .venv-airflow \
   "apache-airflow==${AIRFLOW_VERSION}" \
   --constraint "${CONSTRAINTS}"
-uv pip install --python .venv-airflow -e ".[airflow]"   # SignalForge + its airflow extra
+# SignalForge editable. The --constraint is LOAD-BEARING: without it uv upgrades
+# protobuf 4->5 (and pydantic, requests, typing-extensions) and risks breaking
+# Airflow 2.10.4. With it, signalforge resolves cleanly inside Airflow's pins.
+# Use `-e .` until the skeleton child (epic #228) ships the `[airflow]` extra,
+# then `-e ".[airflow]"`.
+uv pip install --python .venv-airflow -e . --constraint "${CONSTRAINTS}"
 ```
 
 > `.venv-airflow/` is git-ignored scratch — it is the maintainer's isolated Airflow env,
@@ -195,17 +200,21 @@ SHAs below are the repo's already-pinned versions (`ci-supply-chain.md`):
         with:
           python-version: "${{ matrix.python-version }}"
           enable-cache: false
-      - name: Install Airflow under constraints
+      - name: Install Airflow + SignalForge under constraints
         run: |
           CONSTRAINTS="https://raw.githubusercontent.com/apache/airflow/constraints-${{ matrix.airflow-version }}/constraints-${{ matrix.python-version }}.txt"
-          uv pip install --system "apache-airflow==${{ matrix.airflow-version }}" --constraint "$CONSTRAINTS"
-          uv pip install --system -e ".[airflow]"
-          # Test tooling, pinned by the same constraints file. Required because the
-          # `[airflow]` extra is a runtime extra (no test deps); without pytest-cov the
-          # `--no-cov` flag below is unrecognised, and the run errors before collection.
-          uv pip install --system pytest pytest-cov pytest-asyncio --constraint "$CONSTRAINTS"
+          uv venv
+          uv pip install "apache-airflow==${{ matrix.airflow-version }}" --constraint "$CONSTRAINTS"
+          # `-e .` until the skeleton child ships the `[airflow]` extra (then `.[airflow]`).
+          # --constraint is load-bearing (keeps Airflow's protobuf/pydantic pins).
+          uv pip install -e . --constraint "$CONSTRAINTS"
+          # Test tooling under the same constraints — the `[airflow]` extra carries no
+          # test deps, so without pytest-cov the `--no-cov` flag is unrecognised.
+          uv pip install pytest pytest-cov pytest-asyncio --constraint "$CONSTRAINTS"
       - name: Airflow operator + DAG-parse tests (gated marker)
-        run: uv run --no-sync pytest -m airflow --no-cov
+        # Run in the env we just populated (NOT `uv run`, which targets a fresh sync).
+        # `--no-cov` because `--cov-fail-under` in addopts fails marker-only runs.
+        run: .venv/bin/python -m pytest -m airflow --no-cov
 ```
 
 Load-bearing CI notes:
@@ -250,6 +259,16 @@ Certified live on an isolated `uv venv .venv-airflow --python 3.11`:
   fixed accordingly.
 - 🔧 **Finding (folded in):** the airflow env needs pytest/pytest-cov/pytest-asyncio
   installed for `--no-cov` to be a valid flag — added to the CI install step.
+- 🔧 **Finding (folded in):** the SignalForge editable install **must** carry
+  `--constraint`. Without it, `google-cloud-bigquery` drags protobuf 4→5 (plus pydantic /
+  requests / typing-extensions upgrades) over Airflow 2.10.4's pins — it "works" for the
+  parse leg but is fragile. With `--constraint`, signalforge resolves cleanly *inside*
+  Airflow's pins (protobuf stays 4.25.5, pydantic 2.10.3); `airflow` + `signalforge` both
+  import and the DAG parses. Certified.
+- 🔧 **Finding (folded in):** the original `uv pip install --system …` + `uv run --no-sync`
+  recipe was inconsistent — `uv run` targets the project `.venv`, not the `--system` env.
+  CI now does `uv venv` → constrained `uv pip install` → `.venv/bin/python -m pytest`
+  (the exact invocation shape certified here).
 - ⚠️ **Benign:** Airflow's constraints pin an older pytest (7.x) that emits
   `PytestConfigWarning: Unknown config option: strict_markers`. Harmless — the
   `--strict-markers` *flag* in `addopts` still applies; only the pytest-9 `strict_markers`
