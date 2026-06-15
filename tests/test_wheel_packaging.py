@@ -126,18 +126,38 @@ def _build_wheel(outdir: Path) -> Path:
 
 
 @pytest.fixture(scope="module")
-def _built_wheel_members(tmp_path_factory: pytest.TempPathFactory) -> set[str]:
-    """Build the wheel ONCE per test-module run and return its member list.
+def _built_wheel_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build the wheel ONCE per test-module run and return the artifact path.
 
     Module-scoped because ``python -m build --wheel`` is the expensive
-    operation here (~5-15s including PEP 517 isolation). Running it once
-    and asserting separate invariants over the resulting member set keeps
-    ``pytest -m wheel_smoke`` fast without weakening either assertion.
+    operation here (~5-15s including PEP 517 isolation). Both the member-list
+    and METADATA fixtures derive from this single build so the wheel is built
+    exactly once per ``pytest -m wheel_smoke`` invocation.
     """
     outdir = tmp_path_factory.mktemp("wheel-build")
-    wheel_path = _build_wheel(outdir)
-    with zipfile.ZipFile(wheel_path) as zf:
+    return _build_wheel(outdir)
+
+
+@pytest.fixture(scope="module")
+def _built_wheel_members(_built_wheel_path: Path) -> set[str]:
+    """Member name set of the once-built wheel."""
+    with zipfile.ZipFile(_built_wheel_path) as zf:
         return set(zf.namelist())
+
+
+@pytest.fixture(scope="module")
+def _built_wheel_metadata(_built_wheel_path: Path) -> str:
+    """Decoded ``*.dist-info/METADATA`` text of the once-built wheel.
+
+    Used by the core-deps negative assertions (e.g. ``apache-airflow`` must be
+    gated behind its optional extra, never a core ``Requires-Dist``).
+    """
+    with zipfile.ZipFile(_built_wheel_path) as zf:
+        metadata_members = [n for n in zf.namelist() if n.endswith(".dist-info/METADATA")]
+        assert len(metadata_members) == 1, (
+            f"expected exactly one dist-info/METADATA in the wheel, got {metadata_members}"
+        )
+        return zf.read(metadata_members[0]).decode("utf-8")
 
 
 @pytest.mark.wheel_smoke
@@ -240,4 +260,67 @@ def test_wheel_includes_demo_gitignore_dotfile(_built_wheel_members: set[str]) -
         "wheel does not ship `signalforge/_demo/.gitignore`. "
         "Hatchling may have dropped the dotfile under the directory glob; "
         "see DEC-006 of plans/super/47-init-demo.md for the fallback."
+    )
+
+
+@pytest.mark.wheel_smoke
+def test_wheel_does_not_vendor_apache_airflow(_built_wheel_members: set[str]) -> None:
+    """The built wheel MUST NOT vendor Apache Airflow itself (#230 US-004).
+
+    DEC-009 of ``plans/super/230-airflow-skeleton.md`` — Airflow ships only
+    behind the ``[airflow]`` optional extra; the base wheel must stay lean. A
+    vendored Airflow would appear as a top-level ``airflow/`` package or an
+    ``apache_airflow*.dist-info`` entry inside the wheel. SignalForge's own
+    subpackage at ``signalforge/airflow/`` is deliberately NOT matched (it does
+    not start with ``airflow/``). This negative gate catches a future
+    misconfiguration (e.g. adding ``apache-airflow`` to ``packages``/``include``)
+    that would silently bloat the base install.
+    """
+    vendored = sorted(
+        name
+        for name in _built_wheel_members
+        if name.startswith("airflow/") or name.startswith("apache_airflow")
+    )
+    assert not vendored, (
+        "wheel unexpectedly vendors Apache Airflow: "
+        f"{vendored}. Airflow must ship only via the `[airflow]` optional extra "
+        "(DEC-001/DEC-009 of plans/super/230-airflow-skeleton.md), never in the "
+        "base wheel."
+    )
+
+
+@pytest.mark.wheel_smoke
+def test_wheel_core_deps_exclude_apache_airflow(_built_wheel_metadata: str) -> None:
+    """``apache-airflow`` must be an extra-gated dep, never a core one (#230).
+
+    DEC-001 — the ``[airflow]`` optional extra is the ONLY place
+    ``apache-airflow`` may appear; it is deliberately NOT mirrored into core
+    dependencies or the dev group, so a default ``pip install signalforge-dbt``
+    stays Airflow-free. Asserts (a) the extra IS declared (so the negative check
+    is not vacuous) and (b) no un-gated ``Requires-Dist: apache-airflow`` line
+    exists.
+    """
+    apache_airflow_reqs = [
+        line
+        for line in _built_wheel_metadata.splitlines()
+        if line.startswith("Requires-Dist:") and "apache-airflow" in line.lower()
+    ]
+
+    extra_gated = [
+        line
+        for line in apache_airflow_reqs
+        if 'extra == "airflow"' in line or "extra == 'airflow'" in line
+    ]
+    assert extra_gated, (
+        "expected `apache-airflow` declared behind the `[airflow]` optional "
+        "extra in the wheel METADATA (Requires-Dist ... ; extra == 'airflow'). "
+        "Without it this negative gate would be vacuous."
+    )
+
+    core_reqs = [line for line in apache_airflow_reqs if line not in extra_gated]
+    assert not core_reqs, (
+        "wheel METADATA lists `apache-airflow` as a CORE dependency (not gated "
+        f"behind the `[airflow]` extra): {core_reqs}. Per DEC-001 of "
+        "plans/super/230-airflow-skeleton.md, apache-airflow belongs ONLY in the "
+        "`[airflow]` optional extra so the base install stays lean."
     )
