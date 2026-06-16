@@ -2,7 +2,8 @@
 
 ## Meta
 - **Ticket:** #232 — Airflow: SignalForgeGenerateOperator (part of epic #228, depends on #231)
-- **Phase:** detailing
+- **Phase:** devolved
+- **Beads epic:** `bd_1-scaffolding-q5c` — children `.1`…`.7` (US-001…US-007); chain US-001 → US-002 → US-003 → {US-004 → US-005} → US-006 (Quality Gate) → US-007 (Patterns). Only US-001 ready at devolve.
 - **Branch:** `feature/232-generate-operator` (worktree `../worktrees/SignalForge/232-generate-operator`, base `dev`)
 - **Sessions:** 1 (2026-06-15)
 
