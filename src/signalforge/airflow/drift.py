@@ -37,15 +37,26 @@ import hashlib
 import json
 from collections.abc import Iterable
 from datetime import date
+from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, field_serializer, field_validator
 
 import signalforge
+from signalforge._common.path_safety import PathContainmentError
 from signalforge.diff.models import DiffEntry, DiffReport
 from signalforge.grade.models import GradingReport
 
 _BASE_CONFIG = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
+
+# Byte cap for a sidecar read by the fail-soft loaders (DEC-007). Mirrors the
+# diff layer's sidecar cap (``signalforge.diff._sidecar`` —
+# ``_DIFF_SIDECAR_RECORD_LIMIT_BYTES = 10_000_000``): a drift comparison reads a
+# prior ``diff.json`` / ``grade.json`` written by that same writer, so the read
+# cap is sized to the write cap. An over-cap file degrades to ``None`` (the run
+# becomes a baseline / skips the comparison) rather than loading a hostile or
+# runaway payload into memory.
+_DRIFT_SIDECAR_SIZE_LIMIT_BYTES = 10_000_000
 
 # Truncation budget for the per-artifact ``why`` string carried on a
 # :class:`DriftArtifact` (mirrors the diff layer's ``_truncate_why`` idea — a
@@ -461,10 +472,99 @@ def compute_drift(
     )
 
 
+def _load_report_json(
+    path: str | Path, model_cls: type[DiffReport] | type[GradingReport]
+) -> DiffReport | GradingReport | None:
+    """Read + validate a sidecar JSON file into ``model_cls``, FAIL-SOFT.
+
+    Shared body for :func:`load_diff_report` / :func:`load_grade_report`. Returns
+    ``None`` (never raises) on every recoverable fault — absent file, symlink
+    cycle, oversize, unreadable, malformed JSON, or wrong shape — so a drift
+    comparison degrades to a baseline / skipped-grade run rather than crashing
+    the Airflow task (DEC-007 / DEC-013).
+
+    **No project-dir containment (DEC-008).** The prior-read path is
+    operator-TRUSTED config (``detect_drift_against`` / a history-dir mount) and
+    may legitimately live OUTSIDE any project tree, so the project-anchored
+    :func:`signalforge._common.path_safety.canonicalise_path` gate cannot apply.
+    The path is still **symlink-loop-hardened**: it is resolved ``strict=True``
+    first so a cycle surfaces (``OSError(errno.ELOOP)`` on Python >= 3.13,
+    ``RuntimeError`` on <= 3.12) instead of slipping silently through
+    ``strict=False``; either signal is caught and degraded to ``None``. A
+    genuinely missing target falls back to ``strict=False`` and degrades on the
+    subsequent stat/read.
+    """
+    raw = Path(path)
+    try:
+        try:
+            resolved = raw.resolve(strict=True)
+        except (FileNotFoundError, NotADirectoryError):
+            # Target does not exist yet — best-effort lexical resolution; the
+            # subsequent stat()/read() raises FileNotFoundError → ``None``.
+            resolved = raw.resolve(strict=False)
+        if resolved.stat().st_size > _DRIFT_SIDECAR_SIZE_LIMIT_BYTES:
+            return None
+        text = resolved.read_text(encoding="utf-8")
+        return model_cls.model_validate_json(text)
+    except (OSError, RuntimeError, json.JSONDecodeError, ValidationError, PathContainmentError):
+        # OSError covers ELOOP (>=3.13 cycle), missing/unreadable file, and any
+        # other resolve/stat/read failure; RuntimeError covers the <=3.12 cycle
+        # signal; (JSONDecodeError, ValidationError) cover malformed JSON / wrong
+        # shape. PathContainmentError is defensive — this loader does not enforce
+        # containment (DEC-008), but catching it keeps the fail-soft contract
+        # total if a future refactor routes resolution through a containment gate.
+        return None
+
+
+def load_diff_report(path: str | Path) -> DiffReport | None:
+    """Load a prior ``diff.json`` sidecar into a :class:`DiffReport`, FAIL-SOFT.
+
+    Returns ``None`` (never raises) on absent / corrupt / oversize / wrong-shape
+    input, or on a symlink cycle in ``path``. The path is operator-trusted and
+    NOT project-contained (DEC-008); see :func:`_load_report_json`.
+    """
+    report = _load_report_json(path, DiffReport)
+    # ``isinstance`` narrows the union return for the type-checker; a non-None
+    # result of ``_load_report_json(path, DiffReport)`` is always a DiffReport.
+    return report if isinstance(report, DiffReport) else None
+
+
+def load_grade_report(path: str | Path) -> GradingReport | None:
+    """Load a prior ``grade.json`` sidecar into a :class:`GradingReport`, FAIL-SOFT.
+
+    Returns ``None`` (never raises) on absent / corrupt / oversize / wrong-shape
+    input, or on a symlink cycle in ``path``. The path is operator-trusted and
+    NOT project-contained (DEC-008); see :func:`_load_report_json`.
+    """
+    report = _load_report_json(path, GradingReport)
+    return report if isinstance(report, GradingReport) else None
+
+
+def parse_diff_report(stdout: str) -> DiffReport | None:
+    """Parse the CURRENT :class:`DiffReport` from ``run_signalforge`` stdout, FAIL-SOFT.
+
+    Under the operator's default ``write=False`` → ``--dry-run`` there is no
+    on-disk current sidecar, but the diff JSON is on stdout (#231 DEC-005). This
+    mirrors :func:`signalforge.airflow.runner._parse_diff_stdout`'s empty-guard,
+    then validates the text straight into a :class:`DiffReport`. Returns ``None``
+    (never raises) on empty / non-JSON / wrong-shape stdout.
+    """
+    text = stdout.strip()
+    if not text:
+        return None
+    try:
+        return DiffReport.model_validate_json(text)
+    except (json.JSONDecodeError, ValidationError):
+        return None
+
+
 __all__ = [
     "DriftArtifact",
     "DriftReport",
     "GradeRegression",
     "SchemaShapeDelta",
     "compute_drift",
+    "load_diff_report",
+    "load_grade_report",
+    "parse_diff_report",
 ]
