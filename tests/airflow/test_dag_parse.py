@@ -174,7 +174,7 @@ def test_prune_existing_operator_renders_templated_fields() -> None:
     assert op.tests_dir is None
 
 
-def test_drift_monitor_operator_example_dag_parses_without_import_errors() -> None:
+def test_nightly_drift_operator_example_dag_parses_without_import_errors() -> None:
     """The run-over-run drift-monitor example DAG parses cleanly via DagBag (#235 DEC-019).
 
     Distinct ``dag_id`` from the other examples; THREE tasks demonstrating the
@@ -185,7 +185,7 @@ def test_drift_monitor_operator_example_dag_parses_without_import_errors() -> No
     every operator's construction-time validation green at parse).
     """
     pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
-    dag = _load_example_dag("signalforge_drift_monitor")
+    dag = _load_example_dag("signalforge_nightly_drift")
     assert set(dag.task_ids) == {"drift_monitor_ergonomic", "generate", "drift_check"}
     # The branchable form wires the dedicated drift check downstream of generate.
     assert dag.get_task("drift_check").upstream_task_ids == {"generate"}

@@ -639,7 +639,7 @@ regression (`grade_regressions`) — those are the categories that page; `newly_
 
 ### Worked example DAG
 
-`examples/airflow/signalforge_drift_monitor_dag.py` (`dag_id="signalforge_drift_monitor"`)
+`examples/airflow/signalforge_nightly_drift.py` (`dag_id="signalforge_nightly_drift"`)
 ships both surfaces side by side: a `drift_monitor_ergonomic` task (Form 1) and a
 `generate` → `drift_check` pair (Form 2). It ships `schedule=None`; set
 `schedule="@daily"` for a real nightly monitor.
@@ -844,7 +844,7 @@ export AIRFLOW__CORE__DAGS_FOLDER="$(pwd)/examples/airflow"
   (`signalforge_prune_existing_operator`), the Connection-configured both-operators
   example (`signalforge_hook` — `drift_monitor` + `signal_rot_monitor` wired via
   `signalforge_conn_id`), and the run-over-run drift monitor
-  (`signalforge_drift_monitor`). No credentials; runs in the gated CI `airflow` job.
+  (`signalforge_nightly_drift`). No credentials; runs in the gated CI `airflow` job.
 - **render** — each operator's `template_fields` Jinja-render from a synthetic task
   context (e.g. `{{ params.model }}` / `{{ ds }}`).
 - **execute** — `tests/airflow/test_drift_operators.py` and
