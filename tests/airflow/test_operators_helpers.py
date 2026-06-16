@@ -1,24 +1,43 @@
-"""US-001 (#232) — airflow-free pure operator helpers.
+"""US-001 + US-002 (#232) — airflow-free pure operator helpers.
 
-Covers :func:`signalforge.airflow.operators._build_generate_argv` (params →
-``signalforge generate`` argv) and
-:func:`signalforge.airflow.operators._validate_operator_config` (DEC-009 param
-guards). Both helpers are pure — no airflow import, no I/O — so this file is
-**UNGATED**: it carries NO ``@pytest.mark.airflow`` marker and never imports
-``apache-airflow``. It runs in the default ``uv run pytest`` suite and exercises
-every branch of both helpers (the airflow-free core's 100%-ungated codecov patch
-gate).
+Covers the airflow-free operator helpers in
+``signalforge.airflow.operators``:
+
+* :func:`_build_generate_argv` (params → ``signalforge generate`` argv) and
+  :func:`_validate_operator_config` (DEC-009 param guards) — US-001;
+* :func:`_resolve_select_models` (``--select`` → sorted unique_ids, mapping
+  ``ManifestError`` / ``SelectorParseError`` / zero-match → ``AirflowConfigError``,
+  DEC-001/006) and :func:`_aggregate_batch_result` (per-model rollup, DEC-008) —
+  US-002.
+
+None of these import ``airflow`` (``_resolve_select_models`` does manifest I/O
+but is still airflow-free), so this file is **UNGATED**: it carries NO
+``@pytest.mark.airflow`` marker and never imports ``apache-airflow``. It runs in
+the default ``uv run pytest`` suite and exercises every branch (the airflow-free
+core's 100%-ungated codecov patch gate).
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
 from signalforge.airflow.errors import AirflowConfigError
 from signalforge.airflow.operators import (
+    _aggregate_batch_result,
     _build_generate_argv,
+    _resolve_select_models,
     _validate_operator_config,
 )
+from signalforge.airflow.result import SignalForgeRunResult
+
+# A committed multi-model dbt fixture: tags `staging` (stg_a, stg_b) + `marts`
+# (fct_x). Resolves through the real `signalforge.manifest.load` + selector.
+_MULTI_PROJECT = Path(__file__).resolve().parents[1] / "fixtures" / "dbt_project_multi"
+_STG_A = "model.dbt_project_multi.stg_a"
+_STG_B = "model.dbt_project_multi.stg_b"
+_FCT_X = "model.dbt_project_multi.fct_x"
 
 
 def _argv(**overrides: object) -> list[str]:
@@ -182,3 +201,181 @@ def test_validate_accepts_each_valid_on_flagged(on_flagged: str) -> None:
     _validate_operator_config(
         project_dir="/proj", model="m.sql", select=None, on_flagged=on_flagged
     )
+
+
+# --------------------------------------------------------------------------- #
+# _resolve_select_models                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def test_resolve_select_returns_sorted_unique_ids() -> None:
+    """A valid `tag:` selector resolves to the matched unique_ids, sorted."""
+    matched = _resolve_select_models(str(_MULTI_PROJECT), "tag:staging")
+    assert matched == (_STG_A, _STG_B)
+    # Explicitly sorted (the helper sorts; pin it independently of selector order).
+    assert list(matched) == sorted(matched)
+
+
+def test_resolve_select_unions_multiple_atoms() -> None:
+    """A multi-atom selector unions matches across tags, sorted by unique_id."""
+    matched = _resolve_select_models(str(_MULTI_PROJECT), "tag:staging,tag:marts")
+    assert matched == (_FCT_X, _STG_A, _STG_B)
+
+
+def test_resolve_select_parse_error_maps_to_config_error() -> None:
+    """A malformed selector (`SelectorParseError`) → `AirflowConfigError`."""
+    with pytest.raises(AirflowConfigError) as excinfo:
+        # An empty atom is a parse error in the selector grammar.
+        _resolve_select_models(str(_MULTI_PROJECT), "tag:staging,,tag:marts")
+    # The selector that failed is named, and a remediation line is rendered.
+    assert "tag:staging,,tag:marts" in excinfo.value.message
+    assert "↳ Remediation:" in str(excinfo.value)
+
+
+def test_resolve_select_zero_match_maps_to_config_error() -> None:
+    """A selector that matches nothing → `AirflowConfigError` naming the selector."""
+    with pytest.raises(AirflowConfigError) as excinfo:
+        _resolve_select_models(str(_MULTI_PROJECT), "tag:does_not_exist")
+    assert "tag:does_not_exist" in excinfo.value.message
+    assert "matched no models" in excinfo.value.message
+
+
+def test_resolve_select_missing_project_dir_maps_to_config_error(tmp_path: Path) -> None:
+    """A non-existent project_dir (`ManifestNotFoundError`) → `AirflowConfigError`."""
+    missing = tmp_path / "no_such_project"
+    with pytest.raises(AirflowConfigError) as excinfo:
+        _resolve_select_models(str(missing), "tag:staging")
+    # The source ManifestError's remediation is carried onto the AirflowConfigError.
+    assert "↳ Remediation:" in str(excinfo.value)
+
+
+def test_resolve_select_invalid_manifest_maps_to_config_error(tmp_path: Path) -> None:
+    """A project dir lacking a manifest → `ManifestError` → `AirflowConfigError`."""
+    # An existing directory but with no target/manifest.json under it.
+    project = tmp_path / "empty_project"
+    project.mkdir()
+    with pytest.raises(AirflowConfigError):
+        _resolve_select_models(str(project), "tag:staging")
+
+
+# --------------------------------------------------------------------------- #
+# _aggregate_batch_result                                                     #
+# --------------------------------------------------------------------------- #
+
+
+def _result(
+    *,
+    exit_code: int = 0,
+    model_unique_ids: tuple[str, ...] = ("m",),
+    kept: int = 0,
+    kept_uncertain: int = 0,
+    dropped: int = 0,
+    flagged: int = 0,
+    mean_grade: float | None = None,
+    duration_seconds: float | None = None,
+) -> SignalForgeRunResult:
+    """Build a SignalForgeRunResult with batch-relevant fields tunable."""
+    return SignalForgeRunResult(
+        exit_code=exit_code,
+        model_unique_ids=model_unique_ids,
+        kept=kept,
+        kept_uncertain=kept_uncertain,
+        dropped=dropped,
+        flagged=flagged,
+        mean_grade=mean_grade,
+        diff_sidecar_path="/some/diff.json",
+        grade_sidecar_path="/some/grade.json",
+        duration_seconds=duration_seconds,
+        stdout="bulk stdout",
+        stderr="bulk stderr",
+    )
+
+
+def test_aggregate_max_exit_code() -> None:
+    """`exit_code` is the max over per-model codes (4-tier severity = int max)."""
+    agg = _aggregate_batch_result(
+        [_result(exit_code=0), _result(exit_code=3), _result(exit_code=2)]
+    )
+    assert agg.exit_code == 3
+
+
+def test_aggregate_sums_counts_and_unions_ids() -> None:
+    """Counts sum element-wise; model_unique_ids concatenate in input order."""
+    agg = _aggregate_batch_result(
+        [
+            _result(model_unique_ids=("m.a",), kept=2, kept_uncertain=1, dropped=3, flagged=1),
+            _result(
+                model_unique_ids=("m.b", "m.c"),
+                kept=5,
+                kept_uncertain=0,
+                dropped=1,
+                flagged=4,
+            ),
+        ]
+    )
+    assert agg.kept == 7
+    assert agg.kept_uncertain == 1
+    assert agg.dropped == 4
+    assert agg.flagged == 5
+    assert agg.model_unique_ids == ("m.a", "m.b", "m.c")
+    # flagged > 0 → below_threshold derived property holds on the aggregate.
+    assert agg.below_threshold is True
+
+
+def test_aggregate_mean_grade_with_one_none() -> None:
+    """`mean_grade` averages only the non-None per-model means."""
+    agg = _aggregate_batch_result(
+        [
+            _result(mean_grade=0.8),
+            _result(mean_grade=None),
+            _result(mean_grade=0.6),
+        ]
+    )
+    assert agg.mean_grade == pytest.approx(0.7)
+
+
+def test_aggregate_mean_grade_all_none() -> None:
+    """When every per-model mean is None, the aggregate mean is None."""
+    agg = _aggregate_batch_result([_result(mean_grade=None), _result(mean_grade=None)])
+    assert agg.mean_grade is None
+
+
+def test_aggregate_duration_sums_non_none() -> None:
+    """`duration_seconds` sums the non-None per-model durations."""
+    agg = _aggregate_batch_result(
+        [
+            _result(duration_seconds=1.5),
+            _result(duration_seconds=None),
+            _result(duration_seconds=2.0),
+        ]
+    )
+    assert agg.duration_seconds == pytest.approx(3.5)
+
+
+def test_aggregate_duration_all_none() -> None:
+    """When every per-model duration is None, the aggregate duration is None."""
+    agg = _aggregate_batch_result([_result(duration_seconds=None)])
+    assert agg.duration_seconds is None
+
+
+def test_aggregate_single_result() -> None:
+    """A single-result input aggregates to its own counts; ids pass through."""
+    agg = _aggregate_batch_result([_result(exit_code=2, model_unique_ids=("m.only",), kept=9)])
+    assert agg.exit_code == 2
+    assert agg.model_unique_ids == ("m.only",)
+    assert agg.kept == 9
+
+
+def test_aggregate_clears_sidecar_paths_and_bulk_text() -> None:
+    """Aggregate carries no single sidecar path and no bulk stdout/stderr."""
+    agg = _aggregate_batch_result([_result(), _result()])
+    assert agg.diff_sidecar_path is None
+    assert agg.grade_sidecar_path is None
+    assert agg.stdout == ""
+    assert agg.stderr == ""
+
+
+def test_aggregate_empty_sequence_raises() -> None:
+    """An empty batch violates the caller invariant → ValueError."""
+    with pytest.raises(ValueError):
+        _aggregate_batch_result([])

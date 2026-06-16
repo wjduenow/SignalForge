@@ -17,9 +17,11 @@ so the airflow import stays confined to the one shim and out of module scope.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from signalforge.airflow.errors import AirflowConfigError
+from signalforge.airflow.result import SignalForgeRunResult
 
 _VALID_ON_FLAGGED: frozenset[str] = frozenset({"fail", "skip", "succeed"})
 
@@ -122,6 +124,120 @@ def _validate_operator_config(
         raise AirflowConfigError(
             f"`on_flagged` must be one of {{fail, skip, succeed}} (got {on_flagged!r})."
         )
+
+
+def _resolve_select_models(project_dir: str, select: str) -> tuple[str, ...]:
+    """Resolve a ``--select`` expression to a sorted tuple of model unique_ids.
+
+    Airflow-free (it does manifest I/O, but imports no ``airflow``). Loads the
+    dbt manifest under ``project_dir`` via :func:`signalforge.manifest.load` and
+    resolves ``select`` via :func:`signalforge.manifest.select_models`, returning
+    the matched models' ``unique_id`` values as a sorted tuple (DEC-001 — the
+    operator resolves the selector itself so it can loop ``run_signalforge`` once
+    per model and aggregate accurate per-model XCom).
+
+    Every failure maps to :class:`AirflowConfigError` (CLI tier 2, DEC-006),
+    carrying the source exception's ``remediation`` when present and chaining via
+    ``from exc``:
+
+    * a manifest load failure (``ManifestNotFoundError`` /
+      ``UnsupportedManifestVersionError`` / any other ``ManifestError`` — e.g. a
+      symlink-escape ``ModelPathOutsideProjectError``);
+    * a selector parse failure (``SelectorParseError``, itself a
+      ``ManifestError`` subclass);
+    * a zero-match selector (``select_models`` returns an empty tuple — the
+      manifest layer does not raise on empty; the message names the selector).
+    """
+    # Lazy import: keeps `import signalforge.airflow.operators` (and the argv
+    # builders above) free of the manifest package's import cost until a caller
+    # actually resolves a selector. Airflow-free either way.
+    from signalforge.manifest import load, select_models
+    from signalforge.manifest.errors import ManifestError
+
+    try:
+        manifest = load(project_dir)
+    except ManifestError as exc:
+        raise AirflowConfigError(
+            f"Failed to load the dbt manifest for project_dir "
+            f"{project_dir!r}: {getattr(exc, 'message', exc)}",
+            remediation=getattr(exc, "remediation", None),
+        ) from exc
+
+    try:
+        matched = select_models(manifest, select)
+    except ManifestError as exc:  # SelectorParseError (a ManifestError subclass)
+        raise AirflowConfigError(
+            f"Failed to parse the --select expression {select!r}: {getattr(exc, 'message', exc)}",
+            remediation=getattr(exc, "remediation", None),
+        ) from exc
+
+    if not matched:
+        raise AirflowConfigError(
+            f"The --select expression {select!r} matched no models in the dbt "
+            "project under project_dir "
+            f"{project_dir!r}."
+        )
+
+    return tuple(sorted(model.unique_id for model in matched))
+
+
+def _aggregate_batch_result(
+    results: Sequence[SignalForgeRunResult],
+) -> SignalForgeRunResult:
+    """Roll up per-model batch results into ONE aggregate (pure, DEC-008).
+
+    Airflow-free, no I/O. Given a non-empty sequence of
+    :class:`SignalForgeRunResult` (one per model in a ``--select`` batch),
+    returns a single aggregate that drives the one Airflow task state via
+    :func:`signalforge.airflow.result.decide_task_outcome`:
+
+    * ``exit_code`` = ``max`` over the per-model exit codes (the 4-tier severity
+      ordering is just integer ``max`` — mirrors the CLI's
+      ``_run_batch.total_exit_code``);
+    * ``kept`` / ``kept_uncertain`` / ``dropped`` / ``flagged`` = element-wise
+      sums;
+    * ``model_unique_ids`` = concatenation, in input order, of each result's
+      ``model_unique_ids`` (de-dup not required);
+    * ``mean_grade`` = mean of the non-``None`` per-model means, or ``None`` when
+      every per-model mean is ``None``;
+    * ``diff_sidecar_path`` / ``grade_sidecar_path`` = ``None`` (a batch
+      aggregate has no single sidecar);
+    * ``duration_seconds`` = sum of the non-``None`` per-model durations, or
+      ``None`` when every duration is ``None``;
+    * ``stdout`` / ``stderr`` = empty strings (the aggregate carries no bulk
+      text).
+
+    Raises:
+        ValueError: if ``results`` is empty (caller invariant: a batch always
+            resolves at least one model before aggregation).
+    """
+    if not results:
+        raise ValueError("_aggregate_batch_result requires a non-empty sequence of results.")
+
+    model_unique_ids: tuple[str, ...] = tuple(
+        uid for result in results for uid in result.model_unique_ids
+    )
+
+    grades = [r.mean_grade for r in results if r.mean_grade is not None]
+    mean_grade = (sum(grades) / len(grades)) if grades else None
+
+    durations = [r.duration_seconds for r in results if r.duration_seconds is not None]
+    duration_seconds = sum(durations) if durations else None
+
+    return SignalForgeRunResult(
+        exit_code=max(r.exit_code for r in results),
+        model_unique_ids=model_unique_ids,
+        kept=sum(r.kept for r in results),
+        kept_uncertain=sum(r.kept_uncertain for r in results),
+        dropped=sum(r.dropped for r in results),
+        flagged=sum(r.flagged for r in results),
+        mean_grade=mean_grade,
+        diff_sidecar_path=None,
+        grade_sidecar_path=None,
+        duration_seconds=duration_seconds,
+        stdout="",
+        stderr="",
+    )
 
 
 class SignalForgeGenerateOperator:
