@@ -2,7 +2,7 @@
 
 ## Meta
 - **Ticket:** #235 — Airflow: drift / signal-rot detection mode (run-over-run). Part of epic #228 (v0.7 Airflow). Depends on #231 (result/XCom contract — landed) and #232 (`SignalForgeGenerateOperator` — landed).
-- **Phase:** devolved (2026-06-16) — beads created, ready for Ralph.
+- **Phase:** Complete (2026-06-16) — all 8 stories built + merged on `feature/235-drift-detection`; Quality Gate (4 diverse-angle reviews + 2 fixes) passed; certified vs Airflow 2.10.4 (50 gated tests). Epic `bd_1-scaffolding-v42` auto-closed. Pending: merge `feature/235-drift-detection` → `dev`.
 - **Branch:** `feature/235-drift-detection` (worktree `/home/wesd/Projects/worktrees/SignalForge/235-drift-detection`, base `dev`).
 - **Sessions:** 1 (2026-06-16).
 
