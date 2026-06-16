@@ -30,13 +30,14 @@ Two load-bearing design rules govern this subpackage:
    ``# pyright: ignore``. A standalone line-scan confinement test (US-004)
    enforces this.
 
-Error classes (``AirflowIntegrationError`` / ``AirflowConfigError``) and the
-result core (``SignalForgeRunResult`` / ``TaskOutcome`` / ``decide_task_outcome``
-/ ``OnFlagged``) are pure-Python and Airflow-free (neither
-``signalforge.airflow.errors`` nor ``signalforge.airflow.result`` carries a
-``from airflow ...`` import), so they are **eager** re-exports here (only the
-operator/hook names stay lazy — DEC-003 / DEC-006). Importing them does not
-violate the no-eager-import gate.
+Error classes (``AirflowIntegrationError`` / ``AirflowConfigError``), the result
+core (``SignalForgeRunResult`` / ``TaskOutcome`` / ``decide_task_outcome`` /
+``OnFlagged``), and the runner (``run_signalforge``) are pure-Python and
+Airflow-free (none of ``signalforge.airflow.errors`` / ``.result`` / ``.runner``
+carries a ``from airflow ...`` import — the runner's only heavy import,
+:func:`signalforge.cli.main`, is done lazily inside the function body), so they
+are **eager** re-exports here (only the operator/hook names stay lazy —
+DEC-003 / DEC-006). Importing them does not violate the no-eager-import gate.
 """
 
 from __future__ import annotations
@@ -51,6 +52,7 @@ from signalforge.airflow.result import (
     TaskOutcome,
     decide_task_outcome,
 )
+from signalforge.airflow.runner import run_signalforge
 
 if TYPE_CHECKING:
     # Type-checker-only imports: pyright resolves the public names for callers
@@ -77,6 +79,7 @@ __all__ = [
     "SignalForgeRunResult",
     "TaskOutcome",
     "decide_task_outcome",
+    "run_signalforge",
 ]
 
 
