@@ -4,11 +4,12 @@
 
 - **Ticket:** [#234](https://github.com/wjduenow/SignalForge/issues/234)
 - **Epic:** [#228](https://github.com/wjduenow/SignalForge/issues/228) (v0.7 Airflow operator)
-- **Depends on:** #230 (skeleton + shim), #231 (result→task-state), #232 (`SignalForgeGenerateOperator`)
+- **Depends on:** #230 (skeleton + shim), #231 (result→task-state), #232 (`SignalForgeGenerateOperator`), **#233 (`SignalForgePruneExistingOperator`) — MERGED to `dev` 2026-06-16**
 - **Branch:** `feature/234-signalforge-hook`
 - **Worktree:** `../worktrees/SignalForge/234-signalforge-hook`
-- **Phase:** detailing
-- **Sessions:** 1 (2026-06-16)
+- **Phase:** devolved
+- **Sessions:** 2 (2026-06-16)
+- **Epic bead:** `bd_1-scaffolding-qhi` (9 task beads `.1`–`.9`)
 
 ---
 
@@ -35,7 +36,7 @@ Acceptance (A8): a DAG configures SignalForge via Connection + Variable (no inli
 - **Profiles seam.** `load_profile(project_dir, target=None) -> DbtProfileTarget` resolves via `$DBT_PROFILES_DIR` → `<project_dir>/profiles.yml` → `~/.dbt/profiles.yml` (`profiles.py:361-464`). `from_profile(profile)` takes the typed `DbtProfileTarget` (`base.py:273`). The CLI's `--profiles-dir` sets `DBT_PROFILES_DIR`; the operator already emits `--profiles-dir` into argv (`_build_generate_argv`, `operators.py:122`). So **option (a) is "hook supplies `profiles_dir`, which becomes `--profiles-dir`"** — the path already works end-to-end.
 - **No provider→env-var mapping table** exists; each SDK reads its own standard var. A small mapping (`{"anthropic":"ANTHROPIC_API_KEY", …}`) is new.
 - **`__repr__` redaction precedent.** `DbtProfileTarget` uses `Field(repr=False)` on secrets (`profiles.py:164`); `SnowflakeAdapter.__repr__` shows only `account`+`warehouse` (test: `tests/warehouse/test_snowflake_stub.py:72-112` asserts secret substrings AND field-name labels absent).
-- **`SignalForgePruneExistingOperator` DOES NOT EXIST.** Only `SignalForgeGenerateOperator` shipped (#232). The acceptance criterion names a prune-existing operator — scope decision required (see Q2).
+- **`SignalForgePruneExistingOperator` now EXISTS** (merged #233 to `dev`, 2026-06-16). `__init__(*, task_id, project_dir, model, schema, profiles_dir=None, manifest=None, scope=None, sample_strategy=None, as_of=None, tests_dir=None, on_flagged="fail", invocation="in_process", **kwargs)`; `template_fields = ("project_dir","model","schema","profiles_dir","as_of","tests_dir")`; pure helpers `_build_prune_existing_argv` / `_validate_prune_existing_config`; `execute()` validates → builds argv → `run_signalforge` → `decide_task_outcome` → `raise_for_outcome` → `to_xcom`. **Read-only, makes NO LLM call** (#233 DEC-001) — so it needs **warehouse auth (`profiles_dir`) ONLY, no LLM key**; it has no `cache_scope` param. The #234 acceptance criterion names BOTH operators → `signalforge_conn_id` now wires through both (see DEC-002, DEC-016).
 
 ### Airflow 2.x API facts (research, gated to `apache-airflow>=2.8,<3`)
 
@@ -81,21 +82,22 @@ Reviewed areas (Performance / Data-model omitted — N/A for a credential-resolv
 ### Decisions (from discovery answers + architecture review)
 
 - **DEC-001 — Warehouse auth = on-disk profiles only (option a).** Hook resolves `profiles_dir`; operator passes it as `--profiles-dir` (→ `DBT_PROFILES_DIR`), feeding the existing `load_profile` → `from_profile` seam. Connection-synthesis of a `profiles.yml`/`DbtProfileTarget` (option b) is explicitly deferred. _Rationale: the path already works end-to-end; re-deriving the #120 per-type validator from a Connection is its own ticket._
-- **DEC-002 — Prune-existing wiring deferred to #233.** #234 adds `signalforge_conn_id` to `SignalForgeGenerateOperator` only. `SignalForgePruneExistingOperator` already has an open issue (#233); its `conn_id` wiring rides there. _Action: leave a note on #233 recommending it adopt the same hook param when it lands._
-- **DEC-003 — API key source: `Connection.password` primary, Airflow `Variable` fallback.** `provider` + `profiles_dir` come from `extra_dejson`. Key-source recorded (for the log) as `password | variable | absent`; absent-from-both with a non-skippable run → `AirflowConfigError`.
+- **DEC-002 — `signalforge_conn_id` wires through BOTH operators (REVISED after #233 merge).** #234 adds the optional param to `SignalForgeGenerateOperator` AND `SignalForgePruneExistingOperator` (now merged on `dev`). The two consumers differ: Generate needs `profiles_dir` + `provider` + `api_key`; PruneExisting needs `profiles_dir` ONLY (no LLM call → no key, no `provider`, no `cache_scope`). _Supersedes the session-1 deferral; the original "leave a note on #233" action is moot — #233 shipped and #234 owns the wiring for both._
+- **DEC-003 — API key source: `Connection.password` primary, Airflow `Variable` fallback.** `provider` + `profiles_dir` come from `extra_dejson`. Key-source recorded (for the log) as `password | variable | absent`. **The resolver is lenient** — it returns `api_key`/`provider` as `None` when absent; *requiredness is enforced by the consumer*: the Generate operator raises `AirflowConfigError` when `api_key`/`provider` is missing, PruneExisting never checks them (it needs neither). This is what lets one resolver serve both operators (see DEC-016).
 - **DEC-004 — Pure resolver + typed result; operator injects env.** Airflow-free `resolve_connection(conn, variable_lookup) -> HookResolution(profiles_dir, provider, api_key)` at module scope (100% ungated). Gated `SignalForgeHook.get_conn()` delegates to it. Operator `execute()` snapshots → injects `os.environ[PROVIDER_ENV_VAR]` → `run_signalforge` → restores in `finally` (absent-before→delete-after; prior-value→restore-prior).
-- **DEC-005 — Closed provider→env-var allowlist.** `PROVIDER_ENV_VAR_KEYS = {"anthropic":"ANTHROPIC_API_KEY","openai":"OPENAI_API_KEY","gemini":"GOOGLE_API_KEY"}` in `signalforge.llm.providers` (sibling to `PROVIDER_DEFAULT_MODELS`/`PROVIDER_SKU_PREFIXES`, reusable by the v0.8 GH Action). An unknown `provider` from `extra` raises `AirflowConfigError` — never derives an arbitrary env-var name. _Security: closes the arbitrary-env-var injection vector._
+- **DEC-005 — Closed provider→env-var allowlist.** `PROVIDER_ENV_VAR_KEYS = {"anthropic":"ANTHROPIC_API_KEY","openai":"OPENAI_API_KEY","gemini":"GOOGLE_API_KEY"}` in `signalforge.llm.providers` (sibling to `PROVIDER_DEFAULT_MODELS`/`PROVIDER_SKU_PREFIXES`, reusable by the v0.8 GH Action). The allowlist is validated **whenever `provider` is present** (regardless of consumer): a non-`None` unknown `provider` raises `AirflowConfigError` — never derives an arbitrary env-var name. The env-var lookup itself is used only by the Generate operator's injection path. _Security: closes the arbitrary-env-var injection vector even for a prune-existing-only Connection that happens to set `provider`._
 - **DEC-006 — `mask_secret` confined to the shim, called at the operator seam.** New `_airflow_compat.register_secret(value)` (lazy `from airflow.utils.log.secrets_masker import mask_secret`, `# pragma: no cover`, `# type: ignore[import-not-found]`). Operator `execute()` calls it **immediately after resolution, before any logging or `run_signalforge`**. Belt-and-braces over Airflow's auto-masking of `password`/sensitive-`extra` keys.
 - **DEC-007 — Four leak-surface disciplines are ACs, each pinned by a test.** (1) `signalforge_conn_id` NOT in `template_fields` (design-time assertion). (2) Never returned into XCom (`to_xcom()` already counts+paths only; key held in a local, never on `self`). (3) `SignalForgeHook.__repr__` + `HookResolution.__repr__` show only `conn_id`/`provider`, never the key or field-name labels (mirror `tests/warehouse/test_snowflake_stub.py`). (4) `mask_secret` for logs (DEC-006).
 - **DEC-008 — `profiles_dir` from `extra` is symlink-hardened.** Route through `signalforge._common.path_safety.canonicalise_path`; `PathContainmentError` → `AirflowConfigError`. Containment anchor = `project_dir` when available (the operator has it), else suffix-only with the documented gap (mirrors the init-demo seam pattern).
-- **DEC-009 — Reuse `AirflowConfigError` (tier 2); no new error class.** Missing conn / missing-key / unknown-provider / bad-`profiles_dir` are all input-validation. No `errors.py` scan-7 churn, no exit-code-table change.
-- **DEC-010 — `extra` validated by an `extra="forbid"` Pydantic model.** `_ConnectionExtra(profiles_dir: str|None, provider: str, cache_scope: str|None)`. Typos (`cache_scop`) fail loud at resolution. _Mirrors safety-layer.md DEC-015._
+- **DEC-009 — Reuse `AirflowConfigError` (tier 2); no new error class.** Missing conn / missing-key (Generate only) / unknown-provider / bad-`profiles_dir` are all input-validation. No `errors.py` scan-7 churn, no exit-code-table change. PruneExisting's own `_validate_prune_existing_config` already raises `AirflowConfigError` — same class, reused.
+- **DEC-010 — `extra` validated by an `extra="forbid"` Pydantic model; all fields optional.** `_ConnectionExtra(profiles_dir: str|None = None, provider: str|None = None, cache_scope: str|None = None)`. `provider` is optional (a prune-existing-only Connection legitimately omits it); when present it's allowlist-checked (DEC-005). Typos (`cache_scop`) fail loud at resolution. _Mirrors safety-layer.md DEC-015._
 - **DEC-011 — Cost ceilings trimmed from the v0.7 `extra` schema.** No CLI flag delivers `max_grade_*` (#232 DEC-002 deferred `config_overrides`); storing them would be a dead affordance. Documented as a follow-up gated on an operator `--config` overlay landing.
 - **DEC-012 — Precedence: explicit operator param > Connection `extra` > default.** Mirrors CLI `flag > YAML > default`. Applies to `profiles_dir` and `cache_scope` (the two knobs that exist on both surfaces).
 - **DEC-013 — Logger grep-gate extended to `src/signalforge/airflow`.** Add `"airflow"` to `_SCAN_SUBPACKAGES` in `tests/llm/test_logger_grep_gate.py`; update the dir-set wording in `cli-layer.md`/`diff-renderer.md` (they list 6; the test already scans 10). Any hook `_LOGGER` call uses lazy-format `json.dumps`.
 
 - **DEC-014 — `signalforge_conn_id: str | None = None` (optional).** When `None`, the operator behaves exactly as #232 (ambient env / inline config) — byte-compatible, zero change for existing DAGs. When set, the hook resolves credentials. The Airflow-native path is opt-in.
 - **DEC-015 — `invocation` default stays `in_process`; concurrency caveat documented.** No auto-promotion to subprocess. The per-task snapshot/restore `finally` scopes the key; docs state subprocess is the safe choice for concurrent multi-task workers (in-process shares `os.environ` + process-global `redirect_stdout`). Operator keeps explicit control via the existing `invocation` param.
+- **DEC-016 — PruneExisting wiring resolves warehouse auth ONLY; no key injection (NEW, post-#233).** `SignalForgePruneExistingOperator` makes no LLM call, so its `signalforge_conn_id` path uses only the resolved `profiles_dir` (precedence: param > `extra` > default, per DEC-012). It does NOT call `register_secret`, does NOT inject any provider env var, and ignores `provider`/`api_key` on the resolution. A shared helper (extracted in US-005, reused in US-006) does the conn→`HookResolution` call + `profiles_dir` precedence; only the Generate path adds the key-injection + masking + env-restore wrapper. `signalforge_conn_id` must NOT enter either operator's `template_fields`.
 
 ## Phase 4: Detailed Breakdown
 
@@ -137,32 +139,52 @@ Architecture ordering: shared infra → grep-gate → pure resolver → gated ho
 - **Done when:** `SignalForgeHook(conn_id).get_conn()` returns a `HookResolution` against a fake connection.
 - **Depends on:** US-003, US-002.
 
-### US-005 — Wire `signalforge_conn_id` through `SignalForgeGenerateOperator`
-- **Traces to:** DEC-002, DEC-006, DEC-007 (template/XCom), DEC-012, DEC-014, DEC-015.
-- **Description:** Add `signalforge_conn_id: str | None = None` to the operator `__init__` (NOT in `template_fields`). When set, `execute()`: resolve via the hook → `register_secret(api_key)` → apply precedence (param > extra > default) for `profiles_dir`/`cache_scope` → snapshot `os.environ[PROVIDER_ENV_VAR]` → inject → `run_signalforge(...)` → restore in `finally` (absent→delete, prior→restore). Single + batch paths. INFO log: conn_id/provider/key_source/`profiles_dir_set` (never the key). When `None`, behaviour is byte-identical to #232.
-- **Files:** `src/signalforge/airflow/operators.py`; `tests/airflow/test_operators_helpers.py` (ungated — precedence resolution helper); `tests/airflow/test_operators.py` (gated — env inject/restore success+exception, XCom key-absence, `signalforge_conn_id` ∉ `template_fields`, single+batch with conn_id).
-- **AC:** `conn_id=None` path unchanged from #232 (existing tests green); env restored on success AND exception; key absent from XCom + rendered fields; validation passes.
-- **Done when:** an operator built with a `signalforge_conn_id` injects the right env var around `run_signalforge` and restores it.
+### US-005 — Wire `signalforge_conn_id` through `SignalForgeGenerateOperator` (+ shared helper)
+- **Traces to:** DEC-002, DEC-006, DEC-007 (template/XCom), DEC-012, DEC-014, DEC-015, DEC-016.
+- **Description:** Add `signalforge_conn_id: str | None = None` to the operator `__init__` (NOT in `template_fields`). Extract a **shared, reusable helper** (consumed again by US-006) that, given a `conn_id`, calls the hook → `HookResolution` and applies precedence (param > `extra` > default) for `profiles_dir`/`cache_scope` — e.g. `_apply_hook_resolution(...)` plus a key-injection context manager `_provider_key_env(provider, api_key)`. When `conn_id` is set, Generate's `execute()`: resolve → require `provider`+`api_key` (else `AirflowConfigError`) → `register_secret(api_key)` → precedence-merge profiles_dir/cache_scope → enter `_provider_key_env` (snapshot `os.environ[PROVIDER_ENV_VAR]`, inject, restore in `finally`: absent→delete, prior→restore) → `run_signalforge(...)`. Single + batch paths. INFO log: conn_id/provider/key_source/`profiles_dir_set` (never the key). When `None`, behaviour is byte-identical to #232.
+- **Files:** `src/signalforge/airflow/operators.py` (+ shared helper module-level fns); `tests/airflow/test_operators_helpers.py` (ungated — precedence + helper logic); `tests/airflow/test_operators.py` (gated — env inject/restore success+exception, XCom key-absence, `signalforge_conn_id` ∉ `template_fields`, single+batch with conn_id, missing-key→`AirflowConfigError`).
+- **AC:** `conn_id=None` path unchanged from #232 (existing tests green); env restored on success AND exception; key absent from XCom + rendered fields; the shared helper is module-level + ungated-testable; validation passes.
+- **Done when:** a Generate operator built with a `signalforge_conn_id` injects the right env var around `run_signalforge` and restores it.
 - **Depends on:** US-004.
 
-### US-006 — `docs/airflow-ops.md` + example DAG (acceptance A8)
-- **Traces to:** DEC-001, DEC-003, DEC-010, DEC-011, DEC-012, DEC-015.
-- **Description:** Document the Connection `extra` schema (`profiles_dir`, `provider`, `cache_scope`; note cost-ceilings deferral), the `password`+Variable key precedence, secrets-hygiene guarantees (4 surfaces), the in-process concurrency caveat (prefer subprocess for concurrent workers), and the `.venv-airflow` certification command. Ship an example DAG configuring SignalForge via a Connection + Variable with no inline per-task env.
-- **Files:** `docs/airflow-ops.md`; `examples/airflow/signalforge_hook_dag.py`; `tests/airflow/test_dag_parse.py` (gated DAG-parse of the new example).
-- **AC:** A8 met (DAG configures via Connection + Variable, no inline env); example parses via `DagBag` (gated); docs cover the extra schema + hygiene + caveat + cert command; validation passes.
-- **Done when:** the example DAG parses and the ops doc documents the full hook contract.
+### US-006 — Wire `signalforge_conn_id` through `SignalForgePruneExistingOperator`
+- **Traces to:** DEC-002, DEC-007 (template/XCom), DEC-012, DEC-016.
+- **Description:** Add `signalforge_conn_id: str | None = None` to the merged-#233 operator `__init__` (NOT in its `template_fields`). When set, `execute()` resolves via the hook and applies **only** the `profiles_dir` precedence (param > `extra` > default) using the US-005 shared helper. **No `register_secret`, no provider env-var injection** — prune-existing makes no LLM call (DEC-016); `provider`/`api_key`/`cache_scope` on the resolution are ignored (an allowlist-invalid `provider`, if present, still raises per DEC-005). INFO log: conn_id/`profiles_dir_set`. When `None`, behaviour is byte-identical to #233.
+- **Files:** `src/signalforge/airflow/operators.py` (prune-existing `__init__` + `execute`); `tests/airflow/test_operators_helpers.py` (ungated — prune-existing profiles_dir precedence); `tests/airflow/test_operators.py` (gated — conn-resolved `profiles_dir` → argv, NO provider env var touched, `signalforge_conn_id` ∉ `template_fields`, `conn_id=None` unchanged).
+- **AC:** `conn_id=None` path unchanged from #233; resolved `profiles_dir` reaches `--profiles-dir`; no provider env var is set/restored on this path; validation passes.
+- **Done when:** a PruneExisting operator with a `signalforge_conn_id` runs with the conn-resolved `profiles_dir` and injects no LLM key.
 - **Depends on:** US-005.
 
-### US-007 — Quality Gate
+### US-007 — `docs/airflow-ops.md` + example DAG (acceptance A8)
+- **Traces to:** DEC-001, DEC-003, DEC-010, DEC-011, DEC-012, DEC-015, DEC-016.
+- **Description:** Document the Connection `extra` schema (`profiles_dir`, `provider`, `cache_scope`; note cost-ceilings deferral), the `password`+Variable key precedence, secrets-hygiene guarantees (4 surfaces), the in-process concurrency caveat (prefer subprocess for concurrent workers), the `.venv-airflow` certification command, and **the Generate-vs-PruneExisting credential difference** (PruneExisting needs only warehouse auth, no LLM key — a prune-existing-only Connection can omit `provider`/key). Ship an example DAG configuring **both** operators via a Connection + Variable with no inline per-task env.
+- **Files:** `docs/airflow-ops.md`; `examples/airflow/signalforge_hook_dag.py`; `tests/airflow/test_dag_parse.py` (gated DAG-parse of the new example).
+- **AC:** A8 met (a DAG configures both operators via Connection + Variable, no inline env); example parses via `DagBag` (gated); docs cover the extra schema + hygiene + caveat + cert command + the two-operator credential difference; validation passes.
+- **Done when:** the example DAG parses and the ops doc documents the full hook contract for both operators.
+- **Depends on:** US-006.
+
+### US-008 — Quality Gate
 - **Description:** Run the code reviewer 4× across the full changeset, fixing every real bug each pass; run CodeRabbit; certify the airflow-touching paths against the real `.venv-airflow` rig (`SF_RUN_AIRFLOW=1 PYTHONPATH="$PWD/src" /path/to/.venv-airflow/bin/python -m pytest tests/airflow -m airflow --no-cov`). Project validation passes after all fixes.
 - **AC:** 4 review passes complete + fixes applied; CodeRabbit addressed; `.venv-airflow` certification green; full validation passes.
-- **Depends on:** US-006 (all implementation complete).
+- **Depends on:** US-007 (all implementation complete).
 
-### US-008 — Patterns & Memory (priority 99)
-- **Description:** Update `.claude/rules/airflow-integration.md` (hook landed: pure-resolver + shim-confined-`mask_secret` pattern, the four leak-surface disciplines, `PROVIDER_ENV_VAR_KEYS` home, on-disk-profiles DEC, cost-ceiling deferral) — **orchestrator-applied**. Add a memory for the secrets-hygiene-across-4-surfaces hook pattern. Leave the recommended note on #233.
+### US-009 — Patterns & Memory (priority 99)
+- **Description:** Update `.claude/rules/airflow-integration.md` (hook landed: pure-resolver + shim-confined-`mask_secret` pattern, the four leak-surface disciplines, `PROVIDER_ENV_VAR_KEYS` home, on-disk-profiles DEC, cost-ceiling deferral, the two-consumer wiring where PruneExisting resolves warehouse-auth-only) — **orchestrator-applied**. Add a memory for the secrets-hygiene-across-4-surfaces hook pattern.
 - **AC:** rule file reflects the shipped hook; memory written; validation passes.
-- **Depends on:** US-007.
+- **Depends on:** US-008.
 
 ## Beads Manifest
 
-_(pending devolve)_
+- **Epic:** `bd_1-scaffolding-qhi`
+- **Worktree:** `../worktrees/SignalForge/234-signalforge-hook` (branch `feature/234-signalforge-hook`, merged up to `dev`)
+- **Tasks (dependency-ordered):**
+  - `.1` US-001 — `PROVIDER_ENV_VAR_KEYS` shared table — deps: none
+  - `.2` US-002 — logger grep-gate → `signalforge.airflow` — deps: none
+  - `.3` US-003 — pure resolver + typed models (100% ungated) — deps: `.1`
+  - `.4` US-004 — real `SignalForgeHook` + `register_secret` shim (gated) — deps: `.3`, `.2`
+  - `.5` US-005 — wire `signalforge_conn_id` → GenerateOperator (+ shared helper) — deps: `.4`
+  - `.6` US-006 — wire `signalforge_conn_id` → PruneExistingOperator — deps: `.5`
+  - `.7` US-007 — `docs/airflow-ops.md` + example DAG (A8) — deps: `.6`
+  - `.8` US-008 — Quality Gate — deps: `.7`
+  - `.9` US-009 — Patterns & Memory — deps: `.8`
+- **Ready at devolve:** `.1`, `.2`.

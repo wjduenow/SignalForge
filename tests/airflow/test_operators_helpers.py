@@ -23,6 +23,7 @@ core's 100%-ungated codecov patch gate).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,8 @@ from signalforge.airflow.operators import (
     _aggregate_batch_result,
     _build_generate_argv,
     _build_prune_existing_argv,
+    _merge_with_resolution,
+    _provider_key_env,
     _resolve_select_models,
     _validate_operator_config,
     _validate_prune_existing_config,
@@ -647,3 +650,80 @@ def test_validate_prune_accepts_each_valid_on_flagged(on_flagged: str) -> None:
     _validate_prune_existing_config(
         project_dir="/proj", model="customers", schema="schema.yml", on_flagged=on_flagged
     )
+
+
+# --------------------------------------------------------------------------- #
+# _merge_with_resolution (#234 US-005, DEC-012)                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_merge_param_wins_over_extra() -> None:
+    """An explicit (truthy) operator param beats the Connection extra value."""
+    assert _merge_with_resolution("/param/dbt", "/extra/dbt") == "/param/dbt"
+
+
+def test_merge_falls_back_to_extra_when_param_none() -> None:
+    """A ``None`` operator param falls back to the Connection extra value."""
+    assert _merge_with_resolution(None, "/extra/dbt") == "/extra/dbt"
+
+
+def test_merge_falls_back_to_extra_when_param_empty() -> None:
+    """A blank operator param is treated as unset and falls back to extra."""
+    assert _merge_with_resolution("", "/extra/dbt") == "/extra/dbt"
+
+
+def test_merge_returns_none_when_both_absent() -> None:
+    """Both unset → ``None`` (the downstream CLI applies the tool default)."""
+    assert _merge_with_resolution(None, None) is None
+
+
+def test_merge_param_set_extra_none() -> None:
+    """An explicit param with no extra value still wins (extra is ``None``)."""
+    assert _merge_with_resolution("project", None) == "project"
+
+
+# --------------------------------------------------------------------------- #
+# _provider_key_env (#234 US-005, DEC-015)                                    #
+# --------------------------------------------------------------------------- #
+
+
+def test_provider_key_env_absent_injects_then_deletes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Var absent before → injected inside the block → deleted on exit."""
+    monkeypatch.delenv("SF_TEST_KEY", raising=False)
+    assert "SF_TEST_KEY" not in os.environ
+    with _provider_key_env("SF_TEST_KEY", "sk-secret"):
+        assert os.environ["SF_TEST_KEY"] == "sk-secret"
+    assert "SF_TEST_KEY" not in os.environ
+
+
+def test_provider_key_env_prior_value_restored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Var had a prior value → injected inside the block → prior restored on exit."""
+    monkeypatch.setenv("SF_TEST_KEY", "prior-value")
+    with _provider_key_env("SF_TEST_KEY", "sk-secret"):
+        assert os.environ["SF_TEST_KEY"] == "sk-secret"
+    assert os.environ["SF_TEST_KEY"] == "prior-value"
+
+
+def test_provider_key_env_empty_prior_value_restored(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A present-but-empty prior value round-trips as ``""`` (not deleted)."""
+    monkeypatch.setenv("SF_TEST_KEY", "")
+    with _provider_key_env("SF_TEST_KEY", "sk-secret"):
+        assert os.environ["SF_TEST_KEY"] == "sk-secret"
+    assert os.environ.get("SF_TEST_KEY") == ""
+
+
+def test_provider_key_env_restores_on_exception_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An exception inside the block still deletes a previously-absent var."""
+    monkeypatch.delenv("SF_TEST_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="boom"), _provider_key_env("SF_TEST_KEY", "sk-secret"):
+        assert os.environ["SF_TEST_KEY"] == "sk-secret"
+        raise RuntimeError("boom")
+    assert "SF_TEST_KEY" not in os.environ
+
+
+def test_provider_key_env_restores_on_exception_prior(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An exception inside the block still restores a prior value."""
+    monkeypatch.setenv("SF_TEST_KEY", "prior-value")
+    with pytest.raises(RuntimeError, match="boom"), _provider_key_env("SF_TEST_KEY", "sk-secret"):
+        raise RuntimeError("boom")
+    assert os.environ["SF_TEST_KEY"] == "prior-value"

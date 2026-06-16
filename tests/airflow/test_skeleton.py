@@ -148,13 +148,44 @@ def test_prune_existing_operator_access_is_airflow_free_and_construction_require
         pytest.skip("airflow installed; gated tests/airflow/test_operators.py cover construction")
 
 
-def test_hook_stub_raises_not_implemented() -> None:
-    """The skeleton hook is construction-inert until an epic-#228 child
-    implements it."""
+def test_hook_access_is_airflow_free_and_construction_requires_airflow() -> None:
+    """#234 US-004: the hook name resolves WITHOUT importing airflow (the
+    no-eager-import contract), and — with the ``[airflow]`` extra absent —
+    CONSTRUCTING it raises an ``ImportError`` (the real hook subclasses
+    ``BaseHook`` and genuinely needs Airflow at construction time).
+
+    Mirrors the operator skeleton tests above: attribute access goes through the
+    find_spec-guarded ``hooks._get_signalforge_hook_class`` (airflow-absent → the
+    airflow-free placeholder whose ``__init__`` raises ``ModuleNotFoundError``;
+    airflow-present → the real ``BaseHook`` subclass, whose construction is
+    covered by the gated ``tests/airflow/test_hooks.py``). This ungated test is
+    what exercises the airflow-absent placeholder/factory/``__getattr__`` lines in
+    the default (no-airflow) CI env — the codecov patch gate counts them."""
+
+    def _airflow_loaded() -> bool:
+        return any(m == "airflow" or m.startswith("airflow.") for m in sys.modules)
+
+    had_airflow = _airflow_loaded()
     from signalforge.airflow import SignalForgeHook
 
-    with pytest.raises(NotImplementedError):
-        SignalForgeHook()
+    assert SignalForgeHook is not None
+    assert _airflow_loaded() == had_airflow, (
+        "accessing SignalForgeHook must not import the real airflow package"
+    )
+
+    if importlib.util.find_spec("airflow") is None:
+        with pytest.raises((ImportError, ModuleNotFoundError)):
+            SignalForgeHook(signalforge_conn_id="signalforge_default")
+    else:  # pragma: no cover - default CI env has no [airflow] extra
+        pytest.skip("airflow installed; gated tests/airflow/test_hooks.py cover construction")
+
+
+def test_hooks_module_unknown_attr_raises() -> None:
+    """The hooks module's PEP 562 ``__getattr__`` fall-through raises
+    ``AttributeError`` for an unknown name (airflow-free — no class build)."""
+    hooks = importlib.import_module("signalforge.airflow.hooks")
+    with pytest.raises(AttributeError):
+        _ = hooks.does_not_exist  # type: ignore[attr-defined]
 
 
 def test_package_dir_and_unknown_attr() -> None:

@@ -260,6 +260,7 @@ and `--project-dir` are always injected by the runner.
 | `as_of` | `--as-of <YYYY-MM-DD>` | reproducibility anchor for time-bound tests; `{{ ds }}` is a natural source. **`template_fields`** |
 | `on_flagged` | — (decision layer) | `fail` (default) / `skip` / `succeed`; see the **`on_flagged`** section below |
 | `invocation` | — (run mode) | `in_process` (default) / `subprocess`; see the **Invocation modes** section below |
+| `signalforge_conn_id` | — (hook) | optional Airflow Connection id; resolves warehouse auth + LLM credentials via `SignalForgeHook` (see the **Airflow-native credentials** section). `None` (default) = ambient-env mode, byte-identical to prior behaviour. **Not** a `template_field` (secrets hygiene). |
 | `**kwargs` | — | passed to `BaseOperator` (`retries`, `retry_delay`, `depends_on_past`, …) |
 
 Exactly one of `model` or `select` must be set (a validation error fires at DAG-parse
@@ -464,6 +465,7 @@ Every `__init__` kwarg and the `signalforge prune-existing` flag it maps to.
 | `tests_dir` | `--tests-dir <dir>` | directory of singular-test `tests/*.sql` files to ingest too (DEC-006); omitted when unset. **`template_fields`** |
 | `on_flagged` | — (decision layer) | `fail` (default) / `skip` / `succeed`; **inert without grading** (DEC-004) |
 | `invocation` | — (run mode) | `in_process` (default) / `subprocess`; see the **Invocation modes** section above |
+| `signalforge_conn_id` | — (hook) | optional Airflow Connection id; resolves **`profiles_dir` only** via `SignalForgeHook` (read-only — no LLM key; see the **Airflow-native credentials** section). `None` (default) = ambient-env mode, byte-identical to prior behaviour. **Not** a `template_field` (secrets hygiene). |
 | `**kwargs` | — | passed to `BaseOperator` (`retries`, `retry_delay`, `depends_on_past`, …) |
 
 The six `template_fields` (`project_dir`, `model`, `schema`, `profiles_dir`, `as_of`,
@@ -477,6 +479,171 @@ When set, `tests_dir` passes `--tests-dir <dir>` so `prune-existing` also ingest
 singular-test (`tests/*.sql`) files in that directory — the `custom_sql` business-rule
 test surface — alongside the `schema.yml` tests, pruning them in one run. Omitted when
 unset (the CLI defaults to `<project>/tests`).
+
+## Airflow-native credentials: `SignalForgeHook` + `signalforge_conn_id`
+
+Instead of managing `ANTHROPIC_API_KEY` / `DBT_PROFILES_DIR` as inline env on every
+task, configure SignalForge the **Airflow-native** way: one Airflow **Connection**
+(plus an optional **Variable** for the LLM key), referenced by both operators via the
+optional `signalforge_conn_id` param. The hook (`SignalForgeHook`) resolves that
+Connection into the three things a run needs — warehouse auth (`profiles_dir`), the LLM
+`provider`, and the `api_key` — and the operator injects the key into the run's
+environment only for the duration of that run.
+
+`signalforge_conn_id` is **opt-in**: when it is `None` (the default) both operators
+behave exactly as before (ambient env / inline config), byte-identical to #232/#233.
+Set it to switch to the Connection-driven path.
+
+### Setting up the Connection
+
+Create one Connection (Admin → Connections, or `airflow connections add`) and point
+both operators at it via `signalforge_conn_id="<conn id>"`:
+
+- **Conn Type** — any (e.g. `generic`); the hook reads only `password` + `extra`.
+- **Password** — the **LLM API key** (the *primary* key source). Airflow auto-masks a
+  Connection `password` in task logs.
+- **Extra (JSON)** — the validated schema below.
+
+```bash
+airflow connections add signalforge_default \
+  --conn-type generic \
+  --conn-password "$ANTHROPIC_API_KEY" \
+  --conn-extra '{"profiles_dir": "/opt/airflow/dbt_project", "provider": "anthropic", "cache_scope": "project"}'
+```
+
+### Connection `extra` schema (validated `extra="forbid"`)
+
+The `extra` JSON is parsed through a Pydantic model with `extra="forbid"`, so an
+**unknown key fails loud** at resolution (a typo like `cache_scop` raises
+`AirflowConfigError`, tier 2 — it never silently no-ops). Exactly three keys, all
+optional:
+
+| `extra` key    | Meaning                                                                              |
+|----------------|--------------------------------------------------------------------------------------|
+| `profiles_dir` | Directory holding the dbt `profiles.yml` → mapped to `--profiles-dir` (warehouse auth). Omit to use the worker's ambient `DBT_PROFILES_DIR`. |
+| `provider`     | LLM SKU family — `anthropic` / `openai` / `gemini`. Selects the env var the resolved key is injected into (see allowlist below). Omit for a prune-existing-only Connection (no LLM call). |
+| `cache_scope`  | `per-model` / `project` — the Anthropic cached-prefix knob. **Generate only** (PruneExisting ignores it). |
+
+**Cost ceilings are deliberately NOT supported in the `extra` for v0.7** (there is no
+CLI flag that delivers them — `config_overrides` is deferred, DEC-011). Bound a
+scheduled DAG's spend through the committed `signalforge.yml grade:` block instead
+(`max_grade_cost_usd` / `max_grade_calls` / `max_grade_tokens` / `total_budget_seconds`
+— see the **Cost / time guardrails via `signalforge.yml`** section above).
+
+### API key: `password` primary, Variable fallback
+
+The key's primary source is the Connection `password`. When that is empty, the hook
+falls back to an Airflow **Variable** named **`signalforge_api_key`** (the
+`signalforge.airflow._resolve.API_KEY_VARIABLE_KEY` constant — a single fixed,
+provider-agnostic name):
+
+```bash
+airflow variables set signalforge_api_key "$ANTHROPIC_API_KEY"
+```
+
+The resolver is **lenient** — it returns `api_key` / `provider` as `None` when absent;
+*requiredness is enforced by the consuming operator* (Generate raises when either is
+missing; PruneExisting needs neither). Prefer the Connection `password` (it auto-masks);
+the Variable is the fallback.
+
+### Provider allowlist (closed)
+
+`provider`, when present, must be one of a **closed allowlist** — the single source of
+truth is `signalforge.llm.providers.PROVIDER_ENV_VAR_KEYS`:
+
+| `provider`  | env var the key is injected into |
+|-------------|----------------------------------|
+| `anthropic` | `ANTHROPIC_API_KEY`              |
+| `openai`    | `OPENAI_API_KEY`                 |
+| `gemini`    | `GOOGLE_API_KEY` (the `google-genai` SDK's convention, not a `GEMINI_*` name) |
+
+An **unknown provider fails loud** (`AirflowConfigError`) — the check runs whenever
+`provider` is set, regardless of operator, so an arbitrary env-var name can never be
+derived from a Connection (this closes the arbitrary-env-var injection vector even for a
+prune-existing-only Connection that happens to set `provider`).
+
+### Precedence: explicit param > Connection `extra` > default (DEC-012)
+
+For the two knobs that exist on both surfaces — `profiles_dir` (both operators) and
+`cache_scope` (Generate only) — an explicit, non-empty **operator param wins** over the
+Connection `extra` value, which in turn wins over the downstream tool default. Mirrors
+the CLI's `flag > YAML > default` precedence: set `profiles_dir=...` on the operator to
+override the Connection's `extra.profiles_dir` for that one task.
+
+### Generate vs PruneExisting credentials (DEC-016)
+
+The two operators consume the **same** Connection differently:
+
+- **`SignalForgeGenerateOperator`** calls the LLM, so it **requires** both a `provider`
+  and an `api_key` (else `AirflowConfigError`), and uses `profiles_dir` for warehouse
+  auth. It masks the resolved key, precedence-merges `profiles_dir` / `cache_scope`, and
+  injects the provider's API-key env var around the run.
+- **`SignalForgePruneExistingOperator`** is read-only and makes **no LLM call**, so it
+  uses **only** `profiles_dir` — `provider` / `api_key` / `cache_scope` on the resolution
+  are ignored. It calls **no** `register_secret`, injects **no** provider env var. A
+  prune-existing-only deployment can therefore use a Connection with just
+  `{"profiles_dir": "..."}` and no `password` / `provider` at all. (An allowlist-invalid
+  `provider`, if one *is* present, still raises in the resolver per the closed allowlist.)
+
+### Secrets hygiene — the four surfaces
+
+The resolved LLM API key never appears in any of these:
+
+1. **Task logs** — Airflow's secrets-masker (the operator calls `register_secret(key)`
+   before any logging or run, belt-and-braces over Airflow's auto-masking of a
+   Connection `password`).
+2. **XCom** — `to_xcom()` carries tier **counts + sidecar paths only** (no secrets); the
+   key is held in a local, never stored on the operator/hook instance.
+3. **Rendered templates** — `signalforge_conn_id` is **NOT** a `template_fields` entry
+   (templating a credential reference is an avoidable leak surface), so it never renders
+   into the task-instance rendered fields.
+4. **`__repr__`** — `SignalForgeHook.__repr__` shows only the conn id; the resolution's
+   `HookResolution.__repr__` shows only `profiles_dir` + `provider` — never the key value
+   *or* a field-name label that would reveal a credential is present (mirrors
+   `SnowflakeAdapter.__repr__`).
+
+### In-process concurrency caveat (DEC-015)
+
+For `invocation="in_process"` (the default), the operator injects the provider's API-key
+env var into `os.environ` only **around** the `run_signalforge` call and restores it in a
+`finally` (absent-before → deleted; prior value → restored) — so the secret does not
+linger in a long-lived worker across tasks. But because `os.environ` (and the in-process
+stdout capture) is **process-global**, two concurrent in-process tasks in the *same*
+worker can race on the injected key / captured output. **Prefer `invocation="subprocess"`
+for concurrent multi-task workers** — it runs each task in a fresh interpreter with its
+own environment.
+
+### Usage
+
+```python
+from signalforge.airflow import (
+    SignalForgeGenerateOperator,
+    SignalForgePruneExistingOperator,
+)
+
+# Generate: needs provider + key + profiles_dir, all from the Connection.
+generate = SignalForgeGenerateOperator(
+    task_id="drift_monitor",
+    project_dir="/opt/airflow/dbt_project",
+    signalforge_conn_id="signalforge_default",
+    select="tag:staging",
+    write=False,
+)
+
+# PruneExisting: uses ONLY profiles_dir from the same Connection (no LLM key).
+prune = SignalForgePruneExistingOperator(
+    task_id="signal_rot_monitor",
+    project_dir="/opt/airflow/dbt_project",
+    signalforge_conn_id="signalforge_default",
+    model="models/staging/stg_orders.sql",
+    schema="models/staging/schema.yml",
+)
+```
+
+The shipped example DAG `examples/airflow/signalforge_hook_dag.py`
+(`dag_id: signalforge_hook`) configures **both** operators via a single
+`signalforge_conn_id` (+ the `signalforge_api_key` Variable) with **no inline per-task
+env** — copy it as a starting point.
 
 ## Scheduling for drift detection
 
@@ -509,10 +676,11 @@ export AIRFLOW__CORE__DAGS_FOLDER="$(pwd)/examples/airflow"
 
 - **parse** — `DagBag` loads each shipped example with zero import errors and the
   expected tasks present: the two-`PythonOperator` pipeline (`signalforge_generate`), the
-  `SignalForgeGenerateOperator` drift monitor (`signalforge_generate_operator`), and the
+  `SignalForgeGenerateOperator` drift monitor (`signalforge_generate_operator`), the
   `SignalForgePruneExistingOperator` signal-rot monitor
-  (`signalforge_prune_existing_operator`). No credentials; runs in the gated CI `airflow`
-  job.
+  (`signalforge_prune_existing_operator`), and the Connection-configured both-operators
+  example (`signalforge_hook` — `drift_monitor` + `signal_rot_monitor` wired via
+  `signalforge_conn_id`). No credentials; runs in the gated CI `airflow` job.
 - **render** — each operator's `template_fields` Jinja-render from a synthetic task
   context (e.g. `{{ params.model }}` / `{{ ds }}`).
 - **live** — runs the `generate` task against an `init-demo` project; self-skips without

@@ -86,11 +86,11 @@ Every user-supplied path flows through `canonicalise_user_path(raw, project_dir)
 
 When introducing a new flag that takes a path, route it through `canonicalise_user_path` from the orchestrator. Don't trust the writer / loader to derive its own `project_dir`.
 
-## Logger grep gate covers 6 dirs (DEC-019)
+## Logger grep gate covers 11 dirs (DEC-019; `airflow` added by #234)
 
 Every `_LOGGER.{info,warning,debug,error}` call in `signalforge.cli.*` uses lazy-format with `json.dumps()` for any user-controlled string. Never f-string-interpolate — ANSI escapes in a model id or path would inject into log viewers; JSON encoding handles this; f-string interpolation does not.
 
-The grep gate at `tests/llm/test_logger_grep_gate.py` scans `src/signalforge/{llm, draft, prune, grade, diff, cli}` and rejects any `_LOGGER\.\w+\(f"` hit. Extend to a seventh dir only when a new pipeline package ships.
+The grep gate at `tests/llm/test_logger_grep_gate.py` scans the `_SCAN_SUBPACKAGES` set — `src/signalforge/{airflow, cli, demo, diff, draft, grade, llm, manifest, prune, safety, warehouse}` (11 dirs as of #234) — and rejects any `_LOGGER\.\w+\(f"` hit. Add the subpackage to `_SCAN_SUBPACKAGES` when a new package that emits logs ships (`airflow` was added by #234 ahead of the hook's logging).
 
 The CLI is the orchestration layer (NOT a stage-0 reader) so it IS allowed to emit logs. `setup_logging(verbose, quiet)` is the single config site: INFO default, `--verbose` → DEBUG, `--quiet` → WARNING.
 
