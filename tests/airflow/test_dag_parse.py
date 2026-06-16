@@ -34,10 +34,11 @@ _AIRFLOW_SKIP = "Apache Airflow not installed (run inside the constraints-pinned
 def _load_example_dag(dag_id: str = "signalforge_generate"):
     from airflow.models.dagbag import DagBag
 
-    # The examples folder ships THREE DAGs (the two-PythonOperator pipeline
-    # example, the single-task generate drift monitor, and the no-LLM
-    # prune-existing signal-rot monitor); ALL must parse with no import errors
-    # regardless of which one the caller asked for.
+    # The examples folder ships FOUR DAGs (the two-PythonOperator pipeline
+    # example, the single-task generate drift monitor, the no-LLM prune-existing
+    # signal-rot monitor, and the Connection-configured both-operators hook
+    # example); ALL must parse with no import errors regardless of which one the
+    # caller asked for.
     bag = DagBag(dag_folder=str(_EXAMPLES_DIR), include_examples=False)
     assert bag.import_errors == {}, f"DAG import errors: {bag.import_errors}"
     # Read the in-memory parsed-DAG dict, NOT bag.get_dag(): get_dag() consults the
@@ -171,6 +172,23 @@ def test_prune_existing_operator_renders_templated_fields() -> None:
     # Non-templated / no-Jinja fields are untouched by the render pass.
     assert op.project_dir == "/proj"
     assert op.tests_dir is None
+
+
+def test_hook_operator_example_dag_parses_without_import_errors() -> None:
+    """The Connection-configured both-operators example DAG parses cleanly via DagBag.
+
+    Distinct ``dag_id`` from the single-operator examples; TWO tasks (the
+    ``SignalForgeGenerateOperator`` drift monitor + the
+    ``SignalForgePruneExistingOperator`` signal-rot monitor) both wired to ONE
+    ``signalforge_conn_id`` (+ the ``signalforge_api_key`` Variable) with no inline
+    per-task env — the #234 acceptance shape (A8). Parses with NO SignalForge config
+    in the env (the DAG's ``_config`` fallbacks keep both operators' construction-time
+    validation green at parse; the conn id is a literal constant, resolved only at
+    ``execute`` time, so parse needs no Connection backend).
+    """
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    dag = _load_example_dag("signalforge_hook")
+    assert set(dag.task_ids) == {"drift_monitor", "signal_rot_monitor"}
 
 
 def _live_skip_reason() -> str | None:
