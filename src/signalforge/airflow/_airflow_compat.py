@@ -36,6 +36,13 @@ Three responsibilities:
   success). Its ``from airflow.exceptions import ...`` is confined to the
   function body for the same reason as the factories' imports.
 
+* :func:`register_secret` / :func:`airflow_variable_get` — the hook's two
+  airflow touch-points (#234, DEC-004 / DEC-006). ``register_secret`` registers a
+  resolved API key with Airflow's log secrets masker (so it redacts to ``***``);
+  ``airflow_variable_get`` reads an Airflow Variable as the API-key fallback,
+  coerced to ``str | None``. Both confine their ``from airflow ...`` import to the
+  function body, like the factories above.
+
 Observability discipline (mirroring the warehouse/LLM shims): no logger calls in
 this shim. Logging lives in the implementing operator/hook where the task
 context is known. The shim itself is structural plumbing.
@@ -163,13 +170,63 @@ def raise_for_outcome(  # pragma: no cover - requires the [airflow] extra
     raise AirflowException(message)
 
 
+def register_secret(value: str) -> None:  # pragma: no cover - requires the [airflow] extra
+    """Register ``value`` with Apache Airflow's log secrets masker (#234, DEC-006).
+
+    Belt-and-braces over Airflow's automatic masking of a Connection's
+    ``password`` / sensitive ``extra`` keys: the implementing operator calls this
+    immediately after resolving the SignalForge Connection — *before* any logging
+    or ``run_signalforge`` call — so the resolved LLM API key is redacted to
+    ``***`` everywhere Airflow's :class:`~airflow.utils.log.secrets_masker.SecretsMasker`
+    filter runs (task logs, tracebacks). One of the four leak-surface disciplines
+    (DEC-007); the others are ``signalforge_conn_id`` staying out of
+    ``template_fields`` / XCom and the redacting ``__repr__`` on the hook +
+    :class:`~signalforge.airflow._resolve.HookResolution`.
+
+    The ``from airflow ... import mask_secret`` is confined to this function body
+    (DEC-007 — the one-shim-per-vendor rule); the single airflow ``# type: ignore``
+    for the import lives here. ``mask_secret`` is the stable public entry point
+    across ``apache-airflow>=2.8,<3``.
+    """
+    from airflow.utils.log.secrets_masker import mask_secret  # type: ignore[import-not-found]
+
+    mask_secret(value)
+
+
+def airflow_variable_get(key: str) -> str | None:  # pragma: no cover - requires the [airflow] extra
+    """Read an Apache Airflow Variable, returning ``None`` when absent (#234, DEC-004).
+
+    The implementing hook wires this as the ``variable_lookup`` callable handed to
+    the airflow-free :func:`signalforge.airflow._resolve.resolve_connection`, so
+    the resolver never imports ``airflow.models.Variable`` directly (it stays
+    pure + unit-testable with a dict-backed lookup). ``Variable.get(key,
+    default_var=None)`` yields ``None`` for an absent Variable rather than
+    raising, keeping the resolver lenient (DEC-003).
+
+    ``Variable.get`` is typed ``Any`` by Airflow, so the result is coerced to an
+    explicit ``str | None`` here (a non-string Variable — e.g. a JSON-deserialised
+    dict — resolves to ``None``) rather than letting the type widen to ``object``
+    downstream.
+
+    The ``from airflow.models import Variable`` is confined to this function body
+    (DEC-007 — the one-shim-per-vendor rule); the single airflow ``# type: ignore``
+    for the import lives here.
+    """
+    from airflow.models import Variable  # type: ignore[import-not-found]
+
+    value = Variable.get(key, default_var=None)
+    return value if isinstance(value, str) else None
+
+
 # Only the factory functions are public API. The ``_Base*Protocol`` types stay
 # ``_``-prefixed internals (still directly importable for tests / implementing
 # children) and are deliberately NOT listed in ``__all__`` — per the convention
 # that a subpackage's public contract is its ``__all__`` and ``_``-prefixed names
 # are internal.
 __all__ = [
+    "airflow_variable_get",
     "make_base_hook",
     "make_base_operator",
     "raise_for_outcome",
+    "register_secret",
 ]
