@@ -833,6 +833,46 @@ export AIRFLOW__CORE__DAGS_FOLDER="$(pwd)/examples/airflow"
 .venv-airflow/bin/airflow standalone   # admin password printed; UI on :8080 → trigger signalforge_generate
 ```
 
+## Managed Airflow runtimes (Astronomer / MWAA / Composer)
+
+SignalForge's Airflow operators are **documented, not certified** against managed
+Airflow runtimes — **Astronomer**, **AWS MWAA**, and **Google Cloud Composer**. The
+certified target is the constraints-pinned local stack above (`apache-airflow 2.10.4`
+on Python 3.11); the notes below are **pointers, not a support claim**. Treat them as a
+starting point and validate against your own runtime.
+
+The integration is designed to drop into a managed runtime cleanly — the base
+`pip install signalforge-dbt` stays **Airflow-free** (Architectural Commitment #4), so
+it can sit alongside whatever Airflow the runtime already pins without dragging a second
+Airflow tree into the resolution. Three practical caveats under a managed scheduler:
+
+- **The `[airflow]` extra vs the runtime's pinned Airflow.** A managed runtime ships its
+  own Airflow at a fixed version, installed under its own constraints. Do **not** let
+  `signalforge-dbt[airflow]` (which declares `apache-airflow>=2.8,<3`) re-resolve or
+  upgrade that Airflow. Install SignalForge **compatibly** — typically just
+  `signalforge-dbt` (the operators import Airflow from the runtime; the `[airflow]`
+  extra exists mainly to pin Airflow in a *standalone* env). When you do need the extra,
+  add it under the runtime's own constraints file (the same `--constraint` discipline as
+  the local install above) so it can never pull Airflow's pins forward. The certified
+  version floor lives in `docs/research/airflow-test-environment.md` — confirm your
+  runtime's Airflow is `>=2.8,<3`.
+- **Where credentials live — the runtime's secrets backend.** Prefer the Airflow-native
+  `SignalForgeHook` + `signalforge_conn_id` path (see the **Airflow-native credentials**
+  section) over inline per-task env. On a managed runtime, the Connection / Variable it
+  resolves come from that runtime's configured **secrets backend** (Astronomer secrets,
+  AWS Secrets Manager for MWAA, Google Secret Manager for Composer) — SignalForge reads
+  the resolved Connection / Variable exactly the same way regardless of backend, so the
+  LLM key and `profiles_dir` stay out of your DAG source and out of task logs.
+- **The base install stays Airflow-free.** Because `signalforge-dbt`'s core has no
+  Airflow dependency, adding SignalForge to a managed image is additive — it never forces
+  the runtime's Airflow version. The operators resolve Airflow lazily at *construction*
+  time, so importing `signalforge.airflow` in a DAG file parses fine even on a worker
+  image where the extra wasn't separately installed (construction then fails loud with
+  the `pip install 'signalforge-dbt[airflow]'` pointer if Airflow truly is absent).
+
+These are deployment pointers only — for the certified version floor, the `airflow`
+pytest marker, and the CI test recipe, see `docs/research/airflow-test-environment.md`.
+
 ## Testing
 
 `tests/airflow/test_dag_parse.py` ships gated tests (`@pytest.mark.airflow`):
@@ -875,3 +915,7 @@ uv run --no-sync pytest -m airflow --no-cov   # inside the constraints-pinned ai
   engine's `maximum_bytes_billed` cap and `--dry-run` (no file writes) bound it. A
   `prune-existing` run spends **warehouse budget only** (no LLM call), bounded by the
   same `maximum_bytes_billed` cap.
+- **Managed runtimes are documented, not certified.** Running on Astronomer / MWAA /
+  Composer is supported as a set of deployment pointers (the `[airflow]`-extra vs
+  pinned-Airflow interplay, the secrets-backend credential path) — not a certification.
+  See the **Managed Airflow runtimes** section above.
