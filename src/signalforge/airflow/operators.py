@@ -37,6 +37,7 @@ extra installed.
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
@@ -303,7 +304,6 @@ class _GenerateOperatorAirflowMissing:
 # Airflow is installed, else the airflow-free placeholder above. Built once on
 # first attribute access and reused (a process either has Airflow or it does not,
 # so the cached choice is stable for the process lifetime).
-_GENERATE_OPERATOR_CLASS: type | None = None
 
 
 def _make_generate_operator_class() -> type:  # pragma: no cover - requires the [airflow] extra
@@ -444,6 +444,11 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
 
             results: list[SignalForgeRunResult] = []
             for model_id in model_ids:
+                # model_id is a manifest-validated unique_id (dbt's
+                # ``model.<pkg>.<name>`` grammar), not operator-supplied text, so
+                # the leading-dash argv-injection guard from
+                # _validate_operator_config does not apply here — it cannot begin
+                # with ``-``.
                 argv = _build_generate_argv(
                     model=model_id,
                     select=None,
@@ -477,6 +482,7 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
     return SignalForgeGenerateOperator
 
 
+@functools.cache
 def _get_generate_operator_class() -> type:
     """Resolve (and cache) the operator class without importing airflow eagerly.
 
@@ -487,13 +493,9 @@ def _get_generate_operator_class() -> type:
     ``BaseOperator`` subclass; when absent, return the airflow-free placeholder
     whose construction raises :class:`ModuleNotFoundError`.
     """
-    global _GENERATE_OPERATOR_CLASS
-    if _GENERATE_OPERATOR_CLASS is None:
-        if importlib.util.find_spec("airflow") is None:
-            _GENERATE_OPERATOR_CLASS = _GenerateOperatorAirflowMissing
-        else:  # pragma: no cover - requires the [airflow] extra
-            _GENERATE_OPERATOR_CLASS = _make_generate_operator_class()
-    return _GENERATE_OPERATOR_CLASS
+    if importlib.util.find_spec("airflow") is None:
+        return _GenerateOperatorAirflowMissing
+    return _make_generate_operator_class()  # pragma: no cover - requires [airflow]
 
 
 def __getattr__(name: str) -> object:

@@ -346,6 +346,36 @@ def test_batch_honours_explicit_cache_scope(
         assert argv[argv.index("--cache-scope") + 1] == "per-model"
 
 
+def test_batch_single_match_does_not_force_cache_and_keeps_batch_xcom_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``--select`` that resolves to exactly ONE model is still the batch path:
+    cache_scope is NOT force-promoted (DEC-007 needs ≥2 models) yet the XCom keeps
+    the ``{"models": [...], "aggregate": ...}`` batch shape (DEC-010 keys on the
+    ``select`` param, not the match count)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+
+    monkeypatch.setattr(
+        "signalforge.airflow.operators._resolve_select_models",
+        lambda project_dir, select: ("model.p.only",),
+    )
+    captured = _patch_run(
+        monkeypatch,
+        [_result(exit_code=0, flagged=0, model_unique_ids=("model.p.only",), kept=4)],
+    )
+
+    op = _operator_class()(task_id="gen", project_dir="/proj", select="tag:rare")
+    xcom = op.execute(context={})
+
+    # One loop iteration; cache_scope left unset (NOT forced — only one model).
+    assert len(captured) == 1
+    assert "--cache-scope" not in captured[0]
+    # Still the batch XCom shape even with a single match.
+    assert set(xcom) == {"models", "aggregate"}
+    assert len(xcom["models"]) == 1
+    assert xcom["aggregate"]["model_unique_ids"] == ["model.p.only"]
+
+
 # --------------------------------------------------------------------------- #
 # Construction-time validation (fail fast at DAG-parse)
 # --------------------------------------------------------------------------- #
