@@ -148,6 +148,43 @@ def test_prune_existing_operator_access_is_airflow_free_and_construction_require
         pytest.skip("airflow installed; gated tests/airflow/test_operators.py cover construction")
 
 
+def test_drift_operator_access_is_airflow_free_and_construction_requires_airflow() -> None:
+    """#235 US-005: the dedicated drift operator name resolves WITHOUT importing
+    airflow (the no-eager-import contract), and — with the ``[airflow]`` extra
+    absent — CONSTRUCTING it raises an ``ImportError`` (the real operator
+    subclasses ``BaseOperator`` and genuinely needs Airflow at construction time).
+
+    Mirrors the generate / prune-existing sibling tests above: attribute access
+    goes through the find_spec-guarded ``operators._get_drift_operator_class``
+    (airflow-absent → the airflow-free placeholder whose ``__init__`` raises
+    ``ModuleNotFoundError``; airflow-present → the real ``BaseOperator`` subclass,
+    whose construction is covered by the gated ``tests/airflow/test_operators.py``,
+    #235 US-006). This ungated test is what exercises the airflow-absent
+    placeholder / factory / ``__getattr__`` lines in the default (no-airflow) CI
+    env — the codecov patch gate counts them."""
+
+    def _airflow_loaded() -> bool:
+        return any(m == "airflow" or m.startswith("airflow.") for m in sys.modules)
+
+    had_airflow = _airflow_loaded()
+    from signalforge.airflow import SignalForgeDriftOperator
+
+    assert SignalForgeDriftOperator is not None
+    assert _airflow_loaded() == had_airflow, (
+        "accessing SignalForgeDriftOperator must not import the real airflow package"
+    )
+
+    if importlib.util.find_spec("airflow") is None:
+        with pytest.raises((ImportError, ModuleNotFoundError)):
+            SignalForgeDriftOperator(
+                task_id="t",
+                previous_diff_path="/history/prev/diff.json",
+                current_diff_path="/history/curr/diff.json",
+            )
+    else:  # pragma: no cover - default CI env has no [airflow] extra
+        pytest.skip("airflow installed; gated tests/airflow/test_operators.py cover construction")
+
+
 def test_hook_stub_raises_not_implemented() -> None:
     """The skeleton hook is construction-inert until an epic-#228 child
     implements it."""

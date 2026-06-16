@@ -1,6 +1,6 @@
-"""The SignalForge Apache Airflow operators (#232 US-003, #233 US-002).
+"""The SignalForge Apache Airflow operators (#232 US-003, #233 US-002, #235 US-005).
 
-This module ships two operators a DAG author wires as one Airflow task each:
+This module ships three operators a DAG author wires as one Airflow task each:
 
 * :class:`SignalForgeGenerateOperator` — runs ``signalforge generate`` (single
   model or a ``--select`` batch). The four pure helpers below
@@ -11,6 +11,15 @@ This module ships two operators a DAG author wires as one Airflow task each:
   (ingest -> prune -> diff, **no LLM call**, read-only; #233). Its pure helpers
   are :func:`_build_prune_existing_argv` + :func:`_validate_prune_existing_config`.
   Single-model only — no batch apparatus (#233 DEC-003).
+* :class:`SignalForgeDriftOperator` — run-over-run drift / signal-rot detection
+  (#235 DEC-010). Runs NO ``signalforge`` CLI invocation: it reads a prior + a
+  current ``diff.json`` sidecar (plus optional ``grade.json`` siblings) off disk,
+  computes a :class:`~signalforge.airflow.drift.DriftReport`, and maps the
+  ``on_drift`` policy + the drift verdict to a task outcome. Its pure helpers are
+  :func:`_validate_drift_config` + :func:`_build_drift_inputs` +
+  :func:`_drift_task_outcome`. Single-model only — drift is single-model in v0.7
+  (#235 DEC-001). Reuses the existing :func:`build_drift_report` orchestration
+  seam (no new error class — :class:`AirflowConfigError`; #235 DEC-012).
 
 **Deferred class construction (the load-bearing structural constraint).** The
 real operator must subclass Apache Airflow's ``BaseOperator``, which requires
@@ -65,6 +74,7 @@ from signalforge.airflow.result import (
     OnDrift,
     OnFlagged,
     SignalForgeRunResult,
+    TaskOutcome,
     decide_task_outcome,
 )
 from signalforge.airflow.runner import run_signalforge
@@ -85,6 +95,11 @@ if TYPE_CHECKING:
         def execute(self, context: Any) -> Any: ...
 
     class SignalForgePruneExistingOperator:  # noqa: D401 - type stub only
+        def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+        def execute(self, context: Any) -> Any: ...
+
+    class SignalForgeDriftOperator:  # noqa: D401 - type stub only
         def __init__(self, *args: Any, **kwargs: Any) -> None: ...
 
         def execute(self, context: Any) -> Any: ...
@@ -523,6 +538,108 @@ def _validate_prune_existing_config(
         )
 
 
+def _validate_drift_config(
+    *,
+    previous_diff_path: str | None,
+    current_diff_path: str | None,
+    on_drift: str,
+) -> None:
+    """Validate dedicated-drift-operator params (raise :class:`AirflowConfigError`; #235 DEC-010).
+
+    Pure, airflow-free, no I/O. Runs BEFORE any sidecar read. The dedicated
+    :class:`SignalForgeDriftOperator` runs no ``signalforge`` CLI invocation — it
+    reads the prior + current ``diff.json`` sidecars directly — so BOTH diff
+    paths are REQUIRED operator params. Raises on:
+
+    * empty / ``None`` (or non-``str`` / blank) ``previous_diff_path`` — required
+      (a missing prior *file* at this path degrades to a baseline at read time,
+      DEC-013; but the path itself must be configured);
+    * empty / ``None`` (or non-``str`` / blank) ``current_diff_path`` — required;
+    * a ``previous_diff_path`` / ``current_diff_path`` value beginning with ``-``
+      (defensive path-shape guard, mirrors the sibling operators);
+    * ``on_drift`` outside ``{"fail", "skip", "succeed"}``.
+
+    The optional ``previous_grade_path`` / ``current_grade_path`` are NOT
+    validated here: they feed the fail-soft :func:`load_grade_report` (an absent /
+    malformed grade simply leaves the grade-regression axis empty), so a bad
+    value degrades rather than fails (DEC-013).
+    """
+    for label, value in (
+        ("previous_diff_path", previous_diff_path),
+        ("current_diff_path", current_diff_path),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise AirflowConfigError(f"`{label}` must be a non-empty string (got {value!r}).")
+        if value.startswith("-"):
+            raise AirflowConfigError(
+                f"`{label}` must not begin with '-' (got {value!r}); refusing as a "
+                "defensive path-shape guard."
+            )
+
+    if on_drift not in _VALID_ON_FLAGGED:
+        raise AirflowConfigError(
+            f"`on_drift` must be one of {{fail, skip, succeed}} (got {on_drift!r})."
+        )
+
+
+def _build_drift_inputs(
+    *,
+    previous_diff_path: str,
+    current_diff_path: str,
+    previous_grade_path: str | None,
+    current_grade_path: str | None,
+) -> tuple[str, str, str, str]:
+    """Resolve the four sidecar read paths, auto-siblinging the grades (pure, #235 DEC-010).
+
+    Airflow-free, no I/O — pure path arithmetic. A grade sidecar conventionally
+    sits beside its diff (``<dir>/diff.json`` ↔ ``<dir>/grade.json``); when a
+    grade path is not given explicitly it is resolved to the ``grade.json``
+    sibling of the corresponding diff path. Returns
+    ``(previous_diff_path, current_diff_path, previous_grade_path,
+    current_grade_path)`` with the grade entries resolved. The diff paths pass
+    through unchanged.
+    """
+    resolved_previous_grade = previous_grade_path or str(
+        Path(previous_diff_path).parent / _GRADE_SIDECAR_NAME
+    )
+    resolved_current_grade = current_grade_path or str(
+        Path(current_diff_path).parent / _GRADE_SIDECAR_NAME
+    )
+    return (
+        previous_diff_path,
+        current_diff_path,
+        resolved_previous_grade,
+        resolved_current_grade,
+    )
+
+
+def _drift_task_outcome(drift: DriftReport, on_drift: OnDrift) -> TaskOutcome:
+    """Map a ``(drift, on_drift)`` pair to a :class:`TaskOutcome` (pure, #235 DEC-010).
+
+    The dedicated :class:`SignalForgeDriftOperator` runs no ``signalforge`` CLI
+    invocation, so it has NO :class:`SignalForgeRunResult` to feed
+    :func:`~signalforge.airflow.result.decide_task_outcome`; its single Airflow
+    task state is driven directly off the drift verdict. A non-alarming (or
+    degraded) report → ``SUCCESS``; an alarming report (signal rot or a grade
+    regression — :attr:`DriftReport.alarming`) maps ``on_drift`` → ``"skip"``
+    :attr:`~TaskOutcome.SKIP` / ``"succeed"`` :attr:`~TaskOutcome.SUCCESS` /
+    ``"fail"`` (the default) :attr:`~TaskOutcome.FAIL_NO_RETRY`. Mirrors the
+    exit-0 half of :func:`decide_task_outcome`'s ``on_flagged`` axis. Airflow-free,
+    no I/O — the airflow raise stays confined to
+    :func:`~signalforge.airflow._airflow_compat.raise_for_outcome`.
+    """
+    if not drift.alarming:
+        return TaskOutcome.SUCCESS
+    if on_drift == "skip":
+        return TaskOutcome.SKIP
+    if on_drift == "succeed":
+        return TaskOutcome.SUCCESS
+    # on_drift == "fail" (the default): an alarming drift is a hard failure that
+    # bypasses the task's retry policy (signal rot is deterministic — retrying
+    # cannot un-rot it; it is a reviewer signal, not a transient).
+    return TaskOutcome.FAIL_NO_RETRY
+
+
 class _GenerateOperatorAirflowMissing:
     """Stand-in for :class:`SignalForgeGenerateOperator` when Airflow is absent.
 
@@ -557,6 +674,27 @@ class _PruneExistingOperatorAirflowMissing:
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
         raise ModuleNotFoundError(
             "SignalForgePruneExistingOperator requires Apache Airflow, which is not "
+            "installed. Install the optional extra: "
+            "pip install 'signalforge-dbt[airflow]'."
+        )
+
+
+class _DriftOperatorAirflowMissing:
+    """Stand-in for :class:`SignalForgeDriftOperator` when Airflow is absent.
+
+    Mirrors :class:`_GenerateOperatorAirflowMissing` /
+    :class:`_PruneExistingOperatorAirflowMissing` exactly. Resolving
+    ``signalforge.airflow.SignalForgeDriftOperator`` without the ``[airflow]``
+    optional extra installed returns THIS class (attribute access stays
+    airflow-free, keeping the no-eager-import gate green). Constructing it raises
+    :class:`ModuleNotFoundError` (an :class:`ImportError` subclass) naming the
+    remediation — the real operator subclasses ``BaseOperator`` and so genuinely
+    requires Airflow at construction time.
+    """
+
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        raise ModuleNotFoundError(
+            "SignalForgeDriftOperator requires Apache Airflow, which is not "
             "installed. Install the optional extra: "
             "pip install 'signalforge-dbt[airflow]'."
         )
@@ -1108,6 +1246,201 @@ def _get_prune_existing_operator_class() -> type:
     return _make_prune_existing_operator_class()  # pragma: no cover - requires [airflow]
 
 
+def _make_drift_operator_class() -> type:  # pragma: no cover - requires [airflow]
+    """Build and return the real ``BaseOperator``-subclassing drift operator (#235 DEC-010).
+
+    Sibling of :func:`_make_generate_operator_class` /
+    :func:`_make_prune_existing_operator_class`. Reached only when Apache Airflow
+    is installed (guarded by :func:`_get_drift_operator_class`'s ``find_spec``
+    check). The base class comes from the one shim
+    :func:`signalforge.airflow._airflow_compat.make_base_operator`, so the
+    ``from airflow ...`` import stays confined there and out of this module's
+    scope. Marked ``# pragma: no cover`` because its body — the ``BaseOperator``
+    subclass and its ``execute`` — runs only under the gated ``[airflow]`` extra
+    (the gated ``tests/airflow/test_operators.py`` exercise it, #235 US-006); the
+    default coverage env never installs Airflow.
+    """
+    _Base = make_base_operator()
+
+    class SignalForgeDriftOperator(_Base):  # type: ignore[valid-type, misc]
+        """Run run-over-run drift / signal-rot detection as one Apache Airflow task (#235).
+
+        Runs NO ``signalforge`` CLI invocation: it reads a prior + a current
+        ``diff.json`` sidecar (plus optional ``grade.json`` siblings, auto-resolved
+        next to each diff when not given) off disk, computes a
+        :class:`~signalforge.airflow.drift.DriftReport` via the pure
+        :func:`build_drift_report`, and drives the single task state off the drift
+        verdict — :func:`_drift_task_outcome` maps the ``on_drift`` policy +
+        :attr:`DriftReport.alarming` to a
+        :class:`~signalforge.airflow.result.TaskOutcome`, which
+        :func:`~signalforge.airflow._airflow_compat.raise_for_outcome` translates
+        into the matching Airflow signal. Returns the drift XCom payload
+        (:meth:`DriftReport.to_xcom` — per-category counts + the transition
+        lists + the two input hashes; no bulk text, no secrets; #235 DEC-015).
+
+        Wired downstream of a :class:`SignalForgeGenerateOperator` configured to
+        persist its sidecars (its ``drift_history_dir``); this operator points
+        ``previous_diff_path`` / ``current_diff_path`` at two such persisted
+        sidecars. Single-model only — drift is single-model in v0.7 (#235
+        DEC-001). The comparison degrades, never raises (DEC-013): a missing
+        prior ``diff.json`` makes this run a baseline; a ``model_unique_id``
+        mismatch yields a degraded (non-alarming) report.
+        """
+
+        # Airflow renders these fields from the task context before ``execute``
+        # (#235 DEC-010), so a DAG author can template e.g.
+        # ``previous_diff_path="…/{{ prev_ds }}/diff.json"``,
+        # ``current_diff_path="…/{{ ds }}/diff.json"``, ``as_of="{{ ds }}"``.
+        template_fields = (
+            "previous_diff_path",
+            "current_diff_path",
+            "previous_grade_path",
+            "current_grade_path",
+            "as_of",
+        )
+
+        def __init__(
+            self,
+            *,
+            task_id: str,
+            previous_diff_path: str,
+            current_diff_path: str,
+            previous_grade_path: str | None = None,
+            current_grade_path: str | None = None,
+            on_drift: OnDrift = "fail",
+            as_of: str | None = None,
+            grade_regression_threshold: float = 0.05,
+            **kwargs: Any,
+        ) -> None:
+            # BaseOperator owns ``task_id`` + the standard Airflow kwargs
+            # (``retries`` / ``retry_delay`` / ``depends_on_past`` / ...).
+            super().__init__(task_id=task_id, **kwargs)
+            self.previous_diff_path = previous_diff_path
+            self.current_diff_path = current_diff_path
+            self.previous_grade_path = previous_grade_path
+            self.current_grade_path = current_grade_path
+            self.as_of = as_of
+            self.grade_regression_threshold = grade_regression_threshold
+            # Annotate the Literal-typed attr explicitly so pyright does NOT widen
+            # it to ``str`` on assignment (which would break the typed
+            # ``_drift_task_outcome`` call below).
+            self.on_drift: OnDrift = on_drift
+            # Fail fast at DAG-parse / instantiation time. The leading-dash guard
+            # is harmless here: an un-rendered Jinja template (e.g. ``"{{ ds }}"``)
+            # never begins with ``-``, so it cannot false-trip. ``execute``
+            # re-validates the RENDERED values before any read.
+            _validate_drift_config(
+                previous_diff_path=previous_diff_path,
+                current_diff_path=current_diff_path,
+                on_drift=on_drift,
+            )
+
+        def execute(self, context: Any) -> dict[str, object]:
+            # Re-validate the now-rendered template_fields (#235 DEC-010): the
+            # leading-dash guard is meaningful only once Jinja has rendered the
+            # paths to their final values.
+            _validate_drift_config(
+                previous_diff_path=self.previous_diff_path,
+                current_diff_path=self.current_diff_path,
+                on_drift=self.on_drift,
+            )
+            (
+                previous_diff_path,
+                current_diff_path,
+                previous_grade_path,
+                current_grade_path,
+            ) = _build_drift_inputs(
+                previous_diff_path=self.previous_diff_path,
+                current_diff_path=self.current_diff_path,
+                previous_grade_path=self.previous_grade_path,
+                current_grade_path=self.current_grade_path,
+            )
+
+            # The CURRENT diff is required: this operator reads it from a path
+            # (not stdout — it runs no CLI). A None load means the path is wrong /
+            # the file is absent or malformed → a hard config error (NOT a
+            # baseline; baseline is the PRIOR-absent case below).
+            current_diff = load_diff_report(current_diff_path)
+            if current_diff is None:
+                raise AirflowConfigError(
+                    f"The current diff sidecar at {current_diff_path!r} could not "
+                    "be read as a DiffReport (absent, unreadable, oversize, or "
+                    "malformed). The dedicated drift operator runs downstream of a "
+                    "generate task configured to persist its diff.json sidecar; "
+                    "point `current_diff_path` at that persisted file."
+                )
+
+            # The PRIOR diff is fail-soft (DEC-013): None → this run is a baseline.
+            prior_diff = load_diff_report(previous_diff_path)
+            current_grade = load_grade_report(current_grade_path)
+            prior_grade = load_grade_report(previous_grade_path)
+
+            as_of_date: date | None = None
+            if self.as_of:
+                try:
+                    as_of_date = date.fromisoformat(self.as_of)
+                except ValueError:
+                    as_of_date = None
+
+            drift = build_drift_report(
+                current_diff=current_diff,
+                prior_diff=prior_diff,
+                current_grade=current_grade,
+                prior_grade=prior_grade,
+                as_of=as_of_date,
+                grade_regression_threshold=self.grade_regression_threshold,
+            )
+
+            if drift.baseline:
+                _LOGGER.info(
+                    "signalforge drift: baseline established: %s",
+                    json.dumps({"model": drift.model_unique_id}),
+                )
+            else:
+                _LOGGER.info(
+                    "signalforge drift: %s",
+                    json.dumps(
+                        {
+                            "model": drift.model_unique_id,
+                            "alarming": drift.alarming,
+                            "degrade_reason": drift.degrade_reason,
+                            "counts": drift.to_xcom()["counts"],
+                        }
+                    ),
+                )
+
+            outcome = _drift_task_outcome(drift, self.on_drift)
+            raise_for_outcome(
+                outcome,
+                message=(
+                    f"signalforge drift for {drift.model_unique_id!r} produced "
+                    f"task outcome {outcome.value} (alarming={drift.alarming}, "
+                    f"baseline={drift.baseline}, "
+                    f"degrade_reason={drift.degrade_reason!r})."
+                ),
+            )
+            return drift.to_xcom()
+
+    return SignalForgeDriftOperator
+
+
+@functools.cache
+def _get_drift_operator_class() -> type:
+    """Resolve (and cache) the drift operator class without importing airflow eagerly.
+
+    Sibling of :func:`_get_generate_operator_class` /
+    :func:`_get_prune_existing_operator_class` (#235 DEC-010). Attribute ACCESS
+    must stay airflow-free so the no-eager-import gate passes with the
+    ``[airflow]`` extra absent. :func:`importlib.util.find_spec` checks Airflow
+    availability WITHOUT executing/importing it. When Airflow is present, build
+    the real ``BaseOperator`` subclass; when absent, return the airflow-free
+    placeholder whose construction raises :class:`ModuleNotFoundError`.
+    """
+    if importlib.util.find_spec("airflow") is None:
+        return _DriftOperatorAirflowMissing
+    return _make_drift_operator_class()  # pragma: no cover - requires [airflow]
+
+
 def __getattr__(name: str) -> object:
     """PEP 562 lazy resolution of the public operator names.
 
@@ -1120,7 +1453,13 @@ def __getattr__(name: str) -> object:
         return _get_generate_operator_class()
     if name == "SignalForgePruneExistingOperator":
         return _get_prune_existing_operator_class()
+    if name == "SignalForgeDriftOperator":
+        return _get_drift_operator_class()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["SignalForgeGenerateOperator", "SignalForgePruneExistingOperator"]
+__all__ = [
+    "SignalForgeDriftOperator",
+    "SignalForgeGenerateOperator",
+    "SignalForgePruneExistingOperator",
+]
