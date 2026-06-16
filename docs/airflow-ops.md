@@ -196,7 +196,7 @@ need per-model counts, drive one `run_signalforge` per model yourself.
 The **`SignalForgeGenerateOperator` overcomes this**: it resolves the `--select`
 expression itself and loops `run_signalforge` once per matched model, so its XCom
 carries accurate per-model counts plus a rollup aggregate
-(see [`--select` batch: per-model XCom + aggregate task-state](#-select-batch-per-model-xcom-aggregate-task-state)).
+(see the **`--select` batch: per-model XCom + aggregate task-state** section below).
 Prefer the operator over the raw seam for any batch.
 
 ### Usage
@@ -252,12 +252,12 @@ and `--project-dir` are always injected by the runner.
 | `model` | positional `<model>` | model **file-path or unique_id** (a bare name fails); mutex with `select`. **`template_fields`** |
 | `select` | `--select <expr>` | dbt-style selector (`tag:…`, `path:…`, comma-union); mutex with `model`. **`template_fields`** |
 | `profiles_dir` | `--profiles-dir <dir>` | overrides `DBT_PROFILES_DIR`; omitted when unset. **`template_fields`** |
-| `write` | `--write` (True) / `--dry-run` (False) | default `False`. See [`write=False`](#writefalse-is-dry-run-the-safe-scheduled-default) |
+| `write` | `--write` (True) / `--dry-run` (False) | default `False`. See the **`write=False`** section below |
 | `no_grade` | `--no-grade` | default `False`; skips the grade stage (`mean_grade` → `None`) |
 | `cache_scope` | `--cache-scope <scope>` | `per-model` / `project`; omitted when unset (auto-promoted on batches — see below) |
 | `as_of` | `--as-of <YYYY-MM-DD>` | reproducibility anchor for time-bound tests; `{{ ds }}` is a natural source. **`template_fields`** |
-| `on_flagged` | — (decision layer) | `fail` (default) / `skip` / `succeed`; see [`on_flagged` branches](#on_flagged-keys-on-the-diffs-flagged-count-not-the-exit-code) |
-| `invocation` | — (run mode) | `in_process` (default) / `subprocess`; see [Invocation modes](#invocation-modes) |
+| `on_flagged` | — (decision layer) | `fail` (default) / `skip` / `succeed`; see the **`on_flagged`** section below |
+| `invocation` | — (run mode) | `in_process` (default) / `subprocess`; see the **Invocation modes** section below |
 | `**kwargs` | — | passed to `BaseOperator` (`retries`, `retry_delay`, `depends_on_past`, …) |
 
 Exactly one of `model` or `select` must be set (a validation error fires at DAG-parse
@@ -265,8 +265,8 @@ time otherwise). The five `template_fields` are Jinja-rendered from the task con
 before `execute`, so `as_of="{{ ds }}"`, `model="{{ params.model }}"`, etc. work.
 `execute` re-validates the rendered values before building any argv (DEC-005).
 
-The operator does **not** take a `config_overrides` param in v0.7 (DEC-002) — see
-[Cost / time guardrails](#cost-time-guardrails-via-signalforgeyml) below.
+The operator does **not** take a `config_overrides` param in v0.7 (DEC-002) — see the
+**Cost / time guardrails via `signalforge.yml`** section below.
 
 ### `write=False` is `--dry-run` (the safe scheduled default)
 
@@ -283,9 +283,12 @@ populate.
 
 ### `on_flagged` keys on the diff's flagged count, not the exit code
 
-A flagged run **exits 0** (SignalForge runs `grade.fail_on_below_threshold=false`), so a
+A flagged run **exits 0** *under the default* `grade.fail_on_below_threshold=false`, so a
 below-threshold artifact surfaces via the diff's `flagged_count > 0`, **not** via exit 2
-(DEC-008). `on_flagged` only applies to a *successful* (exit-0) run:
+(DEC-008). `on_flagged` only applies to such a *successful* (exit-0) run. (If you set
+`grade.fail_on_below_threshold=true` in `signalforge.yml`, a below-threshold run instead
+exits **2** → `FAIL_NO_RETRY` via the exit-code mapping, bypassing the `on_flagged`
+branch entirely — so leave it at the default if you want `skip`/`succeed` to take effect.)
 
 - `fail` (default — signal over volume): a flagged run is a hard task failure
   (`AirflowFailException`, no retry) so a reviewer sees it.
@@ -336,8 +339,8 @@ keeps the run read-only.)
 
 For a `--select` batch the operator resolves the selector to its model unique_ids itself
 and loops `run_signalforge` once per model (DEC-001), overcoming the raw seam's
-last-writer-wins sidecar limitation (see
-[`--select` batch behaviour](#-select-batch-behaviour-the-raw-seam-vs-the-operator)).
+last-writer-wins sidecar limitation (see the
+**`--select` batch behaviour: the raw seam vs the operator** section above).
 When `cache_scope` is unset and ≥2 models match, the operator forces
 `--cache-scope project` on each looped call (DEC-007) so Anthropic's server-side prompt
 cache amortises the byte-identical project prefix across the siblings instead of paying

@@ -97,7 +97,7 @@ def _build_generate_argv(
       the safe scheduled default writes nothing).
     * ``no_grade=True`` → ``--no-grade``.
     * ``as_of`` (non-empty) → ``--as-of <as_of>``.
-    * ``cache_scope`` (non-``None``) → ``--cache-scope <cache_scope>``.
+    * ``cache_scope`` (non-empty) → ``--cache-scope <cache_scope>``.
     * ``profiles_dir`` (non-empty) → ``--profiles-dir <profiles_dir>``.
     """
     argv: list[str] = ["generate"]
@@ -117,7 +117,7 @@ def _build_generate_argv(
         argv.append("--no-grade")
     if as_of:
         argv += ["--as-of", as_of]
-    if cache_scope is not None:
+    if cache_scope:
         argv += ["--cache-scope", cache_scope]
     if profiles_dir:
         argv += ["--profiles-dir", profiles_dir]
@@ -138,6 +138,8 @@ def _validate_operator_config(
     on:
 
     * empty / ``None`` ``project_dir``;
+    * a ``model`` / ``select`` that is set but blank or not a ``str`` (a blank
+      value must NOT satisfy the mutex — ``model=""`` is "unset", not "set");
     * ``model`` and ``select`` both set OR both unset (mutex — exactly one);
     * a ``model`` / ``select`` value beginning with ``-`` (argv-injection guard);
     * ``on_flagged`` outside ``{"fail", "skip", "succeed"}``.
@@ -145,20 +147,26 @@ def _validate_operator_config(
     if not project_dir:
         raise AirflowConfigError("`project_dir` must be set (non-empty).")
 
+    # A provided model/select must be a non-blank str BEFORE the mutex: a blank
+    # string would otherwise pass `is not None` and bypass the exactly-one check,
+    # then emit an empty positional / `--select ""` into the argv.
+    for label, value in (("model", model), ("select", select)):
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            raise AirflowConfigError(
+                f"`{label}` must be a non-empty string when set (got {value!r})."
+            )
+        if value.startswith("-"):
+            raise AirflowConfigError(
+                f"`{label}` must not begin with '-' (got {value!r}); refusing as an "
+                "argv-injection guard."
+            )
+
     if (model is None) == (select is None):
         raise AirflowConfigError(
             "Exactly one of `model` or `select` must be set "
             f"(got model={model!r}, select={select!r})."
-        )
-
-    if model is not None and model.startswith("-"):
-        raise AirflowConfigError(
-            f"`model` must not begin with '-' (got {model!r}); refusing as an argv-injection guard."
-        )
-    if select is not None and select.startswith("-"):
-        raise AirflowConfigError(
-            f"`select` must not begin with '-' (got {select!r}); refusing as an "
-            "argv-injection guard."
         )
 
     if on_flagged not in _VALID_ON_FLAGGED:
@@ -474,12 +482,28 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
                     f"flagged={aggregate.flagged})."
                 ),
             )
+            # Per-model sidecar paths are NOT stable across a batch: under
+            # write=True every model overwrites the same `.signalforge/*.json`
+            # (O_TRUNC last-writer-wins), so a per-model path would point at a
+            # file holding a DIFFERENT model's diff. Null them in the per-model
+            # XCom rather than ship a misleading path; operators needing stable
+            # per-model sidecars run per-model with a per-run project dir
+            # (see docs/airflow-ops.md). Counts/grades stay per-model and honest.
             return {
-                "models": [r.to_xcom() for r in results],
+                "models": [_without_sidecar_paths(r.to_xcom()) for r in results],
                 "aggregate": aggregate.to_xcom(),
             }
 
     return SignalForgeGenerateOperator
+
+
+def _without_sidecar_paths(xcom: dict[str, object]) -> dict[str, object]:
+    """Return a copy of a ``to_xcom()`` dict with the sidecar paths nulled.
+
+    Used for per-model batch XCom: a batch shares one sidecar location, so the
+    per-model paths are unstable (last-writer-wins) and would mislead.
+    """
+    return {**xcom, "diff_sidecar_path": None, "grade_sidecar_path": None}
 
 
 @functools.cache

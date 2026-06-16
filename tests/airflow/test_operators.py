@@ -282,6 +282,11 @@ def test_batch_loops_per_model_forces_project_cache_and_returns_aggregate(
     # Aggregate XCom shape (DEC-010): per-model list + one rolled-up aggregate.
     assert set(xcom) == {"models", "aggregate"}
     assert [m["model_unique_ids"] for m in xcom["models"]] == [["model.p.a"], ["model.p.b"]]
+    # Per-model sidecar paths are nulled — unstable under a shared batch sidecar
+    # (the canned results carry paths; the operator strips them).
+    for m in xcom["models"]:
+        assert m["diff_sidecar_path"] is None
+        assert m["grade_sidecar_path"] is None
     agg = xcom["aggregate"]
     assert agg["kept"] == 8  # 3 + 5
     assert agg["model_unique_ids"] == ["model.p.a", "model.p.b"]

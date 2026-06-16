@@ -91,11 +91,19 @@ def test_generate_operator_access_is_airflow_free_and_construction_requires_airf
     placeholder whose ``__init__`` raises ``ModuleNotFoundError``; airflow-present
     → the real ``BaseOperator`` subclass (whose construction is covered by the
     gated ``tests/airflow/test_operators.py``)."""
+
     # Resolving the lazy name itself must not pull airflow into sys.modules.
+    # Snapshot before/after rather than asserting global absence: a prior test
+    # (or an env with the [airflow] extra) may legitimately have airflow loaded
+    # already — the invariant is that ACCESS does not ADD it.
+    def _airflow_loaded() -> bool:
+        return any(m == "airflow" or m.startswith("airflow.") for m in sys.modules)
+
+    had_airflow = _airflow_loaded()
     from signalforge.airflow import SignalForgeGenerateOperator
 
     assert SignalForgeGenerateOperator is not None
-    assert not any(m == "airflow" or m.startswith("airflow.") for m in sys.modules), (
+    assert _airflow_loaded() == had_airflow, (
         "accessing SignalForgeGenerateOperator must not import the real airflow package"
     )
 

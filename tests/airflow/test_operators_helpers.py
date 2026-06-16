@@ -29,6 +29,7 @@ from signalforge.airflow.operators import (
     _build_generate_argv,
     _resolve_select_models,
     _validate_operator_config,
+    _without_sidecar_paths,
 )
 from signalforge.airflow.result import SignalForgeRunResult
 
@@ -109,6 +110,25 @@ def test_build_argv_cache_scope_injected_when_set() -> None:
     argv = _argv(cache_scope="project")
     assert "--cache-scope" in argv and argv[argv.index("--cache-scope") + 1] == "project"
     assert "--cache-scope" not in _argv(cache_scope=None)
+    # An empty string is treated as absent — never emit `--cache-scope ""`
+    # (argparse `choices` would reject it).
+    assert "--cache-scope" not in _argv(cache_scope="")
+
+
+def test_without_sidecar_paths_nulls_only_path_fields() -> None:
+    """Per-model batch XCom nulls the unstable sidecar paths, keeping counts."""
+    xcom = {
+        "kept": 3,
+        "flagged": 1,
+        "diff_sidecar_path": ".signalforge/diff.json",
+        "grade_sidecar_path": ".signalforge/grade.json",
+    }
+    stripped = _without_sidecar_paths(xcom)
+    assert stripped["diff_sidecar_path"] is None
+    assert stripped["grade_sidecar_path"] is None
+    assert stripped["kept"] == 3 and stripped["flagged"] == 1
+    # Original is not mutated (copy semantics).
+    assert xcom["diff_sidecar_path"] == ".signalforge/diff.json"
 
 
 def test_build_argv_profiles_dir_injected_when_set() -> None:
@@ -201,6 +221,31 @@ def test_validate_accepts_each_valid_on_flagged(on_flagged: str) -> None:
     _validate_operator_config(
         project_dir="/proj", model="m.sql", select=None, on_flagged=on_flagged
     )
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_validate_rejects_blank_model(blank: str) -> None:
+    """A blank ``model`` must NOT satisfy the mutex (regression: ``model=""``
+    previously passed `is not None` and emitted an empty positional)."""
+    with pytest.raises(AirflowConfigError, match="non-empty"):
+        _validate_operator_config(project_dir="/proj", model=blank, select=None, on_flagged="fail")
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_validate_rejects_blank_select(blank: str) -> None:
+    with pytest.raises(AirflowConfigError, match="non-empty"):
+        _validate_operator_config(project_dir="/proj", model=None, select=blank, on_flagged="fail")
+
+
+def test_validate_rejects_non_str_model() -> None:
+    """A non-str (e.g. a templated value that rendered to a list/int) fails loud."""
+    with pytest.raises(AirflowConfigError, match="non-empty string"):
+        _validate_operator_config(
+            project_dir="/proj",
+            model=123,  # type: ignore[arg-type]
+            select=None,
+            on_flagged="fail",
+        )
 
 
 # --------------------------------------------------------------------------- #
