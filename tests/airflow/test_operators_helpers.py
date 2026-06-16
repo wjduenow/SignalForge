@@ -23,6 +23,7 @@ core's 100%-ungated codecov patch gate).
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -36,8 +37,26 @@ from signalforge.airflow.operators import (
     _validate_operator_config,
     _validate_prune_existing_config,
     _without_sidecar_paths,
+    build_drift_report,
 )
 from signalforge.airflow.result import SignalForgeRunResult
+from signalforge.diff.models import DiffReport as SfDiffReport
+from signalforge.grade.models import GradingReport
+
+# Engineered drift sidecar PAIR committed by #235 US-001: the
+# ``test.column.amount.not_null`` artifact goes kept → dropped/always-passes
+# between the prev and curr diff (signal rot), and the grade mean falls
+# 0.9 → 0.8 (a regression beyond the 0.05 default threshold).
+_DRIFT_PAIRS = Path(__file__).resolve().parents[1] / "fixtures" / "airflow" / "drift_pairs"
+
+
+def _load_diff(name: str) -> SfDiffReport:
+    return SfDiffReport.model_validate_json((_DRIFT_PAIRS / f"{name}.json").read_text())
+
+
+def _load_grade(name: str) -> GradingReport:
+    return GradingReport.model_validate_json((_DRIFT_PAIRS / f"{name}.json").read_text())
+
 
 # A committed multi-model dbt fixture: tags `staging` (stg_a, stg_b) + `marts`
 # (fct_x). Resolves through the real `signalforge.manifest.load` + selector.
@@ -647,3 +666,193 @@ def test_validate_prune_accepts_each_valid_on_flagged(on_flagged: str) -> None:
     _validate_prune_existing_config(
         project_dir="/proj", model="customers", schema="schema.yml", on_flagged=on_flagged
     )
+
+
+# --------------------------------------------------------------------------- #
+# _validate_operator_config — drift params (#235 US-004)                       #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("on_drift", ["fail", "skip", "succeed"])
+def test_validate_accepts_each_valid_on_drift(on_drift: str) -> None:
+    _validate_operator_config(
+        project_dir="/proj", model="m.sql", select=None, on_flagged="fail", on_drift=on_drift
+    )
+
+
+def test_validate_rejects_bogus_on_drift() -> None:
+    with pytest.raises(AirflowConfigError, match="on_drift"):
+        _validate_operator_config(
+            project_dir="/proj", model="m.sql", select=None, on_flagged="fail", on_drift="bogus"
+        )
+
+
+def test_validate_accepts_set_drift_paths() -> None:
+    """A valid prior-diff path + history dir do not raise."""
+    _validate_operator_config(
+        project_dir="/proj",
+        model="m.sql",
+        select=None,
+        on_flagged="fail",
+        detect_drift_against="/history/2026-06-14/diff.json",
+        drift_history_dir="/history/2026-06-15",
+    )
+
+
+def test_validate_accepts_templated_drift_paths() -> None:
+    """An un-rendered Jinja template (begins with '{') is not a leading-dash hit."""
+    _validate_operator_config(
+        project_dir="/proj",
+        model="m.sql",
+        select=None,
+        on_flagged="fail",
+        detect_drift_against="/history/{{ prev_ds }}/diff.json",
+        drift_history_dir="/history/{{ ds }}",
+    )
+
+
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_validate_treats_blank_drift_paths_as_off(blank: str | None) -> None:
+    """``None`` / blank drift paths mean 'feature off' — not an error (opt-in)."""
+    _validate_operator_config(
+        project_dir="/proj",
+        model="m.sql",
+        select=None,
+        on_flagged="fail",
+        detect_drift_against=blank,
+        drift_history_dir=blank,
+    )
+
+
+def test_validate_rejects_leading_dash_detect_drift_against() -> None:
+    with pytest.raises(AirflowConfigError, match="argv-injection guard"):
+        _validate_operator_config(
+            project_dir="/proj",
+            model="m.sql",
+            select=None,
+            on_flagged="fail",
+            detect_drift_against="--evil",
+        )
+
+
+def test_validate_rejects_leading_dash_drift_history_dir() -> None:
+    with pytest.raises(AirflowConfigError, match="argv-injection guard"):
+        _validate_operator_config(
+            project_dir="/proj",
+            model="m.sql",
+            select=None,
+            on_flagged="fail",
+            drift_history_dir="-x",
+        )
+
+
+def test_validate_rejects_non_str_drift_path() -> None:
+    with pytest.raises(AirflowConfigError, match="must be a string"):
+        _validate_operator_config(
+            project_dir="/proj",
+            model="m.sql",
+            select=None,
+            on_flagged="fail",
+            detect_drift_against=123,  # type: ignore[arg-type]
+        )
+
+
+def test_drift_params_do_not_leak_into_generate_argv() -> None:
+    """Drift is operator-internal: it never becomes a ``signalforge generate`` flag.
+
+    Guards against a future change wiring drift into the argv builder — there is
+    no ``--detect-drift-against`` / ``--drift-history-dir`` / ``--on-drift`` CLI
+    flag, so none must appear in the generate argv.
+    """
+    argv = _argv()
+    for tok in ("--detect-drift-against", "--drift-history-dir", "--on-drift"):
+        assert tok not in argv
+
+
+# --------------------------------------------------------------------------- #
+# build_drift_report (#235 US-004) — pure drift orchestration                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_build_drift_report_baseline_when_no_prior() -> None:
+    """``prior_diff=None`` → a non-alarming baseline report; compute_drift NOT called."""
+    curr = _load_diff("signal_rot_curr_diff")
+    report = build_drift_report(
+        current_diff=curr,
+        prior_diff=None,
+        current_grade=None,
+        prior_grade=None,
+        as_of=None,
+        grade_regression_threshold=0.05,
+    )
+    assert report.baseline is True
+    assert report.alarming is False
+    assert report.model_unique_id == "model.shop.fct_orders"
+    assert report.newly_always_passes == ()
+    assert report.newly_dropped == ()
+    assert report.newly_kept == ()
+    assert report.grade_regressions == ()
+    assert report.degrade_reason is None
+    # No comparison performed → no prior hash; as_of threads through.
+    assert report.previous_diff_hash == ""
+
+
+def test_build_drift_report_with_prior_delegates_to_compute_drift() -> None:
+    """``prior_diff`` set → delegates to compute_drift; signal rot ⇒ alarming."""
+    prev = _load_diff("signal_rot_prev_diff")
+    curr = _load_diff("signal_rot_curr_diff")
+    report = build_drift_report(
+        current_diff=curr,
+        prior_diff=prev,
+        current_grade=None,
+        prior_grade=None,
+        as_of=date(2026, 6, 15),
+        grade_regression_threshold=0.05,
+    )
+    assert report.baseline is False
+    assert report.alarming is True
+    assert len(report.newly_always_passes) == 1
+    assert report.newly_always_passes[0].artifact_id == "test.column.amount.not_null"
+    assert report.as_of == date(2026, 6, 15)
+    # Real comparison → real input hashes (not the baseline empty-string sentinel).
+    assert report.previous_diff_hash != ""
+    assert report.current_diff_hash != ""
+
+
+def test_build_drift_report_threads_grades_to_compute_drift() -> None:
+    """Both grades present → grade-regression axis reaches compute_drift.
+
+    The fixture grades fall 0.9 → 0.8 (delta 0.1 ≥ the 0.05 threshold), so a
+    regression is emitted — proving the helper passes the grades through rather
+    than dropping them.
+    """
+    prev = _load_diff("signal_rot_prev_diff")
+    curr = _load_diff("signal_rot_curr_diff")
+    report = build_drift_report(
+        current_diff=curr,
+        prior_diff=prev,
+        current_grade=_load_grade("signal_rot_curr_grade"),
+        prior_grade=_load_grade("signal_rot_prev_grade"),
+        as_of=None,
+        grade_regression_threshold=0.05,
+    )
+    assert len(report.grade_regressions) == 1
+    regression = report.grade_regressions[0]
+    assert regression.previous_mean == pytest.approx(0.9)
+    assert regression.current_mean == pytest.approx(0.8)
+    assert report.alarming is True
+
+
+def test_build_drift_report_no_grades_leaves_regressions_empty() -> None:
+    """A missing grade (``--no-grade``) leaves ``grade_regressions`` empty (degrade)."""
+    prev = _load_diff("signal_rot_prev_diff")
+    curr = _load_diff("signal_rot_curr_diff")
+    report = build_drift_report(
+        current_diff=curr,
+        prior_diff=prev,
+        current_grade=None,
+        prior_grade=None,
+        as_of=None,
+        grade_regression_threshold=0.05,
+    )
+    assert report.grade_regressions == ()
