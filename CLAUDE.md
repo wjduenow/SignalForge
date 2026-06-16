@@ -50,7 +50,7 @@ The pipeline is a chain of subpackages, each with a distilled rules file in
 | `signalforge.cli` | console-script entry, four-tier exit codes | `cli-layer.md` |
 | `signalforge.ingest` | external `schema.yml` / `tests/*.sql` reader (prune any generator's tests) | `ingest-layer.md` |
 | `signalforge.demo` | bundled Austin demo project (`init-demo`) | — |
-| `signalforge.airflow` | Apache Airflow operator integration — **skeleton only** (v0.7, epic #228): one-shim seam (`_airflow_compat`) + lazy `__getattr__` re-exports + stub operators/hooks; ships behind the `[airflow]` extra, zero Airflow weight in the base install | — |
+| `signalforge.airflow` | Apache Airflow operator integration (v0.7, epic #228): one-shim seam (`_airflow_compat`) + lazy `__getattr__` re-exports + stub operators/hooks behind the `[airflow]` extra (zero Airflow weight in base install); **result→task-state + XCom contract landed (#231)** — airflow-free `run_signalforge` + `SignalForgeRunResult`/`TaskOutcome`/`decide_task_outcome` + shim-confined `raise_for_outcome` translator | `airflow-integration.md` |
 
 Cross-cutting rules: `business-rule-tests.md` (the `custom_sql` 5th test type, threaded
 through every stage), `testing-signal.md`, `python-build.md`, `ci-supply-chain.md`,
