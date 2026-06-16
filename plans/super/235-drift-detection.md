@@ -2,7 +2,7 @@
 
 ## Meta
 - **Ticket:** #235 — Airflow: drift / signal-rot detection mode (run-over-run). Part of epic #228 (v0.7 Airflow). Depends on #231 (result/XCom contract — landed) and #232 (`SignalForgeGenerateOperator` — landed).
-- **Phase:** detailing (awaiting approval to devolve)
+- **Phase:** devolved (2026-06-16) — beads created, ready for Ralph.
 - **Branch:** `feature/235-drift-detection` (worktree `/home/wesd/Projects/worktrees/SignalForge/235-drift-detection`, base `dev`).
 - **Sessions:** 1 (2026-06-16).
 
@@ -389,4 +389,16 @@ a new architectural seam.
 
 ---
 
-## Beads Manifest (Phase 7) — pending devolve
+## Beads Manifest (Phase 7) — devolved 2026-06-16
+- **Epic:** `bd_1-scaffolding-v42` — Airflow: drift / signal-rot detection (run-over-run) — epic #235
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/235-drift-detection` (branch `feature/235-drift-detection`, base `dev`).
+- **Tasks (chain):**
+  - `…v42.1` US-001 DriftReport + compute_drift (ungated, TDD) — **ready**
+  - `…v42.2` US-002 StrictDriftReport drift detector ← .1
+  - `…v42.3` US-003 loaders + decide_task_outcome on_drift ← .1
+  - `…v42.4` US-004 generate-operator flag + persistence ← .1, .3
+  - `…v42.5` US-005 dedicated SignalForgeDriftOperator + skeleton ← .1, .3
+  - `…v42.6` US-006 gated execute tests + DAG + docs ← .4, .5
+  - `…v42.7` US-007 Quality Gate ← .6, .2
+  - `…v42.8` US-008 Patterns & Memory (P4) ← .7
+- **Ready frontier:** US-001 only (verified `bd ready`); 14 dependency edges; rest blocked until their parents close.
