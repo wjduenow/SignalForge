@@ -7,7 +7,7 @@
 - **Depends on:** #230 (skeleton + shim), #231 (result→task-state), #232 (`SignalForgeGenerateOperator`)
 - **Branch:** `feature/234-signalforge-hook`
 - **Worktree:** `../worktrees/SignalForge/234-signalforge-hook`
-- **Phase:** discovery
+- **Phase:** detailing
 - **Sessions:** 1 (2026-06-16)
 
 ---
@@ -20,7 +20,7 @@ Ship `SignalForgeHook(BaseHook)` keyed on a `signalforge_conn_id` so DAG authors
 
 1. **Warehouse auth** — locate a dbt `profiles.yml` (the existing `WarehouseAdapter.from_profile` seam consumes it). Issue recommends **(a) on-disk profiles** via a `profiles_dir` for v0.7; **(b) synthesize a profiles.yml from an Airflow Connection** is flagged as a non-trivial follow-up (re-deriving the #120 per-type `DbtProfileTarget` validator from a Connection).
 2. **LLM API key** — from an Airflow Variable or the Connection `extra`/`password`, injected into the task env for the in-process pipeline call. **Never logged / XCom'd / repr'd / rendered.**
-3. **Connection `extra` schema** — `profiles_dir`, `provider`, optional cost ceilings, optional `cache_scope`.
+3. **Connection `extra` schema** — `profiles_dir`, `provider`, optional `cache_scope`. (Cost ceilings are **not** in the v0.7 `extra` schema — they have no CLI landing strip and are trimmed per DEC-011.)
 
 Acceptance (A8): a DAG configures SignalForge via Connection + Variable (no inline per-task env); credentials never leak; documented in `docs/airflow-ops.md`.
 
@@ -166,11 +166,3 @@ Architecture ordering: shared infra → grep-gate → pure resolver → gated ho
 ## Beads Manifest
 
 _(pending devolve)_
-
-## Phase 4: Detailed Breakdown
-
-_(pending)_
-
-## Beads Manifest
-
-_(pending)_
