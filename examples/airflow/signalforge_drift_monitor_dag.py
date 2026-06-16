@@ -51,12 +51,14 @@ through). On the generate operator the flagged-axis and the drift-axis combine
 ## Degrade, never fail (DEC-013)
 
 The comparison is fail-soft: a **missing** prior ``diff.json`` (the first run)
-makes this run a non-alarming **baseline**; a ``model_unique_id`` mismatch or a
-corrupt/unreadable prior sidecar yields a non-alarming **degraded** report
-(``degrade_reason`` set) — never an exception. A missing ``grade.json``
-(``--no-grade``) simply leaves the grade-regression axis empty. So a drift
-monitor never breaks the DAG over its own bookkeeping; only a *genuine* alarm
-trips ``on_drift``.
+**or a corrupt/unreadable prior sidecar** makes this run a non-alarming
+**baseline** — the prior loader returns ``None`` for absent and malformed input
+alike, so a corrupt prior is treated exactly like a missing one (no
+``degrade_reason``). A ``model_unique_id`` mismatch yields a non-alarming
+**degraded** report (``degrade_reason`` set) — never an exception. A missing
+``grade.json`` (``--no-grade``) simply leaves the grade-regression axis empty.
+So a drift monitor never breaks the DAG over its own bookkeeping; only a
+*genuine* alarm trips ``on_drift``.
 
 ## Reproducibility — ``as_of``
 
@@ -189,8 +191,12 @@ with DAG(
         # yesterday so the generate task also records a drift summary on its XCom.
         detect_drift_against=f"{_yesterday_dir}/diff.json",
         drift_history_dir=_today_dir,
-        # Record-only here: the generate task always succeeds; the gate is the
-        # downstream dedicated operator.
+        # Record-only here: the generate task always succeeds so the downstream
+        # dedicated operator is the single pageable gate. BOTH policies must be
+        # `succeed`: `on_drift` for a drift alarm AND `on_flagged` for a flagged
+        # (below-threshold) generate run — otherwise the default `on_flagged="fail"`
+        # could fail this task and prevent `drift_check` from ever running.
+        on_flagged="succeed",
         on_drift="succeed",
     )
 

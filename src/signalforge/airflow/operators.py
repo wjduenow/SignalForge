@@ -261,6 +261,36 @@ def _build_generate_argv(
     return argv
 
 
+def _blank_str_to_none(value: str | None) -> str | None:
+    """Collapse a blank / whitespace-only path to ``None`` (#235 PR review).
+
+    The opt-in drift paths use truthiness as their on/off gate. A
+    whitespace-only value (``"   "``) validates as "off" (blank) but a raw
+    ``if self.detect_drift_against:`` reads it as "on" at runtime — triggering an
+    accidental read/write to an unintended path. Normalising blank → ``None``
+    keeps construction-time validation and the runtime gate consistent.
+    """
+    if isinstance(value, str):
+        return value.strip() or None
+    return value
+
+
+def _validate_grade_regression_threshold(value: object) -> None:
+    """A non-numeric or negative ``grade_regression_threshold`` is a config error.
+
+    Airflow params / Variables frequently arrive as strings; a string or a
+    negative value would raise a runtime ``TypeError`` inside ``compute_drift``
+    or silently mis-behave ("always regresses"). Fail fast with
+    :class:`AirflowConfigError` at construction time (#235 PR review). ``bool`` is
+    rejected explicitly — ``True`` / ``False`` are ``int`` subclasses but never a
+    valid threshold.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AirflowConfigError(f"`grade_regression_threshold` must be a number (got {value!r}).")
+    if value < 0:
+        raise AirflowConfigError(f"`grade_regression_threshold` must be >= 0 (got {value!r}).")
+
+
 def _validate_operator_config(
     *,
     project_dir: str | None,
@@ -899,8 +929,9 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
             # ``grade_regression_threshold`` is the mean-grade drop that counts
             # as a regression. When ``detect_drift_against`` is unset, behaviour
             # is byte-identical to the pre-#235 generate operator.
-            self.detect_drift_against = detect_drift_against
-            self.drift_history_dir = drift_history_dir
+            self.detect_drift_against = _blank_str_to_none(detect_drift_against)
+            self.drift_history_dir = _blank_str_to_none(drift_history_dir)
+            _validate_grade_regression_threshold(grade_regression_threshold)
             self.grade_regression_threshold = grade_regression_threshold
             # A conn id is NOT a templated value and is deliberately kept OUT of
             # ``template_fields`` (DEC-007): templating a credential reference is
@@ -941,6 +972,10 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
                 detect_drift_against=self.detect_drift_against,
                 drift_history_dir=self.drift_history_dir,
             )
+            # A template_field may render to a blank/whitespace value; collapse to
+            # ``None`` so the truthiness gates below agree with validation (#235 PR review).
+            self.detect_drift_against = _blank_str_to_none(self.detect_drift_against)
+            self.drift_history_dir = _blank_str_to_none(self.drift_history_dir)
 
             # No ``signalforge_conn_id`` → byte-identical to #232 (DEC-014): no
             # hook, no credential resolution, no env injection.
@@ -1534,6 +1569,7 @@ def _make_drift_operator_class() -> type:  # pragma: no cover - requires [airflo
             self.previous_grade_path = previous_grade_path
             self.current_grade_path = current_grade_path
             self.as_of = as_of
+            _validate_grade_regression_threshold(grade_regression_threshold)
             self.grade_regression_threshold = grade_regression_threshold
             # Annotate the Literal-typed attr explicitly so pyright does NOT widen
             # it to ``str`` on assignment (which would break the typed

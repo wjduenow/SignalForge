@@ -33,6 +33,7 @@ from signalforge.airflow.drift import DriftArtifact, DriftReport
 from signalforge.airflow.errors import AirflowConfigError
 from signalforge.airflow.operators import (
     _aggregate_batch_result,
+    _blank_str_to_none,
     _build_drift_inputs,
     _build_generate_argv,
     _build_prune_existing_argv,
@@ -41,6 +42,7 @@ from signalforge.airflow.operators import (
     _provider_key_env,
     _resolve_select_models,
     _validate_drift_config,
+    _validate_grade_regression_threshold,
     _validate_operator_config,
     _validate_prune_existing_config,
     _without_sidecar_paths,
@@ -1133,3 +1135,46 @@ def test_provider_key_env_restores_on_exception_prior(monkeypatch: pytest.Monkey
     with pytest.raises(RuntimeError, match="boom"), _provider_key_env("SF_TEST_KEY", "sk-secret"):
         raise RuntimeError("boom")
     assert os.environ["SF_TEST_KEY"] == "prior-value"
+
+
+# --------------------------------------------------------------------------- #
+# _blank_str_to_none + _validate_grade_regression_threshold (#235 PR review)   #
+# --------------------------------------------------------------------------- #
+
+
+def test_blank_str_to_none_collapses_whitespace_only() -> None:
+    """A whitespace-only drift path collapses to None (validation/runtime parity)."""
+    assert _blank_str_to_none("   ") is None
+    assert _blank_str_to_none("") is None
+    assert _blank_str_to_none("\t\n") is None
+
+
+def test_blank_str_to_none_preserves_real_values_and_none() -> None:
+    assert _blank_str_to_none(None) is None
+    assert _blank_str_to_none("/history/diff.json") == "/history/diff.json"
+    # Surrounding whitespace is stripped but the value is preserved.
+    assert _blank_str_to_none("  /history/diff.json  ") == "/history/diff.json"
+    # An un-rendered Jinja template is non-blank and passes through.
+    assert _blank_str_to_none("{{ ds }}/diff.json") == "{{ ds }}/diff.json"
+
+
+def test_validate_grade_regression_threshold_accepts_valid_numbers() -> None:
+    for value in (0, 0.0, 0.05, 1, 0.5):
+        _validate_grade_regression_threshold(value)  # must not raise
+
+
+def test_validate_grade_regression_threshold_rejects_non_numeric() -> None:
+    for bad in ("0.05", None, [0.05]):
+        with pytest.raises(AirflowConfigError, match="must be a number"):
+            _validate_grade_regression_threshold(bad)
+
+
+def test_validate_grade_regression_threshold_rejects_bool() -> None:
+    # bool is an int subclass but is never a valid threshold.
+    with pytest.raises(AirflowConfigError, match="must be a number"):
+        _validate_grade_regression_threshold(True)
+
+
+def test_validate_grade_regression_threshold_rejects_negative() -> None:
+    with pytest.raises(AirflowConfigError, match="must be >= 0"):
+        _validate_grade_regression_threshold(-0.01)

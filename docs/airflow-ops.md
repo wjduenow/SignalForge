@@ -591,10 +591,14 @@ load/parse/input/external error (exit 1/2/3) short-circuits both axes per the
 The comparison is fail-soft, so a drift monitor never breaks the DAG over its own
 bookkeeping:
 
-- **Missing prior `diff.json`** (the first run) → a non-alarming **baseline**
-  (`baseline=True`); the task SUCCEEDs and persists today's diff for next time.
-- **`model_unique_id` mismatch** or a **corrupt / unreadable / oversize** prior sidecar
-  → a non-alarming **degraded** report with `degrade_reason` set; the task SUCCEEDs.
+- **Missing prior `diff.json`** (the first run), **or a corrupt / unreadable / oversize**
+  prior sidecar → a non-alarming **baseline** (`baseline=True`); the task SUCCEEDs and
+  persists today's diff for next time. The prior loader (`load_diff_report`) is fail-soft
+  and returns `None` for absent *and* malformed input alike, so both collapse to the same
+  baseline — a corrupt prior is **not** distinguished from a missing one.
+- **`model_unique_id` mismatch** between the two diffs → a non-alarming **degraded** report
+  with `degrade_reason` set; the task SUCCEEDs. (This is the one degrade path that sets
+  `degrade_reason`; it fires inside `compute_drift`, after both diffs load.)
 - **Missing `grade.json`** (`--no-grade`) → tier-transition drift is still computed; the
   grade-regression axis is simply empty.
 - **Unparseable current diff** (on the generate path) → drift degrades to *no verdict*
