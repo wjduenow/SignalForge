@@ -864,6 +864,22 @@ def _make_prune_existing_operator_class() -> type:  # pragma: no cover - require
         with the sibling operators but is inert today — ``prune-existing`` does
         no grading, so there is never a ``flagged`` tier and a clean (exit-0) run
         always yields ``SUCCESS`` regardless of ``on_flagged`` (#233 DEC-004).
+
+        Airflow-native credentials (#234, optional ``signalforge_conn_id``):
+
+        * When ``signalforge_conn_id`` is ``None`` (the default), the operator is
+          byte-identical to #233 — it relies on ambient env / inline config and
+          never touches the hook (DEC-014).
+        * When set, ``execute`` resolves the Connection via
+          :class:`signalforge.airflow.hooks.SignalForgeHook` and uses ONLY the
+          resolved ``profiles_dir`` (warehouse auth), precedence-merged
+          param > Connection ``extra`` (DEC-012). Because ``prune-existing`` makes
+          NO LLM call (DEC-016), this path does NOT call ``register_secret``,
+          injects NO provider env var, and ignores ``provider`` / ``api_key`` /
+          ``cache_scope`` on the resolution — though an allowlist-invalid
+          ``provider`` in the Connection ``extra`` still raises ``AirflowConfigError``
+          (that check lives in the resolver, DEC-005). The conn id is NOT a
+          ``template_fields`` entry and never enters XCom (DEC-007).
         """
 
         # Airflow renders these fields from the task context before ``execute``
@@ -891,6 +907,7 @@ def _make_prune_existing_operator_class() -> type:  # pragma: no cover - require
             sample_strategy: str | None = None,
             as_of: str | None = None,
             tests_dir: str | None = None,
+            signalforge_conn_id: str | None = None,
             on_flagged: OnFlagged = "fail",
             invocation: Literal["in_process", "subprocess"] = "in_process",
             **kwargs: Any,
@@ -907,6 +924,10 @@ def _make_prune_existing_operator_class() -> type:  # pragma: no cover - require
             self.sample_strategy = sample_strategy
             self.as_of = as_of
             self.tests_dir = tests_dir
+            # A conn id is NOT a templated value and is deliberately kept OUT of
+            # ``template_fields`` (DEC-007): templating a credential reference is
+            # an avoidable leak surface.
+            self.signalforge_conn_id = signalforge_conn_id
             # Annotate the Literal-typed attrs explicitly so pyright does NOT
             # widen them to ``str`` on assignment (which would break the typed
             # ``decide_task_outcome`` / ``run_signalforge`` calls below).
@@ -934,12 +955,40 @@ def _make_prune_existing_operator_class() -> type:  # pragma: no cover - require
                 schema=self.schema,
                 on_flagged=self.on_flagged,
             )
+
+            # No ``signalforge_conn_id`` → byte-identical to #233 (DEC-014): no
+            # hook, no credential resolution. When set, resolve ONLY the
+            # warehouse-auth ``profiles_dir`` (DEC-016): prune-existing makes no
+            # LLM call, so there is NO register_secret, NO provider env injection,
+            # and ``provider`` / ``api_key`` / ``cache_scope`` on the resolution
+            # are ignored (an allowlist-invalid ``provider``, if present, still
+            # raises inside the resolver per DEC-005).
+            effective_profiles_dir = self.profiles_dir
+            if self.signalforge_conn_id is not None:
+                resolution = _resolve_hook(self.signalforge_conn_id)
+                # Precedence merge (DEC-012): explicit param > Connection extra.
+                effective_profiles_dir = _merge_with_resolution(
+                    self.profiles_dir, resolution.profiles_dir
+                )
+                # NEVER log a secret (DEC-007). prune-existing resolves no key, so
+                # there is none to leak; record only conn_id + whether a
+                # profiles_dir was resolved.
+                _LOGGER.info(
+                    "signalforge prune-existing resolved airflow connection: %s",
+                    json.dumps(
+                        {
+                            "conn_id": self.signalforge_conn_id,
+                            "profiles_dir_set": effective_profiles_dir is not None,
+                        }
+                    ),
+                )
+
             # Single call — no batch (#233 DEC-003).
             argv = _build_prune_existing_argv(
                 model=self.model,
                 schema=self.schema,
                 project_dir=self.project_dir,
-                profiles_dir=self.profiles_dir,
+                profiles_dir=effective_profiles_dir,
                 manifest=self.manifest,
                 scope=self.scope,
                 sample_strategy=self.sample_strategy,
