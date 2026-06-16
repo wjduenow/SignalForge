@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "audit_schema_version": 3,
+  "signalforge_version": "0.7.0.dev0",
+  "model_unique_id": "model.shop.fct_orders",
+  "run_id": "0000000000000000000000000000prev",
+  "duration_seconds": 1.5,
+  "proposed_yaml": "version: 2\n",
+  "existing_yaml": null,
+  "unified_diff": "",
+  "entries": [
+    {
+      "artifact_id": "test.column.amount.not_null",
+      "test_type": "not_null",
+      "tier": "kept",
+      "drop_reason": null,
+      "why": "caught 4 failing rows on the warehouse sample",
+      "score": null,
+      "passed": null
+    },
+    {
+      "artifact_id": "column.amount.description",
+      "test_type": null,
+      "tier": "kept",
+      "drop_reason": null,
+      "why": "documents the order amount column",
+      "score": null,
+      "passed": null
+    }
+  ],
+  "proposed_test_files": [],
+  "kept_count": 2,
+  "kept_uncertain_count": 0,
+  "dropped_count": 0,
+  "flagged_count": 0,
+  "has_existing_schema": false,
+  "candidate_hash": "aaaaaaaaaaaaaaaa",
+  "prune_result_hash": "bbbbbbbbbbbbbbbb",
+  "grading_report_hash": "cccccccccccccccc"
+}

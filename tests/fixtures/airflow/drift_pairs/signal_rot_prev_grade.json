@@ -1,0 +1,20 @@
+{
+  "grade_schema_version": 1,
+  "signalforge_version": "0.7.0.dev0",
+  "run_id": "0000000000000000000000000000prev",
+  "timestamp": "2026-06-15T00:00:00.000000Z",
+  "duration_seconds": 2.0,
+  "model_unique_id": "model.shop.fct_orders",
+  "rubric_hash": "1111111111111111",
+  "thresholds": [0.7, 0.7],
+  "results": [
+    {
+      "artifact_id": "column.amount.description",
+      "criterion_id": "clarity",
+      "score": 0.9,
+      "passed": true,
+      "evidence": "",
+      "reasoning": ""
+    }
+  ]
+}
