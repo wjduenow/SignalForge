@@ -157,7 +157,7 @@ No separate WARNING before raising typed errors — the exception IS the signal 
 
 ## ANSI-safe lazy-format JSON logger + grep gate (DEC-019)
 
-Same rule as the other four pipeline layers (`safety-layer.md` DEC-022 / `llm-drafter.md` DEC-011 / `prune-engine.md` DEC-017 / `grade-layer.md` DEC-029). The grep gate at `tests/llm/test_logger_grep_gate.py` scans `src/signalforge/{llm,draft,prune,grade,diff,cli}` (6 dirs as of #9) and rejects any `_LOGGER\.\w+\(f"` hit.
+Same rule as the other four pipeline layers (`safety-layer.md` DEC-022 / `llm-drafter.md` DEC-011 / `prune-engine.md` DEC-017 / `grade-layer.md` DEC-029). The grep gate at `tests/llm/test_logger_grep_gate.py` scans the `_SCAN_SUBPACKAGES` set — `src/signalforge/{airflow, cli, demo, diff, draft, grade, llm, manifest, prune, safety, warehouse}` (11 dirs as of #234) — and rejects any `_LOGGER\.\w+\(f"` hit.
 
 ## Fail-closed writer AST defence (DEC-018)
 
