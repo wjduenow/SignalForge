@@ -11,6 +11,7 @@ Every test is capable of failing: no ``assert True``-shaped placeholders
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import anthropic
@@ -20,6 +21,7 @@ import pytest
 from signalforge.llm.errors import UnknownProviderError
 from signalforge.llm.providers import (
     PROVIDER_DEFAULT_MODELS,
+    PROVIDER_ENV_VAR_KEYS,
     PROVIDER_SKU_PREFIXES,
     AnthropicProvider,
     ExceptionCategory,
@@ -1517,3 +1519,63 @@ def test_both_constants_are_exported() -> None:
 
     assert "PROVIDER_DEFAULT_MODELS" in providers_module.__all__
     assert "PROVIDER_SKU_PREFIXES" in providers_module.__all__
+
+
+# ---------------------------------------------------------------------------
+# #234 US-001 — PROVIDER_ENV_VAR_KEYS shared table
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_provider_env_var_keys_keys_are_the_three_registered_providers() -> None:
+    """``PROVIDER_ENV_VAR_KEYS`` is keyed by exactly the three registered
+    provider names (#234 US-001). Cross-checked against the live registry so a
+    future registry change forces an env-var-table update in lockstep."""
+    assert set(PROVIDER_ENV_VAR_KEYS) == _REGISTERED_PROVIDER_NAMES
+    for name in PROVIDER_ENV_VAR_KEYS:
+        assert provider_for(name).name == name
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_provider_env_var_keys_match_default_models_keys() -> None:
+    """``PROVIDER_ENV_VAR_KEYS`` and ``PROVIDER_DEFAULT_MODELS`` cover the same
+    provider names — the three providers stay in lockstep (#234 US-001)."""
+    assert set(PROVIDER_ENV_VAR_KEYS) == set(PROVIDER_DEFAULT_MODELS)
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_provider_env_var_keys_values_are_upper_snake_env_names() -> None:
+    """Each value is a non-empty UPPER_SNAKE environment-variable name
+    (#234 US-001) — a lower-case or empty value would silently fail to read
+    the credential from the process environment."""
+    for provider, env_var in PROVIDER_ENV_VAR_KEYS.items():
+        assert env_var, f"{provider} env-var name is empty"
+        assert env_var.isupper(), f"{provider} env-var {env_var!r} is not upper-case"
+        assert re.fullmatch(r"[A-Z][A-Z0-9_]*", env_var), (
+            f"{provider} env-var {env_var!r} is not UPPER_SNAKE"
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_provider_env_var_keys_values_match_expected() -> None:
+    """Pin the exact env-var names the Airflow hook (#234) and GH Action depend
+    on (#234 US-001). Gemini's key is ``GOOGLE_API_KEY`` (the ``google-genai``
+    SDK convention), not a ``GEMINI_*`` name."""
+    assert PROVIDER_ENV_VAR_KEYS == {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "gemini": "GOOGLE_API_KEY",
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.llm
+def test_provider_env_var_keys_is_exported() -> None:
+    """The constant is part of the module's public surface (#234 US-001)."""
+    from signalforge.llm import providers as providers_module
+
+    assert "PROVIDER_ENV_VAR_KEYS" in providers_module.__all__
