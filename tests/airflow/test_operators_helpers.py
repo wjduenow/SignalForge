@@ -8,7 +8,11 @@ Covers the airflow-free operator helpers in
 * :func:`_resolve_select_models` (``--select`` → sorted unique_ids, mapping
   ``ManifestError`` / ``SelectorParseError`` / zero-match → ``AirflowConfigError``,
   DEC-001/006) and :func:`_aggregate_batch_result` (per-model rollup, DEC-008) —
-  US-002.
+  US-002;
+* :func:`_build_prune_existing_argv` (params → ``signalforge prune-existing`` argv,
+  always ``--dry-run`` + ``--format json``; #233 DEC-005) and
+  :func:`_validate_prune_existing_config` (required ``schema`` / ``model``,
+  leading-dash + ``on_flagged`` guards; #233 DEC-001/002/004) — #233 US-001.
 
 None of these import ``airflow`` (``_resolve_select_models`` does manifest I/O
 but is still airflow-free), so this file is **UNGATED**: it carries NO
@@ -27,8 +31,10 @@ from signalforge.airflow.errors import AirflowConfigError
 from signalforge.airflow.operators import (
     _aggregate_batch_result,
     _build_generate_argv,
+    _build_prune_existing_argv,
     _resolve_select_models,
     _validate_operator_config,
+    _validate_prune_existing_config,
     _without_sidecar_paths,
 )
 from signalforge.airflow.result import SignalForgeRunResult
@@ -424,3 +430,220 @@ def test_aggregate_empty_sequence_raises() -> None:
     """An empty batch violates the caller invariant → ValueError."""
     with pytest.raises(ValueError):
         _aggregate_batch_result([])
+
+
+# --------------------------------------------------------------------------- #
+# _build_prune_existing_argv (#233 US-001)                                    #
+# --------------------------------------------------------------------------- #
+
+
+def _prune_argv(**overrides: object) -> list[str]:
+    """Build a prune-existing argv with sensible defaults; ``overrides`` tune params."""
+    params: dict[str, object] = {
+        "model": "customers",
+        "schema": "models/marts/schema.yml",
+        "project_dir": "/proj",
+        "profiles_dir": None,
+        "manifest": None,
+        "scope": None,
+        "sample_strategy": None,
+        "as_of": None,
+        "tests_dir": None,
+    }
+    params.update(overrides)
+    return _build_prune_existing_argv(**params)  # type: ignore[arg-type]
+
+
+def test_build_prune_argv_base_shape() -> None:
+    """Base argv: prune-existing <model> --schema <p> --project-dir <d> --format json --dry-run."""
+    argv = _prune_argv()
+    assert argv[0] == "prune-existing"
+    assert argv[1] == "customers"
+    assert "--schema" in argv and argv[argv.index("--schema") + 1] == "models/marts/schema.yml"
+    assert "--project-dir" in argv and argv[argv.index("--project-dir") + 1] == "/proj"
+    assert "--format" in argv and argv[argv.index("--format") + 1] == "json"
+    # --dry-run is ALWAYS present (read-only monitor; no write branch).
+    assert "--dry-run" in argv
+    assert "--write" not in argv
+    # Single-model only — there is no --select / --mode on this surface.
+    assert "--select" not in argv
+    assert "--mode" not in argv
+
+
+def test_build_prune_argv_no_optionals_when_none() -> None:
+    """No optional passthrough flags appear when every optional is None."""
+    argv = _prune_argv()
+    for flag in (
+        "--profiles-dir",
+        "--manifest",
+        "--scope",
+        "--sample-strategy",
+        "--as-of",
+        "--tests-dir",
+    ):
+        assert flag not in argv
+
+
+def test_build_prune_argv_profiles_dir_injected_when_set() -> None:
+    argv = _prune_argv(profiles_dir="/home/u/.dbt")
+    assert argv[argv.index("--profiles-dir") + 1] == "/home/u/.dbt"
+    assert "--profiles-dir" not in _prune_argv(profiles_dir=None)
+    # An empty string is treated as absent.
+    assert "--profiles-dir" not in _prune_argv(profiles_dir="")
+
+
+def test_build_prune_argv_manifest_injected_when_set() -> None:
+    argv = _prune_argv(manifest="target/manifest.json")
+    assert argv[argv.index("--manifest") + 1] == "target/manifest.json"
+    assert "--manifest" not in _prune_argv(manifest=None)
+    assert "--manifest" not in _prune_argv(manifest="")
+
+
+def test_build_prune_argv_scope_injected_when_set() -> None:
+    argv = _prune_argv(scope="full")
+    assert argv[argv.index("--scope") + 1] == "full"
+    assert "--scope" not in _prune_argv(scope=None)
+    assert "--scope" not in _prune_argv(scope="")
+
+
+def test_build_prune_argv_sample_strategy_injected_when_set() -> None:
+    argv = _prune_argv(sample_strategy="oneshot")
+    assert argv[argv.index("--sample-strategy") + 1] == "oneshot"
+    assert "--sample-strategy" not in _prune_argv(sample_strategy=None)
+    assert "--sample-strategy" not in _prune_argv(sample_strategy="")
+
+
+def test_build_prune_argv_as_of_injected_when_set() -> None:
+    argv = _prune_argv(as_of="2026-06-15")
+    assert argv[argv.index("--as-of") + 1] == "2026-06-15"
+    assert "--as-of" not in _prune_argv(as_of=None)
+    assert "--as-of" not in _prune_argv(as_of="")
+
+
+def test_build_prune_argv_tests_dir_injected_when_set() -> None:
+    argv = _prune_argv(tests_dir="tests")
+    assert argv[argv.index("--tests-dir") + 1] == "tests"
+    assert "--tests-dir" not in _prune_argv(tests_dir=None)
+    assert "--tests-dir" not in _prune_argv(tests_dir="")
+
+
+def test_build_prune_argv_all_optionals_together() -> None:
+    """Every optional flag injects in order when all are set."""
+    argv = _prune_argv(
+        profiles_dir="/home/u/.dbt",
+        manifest="target/manifest.json",
+        scope="sample",
+        sample_strategy="materialised",
+        as_of="2026-06-15",
+        tests_dir="tests",
+    )
+    # Optional flags follow the fixed base block, in declared order.
+    assert argv.index("--profiles-dir") < argv.index("--manifest")
+    assert argv.index("--manifest") < argv.index("--scope")
+    assert argv.index("--scope") < argv.index("--sample-strategy")
+    assert argv.index("--sample-strategy") < argv.index("--as-of")
+    assert argv.index("--as-of") < argv.index("--tests-dir")
+
+
+# --------------------------------------------------------------------------- #
+# _validate_prune_existing_config (#233 US-001)                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_prune_accepts_valid_config() -> None:
+    """A valid prune-existing config does not raise."""
+    _validate_prune_existing_config(
+        project_dir="/proj", model="customers", schema="schema.yml", on_flagged="fail"
+    )
+
+
+def test_validate_prune_rejects_empty_project_dir() -> None:
+    with pytest.raises(AirflowConfigError):
+        _validate_prune_existing_config(
+            project_dir="", model="customers", schema="schema.yml", on_flagged="fail"
+        )
+
+
+def test_validate_prune_rejects_none_project_dir() -> None:
+    with pytest.raises(AirflowConfigError):
+        _validate_prune_existing_config(
+            project_dir=None, model="customers", schema="schema.yml", on_flagged="fail"
+        )
+
+
+def test_validate_prune_rejects_none_schema() -> None:
+    with pytest.raises(AirflowConfigError, match="non-empty string"):
+        _validate_prune_existing_config(
+            project_dir="/proj", model="customers", schema=None, on_flagged="fail"
+        )
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_validate_prune_rejects_blank_schema(blank: str) -> None:
+    with pytest.raises(AirflowConfigError, match="non-empty string"):
+        _validate_prune_existing_config(
+            project_dir="/proj", model="customers", schema=blank, on_flagged="fail"
+        )
+
+
+def test_validate_prune_rejects_non_str_schema() -> None:
+    with pytest.raises(AirflowConfigError, match="non-empty string"):
+        _validate_prune_existing_config(
+            project_dir="/proj",
+            model="customers",
+            schema=123,  # type: ignore[arg-type]
+            on_flagged="fail",
+        )
+
+
+def test_validate_prune_rejects_none_model() -> None:
+    with pytest.raises(AirflowConfigError, match="non-empty string"):
+        _validate_prune_existing_config(
+            project_dir="/proj", model=None, schema="schema.yml", on_flagged="fail"
+        )
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_validate_prune_rejects_blank_model(blank: str) -> None:
+    with pytest.raises(AirflowConfigError, match="non-empty string"):
+        _validate_prune_existing_config(
+            project_dir="/proj", model=blank, schema="schema.yml", on_flagged="fail"
+        )
+
+
+def test_validate_prune_rejects_non_str_model() -> None:
+    with pytest.raises(AirflowConfigError, match="non-empty string"):
+        _validate_prune_existing_config(
+            project_dir="/proj",
+            model=123,  # type: ignore[arg-type]
+            schema="schema.yml",
+            on_flagged="fail",
+        )
+
+
+def test_validate_prune_rejects_leading_dash_model() -> None:
+    with pytest.raises(AirflowConfigError, match="argv-injection guard"):
+        _validate_prune_existing_config(
+            project_dir="/proj", model="--evil", schema="schema.yml", on_flagged="fail"
+        )
+
+
+def test_validate_prune_rejects_leading_dash_schema() -> None:
+    with pytest.raises(AirflowConfigError, match="argv-injection guard"):
+        _validate_prune_existing_config(
+            project_dir="/proj", model="customers", schema="--evil", on_flagged="fail"
+        )
+
+
+def test_validate_prune_rejects_bogus_on_flagged() -> None:
+    with pytest.raises(AirflowConfigError, match="on_flagged"):
+        _validate_prune_existing_config(
+            project_dir="/proj", model="customers", schema="schema.yml", on_flagged="bogus"
+        )
+
+
+@pytest.mark.parametrize("on_flagged", ["fail", "skip", "succeed"])
+def test_validate_prune_accepts_each_valid_on_flagged(on_flagged: str) -> None:
+    _validate_prune_existing_config(
+        project_dir="/proj", model="customers", schema="schema.yml", on_flagged=on_flagged
+    )
