@@ -6,8 +6,9 @@
 - **Epic:** [#228](https://github.com/wjduenow/SignalForge/issues/228) (v0.7 Apache Airflow integration) — **this is the closing test+docs child** (modeled on Snowflake/Databricks closers #124/#226)
 - **Branch:** `feature/236-airflow-e2e-docs`
 - **Worktree:** `../worktrees/SignalForge/236-airflow-e2e-docs`
-- **Phase:** detailing
+- **Phase:** published
 - **Sessions:** 1 (2026-06-16)
+- **PR:** [#246](https://github.com/wjduenow/SignalForge/pull/246) (draft, base `dev`)
 - **Depends on:** #229–#235 — ALL merged to `dev` (the gitStatus snapshot was stale; #235 landed as `678da32`/PR #245)
 
 ---
