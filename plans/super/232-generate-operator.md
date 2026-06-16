@@ -2,10 +2,11 @@
 
 ## Meta
 - **Ticket:** #232 — Airflow: SignalForgeGenerateOperator (part of epic #228, depends on #231)
-- **Phase:** devolved
-- **Beads epic:** `bd_1-scaffolding-q5c` — children `.1`…`.7` (US-001…US-007); chain US-001 → US-002 → US-003 → {US-004 → US-005} → US-006 (Quality Gate) → US-007 (Patterns). Only US-001 ready at devolve.
-- **Branch:** `feature/232-generate-operator` (worktree `../worktrees/SignalForge/232-generate-operator`, base `dev`)
-- **Sessions:** 1 (2026-06-15)
+- **Phase:** Complete
+- **PR:** #241 — merged to `dev` 2026-06-16 (squash `bc41661`). Certified against Airflow 2.10.4 (22 gated tests passed).
+- **Beads epic:** `bd_1-scaffolding-q5c` — children `.1`…`.7` (US-001…US-007), all closed; chain US-001 → US-002 → US-003 → {US-004 → US-005} → US-006 (Quality Gate) → US-007 (Patterns).
+- **Branch:** `feature/232-generate-operator` (deleted post-merge), base `dev`
+- **Sessions:** 1 (2026-06-15 plan/build, 2026-06-16 review+merge)
 
 ---
 
