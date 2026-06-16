@@ -34,10 +34,10 @@ _AIRFLOW_SKIP = "Apache Airflow not installed (run inside the constraints-pinned
 def _load_example_dag(dag_id: str = "signalforge_generate"):
     from airflow.models.dagbag import DagBag
 
-    # The examples folder ships THREE DAGs (the two-PythonOperator pipeline
-    # example, the single-task generate drift monitor, and the no-LLM
-    # prune-existing signal-rot monitor); ALL must parse with no import errors
-    # regardless of which one the caller asked for.
+    # The examples folder ships FOUR DAGs (the two-PythonOperator pipeline
+    # example, the single-task generate drift monitor, the no-LLM prune-existing
+    # signal-rot monitor, and the run-over-run drift monitor); ALL must parse
+    # with no import errors regardless of which one the caller asked for.
     bag = DagBag(dag_folder=str(_EXAMPLES_DIR), include_examples=False)
     assert bag.import_errors == {}, f"DAG import errors: {bag.import_errors}"
     # Read the in-memory parsed-DAG dict, NOT bag.get_dag(): get_dag() consults the
@@ -171,6 +171,59 @@ def test_prune_existing_operator_renders_templated_fields() -> None:
     # Non-templated / no-Jinja fields are untouched by the render pass.
     assert op.project_dir == "/proj"
     assert op.tests_dir is None
+
+
+def test_drift_monitor_operator_example_dag_parses_without_import_errors() -> None:
+    """The run-over-run drift-monitor example DAG parses cleanly via DagBag (#235 DEC-019).
+
+    Distinct ``dag_id`` from the other examples; THREE tasks demonstrating the
+    two drift surfaces side by side: the ergonomic ``SignalForgeGenerateOperator``
+    with ``detect_drift_against`` (Form 1), and the branchable
+    ``generate`` → dedicated ``SignalForgeDriftOperator`` pair (Form 2). Parses
+    with NO SignalForge config in the env (the DAG's ``_config`` fallbacks keep
+    every operator's construction-time validation green at parse).
+    """
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    dag = _load_example_dag("signalforge_drift_monitor")
+    assert set(dag.task_ids) == {"drift_monitor_ergonomic", "generate", "drift_check"}
+    # The branchable form wires the dedicated drift check downstream of generate.
+    assert dag.get_task("drift_check").upstream_task_ids == {"generate"}
+
+
+def test_drift_operator_renders_templated_fields() -> None:
+    """The dedicated drift operator's ``template_fields`` render from the task context.
+
+    Constructs the operator inside a DAG context and calls
+    ``render_template_fields`` with a synthetic context carrying ``ds``; asserts
+    the templated ``current_diff_path`` (``{{ ds }}/diff.json``) and ``as_of``
+    (``{{ ds }}``) render to the injected value — the date-stamped sidecar-path
+    pattern the example DAG demonstrates (#235 DEC-010/DEC-019).
+    """
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    import importlib
+    from datetime import datetime
+
+    from airflow import DAG
+
+    operators = importlib.import_module("signalforge.airflow.operators")
+    operator_cls = operators.SignalForgeDriftOperator
+
+    with DAG(dag_id="render_test_drift", start_date=datetime(2026, 1, 1), schedule=None):
+        op = operator_cls(
+            task_id="drift_check",
+            previous_diff_path="/history/2026-06-14/diff.json",
+            current_diff_path="/history/{{ ds }}/diff.json",
+            as_of="{{ ds }}",
+        )
+
+    # BaseOperator.render_template_fields(context, jinja_env=None) renders every
+    # template_fields attr IN PLACE from the context (jinja_env built from the DAG).
+    op.render_template_fields({"ds": "2026-06-15"})
+
+    assert op.current_diff_path == "/history/2026-06-15/diff.json"
+    assert op.as_of == "2026-06-15"
+    # Non-templated literal field is untouched by the render pass.
+    assert op.previous_diff_path == "/history/2026-06-14/diff.json"
 
 
 def _live_skip_reason() -> str | None:
