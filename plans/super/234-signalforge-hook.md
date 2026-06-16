@@ -7,9 +7,10 @@
 - **Depends on:** #230 (skeleton + shim), #231 (result→task-state), #232 (`SignalForgeGenerateOperator`), **#233 (`SignalForgePruneExistingOperator`) — MERGED to `dev` 2026-06-16**
 - **Branch:** `feature/234-signalforge-hook`
 - **Worktree:** `../worktrees/SignalForge/234-signalforge-hook`
-- **Phase:** devolved
+- **Phase:** complete
 - **Sessions:** 2 (2026-06-16)
-- **Epic bead:** `bd_1-scaffolding-qhi` (9 task beads `.1`–`.9`)
+- **Epic bead:** `bd_1-scaffolding-qhi` (9 task beads `.1`–`.9`) — all closed
+- **Status:** **Complete** — PR [#243](https://github.com/wjduenow/SignalForge/pull/243) merged to `dev` 2026-06-16 (squash `0a77d35`); issue #234 closed.
 
 ---
 
