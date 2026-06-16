@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     class SignalForgeHook:  # noqa: D401 - type stub only
         def __init__(self, *args: Any, **kwargs: Any) -> None: ...
 
-        def get_conn(self) -> HookResolution: ...
+        def get_conn(self, *, project_dir: str | None = None) -> HookResolution: ...
 
 
 class _SignalForgeHookAirflowMissing:
@@ -109,18 +109,22 @@ def _make_signalforge_hook_class() -> type:  # pragma: no cover - requires the [
             super().__init__(**kwargs)
             self.signalforge_conn_id = signalforge_conn_id
 
-        def get_conn(self) -> HookResolution:
+        def get_conn(self, *, project_dir: str | None = None) -> HookResolution:
             """Resolve the configured Connection to a :class:`HookResolution`.
 
-            ``project_dir`` is ``None`` at the hook layer: the hook has no
-            project anchor to symlink-contain an ``extra.profiles_dir`` against
-            (DEC-008's bounded-defence gap). The consuming operator — which DOES
-            know its ``project_dir`` — supplies the containment anchor when it
-            calls the resolver itself (US-005/US-006).
+            ``project_dir`` is the symlink-containment anchor for an
+            ``extra.profiles_dir`` (DEC-008). The consuming operator — which
+            knows its ``project_dir`` — passes it through (US-005/US-006) so a
+            Connection-supplied ``profiles_dir`` is canonicalised + contained
+            against the project tree. A standalone hook call without an anchor
+            (``project_dir=None``) accepts ``profiles_dir`` as-is (the documented
+            bounded-defence gap for direct library use).
             """
             conn = self.get_connection(self.signalforge_conn_id)
             variable_lookup = _airflow_compat.airflow_variable_get
-            return resolve_connection(conn, variable_lookup=variable_lookup, project_dir=None)
+            return resolve_connection(
+                conn, variable_lookup=variable_lookup, project_dir=project_dir
+            )
 
         def __repr__(self) -> str:
             # Leak-surface discipline (DEC-007): show only the conn id, never the

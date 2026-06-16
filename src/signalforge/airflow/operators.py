@@ -141,7 +141,9 @@ def _provider_key_env(env_var: str, api_key: str) -> Iterator[None]:
             os.environ[env_var] = prior
 
 
-def _resolve_hook(conn_id: str) -> HookResolution:  # pragma: no cover - needs [airflow]
+def _resolve_hook(  # pragma: no cover - needs [airflow]
+    conn_id: str, project_dir: str | None = None
+) -> HookResolution:
     """Construct the SignalForge hook and resolve its Connection (gated helper).
 
     Reused by both operators' ``execute`` (US-005 / US-006). Constructing
@@ -151,10 +153,16 @@ def _resolve_hook(conn_id: str) -> HookResolution:  # pragma: no cover - needs [
     reason as the operator factories. The hook import is lazy — its
     module-``__getattr__`` resolves the real class without eagerly importing
     airflow — so ``import signalforge.airflow.operators`` stays airflow-free.
+
+    ``project_dir`` is the operator's project root: it is threaded into
+    ``get_conn`` so a Connection-supplied ``extra.profiles_dir`` is
+    symlink-contained against the project tree (DEC-008). The operator always
+    knows its ``project_dir``, so the containment anchor is always supplied on
+    the operator path.
     """
     from signalforge.airflow.hooks import SignalForgeHook
 
-    return SignalForgeHook(conn_id).get_conn()
+    return SignalForgeHook(conn_id).get_conn(project_dir=project_dir)
 
 
 def _build_generate_argv(
@@ -665,7 +673,7 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
             env_cm: contextlib.AbstractContextManager[None] = contextlib.nullcontext()
 
             if self.signalforge_conn_id is not None:
-                resolution = _resolve_hook(self.signalforge_conn_id)
+                resolution = _resolve_hook(self.signalforge_conn_id, self.project_dir)
                 # ``generate`` calls the LLM, so provider + key are REQUIRED here
                 # (DEC-003 — the resolver is lenient; the consumer enforces
                 # requiredness). PruneExisting, by contrast, needs neither.
@@ -965,7 +973,7 @@ def _make_prune_existing_operator_class() -> type:  # pragma: no cover - require
             # raises inside the resolver per DEC-005).
             effective_profiles_dir = self.profiles_dir
             if self.signalforge_conn_id is not None:
-                resolution = _resolve_hook(self.signalforge_conn_id)
+                resolution = _resolve_hook(self.signalforge_conn_id, self.project_dir)
                 # Precedence merge (DEC-012): explicit param > Connection extra.
                 effective_profiles_dir = _merge_with_resolution(
                     self.profiles_dir, resolution.profiles_dir

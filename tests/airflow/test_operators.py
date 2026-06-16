@@ -451,7 +451,7 @@ def _patch_hook(monkeypatch: pytest.MonkeyPatch, resolution: HookResolution) -> 
     masked: list[str] = []
     monkeypatch.setattr(
         "signalforge.airflow.operators._resolve_hook",
-        lambda conn_id: resolution,
+        lambda conn_id, project_dir=None: resolution,
     )
     monkeypatch.setattr(
         "signalforge.airflow.operators.register_secret",
@@ -496,7 +496,7 @@ def test_single_model_conn_id_none_unchanged_no_hook(
     """conn_id=None (#232 default): no hook touched, no conn-derived argv."""
     pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
 
-    def _boom(_conn_id: str) -> HookResolution:
+    def _boom(_conn_id: str, _project_dir: str | None = None) -> HookResolution:
         raise AssertionError("_resolve_hook must NOT be called when conn_id is None")
 
     monkeypatch.setattr("signalforge.airflow.operators._resolve_hook", _boom)
@@ -509,6 +509,31 @@ def test_single_model_conn_id_none_unchanged_no_hook(
     argv = captured[0]
     assert argv[:2] == ["generate", "m"]
     assert "--profiles-dir" not in argv
+
+
+def test_single_model_conn_id_threads_project_dir_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator passes its ``project_dir`` to ``_resolve_hook`` so a
+    Connection ``extra.profiles_dir`` is symlink-contained (DEC-008)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    seen: list[str | None] = []
+
+    def _capture(_conn_id: str, project_dir: str | None = None) -> HookResolution:
+        seen.append(project_dir)
+        return HookResolution(profiles_dir=None, provider="anthropic", api_key="sk-x")
+
+    monkeypatch.setattr("signalforge.airflow.operators._resolve_hook", _capture)
+    monkeypatch.setattr("signalforge.airflow.operators.register_secret", lambda value: None)
+    _patch_run(monkeypatch, [_result(exit_code=0, flagged=0)])
+
+    op = _operator_class()(task_id="gen", project_dir="/proj", model="m", signalforge_conn_id="sf")
+    op.execute(context={})
+
+    # The operator's project_dir reached the resolver as the containment anchor.
+    assert seen == ["/proj"]
 
 
 def test_single_model_conn_env_restored_on_exception(
@@ -933,7 +958,7 @@ def test_prune_existing_conn_id_none_unchanged_no_hook(
     """conn_id=None (#233 default): no hook touched, argv byte-identical to #233."""
     pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
 
-    def _boom(_conn_id: str) -> HookResolution:
+    def _boom(_conn_id: str, _project_dir: str | None = None) -> HookResolution:
         raise AssertionError("_resolve_hook must NOT be called when conn_id is None")
 
     monkeypatch.setattr("signalforge.airflow.operators._resolve_hook", _boom)
