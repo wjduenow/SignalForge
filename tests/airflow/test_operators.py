@@ -835,3 +835,107 @@ def test_prune_existing_construction_rejects_bad_on_flagged() -> None:
         _prune_existing_operator_class()(
             task_id="prune", project_dir="/proj", model="m", schema="s.yml", on_flagged="bogus"
         )
+
+
+# --------------------------------------------------------------------------- #
+# SignalForgePruneExistingOperator + signalforge_conn_id (#234 US-006)         #
+# Read-only path: resolves profiles_dir ONLY — NO key injection (DEC-016).     #
+# --------------------------------------------------------------------------- #
+
+
+def test_prune_existing_conn_id_resolves_profiles_dir_and_injects_no_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """conn_id set → resolved profiles_dir reaches argv; NO provider env injected.
+
+    The resolution deliberately carries a ``provider`` + ``api_key`` to prove the
+    prune-existing path IGNORES them: no ``register_secret`` call, no env var set
+    or restored, the credential never touches ``os.environ`` (DEC-016).
+    """
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    resolution = HookResolution(
+        profiles_dir="/conn/profiles", provider="anthropic", api_key="sk-conn-secret"
+    )
+    masked = _patch_hook(monkeypatch, resolution)
+    argv_cap, env_cap = _patch_run_capturing_env(
+        monkeypatch, [_result(exit_code=0, flagged=0)], "ANTHROPIC_API_KEY"
+    )
+
+    op = _prune_existing_operator_class()(
+        task_id="prune",
+        project_dir="/proj",
+        model="m",
+        schema="s.yml",
+        signalforge_conn_id="sf_default",
+    )
+    op.execute(context={})
+
+    # Conn-resolved profiles_dir reaches the argv (no operator override).
+    argv = argv_cap[0]
+    assert argv[argv.index("--profiles-dir") + 1] == "/conn/profiles"
+    # NO key injection on the read-only path: register_secret never called, the
+    # env var never set during the run, and untouched in os.environ afterward.
+    assert masked == []
+    assert env_cap == [None]
+    assert "ANTHROPIC_API_KEY" not in os.environ
+
+
+def test_prune_existing_conn_explicit_param_beats_extra_profiles_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit operator ``profiles_dir`` wins over the Connection extra (DEC-012)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    resolution = HookResolution(profiles_dir="/conn/profiles", provider=None, api_key=None)
+    _patch_hook(monkeypatch, resolution)
+    captured = _patch_run(monkeypatch, [_result(exit_code=0, flagged=0)])
+
+    op = _prune_existing_operator_class()(
+        task_id="prune",
+        project_dir="/proj",
+        model="m",
+        schema="s.yml",
+        profiles_dir="/op/profiles",
+        signalforge_conn_id="sf",
+    )
+    op.execute(context={})
+    argv = captured[0]
+    assert argv[argv.index("--profiles-dir") + 1] == "/op/profiles"
+
+
+def test_prune_existing_conn_id_none_unchanged_no_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """conn_id=None (#233 default): no hook touched, argv byte-identical to #233."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+
+    def _boom(_conn_id: str) -> HookResolution:
+        raise AssertionError("_resolve_hook must NOT be called when conn_id is None")
+
+    monkeypatch.setattr("signalforge.airflow.operators._resolve_hook", _boom)
+    captured = _patch_run(monkeypatch, [_result(exit_code=0, flagged=0)])
+
+    op = _prune_existing_operator_class()(
+        task_id="prune", project_dir="/proj", model="m", schema="s.yml"
+    )
+    op.execute(context={})
+    assert captured[0] == [
+        "prune-existing",
+        "m",
+        "--schema",
+        "s.yml",
+        "--project-dir",
+        "/proj",
+        "--format",
+        "json",
+        "--dry-run",
+    ]
+
+
+def test_prune_existing_conn_id_not_in_template_fields() -> None:
+    """``signalforge_conn_id`` is NOT a templated field on prune-existing (DEC-007)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    assert "signalforge_conn_id" not in _prune_existing_operator_class().template_fields
