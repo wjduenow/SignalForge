@@ -6,7 +6,7 @@
 - **Epic:** [#228](https://github.com/wjduenow/SignalForge/issues/228) (v0.7 Apache Airflow integration) — **this is the closing test+docs child** (modeled on Snowflake/Databricks closers #124/#226)
 - **Branch:** `feature/236-airflow-e2e-docs`
 - **Worktree:** `../worktrees/SignalForge/236-airflow-e2e-docs`
-- **Phase:** published
+- **Phase:** devolved
 - **Sessions:** 1 (2026-06-16)
 - **PR:** [#246](https://github.com/wjduenow/SignalForge/pull/246) (draft, base `dev`)
 - **Depends on:** #229–#235 — ALL merged to `dev` (the gitStatus snapshot was stale; #235 landed as `678da32`/PR #245)
@@ -198,4 +198,18 @@ Gated `airflow`-marked tests are DESELECTED in the default suite, so a worker's 
 
 ## Beads Manifest (Phase 7)
 
-*(Pending devolve.)*
+- **Epic:** `bd_1-scaffolding-5j1`
+- **Worktree:** `../worktrees/SignalForge/236-airflow-e2e-docs` (branch `feature/236-airflow-e2e-docs`)
+- **Tasks:**
+  | Bead | Story | Depends on |
+  |---|---|---|
+  | `bd_1-scaffolding-5j1.1` | US-001 Rename drift-monitor → nightly_drift | — |
+  | `bd_1-scaffolding-5j1.2` | US-002 New `after_dbt_build` DAG + tests | .1 |
+  | `bd_1-scaffolding-5j1.3` | US-003 Live e2e upgrade (`dag.test()` + Austin) | .2 |
+  | `bd_1-scaffolding-5j1.4` | US-004 Managed-runtime note + docs coherence | .1 |
+  | `bd_1-scaffolding-5j1.5` | US-005 SKILL.md Airflow pointer | — |
+  | `bd_1-scaffolding-5j1.6` | US-006 README reword + CHANGELOG | — |
+  | `bd_1-scaffolding-5j1.7` | US-007 Quality Gate + live cert pass | .1–.6 |
+  | `bd_1-scaffolding-5j1.8` | US-008 Patterns & Memory (orchestrator `.claude/`) | .7 |
+- **Ready at devolve:** US-001, US-005, US-006.
+- **Orchestrator-only beads/edits:** `.claude/rules/airflow-integration.md` in US-001 (rename refs) + US-008 (Patterns & Memory) — workers cannot write `.claude/`.
