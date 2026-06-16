@@ -24,23 +24,48 @@ core's 100%-ungated codecov patch gate).
 from __future__ import annotations
 
 import os
+from datetime import date
 from pathlib import Path
 
 import pytest
 
+from signalforge.airflow.drift import DriftArtifact, DriftReport
 from signalforge.airflow.errors import AirflowConfigError
 from signalforge.airflow.operators import (
     _aggregate_batch_result,
+    _blank_str_to_none,
+    _build_drift_inputs,
     _build_generate_argv,
     _build_prune_existing_argv,
+    _drift_task_outcome,
     _merge_with_resolution,
     _provider_key_env,
     _resolve_select_models,
+    _validate_drift_config,
+    _validate_grade_regression_threshold,
     _validate_operator_config,
     _validate_prune_existing_config,
     _without_sidecar_paths,
+    build_drift_report,
 )
-from signalforge.airflow.result import SignalForgeRunResult
+from signalforge.airflow.result import SignalForgeRunResult, TaskOutcome
+from signalforge.diff.models import DiffReport as SfDiffReport
+from signalforge.grade.models import GradingReport
+
+# Engineered drift sidecar PAIR committed by #235 US-001: the
+# ``test.column.amount.not_null`` artifact goes kept → dropped/always-passes
+# between the prev and curr diff (signal rot), and the grade mean falls
+# 0.9 → 0.8 (a regression beyond the 0.05 default threshold).
+_DRIFT_PAIRS = Path(__file__).resolve().parents[1] / "fixtures" / "airflow" / "drift_pairs"
+
+
+def _load_diff(name: str) -> SfDiffReport:
+    return SfDiffReport.model_validate_json((_DRIFT_PAIRS / f"{name}.json").read_text())
+
+
+def _load_grade(name: str) -> GradingReport:
+    return GradingReport.model_validate_json((_DRIFT_PAIRS / f"{name}.json").read_text())
+
 
 # A committed multi-model dbt fixture: tags `staging` (stg_a, stg_b) + `marts`
 # (fct_x). Resolves through the real `signalforge.manifest.load` + selector.
@@ -653,6 +678,389 @@ def test_validate_prune_accepts_each_valid_on_flagged(on_flagged: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# _validate_operator_config — drift params (#235 US-004)                       #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("on_drift", ["fail", "skip", "succeed"])
+def test_validate_accepts_each_valid_on_drift(on_drift: str) -> None:
+    _validate_operator_config(
+        project_dir="/proj", model="m.sql", select=None, on_flagged="fail", on_drift=on_drift
+    )
+
+
+def test_validate_rejects_bogus_on_drift() -> None:
+    with pytest.raises(AirflowConfigError, match="on_drift"):
+        _validate_operator_config(
+            project_dir="/proj", model="m.sql", select=None, on_flagged="fail", on_drift="bogus"
+        )
+
+
+def test_validate_accepts_set_drift_paths() -> None:
+    """A valid prior-diff path + history dir do not raise."""
+    _validate_operator_config(
+        project_dir="/proj",
+        model="m.sql",
+        select=None,
+        on_flagged="fail",
+        detect_drift_against="/history/2026-06-14/diff.json",
+        drift_history_dir="/history/2026-06-15",
+    )
+
+
+def test_validate_accepts_templated_drift_paths() -> None:
+    """An un-rendered Jinja template (begins with '{') is not a leading-dash hit."""
+    _validate_operator_config(
+        project_dir="/proj",
+        model="m.sql",
+        select=None,
+        on_flagged="fail",
+        detect_drift_against="/history/{{ prev_ds }}/diff.json",
+        drift_history_dir="/history/{{ ds }}",
+    )
+
+
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_validate_treats_blank_drift_paths_as_off(blank: str | None) -> None:
+    """``None`` / blank drift paths mean 'feature off' — not an error (opt-in)."""
+    _validate_operator_config(
+        project_dir="/proj",
+        model="m.sql",
+        select=None,
+        on_flagged="fail",
+        detect_drift_against=blank,
+        drift_history_dir=blank,
+    )
+
+
+def test_validate_rejects_leading_dash_detect_drift_against() -> None:
+    with pytest.raises(AirflowConfigError, match="argv-injection guard"):
+        _validate_operator_config(
+            project_dir="/proj",
+            model="m.sql",
+            select=None,
+            on_flagged="fail",
+            detect_drift_against="--evil",
+        )
+
+
+def test_validate_rejects_leading_dash_drift_history_dir() -> None:
+    with pytest.raises(AirflowConfigError, match="argv-injection guard"):
+        _validate_operator_config(
+            project_dir="/proj",
+            model="m.sql",
+            select=None,
+            on_flagged="fail",
+            drift_history_dir="-x",
+        )
+
+
+def test_validate_rejects_non_str_drift_path() -> None:
+    with pytest.raises(AirflowConfigError, match="must be a string"):
+        _validate_operator_config(
+            project_dir="/proj",
+            model="m.sql",
+            select=None,
+            on_flagged="fail",
+            detect_drift_against=123,  # type: ignore[arg-type]
+        )
+
+
+def test_drift_params_do_not_leak_into_generate_argv() -> None:
+    """Drift is operator-internal: it never becomes a ``signalforge generate`` flag.
+
+    Guards against a future change wiring drift into the argv builder — there is
+    no ``--detect-drift-against`` / ``--drift-history-dir`` / ``--on-drift`` CLI
+    flag, so none must appear in the generate argv.
+    """
+    argv = _argv()
+    for tok in ("--detect-drift-against", "--drift-history-dir", "--on-drift"):
+        assert tok not in argv
+
+
+# --------------------------------------------------------------------------- #
+# build_drift_report (#235 US-004) — pure drift orchestration                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_build_drift_report_baseline_when_no_prior() -> None:
+    """``prior_diff=None`` → a non-alarming baseline report; compute_drift NOT called."""
+    curr = _load_diff("signal_rot_curr_diff")
+    report = build_drift_report(
+        current_diff=curr,
+        prior_diff=None,
+        current_grade=None,
+        prior_grade=None,
+        as_of=None,
+        grade_regression_threshold=0.05,
+    )
+    assert report.baseline is True
+    assert report.alarming is False
+    assert report.model_unique_id == "model.shop.fct_orders"
+    assert report.newly_always_passes == ()
+    assert report.newly_dropped == ()
+    assert report.newly_kept == ()
+    assert report.grade_regressions == ()
+    assert report.degrade_reason is None
+    # No comparison performed → no prior hash; as_of threads through.
+    assert report.previous_diff_hash == ""
+
+
+def test_build_drift_report_with_prior_delegates_to_compute_drift() -> None:
+    """``prior_diff`` set → delegates to compute_drift; signal rot ⇒ alarming."""
+    prev = _load_diff("signal_rot_prev_diff")
+    curr = _load_diff("signal_rot_curr_diff")
+    report = build_drift_report(
+        current_diff=curr,
+        prior_diff=prev,
+        current_grade=None,
+        prior_grade=None,
+        as_of=date(2026, 6, 15),
+        grade_regression_threshold=0.05,
+    )
+    assert report.baseline is False
+    assert report.alarming is True
+    assert len(report.newly_always_passes) == 1
+    assert report.newly_always_passes[0].artifact_id == "test.column.amount.not_null"
+    assert report.as_of == date(2026, 6, 15)
+    # Real comparison → real input hashes (not the baseline empty-string sentinel).
+    assert report.previous_diff_hash != ""
+    assert report.current_diff_hash != ""
+
+
+def test_build_drift_report_threads_grades_to_compute_drift() -> None:
+    """Both grades present → grade-regression axis reaches compute_drift.
+
+    The fixture grades fall 0.9 → 0.8 (delta 0.1 ≥ the 0.05 threshold), so a
+    regression is emitted — proving the helper passes the grades through rather
+    than dropping them.
+    """
+    prev = _load_diff("signal_rot_prev_diff")
+    curr = _load_diff("signal_rot_curr_diff")
+    report = build_drift_report(
+        current_diff=curr,
+        prior_diff=prev,
+        current_grade=_load_grade("signal_rot_curr_grade"),
+        prior_grade=_load_grade("signal_rot_prev_grade"),
+        as_of=None,
+        grade_regression_threshold=0.05,
+    )
+    assert len(report.grade_regressions) == 1
+    regression = report.grade_regressions[0]
+    assert regression.previous_mean == pytest.approx(0.9)
+    assert regression.current_mean == pytest.approx(0.8)
+    assert report.alarming is True
+
+
+def test_build_drift_report_no_grades_leaves_regressions_empty() -> None:
+    """A missing grade (``--no-grade``) leaves ``grade_regressions`` empty (degrade)."""
+    prev = _load_diff("signal_rot_prev_diff")
+    curr = _load_diff("signal_rot_curr_diff")
+    report = build_drift_report(
+        current_diff=curr,
+        prior_diff=prev,
+        current_grade=None,
+        prior_grade=None,
+        as_of=None,
+        grade_regression_threshold=0.05,
+    )
+    assert report.grade_regressions == ()
+
+
+# --------------------------------------------------------------------------- #
+# _validate_drift_config (#235 US-005)                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_validate_drift_accepts_valid_config() -> None:
+    """A valid dedicated-drift config does not raise."""
+    _validate_drift_config(
+        previous_diff_path="/history/2026-06-14/diff.json",
+        current_diff_path="/history/2026-06-15/diff.json",
+        on_drift="fail",
+    )
+
+
+def test_validate_drift_accepts_templated_paths() -> None:
+    """An un-rendered Jinja template (begins with '{') is not a leading-dash hit."""
+    _validate_drift_config(
+        previous_diff_path="/history/{{ prev_ds }}/diff.json",
+        current_diff_path="/history/{{ ds }}/diff.json",
+        on_drift="skip",
+    )
+
+
+@pytest.mark.parametrize("blank", [None, "", "   ", "\t"])
+def test_validate_drift_rejects_blank_previous_diff_path(blank: str | None) -> None:
+    with pytest.raises(AirflowConfigError, match="non-empty string"):
+        _validate_drift_config(
+            previous_diff_path=blank,
+            current_diff_path="/c/diff.json",
+            on_drift="fail",
+        )
+
+
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_validate_drift_rejects_blank_current_diff_path(blank: str | None) -> None:
+    with pytest.raises(AirflowConfigError, match="non-empty string"):
+        _validate_drift_config(
+            previous_diff_path="/p/diff.json",
+            current_diff_path=blank,
+            on_drift="fail",
+        )
+
+
+def test_validate_drift_rejects_non_str_path() -> None:
+    with pytest.raises(AirflowConfigError, match="non-empty string"):
+        _validate_drift_config(
+            previous_diff_path=123,  # type: ignore[arg-type]
+            current_diff_path="/c/diff.json",
+            on_drift="fail",
+        )
+
+
+def test_validate_drift_rejects_leading_dash_previous() -> None:
+    with pytest.raises(AirflowConfigError, match="must not begin with"):
+        _validate_drift_config(
+            previous_diff_path="-evil",
+            current_diff_path="/c/diff.json",
+            on_drift="fail",
+        )
+
+
+def test_validate_drift_rejects_leading_dash_current() -> None:
+    with pytest.raises(AirflowConfigError, match="must not begin with"):
+        _validate_drift_config(
+            previous_diff_path="/p/diff.json",
+            current_diff_path="-evil",
+            on_drift="fail",
+        )
+
+
+def test_validate_drift_rejects_bogus_on_drift() -> None:
+    with pytest.raises(AirflowConfigError, match="on_drift"):
+        _validate_drift_config(
+            previous_diff_path="/p/diff.json",
+            current_diff_path="/c/diff.json",
+            on_drift="bogus",
+        )
+
+
+@pytest.mark.parametrize("on_drift", ["fail", "skip", "succeed"])
+def test_validate_drift_accepts_each_valid_on_drift(on_drift: str) -> None:
+    _validate_drift_config(
+        previous_diff_path="/p/diff.json",
+        current_diff_path="/c/diff.json",
+        on_drift=on_drift,
+    )
+
+
+# --------------------------------------------------------------------------- #
+# _build_drift_inputs (#235 US-005)                                            #
+# --------------------------------------------------------------------------- #
+
+
+def test_build_drift_inputs_auto_siblings_grades_when_none() -> None:
+    """Unset grade paths resolve to the ``grade.json`` sibling of each diff path."""
+    prev_diff, curr_diff, prev_grade, curr_grade = _build_drift_inputs(
+        previous_diff_path="/history/2026-06-14/diff.json",
+        current_diff_path="/history/2026-06-15/diff.json",
+        previous_grade_path=None,
+        current_grade_path=None,
+    )
+    # Diff paths pass through unchanged.
+    assert prev_diff == "/history/2026-06-14/diff.json"
+    assert curr_diff == "/history/2026-06-15/diff.json"
+    # Grades auto-sibling next to each diff.
+    assert prev_grade == str(Path("/history/2026-06-14/grade.json"))
+    assert curr_grade == str(Path("/history/2026-06-15/grade.json"))
+
+
+def test_build_drift_inputs_uses_explicit_grade_paths_when_set() -> None:
+    """Explicit grade paths win over the auto-sibling resolution."""
+    _, _, prev_grade, curr_grade = _build_drift_inputs(
+        previous_diff_path="/history/prev/diff.json",
+        current_diff_path="/history/curr/diff.json",
+        previous_grade_path="/custom/prev_grade.json",
+        current_grade_path="/custom/curr_grade.json",
+    )
+    assert prev_grade == "/custom/prev_grade.json"
+    assert curr_grade == "/custom/curr_grade.json"
+
+
+def test_build_drift_inputs_mixes_explicit_and_auto() -> None:
+    """A set previous grade + unset current grade resolve independently."""
+    _, _, prev_grade, curr_grade = _build_drift_inputs(
+        previous_diff_path="/history/prev/diff.json",
+        current_diff_path="/history/curr/diff.json",
+        previous_grade_path="/custom/prev_grade.json",
+        current_grade_path=None,
+    )
+    assert prev_grade == "/custom/prev_grade.json"
+    assert curr_grade == str(Path("/history/curr/grade.json"))
+
+
+# --------------------------------------------------------------------------- #
+# _drift_task_outcome (#235 US-005)                                            #
+# --------------------------------------------------------------------------- #
+
+
+def _non_alarming_drift() -> DriftReport:
+    """A baseline (no comparison) → non-alarming DriftReport."""
+    return DriftReport(
+        signalforge_version="0",
+        model_unique_id="model.shop.fct_orders",
+        as_of=None,
+        grade_regression_threshold=0.05,
+        baseline=True,
+        previous_diff_hash="",
+        current_diff_hash="",
+    )
+
+
+def _alarming_drift() -> DriftReport:
+    """A DriftReport carrying a signal-rot transition → alarming."""
+    return DriftReport(
+        signalforge_version="0",
+        model_unique_id="model.shop.fct_orders",
+        as_of=None,
+        grade_regression_threshold=0.05,
+        previous_diff_hash="aa",
+        current_diff_hash="bb",
+        newly_always_passes=(
+            DriftArtifact(
+                artifact_id="test.column.amount.not_null",
+                previous_tier="kept",
+                current_tier="dropped",
+                previous_drop_reason=None,
+                current_drop_reason="always-passes",
+            ),
+        ),
+    )
+
+
+def test_drift_outcome_non_alarming_is_success_regardless_of_policy() -> None:
+    """A non-alarming report → SUCCESS for every ``on_drift`` policy."""
+    drift = _non_alarming_drift()
+    assert drift.alarming is False
+    assert _drift_task_outcome(drift, "fail") == TaskOutcome.SUCCESS
+    assert _drift_task_outcome(drift, "skip") == TaskOutcome.SUCCESS
+    assert _drift_task_outcome(drift, "succeed") == TaskOutcome.SUCCESS
+
+
+def test_drift_outcome_alarming_fail_is_fail_no_retry() -> None:
+    """An alarming report under the default ``on_drift="fail"`` → FAIL_NO_RETRY."""
+    assert _drift_task_outcome(_alarming_drift(), "fail") == TaskOutcome.FAIL_NO_RETRY
+
+
+def test_drift_outcome_alarming_skip_is_skip() -> None:
+    assert _drift_task_outcome(_alarming_drift(), "skip") == TaskOutcome.SKIP
+
+
+def test_drift_outcome_alarming_succeed_is_success() -> None:
+    assert _drift_task_outcome(_alarming_drift(), "succeed") == TaskOutcome.SUCCESS
+
+
 # _merge_with_resolution (#234 US-005, DEC-012)                               #
 # --------------------------------------------------------------------------- #
 
@@ -727,3 +1135,46 @@ def test_provider_key_env_restores_on_exception_prior(monkeypatch: pytest.Monkey
     with pytest.raises(RuntimeError, match="boom"), _provider_key_env("SF_TEST_KEY", "sk-secret"):
         raise RuntimeError("boom")
     assert os.environ["SF_TEST_KEY"] == "prior-value"
+
+
+# --------------------------------------------------------------------------- #
+# _blank_str_to_none + _validate_grade_regression_threshold (#235 PR review)   #
+# --------------------------------------------------------------------------- #
+
+
+def test_blank_str_to_none_collapses_whitespace_only() -> None:
+    """A whitespace-only drift path collapses to None (validation/runtime parity)."""
+    assert _blank_str_to_none("   ") is None
+    assert _blank_str_to_none("") is None
+    assert _blank_str_to_none("\t\n") is None
+
+
+def test_blank_str_to_none_preserves_real_values_and_none() -> None:
+    assert _blank_str_to_none(None) is None
+    assert _blank_str_to_none("/history/diff.json") == "/history/diff.json"
+    # Surrounding whitespace is stripped but the value is preserved.
+    assert _blank_str_to_none("  /history/diff.json  ") == "/history/diff.json"
+    # An un-rendered Jinja template is non-blank and passes through.
+    assert _blank_str_to_none("{{ ds }}/diff.json") == "{{ ds }}/diff.json"
+
+
+def test_validate_grade_regression_threshold_accepts_valid_numbers() -> None:
+    for value in (0, 0.0, 0.05, 1, 0.5):
+        _validate_grade_regression_threshold(value)  # must not raise
+
+
+def test_validate_grade_regression_threshold_rejects_non_numeric() -> None:
+    for bad in ("0.05", None, [0.05]):
+        with pytest.raises(AirflowConfigError, match="must be a number"):
+            _validate_grade_regression_threshold(bad)
+
+
+def test_validate_grade_regression_threshold_rejects_bool() -> None:
+    # bool is an int subclass but is never a valid threshold.
+    with pytest.raises(AirflowConfigError, match="must be a number"):
+        _validate_grade_regression_threshold(True)
+
+
+def test_validate_grade_regression_threshold_rejects_negative() -> None:
+    with pytest.raises(AirflowConfigError, match="must be >= 0"):
+        _validate_grade_regression_threshold(-0.01)

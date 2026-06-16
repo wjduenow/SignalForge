@@ -32,9 +32,11 @@ Two load-bearing design rules govern this subpackage:
 
 Error classes (``AirflowIntegrationError`` / ``AirflowConfigError``), the result
 core (``SignalForgeRunResult`` / ``TaskOutcome`` / ``decide_task_outcome`` /
-``OnFlagged``), and the runner (``run_signalforge``) are pure-Python and
-Airflow-free (none of ``signalforge.airflow.errors`` / ``.result`` / ``.runner``
-carries a ``from airflow ...`` import — the runner's only heavy import,
+``OnFlagged``), the runner (``run_signalforge``), and the drift core
+(``compute_drift`` / ``DriftReport`` / ``DriftArtifact`` / ``GradeRegression`` /
+``SchemaShapeDelta`` — issue #235) are pure-Python and Airflow-free (none of
+``signalforge.airflow.errors`` / ``.result`` / ``.runner`` / ``.drift`` carries
+a ``from airflow ...`` import — the runner's only heavy import,
 :func:`signalforge.cli.main`, is done lazily inside the function body), so they
 are **eager** re-exports here (only the operator/hook names stay lazy —
 DEC-003 / DEC-006). Importing them does not violate the no-eager-import gate.
@@ -45,6 +47,13 @@ from __future__ import annotations
 from importlib import import_module
 from typing import TYPE_CHECKING
 
+from signalforge.airflow.drift import (
+    DriftArtifact,
+    DriftReport,
+    GradeRegression,
+    SchemaShapeDelta,
+    compute_drift,
+)
 from signalforge.airflow.errors import AirflowConfigError, AirflowIntegrationError
 from signalforge.airflow.result import (
     OnFlagged,
@@ -61,6 +70,7 @@ if TYPE_CHECKING:
     # gate). The modules themselves are Airflow-free per DEC-004.
     from signalforge.airflow.hooks import SignalForgeHook
     from signalforge.airflow.operators import (
+        SignalForgeDriftOperator,
         SignalForgeGenerateOperator,
         SignalForgePruneExistingOperator,
     )
@@ -71,18 +81,25 @@ if TYPE_CHECKING:
 _LAZY_NAMES: dict[str, str] = {
     "SignalForgeGenerateOperator": "operators",
     "SignalForgePruneExistingOperator": "operators",
+    "SignalForgeDriftOperator": "operators",
     "SignalForgeHook": "hooks",
 }
 
 __all__ = [
     "AirflowConfigError",
     "AirflowIntegrationError",
+    "DriftArtifact",
+    "DriftReport",
+    "GradeRegression",
     "OnFlagged",
+    "SchemaShapeDelta",
+    "SignalForgeDriftOperator",
     "SignalForgeGenerateOperator",
     "SignalForgeHook",
     "SignalForgePruneExistingOperator",
     "SignalForgeRunResult",
     "TaskOutcome",
+    "compute_drift",
     "decide_task_outcome",
     "run_signalforge",
 ]

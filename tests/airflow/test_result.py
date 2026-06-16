@@ -23,11 +23,14 @@ import sys
 import pytest
 
 from signalforge.airflow import (
+    DriftArtifact,
+    DriftReport,
     OnFlagged,
     SignalForgeRunResult,
     TaskOutcome,
     decide_task_outcome,
 )
+from signalforge.airflow.result import OnDrift
 
 
 def _make_result(*, exit_code: int = 0, flagged: int = 0) -> SignalForgeRunResult:
@@ -154,6 +157,141 @@ def test_to_xcom_round_trips_with_none_fields() -> None:
     assert payload["mean_grade"] is None
     assert payload["below_threshold"] is False
     assert json.loads(json.dumps(payload)) == payload
+
+
+def _drift(*, alarming: bool, degraded: bool = False) -> DriftReport:
+    """Build a :class:`DriftReport` whose :attr:`alarming` property is as asked.
+
+    * ``alarming=True`` → one ``newly_always_passes`` artifact (signal rot).
+    * ``alarming=False`` → all transition lists empty.
+    * ``degraded=True`` → a ``degrade_reason`` is set; the alarm lists stay empty
+      so ``alarming`` is ``False`` by construction (DEC-013).
+    """
+    rot = (
+        (
+            DriftArtifact(
+                artifact_id="test.column.amount.not_null",
+                previous_tier="kept",
+                current_tier="dropped",
+                previous_drop_reason=None,
+                current_drop_reason="always-passes",
+                why="always passes on the sample",
+            ),
+        )
+        if alarming
+        else ()
+    )
+    return DriftReport(
+        signalforge_version="0.7.0.dev0",
+        model_unique_id="model.shop.fct_orders",
+        as_of=None,
+        grade_regression_threshold=0.05,
+        previous_diff_hash="0" * 16,
+        current_diff_hash="1" * 16,
+        newly_always_passes=rot,
+        degrade_reason="model mismatch: prior=a current=b" if degraded else None,
+    )
+
+
+def test_drift_helper_alarming_property_truth_table() -> None:
+    """Sanity-pin the helper: it produces the alarming state each case asks for."""
+    assert _drift(alarming=True).alarming is True
+    assert _drift(alarming=False).alarming is False
+    assert _drift(alarming=False, degraded=True).alarming is False
+
+
+def test_decide_task_outcome_drift_none_is_byte_identical_to_pre_235() -> None:
+    """Passing ``drift=None`` reproduces EVERY pre-#235 row exactly.
+
+    The ``on_drift`` value is irrelevant when ``drift is None`` — pinned by
+    varying it across all three policies and asserting the result still equals
+    the drift-free decision.
+    """
+    cases: list[tuple[int, int, OnFlagged, TaskOutcome]] = [
+        (0, 0, "fail", TaskOutcome.SUCCESS),
+        (0, 3, "fail", TaskOutcome.FAIL_NO_RETRY),
+        (0, 3, "skip", TaskOutcome.SKIP),
+        (0, 3, "succeed", TaskOutcome.SUCCESS),
+        (1, 0, "fail", TaskOutcome.FAIL_NO_RETRY),
+        (2, 0, "fail", TaskOutcome.FAIL_NO_RETRY),
+        (3, 0, "fail", TaskOutcome.FAIL_RETRYABLE),
+    ]
+    for exit_code, flagged, on_flagged, expected in cases:
+        result = _make_result(exit_code=exit_code, flagged=flagged)
+        for on_drift in ("fail", "skip", "succeed"):
+            got = decide_task_outcome(result, on_flagged=on_flagged, on_drift=on_drift, drift=None)
+            assert got == expected, (exit_code, flagged, on_flagged, on_drift)
+        # And explicitly equal to the drift-free single-arg form.
+        assert decide_task_outcome(result, on_flagged=on_flagged) == expected
+
+
+@pytest.mark.parametrize(
+    ("flagged", "on_flagged", "alarming", "on_drift", "expected"),
+    [
+        # --- drift drives (not flagged): on_drift maps straight through ---
+        (0, "fail", True, "fail", TaskOutcome.FAIL_NO_RETRY),
+        (0, "fail", True, "skip", TaskOutcome.SKIP),
+        (0, "fail", True, "succeed", TaskOutcome.SUCCESS),
+        # --- non-alarming drift never changes the flagged-only outcome ---
+        (0, "fail", False, "fail", TaskOutcome.SUCCESS),
+        (2, "fail", False, "fail", TaskOutcome.FAIL_NO_RETRY),
+        (2, "succeed", False, "fail", TaskOutcome.SUCCESS),
+        # --- both trip: MOST-SEVERE wins (FAIL_NO_RETRY > SKIP > SUCCESS) ---
+        (2, "fail", True, "succeed", TaskOutcome.FAIL_NO_RETRY),  # flagged worse
+        (2, "succeed", True, "fail", TaskOutcome.FAIL_NO_RETRY),  # drift worse
+        (2, "skip", True, "fail", TaskOutcome.FAIL_NO_RETRY),  # drift worse
+        (2, "fail", True, "skip", TaskOutcome.FAIL_NO_RETRY),  # flagged worse
+        (2, "skip", True, "succeed", TaskOutcome.SKIP),  # skip > success
+        (2, "succeed", True, "skip", TaskOutcome.SKIP),  # skip > success
+        (2, "succeed", True, "succeed", TaskOutcome.SUCCESS),  # both benign
+        (2, "skip", True, "skip", TaskOutcome.SKIP),  # tie
+    ],
+)
+def test_decide_task_outcome_flagged_x_drift_most_severe(
+    flagged: int,
+    on_flagged: OnFlagged,
+    alarming: bool,
+    on_drift: OnDrift,
+    expected: TaskOutcome,
+) -> None:
+    """On an exit-0 run, the flagged-outcome and drift-outcome combine to the
+    MOST-SEVERE verdict (DEC-006)."""
+    result = _make_result(exit_code=0, flagged=flagged)
+    got = decide_task_outcome(
+        result, on_flagged=on_flagged, on_drift=on_drift, drift=_drift(alarming=alarming)
+    )
+    assert got == expected
+
+
+def test_decide_task_outcome_degraded_drift_never_trips() -> None:
+    """A degraded DriftReport (``alarming=False``) never changes the outcome,
+    even with ``on_drift="fail"`` — degrade, don't page (DEC-013)."""
+    result = _make_result(exit_code=0, flagged=0)
+    degraded = _drift(alarming=False, degraded=True)
+    assert decide_task_outcome(result, on_drift="fail", drift=degraded) == TaskOutcome.SUCCESS
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "expected"),
+    [
+        (1, TaskOutcome.FAIL_NO_RETRY),
+        (2, TaskOutcome.FAIL_NO_RETRY),
+        (3, TaskOutcome.FAIL_RETRYABLE),
+        (99, TaskOutcome.FAIL_NO_RETRY),
+    ],
+)
+def test_decide_task_outcome_exit_tiers_ignore_alarming_drift(
+    exit_code: int, expected: TaskOutcome
+) -> None:
+    """The 1/2/3 exit tiers short-circuit BEFORE the drift policy.
+
+    The load-bearing case is exit 3 + alarming drift + ``on_drift="fail"``: it
+    stays ``FAIL_RETRYABLE`` (the retryable external-dependency verdict), NOT
+    downgraded to ``FAIL_NO_RETRY`` by the drift combine — drift is consulted
+    only on an exit-0 run (DEC-006)."""
+    result = _make_result(exit_code=exit_code, flagged=0)
+    got = decide_task_outcome(result, on_drift="fail", drift=_drift(alarming=True))
+    assert got == expected
 
 
 def test_task_outcome_has_exactly_four_members() -> None:

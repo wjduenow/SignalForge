@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "signalforge_version": "0.7.0.dev0",
+  "model_unique_id": "model.jaffle_shop.customers",
+  "as_of": "2026-06-16",
+  "grade_regression_threshold": 0.05,
+  "baseline": false,
+  "previous_diff_hash": "0123456789abcdef",
+  "current_diff_hash": "fedcba9876543210",
+  "newly_always_passes": [
+    {
+      "artifact_id": "test.column.customer_id.not_null",
+      "previous_tier": "kept",
+      "current_tier": "dropped",
+      "previous_drop_reason": null,
+      "current_drop_reason": "always-passes",
+      "why": "ran clean on warehouse sample \u2014 rotted into always-passes"
+    }
+  ],
+  "newly_dropped": [
+    {
+      "artifact_id": "test.column.order_total.accepted_values",
+      "previous_tier": "flagged",
+      "current_tier": "dropped",
+      "previous_drop_reason": null,
+      "current_drop_reason": "failed-on-known-clean-data",
+      "why": "failed on a trusted-model clean sample"
+    }
+  ],
+  "newly_kept": [
+    {
+      "artifact_id": "test.column.email.unique",
+      "previous_tier": "dropped",
+      "current_tier": "kept",
+      "previous_drop_reason": "always-passes",
+      "current_drop_reason": null,
+      "why": "now catches duplicate emails"
+    }
+  ],
+  "added_artifacts": [
+    "column.created_at.description",
+    "test.column.created_at.not_null"
+  ],
+  "removed_artifacts": [
+    "column.legacy_flag.description"
+  ],
+  "grade_regressions": [
+    {
+      "model_unique_id": "model.jaffle_shop.customers",
+      "previous_mean": 0.92,
+      "current_mean": 0.71,
+      "delta": 0.21
+    }
+  ],
+  "schema_shape_changes": {
+    "columns_added": [
+      "created_at"
+    ],
+    "columns_removed": [
+      "legacy_flag"
+    ]
+  },
+  "degrade_reason": null
+}
