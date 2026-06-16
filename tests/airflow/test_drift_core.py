@@ -284,6 +284,25 @@ def test_schema_shape_test_with_args_hash_suffix_parses_column() -> None:
     assert report.schema_shape_changes.columns_added == ("amount",)
 
 
+def test_schema_shape_ignores_too_short_malformed_artifact_ids() -> None:
+    """Short/malformed dotted forms below the spec arity contribute no column.
+
+    The canonical shapes are ``column.<col>.<field>`` (3 parts) and
+    ``test.column.<col>.<type>`` (4 parts). A 2-part ``column.amount`` or a
+    3-part ``test.column.amount`` is malformed and must NOT be mined as a
+    column — otherwise a corrupt sidecar would pollute schema_shape_changes.
+    """
+    prev = _diff(entries=())
+    curr = _diff(
+        entries=(
+            _entry("column.amount", "kept"),
+            _entry("test.column.region", "kept"),
+        )
+    )
+    report = compute_drift(previous_diff=prev, current_diff=curr)
+    assert report.schema_shape_changes == SchemaShapeDelta()
+
+
 # ---------------------------------------------------------------------------
 # Grade regression (DEC-005) at / above / below threshold.
 # ---------------------------------------------------------------------------

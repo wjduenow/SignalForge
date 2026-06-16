@@ -119,9 +119,9 @@ def _columns_from_artifact_ids(artifact_ids: Iterable[str]) -> set[str]:
     columns: set[str] = set()
     for artifact_id in artifact_ids:
         parts = artifact_id.split(".")
-        if len(parts) >= 2 and parts[0] == "column":
+        if len(parts) >= 3 and parts[0] == "column":
             columns.add(parts[1])
-        elif len(parts) >= 3 and parts[0] == "test" and parts[1] == "column":
+        elif len(parts) >= 4 and parts[0] == "test" and parts[1] == "column":
             columns.add(parts[2])
     return columns
 

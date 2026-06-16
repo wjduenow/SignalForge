@@ -565,7 +565,9 @@ next run compares against the prior date's copy (`detect_drift_against="…/{{ m
 Both params are in `template_fields`, so the logical date stamps the path. Mount the
 history base on durable storage so a run can find the prior run's sidecar. Persistence
 reuses the fail-closed `write_sidecar` writer (no new writer); the `grade.json` sibling
-is copied best-effort. Persistence is triggered by `detect_drift_against` being set.
+is copied best-effort. Persistence requires **both** `detect_drift_against` (which enables
+the drift step) **and** `drift_history_dir` (the destination): with `drift_history_dir`
+unset the run still computes drift but writes nothing.
 
 ### `on_drift` (fail / skip / succeed) — most-severe-wins with `on_flagged`
 
@@ -616,8 +618,8 @@ The drift summary is JSON-serialisable, carries **no bulk sidecar text and no se
 and on the generate operator is nested under `"drift"` (the dedicated operator returns it
 directly). Shape:
 
-- `model_unique_id`, `as_of` (iso or `null`), `baseline`, `alarming`, `degrade_reason`,
-  `grade_regression_threshold`, `previous_diff_hash`, `current_diff_hash`;
+- `schema_version`, `model_unique_id`, `as_of` (iso or `null`), `baseline`, `alarming`,
+  `degrade_reason`, `grade_regression_threshold`, `previous_diff_hash`, `current_diff_hash`;
 - `counts` — per-category counts: `newly_always_passes` (the signal-rot tally),
   `newly_dropped`, `newly_kept`, `added_artifacts`, `removed_artifacts`,
   `grade_regressions`, `columns_added`, `columns_removed`;
