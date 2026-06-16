@@ -34,7 +34,7 @@ The integration splits cleanly so the "act on the graded diff" logic is unit-tes
 
 `run_signalforge` injects `--format json` and parses the diff JSON from **captured stdout**, not the `.signalforge/diff.json` file. Reason: `--dry-run` (the read-only scheduled drift mode the epic headlines) **suppresses both sidecar files**, so the file isn't a reliable transport. The JSON shape (`DiffReport.model_dump_json(by_alias=True)`) is byte-identical on stdout and in the file. `mean_grade` is read from `grade.json` on disk **only when present** (NOT `--dry-run`, NOT `--no-grade`) → `None` otherwise. Sidecar path fields are set only when the files exist. **Diff-key contract is pinned by a default-suite structural guard** asserting the runner's parsed keys ⊆ `DiffReport` schema properties and `mean_score ∈ GradingReport.model_computed_fields` — the fake-driven-byte-identity defence (`testing-signal.md`; [[fake-driven-byte-identity-blind-spot]]).
 
-**`--select` batch (#231 DEC-002):** sidecars are last-writer-wins, so one `run_signalforge` over a `--select` batch reflects the LAST model; `model_unique_ids` lists the match set. Accurate per-model batch XCom is the `GenerateOperator` child's job (loop per model).
+**`--select` batch (#231 DEC-002):** sidecars are last-writer-wins, so one `run_signalforge` over a `--select` batch reflects the LAST model; `model_unique_ids` contains at most that last model's id (NOT the full match set). Accurate per-model batch XCom is the `GenerateOperator` child's job (loop per model).
 
 ## In-process invocation isolation (#231 DEC-003/004 + QG)
 

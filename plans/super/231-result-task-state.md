@@ -7,7 +7,7 @@
 - **Depends on:** #230 (skeleton — CLOSED), #229 (local + CI test env — landed)
 - **Branch:** `feature/231-result-task-state`
 - **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/231-result-task-state`
-- **Phase:** devolved (beads created; PR #240)
+- **Phase:** complete — implemented, in review (PR #240)
 - **Sessions:** 1 (2026-06-15)
 
 ### Beads Manifest
@@ -152,7 +152,8 @@ are a drop-in swap.
 - **DEC-002 — single-model accurate; `--select` batch = last-model + documented.**
   `run_signalforge` returns accurate counts for a single-model argv. For `--select`
   it returns the LAST model's JSON (sidecar last-writer-wins) with
-  `model_unique_ids` listing the full match set, and documents the limitation.
+  `model_unique_ids` containing at most that last model's id (NOT the full match
+  set), and documents the limitation.
   Accurate per-model batch XCom is the GenerateOperator child's job (loop per model).
 
 - **DEC-003 — save/restore `sys.excepthook` + the 3 mutated env keys.**

@@ -106,6 +106,87 @@ def test_normalise_argv_leaves_explicit_project_dir_alone() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# invocation guard (FIX 1) — unknown invocation fails loud, runs nothing
+# --------------------------------------------------------------------------- #
+
+
+def test_unknown_invocation_raises_value_error_without_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A typo'd invocation must raise ValueError BEFORE invoking the pipeline —
+    # never silently fall back to subprocess. A fake ``main`` that explodes if
+    # called proves nothing ran.
+    def _exploding_main(argv: list[str]) -> int:
+        raise AssertionError("main must not be called for an unknown invocation")
+
+    monkeypatch.setattr("signalforge.cli.main", _exploding_main)
+
+    with pytest.raises(ValueError, match="Unsupported invocation='bogus'"):
+        run_signalforge(
+            ["generate", "m"],
+            project_dir=tmp_path,
+            invocation="bogus",  # type: ignore[arg-type]
+        )
+
+
+# --------------------------------------------------------------------------- #
+# SystemExit parity (FIX 2) — in-process SystemExit → exit_code, not propagated
+# --------------------------------------------------------------------------- #
+
+
+def test_in_process_systemexit_int_becomes_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sentinel_hook = sys.excepthook
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+
+    def _exiting_main(argv: list[str]) -> int:
+        import os
+
+        sys.excepthook = lambda *a: None  # type: ignore[assignment]
+        os.environ["FORCE_COLOR"] = "1"
+        raise SystemExit(2)
+
+    monkeypatch.setattr("signalforge.cli.main", _exiting_main)
+
+    import os
+
+    result = run_signalforge(["generate", "m"], project_dir=tmp_path)
+
+    # SystemExit converted to the exit code (subprocess parity) — never propagated.
+    assert result.exit_code == 2
+    # Isolation still restored even though main raised SystemExit.
+    assert sys.excepthook is sentinel_hook
+    assert "FORCE_COLOR" not in os.environ
+
+
+def test_in_process_systemexit_none_becomes_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _exiting_main(argv: list[str]) -> int:
+        raise SystemExit(None)
+
+    monkeypatch.setattr("signalforge.cli.main", _exiting_main)
+
+    result = run_signalforge(["generate", "m"], project_dir=tmp_path)
+    assert result.exit_code == 0
+
+
+def test_in_process_systemexit_str_becomes_one_and_writes_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _exiting_main(argv: list[str]) -> int:
+        raise SystemExit("usage: signalforge ...")
+
+    monkeypatch.setattr("signalforge.cli.main", _exiting_main)
+
+    result = run_signalforge(["generate", "m"], project_dir=tmp_path)
+    assert result.exit_code == 1
+    # The str message lands in the captured stderr (Python sys.exit semantics).
+    assert "usage: signalforge ..." in result.stderr
+
+
+# --------------------------------------------------------------------------- #
 # in_process happy path + parsing
 # --------------------------------------------------------------------------- #
 
@@ -271,6 +352,35 @@ def test_grade_sidecar_non_dict_json_yields_none(
 
     assert result.grade_sidecar_path is not None
     assert result.mean_grade is None
+
+
+def test_sidecars_read_from_effective_project_dir_in_argv(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # FIX 3: when the caller passes an explicit ``--project-dir B`` in argv that
+    # differs from the ``project_dir=A`` param, the run writes sidecars under B —
+    # so the runner must read them from B, NOT A. Build the grade sidecar under B
+    # only and assert mean_grade / paths come from B.
+    monkeypatch.setattr("signalforge.cli.main", _fake_main_writing(json.dumps(_DIFF_JSON)))
+
+    dir_a = tmp_path / "param_dir"
+    dir_b = tmp_path / "argv_dir"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    _write_sidecar(dir_b, "grade.json", {"mean_score": 0.71})
+    _write_sidecar(dir_b, "diff.json", {"anything": True})
+
+    result = run_signalforge(
+        ["generate", "models/x.sql", "--project-dir", str(dir_b)],
+        project_dir=dir_a,
+    )
+
+    assert result.mean_grade == 0.71
+    assert result.grade_sidecar_path is not None
+    assert str(dir_b) in result.grade_sidecar_path
+    assert str(dir_a) not in result.grade_sidecar_path
+    assert result.diff_sidecar_path is not None
+    assert str(dir_b) in result.diff_sidecar_path
 
 
 def test_sidecar_path_containment_failure_yields_none(

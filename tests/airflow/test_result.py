@@ -170,7 +170,23 @@ def test_task_outcome_has_exactly_four_members() -> None:
 
 def test_importing_signalforge_airflow_with_result_reexports_does_not_import_airflow() -> None:
     """The new eager result re-exports keep the no-eager-airflow-import contract:
-    ``signalforge.airflow.result`` carries no ``from airflow ...`` import."""
+    ``signalforge.airflow.result`` carries no ``from airflow ...`` import.
+
+    Order-independent: scrub any ``airflow`` / cached ``signalforge.airflow``
+    entries a PRIOR test may have left in ``sys.modules`` FIRST, then re-import
+    ``signalforge.airflow`` cleanly and assert nothing airflow-prefixed appears.
+    Mirrors the scrub idiom in ``tests/airflow/test_airflow_no_eager_import.py``.
+    """
+    import importlib
+
+    for name in list(sys.modules):
+        if name == "airflow" or name.startswith("airflow."):
+            del sys.modules[name]
+        if name == "signalforge.airflow" or name.startswith("signalforge.airflow."):
+            del sys.modules[name]
+
+    importlib.import_module("signalforge.airflow")
+
     leaked = sorted(
         name for name in sys.modules if name == "airflow" or name.startswith("airflow.")
     )

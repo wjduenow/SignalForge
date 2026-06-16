@@ -34,7 +34,11 @@ Two invocation modes:
 
 The result is parsed from the JSON diff render on stdout (the same shape as
 :meth:`signalforge.diff.models.DiffReport.model_dump_json`) plus the on-disk
-``<project_dir>/.signalforge/grade.json`` sidecar (for ``mean_grade``). Both
+``grade.json`` sidecar (for ``mean_grade``). Sidecars are located under the
+EFFECTIVE ``--project-dir`` — the value actually passed to the CLI (a
+caller-supplied ``--project-dir`` in ``argv`` if present, else the injected
+``project_dir`` param) — so the runner reads them from the same tree the run
+wrote them under. Both
 parses are **best-effort**: a non-zero exit that produced no diff, a non-JSON
 ``--format``, or a missing/odd sidecar degrades to empty counts / ``None``
 rather than crashing — the operator maps the captured ``exit_code`` to a task
@@ -97,8 +101,11 @@ def normalise_argv(argv: list[str], project_dir: str | Path) -> tuple[list[str],
       ``--format <x>``, it is left ALONE — the caller chose, and a non-json
       format means the stdout parse is skipped/best-effort.
     * ``--project-dir``: if absent, append ``--project-dir <project_dir>``. If
-      the caller already passed one, it is left as-is (but ``run_signalforge``
-      still uses the *passed* ``project_dir`` to locate the grade.json sidecar).
+      the caller already passed one, it is left as-is — and ``run_signalforge``
+      locates the sidecars under the EFFECTIVE ``--project-dir`` (the value
+      actually present in the returned argv), so a caller-supplied
+      ``--project-dir`` that differs from ``project_dir`` is honoured for the
+      sidecar reads too.
 
     The second element of the tuple is ``True`` iff the effective ``--format``
     is ``json`` — the signal :func:`run_signalforge` uses to decide whether to
@@ -118,8 +125,32 @@ def normalise_argv(argv: list[str], project_dir: str | Path) -> tuple[list[str],
     return out, stdout_is_json
 
 
+def _exit_code_from_systemexit(exc: SystemExit, stderr_buf: io.StringIO) -> int:
+    """Convert a ``SystemExit`` raised by ``main`` into an exit code.
+
+    Subprocess parity: in ``subprocess`` mode a ``sys.exit`` / argparse-usage /
+    ``--version`` path becomes a process returncode; in-process it would instead
+    raise :class:`SystemExit`, escape, and bypass :class:`SignalForgeRunResult`
+    creation. This mirrors Python's own ``sys.exit`` semantics (and
+    :func:`signalforge.cli.main`'s own ``SystemExit`` handling): ``None`` → 0, an
+    ``int`` → that code, anything else (a str message) is written to the captured
+    stderr buffer and mapped to exit 1.
+    """
+    code = exc.code
+    if code is None:
+        return 0
+    if isinstance(code, int):
+        return code
+    stderr_buf.write(str(code))
+    return 1
+
+
 def _run_in_process(normalised_argv: list[str]) -> tuple[int, str, str]:
     """Call :func:`signalforge.cli.main` in-process, capturing output.
+
+    A :class:`SystemExit` raised by ``main`` (argparse usage / ``--version`` /
+    any ``sys.exit``) is converted to an exit code via
+    :func:`_exit_code_from_systemexit` (subprocess parity) — it does NOT escape.
 
     Best-effort process-global isolation across tasks in a long-lived Airflow
     worker (DEC-003). Snapshots — before running ``main`` — and restores in a
@@ -159,7 +190,10 @@ def _run_in_process(normalised_argv: list[str]) -> tuple[int, str, str]:
     stderr_buf = io.StringIO()
     try:
         with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
-            exit_code = main(normalised_argv)
+            try:
+                exit_code = main(normalised_argv)
+            except SystemExit as exc:
+                exit_code = _exit_code_from_systemexit(exc, stderr_buf)
     finally:
         sys.excepthook = saved_excepthook
         for key, prior in saved_env.items():
@@ -302,9 +336,12 @@ def run_signalforge(
             and ``--project-dir`` are injected by :func:`normalise_argv` when
             absent; an explicit ``--format <x>`` is honoured (a non-json format
             means the stdout parse is skipped).
-        project_dir: The dbt project directory. Used both to inject
-            ``--project-dir`` (when absent from ``argv``) and to locate the
-            ``<project_dir>/.signalforge/{diff,grade}.json`` sidecars.
+        project_dir: The dbt project directory. Used to inject ``--project-dir``
+            (when absent from ``argv``) and as the fallback root for the
+            ``.signalforge/{diff,grade}.json`` sidecars. NOTE: sidecars are read
+            from the EFFECTIVE ``--project-dir`` — if the caller passes an
+            explicit ``--project-dir`` in ``argv`` that differs from this param,
+            the sidecars are located under THAT path (the one the run used).
         invocation: ``"in_process"`` (default — call :func:`signalforge.cli.main`
             directly, with snapshot/restore of process-global state) or
             ``"subprocess"`` (shell out to ``python -m signalforge``, full
@@ -323,8 +360,24 @@ def run_signalforge(
         one model named in the diff JSON. A ``--select`` batch's stdout diff is
         the LAST model's render; aggregating a batch is a documented limitation.
     """
-    project_dir_path = Path(project_dir)
+    # Reject an unknown ``invocation`` explicitly BEFORE running anything — a typo
+    # must fail loud, not silently fall back to subprocess.
+    if invocation not in ("in_process", "subprocess"):
+        raise ValueError(
+            f"Unsupported invocation={invocation!r}; expected 'in_process' or 'subprocess'."
+        )
+
     normalised, stdout_is_json = normalise_argv(argv, project_dir)
+
+    # Locate sidecars under the EFFECTIVE ``--project-dir`` actually passed to the
+    # CLI (the caller's explicit value if present in ``argv``, else the injected
+    # ``project_dir``). ``normalise_argv`` guarantees the flag is present, so a
+    # caller who passes a different ``--project-dir`` than ``project_dir`` still
+    # has its sidecars read from the path the run actually wrote them under.
+    effective_project_dir_value, _ = _find_flag(normalised, "--project-dir")
+    effective_project_dir = (
+        Path(effective_project_dir_value) if effective_project_dir_value else Path(project_dir)
+    )
 
     if invocation == "in_process":
         exit_code, stdout, stderr = _run_in_process(normalised)
@@ -345,8 +398,8 @@ def run_signalforge(
         flagged = _coerce_int(report.get("flagged_count"))
         duration_seconds = _coerce_float_or_none(report.get("duration_seconds"))
 
-    diff_sidecar_path = _sidecar_path_if_exists(project_dir_path, _DIFF_SIDECAR_NAME)
-    grade_sidecar_path, mean_grade = _read_grade_sidecar(project_dir_path)
+    diff_sidecar_path = _sidecar_path_if_exists(effective_project_dir, _DIFF_SIDECAR_NAME)
+    grade_sidecar_path, mean_grade = _read_grade_sidecar(effective_project_dir)
 
     return SignalForgeRunResult(
         exit_code=exit_code,

@@ -43,13 +43,14 @@ docs/airflow-ops.md.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from airflow import DAG
 from airflow.exceptions import AirflowFailException
 from airflow.operators.python import PythonOperator
 
 from signalforge.airflow import (
+    OnFlagged,
     SignalForgeRunResult,
     decide_task_outcome,
     run_signalforge,
@@ -88,12 +89,13 @@ def _config(env_name: str, var_name: str, *, required: bool = False) -> str | No
     return value
 
 
-def _resolve_on_flagged() -> str:
+def _resolve_on_flagged() -> OnFlagged:
     """Resolve the `on_flagged` policy (Variable / env), defaulting to ``"fail"``.
 
     An invalid value fails the task loudly (a config error) rather than silently
     defaulting — mirroring the original example's int-validation of the gate
-    threshold.
+    threshold. The validated string is returned typed as `OnFlagged` so the
+    `decide_task_outcome` call site needs no `# type: ignore`.
     """
     value = _config("SF_ON_FLAGGED", "signalforge_on_flagged")
     if value is None:
@@ -103,7 +105,7 @@ def _resolve_on_flagged() -> str:
             "SignalForge config invalid: signalforge_on_flagged / SF_ON_FLAGGED "
             f"must be one of {'|'.join(_VALID_ON_FLAGGED)}"
         )
-    return value
+    return cast(OnFlagged, value)
 
 
 def _run_generate(**context: object) -> dict[str, object]:
@@ -178,7 +180,7 @@ def _gate(**context: object) -> None:
         stderr="",
     )
 
-    outcome = decide_task_outcome(result, on_flagged=on_flagged)  # type: ignore[arg-type]
+    outcome = decide_task_outcome(result, on_flagged=on_flagged)
     # Message is built from ints + the validated on_flagged literal only (no raw
     # model strings) — safe to render into the exception / Airflow log.
     message = (

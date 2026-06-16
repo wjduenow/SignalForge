@@ -185,7 +185,8 @@ don't exist.
 ### `--select` batch limitation
 
 Sidecars are last-writer-wins, so a single `run_signalforge` over a `--select` batch
-reflects the **last** model's diff JSON; `model_unique_ids` lists the full match set.
+reflects the **last** model's diff JSON; `model_unique_ids` contains at most that last
+model's id (NOT the full match set).
 Accurate per-model batch XCom is the `SignalForgeGenerateOperator`'s job (it loops per
 model). For now, drive one `run_signalforge` per model when you need per-model counts.
 
