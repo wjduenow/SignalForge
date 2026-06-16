@@ -16,6 +16,7 @@ in the default coverage env) and are marked ``# pragma: no cover``, mirroring
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import sys
 
 import pytest
@@ -79,13 +80,38 @@ def test_hook_protocol_is_runtime_checkable() -> None:
     assert not isinstance(_Missing(), _airflow_compat._BaseHookProtocol)
 
 
-def test_generate_operator_stub_raises_not_implemented() -> None:
-    """The skeleton operator is construction-inert until an epic-#228 child
-    implements it."""
+def test_generate_operator_access_is_airflow_free_and_construction_requires_airflow() -> None:
+    """#232 US-003: the operator name resolves WITHOUT importing airflow (the
+    no-eager-import contract), and — with the ``[airflow]`` extra absent —
+    CONSTRUCTING it raises an ``ImportError`` (the real operator subclasses
+    ``BaseOperator`` and genuinely needs Airflow at construction time).
+
+    Attribute access goes through the find_spec-guarded
+    ``operators._get_generate_operator_class``: airflow-absent → the airflow-free
+    placeholder whose ``__init__`` raises ``ModuleNotFoundError``; airflow-present
+    → the real ``BaseOperator`` subclass (whose construction is covered by the
+    gated ``tests/airflow/test_operators.py``)."""
+
+    # Resolving the lazy name itself must not pull airflow into sys.modules.
+    # Snapshot before/after rather than asserting global absence: a prior test
+    # (or an env with the [airflow] extra) may legitimately have airflow loaded
+    # already — the invariant is that ACCESS does not ADD it.
+    def _airflow_loaded() -> bool:
+        return any(m == "airflow" or m.startswith("airflow.") for m in sys.modules)
+
+    had_airflow = _airflow_loaded()
     from signalforge.airflow import SignalForgeGenerateOperator
 
-    with pytest.raises(NotImplementedError, match="skeleton placeholder"):
-        SignalForgeGenerateOperator()
+    assert SignalForgeGenerateOperator is not None
+    assert _airflow_loaded() == had_airflow, (
+        "accessing SignalForgeGenerateOperator must not import the real airflow package"
+    )
+
+    if importlib.util.find_spec("airflow") is None:
+        with pytest.raises((ImportError, ModuleNotFoundError)):
+            SignalForgeGenerateOperator(task_id="t", project_dir="/p", model="m")
+    else:  # pragma: no cover - default CI env has no [airflow] extra
+        pytest.skip("airflow installed; gated tests/airflow/test_operators.py cover construction")
 
 
 def test_hook_stub_raises_not_implemented() -> None:

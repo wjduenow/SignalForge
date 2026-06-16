@@ -31,16 +31,19 @@ _EXAMPLES_DIR = Path(__file__).resolve().parents[2] / "examples" / "airflow"
 _AIRFLOW_SKIP = "Apache Airflow not installed (run inside the constraints-pinned airflow venv)"
 
 
-def _load_example_dag():
+def _load_example_dag(dag_id: str = "signalforge_generate"):
     from airflow.models.dagbag import DagBag
 
+    # The examples folder ships TWO DAGs (the two-PythonOperator pipeline example
+    # and the single-task operator drift monitor); BOTH must parse with no import
+    # errors regardless of which one the caller asked for.
     bag = DagBag(dag_folder=str(_EXAMPLES_DIR), include_examples=False)
     assert bag.import_errors == {}, f"DAG import errors: {bag.import_errors}"
     # Read the in-memory parsed-DAG dict, NOT bag.get_dag(): get_dag() consults the
     # metadata DB (DagModel.get_current), which requires `airflow db init`. Parse
     # certification must not need a DB — bag.dags is populated purely from parsing.
-    assert "signalforge_generate" in bag.dags, f"parsed dags: {list(bag.dags)}"
-    return bag.dags["signalforge_generate"]
+    assert dag_id in bag.dags, f"parsed dags: {list(bag.dags)}"
+    return bag.dags[dag_id]
 
 
 def test_example_dag_parses_without_import_errors() -> None:
@@ -56,6 +59,56 @@ def test_example_dag_parses_without_import_errors() -> None:
     assert set(dag.task_ids) == {"generate", "gate"}
     # `generate` feeds `gate` — the result→task-state + XCom contract the example teaches.
     assert dag.get_task("gate").upstream_task_ids == {"generate"}
+
+
+def test_operator_example_dag_parses_without_import_errors() -> None:
+    """The operator-based drift-monitor example DAG parses cleanly via DagBag.
+
+    Distinct ``dag_id`` from the two-PythonOperator example; a SINGLE task built
+    with the dedicated ``SignalForgeGenerateOperator``. Parses with NO SignalForge
+    config in the env (the DAG's ``_config`` fallbacks keep the operator's
+    construction-time validation green at parse).
+    """
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    dag = _load_example_dag("signalforge_generate_operator")
+    assert set(dag.task_ids) == {"drift_monitor"}
+
+
+def test_operator_renders_templated_fields() -> None:
+    """The operator's ``template_fields`` render from the task context.
+
+    Constructs the operator inside a DAG context and calls
+    ``render_template_fields`` with a synthetic context carrying ``ds`` + ``params``;
+    asserts the templated ``select`` (``{{ params.select }}``) and ``as_of``
+    (``{{ ds }}``) render to the injected values — the feature the example DAG
+    demonstrates.
+    """
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    import importlib
+    from datetime import datetime
+
+    from airflow import DAG
+
+    operators = importlib.import_module("signalforge.airflow.operators")
+    operator_cls = operators.SignalForgeGenerateOperator
+
+    with DAG(dag_id="render_test", start_date=datetime(2026, 1, 1), schedule=None):
+        op = operator_cls(
+            task_id="drift_monitor",
+            project_dir="/proj",
+            select="{{ params.select }}",
+            as_of="{{ ds }}",
+        )
+
+    # BaseOperator.render_template_fields(context, jinja_env=None) renders every
+    # template_fields attr IN PLACE from the context (jinja_env built from the DAG).
+    op.render_template_fields({"ds": "2026-06-15", "params": {"select": "tag:staging"}})
+
+    assert op.select == "tag:staging"
+    assert op.as_of == "2026-06-15"
+    # Non-templated / no-Jinja fields are untouched by the render pass.
+    assert op.project_dir == "/proj"
+    assert op.model is None
 
 
 def _live_skip_reason() -> str | None:
