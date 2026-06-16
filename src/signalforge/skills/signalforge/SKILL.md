@@ -201,7 +201,21 @@ The repo ships a live end-to-end test that exercises the full pipeline against r
 
 Surface the test output verbatim. The live e2e is the cleanest demonstration that SignalForge actually drops always-pass tests against real data, but it is **never** the default — Section 2's zero-credential demo is.
 
-## 7. Troubleshooting
+## 7. Scheduled runs (Airflow)
+
+For unattended, scheduled drift / signal-rot monitoring, SignalForge ships Apache Airflow operators behind the optional `[airflow]` extra (`pip install signalforge-dbt[airflow]`). The base install stays Airflow-free — the operators import nothing from Airflow until you install the extra and construct them inside a DAG.
+
+Three operators wrap the pipeline as Airflow tasks:
+
+- **`SignalForgeGenerateOperator`** — the full draft → prune → grade → diff pipeline as a scheduled task.
+- **`SignalForgePruneExistingOperator`** — the no-LLM ingest → prune → diff path, grading existing tests on a schedule.
+- **`SignalForgeDriftOperator`** — a read-only scheduled drift / signal-rot monitor.
+
+Plus a **`SignalForgeHook`** that resolves provider credentials and the dbt profile from a single Airflow Connection (and optional Variable) instead of inline per-task env, keeping secrets out of task definitions and XCom.
+
+For the operator parameters, the result → task-state contract, credential wiring, and ready-to-copy example DAGs, point the user at `docs/airflow-ops.md`.
+
+## 8. Troubleshooting
 
 Common errors and their one-line fixes:
 
