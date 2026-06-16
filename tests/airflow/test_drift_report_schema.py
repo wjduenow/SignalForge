@@ -195,9 +195,7 @@ def test_strict_drift_artifact_validates_each_transition_entry() -> None:
     """
     fixture_path = _FIXTURES_DIR / "drift_report_v1.json"
     payload = json.loads(fixture_path.read_text(encoding="utf-8"))
-    artifacts = (
-        payload["newly_always_passes"] + payload["newly_dropped"] + payload["newly_kept"]
-    )
+    artifacts = payload["newly_always_passes"] + payload["newly_dropped"] + payload["newly_kept"]
     assert artifacts, "expected at least one transition artifact in the fixture"
     saw_drop_reason = False
     saw_null_drop_reason = False
@@ -207,12 +205,8 @@ def test_strict_drift_artifact_validates_each_transition_entry() -> None:
             saw_null_drop_reason = True
         else:
             saw_drop_reason = True
-    assert saw_drop_reason, (
-        "fixture must include a transition with a populated current_drop_reason"
-    )
-    assert saw_null_drop_reason, (
-        "fixture must include a transition with a null current_drop_reason"
-    )
+    assert saw_drop_reason, "fixture must include a transition with a populated current_drop_reason"
+    assert saw_null_drop_reason, "fixture must include a transition with a null current_drop_reason"
 
 
 # ---------------------------------------------------------------------------
