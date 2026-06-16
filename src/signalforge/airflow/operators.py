@@ -44,12 +44,25 @@ from __future__ import annotations
 
 import functools
 import importlib.util
+import json
+import logging
 from collections.abc import Sequence
+from datetime import date
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import signalforge
 from signalforge.airflow._airflow_compat import make_base_operator, raise_for_outcome
+from signalforge.airflow.drift import (
+    DriftReport,
+    compute_drift,
+    load_diff_report,
+    load_grade_report,
+    parse_diff_report,
+)
 from signalforge.airflow.errors import AirflowConfigError
 from signalforge.airflow.result import (
+    OnDrift,
     OnFlagged,
     SignalForgeRunResult,
     decide_task_outcome,
@@ -57,6 +70,9 @@ from signalforge.airflow.result import (
 from signalforge.airflow.runner import run_signalforge
 
 if TYPE_CHECKING:
+    from signalforge.diff.models import DiffReport
+    from signalforge.grade.models import GradingReport
+
     # Type-checker-only declaration of the operator name. At runtime the class is
     # built by the find_spec-guarded factory below (it subclasses Apache
     # Airflow's ``BaseOperator``, which is NOT a typecheck dependency), and the
@@ -74,7 +90,16 @@ if TYPE_CHECKING:
         def execute(self, context: Any) -> Any: ...
 
 
+_LOGGER = logging.getLogger(__name__)
+
 _VALID_ON_FLAGGED: frozenset[str] = frozenset({"fail", "skip", "succeed"})
+
+# Conventional sidecar filenames under a drift-history directory (mirror the
+# runner's ``<project>/.signalforge/<name>.json`` names). The generate operator
+# persists THIS run's ``diff.json`` (+ ``grade.json`` sibling) here so a later
+# run can pass ``detect_drift_against=<dir>/diff.json`` (#235 DEC-009).
+_DIFF_SIDECAR_NAME = "diff.json"
+_GRADE_SIDECAR_NAME = "grade.json"
 
 
 def _build_generate_argv(
@@ -141,8 +166,11 @@ def _validate_operator_config(
     model: str | None,
     select: str | None,
     on_flagged: str,
+    on_drift: str = "fail",
+    detect_drift_against: str | None = None,
+    drift_history_dir: str | None = None,
 ) -> None:
-    """Validate operator params, raising :class:`AirflowConfigError` (DEC-009).
+    """Validate operator params, raising :class:`AirflowConfigError` (DEC-009 / #235 DEC-012).
 
     Pure, airflow-free, no I/O. Runs BEFORE any ``run_signalforge`` call. Raises
     on:
@@ -152,7 +180,12 @@ def _validate_operator_config(
       value must NOT satisfy the mutex — ``model=""`` is "unset", not "set");
     * ``model`` and ``select`` both set OR both unset (mutex — exactly one);
     * a ``model`` / ``select`` value beginning with ``-`` (argv-injection guard);
-    * ``on_flagged`` outside ``{"fail", "skip", "succeed"}``.
+    * ``on_flagged`` / ``on_drift`` outside ``{"fail", "skip", "succeed"}``;
+    * a ``detect_drift_against`` / ``drift_history_dir`` path that is set (and
+      non-blank) but not a ``str`` or begins with ``-`` (argv-injection guard).
+      A ``None`` or blank value means "drift detection / persistence off" for
+      that param (the feature is opt-in, #235 DEC-001/009), so it is NOT an
+      error — mirrors the truthiness gate ``execute`` keys on.
     """
     if not project_dir:
         raise AirflowConfigError("`project_dir` must be set (non-empty).")
@@ -183,6 +216,29 @@ def _validate_operator_config(
         raise AirflowConfigError(
             f"`on_flagged` must be one of {{fail, skip, succeed}} (got {on_flagged!r})."
         )
+
+    if on_drift not in _VALID_ON_FLAGGED:
+        raise AirflowConfigError(
+            f"`on_drift` must be one of {{fail, skip, succeed}} (got {on_drift!r})."
+        )
+
+    # Drift paths are opt-in: ``None`` / blank means "off" (mirrors ``execute``'s
+    # truthiness gate), so only a set, non-blank value is validated. A set value
+    # must be a ``str`` and must not begin with ``-`` (argv-injection guard,
+    # mirrors the model/select guard above).
+    for label, value in (
+        ("detect_drift_against", detect_drift_against),
+        ("drift_history_dir", drift_history_dir),
+    ):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        if not isinstance(value, str):
+            raise AirflowConfigError(f"`{label}` must be a string when set (got {value!r}).")
+        if value.startswith("-"):
+            raise AirflowConfigError(
+                f"`{label}` must not begin with '-' (got {value!r}); refusing as an "
+                "argv-injection guard."
+            )
 
 
 def _resolve_select_models(project_dir: str, select: str) -> tuple[str, ...]:
@@ -296,6 +352,59 @@ def _aggregate_batch_result(
         duration_seconds=duration_seconds,
         stdout="",
         stderr="",
+    )
+
+
+def build_drift_report(
+    *,
+    current_diff: DiffReport,
+    prior_diff: DiffReport | None,
+    current_grade: GradingReport | None,
+    prior_grade: GradingReport | None,
+    as_of: date | None,
+    grade_regression_threshold: float,
+) -> DriftReport:
+    """Orchestrate run-over-run drift detection into a :class:`DriftReport` (pure).
+
+    Airflow-free, no I/O — the decision-logic seam the (gated) generate-operator
+    ``execute`` drives, factored out so the codecov patch gate covers it (#235
+    US-004). The loaders that read the prior sidecars off disk
+    (:func:`load_diff_report` / :func:`load_grade_report`) and the stdout parse
+    (:func:`parse_diff_report`) live in :mod:`signalforge.airflow.drift`; this
+    function takes the already-parsed objects.
+
+    Two cases (DEC-013 — the comparison degrades, never raises):
+
+    * ``prior_diff is None`` — there is NO prior run to compare against, so this
+      run establishes the **baseline**: a non-alarming :class:`DriftReport` with
+      ``baseline=True``, empty transition / regression lists, an empty schema
+      delta, and ``degrade_reason=None``. The two input hashes are left empty
+      (``""``) — a baseline performs NO comparison, so neither hash is
+      meaningful. :func:`compute_drift` is NOT called.
+    * ``prior_diff is not None`` — delegate to the pure
+      :func:`signalforge.airflow.drift.compute_drift`, which classifies the
+      tier transitions (incl. the signal-rot ``newly_always_passes`` alarm),
+      folds in any grade regression beyond ``grade_regression_threshold`` (only
+      when BOTH grades are present), and itself degrades (never raises) on a
+      ``model_unique_id`` mismatch.
+    """
+    if prior_diff is None:
+        return DriftReport(
+            signalforge_version=signalforge.__version__,
+            model_unique_id=current_diff.model_unique_id,
+            as_of=as_of,
+            grade_regression_threshold=grade_regression_threshold,
+            baseline=True,
+            previous_diff_hash="",
+            current_diff_hash="",
+        )
+    return compute_drift(
+        previous_diff=prior_diff,
+        current_diff=current_diff,
+        previous_grade=prior_grade,
+        current_grade=current_grade,
+        as_of=as_of,
+        grade_regression_threshold=grade_regression_threshold,
     )
 
 
@@ -499,8 +608,18 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
         """
 
         # Airflow renders these fields from the task context before ``execute``
-        # (DEC-005), so a DAG author can template e.g. ``as_of="{{ ds }}"``.
-        template_fields = ("project_dir", "select", "model", "profiles_dir", "as_of")
+        # (DEC-005), so a DAG author can template e.g. ``as_of="{{ ds }}"``,
+        # ``detect_drift_against="…/{{ prev_ds }}/diff.json"`` (#235 DEC-001),
+        # ``drift_history_dir="…/{{ ds }}"`` (#235 DEC-009).
+        template_fields = (
+            "project_dir",
+            "select",
+            "model",
+            "profiles_dir",
+            "as_of",
+            "detect_drift_against",
+            "drift_history_dir",
+        )
 
         def __init__(
             self,
@@ -515,6 +634,10 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
             cache_scope: str | None = None,
             as_of: str | None = None,
             on_flagged: OnFlagged = "fail",
+            detect_drift_against: str | None = None,
+            drift_history_dir: str | None = None,
+            on_drift: OnDrift = "fail",
+            grade_regression_threshold: float = 0.05,
             invocation: Literal["in_process", "subprocess"] = "in_process",
             **kwargs: Any,
         ) -> None:
@@ -529,10 +652,21 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
             self.no_grade = no_grade
             self.cache_scope = cache_scope
             self.as_of = as_of
+            # Run-over-run drift detection (#235 US-004), all opt-in:
+            # ``detect_drift_against`` is the prior run's diff.json path,
+            # ``drift_history_dir`` is where THIS run's diff.json is persisted
+            # for the next run, ``on_drift`` is the alarm policy, and
+            # ``grade_regression_threshold`` is the mean-grade drop that counts
+            # as a regression. When ``detect_drift_against`` is unset, behaviour
+            # is byte-identical to the pre-#235 generate operator.
+            self.detect_drift_against = detect_drift_against
+            self.drift_history_dir = drift_history_dir
+            self.grade_regression_threshold = grade_regression_threshold
             # Annotate the Literal-typed attrs explicitly so pyright does NOT
             # widen them to ``str`` on assignment (which would break the typed
             # ``decide_task_outcome`` / ``run_signalforge`` calls below).
             self.on_flagged: OnFlagged = on_flagged
+            self.on_drift: OnDrift = on_drift
             self.invocation: Literal["in_process", "subprocess"] = invocation
             # Fail fast at DAG-parse / instantiation time. The leading-dash
             # argv-injection guard is harmless here: an un-rendered Jinja
@@ -544,18 +678,24 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
                 model=model,
                 select=select,
                 on_flagged=on_flagged,
+                on_drift=on_drift,
+                detect_drift_against=detect_drift_against,
+                drift_history_dir=drift_history_dir,
             )
 
         def execute(self, context: Any) -> dict[str, object]:
             # Re-validate the now-rendered template_fields (DEC-005): the
             # leading-dash argv-injection guard is meaningful only once Jinja has
-            # rendered ``model`` / ``select`` / ``project_dir`` to their final
-            # values.
+            # rendered ``model`` / ``select`` / ``project_dir`` (and the drift
+            # paths) to their final values.
             _validate_operator_config(
                 project_dir=self.project_dir,
                 model=self.model,
                 select=self.select,
                 on_flagged=self.on_flagged,
+                on_drift=self.on_drift,
+                detect_drift_against=self.detect_drift_against,
+                drift_history_dir=self.drift_history_dir,
             )
 
             if self.select is None:
@@ -574,19 +714,169 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
                 as_of=self.as_of,
             )
             result = run_signalforge(argv, project_dir=self.project_dir, invocation=self.invocation)
-            outcome = decide_task_outcome(result, on_flagged=self.on_flagged)
+
+            # Run-over-run drift detection (#235 US-004). Opt-in via
+            # ``detect_drift_against``; degrades to ``None`` (no drift key, no
+            # outcome change) when the current diff JSON is unparseable, so the
+            # generate run's own exit_code / flagged verdict still governs.
+            drift: DriftReport | None = None
+            drift_xcom: dict[str, object] | None = None
+            if self.detect_drift_against:
+                drift = self._maybe_compute_and_persist_drift(result)
+                if drift is not None:
+                    drift_xcom = drift.to_xcom()
+
+            outcome = decide_task_outcome(
+                result,
+                on_flagged=self.on_flagged,
+                on_drift=self.on_drift,
+                drift=drift,
+            )
             raise_for_outcome(
                 outcome,
                 message=(
                     f"signalforge generate for {self.model!r} produced "
                     f"task outcome {outcome.value} "
-                    f"(exit_code={result.exit_code}, flagged={result.flagged})."
+                    f"(exit_code={result.exit_code}, flagged={result.flagged}"
+                    + (f", drift_alarming={drift.alarming}" if drift is not None else "")
+                    + ")."
                 ),
             )
-            return result.to_xcom()
+            xcom = result.to_xcom()
+            if drift_xcom is not None:
+                xcom = {**xcom, "drift": drift_xcom}
+            return xcom
+
+        def _maybe_compute_and_persist_drift(
+            self, result: SignalForgeRunResult
+        ) -> DriftReport | None:
+            """Compute drift for THIS run and persist it for the next (gated wiring).
+
+            Returns the :class:`DriftReport` (baseline or comparison), or
+            ``None`` when the current diff JSON is unparseable (degrade — no
+            drift verdict, so it cannot alarm). Everything here is fail-soft on
+            the read side (DEC-013): a missing / corrupt prior sidecar yields a
+            baseline, a missing grade leaves ``grade_regressions`` empty.
+            """
+            current_diff = parse_diff_report(result.stdout)
+            if current_diff is None:
+                _LOGGER.warning(
+                    "signalforge drift: current diff JSON unparseable; skipping drift: %s",
+                    json.dumps(
+                        {
+                            "model": self.model,
+                            "detect_drift_against": self.detect_drift_against,
+                        }
+                    ),
+                )
+                return None
+
+            prior_diff = load_diff_report(self.detect_drift_against)  # type: ignore[arg-type]
+            current_grade = (
+                load_grade_report(result.grade_sidecar_path) if result.grade_sidecar_path else None
+            )
+            prior_grade = self._load_prior_grade_sibling()
+
+            as_of_date: date | None = None
+            if self.as_of:
+                try:
+                    as_of_date = date.fromisoformat(self.as_of)
+                except ValueError:
+                    as_of_date = None
+
+            drift = build_drift_report(
+                current_diff=current_diff,
+                prior_diff=prior_diff,
+                current_grade=current_grade,
+                prior_grade=prior_grade,
+                as_of=as_of_date,
+                grade_regression_threshold=self.grade_regression_threshold,
+            )
+
+            if drift.baseline:
+                _LOGGER.info(
+                    "signalforge drift: baseline established: %s",
+                    json.dumps({"model": drift.model_unique_id}),
+                )
+            else:
+                _LOGGER.info(
+                    "signalforge drift: %s",
+                    json.dumps(
+                        {
+                            "model": drift.model_unique_id,
+                            "alarming": drift.alarming,
+                            "degrade_reason": drift.degrade_reason,
+                            "counts": drift.to_xcom()["counts"],
+                        }
+                    ),
+                )
+
+            self._persist_current_run(current_diff, result)
+            return drift
+
+        def _load_prior_grade_sibling(self) -> GradingReport | None:
+            """Best-effort load of the ``grade.json`` next to ``detect_drift_against``.
+
+            The prior grade sidecar conventionally sits beside the prior
+            diff.json (``<dir>/diff.json`` ↔ ``<dir>/grade.json``). Fail-soft —
+            an absent / corrupt sibling yields ``None`` (DEC-013): drift's tier
+            transitions are still computed, only the grade-regression axis is
+            skipped.
+            """
+            prior_path = self.detect_drift_against
+            if not prior_path:
+                return None
+            sibling = Path(prior_path).parent / _GRADE_SIDECAR_NAME
+            return load_grade_report(sibling)
+
+        def _persist_current_run(
+            self, current_diff: DiffReport, result: SignalForgeRunResult
+        ) -> None:
+            """Persist THIS run's diff.json (+ grade.json sibling) for the next comparison.
+
+            Reuses the existing fail-closed
+            :func:`signalforge.diff._sidecar.write_sidecar` (#235 DEC-009/011 —
+            NO new writer); containment is anchored to the resolved
+            ``drift_history_dir`` (the directory the run is persisting under, not
+            the project dir). The grade sidecar — supplementary — is copied
+            best-effort. A no-op when ``drift_history_dir`` is unset.
+            """
+            if not self.drift_history_dir:
+                return
+            import shutil
+
+            from signalforge.diff._sidecar import write_sidecar
+
+            history_dir = Path(self.drift_history_dir)
+            history_dir.mkdir(parents=True, exist_ok=True)
+            write_sidecar(
+                current_diff,
+                sidecar_path=history_dir / _DIFF_SIDECAR_NAME,
+                project_dir=history_dir,
+            )
+            # Persist the grade sidecar if this run produced one, so the next
+            # run's prior-grade sibling load finds it. Supplementary → best
+            # effort; a copy failure must not fail the (already-succeeded) run.
+            if result.grade_sidecar_path:
+                try:
+                    shutil.copyfile(result.grade_sidecar_path, history_dir / _GRADE_SIDECAR_NAME)
+                except OSError:
+                    _LOGGER.warning(
+                        "signalforge drift: failed to persist grade sidecar: %s",
+                        json.dumps({"src": result.grade_sidecar_path}),
+                    )
 
         def _execute_batch(self) -> dict[str, object]:
             assert self.select is not None  # narrowed by execute()
+            if self.detect_drift_against:
+                # Drift detection is single-model only in v0.7 (#235 DEC-001):
+                # a ``--select`` batch's stdout diff is the LAST model's render
+                # (runner DEC-002), so there is no faithful per-model current
+                # diff to compare. Skip drift for the batch and proceed.
+                _LOGGER.info(
+                    "signalforge drift: detection skipped for --select batch: %s",
+                    json.dumps({"select": self.select}),
+                )
             model_ids = _resolve_select_models(self.project_dir, self.select)
             # DEC-007: force project-scope caching for a ≥2-model batch when the
             # operator did not pin a scope, so the Anthropic cached prefix
