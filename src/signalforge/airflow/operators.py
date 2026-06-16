@@ -1,11 +1,16 @@
-"""The SignalForge ``generate`` Apache Airflow operator (#232 US-003).
+"""The SignalForge Apache Airflow operators (#232 US-003, #233 US-002).
 
-This module ships :class:`SignalForgeGenerateOperator` — the operator a DAG
-author wires to run ``signalforge generate`` (single model or a ``--select``
-batch) as one Airflow task. The four pure helpers below
-(:func:`_build_generate_argv`, :func:`_validate_operator_config`,
-:func:`_resolve_select_models`, :func:`_aggregate_batch_result`) are the
-Airflow-free machinery the operator drives.
+This module ships two operators a DAG author wires as one Airflow task each:
+
+* :class:`SignalForgeGenerateOperator` — runs ``signalforge generate`` (single
+  model or a ``--select`` batch). The four pure helpers below
+  (:func:`_build_generate_argv`, :func:`_validate_operator_config`,
+  :func:`_resolve_select_models`, :func:`_aggregate_batch_result`) are the
+  Airflow-free machinery it drives.
+* :class:`SignalForgePruneExistingOperator` — runs ``signalforge prune-existing``
+  (ingest -> prune -> diff, **no LLM call**, read-only; #233). Its pure helpers
+  are :func:`_build_prune_existing_argv` + :func:`_validate_prune_existing_config`.
+  Single-model only — no batch apparatus (#233 DEC-003).
 
 **Deferred class construction (the load-bearing structural constraint).** The
 real operator must subclass Apache Airflow's ``BaseOperator``, which requires
@@ -59,6 +64,11 @@ if TYPE_CHECKING:
     # block exists so ``signalforge.airflow.__init__``'s ``TYPE_CHECKING``
     # re-export of the name resolves and ``__all__`` is satisfied under pyright.
     class SignalForgeGenerateOperator:  # noqa: D401 - type stub only
+        def __init__(self, *args: Any, **kwargs: Any) -> None: ...
+
+        def execute(self, context: Any) -> Any: ...
+
+    class SignalForgePruneExistingOperator:  # noqa: D401 - type stub only
         def __init__(self, *args: Any, **kwargs: Any) -> None: ...
 
         def execute(self, context: Any) -> Any: ...
@@ -423,6 +433,26 @@ class _GenerateOperatorAirflowMissing:
         )
 
 
+class _PruneExistingOperatorAirflowMissing:
+    """Stand-in for :class:`SignalForgePruneExistingOperator` when Airflow is absent.
+
+    Mirrors :class:`_GenerateOperatorAirflowMissing` exactly. Resolving
+    ``signalforge.airflow.SignalForgePruneExistingOperator`` without the
+    ``[airflow]`` optional extra installed returns THIS class (attribute access
+    stays airflow-free, keeping the no-eager-import gate green). Constructing it
+    raises :class:`ModuleNotFoundError` (an :class:`ImportError` subclass) naming
+    the remediation — the real operator subclasses ``BaseOperator`` and so
+    genuinely requires Airflow at construction time.
+    """
+
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        raise ModuleNotFoundError(
+            "SignalForgePruneExistingOperator requires Apache Airflow, which is not "
+            "installed. Install the optional extra: "
+            "pip install 'signalforge-dbt[airflow]'."
+        )
+
+
 # Cache for the resolved operator class — the real ``BaseOperator`` subclass when
 # Airflow is installed, else the airflow-free placeholder above. Built once on
 # first attribute access and reused (a process either has Airflow or it does not,
@@ -637,17 +667,170 @@ def _get_generate_operator_class() -> type:
     return _make_generate_operator_class()  # pragma: no cover - requires [airflow]
 
 
-def __getattr__(name: str) -> object:
-    """PEP 562 lazy resolution of the public ``SignalForgeGenerateOperator`` name.
+def _make_prune_existing_operator_class() -> type:  # pragma: no cover - requires [airflow]
+    """Build and return the real ``BaseOperator``-subclassing prune-existing operator.
 
-    Building the real ``BaseOperator`` subclass at module scope would force an
-    eager ``from airflow ...`` import; resolving the name here (via the
-    find_spec-guarded :func:`_get_generate_operator_class`) keeps attribute access
-    airflow-free while still yielding the real operator when Airflow is installed.
+    Sibling of :func:`_make_generate_operator_class` (#233 DEC-008). Reached only
+    when Apache Airflow is installed (guarded by
+    :func:`_get_prune_existing_operator_class`'s ``find_spec`` check). The base
+    class comes from the one shim
+    :func:`signalforge.airflow._airflow_compat.make_base_operator`, so the
+    ``from airflow ...`` import stays confined there and out of this module's
+    scope (DEC-008). Marked ``# pragma: no cover`` because its body — the
+    ``BaseOperator`` subclass and its ``execute`` — runs only under the gated
+    ``[airflow]`` extra (the gated ``tests/airflow/test_operators.py`` exercise
+    it); the default coverage env never installs Airflow.
+    """
+    _Base = make_base_operator()
+
+    class SignalForgePruneExistingOperator(_Base):  # type: ignore[valid-type, misc]
+        """Run ``signalforge prune-existing`` as one Apache Airflow task (no LLM).
+
+        Wraps the Airflow-free :func:`signalforge.airflow.runner.run_signalforge`
+        seam for the no-LLM ingest -> prune -> diff path (#233): maps operator
+        params to a ``signalforge prune-existing`` argv, runs it, maps the result
+        to a :class:`~signalforge.airflow.result.TaskOutcome` via the pure
+        :func:`~signalforge.airflow.result.decide_task_outcome`, and translates
+        that outcome into the matching Airflow signal via
+        :func:`~signalforge.airflow._airflow_compat.raise_for_outcome`. Returns
+        the run's XCom payload (counts + sidecar paths).
+
+        Single-model only (#233 DEC-003): ``prune-existing`` takes one positional
+        ``<model>`` and has no ``--select`` — so there is NO batch apparatus
+        (no selector resolution, no per-model loop, no aggregation, no
+        ``--cache-scope``). One ``run_signalforge`` call, one result, one XCom.
+
+        Read-only by design (#233 DEC-001): no ``write`` / ``mode`` param, no
+        Anthropic credential required. ``on_flagged`` is accepted for symmetry
+        with the sibling operators but is inert today — ``prune-existing`` does
+        no grading, so there is never a ``flagged`` tier and a clean (exit-0) run
+        always yields ``SUCCESS`` regardless of ``on_flagged`` (#233 DEC-004).
+        """
+
+        # Airflow renders these fields from the task context before ``execute``
+        # (DEC-007), so a DAG author can template e.g. ``as_of="{{ ds }}"`` or
+        # ``schema="{{ var.value.schema_path }}"``.
+        template_fields = (
+            "project_dir",
+            "model",
+            "schema",
+            "profiles_dir",
+            "as_of",
+            "tests_dir",
+        )
+
+        def __init__(
+            self,
+            *,
+            task_id: str,
+            project_dir: str,
+            model: str,
+            schema: str,
+            profiles_dir: str | None = None,
+            manifest: str | None = None,
+            scope: str | None = None,
+            sample_strategy: str | None = None,
+            as_of: str | None = None,
+            tests_dir: str | None = None,
+            on_flagged: OnFlagged = "fail",
+            invocation: Literal["in_process", "subprocess"] = "in_process",
+            **kwargs: Any,
+        ) -> None:
+            # BaseOperator owns ``task_id`` + the standard Airflow kwargs
+            # (``retries`` / ``retry_delay`` / ``depends_on_past`` / ...).
+            super().__init__(task_id=task_id, **kwargs)
+            self.project_dir = project_dir
+            self.model = model
+            self.schema = schema
+            self.profiles_dir = profiles_dir
+            self.manifest = manifest
+            self.scope = scope
+            self.sample_strategy = sample_strategy
+            self.as_of = as_of
+            self.tests_dir = tests_dir
+            # Annotate the Literal-typed attrs explicitly so pyright does NOT
+            # widen them to ``str`` on assignment (which would break the typed
+            # ``decide_task_outcome`` / ``run_signalforge`` calls below).
+            self.on_flagged: OnFlagged = on_flagged
+            self.invocation: Literal["in_process", "subprocess"] = invocation
+            # Fail fast at DAG-parse / instantiation time. The leading-dash
+            # argv-injection guard is harmless here: an un-rendered Jinja
+            # template (e.g. ``"{{ ds }}"``) never begins with ``-``, so it
+            # cannot false-trip. ``execute`` re-validates the RENDERED values
+            # (where the dash guard is meaningful) before building any argv.
+            _validate_prune_existing_config(
+                project_dir=project_dir,
+                model=model,
+                schema=schema,
+                on_flagged=on_flagged,
+            )
+
+        def execute(self, context: Any) -> dict[str, object]:
+            # Re-validate the now-rendered template_fields (DEC-007): the
+            # leading-dash argv-injection guard is meaningful only once Jinja has
+            # rendered ``model`` / ``schema`` / ``project_dir`` to final values.
+            _validate_prune_existing_config(
+                project_dir=self.project_dir,
+                model=self.model,
+                schema=self.schema,
+                on_flagged=self.on_flagged,
+            )
+            # Single call — no batch (#233 DEC-003).
+            argv = _build_prune_existing_argv(
+                model=self.model,
+                schema=self.schema,
+                project_dir=self.project_dir,
+                profiles_dir=self.profiles_dir,
+                manifest=self.manifest,
+                scope=self.scope,
+                sample_strategy=self.sample_strategy,
+                as_of=self.as_of,
+                tests_dir=self.tests_dir,
+            )
+            result = run_signalforge(argv, project_dir=self.project_dir, invocation=self.invocation)
+            outcome = decide_task_outcome(result, on_flagged=self.on_flagged)
+            raise_for_outcome(
+                outcome,
+                message=(
+                    f"signalforge prune-existing for {self.model!r} produced "
+                    f"task outcome {outcome.value} "
+                    f"(exit_code={result.exit_code}, flagged={result.flagged})."
+                ),
+            )
+            return result.to_xcom()
+
+    return SignalForgePruneExistingOperator
+
+
+@functools.cache
+def _get_prune_existing_operator_class() -> type:
+    """Resolve (and cache) the prune-existing operator class without importing airflow eagerly.
+
+    Sibling of :func:`_get_generate_operator_class` (#233 DEC-008). Attribute
+    ACCESS must stay airflow-free so the no-eager-import gate passes with the
+    ``[airflow]`` extra absent. :func:`importlib.util.find_spec` checks Airflow
+    availability WITHOUT executing/importing it. When Airflow is present, build
+    the real ``BaseOperator`` subclass; when absent, return the airflow-free
+    placeholder whose construction raises :class:`ModuleNotFoundError`.
+    """
+    if importlib.util.find_spec("airflow") is None:
+        return _PruneExistingOperatorAirflowMissing
+    return _make_prune_existing_operator_class()  # pragma: no cover - requires [airflow]
+
+
+def __getattr__(name: str) -> object:
+    """PEP 562 lazy resolution of the public operator names.
+
+    Building a real ``BaseOperator`` subclass at module scope would force an
+    eager ``from airflow ...`` import; resolving the names here (via the
+    find_spec-guarded getters) keeps attribute access airflow-free while still
+    yielding the real operator when Airflow is installed.
     """
     if name == "SignalForgeGenerateOperator":
         return _get_generate_operator_class()
+    if name == "SignalForgePruneExistingOperator":
+        return _get_prune_existing_operator_class()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-__all__ = ["SignalForgeGenerateOperator"]
+__all__ = ["SignalForgeGenerateOperator", "SignalForgePruneExistingOperator"]
