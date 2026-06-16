@@ -76,15 +76,19 @@ backend — **never** log them.
 
 The integration formalises one contract — reused verbatim by the example DAG today
 and the dedicated operators on the roadmap — turning a SignalForge run into (1) an
-Airflow task state and (2) an XCom payload. Three Airflow-free pieces in
-`signalforge.airflow` carry it (eagerly importable — no Airflow install needed):
+Airflow task state and (2) an XCom payload. Two Airflow-free pieces in
+`signalforge.airflow` carry it (eagerly importable — no Airflow install needed), plus
+a thin Airflow-side translator:
 
 - `run_signalforge(argv, *, project_dir, ...) -> SignalForgeRunResult` — runs the
-  pipeline and parses its output into a frozen result.
+  pipeline and parses its output into a frozen result. Airflow-free.
 - `decide_task_outcome(result, *, on_flagged="fail") -> TaskOutcome` — the **pure**
-  decision table.
-- `raise_for_outcome(outcome, *, message)` — the thin Airflow-side translator (the
-  one place that imports `airflow.exceptions`).
+  decision table (the result core). Airflow-free.
+- `raise_for_outcome(outcome, *, message)` — the thin Airflow-side translator that
+  turns a `TaskOutcome` into the matching Airflow exception. It lives in
+  `signalforge.airflow._airflow_compat` (not the package top, and not eagerly
+  re-exported); the `from airflow.exceptions import ...` is lazy in its body, so the
+  symbol is importable without Airflow, but *calling* it needs the `[airflow]` extra.
 
 ### Exit → TaskOutcome → Airflow
 
@@ -107,14 +111,16 @@ deterministic (retrying can't help, so retries are bypassed), while tier 3
 (auth / rate-limit / warehouse / API blips) is worth retrying under the task's
 `retries` / `retry_delay`.
 
-### `on_flagged` keys on the sidecar, not the exit code
+### `on_flagged` keys on the diff's flagged count, not the exit code
 
 A flagged run **exits 0 by default** — SignalForge runs with
 `grade.fail_on_below_threshold=false`, so a below-threshold artifact is surfaced via
-the diff's `flagged_count > 0` (`SignalForgeRunResult.below_threshold`), **not** via
-exit 2. Tier 2 stays purely *hard* input errors (`ModelNotFoundError`, anchor-contract
-failures); conflating it with "reviewable flagged" would mis-route hard errors to the
-review branch. So `on_flagged` only applies to a *successful* (exit-0) run:
+the diff JSON's `flagged_count > 0` (`SignalForgeRunResult.below_threshold`), **not** via
+exit 2. Under the documented default `--dry-run` path there is no sidecar file (it is
+suppressed); the count is read off the rendered diff on stdout (see *Transport +
+`--dry-run`* below). Tier 2 stays purely *hard* input errors (`ModelNotFoundError`,
+anchor-contract failures); conflating it with "reviewable flagged" would mis-route hard
+errors to the review branch. So `on_flagged` only applies to a *successful* (exit-0) run:
 
 - `fail` (default — signal over volume): a flagged run is a hard task failure so a
   reviewer sees it.

@@ -18,10 +18,14 @@ Two invocation modes:
 
 * ``in_process`` (default) — call :func:`signalforge.cli.main` directly,
   capturing stdout/stderr via :func:`contextlib.redirect_stdout` /
-  ``redirect_stderr``. Faster (no fresh interpreter), but mutates a little
-  process-global state — ``sys.excepthook`` and a handful of env vars — so this
-  mode snapshots and restores ALL of them in a ``finally`` block (DEC-003) to
-  keep a long-lived Airflow worker clean across tasks.
+  ``redirect_stderr``. Faster (no fresh interpreter), but mutates some
+  process-global state, so this mode snapshots and restores it in a ``finally``
+  block (DEC-003) to keep a long-lived Airflow worker clean across tasks:
+  ``sys.excepthook``, the ``NO_COLOR`` / ``FORCE_COLOR`` / ``DBT_PROFILES_DIR``
+  env vars, and — best-effort — the root logger's handlers + level (the CLI's
+  ``setup_logging`` calls ``logging.basicConfig(force=True)``, which removes and
+  may close the root logger's handlers; re-attaching them is best-effort, so for
+  full process isolation in a long-lived worker prefer ``subprocess``).
 * ``subprocess`` — shell out to ``python -m signalforge`` (LIST form, never
   ``shell=True``) for full process isolation. A ``timeout_seconds`` overrun
   surfaces as :class:`subprocess.TimeoutExpired` propagating unchanged (a
@@ -41,6 +45,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -116,11 +121,28 @@ def normalise_argv(argv: list[str], project_dir: str | Path) -> tuple[list[str],
 def _run_in_process(normalised_argv: list[str]) -> tuple[int, str, str]:
     """Call :func:`signalforge.cli.main` in-process, capturing output.
 
-    Snapshots ``sys.excepthook`` and the :data:`_ISOLATED_ENV_KEYS` env vars,
-    runs ``main`` under ``redirect_stdout`` / ``redirect_stderr``, and restores
-    ALL of the snapshotted state in a ``finally`` block — including when
-    ``main`` raises (the exception propagates AFTER restoration). This keeps a
-    long-lived Airflow worker process clean across tasks (DEC-003).
+    Best-effort process-global isolation across tasks in a long-lived Airflow
+    worker (DEC-003). Snapshots — before running ``main`` — and restores in a
+    ``finally`` block (even when ``main`` raises; the exception propagates AFTER
+    restoration):
+
+    * ``sys.excepthook``;
+    * the :data:`_ISOLATED_ENV_KEYS` env vars
+      (``NO_COLOR`` / ``FORCE_COLOR`` / ``DBT_PROFILES_DIR``);
+    * the root logger's handler LIST, level, and ``disabled`` flag.
+
+    The root-logger restore is needed because the CLI's
+    :func:`signalforge.cli._helpers.setup_logging` calls
+    ``logging.basicConfig(..., force=True)``, which REMOVES (and ``close()``-s)
+    the root logger's existing handlers and installs a single stderr handler —
+    tearing down Airflow's per-task log handlers. Re-attaching the original
+    handler list + level routes subsequent worker logging back through Airflow.
+
+    Residual limitation: ``basicConfig(force=True)`` may have already CLOSED the
+    original handler objects, so re-attaching them is best-effort (still
+    strictly better than leaving ``basicConfig``'s lone stderr handler in
+    place). For full process isolation in a long-lived worker, prefer
+    ``invocation="subprocess"``.
     """
     # Lazy import: keeps ``import signalforge.airflow.runner`` from eagerly
     # pulling the whole CLI (and its dbt / warehouse / pydantic imports).
@@ -128,6 +150,10 @@ def _run_in_process(normalised_argv: list[str]) -> tuple[int, str, str]:
 
     saved_excepthook = sys.excepthook
     saved_env: dict[str, str | None] = {k: os.environ.get(k) for k in _ISOLATED_ENV_KEYS}
+    _root = logging.getLogger()
+    saved_handlers = _root.handlers[:]
+    saved_level = _root.level
+    saved_disabled = _root.disabled
 
     stdout_buf = io.StringIO()
     stderr_buf = io.StringIO()
@@ -141,6 +167,13 @@ def _run_in_process(normalised_argv: list[str]) -> tuple[int, str, str]:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = prior
+        # Best-effort: re-attach the original handler list + level so worker
+        # logging routes back through Airflow's handlers (which the CLI's
+        # ``setup_logging`` torn down via ``basicConfig(force=True)``). The
+        # original handlers may have been closed; see the docstring.
+        _root.handlers[:] = saved_handlers
+        _root.setLevel(saved_level)
+        _root.disabled = saved_disabled
 
     return exit_code, stdout_buf.getvalue(), stderr_buf.getvalue()
 
@@ -213,14 +246,18 @@ def _sidecar_path_if_exists(project_dir: Path, filename: str) -> str | None:
 
     Routes ``<project_dir>/.signalforge/<filename>`` through the
     symlink-hardened :func:`canonicalise_path` (mirrors how the diff / grade
-    orchestrators read sidecars). Returns ``None`` on containment failure or
+    orchestrators read sidecars). Returns ``None`` on containment failure, on a
+    bare ``OSError`` while resolving (e.g. ``PermissionError`` or a non-ELOOP
+    resolve error — :func:`canonicalise_path` can raise these unwrapped), or
     when the file is absent (so ``--dry-run`` — which suppresses the sidecars —
-    yields ``None``).
+    yields ``None``). Both sidecar-path lookups go through this helper, so the
+    diff- and grade-sidecar checks degrade symmetrically (the grade read path
+    already swallows ``OSError`` on the file read).
     """
     raw = project_dir / _SIGNALFORGE_DIR / filename
     try:
         canonical = canonicalise_path(raw, project_dir)
-    except PathContainmentError:
+    except (PathContainmentError, OSError):
         return None
     return str(canonical) if canonical.exists() else None
 

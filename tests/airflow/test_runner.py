@@ -17,7 +17,11 @@ These tests import ONLY the Airflow-free runner — never the real
    is None``.
 5. Defensive parse: a non-JSON / empty / malformed-dict stdout does not crash.
 6. Subprocess mode: the command list is exactly
-   ``[sys.executable, "-m", "signalforge", ...]`` with NO ``shell=True``.
+   ``[sys.executable, "-m", "signalforge", ...]`` with NO ``shell=True``; a
+   ``TimeoutExpired`` propagates unchanged; the normalised argv reaches the cmd.
+7. Key-contract guard: the diff keys the runner reads + ``mean_score`` are real
+   ``DiffReport`` / ``GradingReport`` surfaces (round-trip through the real
+   serializer) — so a rename can't silently drift the parse to zero counts.
 """
 
 from __future__ import annotations
@@ -31,7 +35,7 @@ from typing import Any
 import pytest
 
 from signalforge._common.path_safety import PathContainmentError
-from signalforge.airflow.runner import normalise_argv, run_signalforge
+from signalforge.airflow.runner import _parse_diff_stdout, normalise_argv, run_signalforge
 
 # A minimal ``DiffReport.model_dump_json`` shape — only the keys the runner
 # parses. Mirrors ``src/signalforge/diff/models.py``'s field names.
@@ -254,6 +258,21 @@ def test_grade_sidecar_non_numeric_mean_score_yields_none(
     assert result.mean_grade is None
 
 
+def test_grade_sidecar_non_dict_json_yields_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Valid JSON, but the top-level value is an array (not an object) — exercises
+    # the ``isinstance(data, dict)`` false arm in ``_read_grade_sidecar``: the
+    # path is still set, mean_grade degrades to None (no crash).
+    monkeypatch.setattr("signalforge.cli.main", _fake_main_writing(json.dumps(_DIFF_JSON)))
+    _write_sidecar(tmp_path, "grade.json", json.dumps([{"mean_score": 0.5}]))
+
+    result = run_signalforge(["generate", "models/x.sql"], project_dir=tmp_path)
+
+    assert result.grade_sidecar_path is not None
+    assert result.mean_grade is None
+
+
 def test_sidecar_path_containment_failure_yields_none(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -391,6 +410,10 @@ def test_subprocess_mode_builds_list_command_no_shell(
     cmd = captured["cmd"]
     assert cmd[:3] == [sys.executable, "-m", "signalforge"]
     assert "generate" in cmd
+    # ``normalise_argv``'s injected flags reached the subprocess command (not just
+    # the program-name prefix): both ``--format`` and ``--project-dir`` are threaded.
+    assert "--format" in cmd
+    assert "--project-dir" in cmd
     # LIST form invoked; shell=True must never be passed.
     assert "shell" not in captured["kwargs"]
     assert captured["kwargs"].get("capture_output") is True
@@ -426,6 +449,26 @@ def test_subprocess_mode_passes_timeout(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert captured["kwargs"].get("timeout") == 42.0
 
 
+def test_subprocess_mode_propagates_timeout_expired(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A subprocess wall-clock overrun surfaces as ``subprocess.TimeoutExpired``
+    # propagating UNCHANGED — a runtime/external failure, deliberately NOT wrapped
+    # in ``AirflowConfigError`` (the documented contract).
+    def _fake_run(cmd: list[str], **kwargs: Any) -> Any:
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=1.0)
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_signalforge(
+            ["generate", "models/x.sql"],
+            project_dir=tmp_path,
+            invocation="subprocess",
+            timeout_seconds=1.0,
+        )
+
+
 def test_top_level_main_module_importable() -> None:
     """``signalforge.__main__`` imports cleanly and re-exports the CLI ``main``
     (the module that makes ``python -m signalforge`` resolvable)."""
@@ -450,3 +493,78 @@ def test_python_dash_m_signalforge_resolves() -> None:
     )
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
     assert proc.stdout.startswith("signalforge ")
+
+
+# --------------------------------------------------------------------------- #
+# key-contract guard (against the fake-driven-byte-identity blind spot)
+# --------------------------------------------------------------------------- #
+#
+# Every runner test above feeds a hand-crafted ``_DIFF_JSON`` / ``{"mean_score":
+# ...}`` that happens to match the real serialized shapes. A rename of
+# ``DiffReport.kept_count`` -> ``kept`` (or dropping ``GradingReport.mean_score``)
+# would keep ALL of those tests green while a real Airflow run parsed zero counts
+# / ``None`` mean_grade. These ungated, airflow-free tests pin the parse contract
+# against the REAL pydantic surfaces so it can't silently drift.
+
+
+def test_runner_diff_keys_are_real_diffreport_fields() -> None:
+    from signalforge.diff.models import DiffReport
+
+    # ``DiffReport`` carries no field aliases, so ``model_json_schema().properties``
+    # keys == the JSON keys ``model_dump_json(by_alias=True)`` emits == the keys the
+    # runner reads. A rename of any of these fails this test loudly.
+    properties = set(DiffReport.model_json_schema()["properties"])
+    runner_diff_keys = {
+        "model_unique_id",
+        "kept_count",
+        "kept_uncertain_count",
+        "dropped_count",
+        "flagged_count",
+        "duration_seconds",
+    }
+    missing = runner_diff_keys - properties
+    assert not missing, f"runner reads diff keys absent from DiffReport: {sorted(missing)}"
+
+
+def test_runner_mean_score_is_real_gradingreport_computed_field() -> None:
+    from signalforge.grade.models import GradingReport
+
+    # ``mean_score`` is a computed field on ``GradingReport`` (serialized into the
+    # grade.json sidecar). ``_read_grade_sidecar`` reads ``mean_score`` — drop or
+    # rename it and this fails loudly.
+    assert "mean_score" in GradingReport.model_computed_fields
+
+
+def test_real_diffreport_roundtrips_through_parse_diff_stdout() -> None:
+    # True round-trip against the REAL serializer: build a minimal ``DiffReport``,
+    # render it via ``model_dump_json(by_alias=True)`` (the exact shape stdout
+    # carries), and feed it through the runner's ``_parse_diff_stdout`` — the counts
+    # must come back under the keys ``run_signalforge`` reads.
+    from signalforge.diff.models import DiffReport
+
+    report = DiffReport(
+        signalforge_version="0.7.0.dev0",
+        model_unique_id="model.demo.stg_trips",
+        run_id="abc123",
+        duration_seconds=9.5,
+        proposed_yaml="",
+        existing_yaml=None,
+        unified_diff="",
+        entries=(),
+        kept_count=4,
+        kept_uncertain_count=2,
+        dropped_count=7,
+        flagged_count=1,
+        has_existing_schema=False,
+        candidate_hash="h1",
+        prune_result_hash="h2",
+        grading_report_hash=None,
+    )
+    parsed = _parse_diff_stdout(report.model_dump_json(by_alias=True), True)
+    assert parsed is not None
+    assert parsed["model_unique_id"] == "model.demo.stg_trips"
+    assert parsed["kept_count"] == 4
+    assert parsed["kept_uncertain_count"] == 2
+    assert parsed["dropped_count"] == 7
+    assert parsed["flagged_count"] == 1
+    assert parsed["duration_seconds"] == 9.5
