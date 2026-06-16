@@ -7,8 +7,9 @@
 - **Depends on:** #230 (skeleton + shim), #231 (result→task-state), #232 (`SignalForgeGenerateOperator`), **#233 (`SignalForgePruneExistingOperator`) — MERGED to `dev` 2026-06-16**
 - **Branch:** `feature/234-signalforge-hook`
 - **Worktree:** `../worktrees/SignalForge/234-signalforge-hook`
-- **Phase:** detailing (revised after #233 merge)
+- **Phase:** devolved
 - **Sessions:** 2 (2026-06-16)
+- **Epic bead:** `bd_1-scaffolding-qhi` (9 task beads `.1`–`.9`)
 
 ---
 
@@ -174,4 +175,16 @@ Architecture ordering: shared infra → grep-gate → pure resolver → gated ho
 
 ## Beads Manifest
 
-_(pending devolve)_
+- **Epic:** `bd_1-scaffolding-qhi`
+- **Worktree:** `../worktrees/SignalForge/234-signalforge-hook` (branch `feature/234-signalforge-hook`, merged up to `dev`)
+- **Tasks (dependency-ordered):**
+  - `.1` US-001 — `PROVIDER_ENV_VAR_KEYS` shared table — deps: none
+  - `.2` US-002 — logger grep-gate → `signalforge.airflow` — deps: none
+  - `.3` US-003 — pure resolver + typed models (100% ungated) — deps: `.1`
+  - `.4` US-004 — real `SignalForgeHook` + `register_secret` shim (gated) — deps: `.3`, `.2`
+  - `.5` US-005 — wire `signalforge_conn_id` → GenerateOperator (+ shared helper) — deps: `.4`
+  - `.6` US-006 — wire `signalforge_conn_id` → PruneExistingOperator — deps: `.5`
+  - `.7` US-007 — `docs/airflow-ops.md` + example DAG (A8) — deps: `.6`
+  - `.8` US-008 — Quality Gate — deps: `.7`
+  - `.9` US-009 — Patterns & Memory — deps: `.8`
+- **Ready at devolve:** `.1`, `.2`.
