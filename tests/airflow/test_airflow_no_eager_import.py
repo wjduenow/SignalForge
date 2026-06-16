@@ -28,6 +28,8 @@ import importlib
 import subprocess
 import sys
 
+import pytest
+
 _SUBPROCESS_SCRIPT = """
 import importlib
 import sys
@@ -92,6 +94,71 @@ def test_resolving_lazy_names_does_not_import_airflow_in_process() -> None:
     assert not _airflow_modules_in_sys_modules(), (
         "resolving the lazy operator/hook names must not import airflow — the "
         "stubs deliberately do not subclass BaseOperator/BaseHook at module scope"
+    )
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "signalforge.airflow.result",
+        "signalforge.airflow.runner",
+    ],
+)
+def test_importing_airflow_free_submodule_does_not_import_airflow(module_name: str) -> None:
+    """The Airflow-free core submodules (#231 ``result``, ``runner``) must each
+    import without pulling ``airflow`` into ``sys.modules``.
+
+    These are the modules whose public names ``signalforge.airflow.__init__``
+    re-exports **eagerly** (``SignalForgeRunResult`` / ``TaskOutcome`` /
+    ``decide_task_outcome`` / ``OnFlagged`` / ``run_signalforge``). The eager
+    re-export is only sound if importing the defining module is itself
+    airflow-free — pin that directly. (``result`` carries NO ``from airflow``;
+    ``runner`` defers its only heavy import, ``signalforge.cli.main``, lazily
+    inside the function body.)
+    """
+    for name in list(sys.modules):
+        if name == "airflow" or name.startswith("airflow."):
+            del sys.modules[name]
+        if name == module_name or name.startswith(f"{module_name}."):
+            del sys.modules[name]
+
+    importlib.import_module(module_name)
+
+    assert not _airflow_modules_in_sys_modules(), (
+        f"importing {module_name} must not pull the real `airflow` package into "
+        "sys.modules — the airflow-free core stays unit-testable without the "
+        "[airflow] extra installed"
+    )
+
+
+def test_accessing_eager_names_does_not_import_airflow() -> None:
+    """Accessing the eagerly re-exported core names off ``signalforge.airflow``
+    pulls in only the airflow-free ``result`` / ``runner`` modules — no airflow.
+    """
+    for name in list(sys.modules):
+        if name == "airflow" or name.startswith("airflow."):
+            del sys.modules[name]
+        if name == "signalforge.airflow" or name.startswith("signalforge.airflow."):
+            del sys.modules[name]
+
+    from signalforge.airflow import (
+        OnFlagged,
+        SignalForgeRunResult,
+        TaskOutcome,
+        decide_task_outcome,
+        run_signalforge,
+    )
+
+    # OnFlagged is a typing.Literal alias (truthy but not a class) — bind it to
+    # prove the eager import resolved it; the others are concrete objects.
+    assert OnFlagged is not None
+    assert SignalForgeRunResult is not None
+    assert TaskOutcome is not None
+    assert decide_task_outcome is not None
+    assert run_signalforge is not None
+    assert not _airflow_modules_in_sys_modules(), (
+        "resolving the eager core names must not import airflow — result/runner "
+        "are airflow-free and re-exported eagerly per DEC-006"
     )
 
 
