@@ -5,15 +5,17 @@ DAG — turning the CLI from an ad-hoc tool into a **scheduled schema-drift / si
 monitor**. Consistent with Architectural Commitment #4 (OSS-first, Core-friendly): an
 Airflow DAG runs against any dbt-core project, no dbt Cloud dependency.
 
-> **Status (v0.7).** The dedicated **`SignalForgeGenerateOperator`** has landed (epic
-> #228, issue #232) — see [SignalForgeGenerateOperator](#signalforgegenerateoperator)
-> below. It is the recommended surface: one task wraps `signalforge generate` (single
-> model or a `--select` batch) and reuses the exact same result→task-state + XCom
-> contract documented here. The **example DAG** that drives the pipeline through the
-> `signalforge.airflow` helpers (`run_signalforge` + `decide_task_outcome` +
-> `raise_for_outcome`) from a `PythonOperator` still ships as a from-scratch reference;
-> the operator collapses both halves of that pattern into one `execute()`. A
-> `SignalForgePruneExistingOperator` remains on the roadmap.
+> **Status (v0.7).** Two dedicated operators have landed (epic #228): the
+> **`SignalForgeGenerateOperator`** (issue #232 —
+> [section](#signalforgegenerateoperator)) wraps `signalforge generate` (single model or
+> a `--select` batch), and the **`SignalForgePruneExistingOperator`** (issue #233 —
+> [section](#signalforgepruneexistingoperator)) wraps the no-LLM, read-only
+> `signalforge prune-existing` (ingest → prune → diff) as a zero-credential signal-rot
+> monitor. Both reuse the exact same result→task-state + XCom contract documented here.
+> The **example DAG** that drives the pipeline through the `signalforge.airflow` helpers
+> (`run_signalforge` + `decide_task_outcome` + `raise_for_outcome`) from a
+> `PythonOperator` still ships as a from-scratch reference; the operators collapse both
+> halves of that pattern into one `execute()`.
 
 ## Install Airflow alongside SignalForge
 
@@ -368,6 +370,114 @@ give each concurrent run its own `project_dir` (or accept last-writer-wins). Thi
 distinct from the in-process stdout-capture concurrency caveat above (that one bites even
 under dry-run; use `subprocess` for it).
 
+## SignalForgePruneExistingOperator
+
+`SignalForgePruneExistingOperator` runs `signalforge prune-existing` (ingest → prune →
+diff, **no LLM call**) as **one Airflow task**. It is the cheapest, fastest,
+zero-credential SignalForge integration: a **signal-rot monitor** that grades the dbt
+tests a team *already has* (a hand-authored or generated `schema.yml`) against live
+warehouse data on a schedule, flagging the tests that *used* to catch failing rows but
+now always-pass. Because it makes no Anthropic call, the worker needs **no
+`ANTHROPIC_API_KEY`** — only the warehouse credentials.
+
+Like the generate operator it ships behind the `[airflow]` extra. Importing it without
+Airflow installed is fine (attribute access stays Airflow-free); **constructing** it
+without Airflow raises `ModuleNotFoundError` pointing at
+`pip install 'signalforge-dbt[airflow]'`.
+
+### Minimal usage
+
+```python
+from signalforge.airflow import SignalForgePruneExistingOperator
+
+monitor = SignalForgePruneExistingOperator(
+    task_id="signalforge_signal_rot",
+    project_dir="/opt/dbt/my_project",
+    model="models/staging/stg_orders.sql",      # file-path or unique_id (a bare name fails)
+    schema="models/staging/schema.yml",         # the hand-authored schema.yml to prune
+)
+```
+
+### Read-only / no-LLM by design (DEC-001)
+
+The operator deliberately exposes **no `write` param and no `mode` param**:
+
+- `prune-existing` has no `--write` — the `--schema` source is a hand-authored file and
+  overwriting it would be surprising. The operator is **always read-only**: it passes
+  `--dry-run` on every run, so nothing is written to the dbt project (both sidecars
+  suppressed) and the diff is read off **stdout** (`--format json`) — the #231 JSON
+  transport, not the suppressed sidecar file.
+- `--mode` (a `SafetyPolicy` knob) is **inert** on this path — `prune_tests` never reads
+  the safety policy, and the LLM payload `--mode` shapes is never built. The warehouse
+  knobs that *do* matter are `scope` (`--scope`) and `sample_strategy`
+  (`--sample-strategy`).
+
+No Anthropic credential is required or read — this path never touches an LLM credential
+at all (no `conn_id`-style LLM connection param exists on the operator).
+
+### `schema` is a required param (DEC-002)
+
+`prune-existing` cannot run without `--schema <path>` (the hand-authored `schema.yml`
+whose tests are pruned). `schema` is therefore a **required** operator param; an
+empty / `None` / blank value raises `AirflowConfigError` (CLI tier 2) at DAG-parse /
+instantiation time, before any `run_signalforge` call — alongside the empty-`project_dir`,
+empty-`model`, and leading-dash argv-injection guards.
+
+### Single-model only — no `--select` batch (DEC-003)
+
+`prune-existing` takes a single positional `<model>` and has **no `--select`**. The
+operator therefore drops the entire batch apparatus the generate operator carries: no
+selector resolution, no per-model loop, no aggregation, no `--cache-scope`. One
+`run_signalforge` call, one `SignalForgeRunResult`, one `to_xcom()` payload.
+
+### `on_flagged` is inert without grading (DEC-004)
+
+`prune-existing` calls `render_diff(grading_report=None)` — there is **no grading**, so
+there is never a `flagged` tier. Entries are only kept / kept-uncertain / dropped,
+`result.flagged` is always `0`, and `result.below_threshold` is always `False`. A clean
+(exit-0) run therefore always yields the `SUCCESS` `TaskOutcome` **regardless of
+`on_flagged`**.
+
+`on_flagged` is retained (and validated against `{fail, skip, succeed}`) for symmetry
+with the sibling operators — and so a future grade pass layered on top would Just Work —
+but **it has no effect today**. The exit→`TaskOutcome`→Airflow table for tiers 1/2/3 (a
+hard load/parse/input/external error) still applies exactly as documented above: tier 1
+or 2 → `FAIL_NO_RETRY`, tier 3 (warehouse/auth) → `FAIL_RETRYABLE`.
+
+### Params → CLI flags
+
+Every `__init__` kwarg and the `signalforge prune-existing` flag it maps to.
+`--format json` and `--dry-run` are **always** injected (DEC-005). There is no `write`,
+`mode`, `select`, `no_grade`, or `cache_scope` param.
+
+| Operator param | Maps to | Notes |
+|----------------|---------|-------|
+| `task_id` | — | standard Airflow; required |
+| `project_dir` | `--project-dir <dir>` | dbt project root (must contain `target/manifest.json`); required. **`template_fields`** |
+| `model` | positional `<model>` | model **file-path or unique_id** (a bare name fails); required. **`template_fields`** |
+| `schema` | `--schema <path>` | the hand-authored `schema.yml` to prune; **required** (DEC-002). **`template_fields`** |
+| `profiles_dir` | `--profiles-dir <dir>` | overrides `DBT_PROFILES_DIR`; omitted when unset. **`template_fields`** |
+| `manifest` | `--manifest <path>` | explicit `manifest.json` override; omitted when unset |
+| `scope` | `--scope <scope>` | prune scope (`sample` / `full`); omitted when unset |
+| `sample_strategy` | `--sample-strategy <strategy>` | `materialised` / `oneshot`; omitted when unset |
+| `as_of` | `--as-of <YYYY-MM-DD>` | reproducibility anchor for time-bound tests; `{{ ds }}` is a natural source. **`template_fields`** |
+| `tests_dir` | `--tests-dir <dir>` | directory of singular-test `tests/*.sql` files to ingest too (DEC-006); omitted when unset. **`template_fields`** |
+| `on_flagged` | — (decision layer) | `fail` (default) / `skip` / `succeed`; **inert without grading** (DEC-004) |
+| `invocation` | — (run mode) | `in_process` (default) / `subprocess`; see the **Invocation modes** section above |
+| `**kwargs` | — | passed to `BaseOperator` (`retries`, `retry_delay`, `depends_on_past`, …) |
+
+The six `template_fields` (`project_dir`, `model`, `schema`, `profiles_dir`, `as_of`,
+`tests_dir`) are Jinja-rendered from the task context before `execute`, so
+`model="{{ params.model }}"`, `schema="{{ params.schema }}"`, `as_of="{{ ds }}"`, etc.
+work. `execute` re-validates the rendered values before building any argv.
+
+### `tests_dir` — singular `custom_sql` test ingestion (DEC-006)
+
+When set, `tests_dir` passes `--tests-dir <dir>` so `prune-existing` also ingests the
+singular-test (`tests/*.sql`) files in that directory — the `custom_sql` business-rule
+test surface — alongside the `schema.yml` tests, pruning them in one run. Omitted when
+unset (the CLI defaults to `<project>/tests`).
+
 ## Scheduling for drift detection
 
 The example ships with `schedule=None` (manual trigger) so it never auto-spends on
@@ -395,10 +505,16 @@ export AIRFLOW__CORE__DAGS_FOLDER="$(pwd)/examples/airflow"
 
 ## Testing
 
-`tests/airflow/test_dag_parse.py` ships two gated tests (`@pytest.mark.airflow`):
+`tests/airflow/test_dag_parse.py` ships gated tests (`@pytest.mark.airflow`):
 
-- **parse** — `DagBag` loads the example with zero import errors and both tasks present
-  (no credentials; runs in the gated CI `airflow` job).
+- **parse** — `DagBag` loads each shipped example with zero import errors and the
+  expected tasks present: the two-`PythonOperator` pipeline (`signalforge_generate`), the
+  `SignalForgeGenerateOperator` drift monitor (`signalforge_generate_operator`), and the
+  `SignalForgePruneExistingOperator` signal-rot monitor
+  (`signalforge_prune_existing_operator`). No credentials; runs in the gated CI `airflow`
+  job.
+- **render** — each operator's `template_fields` Jinja-render from a synthetic task
+  context (e.g. `{{ params.model }}` / `{{ ds }}`).
 - **live** — runs the `generate` task against an `init-demo` project; self-skips without
   `SF_RUN_AIRFLOW=1` + `ANTHROPIC_API_KEY` + `GOOGLE_CLOUD_PROJECT` + `SF_RUN_BQ`.
 
@@ -408,12 +524,14 @@ uv run --no-sync pytest -m airflow --no-cov   # inside the constraints-pinned ai
 
 ## Caveats
 
-- **`SignalForgeGenerateOperator` has landed (epic #228, #232);** see
-  [SignalForgeGenerateOperator](#signalforgegenerateoperator). The `PythonOperator`
-  example DAG remains a from-scratch reference. A `SignalForgePruneExistingOperator`
-  is still roadmap.
+- **Both operators have landed (epic #228):** the `SignalForgeGenerateOperator` (#232,
+  [section](#signalforgegenerateoperator)) and the no-LLM `SignalForgePruneExistingOperator`
+  (#233, [section](#signalforgepruneexistingoperator)). The `PythonOperator` example DAG
+  remains a from-scratch reference.
 - **Time-bound tests + reproducibility.** If your draft includes the time-bound
   `row_count_anomaly_by_period` variant, pass `--as-of YYYY-MM-DD` (the DAG's logical
   date is a natural source) so a re-run is reproducible — see `docs/prune-ops.md`.
 - **Cost.** Each `generate` run spends real Anthropic + warehouse budget; the prune
-  engine's `maximum_bytes_billed` cap and `--dry-run` (no file writes) bound it.
+  engine's `maximum_bytes_billed` cap and `--dry-run` (no file writes) bound it. A
+  `prune-existing` run spends **warehouse budget only** (no LLM call), bounded by the
+  same `maximum_bytes_billed` cap.

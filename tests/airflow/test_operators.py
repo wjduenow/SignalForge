@@ -402,3 +402,172 @@ def test_construction_rejects_bad_on_flagged() -> None:
 
     with pytest.raises(AirflowConfigError):
         _operator_class()(task_id="gen", project_dir="/proj", model="m", on_flagged="bogus")
+
+
+# --------------------------------------------------------------------------- #
+# SignalForgePruneExistingOperator (#233) — single-model, no-LLM, read-only
+# --------------------------------------------------------------------------- #
+
+
+def _prune_existing_operator_class() -> type:
+    """Resolve the real prune-existing operator class (airflow present)."""
+    operators = importlib.import_module("signalforge.airflow.operators")
+    return operators.SignalForgePruneExistingOperator
+
+
+def test_prune_existing_success_returns_xcom_and_builds_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """exit 0 / flagged 0 → no raise, returns ``to_xcom()`` (single dict); argv correct."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+
+    result = _result(exit_code=0, flagged=0)
+    captured = _patch_run(monkeypatch, [result])
+
+    op = _prune_existing_operator_class()(
+        task_id="prune",
+        project_dir="/proj",
+        model="model.demo.stg_trips",
+        schema="models/staging/schema.yml",
+    )
+    xcom = op.execute(context={})
+
+    # to_xcom() is a single dict (NOT the {"models", "aggregate"} batch shape).
+    assert xcom == result.to_xcom()
+    # One run — argv is the prune-existing form: positional model, required
+    # --schema, --format json + --dry-run always present, no --select/--write.
+    assert len(captured) == 1
+    assert captured[0] == [
+        "prune-existing",
+        "model.demo.stg_trips",
+        "--schema",
+        "models/staging/schema.yml",
+        "--project-dir",
+        "/proj",
+        "--format",
+        "json",
+        "--dry-run",
+    ]
+
+
+def test_prune_existing_passes_optional_flags_through_to_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """profiles_dir / manifest / scope / sample_strategy / as_of / tests_dir reach argv."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+
+    captured = _patch_run(monkeypatch, [_result(exit_code=0, flagged=0)])
+    op = _prune_existing_operator_class()(
+        task_id="prune",
+        project_dir="/proj",
+        model="m",
+        schema="s.yml",
+        profiles_dir="/profiles",
+        manifest="target/manifest.json",
+        scope="sample",
+        sample_strategy="oneshot",
+        as_of="2026-06-15",
+        tests_dir="tests",
+    )
+    op.execute(context={})
+    argv = captured[0]
+    assert argv[argv.index("--profiles-dir") + 1] == "/profiles"
+    assert argv[argv.index("--manifest") + 1] == "target/manifest.json"
+    assert argv[argv.index("--scope") + 1] == "sample"
+    assert argv[argv.index("--sample-strategy") + 1] == "oneshot"
+    assert argv[argv.index("--as-of") + 1] == "2026-06-15"
+    assert argv[argv.index("--tests-dir") + 1] == "tests"
+    # Read-only monitor — never --write, never --select (#233 DEC-001/DEC-003).
+    assert "--write" not in argv
+    assert "--select" not in argv
+
+
+def test_prune_existing_exit1_raises_airflow_fail_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """exit 1 (load/parse) → AirflowFailException (no retry)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    from airflow.exceptions import AirflowFailException
+
+    _patch_run(monkeypatch, [_result(exit_code=1, flagged=0)])
+    op = _prune_existing_operator_class()(
+        task_id="prune", project_dir="/proj", model="m", schema="s.yml"
+    )
+    with pytest.raises(AirflowFailException):
+        op.execute(context={})
+
+
+def test_prune_existing_exit2_raises_airflow_fail_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """exit 2 (input-validation, incl. IngestError/ModelNotFoundError) → AirflowFailException."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    from airflow.exceptions import AirflowFailException
+
+    _patch_run(monkeypatch, [_result(exit_code=2, flagged=0)])
+    op = _prune_existing_operator_class()(
+        task_id="prune", project_dir="/proj", model="m", schema="s.yml"
+    )
+    with pytest.raises(AirflowFailException):
+        op.execute(context={})
+
+
+def test_prune_existing_exit3_raises_retryable_airflow_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """exit 3 (warehouse / external dependency) → base AirflowException (retryable)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    from airflow.exceptions import AirflowException, AirflowFailException, AirflowSkipException
+
+    _patch_run(monkeypatch, [_result(exit_code=3, flagged=0)])
+    op = _prune_existing_operator_class()(
+        task_id="prune", project_dir="/proj", model="m", schema="s.yml"
+    )
+    with pytest.raises(AirflowException) as exc_info:
+        op.execute(context={})
+    assert type(exc_info.value) is AirflowException
+    assert not isinstance(exc_info.value, (AirflowFailException, AirflowSkipException))
+
+
+@pytest.mark.parametrize("on_flagged", ["fail", "skip", "succeed"])
+def test_prune_existing_on_flagged_is_inert_clean_run_always_succeeds(
+    monkeypatch: pytest.MonkeyPatch, on_flagged: str
+) -> None:
+    """``on_flagged`` is inert without grading (#233 DEC-004): a clean exit-0 run
+    (flagged always 0 on the no-LLM path) yields SUCCESS for ALL three values —
+    no raise, returns the XCom dict."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+
+    result = _result(exit_code=0, flagged=0)
+    _patch_run(monkeypatch, [result])
+    op = _prune_existing_operator_class()(
+        task_id="prune",
+        project_dir="/proj",
+        model="m",
+        schema="s.yml",
+        on_flagged=on_flagged,
+    )
+    xcom = op.execute(context={})
+    assert xcom == result.to_xcom()
+    assert xcom["flagged"] == 0
+    assert xcom["below_threshold"] is False
+
+
+def test_prune_existing_construction_rejects_empty_schema() -> None:
+    """``schema`` is required (#233 DEC-002) — empty fails fast at __init__."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    from signalforge.airflow.errors import AirflowConfigError
+
+    with pytest.raises(AirflowConfigError):
+        _prune_existing_operator_class()(task_id="prune", project_dir="/proj", model="m", schema="")
+
+
+def test_prune_existing_construction_rejects_bad_on_flagged() -> None:
+    """An invalid ``on_flagged`` fails fast at __init__ (validated for symmetry)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    from signalforge.airflow.errors import AirflowConfigError
+
+    with pytest.raises(AirflowConfigError):
+        _prune_existing_operator_class()(
+            task_id="prune", project_dir="/proj", model="m", schema="s.yml", on_flagged="bogus"
+        )
