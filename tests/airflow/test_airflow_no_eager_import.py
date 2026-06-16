@@ -39,6 +39,7 @@ importlib.import_module("signalforge.airflow")
 
 # Resolving the lazy public names imports the airflow-free stub modules only.
 from signalforge.airflow import (
+    SignalForgeDriftOperator,
     SignalForgeGenerateOperator,
     SignalForgeHook,
     SignalForgePruneExistingOperator,
@@ -47,6 +48,7 @@ from signalforge.airflow import (
 assert SignalForgeGenerateOperator is not None
 assert SignalForgeHook is not None
 assert SignalForgePruneExistingOperator is not None
+assert SignalForgeDriftOperator is not None
 
 leaked = sorted(
     name for name in sys.modules if name == "airflow" or name.startswith("airflow.")
@@ -93,6 +95,7 @@ def test_resolving_lazy_names_does_not_import_airflow_in_process() -> None:
             del sys.modules[name]
 
     from signalforge.airflow import (
+        SignalForgeDriftOperator,
         SignalForgeGenerateOperator,
         SignalForgeHook,
         SignalForgePruneExistingOperator,
@@ -101,6 +104,7 @@ def test_resolving_lazy_names_does_not_import_airflow_in_process() -> None:
     assert SignalForgeGenerateOperator is not None
     assert SignalForgeHook is not None
     assert SignalForgePruneExistingOperator is not None
+    assert SignalForgeDriftOperator is not None
     assert not _airflow_modules_in_sys_modules(), (
         "resolving the lazy operator/hook names must not import airflow — the "
         "stubs deliberately do not subclass BaseOperator/BaseHook at module scope"

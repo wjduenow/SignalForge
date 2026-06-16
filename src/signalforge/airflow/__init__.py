@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     # gate). The modules themselves are Airflow-free per DEC-004.
     from signalforge.airflow.hooks import SignalForgeHook
     from signalforge.airflow.operators import (
+        SignalForgeDriftOperator,
         SignalForgeGenerateOperator,
         SignalForgePruneExistingOperator,
     )
@@ -80,6 +81,7 @@ if TYPE_CHECKING:
 _LAZY_NAMES: dict[str, str] = {
     "SignalForgeGenerateOperator": "operators",
     "SignalForgePruneExistingOperator": "operators",
+    "SignalForgeDriftOperator": "operators",
     "SignalForgeHook": "hooks",
 }
 
@@ -91,6 +93,7 @@ __all__ = [
     "GradeRegression",
     "OnFlagged",
     "SchemaShapeDelta",
+    "SignalForgeDriftOperator",
     "SignalForgeGenerateOperator",
     "SignalForgeHook",
     "SignalForgePruneExistingOperator",
