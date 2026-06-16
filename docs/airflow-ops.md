@@ -5,13 +5,15 @@ DAG — turning the CLI from an ad-hoc tool into a **scheduled schema-drift / si
 monitor**. Consistent with Architectural Commitment #4 (OSS-first, Core-friendly): an
 Airflow DAG runs against any dbt-core project, no dbt Cloud dependency.
 
-> **Status (v0.7).** The shipped surface today is an **example DAG** that drives the
-> pipeline through the `signalforge.airflow` helpers (`run_signalforge` +
-> `decide_task_outcome` + `raise_for_outcome`) from a `PythonOperator`. Dedicated
-> `SignalForgeGenerateOperator` / `SignalForgePruneExistingOperator` are on the roadmap
-> (epic #228); they are a drop-in swap for the `PythonOperator` — they reuse the exact
-> same result→task-state + XCom contract documented below. The helper-wrapping pattern
-> keeps working regardless.
+> **Status (v0.7).** The dedicated **`SignalForgeGenerateOperator`** has landed (epic
+> #228, issue #232) — see [SignalForgeGenerateOperator](#signalforgegenerateoperator)
+> below. It is the recommended surface: one task wraps `signalforge generate` (single
+> model or a `--select` batch) and reuses the exact same result→task-state + XCom
+> contract documented here. The **example DAG** that drives the pipeline through the
+> `signalforge.airflow` helpers (`run_signalforge` + `decide_task_outcome` +
+> `raise_for_outcome`) from a `PythonOperator` still ships as a from-scratch reference;
+> the operator collapses both halves of that pattern into one `execute()`. A
+> `SignalForgePruneExistingOperator` remains on the roadmap.
 
 ## Install Airflow alongside SignalForge
 
@@ -182,13 +184,20 @@ byte-identical whether read from the file or stdout. `mean_grade` is read from
 sidecar), and `diff_sidecar_path` / `grade_sidecar_path` are `None` when the files
 don't exist.
 
-### `--select` batch limitation
+### `--select` batch behaviour: the raw seam vs the operator
 
-Sidecars are last-writer-wins, so a single `run_signalforge` over a `--select` batch
-reflects the **last** model's diff JSON; `model_unique_ids` contains at most that last
-model's id (NOT the full match set).
-Accurate per-model batch XCom is the `SignalForgeGenerateOperator`'s job (it loops per
-model). For now, drive one `run_signalforge` per model when you need per-model counts.
+This is a property of the **raw `run_signalforge` seam**, not the operator. A single
+`run_signalforge` call over a `--select` batch lets the CLI's own batch driver render
+every matched model, but the sidecars are last-writer-wins — so the parsed result
+reflects only the **last** model's diff JSON, and `model_unique_ids` contains at most
+that last model's id (NOT the full match set). If you call the raw seam directly and
+need per-model counts, drive one `run_signalforge` per model yourself.
+
+The **`SignalForgeGenerateOperator` overcomes this**: it resolves the `--select`
+expression itself and loops `run_signalforge` once per matched model, so its XCom
+carries accurate per-model counts plus a rollup aggregate
+(see [`--select` batch: per-model XCom + aggregate task-state](#-select-batch-per-model-xcom-aggregate-task-state)).
+Prefer the operator over the raw seam for any batch.
 
 ### Usage
 
@@ -203,6 +212,158 @@ result = run_signalforge(
 outcome = decide_task_outcome(result, on_flagged="fail")
 raise_for_outcome(outcome, message=f"signalforge exit={result.exit_code}")
 ```
+
+## SignalForgeGenerateOperator
+
+`SignalForgeGenerateOperator` runs `signalforge generate` (a single model or a
+`--select` batch) as **one Airflow task**. It wraps the Airflow-free
+`run_signalforge` seam: maps its params to a `generate` argv, runs the pipeline, maps
+the result to a `TaskOutcome` via the pure `decide_task_outcome`, and raises the
+matching Airflow signal — returning the run's XCom payload (counts + sidecar paths).
+It is the recommended surface over the hand-wired `PythonOperator` example DAG.
+
+The operator ships behind the `[airflow]` extra. Importing it without Airflow
+installed is fine (attribute access stays Airflow-free); **constructing** it without
+Airflow raises `ModuleNotFoundError` pointing at `pip install 'signalforge-dbt[airflow]'`.
+
+### Minimal usage
+
+```python
+from signalforge.airflow import SignalForgeGenerateOperator
+
+monitor = SignalForgeGenerateOperator(
+    task_id="signalforge_nightly",
+    project_dir="/opt/dbt/my_project",
+    select="tag:nightly",   # or model="models/staging/stg_orders.sql"
+    write=False,            # dry-run: the safe scheduled default (no file writes)
+    on_flagged="fail",      # a below-threshold (flagged) run fails the task
+)
+```
+
+### Params → CLI flags
+
+Every `__init__` kwarg and the `signalforge generate` flag it maps to. `--format json`
+and `--project-dir` are always injected by the runner.
+
+| Operator param | Maps to | Notes |
+|----------------|---------|-------|
+| `task_id` | — | standard Airflow; required |
+| `project_dir` | `--project-dir <dir>` | dbt project root (must contain `target/manifest.json`); required. **`template_fields`** |
+| `model` | positional `<model>` | model **file-path or unique_id** (a bare name fails); mutex with `select`. **`template_fields`** |
+| `select` | `--select <expr>` | dbt-style selector (`tag:…`, `path:…`, comma-union); mutex with `model`. **`template_fields`** |
+| `profiles_dir` | `--profiles-dir <dir>` | overrides `DBT_PROFILES_DIR`; omitted when unset. **`template_fields`** |
+| `write` | `--write` (True) / `--dry-run` (False) | default `False`. See [`write=False`](#writefalse-is-dry-run-the-safe-scheduled-default) |
+| `no_grade` | `--no-grade` | default `False`; skips the grade stage (`mean_grade` → `None`) |
+| `cache_scope` | `--cache-scope <scope>` | `per-model` / `project`; omitted when unset (auto-promoted on batches — see below) |
+| `as_of` | `--as-of <YYYY-MM-DD>` | reproducibility anchor for time-bound tests; `{{ ds }}` is a natural source. **`template_fields`** |
+| `on_flagged` | — (decision layer) | `fail` (default) / `skip` / `succeed`; see [`on_flagged` branches](#on_flagged-keys-on-the-diffs-flagged-count-not-the-exit-code) |
+| `invocation` | — (run mode) | `in_process` (default) / `subprocess`; see [Invocation modes](#invocation-modes) |
+| `**kwargs` | — | passed to `BaseOperator` (`retries`, `retry_delay`, `depends_on_past`, …) |
+
+Exactly one of `model` or `select` must be set (a validation error fires at DAG-parse
+time otherwise). The five `template_fields` are Jinja-rendered from the task context
+before `execute`, so `as_of="{{ ds }}"`, `model="{{ params.model }}"`, etc. work.
+`execute` re-validates the rendered values before building any argv (DEC-005).
+
+The operator does **not** take a `config_overrides` param in v0.7 (DEC-002) — see
+[Cost / time guardrails](#cost-time-guardrails-via-signalforgeyml) below.
+
+### `write=False` is `--dry-run` (the safe scheduled default)
+
+`write=False` (the default) passes `--dry-run`: the run writes **nothing** — no
+`schema.yml`, no proposed `.sql`, no `.signalforge/diff.json` or `grade.json` sidecars
+(DEC-003). XCom counts are built from the diff JSON on **stdout**, and the
+`diff_sidecar_path` / `grade_sidecar_path` XCom fields are `None`. This is exactly what
+a scheduled drift monitor wants: observe the tier-count delta run-over-run without
+mutating the repo.
+
+`write=True` passes `--write`: SignalForge writes the proposed `schema.yml` (kept tests)
+plus any `custom_sql` `.sql` files, and the sidecar files are written so the path fields
+populate.
+
+### `on_flagged` keys on the diff's flagged count, not the exit code
+
+A flagged run **exits 0** (SignalForge runs `grade.fail_on_below_threshold=false`), so a
+below-threshold artifact surfaces via the diff's `flagged_count > 0`, **not** via exit 2
+(DEC-008). `on_flagged` only applies to a *successful* (exit-0) run:
+
+- `fail` (default — signal over volume): a flagged run is a hard task failure
+  (`AirflowFailException`, no retry) so a reviewer sees it.
+- `skip`: raises `AirflowSkipException` — route a downstream review task off it (a
+  trigger-rule / `BranchPythonOperator` path).
+- `succeed`: pass through — report-only.
+
+Hard input errors (tier 2: `ModelNotFoundError`, anchor-contract failures) stay hard
+task failures regardless of `on_flagged` — they never route to the review branch.
+
+### Invocation modes
+
+`invocation` selects how the operator runs the CLI:
+
+- `in_process` (default) — calls `signalforge.cli.main(argv)` directly: no subprocess
+  overhead, and the CLI's panic-path + four-tier exit-code mapping come for free. It
+  snapshots and restores `sys.excepthook`, the env keys the CLI mutates
+  (`NO_COLOR` / `FORCE_COLOR` / `DBT_PROFILES_DIR`), and the root logger so a long-lived
+  worker stays clean across tasks.
+- `subprocess` — runs `[sys.executable, "-m", "signalforge", *argv]` (list form, never
+  `shell=True`) in a fresh interpreter.
+
+> **Concurrency caveat (DEC-004).** In-process capture uses
+> `contextlib.redirect_stdout`, which is **process-global** — two concurrent
+> `in_process` tasks in the *same* worker would clobber each other's captured output.
+> Use `invocation="subprocess"` for parallel / high-concurrency workers; it is the clean
+> per-task isolation choice.
+
+### Cost / time guardrails via `signalforge.yml`
+
+The operator takes **no** cost/time-ceiling params in v0.7 (DEC-002). Bound scheduled
+spend through the project's committed `signalforge.yml grade:` block instead — every run
+the operator launches reads it:
+
+```yaml
+grade:
+  max_grade_cost_usd: 5.00     # degrade-not-fail once the run's grade spend hits the cap
+  max_grade_calls: 200         # cap on judge calls
+  max_grade_tokens: 500000     # cap on judge tokens
+  total_budget_seconds: 600    # absolute wall-clock cap on the grade stage
+```
+
+These are the documented way to cap a scheduled DAG's Anthropic spend. (Warehouse spend
+is bounded separately by the prune engine's `maximum_bytes_billed`, and `write=False`
+keeps the run read-only.)
+
+### `--select` batch: per-model XCom + aggregate task-state
+
+For a `--select` batch the operator resolves the selector to its model unique_ids itself
+and loops `run_signalforge` once per model (DEC-001), overcoming the raw seam's
+last-writer-wins sidecar limitation (see
+[`--select` batch behaviour](#-select-batch-behaviour-the-raw-seam-vs-the-operator)).
+When `cache_scope` is unset and ≥2 models match, the operator forces
+`--cache-scope project` on each looped call (DEC-007) so Anthropic's server-side prompt
+cache amortises the byte-identical project prefix across the siblings instead of paying
+cache-creation per model.
+
+The XCom payload for a batch is `{"models": [<per-model to_xcom() dict>…],
+"aggregate": <rollup to_xcom() dict>}` (DEC-010). The **single** Airflow task state is
+driven by the aggregate (DEC-008): `exit_code = max(per-model exit codes)` over the
+four-tier severity ordering (mirrors the CLI's `_run_batch.total_exit_code`); the tier
+counts (`kept` / `kept_uncertain` / `dropped` / `flagged`) are element-wise sums;
+`mean_grade` is the mean of the non-`None` per-model means; the aggregate's sidecar paths
+are `None` (a batch has no single sidecar). A batch mixing a tier-2 and a tier-3 model
+maps to the retryable tier-3 outcome — the tier-2 model re-fails until the task's retry
+budget exhausts (acceptable at single-task granularity).
+
+A single-model run returns the bare `result.to_xcom()` dict (no `models`/`aggregate`
+wrapper).
+
+### Concurrent `project_dir` sidecar caveat
+
+Two runs against the **same** `project_dir` collide on the `.signalforge/*.json`
+sidecars (`O_TRUNC`, last-writer-wins). Under the default `write=False` (dry-run) this is
+a non-issue — no sidecars are written, so there is nothing to collide. With `write=True`,
+give each concurrent run its own `project_dir` (or accept last-writer-wins). This is
+distinct from the in-process stdout-capture concurrency caveat above (that one bites even
+under dry-run; use `subprocess` for it).
 
 ## Scheduling for drift detection
 
@@ -244,8 +405,10 @@ uv run --no-sync pytest -m airflow --no-cov   # inside the constraints-pinned ai
 
 ## Caveats
 
-- **Dedicated operators are roadmap (epic #228).** Today's example wraps the CLI; the
-  operator swap is mechanical when it lands.
+- **`SignalForgeGenerateOperator` has landed (epic #228, #232);** see
+  [SignalForgeGenerateOperator](#signalforgegenerateoperator). The `PythonOperator`
+  example DAG remains a from-scratch reference. A `SignalForgePruneExistingOperator`
+  is still roadmap.
 - **Time-bound tests + reproducibility.** If your draft includes the time-bound
   `row_count_anomaly_by_period` variant, pass `--as-of YYYY-MM-DD` (the DAG's logical
   date is a natural source) so a re-run is reproducible — see `docs/prune-ops.md`.
