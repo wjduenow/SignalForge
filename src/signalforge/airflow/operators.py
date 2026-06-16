@@ -289,6 +289,121 @@ def _aggregate_batch_result(
     )
 
 
+def _build_prune_existing_argv(
+    *,
+    model: str,
+    schema: str,
+    project_dir: str,
+    profiles_dir: str | None,
+    manifest: str | None,
+    scope: str | None,
+    sample_strategy: str | None,
+    as_of: str | None,
+    tests_dir: str | None,
+) -> list[str]:
+    """Map operator params to a ``signalforge prune-existing`` argv list (pure).
+
+    Builds the ``["prune-existing", ...]`` argv consumed by
+    :func:`signalforge.airflow.runner.run_signalforge` for the no-LLM
+    ingest -> prune -> diff path (#233 DEC-005). Airflow-free, no I/O.
+
+    Flag contract:
+
+    * The positional ``<model>`` is ALWAYS the second token (single-model
+      only — ``prune-existing`` has no ``--select``; #233 DEC-003).
+    * ``--schema <schema>`` is ALWAYS present (the hand-authored
+      ``schema.yml`` to prune; #233 DEC-002).
+    * ``--project-dir <project_dir>`` is ALWAYS present.
+    * ``--format json`` is ALWAYS present — the runner parses the diff JSON
+      off stdout.
+    * ``--dry-run`` is ALWAYS present — the operator is a read-only monitor;
+      the JSON transport is stdout (#231 DEC-005), not the suppressed
+      sidecar. There is NO ``write=True`` branch (#233 DEC-001 — read-only).
+    * ``profiles_dir`` (non-empty) → ``--profiles-dir <profiles_dir>``.
+    * ``manifest`` (non-empty) → ``--manifest <manifest>``.
+    * ``scope`` (non-empty) → ``--scope <scope>``.
+    * ``sample_strategy`` (non-empty) → ``--sample-strategy <sample_strategy>``.
+    * ``as_of`` (non-empty) → ``--as-of <as_of>``.
+    * ``tests_dir`` (non-empty) → ``--tests-dir <tests_dir>`` (#233 DEC-006 —
+      singular ``tests/*.sql`` ingestion).
+
+    Each optional flag is omitted entirely when its value is ``None`` (or an
+    empty string), so a falsy override never emits a bare flag.
+    """
+    argv: list[str] = [
+        "prune-existing",
+        model,
+        "--schema",
+        schema,
+        "--project-dir",
+        project_dir,
+        "--format",
+        "json",
+        "--dry-run",
+    ]
+    if profiles_dir:
+        argv += ["--profiles-dir", profiles_dir]
+    if manifest:
+        argv += ["--manifest", manifest]
+    if scope:
+        argv += ["--scope", scope]
+    if sample_strategy:
+        argv += ["--sample-strategy", sample_strategy]
+    if as_of:
+        argv += ["--as-of", as_of]
+    if tests_dir:
+        argv += ["--tests-dir", tests_dir]
+    return argv
+
+
+def _validate_prune_existing_config(
+    *,
+    project_dir: str | None,
+    model: str | None,
+    schema: str | None,
+    on_flagged: str,
+) -> None:
+    """Validate prune-existing params, raising :class:`AirflowConfigError` (#233 DEC-001/002/004).
+
+    Pure, airflow-free, no I/O. Runs BEFORE any ``run_signalforge`` call.
+    There are deliberately NO ``write`` / ``mode`` params on this operator —
+    ``prune-existing`` is read-only (no ``--write``) and makes no LLM call
+    (``--mode`` is inert; #233 DEC-001). Raises on:
+
+    * empty / ``None`` ``project_dir``;
+    * empty / ``None`` (or non-``str`` / blank) ``schema`` — ``--schema`` is a
+      required operator param (#233 DEC-002);
+    * empty / ``None`` (or non-``str`` / blank) ``model`` — the single
+      positional model is required (no ``--select``);
+    * a ``model`` / ``schema`` value beginning with ``-`` (argv-injection
+      guard);
+    * ``on_flagged`` outside ``{"fail", "skip", "succeed"}`` (retained for
+      symmetry with the sibling operators but documented inert without
+      grading; #233 DEC-004).
+    """
+    if not project_dir:
+        raise AirflowConfigError("`project_dir` must be set (non-empty).")
+
+    # ``model`` and ``schema`` are BOTH required for the single-model,
+    # required-schema prune-existing surface. A provided value must be a
+    # non-blank str BEFORE the leading-dash check: a blank / non-str value
+    # would otherwise emit an empty positional / ``--schema ""`` into the
+    # argv (or crash the ``.startswith`` guard).
+    for label, value in (("model", model), ("schema", schema)):
+        if not isinstance(value, str) or not value.strip():
+            raise AirflowConfigError(f"`{label}` must be a non-empty string (got {value!r}).")
+        if value.startswith("-"):
+            raise AirflowConfigError(
+                f"`{label}` must not begin with '-' (got {value!r}); refusing as an "
+                "argv-injection guard."
+            )
+
+    if on_flagged not in _VALID_ON_FLAGGED:
+        raise AirflowConfigError(
+            f"`on_flagged` must be one of {{fail, skip, succeed}} (got {on_flagged!r})."
+        )
+
+
 class _GenerateOperatorAirflowMissing:
     """Stand-in for :class:`SignalForgeGenerateOperator` when Airflow is absent.
 
