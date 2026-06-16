@@ -478,6 +478,164 @@ singular-test (`tests/*.sql`) files in that directory — the `custom_sql` busin
 test surface — alongside the `schema.yml` tests, pruning them in one run. Omitted when
 unset (the CLI defaults to `<project>/tests`).
 
+## Drift / signal-rot detection
+
+SignalForge's prune step drops a test that *always-passes* on warehouse samples
+(Architectural Commitment #1 — an always-pass test is noise). **Signal rot** is the
+run-over-run version of that: a test that *used to* catch failing rows (a `kept` /
+`kept-uncertain` / `flagged` tier) but **now always-passes** (`dropped` with
+`drop_reason == "always-passes"`). The data changed underneath a test that silently
+stopped doing anything — a schema-drift alarm worth paging on. A run-over-run **grade
+regression** (the mean rubric score fell beyond a threshold) is the second alarming
+signal.
+
+Drift detection is **single-model** in v0.7, opt-in, and comes in **two operator
+surfaces** — both backed by the same pure, Airflow-free comparison core
+(`signalforge.airflow.compute_drift`).
+
+### Form 1 — ergonomic: drift folded into the generate task
+
+The `SignalForgeGenerateOperator` detects drift *as part of* its run when
+`detect_drift_against` is set: it parses the current diff off its own stdout, loads the
+prior run's `diff.json` from the templated path, computes a `DriftReport`, optionally
+persists this run's `diff.json` (+ `grade.json` sibling) for the next run
+(`drift_history_dir`), and folds the drift verdict into the task state via `on_drift`.
+One task does run + compare + persist + decide. The drift summary rides on the task's
+XCom under the `"drift"` key.
+
+```python
+from signalforge.airflow import SignalForgeGenerateOperator
+
+monitor = SignalForgeGenerateOperator(
+    task_id="drift_monitor",
+    project_dir="/opt/dbt/my_project",
+    model="models/staging/stg_orders.sql",
+    write=False,                       # read-only scheduled default
+    as_of="{{ ds }}",                  # reproducibility anchor
+    # Compare against yesterday's persisted diff; persist today's for tomorrow.
+    detect_drift_against="/opt/airflow/sf_history/{{ macros.ds_add(ds, -1) }}/diff.json",
+    drift_history_dir="/opt/airflow/sf_history/{{ ds }}",
+    on_drift="fail",                   # alarming drift → hard, no-retry failure
+)
+```
+
+When `detect_drift_against` is unset the operator behaves byte-identically to the
+pre-drift generate operator — no drift key, no behaviour change.
+
+### Form 2 — branchable: generate persists, a dedicated operator gates
+
+When you want the run and the alarm to be **separate tasks** — the generate should
+always succeed-and-persist, and a downstream task is the pageable gate you branch /
+alert on independently — use the dedicated `SignalForgeDriftOperator`. It runs **no
+`signalforge` CLI invocation**: it reads two persisted `diff.json` sidecars
+(yesterday + today, plus auto-resolved `grade.json` siblings) off disk, computes the
+`DriftReport`, and drives its single task state off the drift verdict. Because it
+touches no LLM and no warehouse, the worker needs **no credentials** for this task.
+
+```python
+from signalforge.airflow import SignalForgeDriftOperator, SignalForgeGenerateOperator
+
+generate = SignalForgeGenerateOperator(
+    task_id="generate",
+    project_dir="/opt/dbt/my_project",
+    model="models/staging/stg_orders.sql",
+    detect_drift_against="/opt/airflow/sf_history/{{ macros.ds_add(ds, -1) }}/diff.json",
+    drift_history_dir="/opt/airflow/sf_history/{{ ds }}",  # persists today's diff.json
+    on_drift="succeed",                # record-only: the generate task never fails on drift
+)
+
+drift_check = SignalForgeDriftOperator(
+    task_id="drift_check",
+    previous_diff_path="/opt/airflow/sf_history/{{ macros.ds_add(ds, -1) }}/diff.json",
+    current_diff_path="/opt/airflow/sf_history/{{ ds }}/diff.json",
+    on_drift="fail",                   # the pageable gate
+)
+
+generate >> drift_check
+```
+
+`previous_diff_path` and `current_diff_path` are **required** params (validated at
+DAG-parse). The dedicated operator's XCom **is** the drift payload (not nested under a
+`"drift"` key — that nesting is the generate operator's shape).
+
+### `detect_drift_against` + `drift_history_dir` — the date-stamped history pattern
+
+Each run persists a date-stamped `diff.json` (`drift_history_dir="…/{{ ds }}"`); the
+next run compares against the prior date's copy (`detect_drift_against="…/{{ macros.ds_add(ds, -1) }}/diff.json"`).
+Both params are in `template_fields`, so the logical date stamps the path. Mount the
+history base on durable storage so a run can find the prior run's sidecar. Persistence
+reuses the fail-closed `write_sidecar` writer (no new writer); the `grade.json` sibling
+is copied best-effort. Persistence is triggered by `detect_drift_against` being set.
+
+### `on_drift` (fail / skip / succeed) — most-severe-wins with `on_flagged`
+
+`on_drift` is the run-over-run analogue of `on_flagged`:
+
+- `fail` (default) — an alarming drift is a hard, **no-retry** `AirflowFailException`.
+  Signal rot is deterministic, so retrying cannot un-rot it; it is a reviewer signal,
+  not a transient.
+- `skip` — `AirflowSkipException` (mark the task skipped — route to a review branch).
+- `succeed` — pass through (record-only; the drift still rides on XCom).
+
+On the generate operator the flagged-axis (`on_flagged`) and the drift-axis (`on_drift`)
+**combine most-severe-wins** on an exit-0 run (`FAIL_NO_RETRY > SKIP > SUCCESS`). A hard
+load/parse/input/external error (exit 1/2/3) short-circuits both axes per the
+[Exit → TaskOutcome → Airflow](#exit--taskoutcome--airflow) table.
+
+### Degrade, never fail (DEC-013)
+
+The comparison is fail-soft, so a drift monitor never breaks the DAG over its own
+bookkeeping:
+
+- **Missing prior `diff.json`** (the first run) → a non-alarming **baseline**
+  (`baseline=True`); the task SUCCEEDs and persists today's diff for next time.
+- **`model_unique_id` mismatch** or a **corrupt / unreadable / oversize** prior sidecar
+  → a non-alarming **degraded** report with `degrade_reason` set; the task SUCCEEDs.
+- **Missing `grade.json`** (`--no-grade`) → tier-transition drift is still computed; the
+  grade-regression axis is simply empty.
+- **Unparseable current diff** (on the generate path) → drift degrades to *no verdict*
+  (no `"drift"` key); the generate run's own exit-code / flagged verdict still governs.
+
+A degraded or baseline report is **never** `alarming`, so `on_drift` cannot trip on it.
+
+On the **dedicated** operator only, a missing / unreadable **current** diff is the one
+hard error: it reads the current diff from a path (it runs no CLI), so an absent current
+file means the operator is misconfigured → `AirflowConfigError` (CLI tier 2), not a
+baseline.
+
+### `--as-of` reproducibility
+
+`as_of="{{ ds }}"` flows the logical date into `--as-of` so time-bound primitives (e.g.
+`row_count_anomaly_by_period`) are pinned to the scheduled date — see
+`docs/prune-ops.md`. The same two sidecars + same `as_of` reproduce a byte-identical
+`DriftReport` (the report carries the two input `blake2b-8` hashes).
+
+### Drift XCom payload (`DriftReport.to_xcom`)
+
+The drift summary is JSON-serialisable, carries **no bulk sidecar text and no secrets**,
+and on the generate operator is nested under `"drift"` (the dedicated operator returns it
+directly). Shape:
+
+- `model_unique_id`, `as_of` (iso or `null`), `baseline`, `alarming`, `degrade_reason`,
+  `grade_regression_threshold`, `previous_diff_hash`, `current_diff_hash`;
+- `counts` — per-category counts: `newly_always_passes` (the signal-rot tally),
+  `newly_dropped`, `newly_kept`, `added_artifacts`, `removed_artifacts`,
+  `grade_regressions`, `columns_added`, `columns_removed`;
+- the transition lists (`newly_always_passes` / `newly_dropped` / `newly_kept` as
+  artifact dicts with a truncated one-line `why`), `added_artifacts` /
+  `removed_artifacts` (artifact-id lists), `grade_regressions`, `schema_shape_changes`.
+
+`alarming` is `True` iff there is signal rot (`newly_always_passes`) or a grade
+regression (`grade_regressions`) — those are the categories that page; `newly_kept` /
+`newly_dropped` / added / removed / schema-shape are informational.
+
+### Worked example DAG
+
+`examples/airflow/signalforge_drift_monitor_dag.py` (`dag_id="signalforge_drift_monitor"`)
+ships both surfaces side by side: a `drift_monitor_ergonomic` task (Form 1) and a
+`generate` → `drift_check` pair (Form 2). It ships `schedule=None`; set
+`schedule="@daily"` for a real nightly monitor.
+
 ## Scheduling for drift detection
 
 The example ships with `schedule=None` (manual trigger) so it never auto-spends on
@@ -509,12 +667,18 @@ export AIRFLOW__CORE__DAGS_FOLDER="$(pwd)/examples/airflow"
 
 - **parse** — `DagBag` loads each shipped example with zero import errors and the
   expected tasks present: the two-`PythonOperator` pipeline (`signalforge_generate`), the
-  `SignalForgeGenerateOperator` drift monitor (`signalforge_generate_operator`), and the
+  `SignalForgeGenerateOperator` drift monitor (`signalforge_generate_operator`), the
   `SignalForgePruneExistingOperator` signal-rot monitor
-  (`signalforge_prune_existing_operator`). No credentials; runs in the gated CI `airflow`
-  job.
+  (`signalforge_prune_existing_operator`), and the run-over-run drift monitor
+  (`signalforge_drift_monitor`). No credentials; runs in the gated CI `airflow` job.
 - **render** — each operator's `template_fields` Jinja-render from a synthetic task
   context (e.g. `{{ params.model }}` / `{{ ds }}`).
+- **execute** — `tests/airflow/test_drift_operators.py` and
+  `tests/airflow/test_operators.py` drive each operator's `execute` against a fake
+  `run_signalforge` (and, for the dedicated drift operator, the committed
+  `tests/fixtures/airflow/drift_pairs/*.json` sidecars): the result/drift → `TaskOutcome`
+  → Airflow-signal translation, the XCom shape, and the baseline / degrade / unparseable
+  paths. No credentials; runs in the gated CI `airflow` job.
 - **live** — runs the `generate` task against an `init-demo` project; self-skips without
   `SF_RUN_AIRFLOW=1` + `ANTHROPIC_API_KEY` + `GOOGLE_CLOUD_PROJECT` + `SF_RUN_BQ`.
 
@@ -524,10 +688,12 @@ uv run --no-sync pytest -m airflow --no-cov   # inside the constraints-pinned ai
 
 ## Caveats
 
-- **Both operators have landed (epic #228):** the `SignalForgeGenerateOperator` (#232,
-  [section](#signalforgegenerateoperator)) and the no-LLM `SignalForgePruneExistingOperator`
-  (#233, [section](#signalforgepruneexistingoperator)). The `PythonOperator` example DAG
-  remains a from-scratch reference.
+- **Three operators have landed (epic #228):** the `SignalForgeGenerateOperator` (#232,
+  [section](#signalforgegenerateoperator)), the no-LLM `SignalForgePruneExistingOperator`
+  (#233, [section](#signalforgepruneexistingoperator)), and the run-over-run drift surface
+  (#235) — `detect_drift_against` on the generate operator plus the dedicated
+  `SignalForgeDriftOperator` ([section](#drift--signal-rot-detection)). The `PythonOperator`
+  example DAG remains a from-scratch reference.
 - **Time-bound tests + reproducibility.** If your draft includes the time-bound
   `row_count_anomaly_by_period` variant, pass `--as-of YYYY-MM-DD` (the DAG's logical
   date is a natural source) so a re-run is reproducible — see `docs/prune-ops.md`.
