@@ -260,6 +260,7 @@ and `--project-dir` are always injected by the runner.
 | `as_of` | `--as-of <YYYY-MM-DD>` | reproducibility anchor for time-bound tests; `{{ ds }}` is a natural source. **`template_fields`** |
 | `on_flagged` | — (decision layer) | `fail` (default) / `skip` / `succeed`; see the **`on_flagged`** section below |
 | `invocation` | — (run mode) | `in_process` (default) / `subprocess`; see the **Invocation modes** section below |
+| `signalforge_conn_id` | — (hook) | optional Airflow Connection id; resolves warehouse auth + LLM credentials via `SignalForgeHook` (see the **Airflow-native credentials** section). `None` (default) = ambient-env mode, byte-identical to prior behaviour. **Not** a `template_field` (secrets hygiene). |
 | `**kwargs` | — | passed to `BaseOperator` (`retries`, `retry_delay`, `depends_on_past`, …) |
 
 Exactly one of `model` or `select` must be set (a validation error fires at DAG-parse
@@ -464,6 +465,7 @@ Every `__init__` kwarg and the `signalforge prune-existing` flag it maps to.
 | `tests_dir` | `--tests-dir <dir>` | directory of singular-test `tests/*.sql` files to ingest too (DEC-006); omitted when unset. **`template_fields`** |
 | `on_flagged` | — (decision layer) | `fail` (default) / `skip` / `succeed`; **inert without grading** (DEC-004) |
 | `invocation` | — (run mode) | `in_process` (default) / `subprocess`; see the **Invocation modes** section above |
+| `signalforge_conn_id` | — (hook) | optional Airflow Connection id; resolves **`profiles_dir` only** via `SignalForgeHook` (read-only — no LLM key; see the **Airflow-native credentials** section). `None` (default) = ambient-env mode, byte-identical to prior behaviour. **Not** a `template_field` (secrets hygiene). |
 | `**kwargs` | — | passed to `BaseOperator` (`retries`, `retry_delay`, `depends_on_past`, …) |
 
 The six `template_fields` (`project_dir`, `model`, `schema`, `profiles_dir`, `as_of`,

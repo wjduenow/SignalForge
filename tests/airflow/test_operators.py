@@ -490,6 +490,27 @@ def test_single_model_conn_id_injects_env_masks_key_and_restores(
     assert argv[argv.index("--profiles-dir") + 1] == "/conn/profiles"
 
 
+def test_single_model_conn_id_none_unchanged_no_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """conn_id=None (#232 default): no hook touched, no conn-derived argv."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+
+    def _boom(_conn_id: str) -> HookResolution:
+        raise AssertionError("_resolve_hook must NOT be called when conn_id is None")
+
+    monkeypatch.setattr("signalforge.airflow.operators._resolve_hook", _boom)
+    captured = _patch_run(monkeypatch, [_result(exit_code=0, flagged=0)])
+
+    op = _operator_class()(task_id="gen", project_dir="/proj", model="m")
+    op.execute(context={})
+
+    # Hook never called (the _boom guard); argv carries no conn-derived profiles_dir.
+    argv = captured[0]
+    assert argv[:2] == ["generate", "m"]
+    assert "--profiles-dir" not in argv
+
+
 def test_single_model_conn_env_restored_on_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
