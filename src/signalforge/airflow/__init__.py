@@ -60,13 +60,17 @@ if TYPE_CHECKING:
     # never executed at runtime, so it does not violate the no-eager-import
     # gate). The modules themselves are Airflow-free per DEC-004.
     from signalforge.airflow.hooks import SignalForgeHook
-    from signalforge.airflow.operators import SignalForgeGenerateOperator
+    from signalforge.airflow.operators import (
+        SignalForgeGenerateOperator,
+        SignalForgePruneExistingOperator,
+    )
 
 # Public name -> submodule that defines it. The PEP 562 ``__getattr__`` below
 # imports the submodule lazily on first attribute access, so ``import
 # signalforge.airflow`` itself imports neither the submodule nor airflow.
 _LAZY_NAMES: dict[str, str] = {
     "SignalForgeGenerateOperator": "operators",
+    "SignalForgePruneExistingOperator": "operators",
     "SignalForgeHook": "hooks",
 }
 
@@ -76,6 +80,7 @@ __all__ = [
     "OnFlagged",
     "SignalForgeGenerateOperator",
     "SignalForgeHook",
+    "SignalForgePruneExistingOperator",
     "SignalForgeRunResult",
     "TaskOutcome",
     "decide_task_outcome",
