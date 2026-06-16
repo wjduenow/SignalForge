@@ -12,6 +12,10 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 - **Renamed the Airflow drift example DAG (#236, epic #228).** The run-over-run drift monitor example is now `examples/airflow/signalforge_nightly_drift.py` with `dag_id="signalforge_nightly_drift"`; internal task ids unchanged.
 
+### Docs
+
+- **Closed the Apache Airflow epic (#236, epic #228).** The end-to-end-and-docs ticket that lands v0.7 (operators ×3 — `SignalForgeGenerateOperator` / `SignalForgePruneExistingOperator` / `SignalForgeDriftOperator` — plus `SignalForgeHook`) on `dev`. Consolidated the gated `airflow` test harness and upgraded the live test to a real `dag.test()` end-to-end run against the bundled Austin demo fixture (self-skipping without `SF_RUN_AIRFLOW` + the Anthropic/BigQuery gates). Ships two example DAGs: the renamed `examples/airflow/signalforge_nightly_drift.py` (run-over-run drift / signal-rot monitor) and the new `examples/airflow/signalforge_after_dbt_build.py` (`SignalForgePruneExistingOperator` downstream of an upstream dbt `run`/`build` task). Added the managed-runtime caveat to `docs/airflow-ops.md` (constraints-pinning under managed schedulers, secrets via `SignalForgeHook`/Connection, explicitly documented-not-certified) plus a coherence pass cross-linking the operator/hook sections, an Airflow pointer in the bundled `SKILL.md`, and this README v0.7 roadmap reword (the dated Released-table migration is deferred to the v0.7.0 release cut).
+
 ## [0.6.1] — 2026-06-11
 
 ### Added

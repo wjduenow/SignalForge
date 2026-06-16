@@ -591,7 +591,7 @@ Planned:
 
 | Version | Scope                                                                                                            |
 | ------- | ---------------------------------------------------------------------------------------------------------------- |
-| v0.7    | **Airflow operator** — drop SignalForge into a scheduled DAG for periodic schema drift / signal-rot detection    |
+| v0.7    | **Airflow integration** (landed on `dev`, pending the v0.7.0 release) — three operators (`SignalForgeGenerateOperator`, `SignalForgePruneExistingOperator`, `SignalForgeDriftOperator`) + a `SignalForgeHook` (Airflow Connection/Variable → credentials) for run-over-run schema drift / signal-rot detection in a scheduled DAG; reference at `docs/airflow-ops.md` |
 | v0.8    | **GitHub Action** — PR-time invocation with inline comment integration (kept/dropped/flagged surfaced on the PR) |
 | v0.9    | **Rubric customization** — project-specific grading criteria; organization-wide style profiles                   |
 | v1.0    | **dbt Fusion engine compatibility** — dbt MCP server consumption; first-class Fusion integration                 |
