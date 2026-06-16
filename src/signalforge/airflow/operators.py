@@ -42,12 +42,21 @@ extra installed.
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import importlib.util
-from collections.abc import Sequence
+import json
+import logging
+import os
+from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
-from signalforge.airflow._airflow_compat import make_base_operator, raise_for_outcome
+from signalforge.airflow._airflow_compat import (
+    make_base_operator,
+    raise_for_outcome,
+    register_secret,
+)
+from signalforge.airflow._resolve import HookResolution
 from signalforge.airflow.errors import AirflowConfigError
 from signalforge.airflow.result import (
     OnFlagged,
@@ -55,6 +64,9 @@ from signalforge.airflow.result import (
     decide_task_outcome,
 )
 from signalforge.airflow.runner import run_signalforge
+from signalforge.llm.providers import PROVIDER_ENV_VAR_KEYS
+
+_LOGGER = logging.getLogger("signalforge.airflow")
 
 if TYPE_CHECKING:
     # Type-checker-only declaration of the operator name. At runtime the class is
@@ -75,6 +87,74 @@ if TYPE_CHECKING:
 
 
 _VALID_ON_FLAGGED: frozenset[str] = frozenset({"fail", "skip", "succeed"})
+
+
+# --------------------------------------------------------------------------- #
+# Shared `signalforge_conn_id` wiring helpers (#234 US-005)                    #
+#                                                                             #
+# Two of these are airflow-free + ungated-testable (the precedence merge and  #
+# the env-injection context manager); the third constructs the gated hook and #
+# is reached only on the conn-id path inside ``execute``. US-006 reuses the    #
+# airflow-free merge for the prune-existing operator's profiles_dir-only       #
+# precedence (it needs NO key injection), so the two concerns are kept         #
+# deliberately decoupled (DEC-016).                                            #
+# --------------------------------------------------------------------------- #
+
+
+def _merge_with_resolution(param_value: str | None, extra_value: str | None) -> str | None:
+    """Precedence merge for a value present on both the operator + Connection (DEC-012).
+
+    Pure, airflow-free. Returns the explicit operator ``param_value`` when it is
+    truthy (an explicitly-set, non-empty operator param), else the
+    ``extra_value`` resolved from the Connection ``extra`` (itself possibly
+    ``None``). Mirrors the CLI's ``flag > YAML > default`` precedence; the final
+    fall-through to the tool default (when both are ``None``) is left to the
+    downstream CLI. Used for ``profiles_dir`` (both operators) and ``cache_scope``
+    (Generate only).
+    """
+    return param_value if param_value else extra_value
+
+
+@contextlib.contextmanager
+def _provider_key_env(env_var: str, api_key: str) -> Iterator[None]:
+    """Inject ``os.environ[env_var] = api_key`` for the block, restoring on exit.
+
+    Pure (touches only ``os.environ``), airflow-free, ungated-testable. Snapshots
+    the prior value and, in a ``finally`` that fires on BOTH normal completion
+    and an exception raised inside the block, restores it: if the var was absent
+    before it is deleted; if it had a prior value (including an empty string)
+    that value is restored. This keeps a resolved LLM credential from lingering
+    in a long-lived Airflow worker's environment across tasks (DEC-015).
+
+    ``os.environ`` values are always ``str``, so a ``None`` from ``.get`` means
+    the var was genuinely absent — distinguishing it cleanly from a present
+    empty-string value (which round-trips as ``""``).
+    """
+    prior = os.environ.get(env_var)
+    os.environ[env_var] = api_key
+    try:
+        yield
+    finally:
+        if prior is None:
+            os.environ.pop(env_var, None)
+        else:
+            os.environ[env_var] = prior
+
+
+def _resolve_hook(conn_id: str) -> HookResolution:  # pragma: no cover - needs [airflow]
+    """Construct the SignalForge hook and resolve its Connection (gated helper).
+
+    Reused by both operators' ``execute`` (US-005 / US-006). Constructing
+    :class:`signalforge.airflow.hooks.SignalForgeHook` requires Apache Airflow
+    (it subclasses ``BaseHook``), so this helper is reached only on the
+    ``signalforge_conn_id``-set path and is ``# pragma: no cover`` for the same
+    reason as the operator factories. The hook import is lazy — its
+    module-``__getattr__`` resolves the real class without eagerly importing
+    airflow — so ``import signalforge.airflow.operators`` stays airflow-free.
+    """
+    from signalforge.airflow.hooks import SignalForgeHook
+
+    return SignalForgeHook(conn_id).get_conn()
 
 
 def _build_generate_argv(
@@ -496,6 +576,21 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
           operator's ``cache_scope`` is unset and the batch has ≥2 models, it is
           forced to ``"project"`` (DEC-007) so the Anthropic cached prefix
           amortises across the siblings.
+
+        Airflow-native credentials (#234, optional ``signalforge_conn_id``):
+
+        * When ``signalforge_conn_id`` is ``None`` (the default), the operator is
+          byte-identical to #232 — it relies on ambient env / inline config and
+          never touches the hook (DEC-014).
+        * When set, ``execute`` resolves the Connection via
+          :class:`signalforge.airflow.hooks.SignalForgeHook`, REQUIRES both an LLM
+          ``provider`` and an ``api_key`` (``generate`` calls the LLM; DEC-003),
+          masks the key (DEC-006), precedence-merges ``profiles_dir`` /
+          ``cache_scope`` (param > Connection ``extra``; DEC-012), and injects the
+          provider's API-key env var only for the duration of the run — restoring
+          it afterward so the secret never lingers across tasks (DEC-015). The
+          conn id is NOT a ``template_fields`` entry and never enters XCom
+          (DEC-007).
         """
 
         # Airflow renders these fields from the task context before ``execute``
@@ -514,6 +609,7 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
             no_grade: bool = False,
             cache_scope: str | None = None,
             as_of: str | None = None,
+            signalforge_conn_id: str | None = None,
             on_flagged: OnFlagged = "fail",
             invocation: Literal["in_process", "subprocess"] = "in_process",
             **kwargs: Any,
@@ -529,6 +625,10 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
             self.no_grade = no_grade
             self.cache_scope = cache_scope
             self.as_of = as_of
+            # A conn id is NOT a templated value and is deliberately kept OUT of
+            # ``template_fields`` (DEC-007): templating a credential reference is
+            # an avoidable leak surface.
+            self.signalforge_conn_id = signalforge_conn_id
             # Annotate the Literal-typed attrs explicitly so pyright does NOT
             # widen them to ``str`` on assignment (which would break the typed
             # ``decide_task_outcome`` / ``run_signalforge`` calls below).
@@ -558,19 +658,75 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
                 on_flagged=self.on_flagged,
             )
 
-            if self.select is None:
-                return self._execute_single()
-            return self._execute_batch()
+            # No ``signalforge_conn_id`` → byte-identical to #232 (DEC-014): no
+            # hook, no credential resolution, no env injection.
+            effective_profiles_dir = self.profiles_dir
+            effective_cache_scope = self.cache_scope
+            env_cm: contextlib.AbstractContextManager[None] = contextlib.nullcontext()
 
-        def _execute_single(self) -> dict[str, object]:
+            if self.signalforge_conn_id is not None:
+                resolution = _resolve_hook(self.signalforge_conn_id)
+                # ``generate`` calls the LLM, so provider + key are REQUIRED here
+                # (DEC-003 — the resolver is lenient; the consumer enforces
+                # requiredness). PruneExisting, by contrast, needs neither.
+                if resolution.provider is None or resolution.api_key is None:
+                    raise AirflowConfigError(
+                        f"The SignalForge Airflow Connection {self.signalforge_conn_id!r} "
+                        "did not supply both an LLM `provider` and an API key, which "
+                        "`signalforge generate` requires (it calls the LLM).",
+                        remediation=(
+                            "Set the Connection `extra.provider` to one of "
+                            "anthropic / openai / gemini and put the API key in the "
+                            "Connection `password` (or the `signalforge_api_key` Airflow "
+                            "Variable). For a credential-free task, use "
+                            "SignalForgePruneExistingOperator instead."
+                        ),
+                    )
+                # Mask the resolved key in Airflow's logs BEFORE any logging or
+                # run (DEC-006), belt-and-braces over Airflow's auto-masking.
+                register_secret(resolution.api_key)
+                # Precedence merge (DEC-012): explicit param > Connection extra.
+                effective_profiles_dir = _merge_with_resolution(
+                    self.profiles_dir, resolution.profiles_dir
+                )
+                effective_cache_scope = _merge_with_resolution(
+                    self.cache_scope, resolution.cache_scope
+                )
+                # NEVER log the api_key (DEC-007). ``key_source`` is not exposed
+                # by the resolution, so it is omitted.
+                _LOGGER.info(
+                    "signalforge generate resolved airflow connection: %s",
+                    json.dumps(
+                        {
+                            "conn_id": self.signalforge_conn_id,
+                            "provider": resolution.provider,
+                            "profiles_dir_set": effective_profiles_dir is not None,
+                        }
+                    ),
+                )
+                env_cm = _provider_key_env(
+                    PROVIDER_ENV_VAR_KEYS[resolution.provider], resolution.api_key
+                )
+
+            # The provider env var is injected only for the duration of the run
+            # and restored in the context manager's ``finally`` (success OR
+            # exception) so the secret never lingers across tasks (DEC-015).
+            with env_cm:
+                if self.select is None:
+                    return self._execute_single(effective_profiles_dir, effective_cache_scope)
+                return self._execute_batch(effective_profiles_dir, effective_cache_scope)
+
+        def _execute_single(
+            self, profiles_dir: str | None, cache_scope: str | None
+        ) -> dict[str, object]:
             argv = _build_generate_argv(
                 model=self.model,
                 select=None,
                 project_dir=self.project_dir,
-                profiles_dir=self.profiles_dir,
+                profiles_dir=profiles_dir,
                 write=self.write,
                 no_grade=self.no_grade,
-                cache_scope=self.cache_scope,
+                cache_scope=cache_scope,
                 as_of=self.as_of,
             )
             result = run_signalforge(argv, project_dir=self.project_dir, invocation=self.invocation)
@@ -585,13 +741,16 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
             )
             return result.to_xcom()
 
-        def _execute_batch(self) -> dict[str, object]:
+        def _execute_batch(
+            self, profiles_dir: str | None, cache_scope: str | None
+        ) -> dict[str, object]:
             assert self.select is not None  # narrowed by execute()
             model_ids = _resolve_select_models(self.project_dir, self.select)
             # DEC-007: force project-scope caching for a ≥2-model batch when the
-            # operator did not pin a scope, so the Anthropic cached prefix
-            # amortises across the siblings instead of paying creation per model.
-            resolved_cache_scope = self.cache_scope
+            # operator did not pin a scope (after the Connection-extra precedence
+            # merge), so the Anthropic cached prefix amortises across the siblings
+            # instead of paying creation per model.
+            resolved_cache_scope = cache_scope
             if resolved_cache_scope is None and len(model_ids) >= 2:
                 resolved_cache_scope = "project"
 
@@ -606,7 +765,7 @@ def _make_generate_operator_class() -> type:  # pragma: no cover - requires the 
                     model=model_id,
                     select=None,
                     project_dir=self.project_dir,
-                    profiles_dir=self.profiles_dir,
+                    profiles_dir=profiles_dir,
                     write=self.write,
                     no_grade=self.no_grade,
                     cache_scope=resolved_cache_scope,
