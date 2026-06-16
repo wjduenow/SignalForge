@@ -84,10 +84,12 @@ class _ConnectionLike(Protocol):
 class HookResolution:
     """The typed result of resolving a SignalForge Airflow Connection.
 
-    Frozen and airflow-free. Carries the three things the operators need:
-    ``profiles_dir`` (warehouse auth), ``provider`` (which LLM SKU family), and
-    ``api_key`` (the credential). All three are ``None``-able — the resolver is
-    lenient (DEC-003); the consuming operator enforces requiredness.
+    Frozen and airflow-free. Carries what the operators need:
+    ``profiles_dir`` (warehouse auth), ``provider`` (which LLM SKU family),
+    ``api_key`` (the credential), and ``cache_scope`` (the Anthropic
+    cached-prefix knob — precedence-merged by the Generate operator, DEC-012).
+    All are ``None``-able — the resolver is lenient (DEC-003); the consuming
+    operator enforces requiredness.
 
     The custom :meth:`__repr__` is a **leak-surface discipline** (DEC-007): it
     renders ``profiles_dir`` and ``provider`` only, and NEVER the ``api_key``
@@ -100,6 +102,7 @@ class HookResolution:
     profiles_dir: str | None
     provider: str | None
     api_key: str | None
+    cache_scope: str | None = None
 
     def __repr__(self) -> str:
         # Deliberately omits ``api_key`` entirely — no value, no label.
@@ -159,6 +162,9 @@ def resolve_connection(
       from resolution) raises :class:`AirflowConfigError` (DEC-008). When no
       ``project_dir`` is given the path is accepted as-is (the documented
       bounded-defence gap — there is no anchor to contain against).
+    * **cache_scope** — read from the validated ``extra`` and carried through
+      unchanged (may be ``None``). The Generate operator precedence-merges it
+      with its own ``cache_scope`` param (DEC-012); other consumers ignore it.
 
     Raises:
         AirflowConfigError: on any misconfiguration (DEC-009 — the one reused
@@ -217,6 +223,7 @@ def resolve_connection(
         profiles_dir=profiles_dir,
         provider=provider,
         api_key=api_key,
+        cache_scope=extra.cache_scope,
     )
 
 
