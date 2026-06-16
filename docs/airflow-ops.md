@@ -412,9 +412,8 @@ The operator deliberately exposes **no `write` param and no `mode` param**:
   knobs that *do* matter are `scope` (`--scope`) and `sample_strategy`
   (`--sample-strategy`).
 
-No Anthropic credential is required or read. The `signalforge_conn_id`-style symmetry
-with the sibling operators is preserved at the contract level, but this path never
-touches an LLM credential.
+No Anthropic credential is required or read — this path never touches an LLM credential
+at all (no `conn_id`-style LLM connection param exists on the operator).
 
 ### `schema` is a required param (DEC-002)
 
@@ -533,4 +532,6 @@ uv run --no-sync pytest -m airflow --no-cov   # inside the constraints-pinned ai
   `row_count_anomaly_by_period` variant, pass `--as-of YYYY-MM-DD` (the DAG's logical
   date is a natural source) so a re-run is reproducible — see `docs/prune-ops.md`.
 - **Cost.** Each `generate` run spends real Anthropic + warehouse budget; the prune
-  engine's `maximum_bytes_billed` cap and `--dry-run` (no file writes) bound it.
+  engine's `maximum_bytes_billed` cap and `--dry-run` (no file writes) bound it. A
+  `prune-existing` run spends **warehouse budget only** (no LLM call), bounded by the
+  same `maximum_bytes_billed` cap.

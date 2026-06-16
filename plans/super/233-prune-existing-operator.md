@@ -71,9 +71,12 @@ Same set as #232 (`airflow-integration.md`, `cli-layer.md`, `python-build.md`, `
 - **DEC-001 — No-LLM / read-only posture is the operator contract.** The operator exposes **no
   `write` param** (mirrors `prune-existing` having no `--write`) and **no `mode` param** (`--mode`
   is inert on the no-LLM path). It requires no Anthropic connection and never sets / reads
-  `ANTHROPIC_API_KEY`. The `signalforge_conn_id` param is accepted for symmetry with the sibling
-  operators but is documented as not requiring an LLM credential. Rationale: faithful to #105's
-  read-only design; surfacing `--write`/`--mode` would invite misconfiguration.
+  `ANTHROPIC_API_KEY`. There is **no `signalforge_conn_id` / LLM-connection param** — the operator
+  family (generate + prune-existing) takes no LLM connection param at all, so this no-LLM path
+  simply never references one. (The issue's example sketch showed a `signalforge_conn_id` kwarg;
+  it was dropped as unused — the operators read credentials from the ambient env per the CLI's
+  own resolution, not an Airflow connection.) Rationale: faithful to #105's read-only design;
+  surfacing `--write`/`--mode` or a phantom connection param would invite misconfiguration.
 - **DEC-002 — `schema` is a required operator param.** `prune-existing` cannot run without
   `--schema <path>` (the hand-authored schema.yml to prune). `_validate_operator_config` rejects
   empty/None `schema` with `AirflowConfigError` (tier 2) BEFORE any `run_signalforge` call —
