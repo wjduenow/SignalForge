@@ -43,6 +43,7 @@ _SRC_ROOT = _REPO_ROOT / "src" / "signalforge"
 # Subpackages covered by the gate. Order is alphabetical for ease of
 # diffing when a future stage extends the list.
 _SCAN_SUBPACKAGES: tuple[str, ...] = (
+    "airflow",
     "cli",
     "demo",
     "diff",

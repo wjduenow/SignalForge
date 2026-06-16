@@ -27,9 +27,12 @@ and the XCom payload shape. ``run_signalforge`` (and, for batch,
 from __future__ import annotations
 
 import importlib
+import json
+import os
 
 import pytest
 
+from signalforge.airflow._resolve import HookResolution
 from signalforge.airflow.result import SignalForgeRunResult
 
 pytestmark = pytest.mark.airflow
@@ -405,6 +408,313 @@ def test_construction_rejects_bad_on_flagged() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# signalforge_conn_id wiring (#234 US-005)                                    #
+# --------------------------------------------------------------------------- #
+
+
+def _patch_run_capturing_env(
+    monkeypatch: pytest.MonkeyPatch,
+    results: list[SignalForgeRunResult],
+    env_var: str,
+) -> tuple[list[list[str]], list[str | None]]:
+    """Patch ``run_signalforge`` recording (argv, ``os.environ[env_var]``) per call.
+
+    The env value is sampled INSIDE the fake at call time, so a test can assert
+    the provider key was injected for the duration of the run (and later that it
+    was restored after ``execute`` returns / raises).
+    """
+    captured_argv: list[list[str]] = []
+    captured_env: list[str | None] = []
+    queue = list(results)
+
+    def _fake_run(
+        argv: list[str],
+        *,
+        project_dir: object,
+        invocation: object = "in_process",
+        timeout_seconds: object = None,
+    ) -> SignalForgeRunResult:
+        captured_argv.append(list(argv))
+        captured_env.append(os.environ.get(env_var))
+        return queue.pop(0)
+
+    monkeypatch.setattr("signalforge.airflow.operators.run_signalforge", _fake_run)
+    return captured_argv, captured_env
+
+
+def _patch_hook(monkeypatch: pytest.MonkeyPatch, resolution: HookResolution) -> list[str]:
+    """Patch ``_resolve_hook`` to return ``resolution`` + ``register_secret`` to record.
+
+    Returns the list of values passed to ``register_secret`` (so a test can
+    assert the resolved key was masked before the run).
+    """
+    masked: list[str] = []
+    monkeypatch.setattr(
+        "signalforge.airflow.operators._resolve_hook",
+        lambda conn_id, project_dir=None: resolution,
+    )
+    monkeypatch.setattr(
+        "signalforge.airflow.operators.register_secret",
+        lambda value: masked.append(value),
+    )
+    return masked
+
+
+def test_single_model_conn_id_injects_env_masks_key_and_restores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """conn_id set → env var injected DURING the run, masked, restored after."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    resolution = HookResolution(
+        profiles_dir="/conn/profiles", provider="anthropic", api_key="sk-conn-secret"
+    )
+    masked = _patch_hook(monkeypatch, resolution)
+    argv_cap, env_cap = _patch_run_capturing_env(
+        monkeypatch, [_result(exit_code=0, flagged=0)], "ANTHROPIC_API_KEY"
+    )
+
+    op = _operator_class()(
+        task_id="gen", project_dir="/proj", model="m", signalforge_conn_id="sf_default"
+    )
+    op.execute(context={})
+
+    # Injected for the run, then restored (absent before → absent after).
+    assert env_cap == ["sk-conn-secret"]
+    assert "ANTHROPIC_API_KEY" not in os.environ
+    # Masked before the run (DEC-006).
+    assert masked == ["sk-conn-secret"]
+    # The conn-resolved profiles_dir reaches the argv (no operator override).
+    argv = argv_cap[0]
+    assert argv[argv.index("--profiles-dir") + 1] == "/conn/profiles"
+
+
+def test_single_model_conn_id_none_unchanged_no_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """conn_id=None (#232 default): no hook touched, no conn-derived argv."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+
+    def _boom(_conn_id: str, _project_dir: str | None = None) -> HookResolution:
+        raise AssertionError("_resolve_hook must NOT be called when conn_id is None")
+
+    monkeypatch.setattr("signalforge.airflow.operators._resolve_hook", _boom)
+    captured = _patch_run(monkeypatch, [_result(exit_code=0, flagged=0)])
+
+    op = _operator_class()(task_id="gen", project_dir="/proj", model="m")
+    op.execute(context={})
+
+    # Hook never called (the _boom guard); argv carries no conn-derived profiles_dir.
+    argv = captured[0]
+    assert argv[:2] == ["generate", "m"]
+    assert "--profiles-dir" not in argv
+
+
+def test_single_model_conn_id_threads_project_dir_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The operator passes its ``project_dir`` to ``_resolve_hook`` so a
+    Connection ``extra.profiles_dir`` is symlink-contained (DEC-008)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    seen: list[str | None] = []
+
+    def _capture(_conn_id: str, project_dir: str | None = None) -> HookResolution:
+        seen.append(project_dir)
+        return HookResolution(profiles_dir=None, provider="anthropic", api_key="sk-x")
+
+    monkeypatch.setattr("signalforge.airflow.operators._resolve_hook", _capture)
+    monkeypatch.setattr("signalforge.airflow.operators.register_secret", lambda value: None)
+    _patch_run(monkeypatch, [_result(exit_code=0, flagged=0)])
+
+    op = _operator_class()(task_id="gen", project_dir="/proj", model="m", signalforge_conn_id="sf")
+    op.execute(context={})
+
+    # The operator's project_dir reached the resolver as the containment anchor.
+    assert seen == ["/proj"]
+
+
+def test_single_model_conn_env_restored_on_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception inside the run (exit 3 → raise) still restores the env var."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    from airflow.exceptions import AirflowException
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    resolution = HookResolution(profiles_dir=None, provider="anthropic", api_key="sk-conn-secret")
+    _patch_hook(monkeypatch, resolution)
+    _patch_run_capturing_env(monkeypatch, [_result(exit_code=3, flagged=0)], "ANTHROPIC_API_KEY")
+
+    op = _operator_class()(task_id="gen", project_dir="/proj", model="m", signalforge_conn_id="sf")
+    with pytest.raises(AirflowException):
+        op.execute(context={})
+    # raise_for_outcome raises INSIDE the _provider_key_env block → finally restores.
+    assert "ANTHROPIC_API_KEY" not in os.environ
+
+
+def test_single_model_conn_prior_env_value_restored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-existing ambient key is overlaid for the run, then restored."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "ambient-prior")
+    resolution = HookResolution(profiles_dir=None, provider="anthropic", api_key="sk-conn-secret")
+    _patch_hook(monkeypatch, resolution)
+    _, env_cap = _patch_run_capturing_env(
+        monkeypatch, [_result(exit_code=0, flagged=0)], "ANTHROPIC_API_KEY"
+    )
+
+    op = _operator_class()(task_id="gen", project_dir="/proj", model="m", signalforge_conn_id="sf")
+    op.execute(context={})
+    assert env_cap == ["sk-conn-secret"]
+    assert os.environ["ANTHROPIC_API_KEY"] == "ambient-prior"
+
+
+def test_conn_explicit_param_beats_extra_profiles_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit operator ``profiles_dir`` wins over the Connection extra (DEC-012)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    resolution = HookResolution(profiles_dir="/conn/profiles", provider="anthropic", api_key="sk")
+    _patch_hook(monkeypatch, resolution)
+    argv_cap, _ = _patch_run_capturing_env(
+        monkeypatch, [_result(exit_code=0, flagged=0)], "ANTHROPIC_API_KEY"
+    )
+
+    op = _operator_class()(
+        task_id="gen",
+        project_dir="/proj",
+        model="m",
+        profiles_dir="/op/profiles",
+        signalforge_conn_id="sf",
+    )
+    op.execute(context={})
+    argv = argv_cap[0]
+    assert argv[argv.index("--profiles-dir") + 1] == "/op/profiles"
+
+
+def test_conn_cache_scope_from_extra_reaches_argv(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Connection-extra ``cache_scope`` is precedence-merged into the argv (DEC-012)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    resolution = HookResolution(
+        profiles_dir=None, provider="gemini", api_key="sk", cache_scope="project"
+    )
+    _patch_hook(monkeypatch, resolution)
+    argv_cap, env_cap = _patch_run_capturing_env(
+        monkeypatch, [_result(exit_code=0, flagged=0)], "GOOGLE_API_KEY"
+    )
+
+    op = _operator_class()(task_id="gen", project_dir="/proj", model="m", signalforge_conn_id="sf")
+    op.execute(context={})
+    argv = argv_cap[0]
+    assert argv[argv.index("--cache-scope") + 1] == "project"
+    # The provider→env-var mapping picks GOOGLE_API_KEY for gemini (#234 US-001).
+    assert env_cap == ["sk"]
+    assert "GOOGLE_API_KEY" not in os.environ
+
+
+def test_conn_api_key_absent_from_returned_xcom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resolved key never enters the returned XCom payload (DEC-007)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    resolution = HookResolution(profiles_dir=None, provider="anthropic", api_key="sk-conn-secret")
+    _patch_hook(monkeypatch, resolution)
+    _patch_run_capturing_env(monkeypatch, [_result(exit_code=0, flagged=0)], "ANTHROPIC_API_KEY")
+
+    op = _operator_class()(task_id="gen", project_dir="/proj", model="m", signalforge_conn_id="sf")
+    xcom = op.execute(context={})
+    assert "sk-conn-secret" not in json.dumps(xcom)
+
+
+def test_conn_missing_key_raises_config_error_and_skips_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """provider present but api_key absent → AirflowConfigError before any run."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    from signalforge.airflow.errors import AirflowConfigError
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _patch_hook(monkeypatch, HookResolution(profiles_dir=None, provider="anthropic", api_key=None))
+    argv_cap, _ = _patch_run_capturing_env(monkeypatch, [_result()], "ANTHROPIC_API_KEY")
+
+    op = _operator_class()(task_id="gen", project_dir="/proj", model="m", signalforge_conn_id="sf")
+    with pytest.raises(AirflowConfigError):
+        op.execute(context={})
+    # Fails before run_signalforge is reached, and leaks no env var.
+    assert argv_cap == []
+    assert "ANTHROPIC_API_KEY" not in os.environ
+
+
+def test_conn_missing_provider_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """api_key present but provider absent → AirflowConfigError (generate needs both)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    from signalforge.airflow.errors import AirflowConfigError
+
+    _patch_hook(monkeypatch, HookResolution(profiles_dir=None, provider=None, api_key="sk"))
+    argv_cap, _ = _patch_run_capturing_env(monkeypatch, [_result()], "ANTHROPIC_API_KEY")
+
+    op = _operator_class()(task_id="gen", project_dir="/proj", model="m", signalforge_conn_id="sf")
+    with pytest.raises(AirflowConfigError):
+        op.execute(context={})
+    assert argv_cap == []
+
+
+def test_conn_id_not_in_template_fields() -> None:
+    """``signalforge_conn_id`` is NOT a templated field (DEC-007)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    assert "signalforge_conn_id" not in _operator_class().template_fields
+
+
+def test_batch_with_conn_id_injects_env_for_every_model_and_restores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A --select batch injects the env var around EACH per-model run + restores it,
+    and the conn-resolved profiles_dir (+ forced project cache) reach each argv."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "signalforge.airflow.operators._resolve_select_models",
+        lambda project_dir, select: ("model.p.a", "model.p.b"),
+    )
+    resolution = HookResolution(
+        profiles_dir="/conn/profiles", provider="anthropic", api_key="sk-conn-secret"
+    )
+    _patch_hook(monkeypatch, resolution)
+    argv_cap, env_cap = _patch_run_capturing_env(
+        monkeypatch,
+        [
+            _result(exit_code=0, flagged=0, model_unique_ids=("model.p.a",)),
+            _result(exit_code=0, flagged=0, model_unique_ids=("model.p.b",)),
+        ],
+        "ANTHROPIC_API_KEY",
+    )
+
+    op = _operator_class()(
+        task_id="gen", project_dir="/proj", select="tag:staging", signalforge_conn_id="sf"
+    )
+    op.execute(context={})
+
+    # Env var present for BOTH per-model runs, restored afterward.
+    assert env_cap == ["sk-conn-secret", "sk-conn-secret"]
+    assert "ANTHROPIC_API_KEY" not in os.environ
+    # conn profiles_dir + the ≥2-model forced project cache reach each argv.
+    for argv in argv_cap:
+        assert argv[argv.index("--profiles-dir") + 1] == "/conn/profiles"
+        assert argv[argv.index("--cache-scope") + 1] == "project"
+
+
+# --------------------------------------------------------------------------- #
 # SignalForgePruneExistingOperator (#233) — single-model, no-LLM, read-only
 # --------------------------------------------------------------------------- #
 
@@ -571,3 +881,107 @@ def test_prune_existing_construction_rejects_bad_on_flagged() -> None:
         _prune_existing_operator_class()(
             task_id="prune", project_dir="/proj", model="m", schema="s.yml", on_flagged="bogus"
         )
+
+
+# --------------------------------------------------------------------------- #
+# SignalForgePruneExistingOperator + signalforge_conn_id (#234 US-006)         #
+# Read-only path: resolves profiles_dir ONLY — NO key injection (DEC-016).     #
+# --------------------------------------------------------------------------- #
+
+
+def test_prune_existing_conn_id_resolves_profiles_dir_and_injects_no_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """conn_id set → resolved profiles_dir reaches argv; NO provider env injected.
+
+    The resolution deliberately carries a ``provider`` + ``api_key`` to prove the
+    prune-existing path IGNORES them: no ``register_secret`` call, no env var set
+    or restored, the credential never touches ``os.environ`` (DEC-016).
+    """
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    resolution = HookResolution(
+        profiles_dir="/conn/profiles", provider="anthropic", api_key="sk-conn-secret"
+    )
+    masked = _patch_hook(monkeypatch, resolution)
+    argv_cap, env_cap = _patch_run_capturing_env(
+        monkeypatch, [_result(exit_code=0, flagged=0)], "ANTHROPIC_API_KEY"
+    )
+
+    op = _prune_existing_operator_class()(
+        task_id="prune",
+        project_dir="/proj",
+        model="m",
+        schema="s.yml",
+        signalforge_conn_id="sf_default",
+    )
+    op.execute(context={})
+
+    # Conn-resolved profiles_dir reaches the argv (no operator override).
+    argv = argv_cap[0]
+    assert argv[argv.index("--profiles-dir") + 1] == "/conn/profiles"
+    # NO key injection on the read-only path: register_secret never called, the
+    # env var never set during the run, and untouched in os.environ afterward.
+    assert masked == []
+    assert env_cap == [None]
+    assert "ANTHROPIC_API_KEY" not in os.environ
+
+
+def test_prune_existing_conn_explicit_param_beats_extra_profiles_dir(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit operator ``profiles_dir`` wins over the Connection extra (DEC-012)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    resolution = HookResolution(profiles_dir="/conn/profiles", provider=None, api_key=None)
+    _patch_hook(monkeypatch, resolution)
+    captured = _patch_run(monkeypatch, [_result(exit_code=0, flagged=0)])
+
+    op = _prune_existing_operator_class()(
+        task_id="prune",
+        project_dir="/proj",
+        model="m",
+        schema="s.yml",
+        profiles_dir="/op/profiles",
+        signalforge_conn_id="sf",
+    )
+    op.execute(context={})
+    argv = captured[0]
+    assert argv[argv.index("--profiles-dir") + 1] == "/op/profiles"
+
+
+def test_prune_existing_conn_id_none_unchanged_no_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """conn_id=None (#233 default): no hook touched, argv byte-identical to #233."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+
+    def _boom(_conn_id: str, _project_dir: str | None = None) -> HookResolution:
+        raise AssertionError("_resolve_hook must NOT be called when conn_id is None")
+
+    monkeypatch.setattr("signalforge.airflow.operators._resolve_hook", _boom)
+    captured = _patch_run(monkeypatch, [_result(exit_code=0, flagged=0)])
+
+    op = _prune_existing_operator_class()(
+        task_id="prune", project_dir="/proj", model="m", schema="s.yml"
+    )
+    op.execute(context={})
+    assert captured[0] == [
+        "prune-existing",
+        "m",
+        "--schema",
+        "s.yml",
+        "--project-dir",
+        "/proj",
+        "--format",
+        "json",
+        "--dry-run",
+    ]
+
+
+def test_prune_existing_conn_id_not_in_template_fields() -> None:
+    """``signalforge_conn_id`` is NOT a templated field on prune-existing (DEC-007)."""
+    pytest.importorskip("airflow", reason=_AIRFLOW_SKIP)
+    assert "signalforge_conn_id" not in _prune_existing_operator_class().template_fields
