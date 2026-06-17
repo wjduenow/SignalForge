@@ -95,8 +95,12 @@ dev = [
 signalforge = "signalforge.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/wjduenow/SignalForge"
+Homepage = "https://signalforge-dbt.com"
+Documentation = "https://wjduenow.github.io/SignalForge/"
+Source = "https://github.com/wjduenow/SignalForge"
 Issues = "https://github.com/wjduenow/SignalForge/issues"
+Discussions = "https://github.com/wjduenow/SignalForge/discussions"
+Changelog = "https://github.com/wjduenow/SignalForge/releases"
 
 [tool.hatch.version]
 path = "src/signalforge/__init__.py"
