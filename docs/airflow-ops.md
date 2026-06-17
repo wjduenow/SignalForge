@@ -5,13 +5,19 @@ DAG — turning the CLI from an ad-hoc tool into a **scheduled schema-drift / si
 monitor**. Consistent with Architectural Commitment #4 (OSS-first, Core-friendly): an
 Airflow DAG runs against any dbt-core project, no dbt Cloud dependency.
 
-> **Status (v0.7).** Two dedicated operators have landed (epic #228): the
-> **`SignalForgeGenerateOperator`** (issue #232 —
+> **Status (v0.7).** Epic #228 landed in full: three operators plus a credential hook,
+> all reusing the one result→task-state + XCom contract documented here.
+> The **`SignalForgeGenerateOperator`** (issue #232 —
 > [section](#signalforgegenerateoperator)) wraps `signalforge generate` (single model or
-> a `--select` batch), and the **`SignalForgePruneExistingOperator`** (issue #233 —
+> a `--select` batch); the **`SignalForgePruneExistingOperator`** (issue #233 —
 > [section](#signalforgepruneexistingoperator)) wraps the no-LLM, read-only
 > `signalforge prune-existing` (ingest → prune → diff) as a zero-credential signal-rot
-> monitor. Both reuse the exact same result→task-state + XCom contract documented here.
+> monitor; the **`SignalForgeDriftOperator`** (issue #235 —
+> [section](#drift--signal-rot-detection)) gates a DAG on run-over-run drift by comparing
+> two persisted `diff.json` sidecars (no CLI call, no credentials); and the
+> **`SignalForgeHook`** (issue #234 —
+> [section](#airflow-native-credentials-signalforgehook--signalforge_conn_id)) maps an
+> Airflow Connection/Variable to the dbt `profiles.yml` + LLM API key.
 > The **example DAG** that drives the pipeline through the `signalforge.airflow` helpers
 > (`run_signalforge` + `decide_task_outcome` + `raise_for_outcome`) from a
 > `PythonOperator` still ships as a from-scratch reference; the operators collapse both
