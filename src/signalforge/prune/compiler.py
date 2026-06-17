@@ -1176,13 +1176,23 @@ def _percentile_expr(p: float, order_expr: str, dialect: Dialect) -> str:
 
     BigQuery has no ordered-set-aggregate ``PERCENTILE_CONT`` (it is
     window-only and cannot reduce rows in a ``GROUP BY``), so its template is
-    ``APPROX_QUANTILES(expr, 100)[OFFSET(round(p*100))]``; Snowflake / Postgres
-    use the standard-SQL ``PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY expr)``
-    ordered-set form. The compiler never branches on ``dialect.name`` — both
-    surfaces are dialect templates; ``{offset}`` is ignored by the WITHIN GROUP
-    form and ``{p}`` is ignored by the APPROX_QUANTILES form.
+    ``APPROX_QUANTILES(expr, 100)[OFFSET(<offset>)]`` where ``<offset>`` is the
+    bucket index for percentile ``p`` into the 101-element quantile array;
+    Snowflake / Postgres use the standard-SQL ``PERCENTILE_CONT(p) WITHIN GROUP
+    (ORDER BY expr)`` ordered-set form. The compiler never branches on
+    ``dialect.name`` — both surfaces are dialect templates; ``{offset}`` is
+    ignored by the WITHIN GROUP form and ``{p}`` is ignored by the
+    APPROX_QUANTILES form.
+
+    The offset is ``round-half-up`` (``int(p * 100 + 0.5)``), NOT Python's
+    built-in ``round`` (banker's rounding, ties-to-even): a half-integer bucket
+    such as ``p=0.125`` → ``12.5`` resolves to ``OFFSET(13)`` (away from zero),
+    matching the conventional percentile-rounding expectation rather than
+    silently rounding to the even ``12``. All realistic inputs (``p=0.5`` for
+    the median; integer ``threshold`` percentiles) land on exact integers, so
+    this only affects fractional thresholds.
     """
-    offset = round(p * 100)
+    offset = int(p * 100 + 0.5)
     return dialect.percentile_cont_expr_template.format(p=p, expr=order_expr, offset=offset)
 
 

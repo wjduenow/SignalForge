@@ -2484,6 +2484,29 @@ def test_singular_test_sql_percentile_uses_threshold_as_half_band_width() -> Non
     assert "APPROX_QUANTILES(cnt, 100)[OFFSET(90)]" in sql
 
 
+def test_percentile_expr_offset_rounds_half_up_not_bankers() -> None:
+    """The BigQuery `APPROX_QUANTILES` OFFSET is `round-half-up`
+    (`int(p*100 + 0.5)`), NOT Python's banker's-rounding `round`.
+
+    A half-integer bucket (``p=0.125`` → ``12.5``) resolves to ``OFFSET(13)``
+    (away from zero) — the conventional percentile-rounding expectation — not
+    the even ``12`` that ``round(12.5)`` would yield. Exact integers are
+    unaffected (``p=0.5`` → ``OFFSET(50)``), so no existing snapshot moves.
+    """
+    from signalforge.prune.compiler import _percentile_expr
+
+    assert _percentile_expr(0.125, "cnt", BIGQUERY_DIALECT) == (
+        "APPROX_QUANTILES(cnt, 100)[OFFSET(13)]"
+    )
+    # 0.5 → 50 exactly (median); 0.005 → 0.5 → round-half-up to OFFSET(1).
+    assert "OFFSET(50)" in _percentile_expr(0.5, "cnt", BIGQUERY_DIALECT)
+    assert "OFFSET(1)" in _percentile_expr(0.005, "cnt", BIGQUERY_DIALECT)
+    # Snowflake ignores {offset} and keeps the ordered-set form.
+    assert _percentile_expr(0.125, "cnt", SNOWFLAKE_DIALECT) == (
+        "PERCENTILE_CONT(0.125) WITHIN GROUP (ORDER BY cnt)"
+    )
+
+
 def _make_orders_model_with_date_column(data_type: str | None) -> Model:
     """An ``orders`` model carrying an ``event_date`` column of the given
     warehouse ``data_type`` (the anomaly date column)."""
