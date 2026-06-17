@@ -1,0 +1,13 @@
+# Issue chooser config. Blank issues are disabled so questions and ideas are
+# routed to Discussions, keeping the issue tracker focused on actionable bugs.
+blank_issues_enabled: false
+contact_links:
+  - name: ❓ Question or usage help
+    url: https://github.com/wjduenow/SignalForge/discussions/categories/q-a
+    about: Ask how to use SignalForge in Discussions — answers become a searchable FAQ.
+  - name: 💡 Feature request or idea
+    url: https://github.com/wjduenow/SignalForge/discussions/categories/ideas
+    about: Suggest a feature or share an idea for the roadmap.
+  - name: 📚 Documentation
+    url: https://wjduenow.github.io/SignalForge/
+    about: Quick start, CLI reference, configuration, and data safety.

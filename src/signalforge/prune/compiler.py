@@ -1026,7 +1026,36 @@ def _period_unit_keyword(period: str) -> str:
     return period.upper()
 
 
-def _render_as_of_literal(as_of: date, period: str, dialect: Dialect) -> str:
+def _date_value_literal(value_iso: str, column_type: str | None, dialect: Dialect) -> str:
+    """Render a date/timestamp literal whose TYPE matches the date column.
+
+    The DEC-012 partition-pruning predicate compares the bare (un-CAST) date
+    column against this literal, so the literal's type MUST match the column's
+    type or a strict-typed warehouse (BigQuery) rejects the comparison
+    (``No matching signature for >=: TIMESTAMP, DATE``). CASTing the *column*
+    would fix the type mismatch but disable partition pruning — exactly the
+    cost regression DEC-012 exists to prevent — so we type-match the *literal*
+    instead, leaving the column bare.
+
+    ``column_type`` is the date column's ``data_type`` (from the manifest /
+    catalog merge, issue #159). When it is unknown (no ``data_type``) we fall
+    back to a DATE literal — the historical behaviour — which a non-DATE column
+    will reject at query time, routing the test to ``kept-without-evidence``
+    (graceful degrade, unchanged from today).
+    """
+    normalised = (column_type or "").strip().upper()
+    if normalised.startswith("TIMESTAMP"):
+        template = dialect.timestamp_literal_template
+    elif normalised.startswith("DATETIME"):
+        template = dialect.datetime_literal_template
+    else:  # "DATE", unknown, or any other type → DATE-literal fallback
+        template = dialect.date_literal_template
+    return template.format(value=value_iso)
+
+
+def _render_as_of_literal(
+    as_of: date, period: str, dialect: Dialect, *, column_type: str | None = None
+) -> str:
     """Render the ``as_of`` literal, period-aligned for ``week`` / ``hour``.
 
     Per #171 CodeRabbit finding #4: when ``period`` is ``week`` or ``hour``,
@@ -1046,7 +1075,7 @@ def _render_as_of_literal(as_of: date, period: str, dialect: Dialect) -> str:
     — document; the workaround for hourly cadence is `period="day"` with the
     operator's choice of `as_of` reflecting their preferred hour boundary.
     """
-    bare = dialect.date_literal_template.format(value=as_of.isoformat())
+    bare = _date_value_literal(as_of.isoformat(), column_type, dialect)
     if period == "day":
         return bare
     unit = _period_unit_keyword(period)
@@ -1060,6 +1089,7 @@ def _render_anomaly_stats_partition_filter(
     lookback_periods: int,
     period: str,
     dialect: Dialect,
+    column_type: str | None = None,
 ) -> str:
     """Render the load-bearing DEC-012 partition-pruning WHERE fragment
     for the stats (history) query.
@@ -1080,7 +1110,7 @@ def _render_anomaly_stats_partition_filter(
     form. The compiler NEVER branches on ``dialect.name`` — both surfaces
     are dialect templates.
     """
-    as_of_literal = _render_as_of_literal(as_of, period, dialect)
+    as_of_literal = _render_as_of_literal(as_of, period, dialect, column_type=column_type)
     unit = _period_unit_keyword(period)
     lookback_interval = dialect.interval_expr_template.format(n=lookback_periods, unit=unit)
     return (
@@ -1099,6 +1129,7 @@ def _render_anomaly_history_cte(
     seasonality: str,
     where: str | None,
     dialect: Dialect,
+    column_type: str | None = None,
 ) -> str:
     """Render the ``history`` CTE common to all four methods.
 
@@ -1122,6 +1153,7 @@ def _render_anomaly_history_cte(
         lookback_periods=lookback_periods,
         period=period,
         dialect=dialect,
+        column_type=column_type,
     )
     where_clause = partition_pred if where is None else f"{partition_pred} AND {where}"
 
@@ -1140,8 +1172,28 @@ def _render_anomaly_history_cte(
 
 
 def _percentile_expr(p: float, order_expr: str, dialect: Dialect) -> str:
-    """Render a ``PERCENTILE_CONT`` call from the dialect template."""
-    return dialect.percentile_cont_expr_template.format(p=p, expr=order_expr)
+    """Render a GROUP-BY percentile expression from the dialect template.
+
+    BigQuery has no ordered-set-aggregate ``PERCENTILE_CONT`` (it is
+    window-only and cannot reduce rows in a ``GROUP BY``), so its template is
+    ``APPROX_QUANTILES(expr, 100)[OFFSET(<offset>)]`` where ``<offset>`` is the
+    bucket index for percentile ``p`` into the 101-element quantile array;
+    Snowflake / Postgres use the standard-SQL ``PERCENTILE_CONT(p) WITHIN GROUP
+    (ORDER BY expr)`` ordered-set form. The compiler never branches on
+    ``dialect.name`` — both surfaces are dialect templates; ``{offset}`` is
+    ignored by the WITHIN GROUP form and ``{p}`` is ignored by the
+    APPROX_QUANTILES form.
+
+    The offset is ``round-half-up`` (``int(p * 100 + 0.5)``), NOT Python's
+    built-in ``round`` (banker's rounding, ties-to-even): a half-integer bucket
+    such as ``p=0.125`` → ``12.5`` resolves to ``OFFSET(13)`` (away from zero),
+    matching the conventional percentile-rounding expectation rather than
+    silently rounding to the even ``12``. All realistic inputs (``p=0.5`` for
+    the median; integer ``threshold`` percentiles) land on exact integers, so
+    this only affects fractional thresholds.
+    """
+    offset = int(p * 100 + 0.5)
+    return dialect.percentile_cont_expr_template.format(p=p, expr=order_expr, offset=offset)
 
 
 def _compile_anomaly_stats_query(
@@ -1150,6 +1202,7 @@ def _compile_anomaly_stats_query(
     dialect: Dialect,
     *,
     as_of: date,
+    date_column_type: str | None = None,
 ) -> str:
     """Render the stats query for a ``row_count_anomaly_by_period`` test.
 
@@ -1180,6 +1233,7 @@ def _compile_anomaly_stats_query(
         seasonality=test.seasonality,
         where=test.where,
         dialect=dialect,
+        column_type=date_column_type,
     )
 
     seasonality_dow = test.seasonality == "dow"
@@ -1256,6 +1310,7 @@ def _compile_anomaly_violation_query(
     dialect: Dialect,
     *,
     as_of: date,
+    date_column_type: str | None = None,
 ) -> str:
     """Render the violation query for a ``row_count_anomaly_by_period`` test.
 
@@ -1278,7 +1333,7 @@ def _compile_anomaly_violation_query(
     # ``as_of`` is a date at 00:00, which is the boundary by construction).
     # The DEC-012 partition-pruning shape inverts the upper bound vs. the
     # stats query: stats excludes today, violation IS today.
-    as_of_literal = _render_as_of_literal(as_of, test.period, dialect)
+    as_of_literal = _render_as_of_literal(as_of, test.period, dialect, column_type=date_column_type)
     unit = _period_unit_keyword(test.period)
     today_interval = dialect.interval_expr_template.format(n=1, unit=unit)
     today_only = (
@@ -1298,6 +1353,7 @@ def _render_anomaly_today_cte(
     where: str | None,
     dialect: Dialect,
     include_dow: bool,
+    column_type: str | None = None,
 ) -> str:
     """Render the ``today`` CTE used by the singular-test SQL emitter.
 
@@ -1309,7 +1365,7 @@ def _render_anomaly_today_cte(
     When ``where`` is non-None, the predicate appends so the today count
     reflects the same filtered universe as the history CTE.
     """
-    as_of_literal = _render_as_of_literal(as_of, period, dialect)
+    as_of_literal = _render_as_of_literal(as_of, period, dialect, column_type=column_type)
     unit = _period_unit_keyword(period)
     today_interval = dialect.interval_expr_template.format(n=1, unit=unit)
     today_pred = (
@@ -1377,6 +1433,7 @@ def _compile_anomaly_singular_test_sql(
     dialect: Dialect,
     *,
     as_of: date,
+    date_column_type: str | None = None,
 ) -> str:
     """Render a STANDALONE dbt-singular-test SQL for the variant.
 
@@ -1432,6 +1489,7 @@ def _compile_anomaly_singular_test_sql(
         seasonality=test.seasonality,
         where=test.where,
         dialect=dialect,
+        column_type=date_column_type,
     )
     today_cte = _render_anomaly_today_cte(
         date_column_quoted=date_column_quoted,
@@ -1441,6 +1499,7 @@ def _compile_anomaly_singular_test_sql(
         where=test.where,
         dialect=dialect,
         include_dow=seasonal,
+        column_type=date_column_type,
     )
     band_predicate = _render_anomaly_band_violation_predicate(
         method=test.method,
@@ -1544,6 +1603,7 @@ def _compile_row_count_anomaly_by_period(
     dialect: Dialect,
     *,
     as_of: date,
+    date_column_type: str | None = None,
 ) -> tuple[str, str] | _InvalidIdentifier:
     """Compile a ``row_count_anomaly_by_period`` test to the
     ``(stats_sql, violation_sql)`` tuple per DEC-008.
@@ -1587,8 +1647,19 @@ def _compile_row_count_anomaly_by_period(
             )
         )
 
-    stats_sql = _compile_anomaly_stats_query(test, table_ref, dialect, as_of=as_of)
-    violation_sql = _compile_anomaly_violation_query(test, table_ref, dialect, as_of=as_of)
+    # ``date_column_type`` (the date column's warehouse ``data_type``, resolved
+    # by ``_compile_test`` from the manifest / catalog merge of issue #159)
+    # TYPE-MATCHES the partition-pruning bound literal to the column — a
+    # TIMESTAMP column compared against a DATE literal is rejected by BigQuery,
+    # and CASTing the column to DATE would disable partition pruning (DEC-012).
+    # Unknown type → DATE-literal fallback (the historical behaviour), which
+    # degrades gracefully if the column is not a DATE.
+    stats_sql = _compile_anomaly_stats_query(
+        test, table_ref, dialect, as_of=as_of, date_column_type=date_column_type
+    )
+    violation_sql = _compile_anomaly_violation_query(
+        test, table_ref, dialect, as_of=as_of, date_column_type=date_column_type
+    )
 
     # Compose-then-validate (DEC-005 of #169 generalised): a hostile ``where``
     # surfaces on the assembled SQL via the cheap-rejects scan. Re-using
@@ -1759,7 +1830,22 @@ def _compile_test(
                     "before calling _compile_test"
                 )
             )
-        return _compile_row_count_anomaly_by_period(test, table_ref, dialect, as_of=as_of)
+        # Resolve the date column's warehouse type from the manifest model so
+        # the anomaly compiler can TYPE-MATCH the partition-pruning bound
+        # literal (issue #159 data_type). ``model`` is None in unit snapshots
+        # (column type unknown → DATE-literal fallback).
+        anomaly_date_column_type: str | None = None
+        if model is not None:
+            anomaly_date_col = model.columns.get(test.date_column)
+            if anomaly_date_col is not None:
+                anomaly_date_column_type = anomaly_date_col.data_type
+        return _compile_row_count_anomaly_by_period(
+            test,
+            table_ref,
+            dialect,
+            as_of=as_of,
+            date_column_type=anomaly_date_column_type,
+        )
     # The discriminated union is closed over the eight variants above; an
     # unreachable arm here means a ninth variant was added without a
     # compiler branch.

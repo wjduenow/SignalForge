@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 from signalforge._common import palette
 from signalforge._common.ansi_safety import strip_ansi_escapes
 from signalforge._common.path_safety import PathContainmentError, canonicalise_path
+from signalforge.airflow import AirflowConfigError
 from signalforge.cli.errors import (
     CliError,
     CliInitDemoCopyError,
@@ -452,6 +453,16 @@ _EXCEPTION_TO_EXIT_CODE: dict[type[BaseException], int] = {
     # failure — the YAML is stale or wrong vs. the manifest).
     IngestModelNotFoundError: 2,
     IngestAnchorContractError: 2,
+    # signalforge.airflow integration layer (issue #230 / DEC-003).
+    # ``AirflowConfigError`` fires when a SignalForge Airflow operator
+    # reads a missing/invalid ``project_dir`` / ``model`` from its config
+    # — operator misconfiguration, tier 2 (input-validation), mirroring
+    # ``ModelNotFoundError``'s "the operator named something the project
+    # rejects" tier. NOTE: registration is defensive / scan-7 compliance
+    # — these errors surface through Airflow's own task runner
+    # (``AirflowFailException``), not the ``signalforge`` CLI panic path,
+    # so the tier is notional but every typed error must resolve to one.
+    AirflowConfigError: 2,
     # LLM cost-rollup layer (issue #157 / DEC-002 of US-001). The rollup
     # walks per-run audit JSONLs and turns token counts into USD via the
     # pricing table; all three concretes are input-shape failures (the

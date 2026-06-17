@@ -1,0 +1,75 @@
+name: 🐛 Bug report
+description: Something broke or behaved differently than expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. A reproducible report gets fixed far faster.
+        Please search [existing issues](https://github.com/wjduenow/SignalForge/issues) first.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you run, and what went wrong?
+      placeholder: I ran `signalforge generate stg_orders` and it ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact command(s) and relevant config. Redact anything sensitive — never paste warehouse rows or secrets.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: SignalForge version
+      description: Output of `signalforge --version` (or `pip show signalforge-dbt`).
+      placeholder: "0.6.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: warehouse
+    attributes:
+      label: Data warehouse
+      options:
+        - BigQuery
+        - Snowflake
+        - Other / not applicable
+    validations:
+      required: true
+  - type: dropdown
+    id: llm
+    attributes:
+      label: LLM provider
+      options:
+        - Anthropic
+        - OpenAI
+        - Gemini
+        - Not applicable
+    validations:
+      required: false
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: "3.11"
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or traceback
+      description: Paste any error output — it will be rendered as code. Redact secrets.
+      render: shell
+    validations:
+      required: false

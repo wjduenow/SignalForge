@@ -3,7 +3,7 @@ name: signalforge
 description: Use when the user wants to draft, prune, or grade dbt tests / docs with an LLM, has a dbt project (manifest.json + sql models), or asks about SignalForge. Drives the `signalforge` CLI end-to-end: drafts candidate tests, runs them against warehouse samples, drops the noise, and explains every kept/dropped artifact.
 compatibility: "Requires: signalforge installed (pip install signalforge-dbt) + ANTHROPIC_API_KEY (the drafter always calls Anthropic). The `signalforge lint` and `signalforge install-skill` paths are fully offline. The bundled demo (`init-demo` + `generate`) reads a public BigQuery dataset, so it needs ADC (`gcloud auth application-default login`) + `GOOGLE_CLOUD_PROJECT` for billing — no proprietary warehouse setup of your own, but not credential-free. For real dbt projects: dbt-core + a populated manifest.json + your warehouse profile. For live e2e: BigQuery v0.1."
 metadata:
-  signalforge-version: "0.6.1"
+  signalforge-version: "0.7.0"
 allowed-tools: Bash(signalforge *), Bash(uv run signalforge *), Bash(uv run pytest -m e2e*), Bash(cat *), Bash(ls *), Bash(grep *), Bash(head *), Bash(tail *), Read, Write, Edit
 ---
 
@@ -201,7 +201,21 @@ The repo ships a live end-to-end test that exercises the full pipeline against r
 
 Surface the test output verbatim. The live e2e is the cleanest demonstration that SignalForge actually drops always-pass tests against real data, but it is **never** the default — Section 2's zero-credential demo is.
 
-## 7. Troubleshooting
+## 7. Scheduled runs (Airflow)
+
+For unattended, scheduled drift / signal-rot monitoring, SignalForge ships Apache Airflow operators behind the optional `[airflow]` extra (`pip install signalforge-dbt[airflow]`). The base install stays Airflow-free — the operators import nothing from Airflow until you install the extra and construct them inside a DAG.
+
+Three operators wrap the pipeline as Airflow tasks:
+
+- **`SignalForgeGenerateOperator`** — the full draft → prune → grade → diff pipeline as a scheduled task.
+- **`SignalForgePruneExistingOperator`** — the no-LLM ingest → prune → diff path (no API key); prunes your existing dbt tests against live warehouse data on a schedule.
+- **`SignalForgeDriftOperator`** — a read-only scheduled drift / signal-rot monitor.
+
+Plus a **`SignalForgeHook`** that resolves provider credentials and the dbt profile from a single Airflow Connection (and optional Variable) instead of inline per-task env, keeping secrets out of task definitions and XCom.
+
+For the operator parameters, the result → task-state contract, credential wiring, and ready-to-copy example DAGs, point the user at `docs/airflow-ops.md`.
+
+## 8. Troubleshooting
 
 Common errors and their one-line fixes:
 

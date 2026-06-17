@@ -22,6 +22,7 @@ And you don't have to start from SignalForge's own drafts. Point it at a `schema
 - **Reports what was kept and what was dropped**, with a one-line "why" per artifact. No black-box generation.
 - **Prunes tests you already have.** Point it at an existing `schema.yml` — from dbt-codegen, dbt Copilot, DinoAI, datapilot, or hand-written — and the warehouse tells you which of *those* tests add no signal. Same prune step, no LLM call (`signalforge prune-existing`).
 - **Drives end-to-end from Claude Code.** Run `signalforge install-skill` once in your dbt project and Claude recognises requests like "draft tests for `dim_customers`" or "prune my existing `schema.yml`," picks the right subcommand + flags, and explains the kept / kept-uncertain / dropped / flagged diff back. Deep dive: [Claude Code skill](docs/skills.md).
+- **Runs on a schedule in Airflow.** Drop the pipeline into a DAG — nightly against changed models, or downstream of a `dbt build` — for run-over-run **schema-drift / signal-rot detection**: get paged the day a test that *used* to catch failing rows silently starts always-passing. Three operators + a `SignalForgeHook` map Airflow Connections to credentials and graded results to task state + XCom, all behind an optional extra (the core install never pulls Airflow in). Deep dive: [Airflow integration](docs/airflow-ops.md).
 
 ## What tests SignalForge generates
 
@@ -574,6 +575,55 @@ silently happen. A reviewer correlates the two streams by
 the retry taxonomy, the cache pre-send checks, and the typed-error
 reference.
 
+## Orchestration: scheduled drift detection (Airflow)
+
+SignalForge ships a first-class Apache Airflow integration so dbt shops can run the
+pipeline **on a schedule** — nightly against changed models, or downstream of a
+`dbt build` — instead of ad-hoc from the CLI. The headline scheduled value-add is
+**signal-rot detection**: a run-over-run comparison that pages you the day a test which
+*used* to catch failing rows silently starts always-passing. That drift is exactly the
+schema rot this product exists to surface — it turns SignalForge from a generator into a
+monitor.
+
+Three operators + a hook, all behind the `[airflow]` optional extra. The core
+`pip install signalforge-dbt` **never** pulls Airflow in; every `airflow.*` import is
+confined to the `signalforge.airflow` subpackage.
+
+| Surface | Role |
+| --- | --- |
+| `SignalForgeGenerateOperator` | Wraps `generate` (single model or `--select` batch). `write=False` runs `--dry-run` — the safe, read-only scheduled default |
+| `SignalForgePruneExistingOperator` | Wraps the no-LLM, read-only `prune-existing` — a **zero-credential** signal-rot monitor |
+| `SignalForgeDriftOperator` | Compares this run's diff against a prior run's sidecar and gates the DAG on newly-always-passing tests or grade regressions |
+| `SignalForgeHook` | Maps an Airflow Connection/Variable to the dbt `profiles.yml` + LLM API key — credentials never reach task logs or XCom |
+
+Graded results map onto Airflow the way you'd expect: the CLI's four-tier exit-code
+taxonomy drives task state (success / retryable / fail), flagged or drift-alarming runs
+fail or branch to a review task via `on_flagged` / `on_drift` (most-severe-wins), and
+tier counts + sidecar paths surface as XCom for downstream alerting.
+
+```python
+from signalforge.airflow import SignalForgeGenerateOperator
+
+# Nightly: regenerate stg_orders read-only and page if a kept test rotted to always-pass.
+monitor = SignalForgeGenerateOperator(
+    task_id="drift_monitor",
+    project_dir="/opt/dbt/my_project",
+    model="models/staging/stg_orders.sql",
+    write=False,                       # read-only scheduled default (--dry-run)
+    as_of="{{ ds }}",                  # reproducibility anchor for time-bound tests
+    # Compare against yesterday's persisted diff; persist today's for tomorrow.
+    detect_drift_against="/opt/airflow/sf_history/{{ macros.ds_add(ds, -1) }}/diff.json",
+    drift_history_dir="/opt/airflow/sf_history/{{ ds }}",
+    on_drift="fail",                   # alarming drift → hard, no-retry failure
+)
+```
+
+Install steps (the constraints-pinned `[airflow]` environment), the full
+result→task-state table, every operator's params, the `SignalForgeHook` credential flow,
+the date-stamped drift-history pattern, managed-runtime notes (Astronomer / MWAA /
+Composer), and runnable example DAGs live in the deep dive:
+**[Airflow integration](docs/airflow-ops.md)**.
+
 ## Roadmap
 
 Shipped:
@@ -586,12 +636,12 @@ Shipped:
 | v0.4    | 2026-05-28 | **Multi-provider LLM support** — OpenAI (#136) and Google Gemini (#137) behind the provider-neutral seam established in #135 (Anthropic remains the default). `--estimate` is provider-aware: Anthropic uses `messages.count_tokens` (live SDK call), OpenAI uses local `tiktoken`, Gemini uses native `client.models.count_tokens` |
 | v0.5    | 2026-05-30 | **Installable Claude Code skill** — `signalforge install-skill` ships a SKILL.md that teaches Claude to drive the CLI against your dbt project                  |
 | v0.6    | 2026-06-09 | **Three new test primitives** (`row_count_between`, `unique_combination`, `row_count_anomaly_by_period` + `--as-of` time-bound reproducibility); grade-stage asyncio orchestrator (~9× faster); persistent grade cache + `--no-grade` / `--no-cache`; grade-to-100% completeness + opt-in cost ceilings; wide-table safety audit; per-provider judge defaults; bulk `--select` shared cache prefix |
+| v0.7    | 2026-06-17 | **Airflow integration** — three operators (`SignalForgeGenerateOperator`, `SignalForgePruneExistingOperator`, `SignalForgeDriftOperator`) + a `SignalForgeHook` (Airflow Connection/Variable → credentials) for scheduled run-over-run schema-drift / signal-rot detection in a DAG; behind the `[airflow]` optional extra so the core install stays Airflow-free. Deep dive: [`docs/airflow-ops.md`](docs/airflow-ops.md) |
 
 Planned:
 
 | Version | Scope                                                                                                            |
 | ------- | ---------------------------------------------------------------------------------------------------------------- |
-| v0.7    | **Airflow operator** — drop SignalForge into a scheduled DAG for periodic schema drift / signal-rot detection    |
 | v0.8    | **GitHub Action** — PR-time invocation with inline comment integration (kept/dropped/flagged surfaced on the PR) |
 | v0.9    | **Rubric customization** — project-specific grading criteria; organization-wide style profiles                   |
 | v1.0    | **dbt Fusion engine compatibility** — dbt MCP server consumption; first-class Fusion integration                 |

@@ -374,11 +374,11 @@ def provider_for(name: str) -> LLMProvider:
 
 
 # ---------------------------------------------------------------------------
-# Provider -> string mappings (#187 US-001).
+# Provider -> string mappings (#187 US-001; #234 US-001).
 #
-# Two read-only constants keyed by the canonical provider names registered
+# Read-only constants keyed by the canonical provider names registered
 # below (``anthropic`` / ``openai`` / ``gemini``). They are the single
-# source of truth for two cross-cutting facts that previously lived as
+# source of truth for cross-cutting facts that previously lived as
 # duplicated literals scattered across stages:
 #
 # * ``PROVIDER_DEFAULT_MODELS`` — the cheap/fast judge SKU per provider, used by
@@ -389,6 +389,10 @@ def provider_for(name: str) -> LLMProvider:
 #   the cost-rollup's prefix dispatch (``signalforge.llm.cost._rollup``) to map
 #   a priced SKU back to its provider. Consumers that need the inverse
 #   (prefix -> provider) iterate ``.items()`` and invert.
+# * ``PROVIDER_ENV_VAR_KEYS`` — the environment-variable name carrying each
+#   provider's API key (#234 US-001). The single source of truth for "which env
+#   var holds provider X's credential," reused by the Airflow hook (#234) and the
+#   v0.8 GitHub Action so neither hard-codes the per-provider env-var name.
 #
 # These are plain ``dict`` literals (not ``MappingProxyType``) for the same
 # reason the cost-rollup's prefix table is a plain tuple — they are internal
@@ -415,6 +419,19 @@ PROVIDER_SKU_PREFIXES: dict[str, str] = {
     "anthropic": "claude-",
     "openai": "gpt-",
     "gemini": "gemini-",
+}
+
+#: Environment-variable name carrying each provider's API key (#234 US-001).
+#: The single source of truth for "which env var holds provider X's credential,"
+#: reused by the Airflow hook (#234) and the v0.8 GitHub Action. A closed
+#: allowlist keyed by exactly the three registered provider names — stays in
+#: lockstep with :data:`PROVIDER_DEFAULT_MODELS`. Note Gemini's key is
+#: ``GOOGLE_API_KEY`` (the ``google-genai`` SDK's convention), not a
+#: ``GEMINI_*`` name.
+PROVIDER_ENV_VAR_KEYS: dict[str, str] = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GOOGLE_API_KEY",
 }
 
 
@@ -1567,6 +1584,7 @@ register_provider(GeminiProvider())
 
 __all__ = (
     "PROVIDER_DEFAULT_MODELS",
+    "PROVIDER_ENV_VAR_KEYS",
     "PROVIDER_SKU_PREFIXES",
     "AnthropicProvider",
     "ExceptionCategory",
