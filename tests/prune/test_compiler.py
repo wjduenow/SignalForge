@@ -2477,9 +2477,122 @@ def test_singular_test_sql_percentile_uses_threshold_as_half_band_width() -> Non
     sql = _compile_anomaly_singular_test_sql(
         test, _make_orders_table_ref(), BIGQUERY_DIALECT, as_of=_ANOMALY_AS_OF
     )
-    # p_lo = 10.0 / 100 = 0.1; p_hi = 1 - 0.1 = 0.9.
-    assert "PERCENTILE_CONT(0.1) WITHIN GROUP (ORDER BY cnt)" in sql
-    assert "PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY cnt)" in sql
+    # p_lo = 10.0 / 100 = 0.1; p_hi = 1 - 0.1 = 0.9. BigQuery renders the
+    # percentile via the ``APPROX_QUANTILES`` idiom with OFFSET = round(p*100):
+    # p_lo=0.1 → OFFSET(10); p_hi=0.9 → OFFSET(90).
+    assert "APPROX_QUANTILES(cnt, 100)[OFFSET(10)]" in sql
+    assert "APPROX_QUANTILES(cnt, 100)[OFFSET(90)]" in sql
+
+
+def test_percentile_expr_offset_rounds_half_up_not_bankers() -> None:
+    """The BigQuery `APPROX_QUANTILES` OFFSET is `round-half-up`
+    (`int(p*100 + 0.5)`), NOT Python's banker's-rounding `round`.
+
+    A half-integer bucket (``p=0.125`` → ``12.5``) resolves to ``OFFSET(13)``
+    (away from zero) — the conventional percentile-rounding expectation — not
+    the even ``12`` that ``round(12.5)`` would yield. Exact integers are
+    unaffected (``p=0.5`` → ``OFFSET(50)``), so no existing snapshot moves.
+    """
+    from signalforge.prune.compiler import _percentile_expr
+
+    assert _percentile_expr(0.125, "cnt", BIGQUERY_DIALECT) == (
+        "APPROX_QUANTILES(cnt, 100)[OFFSET(13)]"
+    )
+    # 0.5 → 50 exactly (median); 0.005 → 0.5 → round-half-up to OFFSET(1).
+    assert "OFFSET(50)" in _percentile_expr(0.5, "cnt", BIGQUERY_DIALECT)
+    assert "OFFSET(1)" in _percentile_expr(0.005, "cnt", BIGQUERY_DIALECT)
+    # Snowflake ignores {offset} and keeps the ordered-set form.
+    assert _percentile_expr(0.125, "cnt", SNOWFLAKE_DIALECT) == (
+        "PERCENTILE_CONT(0.125) WITHIN GROUP (ORDER BY cnt)"
+    )
+
+
+def _make_orders_model_with_date_column(data_type: str | None) -> Model:
+    """An ``orders`` model carrying an ``event_date`` column of the given
+    warehouse ``data_type`` (the anomaly date column)."""
+    return Model(
+        unique_id="model.shop.orders",
+        name="orders",
+        resource_type="model",
+        package_name="shop",
+        original_file_path="models/orders.sql",
+        path="orders.sql",
+        database="fake_project",
+        schema="dataset",  # type: ignore[call-arg]
+        columns={"event_date": Column(name="event_date", data_type=data_type)},
+        raw_code="select 1",
+    )
+
+
+@pytest.mark.parametrize(
+    "data_type,expected_literal",
+    [
+        ("TIMESTAMP", "TIMESTAMP('2026-05-01')"),
+        ("TIMESTAMP_NTZ", "TIMESTAMP('2026-05-01')"),  # timestamp family by prefix
+        ("DATE", "DATE('2026-05-01')"),
+        ("DATETIME", "DATETIME('2026-05-01')"),
+        (None, "DATE('2026-05-01')"),  # unknown type → DATE-literal fallback
+    ],
+)
+def test_anomaly_partition_bound_literal_matches_date_column_type(
+    data_type: str | None, expected_literal: str
+) -> None:
+    """The DEC-012 partition-pruning bound literal is TYPE-MATCHED to the date
+    column's warehouse type (issue #159 ``data_type``).
+
+    Regression guard for the BigQuery bug surfaced by the gated live e2e: a
+    TIMESTAMP date column compared against a bare ``DATE('...')`` bound is
+    rejected by BigQuery (``No matching signature for >=: TIMESTAMP, DATE``).
+    CASTing the column to DATE would fix the type mismatch but DISABLE
+    partition pruning (the load-bearing DEC-012 cost mechanism), so the
+    compiler type-matches the *literal* to the column instead, leaving the
+    column bare. Unknown type → DATE-literal fallback (historical behaviour;
+    degrades gracefully via ``kept-without-evidence`` if the column is not a
+    DATE). Both the stats (history-CTE) and violation queries carry the bound.
+    """
+    model = _make_orders_model_with_date_column(data_type)
+    manifest = Manifest(metadata={"dbt_schema_version": "v12"}, nodes={model.unique_id: model})
+    test = _make_anomaly_test(method="mad", seasonality="dow")
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        manifest,
+        model=model,
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, tuple)
+    stats_sql, violation_sql = result
+    assert expected_literal in stats_sql
+    assert expected_literal in violation_sql
+    # A TIMESTAMP column must NOT emit a bare DATE/DATETIME bound (the bug).
+    if data_type and data_type.upper().startswith("TIMESTAMP"):
+        assert "DATE('2026-05-01')" not in stats_sql
+        assert "DATETIME('2026-05-01')" not in stats_sql
+
+
+def test_singular_test_sql_bound_literal_matches_date_column_type() -> None:
+    """The operator-shipped singular-test SQL (emitter path) type-matches the
+    partition-pruning bound to the date column's warehouse type — a TIMESTAMP
+    column must emit ``TIMESTAMP('...')`` bounds, not a bare ``DATE('...')``
+    (which BigQuery rejects). Parallel guard to the engine-path bound test;
+    the singular-test SQL is what lands in the operator's dbt repo.
+    """
+    test = _make_anomaly_test(method="mad", seasonality="dow")
+    ts_sql = _compile_anomaly_singular_test_sql(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        as_of=_ANOMALY_AS_OF,
+        date_column_type="TIMESTAMP",
+    )
+    assert "TIMESTAMP('2026-05-01')" in ts_sql
+    assert "DATE('2026-05-01')" not in ts_sql
+    # Unknown type → DATE-literal fallback (historical behaviour).
+    date_sql = _compile_anomaly_singular_test_sql(
+        test, _make_orders_table_ref(), BIGQUERY_DIALECT, as_of=_ANOMALY_AS_OF
+    )
+    assert "DATE('2026-05-01')" in date_sql
 
 
 def test_singular_test_sql_snowflake_dialect_uses_dialect_fragments() -> None:

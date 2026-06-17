@@ -121,6 +121,8 @@ def read_prune_decisions(project_dir: Path) -> tuple[PruneDecision, ...]:
                     compiled_sql=event.compiled_sql,
                     why=event.why,
                     sample_failures=event.sample_failures,
+                    as_of=event.as_of,
+                    stats=event.stats,
                 )
             )
     return tuple(decisions)

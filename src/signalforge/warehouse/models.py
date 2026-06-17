@@ -124,10 +124,21 @@ class Dialect:
       Snowflake's ``DOW`` returns ``0`` for Sunday (0..6) by default (the
       session ``WEEK_START`` parameter can change Snowflake's basis; ``0`` is
       the conservative default assumption).
-    * ``percentile_cont_expr_template`` — ``str.format(p=..., expr=...)``
-      template for ``PERCENTILE_CONT``. BigQuery and Snowflake share the
-      ``PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY expr)`` form; the field
-      exists for dialect parity and to anchor future Postgres variation.
+    * ``percentile_cont_expr_template`` — ``str.format(p=..., expr=...,
+      offset=...)`` template for a GROUP-BY percentile. **The dialects do NOT
+      share a form.** BigQuery has no ordered-set-aggregate ``PERCENTILE_CONT``
+      (it is window-only and cannot reduce rows in a ``GROUP BY``), so BigQuery
+      uses ``APPROX_QUANTILES(expr, 100)[OFFSET(round(p*100))]``; Snowflake and
+      Postgres use the standard-SQL ``PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY
+      expr)`` ordered-set form. ``{offset}`` is ``round(p*100)`` (supplied by
+      the compiler); the ``WITHIN GROUP`` form ignores it and the
+      ``APPROX_QUANTILES`` form ignores ``{p}``. The ``APPROX_QUANTILES`` median
+      is *approximate* (~1% error) — acceptable for row-count anomaly bands and
+      consistent with the ``HASH()`` reproducibility caveat (issue #121).
+    * ``datetime_literal_template`` — the DATETIME analogue of
+      ``timestamp_literal_template`` / ``date_literal_template``. Used by the
+      anomaly compiler to render a partition-pruning bound whose type matches a
+      ``DATETIME`` date column (BigQuery ``DATETIME('{value}')``).
 
     The defaults reproduce BigQuery's SQL byte-for-byte so every existing
     construction site stays valid unedited (DEC-001 of issue #121; DEC-001 of
@@ -142,6 +153,7 @@ class Dialect:
     sample_row_hash_expr: str = "ABS(FARM_FINGERPRINT(TO_JSON_STRING(t)))"
     timestamp_literal_template: str = "TIMESTAMP('{value}')"
     date_literal_template: str = "DATE('{value}')"
+    datetime_literal_template: str = "DATETIME('{value}')"
     quote_qualified_per_component: bool = False
     sample_cte_alias: str = "sample"
     sample_hash_in_projection: bool = False
@@ -153,7 +165,13 @@ class Dialect:
     interval_expr_template: str = "INTERVAL {n} {unit}"
     extract_dow_expr_template: str = "EXTRACT(DAYOFWEEK FROM {date})"
     dow_sunday_index: int = 1
-    percentile_cont_expr_template: str = "PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})"
+    # BigQuery has no GROUP-BY-compatible ordered-set ``PERCENTILE_CONT`` (it is
+    # window-only), so the default is the ``APPROX_QUANTILES`` idiom. The
+    # ``{offset}`` placeholder is ``round(p * 100)`` (computed by the compiler's
+    # ``_percentile_expr``). Snowflake / Postgres override to the standard-SQL
+    # ``PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY expr)`` ordered-set form, which
+    # ignores ``{offset}``.
+    percentile_cont_expr_template: str = "APPROX_QUANTILES({expr}, 100)[OFFSET({offset})]"
 
 
 BIGQUERY_DIALECT = Dialect(
@@ -171,6 +189,11 @@ POSTGRES_DIALECT = Dialect(
     supports_qualify=False,
     quote_char='"',
     identifier_case="lower",
+    # The BigQuery default ``percentile_cont_expr_template`` is now the
+    # BigQuery-only ``APPROX_QUANTILES`` idiom, which is invalid Postgres, so
+    # Postgres must declare its own form explicitly rather than inherit it.
+    # Postgres supports the standard-SQL ordered-set aggregate directly.
+    percentile_cont_expr_template="PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})",
 )
 """Postgres-flavoured :class:`Dialect` for the v0.2 stub adapter (issue #53).
 
@@ -184,13 +207,16 @@ POSTGRES_DIALECT = Dialect(
 
 The five issue-#121 SQL-fragment fields (``sample_row_hash_expr``,
 ``timestamp_literal_template``, ``date_literal_template``,
-``quote_qualified_per_component``, ``sample_cte_alias``) AND the five
-issue-#171 fields (``date_trunc_expr_template``, ``interval_expr_template``,
-``extract_dow_expr_template``, ``dow_sunday_index``,
-``percentile_cont_expr_template``) keep their **BigQuery defaults** here
-because the Postgres adapter's warehouse ops are not implemented yet (the
-#53 stub raises ``NotImplementedError`` from every op method), so the prune
-compiler is never invoked for a Postgres profile. Most of these defaults are
+``quote_qualified_per_component``, ``sample_cte_alias``) AND the issue-#171
+date-arithmetic fields (``date_trunc_expr_template``, ``interval_expr_template``,
+``extract_dow_expr_template``, ``dow_sunday_index``) keep their **BigQuery
+defaults** here because the Postgres adapter's warehouse ops are not
+implemented yet (the #53 stub raises ``NotImplementedError`` from every op
+method), so the prune compiler is never invoked for a Postgres profile.
+``percentile_cont_expr_template`` is the exception: its BigQuery default is now
+the BigQuery-only ``APPROX_QUANTILES`` idiom (invalid Postgres), so Postgres
+declares the standard-SQL ``PERCENTILE_CONT … WITHIN GROUP`` form explicitly.
+Most of these defaults are
 wrong for Postgres and will be corrected when the Postgres adapter's
 warehouse ops land (DEC-007 of issue #121; corrected in the Postgres-ops PR
 in the issue #53/118 family): Postgres needs
@@ -219,6 +245,7 @@ SNOWFLAKE_DIALECT = Dialect(
     sample_cte_alias='"sample"',
     timestamp_literal_template="'{value}'::TIMESTAMP",
     date_literal_template="'{value}'::DATE",
+    datetime_literal_template="'{value}'::DATETIME",
     quote_qualified_per_component=True,
     sample_hash_in_projection=True,
     # Issue #171 DEC-011 — Snowflake overrides for the row-count-anomaly variant.
