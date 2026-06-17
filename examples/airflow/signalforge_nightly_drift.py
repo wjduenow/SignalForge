@@ -146,7 +146,7 @@ _yesterday_dir = f"{_history_dir}/{{{{ macros.ds_add(ds, -1) }}}}"
 
 
 with DAG(
-    dag_id="signalforge_drift_monitor",
+    dag_id="signalforge_nightly_drift",
     # Manual trigger by default so the example never auto-spends on credentials.
     # For a real nightly drift monitor, set schedule="@daily".
     schedule=None,
