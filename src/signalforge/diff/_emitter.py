@@ -481,8 +481,16 @@ def emit_proposed_test_files(
                 )
             except InvalidIdentifierError:
                 continue
+            # Type-match the partition-pruning bound literal to the date
+            # column's warehouse type (issue #159 ``data_type``) so the
+            # operator-shipped singular test compiles against a TIMESTAMP
+            # column (a bare DATE bound is rejected by BigQuery). Unknown type
+            # → DATE-literal fallback. Mirrors the engine-side resolution in
+            # ``_compile_test``.
+            anomaly_date_col = model.columns.get(test.date_column)
+            date_column_type = anomaly_date_col.data_type if anomaly_date_col is not None else None
             sql_body = _compile_anomaly_singular_test_sql(
-                test, table_ref, dialect, as_of=resolved_as_of
+                test, table_ref, dialect, as_of=resolved_as_of, date_column_type=date_column_type
             )
             try:
                 validate_test_sql(sql_body)

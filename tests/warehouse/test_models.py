@@ -133,6 +133,7 @@ def test_dialect_constructs_without_new_field_args() -> None:
     assert d.sample_row_hash_expr == "ABS(FARM_FINGERPRINT(TO_JSON_STRING(t)))"
     assert d.timestamp_literal_template == "TIMESTAMP('{value}')"
     assert d.date_literal_template == "DATE('{value}')"
+    assert d.datetime_literal_template == "DATETIME('{value}')"
     assert d.quote_qualified_per_component is False
     assert d.sample_cte_alias == "sample"
     assert d.sample_hash_in_projection is False
@@ -142,9 +143,9 @@ def test_dialect_constructs_without_new_field_args() -> None:
     assert d.interval_expr_template == "INTERVAL {n} {unit}"
     assert d.extract_dow_expr_template == "EXTRACT(DAYOFWEEK FROM {date})"
     assert d.dow_sunday_index == 1
-    assert d.percentile_cont_expr_template == (
-        "PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})"
-    )
+    # BigQuery default percentile form is the ``APPROX_QUANTILES`` idiom —
+    # BigQuery has no GROUP-BY-compatible ordered-set ``PERCENTILE_CONT``.
+    assert d.percentile_cont_expr_template == ("APPROX_QUANTILES({expr}, 100)[OFFSET({offset})]")
 
 
 @pytest.mark.unit
@@ -166,8 +167,11 @@ def test_bigquery_dialect_171_fields() -> None:
     assert BIGQUERY_DIALECT.extract_dow_expr_template == "EXTRACT(DAYOFWEEK FROM {date})"
     # BigQuery's DAYOFWEEK returns 1..7 with Sunday=1 (Snowflake's DOW is 0..6).
     assert BIGQUERY_DIALECT.dow_sunday_index == 1
+    # BigQuery has no GROUP-BY-compatible ordered-set ``PERCENTILE_CONT`` (it is
+    # window-only), so it uses the ``APPROX_QUANTILES`` idiom — Snowflake /
+    # Postgres use the standard-SQL ``PERCENTILE_CONT … WITHIN GROUP`` form.
     assert BIGQUERY_DIALECT.percentile_cont_expr_template == (
-        "PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})"
+        "APPROX_QUANTILES({expr}, 100)[OFFSET({offset})]"
     )
 
 
@@ -186,7 +190,9 @@ def test_snowflake_dialect_171_fields() -> None:
     # Snowflake's DOW returns 0..6 with Sunday=0 by default; conservative
     # assumption — session WEEK_START parameter could shift this.
     assert SNOWFLAKE_DIALECT.dow_sunday_index == 0
-    # PERCENTILE_CONT shape matches BigQuery exactly (parity field).
+    # Snowflake uses the standard-SQL ordered-set ``PERCENTILE_CONT … WITHIN
+    # GROUP`` form — this DIVERGES from BigQuery's ``APPROX_QUANTILES`` idiom
+    # (BigQuery has no GROUP-BY-compatible ordered-set percentile).
     assert SNOWFLAKE_DIALECT.percentile_cont_expr_template == (
         "PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})"
     )
@@ -206,21 +212,32 @@ def test_snowflake_date_trunc_diverges_from_bigquery() -> None:
 
 @pytest.mark.unit
 def test_postgres_dialect_171_fields_inherit_bq_defaults() -> None:
-    """POSTGRES_DIALECT inherits BigQuery defaults for the five issue-#171
-    fields — corrected when the Postgres adapter's ops land (DEC-011 of #171,
-    mirroring the issue-#121 deferral; see issue #53/118 family).
+    """POSTGRES_DIALECT inherits BigQuery defaults for the issue-#171
+    date-arithmetic fields — corrected when the Postgres adapter's ops land
+    (DEC-011 of #171, mirroring the issue-#121 deferral; see issue #53/118
+    family).
 
     The #53 Postgres stub raises NotImplementedError from every op method so
     the prune compiler is never invoked for a Postgres profile; shipping
     knowingly-wrong-but-untested fragments now would be misleading.
+
+    ``percentile_cont_expr_template`` is the EXCEPTION: BigQuery's default is
+    now the BigQuery-only ``APPROX_QUANTILES`` idiom (invalid Postgres), so
+    Postgres declares the standard-SQL ``PERCENTILE_CONT … WITHIN GROUP`` form
+    explicitly rather than inheriting it.
     """
     assert POSTGRES_DIALECT.date_trunc_expr_template == BIGQUERY_DIALECT.date_trunc_expr_template
     assert POSTGRES_DIALECT.interval_expr_template == BIGQUERY_DIALECT.interval_expr_template
     assert POSTGRES_DIALECT.extract_dow_expr_template == BIGQUERY_DIALECT.extract_dow_expr_template
     assert POSTGRES_DIALECT.dow_sunday_index == BIGQUERY_DIALECT.dow_sunday_index
+    # Postgres does NOT inherit BigQuery's APPROX_QUANTILES percentile form —
+    # it declares the standard-SQL ordered-set form explicitly.
+    assert POSTGRES_DIALECT.percentile_cont_expr_template == (
+        "PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})"
+    )
     assert (
         POSTGRES_DIALECT.percentile_cont_expr_template
-        == BIGQUERY_DIALECT.percentile_cont_expr_template
+        != BIGQUERY_DIALECT.percentile_cont_expr_template
     )
 
 
