@@ -37,10 +37,10 @@ See ``docs/airflow-ops.md`` / ``docs/research/airflow-test-environment.md``.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -50,6 +50,12 @@ from tests.cli._e2e_helpers import copy_fixture_to_tmp
 pytestmark = pytest.mark.airflow
 
 _AIRFLOW_SKIP = "Apache Airflow not installed (run inside the constraints-pinned airflow venv)"
+
+# The subprocess driver that actually builds + runs the DAG (see its module
+# docstring for why ``dag.test()`` must run in a child process for AIRFLOW_HOME
+# isolation). Must agree with the marker in ``_e2e_generate_driver.py``.
+_DRIVER = Path(__file__).resolve().parent / "_e2e_generate_driver.py"
+_RESULT_MARKER = "__SF_E2E_RESULT__"
 
 # Reuse the committed Austin bikeshare fixture (source-as-model aliased to the
 # public ``bigquery-public-data.austin_bikeshare.bikeshare_trips`` table). Its
@@ -78,15 +84,14 @@ def _live_skip_reason() -> str | None:
 @pytest.mark.e2e
 @pytest.mark.anthropic
 @pytest.mark.bigquery
-def test_generate_operator_runs_live_via_dag_test(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_generate_operator_runs_live_via_dag_test(tmp_path: Path) -> None:
     """LIVE: the real operator runs the full pipeline end-to-end via ``dag.test()``.
 
     Recipe (DEC-001): copy the Austin fixture to ``tmp_path`` (committed fixture
-    untouched); point ``AIRFLOW_HOME`` at a per-run temp dir + initialise its
+    untouched); point ``AIRFLOW_HOME`` at a per-run temp dir + migrate its
     metadata DB; build an inline single-``--model`` DAG with the real
-    ``SignalForgeGenerateOperator``; run ``dag.test()``; assert the task
+    ``SignalForgeGenerateOperator`` and run ``dag.test()`` in a child process
+    (``_e2e_generate_driver.py``, for AIRFLOW_HOME isolation); assert the task
     succeeded AND its XCom carries non-negative tier counts with at least one
     ``dropped`` (the always-passes drop).
     """
@@ -101,26 +106,25 @@ def test_generate_operator_runs_live_via_dag_test(
     # land under the per-run temp dir, never the committed fixture.
     project_dir = copy_fixture_to_tmp(_AUSTIN_FIXTURE, tmp_path)
 
-    # ``dag.test()`` needs an initialised Airflow metadata DB. Point
-    # ``AIRFLOW_HOME`` at a per-run temp dir so the SQLite DB lands there
-    # (never the maintainer's ~/airflow), then run ``airflow db migrate``
-    # idempotently. We use a subprocess (rather than the in-process
-    # ``airflow.utils.db.migratedb()``) so the ``AIRFLOW_HOME`` env reliably
-    # drives the DB path for the migrate step regardless of whether the
-    # in-process Airflow settings were already configured by a sibling test.
+    # ``dag.test()`` needs an initialised Airflow metadata DB, and Airflow binds
+    # its ORM engine to ``$AIRFLOW_HOME/airflow.db`` at IMPORT time — setting
+    # ``AIRFLOW_HOME`` after ``import airflow`` (e.g. once a sibling gated test
+    # has already imported it in the same ``-m airflow`` session) does NOT
+    # repoint the engine. So: (a) point ``AIRFLOW_HOME`` at a per-run temp dir,
+    # (b) migrate that DB via the CLI, and (c) run the actual DAG in a CHILD
+    # process (``_e2e_generate_driver.py``) whose environment carries
+    # ``AIRFLOW_HOME`` BEFORE it imports Airflow — the only reliable way to keep
+    # the metadata DB under tmp (never the maintainer's ~/airflow) without
+    # mutating Airflow's global ORM state in the pytest worker.
     airflow_home = tmp_path / "af"
     airflow_home.mkdir()
-    monkeypatch.setenv("AIRFLOW_HOME", str(airflow_home))
+    child_env = {**os.environ, "AIRFLOW_HOME": str(airflow_home)}
     subprocess.run(
         [sys.executable, "-m", "airflow", "db", "migrate"],
-        env={**os.environ, "AIRFLOW_HOME": str(airflow_home)},
+        env=child_env,
         check=True,
         capture_output=True,
     )
-
-    from airflow import DAG
-
-    from signalforge.airflow.operators import SignalForgeGenerateOperator
 
     # The committed ``profiles.yml`` pins ``project: bigquery-public-data`` for
     # the regen ``dbt parse``; at query time the BigQuery client bills
@@ -144,38 +148,33 @@ def test_generate_operator_runs_live_via_dag_test(
         "      maximum_bytes_billed: 1000000000\n"
     )
 
-    # Inline DAG with a SINGLE ``--model`` task (the example DAGs use
-    # ``--select``; the always-passes assertion needs the one staging model).
-    # ``write=False`` keeps the run read-only (no proposed .sql / schema.yml
-    # written). ``on_flagged="succeed"`` so the fixture's tight grade
-    # thresholds (which force a flag) don't fail the Airflow task — this test
-    # pins pipeline completion + the warehouse-side always-passes drop, not the
-    # grade verdict.
-    with DAG(
-        dag_id="sf_e2e_generate",
-        schedule=None,
-        start_date=datetime(2026, 1, 1),
-        catchup=False,
-    ) as dag:
-        SignalForgeGenerateOperator(
-            task_id="generate",
-            project_dir=str(project_dir),
-            model="models/staging/stg_bikeshare_trips.sql",
-            write=False,
-            on_flagged="succeed",
-        )
-
-    # Drive the DAG end-to-end through Airflow's task runner (airflow 2.10.4
-    # returns the created ``DagRun``).
-    dag_run = dag.test()
+    # Build + run the inline single-``--model`` DAG end-to-end via ``dag.test()``
+    # in the child driver (its env carries the per-run ``AIRFLOW_HOME`` from the
+    # start, so its in-process engine binds to the migrated tmp DB). The child
+    # prints one ``__SF_E2E_RESULT__`` line with the task state + the operator's
+    # XCom dict. Anthropic/BigQuery creds + ``PYTHONPATH`` ride through ``os.environ``.
+    proc = subprocess.run(
+        [sys.executable, str(_DRIVER), str(project_dir)],
+        env=child_env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, (
+        f"driver exited {proc.returncode}\n--- stdout ---\n{proc.stdout}\n"
+        f"--- stderr ---\n{proc.stderr}"
+    )
+    result_lines = [ln for ln in proc.stdout.splitlines() if ln.startswith(_RESULT_MARKER)]
+    assert result_lines, (
+        f"driver produced no {_RESULT_MARKER} line\n--- stdout ---\n{proc.stdout}\n"
+        f"--- stderr ---\n{proc.stderr}"
+    )
+    result = json.loads(result_lines[-1][len(_RESULT_MARKER) :].strip())
 
     # The task must have completed successfully.
-    ti = dag_run.get_task_instance("generate")
-    assert ti is not None, "no TaskInstance for 'generate' after dag.test()"
-    assert ti.state == "success", f"expected task success; got state={ti.state!r}"
+    assert result["state"] == "success", f"expected task success; got state={result['state']!r}"
 
-    # Pull the operator's return value (its ``to_xcom()`` dict) from XCom.
-    xcom = ti.xcom_pull(task_ids="generate")
+    # The operator's return value (its ``to_xcom()`` dict), carried out of the child.
+    xcom = result["xcom"]
     assert isinstance(xcom, dict), f"expected an XCom dict; got {type(xcom).__name__}"
 
     # Every tier-count key must be present and a non-negative int.
