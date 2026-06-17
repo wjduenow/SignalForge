@@ -208,7 +208,7 @@ For unattended, scheduled drift / signal-rot monitoring, SignalForge ships Apach
 Three operators wrap the pipeline as Airflow tasks:
 
 - **`SignalForgeGenerateOperator`** — the full draft → prune → grade → diff pipeline as a scheduled task.
-- **`SignalForgePruneExistingOperator`** — the no-LLM ingest → prune → diff path, grading existing tests on a schedule.
+- **`SignalForgePruneExistingOperator`** — the no-LLM ingest → prune → diff path (no API key); prunes your existing dbt tests against live warehouse data on a schedule.
 - **`SignalForgeDriftOperator`** — a read-only scheduled drift / signal-rot monitor.
 
 Plus a **`SignalForgeHook`** that resolves provider credentials and the dbt profile from a single Airflow Connection (and optional Variable) instead of inline per-task env, keeping secrets out of task definitions and XCom.

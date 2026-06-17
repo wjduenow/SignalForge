@@ -75,6 +75,7 @@ post-build monitor. Full walkthrough: docs/airflow-ops.md.
 
 from __future__ import annotations
 
+import shlex
 from datetime import datetime
 
 from airflow import DAG
@@ -142,7 +143,7 @@ with DAG(
     # ----------------------------------------------------------------------- #
     dbt_build = BashOperator(
         task_id="dbt_build",
-        bash_command=f"dbt build --project-dir {_project_dir}",
+        bash_command=f"dbt build --project-dir {shlex.quote(_project_dir)}",
     )
 
     # ----------------------------------------------------------------------- #

@@ -63,6 +63,10 @@ _RESULT_MARKER = "__SF_E2E_RESULT__"
 # mathematically-guaranteed always-passes drop — see the assertion comment below.
 _AUSTIN_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "dbt_project_austin"
 
+# Opt-in flags must be an explicit truthy value (mirrors ``test_e2e_bigquery_smoke.py``)
+# so a stray ``SF_RUN_BQ=0`` / ``SF_RUN_AIRFLOW=0`` never runs a paid test.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
 
 def _live_skip_reason() -> str | None:
     """Return a skip-reason string if any of the four live gates is unset.
@@ -70,14 +74,18 @@ def _live_skip_reason() -> str | None:
     The four-var gate mirrors the existing live Airflow e2e: ``SF_RUN_AIRFLOW``
     (opt-in to the Airflow live leg), ``ANTHROPIC_API_KEY`` (the drafter +
     grader), ``GOOGLE_CLOUD_PROJECT`` (BigQuery billing project), and
-    ``SF_RUN_BQ`` (opt-in to real warehouse spend). Each missing var surfaces
-    in the reason so the maintainer sees exactly what to set.
+    ``SF_RUN_BQ`` (opt-in to real warehouse spend). The opt-in flags require an
+    explicit truthy value and the secrets must be non-empty after stripping —
+    so ``SF_RUN_BQ=0`` or a whitespace-only key skips rather than spending money.
+    Each missing var surfaces in the reason so the maintainer sees what to set.
     """
-    missing = [
-        v
-        for v in ("SF_RUN_AIRFLOW", "ANTHROPIC_API_KEY", "GOOGLE_CLOUD_PROJECT", "SF_RUN_BQ")
-        if not os.environ.get(v)
-    ]
+    missing: list[str] = []
+    for flag in ("SF_RUN_AIRFLOW", "SF_RUN_BQ"):
+        if os.environ.get(flag, "").strip().lower() not in _TRUTHY:
+            missing.append(flag)
+    for secret in ("ANTHROPIC_API_KEY", "GOOGLE_CLOUD_PROJECT"):
+        if not os.environ.get(secret, "").strip():
+            missing.append(secret)
     return f"live Airflow e2e needs: {', '.join(missing)}" if missing else None
 
 
