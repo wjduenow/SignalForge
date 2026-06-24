@@ -53,6 +53,10 @@ def test_databricks_dialect_values() -> None:
     assert DATABRICKS_DIALECT.supports_qualify is True
     # 64-bit hash for sampling stability (Spark's bare hash(*) is Murmur3-32).
     assert "xxhash64" in DATABRICKS_DIALECT.sample_row_hash_expr
+    # Sign-bit MASK, never ABS: Spark's ABS(Long.MIN_VALUE) stays negative in
+    # non-ANSI mode and would skew MOD(<expr>, bucket) < 1 (CodeRabbit, PR #254).
+    assert "ABS(" not in DATABRICKS_DIALECT.sample_row_hash_expr
+    assert "9223372036854775807" in DATABRICKS_DIALECT.sample_row_hash_expr
     # Unity Catalog three-part names quote per component.
     assert DATABRICKS_DIALECT.quote_qualified_per_component is True
 

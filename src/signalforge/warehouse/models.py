@@ -311,7 +311,13 @@ DATABRICKS_DIALECT = Dialect(
     supports_qualify=True,
     quote_char="`",
     identifier_case="lower",
-    sample_row_hash_expr="ABS(xxhash64(to_json(struct(*))))",
+    # Sign-bit MASK, not ABS: xxhash64 returns a SIGNED 64-bit long, and Spark's
+    # ABS(Long.MIN_VALUE) stays negative in non-ANSI mode (no positive equivalent
+    # fits a signed long), so MOD(ABS(...), bucket) would admit a stray negative
+    # residue class and skew the deterministic sample. `& 9223372036854775807`
+    # (Long.MAX_VALUE) clears the sign bit — always non-negative, no overflow,
+    # uniform — and the renderer's MOD(<expr>, bucket) wrapper stays correct.
+    sample_row_hash_expr="(xxhash64(to_json(struct(*))) & 9223372036854775807)",
     timestamp_literal_template="TIMESTAMP '{value}'",
     date_literal_template="DATE '{value}'",
     # Spark/Databricks has no distinct DATETIME type — TIMESTAMP is the
@@ -343,11 +349,14 @@ ABC degrade), so these are provisional-but-grounded, not yet executed.
 * ``supports_qualify=True`` — Databricks SQL supports ``QUALIFY`` (Spark 3.5+),
   but ``unique`` stays on the portable ``GROUP BY … HAVING`` form per #121 (a
   ``QUALIFY`` rewrite is a separate semantics decision, not a dialect flag).
-* ``sample_row_hash_expr='ABS(xxhash64(to_json(struct(*))))'`` — the **64-bit**
-  whole-row hash. Spark's bare ``hash(*)`` is Murmur3-**32** (collision-prone at
-  scale), so the 64-bit ``xxhash64`` over the JSON-serialised row is chosen for
-  sampling stability. Same "``HASH`` is engine/release-stable, not cross-time"
-  caveat Snowflake documented applies.
+* ``sample_row_hash_expr='(xxhash64(to_json(struct(*))) & 9223372036854775807)'``
+  — the **64-bit** whole-row hash, sign-bit masked. Spark's bare ``hash(*)`` is
+  Murmur3-**32** (collision-prone at scale), so the 64-bit ``xxhash64`` over the
+  JSON-serialised row is chosen for sampling stability. The mask (``& Long.MAX``)
+  replaces ``ABS``: ``xxhash64`` is signed and Spark's ``ABS(Long.MIN_VALUE)``
+  stays negative in non-ANSI mode, which would skew ``MOD(<expr>, bucket) < 1``;
+  clearing the sign bit is non-negative + overflow-free + uniform. Same "``HASH``
+  is engine/release-stable, not cross-time" caveat Snowflake documented applies.
 * ``timestamp_literal_template="TIMESTAMP '{value}'"`` /
   ``date_literal_template="DATE '{value}'"`` — Spark typed-literal form. Spark
   has no separate ``DATETIME`` type, so ``datetime_literal_template`` reuses the
