@@ -287,6 +287,11 @@ class WarehouseAdapter(abc.ABC):
           (issue #119; epic #118); its warehouse-operation methods raise
           :class:`NotImplementedError` until the full implementation
           lands.
+        * ``"databricks"`` — returns the v0.x skeleton
+          :class:`signalforge.warehouse.adapters.databricks.DatabricksAdapter`
+          (issue #221; epic #219); ``sample_rows`` / ``column_stats`` /
+          ``run_test_sql`` raise :class:`NotImplementedError` and the rest
+          inherit the ABC typed degrade until the full implementation lands.
 
         Anything else raises :class:`UnsupportedProfileTypeError`.
 
@@ -355,6 +360,27 @@ class WarehouseAdapter(abc.ABC):
                 private_key_path=profile.private_key_path,
                 private_key_passphrase=profile.private_key_passphrase,
                 authenticator=profile.authenticator,
+            )
+        if profile.type == "databricks":
+            # v0.x skeleton (issue #221; epic #219) — validates the
+            # warehouse-agnostic seam by routing a FOURTH profile.type through
+            # the factory. The adapter's warehouse-operation methods
+            # (sample_rows / column_stats / run_test_sql) raise
+            # NotImplementedError and the rest inherit the ABC typed degrade, so
+            # operators see a clear "v0.x pending" signal rather than the v0.1
+            # UnsupportedProfileTypeError.
+            from signalforge.warehouse.adapters.databricks import DatabricksAdapter
+
+            # Like the Snowflake #119 skeleton (which passed only
+            # database=profile.project / schema=profile.dataset and deferred the
+            # real account/user/role/warehouse fields to #120), this maps the
+            # existing generic profile fields — catalog<-project, schema<-dataset.
+            # The real Databricks connection fields (host / http_path / token /
+            # catalog) land on DbtProfileTarget in the profile-parsing child #222
+            # and get wired through here then.
+            return DatabricksAdapter(
+                catalog=profile.project,
+                schema=profile.dataset,
             )
         raise UnsupportedProfileTypeError(profile_type=profile.type)
 
