@@ -1,9 +1,12 @@
 # Databricks test-environment spike (#220)
 
 > Status: **decided** · Epic [#219](https://github.com/wjduenow/SignalForge/issues/219) · First child.
-> This doc is the contract every later Databricks child (#D4/#D5/#D6) references for the
-> test stack, the env-var gate, and the live certification target — so no sibling
-> re-litigates them.
+> This doc is the contract every later Databricks child references for the test stack, the
+> env-var gate, and the live certification target — so no sibling re-litigates them.
+>
+> **Child legend** (the `#D4`/`#D5`/`#D6` shorthand below maps to the epic's real issues):
+> `#D4` ≈ #221 skeleton + #222 profile + #223 compiler · `#D5` ≈ #224 sampling + #225 estimate ·
+> `#D6` = #226 test-harness + live e2e + ops docs.
 
 Databricks has **no `fakesnow` equivalent**, and we are building without a paid account.
 This spike decides the concrete free/low-cost build+test stack, confirms a live connection
@@ -59,13 +62,21 @@ hatch only.
 
 ### DEC-3 — The `databricks` pytest marker + env-var gate (mirrors `snowflake`)
 
-Live tests carry the belt-and-suspenders gate from `testing-signal.md`: a
-`@pytest.mark.databricks` marker (deselected by default `addopts`) **plus** a runtime
-`_skip_reason()` that skips with a clear message when an env var is missing. Run with
-`uv run pytest -m databricks --no-cov` (the `--no-cov` is required — `--cov-fail-under` in
-`addopts` would fail a marker-only run, mirroring the `snowflake` / `bigquery` precedent).
+> **Landing status:** the `databricks` marker + addopts exclusion are **registered by the
+> adapter skeleton (#221)** — so the marker exists and is deselected by default once #221
+> lands. The runtime `_skip_reason()` helper and the actual `@pytest.mark.databricks` live
+> tests land with the **test-harness child (#226)**; until then the marker is registered but
+> exercises no tests. This DEC describes the gate shape, not a suite runnable from this doc PR.
 
-**Env-var contract** — the canonical reference #D4/#D5/#D6 cite (don't re-derive):
+Live tests carry the belt-and-suspenders gate from `testing-signal.md`: a
+`@pytest.mark.databricks` marker (registered by #221; deselected by default `addopts`) **plus**
+a runtime `_skip_reason()` (lands with #226) that skips with a clear message when an env var is
+missing. Run with `uv run pytest -m databricks --no-cov` (the `--no-cov` is required —
+`--cov-fail-under` in `addopts` would fail a marker-only run, mirroring the `snowflake` /
+`bigquery` precedent).
+
+**Env-var contract** — the canonical reference the adapter children (#221–#226) cite
+(don't re-derive):
 
 | Env var | Where it comes from |
 |---|---|
@@ -81,11 +92,11 @@ a writable schema under the `workspace` catalog is only needed if `materialise_s
 
 The core install (`pip install signalforge-dbt`) **never** gains an unconditional Databricks
 dependency (Architectural Commitment #4, mirroring the `[snowflake]` / `[airflow]` extras).
-`databricks-sql-connector` ships behind a `[databricks]` optional extra defined by the
-adapter child (#D4); the lazy SDK import stays confined to the adapter's `_databricks_client.py`
-shim per the one-shim-per-vendor rule. The extra is mirrored into the dev group so the gated
-suite resolves it (contrast the `[airflow]` deliberate exception — Databricks is not heavy or
-constraints-pinned, so the normal mirror applies).
+`databricks-sql-connector` ships behind a `[databricks]` optional extra **registered by the
+adapter skeleton (#221)**; the lazy SDK import stays confined to the adapter's
+`_databricks_client.py` shim per the one-shim-per-vendor rule. The extra is mirrored into the
+dev group so the gated suite resolves it (contrast the `[airflow]` deliberate exception —
+Databricks is not heavy or constraints-pinned, so the normal mirror applies).
 
 ---
 
