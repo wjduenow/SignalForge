@@ -46,6 +46,7 @@ from signalforge.prune.compiler import (
 from signalforge.warehouse._sql_safety import validate_test_sql
 from signalforge.warehouse.models import (
     BIGQUERY_DIALECT,
+    DATABRICKS_DIALECT,
     POSTGRES_DIALECT,
     SNOWFLAKE_DIALECT,
     Dialect,
@@ -1203,6 +1204,133 @@ def test_snowflake_relationships_per_component_and_folded() -> None:
     assert 'child."CUSTOMER_ID"' in sql
     assert 'parent."ID"' in sql
     assert "`" not in sql
+
+
+# ---------------------------------------------------------------------------
+# US-002 (#223): Databricks per-dialect UNIT tests. The prune compiler is
+# dialect-driven — it emits warehouse-correct SQL purely from the ``Dialect``
+# value object, never branching on ``dialect.name`` — so these pin every
+# ``DATABRICKS_DIALECT`` field the compiler consumes: backtick quote char +
+# ``identifier_case='lower'`` fold, ``quote_qualified_per_component=True``,
+# the ``xxhash64(...) & Long.MAX`` sign-bit-masked sample expression (NOT
+# BigQuery ``FARM_FINGERPRINT``, NOT Snowflake ``HASH(*)``), and the
+# ``TIMESTAMP '...'`` / ``DATE '...'`` typed-literal partition-filter form
+# (NOT BigQuery's ``TIMESTAMP('...')`` function form, NOT Snowflake's
+# ``'...'::TIMESTAMP`` cast form). Backtick presence does NOT distinguish
+# BigQuery from Databricks (both backtick), so the leakage assertions key on
+# the hash/literal markers, never the quote char. Byte-exact snapshot
+# fixtures for the rendered output are US-003's job.
+# ---------------------------------------------------------------------------
+
+
+def test_quote_folds_lower_and_backticks_for_databricks() -> None:
+    """``identifier_case='lower'`` folds the token to lower-case before
+    wrapping in the Databricks backtick quote char. An already-lower token is
+    a no-op fold; a mixed-case token exercises the fold rather than a no-op."""
+    assert _quote("customer_id", DATABRICKS_DIALECT) == "`customer_id`"
+    assert _quote("Customer_ID", DATABRICKS_DIALECT) == "`customer_id`"
+
+
+def test_qualified_table_name_per_component_for_databricks() -> None:
+    """Databricks quotes each component separately with backticks
+    (``quote_qualified_per_component=True``) and folds to lower so a dotted
+    path is not read as one literal identifier named ``db.schema.table``."""
+    ref = TableRef(project="prod_db", dataset="sch", name="orders")
+    assert _qualified_table_name(ref, DATABRICKS_DIALECT) == "`prod_db`.`sch`.`orders`"
+
+
+def test_qualified_table_name_per_component_two_part_for_databricks() -> None:
+    """``project=None`` yields a two-part per-component backtick-quoted name."""
+    ref = TableRef(project=None, dataset="sch", name="orders")
+    assert _qualified_table_name(ref, DATABRICKS_DIALECT) == "`sch`.`orders`"
+
+
+def test_databricks_sample_cte_uses_xxhash64_mask_not_farm_fingerprint() -> None:
+    """The Databricks sample CTE uses the inline
+    ``MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), bucket) < 1``
+    form (``sample_hash_in_projection=False``, like BigQuery). The BigQuery
+    ``FARM_FINGERPRINT`` form and the Snowflake ``HASH(*)`` form never
+    appear."""
+    test = CandidateTestNotNull(column="customer_id")
+    sql = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert isinstance(sql, str)
+    # The sign-bit-masked xxhash64 expression, inline in the WHERE predicate.
+    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 10) < 1" in sql
+    # Folded + backtick-quoted identifier.
+    assert "`customer_id`" in sql
+    # Cross-dialect leakage guards (backtick is NOT a discriminator — both
+    # BigQuery and Databricks backtick — so key on the hash markers).
+    assert "FARM_FINGERPRINT" not in sql
+    assert "HASH(*)" not in sql
+
+
+def test_databricks_datetime_partition_filter_uses_typed_literal_form() -> None:
+    """A ``datetime`` partition filter under Databricks renders the
+    ``TIMESTAMP '...'`` typed-literal form, not BigQuery's ``TIMESTAMP('...')``
+    function form nor Snowflake's ``'...'::TIMESTAMP`` cast form."""
+    from datetime import datetime
+
+    test = CandidateTestNotNull(column="customer_id")
+    pf = PartitionFilter(column="event_ts", op=">=", value=datetime(2026, 1, 1, 0, 0, 0))
+    sql = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        scope="full",
+        partition_filter=pf,
+    )
+    assert isinstance(sql, str)
+    assert "TIMESTAMP '2026-01-01T00:00:00'" in sql
+    # BigQuery function form and Snowflake cast form are both absent.
+    assert "TIMESTAMP(" not in sql
+    assert "::" not in sql
+    # The partition column is folded + backtick-quoted the Databricks way.
+    assert "`event_ts` >=" in sql
+
+
+def test_databricks_date_partition_filter_uses_typed_literal_form() -> None:
+    """A ``date`` partition filter under Databricks renders ``DATE '...'``."""
+    from datetime import date as _date
+
+    test = CandidateTestNotNull(column="customer_id")
+    pf = PartitionFilter(column="event_dt", op=">=", value=_date(2026, 1, 1))
+    sql = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        scope="full",
+        partition_filter=pf,
+    )
+    assert isinstance(sql, str)
+    assert "DATE '2026-01-01'" in sql
+    # BigQuery function form and Snowflake cast form are both absent.
+    assert "DATE(" not in sql
+    assert "::" not in sql
+
+
+def test_databricks_relationships_per_component_and_folded() -> None:
+    """End-to-end relationships under Databricks: both child and parent
+    tables are per-component backtick-quoted + lower-folded; columns
+    folded + backtick-quoted."""
+    test = CandidateTestRelationships(column="customer_id", to="customers", field="id")
+    sql = _compile_test(test, _make_orders_table_ref(), DATABRICKS_DIALECT, _make_manifest())
+    assert isinstance(sql, str)
+    assert "`fake_project`.`dataset`.`orders`" in sql
+    assert "`fake_project`.`dataset`.`customers`" in sql
+    assert "child.`customer_id`" in sql
+    assert "parent.`id`" in sql
+    # No Snowflake double-quote leakage.
+    assert '"' not in sql
 
 
 # ---------------------------------------------------------------------------
