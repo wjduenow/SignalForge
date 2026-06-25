@@ -190,15 +190,12 @@ def test_from_profile_dispatches_databricks_to_skeleton() -> None:
     """The factory routes ``type: databricks`` to the skeleton adapter (NOT
     raise :class:`UnsupportedProfileTypeError`). Since #222 the profile model
     parses the real Databricks connection fields (``host`` / ``http_path`` /
-    ``token`` / ``catalog``), so the dispatch input is a valid full target.
-
-    ``base.py``'s ``from_profile`` databricks branch still carries the #221
-    skeleton mapping (``catalog<-profile.project`` / ``schema<-profile.dataset``)
-    — rewiring it to read the real ``profile.host`` / ``profile.catalog`` is
-    US-003. Until then the dispatch routes correctly but ``_catalog`` stays
-    ``None`` (``profile.project`` is now a forbidden BigQuery-only field on a
-    databricks target). This assertion flips in US-003 alongside the base.py
-    rewire."""
+    ``token`` / ``catalog``), and US-003 rewired ``base.py``'s ``from_profile``
+    databricks branch to wire every parsed field through to the adapter
+    (replacing the #221 placeholder ``catalog<-profile.project`` mapping). So
+    ``_host`` / ``_http_path`` / ``_token`` / ``_catalog`` now reflect the real
+    target, and ``schema:`` still hydrates ``_schema`` via the ``dataset``
+    alias."""
     profile = DbtProfileTarget.model_validate(
         {
             "type": "databricks",
@@ -213,10 +210,13 @@ def test_from_profile_dispatches_databricks_to_skeleton() -> None:
     adapter = WarehouseAdapter.from_profile(profile)
 
     assert isinstance(adapter, DatabricksAdapter)
-    # `schema:` hydrates profile.dataset, which base.py still maps to _schema.
+    # US-003 wires the real parsed connection fields through from_profile.
+    assert adapter._host == "dbc-ab12cd34.cloud.databricks.com"
+    assert adapter._http_path == "/sql/1.0/warehouses/abc123"
+    assert adapter._token == "dapi-token"
+    assert adapter._catalog == "main"
+    # `schema:` hydrates profile.dataset, which base.py maps to _schema.
     assert adapter._schema == "analytics"
-    # base.py maps _catalog from profile.project (None here) until US-003.
-    assert adapter._catalog is None
 
 
 # ---------------------------------------------------------------------------

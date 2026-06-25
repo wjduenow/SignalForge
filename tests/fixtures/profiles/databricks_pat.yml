@@ -1,0 +1,20 @@
+# Minimal valid Databricks profile for the v0.x skeleton adapter (issue #222).
+# Exercises the WarehouseAdapter.from_profile dispatch path for
+# `type: databricks` via load_profile, without depending on a real Databricks
+# connection. Databricks's `schema:` key hydrates DbtProfileTarget.dataset via
+# the existing alias; `catalog:` maps to DbtProfileTarget.catalog.
+#
+# PAT-shaped target (token set, auth_type omitted ⇒ default PAT). The token
+# uses the dbt env_var() convention with a literal default so the fixture parses
+# without DATABRICKS_TOKEN exported.
+signalforge_test:
+  target: dev
+  outputs:
+    dev:
+      type: databricks
+      host: dbc-ab12cd34.cloud.databricks.com
+      http_path: /sql/1.0/warehouses/abc123def456
+      token: "{{ env_var('DATABRICKS_TOKEN', 'dapifake') }}"
+      catalog: analytics
+      schema: public
+      threads: 4

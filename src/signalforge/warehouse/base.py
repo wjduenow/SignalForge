@@ -289,7 +289,9 @@ class WarehouseAdapter(abc.ABC):
           lands.
         * ``"databricks"`` — returns the v0.x skeleton
           :class:`signalforge.warehouse.adapters.databricks.DatabricksAdapter`
-          (issue #221; epic #219); ``sample_rows`` / ``column_stats`` /
+          (issue #221; epic #219), wired with the real parsed connection
+          fields (``host`` / ``http_path`` / ``token`` / ``catalog`` + the
+          OAuth-M2M fields) since #222; ``sample_rows`` / ``column_stats`` /
           ``run_test_sql`` raise :class:`NotImplementedError` and the rest
           inherit the ABC typed degrade until the full implementation lands.
 
@@ -371,16 +373,22 @@ class WarehouseAdapter(abc.ABC):
             # UnsupportedProfileTypeError.
             from signalforge.warehouse.adapters.databricks import DatabricksAdapter
 
-            # Like the Snowflake #119 skeleton (which passed only
-            # database=profile.project / schema=profile.dataset and deferred the
-            # real account/user/role/warehouse fields to #120), this maps the
-            # existing generic profile fields — catalog<-project, schema<-dataset.
-            # The real Databricks connection fields (host / http_path / token /
-            # catalog) land on DbtProfileTarget in the profile-parsing child #222
-            # and get wired through here then.
+            # #222 grew DbtProfileTarget to parse a real Databricks target
+            # (host / http_path / token / catalog + the forward-compat OAuth-M2M
+            # auth fields) and wires every parsed field through here, replacing
+            # the #221 placeholder mapping (catalog<-project / schema<-dataset).
+            # Databricks's `schema:` key continues to hydrate `profile.dataset`
+            # via the existing alias, so the adapter's `schema` kwarg reads from
+            # there.
             return DatabricksAdapter(
-                catalog=profile.project,
+                host=profile.host,
+                http_path=profile.http_path,
+                token=profile.token,
+                catalog=profile.catalog,
                 schema=profile.dataset,
+                auth_type=profile.auth_type,
+                client_id=profile.client_id,
+                client_secret=profile.client_secret,
             )
         raise UnsupportedProfileTypeError(profile_type=profile.type)
 

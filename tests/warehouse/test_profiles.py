@@ -940,6 +940,81 @@ def test_load_profile_parses_snowflake_target(
     assert target.dataset == "PUBLIC"
 
 
+class StrictDatabricksModel(BaseModel):
+    """Test-only mirror of dbt-databricks's commonly-documented target fields.
+
+    ``extra="forbid"`` so adding a new field to the Databricks drift fixture
+    without updating BOTH this model and (if SignalForge needs it) the
+    production :class:`DbtProfileTarget` trips the test loudly — the same
+    forward-compat compensation the BigQuery :class:`StrictModel` and Snowflake
+    :class:`StrictSnowflakeModel` provide (DEC-017).
+
+    The field list mirrors ``tests/fixtures/profiles/dbt_databricks_drift_v1_x.yml``.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    type: str
+    host: str | None = None
+    http_path: str | None = None
+    catalog: str | None = None
+    # `schema` shadows Pydantic's deprecated BaseModel.schema(); mirror the
+    # production model's approach and alias the dbt `schema:` key to a
+    # differently-named attribute (safety-layer.md § field-name shadow).
+    dataset: str | None = Field(default=None, alias="schema")
+    threads: int | None = None
+    token: str | None = None
+    auth_type: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    connect_retries: int | None = None
+    connect_timeout: int | None = None
+    connect_max_idle: int | None = None
+    retry_all: bool | None = None
+    session_properties: dict[str, object] | None = None
+
+
+def test_drift_detector_databricks_extra_forbid() -> None:
+    """The Databricks drift fixture validates against StrictDatabricksModel —
+    bumping fixture fields without updating StrictDatabricksModel/DbtProfileTarget
+    fails this test loudly (DEC-017)."""
+    with (FIXTURES / "dbt_databricks_drift_v1_x.yml").open("r", encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh)
+    target_dict = raw["signalforge_test"]["outputs"]["dev"]
+
+    model = StrictDatabricksModel.model_validate(target_dict)
+
+    # Sanity-check a couple of fields so this catches at least one corruption
+    # mode (not just structural validation).
+    assert model.type == "databricks"
+    assert model.host == "dbc-ab12cd34.cloud.databricks.com"
+    assert model.catalog == "analytics"
+
+
+def test_load_profile_parses_databricks_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``load_profile`` parses a ``type: databricks`` target end-to-end: the
+    Databricks-shaped fields populate, and ``schema:`` hydrates ``dataset`` via
+    the alias (#222, US-003)."""
+    _clear_profile_env(monkeypatch)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake_home")
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    _write_dbt_project(project_dir)
+    shutil.copy(FIXTURES / "databricks_pat.yml", project_dir / "profiles.yml")
+
+    target = load_profile(project_dir)
+
+    assert target.type == "databricks"
+    assert target.host == "dbc-ab12cd34.cloud.databricks.com"
+    assert target.http_path == "/sql/1.0/warehouses/abc123def456"
+    assert target.catalog == "analytics"
+    # Databricks's `schema:` key hydrates `dataset` via the alias.
+    assert target.dataset == "public"
+
+
 def test_module_uses_warehouse_logger() -> None:
     """DEC-027: every module in ``signalforge.warehouse.*`` uses the
     ``signalforge.warehouse`` logger, not a dunder-name logger.
