@@ -26,14 +26,24 @@ Scope (deliberately minimal):
   swallows-and-warns on failure. With no opened connection
   (``_active_session is None``) the ``with adapter:`` block is a clean no-op.
 * :meth:`dialect` returns the :data:`DATABRICKS_DIALECT` constant.
-* :meth:`sample_rows` / :meth:`column_stats` / :meth:`run_test_sql` raise
-  :class:`NotImplementedError` naming the epic (#219) — implemented in #224 /
-  the follow-ups bucket.
+* :meth:`sample_rows` is implemented (#224 US-003) — deterministic hash-mod
+  sampling (the inline-predicate shape: ``MOD((xxhash64(to_json(struct(*))) &
+  9223372036854775807), bucket) < 1``) sized from :meth:`get_row_count`
+  (``SELECT COUNT(*)``), with the fail-loud sizing the Snowflake / BigQuery
+  adapters share (:class:`UnknownTableSizeError` /
+  :class:`SamplingRequiresPartitionFilterError`).
+* :meth:`get_row_count` is implemented (#224 US-003) — overrides the ABC degrade
+  with a ``SELECT COUNT(*)`` (``DESCRIBE DETAIL`` has no reliable ``numRows``;
+  COUNT is metadata-cheap on Delta), returning ``None`` on a
+  :class:`WarehouseError` so the shared sizing pathway decides.
+* :meth:`column_stats` / :meth:`run_test_sql` raise
+  :class:`NotImplementedError` naming the epic (#219) — implemented in #224
+  US-004 / US-005.
 * :meth:`materialise_sample` / :meth:`estimate_query_bytes` /
-  :meth:`get_row_count` / :meth:`run_stats_query` inherit the ABC typed degrade
+  :meth:`run_stats_query` inherit the ABC typed degrade
   (``MaterialisationNotSupportedError`` / ``EstimateNotSupportedError`` /
-  ``RowCountNotSupportedError`` / ``StatsQueryNotSupportedError``) — a clean,
-  operator-actionable signal until #224 / #225 land.
+  ``StatsQueryNotSupportedError``) — a clean, operator-actionable signal until
+  #224 US-004 / #225 land.
 * :meth:`WarehouseAdapter.from_profile` dispatches ``profile.type ==
   "databricks"`` here so an operator with a Databricks profile sees a typed
   "v0.x pending" ``NotImplementedError`` rather than the v0.1
@@ -49,10 +59,17 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
 from signalforge.warehouse._sample_id import _hash_session_id
+from signalforge.warehouse._sample_sql import render_sample_select
 from signalforge.warehouse.base import WarehouseAdapter
+from signalforge.warehouse.errors import (
+    SamplingRequiresPartitionFilterError,
+    UnknownTableSizeError,
+    WarehouseError,
+)
 from signalforge.warehouse.models import (
     DATABRICKS_DIALECT,
     ColumnStats,
@@ -62,11 +79,20 @@ from signalforge.warehouse.models import (
 )
 
 if TYPE_CHECKING:
-    from signalforge.warehouse.adapters._databricks_client import _DatabricksClientProtocol
+    from signalforge.warehouse.adapters._databricks_client import (
+        _DatabricksClientProtocol,
+        _DatabricksCursorProtocol,
+    )
     from signalforge.warehouse.models import PartitionFilter
 
 
 _LOGGER = logging.getLogger("signalforge.warehouse")
+
+# Mirror of :data:`signalforge.warehouse.adapters.bigquery._LARGE_TABLE_THRESHOLD`
+# (100M). Re-declared (not imported) so this module never pulls in the BigQuery
+# adapter — the value is the load-bearing contract: identical sizing behaviour
+# across vendors (mirrors the Snowflake adapter's same re-declaration).
+_LARGE_TABLE_THRESHOLD: int = 100_000_000
 
 _SKELETON_REMEDIATION = (
     "DatabricksAdapter is a v0.x skeleton (issue #219) — full implementation pending."
@@ -76,12 +102,14 @@ _SKELETON_REMEDIATION = (
 class DatabricksAdapter(WarehouseAdapter):
     """:class:`WarehouseAdapter` for Databricks SQL profiles (v0.x skeleton).
 
-    Issue #221 stands up the seam end-to-end with every warehouse operation
-    degrading gracefully: :meth:`sample_rows` / :meth:`column_stats` /
-    :meth:`run_test_sql` raise :class:`NotImplementedError`; the degrade-default
-    ABC methods (:meth:`materialise_sample` / :meth:`estimate_query_bytes` /
-    :meth:`get_row_count` / :meth:`run_stats_query`) inherit their typed
-    ``*NotSupportedError``. The sampling / SQL surface lands in #224.
+    Issue #224 (US-003) lands the first real warehouse I/O: :meth:`sample_rows`
+    (deterministic inline-predicate hash-mod), :meth:`get_row_count`
+    (``SELECT COUNT(*)``), and the shared fail-loud :meth:`_resolve_sample_bucket`
+    sizing, all on a connection wired via :meth:`_get_connection` with a fail-soft
+    ``__exit__`` cleanup. :meth:`column_stats` / :meth:`run_test_sql` still raise
+    :class:`NotImplementedError`; :meth:`materialise_sample` /
+    :meth:`estimate_query_bytes` / :meth:`run_stats_query` inherit their typed
+    ``*NotSupportedError`` degrade until #224 US-004 / #225 land.
     """
 
     def __init__(
@@ -251,6 +279,228 @@ class DatabricksAdapter(WarehouseAdapter):
     def dialect(self) -> Dialect:
         return DATABRICKS_DIALECT
 
+    # ------------------------------------------------------------------
+    # get_row_count + sizing + sample_rows — DEC-002 / DEC-003 / DEC-008
+    # of issue #224.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _fold(identifier: str) -> str:
+        """Case-fold one identifier per :attr:`Dialect.identifier_case` (DEC-008).
+
+        Mirrors the prune compiler's ``_fold_identifier`` (and the Snowflake
+        adapter's ``_fold``) so the adapter and the compiler quote identifiers
+        byte-identically — load-bearing for the ``materialised`` strategy (the
+        temp table the adapter CREATEs and the compiler REFERENCEs must fold to
+        the same case, since quoted identifiers are case-sensitive). Databricks
+        folds unquoted identifiers to **lowercase** (Unity Catalog), the
+        opposite of Snowflake's ``"upper"``. Folds an already-validated ASCII
+        identifier (validated on :class:`TableRef` / :class:`PartitionFilter`
+        construction), so it cannot introduce a quote-breaking character.
+        """
+        case = DATABRICKS_DIALECT.identifier_case
+        if case == "upper":
+            return identifier.upper()
+        if case == "lower":
+            return identifier.lower()
+        return identifier
+
+    def _quote_identifier(self, identifier: str) -> str:
+        """Fold-then-quote ONE identifier with the dialect's backtick (DEC-008)."""
+        qc = DATABRICKS_DIALECT.quote_char
+        return f"{qc}{self._fold(identifier)}{qc}"
+
+    def _quote(self, ref: TableRef) -> str:
+        """Render a fully-qualified Databricks table identifier (DEC-008).
+
+        Unity Catalog three-part names are quoted **per component**
+        (`` `catalog`.`schema`.`table` ``) because
+        :attr:`Dialect.quote_qualified_per_component` is ``True`` — a single
+        backtick-quoted string spanning dots would read as ONE literal
+        identifier named ``catalog.schema.table``. Two-part `` `schema`.`table` ``
+        when ``project`` is ``None``.
+
+        **Fold-then-quote, identical to the prune compiler's ``_quote`` /
+        ``_fold_identifier``.** Each component is case-folded
+        (``identifier_case='lower'`` for Databricks) BEFORE the backticks are
+        added, so a conventionally-cased manifest identifier resolves against the
+        real Unity Catalog object and the temp table the adapter CREATEs in
+        :meth:`materialise_sample` matches the name the compiler REFERENCEs (the
+        #124 lesson — CREATE-vs-REFERENCE must never diverge).
+        """
+        components = (
+            [ref.dataset, ref.name] if ref.project is None else [ref.project, ref.dataset, ref.name]
+        )
+        return ".".join(self._quote_identifier(c) for c in components)
+
+    def _render_partition_filter(self, pf: PartitionFilter) -> str:
+        """Render a :class:`PartitionFilter` to a Databricks SQL fragment (DEC-008).
+
+        ``datetime`` → ``TIMESTAMP '…'``; ``date`` → ``DATE '…'`` (via the
+        dialect literal templates — Spark typed-literal form); ``str`` is escaped
+        via :func:`escape_bq_string_literal` for safe inclusion inside a
+        single-quoted literal. The column name is fold-then-quoted (per-component
+        backtick) and already validated on :class:`PartitionFilter` construction.
+
+        Mirrors the Snowflake adapter's ``_render_partition_filter`` and the
+        prune compiler's ``_render_partition_filter(pf, dialect)`` — the
+        partition predicate this method renders matches what the compiler emits
+        for the deterministic sample CTE.
+        """
+        # ``datetime`` is a subclass of ``date``, so check it first.
+        if isinstance(pf.value, datetime):
+            rendered = DATABRICKS_DIALECT.timestamp_literal_template.format(
+                value=pf.value.isoformat()
+            )
+        elif isinstance(pf.value, date):
+            rendered = DATABRICKS_DIALECT.date_literal_template.format(value=pf.value.isoformat())
+        else:
+            from signalforge.warehouse._sql_safety import escape_bq_string_literal
+
+            rendered = f"'{escape_bq_string_literal(str(pf.value))}'"
+        return f"{self._quote_identifier(pf.column)} {pf.op} {rendered}"
+
+    def _execute(self, sql: str, *, table: TableRef | None = None) -> list[Any]:
+        """Run ``sql`` on the connection's cursor, returning ``fetchall()``.
+
+        Any SDK exception is routed through
+        :func:`signalforge.warehouse.adapters._databricks_client.map_databricks_exception`
+        (DEC-009): a mapped typed error is re-raised ``from`` the original; an
+        unchanged passthrough re-raises the original. ``table`` (when supplied)
+        gives the mapper the ``table`` identifier for the Table/Column arms.
+        """
+        from signalforge.warehouse.adapters._databricks_client import map_databricks_exception
+
+        context = {"table": table.qualified_name} if table is not None else None
+        cursor = self._get_connection().cursor()
+        try:
+            cursor.execute(sql)
+            return list(cursor.fetchall())
+        except Exception as exc:
+            mapped = map_databricks_exception(exc, context=context)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+
+    def _execute_to_dicts(self, sql: str, *, table: TableRef | None = None) -> list[dict[str, Any]]:
+        """Run ``sql`` and shape tuple ``fetchall()`` rows into dicts (DEC-002).
+
+        Reads ``cursor.description`` (DB-API: each descriptor's ``[0]`` is the
+        column name) so the adapter builds ``dict`` rows from tuple results
+        without depending on a dict-cursor. SDK errors route through
+        :func:`map_databricks_exception` (DEC-009).
+        """
+        from signalforge.warehouse.adapters._databricks_client import map_databricks_exception
+
+        context = {"table": table.qualified_name} if table is not None else None
+        cursor = self._get_connection().cursor()
+        try:
+            cursor.execute(sql)
+            rows = list(cursor.fetchall())
+        except Exception as exc:
+            mapped = map_databricks_exception(exc, context=context)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+        return self._rows_to_dicts(cursor, rows)
+
+    @staticmethod
+    def _rows_to_dicts(cursor: _DatabricksCursorProtocol, rows: list[Any]) -> list[dict[str, Any]]:
+        """Build dict rows from tuple ``fetchall()`` results via ``description``.
+
+        Each DB-API descriptor's element ``[0]`` is the column name. A row that
+        is already a mapping passes through unchanged (defensive against a
+        dict-cursor-style connection). Mirrors the Snowflake adapter's
+        ``_rows_to_dicts``.
+        """
+        description = cursor.description
+        column_names = [desc[0] for desc in description] if description else []
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            if isinstance(row, dict):
+                result.append(dict(row))
+            else:
+                result.append(dict(zip(column_names, row, strict=False)))
+        return result
+
+    def get_row_count(self, table: TableRef) -> int | None:
+        """Return the row count for ``table`` via ``SELECT COUNT(*)``, or ``None``
+        when it cannot be determined (DEC-003).
+
+        Overrides the ABC default (which raises
+        :class:`RowCountNotSupportedError`). This is the seam
+        :func:`signalforge.prune.engine._resolve_sample_bucket` calls to size the
+        deterministic-sample bucket under ``prune.scope: sample``.
+
+        **Why ``COUNT(*)`` and not metadata** (DEC-003): ``DESCRIBE DETAIL`` has
+        no reliable top-level ``numRows`` (it lives in the Delta ``statistics``
+        map, populated only after ``ANALYZE TABLE COMPUTE STATISTICS`` →
+        commonly NULL/stale), and ``information_schema.tables`` carries no
+        ``row_count``. ``SELECT COUNT(*)`` is the reliable source — metadata-only
+        / cheap on Delta tables.
+
+        Any :class:`WarehouseError` (a non-countable target, a mapped SDK error)
+        returns ``None`` so the shared :meth:`_resolve_sample_bucket` fail-loud
+        sizing decides what to do (unknown + no filter → fail loud; unknown +
+        filter → ``bucket=1000``). A non-:class:`WarehouseError` (an unmapped
+        transient blip) propagates unchanged.
+        """
+        sql = f"SELECT COUNT(*) AS row_count FROM {self._quote(table)}"
+        try:
+            rows = self._execute(sql, table=table)
+        except WarehouseError:
+            return None
+        if not rows:
+            return None
+        first = rows[0]
+        if isinstance(first, dict):
+            value = next(iter(first.values()), None)
+        elif isinstance(first, (list, tuple)):
+            value = first[0]
+        else:
+            value = first
+        if value is None:
+            return None
+        return int(value)
+
+    def _resolve_sample_bucket(
+        self,
+        table: TableRef,
+        n: int,
+        *,
+        partition_filter: PartitionFilter | None,
+    ) -> int:
+        """Size the deterministic-sample bucket via the fail-loud sizing pathway
+        (DEC-003), mirroring the Snowflake / BigQuery adapters exactly:
+
+        * row count unknown + no ``partition_filter`` →
+          :class:`UnknownTableSizeError`.
+        * row count unknown + ``partition_filter`` present → ``bucket = 1000``
+          (DEBUG-logged fallback).
+        * row count ``>= _LARGE_TABLE_THRESHOLD`` + no ``partition_filter`` →
+          :class:`SamplingRequiresPartitionFilterError`.
+        * else → ``bucket = max(num_rows // n, 1)``.
+
+        Row count comes from :meth:`get_row_count` (``SELECT COUNT(*)``), which
+        returns ``None`` on a :class:`WarehouseError`; ``None`` and ``0`` route
+        through the same unknown-size pathway (mirrors BigQuery's
+        ``num_rows == 0`` branch).
+        """
+        num_rows = self.get_row_count(table)
+        if num_rows is None or num_rows == 0:
+            if partition_filter is None:
+                raise UnknownTableSizeError(table=table.qualified_name)
+            _LOGGER.debug(
+                "Sampling table with unknown num_rows; using bucket=1000 (table=%s)",
+                table.qualified_name,
+            )
+            return 1000
+        if num_rows >= _LARGE_TABLE_THRESHOLD and partition_filter is None:
+            raise SamplingRequiresPartitionFilterError(
+                table=table.qualified_name, num_rows=num_rows
+            )
+        return max(num_rows // n, 1)
+
     def sample_rows(
         self,
         table: TableRef,
@@ -258,7 +508,60 @@ class DatabricksAdapter(WarehouseAdapter):
         *,
         partition_filter: PartitionFilter | None = None,
     ) -> list[dict[str, Any]]:
-        raise NotImplementedError(f"sample_rows: {_SKELETON_REMEDIATION}")
+        """Sample up to ``n`` rows deterministically (DEC-002 / DEC-003 / DEC-008).
+
+        Algorithm (mirrors the Snowflake / BigQuery ``sample_rows``,
+        Databricks-flavoured):
+
+        1. Reject ``n <= 0`` with :class:`ValueError` before any warehouse
+           contact.
+        2. Size the bucket via :meth:`_resolve_sample_bucket` (``SELECT
+           COUNT(*)`` + the shared fail-loud sizing).
+        3. Emit the deterministic sample SELECT via the shared
+           :func:`signalforge.warehouse._sample_sql.render_sample_select` helper
+           (``order_by_hash=True``). For Databricks
+           (``sample_hash_in_projection=False``) this is the **inline-predicate**
+           shape — Databricks has NO Snowflake-style ``HASH(*)`` predicate
+           restriction, so ``xxhash64(...)`` and the masked ``MOD(...)`` are
+           legal directly in ``WHERE``/``ORDER BY``::
+
+               SELECT * FROM `cat`.`sch`.`tbl` AS t
+               WHERE MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), <bucket>) < 1
+                 [AND <partition_filter>]
+               ORDER BY (xxhash64(to_json(struct(*))) & 9223372036854775807)
+               LIMIT n
+
+        The hash-mod approach is deterministic across runs (same input → same
+        prune decision) and works on views / CTEs where ``TABLESAMPLE`` does not.
+        The hash expression and sample SHAPE are read from
+        :data:`DATABRICKS_DIALECT` (NEVER hard-coded) so the adapter's sample SQL
+        is byte-consistent with the prune compiler's sample CTE (Architectural
+        Commitment #5). The ``ORDER BY`` makes ``LIMIT`` truncation deterministic.
+        The partition filter is rendered by the adapter's own
+        :meth:`_render_partition_filter` and passed to the helper as
+        ``extra_where``.
+        """
+        if n <= 0:
+            raise ValueError(f"sample_rows requires n > 0; got n={n}")
+
+        bucket = self._resolve_sample_bucket(table, n, partition_filter=partition_filter)
+
+        quoted = self._quote(table)
+        extra_where = (
+            self._render_partition_filter(partition_filter)
+            if partition_filter is not None
+            else None
+        )
+        sql = render_sample_select(
+            quoted,
+            dialect=DATABRICKS_DIALECT,
+            sample_bucket=bucket,
+            sample_size=n,
+            extra_where=extra_where,
+            order_by_hash=True,
+        )
+
+        return self._execute_to_dicts(sql, table=table)
 
     def column_stats(self, table: TableRef, column: str) -> ColumnStats:
         raise NotImplementedError(f"column_stats: {_SKELETON_REMEDIATION}")

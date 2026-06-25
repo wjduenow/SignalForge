@@ -10,10 +10,12 @@ Snowflake). Tests pin the issue ACs:
 2. :meth:`dialect` returns :data:`DATABRICKS_DIALECT` by identity.
 3. :meth:`__repr__` shows only safe fields (``host`` / ``http_path`` /
    ``catalog``), never ``token`` / ``client_secret`` / ``schema``.
-4. ``sample_rows`` / ``column_stats`` / ``run_test_sql`` raise
-   :class:`NotImplementedError` naming the epic (#219).
-5. ``materialise_sample`` / ``estimate_query_bytes`` / ``get_row_count`` /
-   ``run_stats_query`` inherit the ABC typed degrade.
+4. ``column_stats`` / ``run_test_sql`` raise :class:`NotImplementedError`
+   naming the epic (#219). (``sample_rows`` + ``get_row_count`` graduated to
+   real implementations in #224 US-003 — covered in
+   ``tests/warehouse/test_databricks_adapter.py``.)
+5. ``materialise_sample`` / ``estimate_query_bytes`` / ``run_stats_query``
+   inherit the ABC typed degrade.
 6. SDK type-ignores are confined to ``_databricks_client.py`` — pinned by
    ``tests/warehouse/test_databricks_client_confinement.py``, not here.
 """
@@ -29,7 +31,6 @@ from signalforge.warehouse import (
     DatabricksAdapter,
     EstimateNotSupportedError,
     MaterialisationNotSupportedError,
-    RowCountNotSupportedError,
     StatsQueryNotSupportedError,
 )
 from signalforge.warehouse.base import WarehouseAdapter
@@ -123,16 +124,10 @@ def test_init_stores_forward_compat_oauth_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# sample_rows / column_stats / run_test_sql raise NotImplementedError (AC-4)
+# column_stats / run_test_sql still raise NotImplementedError (AC-4)
+# (sample_rows graduated to a real impl in #224 US-003 — see
+# tests/warehouse/test_databricks_adapter.py)
 # ---------------------------------------------------------------------------
-
-
-def test_sample_rows_raises_not_implemented() -> None:
-    adapter = DatabricksAdapter()
-    table = TableRef(project=None, dataset="analytics", name="t")
-    with pytest.raises(NotImplementedError) as exc_info:
-        adapter.sample_rows(table, 100)
-    assert "issue #219" in str(exc_info.value)
 
 
 def test_column_stats_raises_not_implemented() -> None:
@@ -166,13 +161,6 @@ def test_estimate_query_bytes_inherits_typed_degrade() -> None:
     adapter = DatabricksAdapter()
     with pytest.raises(EstimateNotSupportedError):
         adapter.estimate_query_bytes("SELECT 1")
-
-
-def test_get_row_count_inherits_typed_degrade() -> None:
-    adapter = DatabricksAdapter()
-    table = TableRef(project=None, dataset="analytics", name="t")
-    with pytest.raises(RowCountNotSupportedError):
-        adapter.get_row_count(table)
 
 
 def test_run_stats_query_inherits_typed_degrade() -> None:

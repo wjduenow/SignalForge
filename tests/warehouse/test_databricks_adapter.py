@@ -16,6 +16,7 @@ in the default suite, like the Snowflake exception-mapping tests.
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 
 import pytest
 
@@ -30,9 +31,13 @@ from signalforge.warehouse.adapters.databricks import DatabricksAdapter
 from signalforge.warehouse.errors import (
     ColumnNotFoundError,
     QuerySyntaxError,
+    SamplingRequiresPartitionFilterError,
     TableNotFoundError,
+    UnknownTableSizeError,
     WarehouseAuthError,
+    WarehouseError,
 )
+from signalforge.warehouse.models import PartitionFilter, TableRef
 from tests.warehouse._fake_databricks import FakeDatabricksConnection
 
 _LOGGER_NAME = "signalforge.warehouse"
@@ -421,3 +426,387 @@ def test_extract_unresolved_column_falls_back_to_full_message() -> None:
 
 def test_extract_unresolved_column_pulls_bare_token() -> None:
     assert _extract_unresolved_column("with name `my_col` cannot be resolved") == "my_col"
+
+
+# ---------------------------------------------------------------------------
+# get_row_count + sizing + sample_rows (#224 US-003)
+# ---------------------------------------------------------------------------
+
+# The size query is ``SELECT COUNT(*)`` (no metadata table); the sample query
+# carries the dialect hash expression and never touches COUNT, so the two
+# expectations can't cross-match.
+_COUNT_QUERY = r"SELECT COUNT\(\*\)"
+_SAMPLE_QUERY = r"xxhash64"
+
+# ``project`` is the Unity Catalog catalog (short names like ``main`` are
+# allowed since US-001 relaxed TableRef.project). ``identifier_case='lower'`` so
+# the conventionally-named warehouse object resolves under fold-to-lower.
+_TABLE = TableRef(project="main", dataset="sales", name="orders")
+
+
+class _RecordingDatabricksConnection(FakeDatabricksConnection):
+    """A :class:`FakeDatabricksConnection` that records every executed SQL."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.executed: list[str] = []
+
+    def _consume_execute(self, sql: str):  # type: ignore[override]
+        self.executed.append(sql)
+        return super()._consume_execute(sql)
+
+
+def _make_adapter(conn: FakeDatabricksConnection) -> DatabricksAdapter:
+    return DatabricksAdapter(connection=conn)
+
+
+# ---- Determinism (DEC-002) ------------------------------------------------
+
+
+def test_sample_sql_is_byte_identical_across_two_calls() -> None:
+    """Identical ``(table, n, partition_filter)`` → byte-identical executed
+    sample SQL. Pins the deterministic hash-mod contract and the inline shape."""
+    sample_sqls: list[str] = []
+    for _ in range(2):
+        conn = _RecordingDatabricksConnection()
+        conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+        conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
+        adapter = _make_adapter(conn)
+        adapter.sample_rows(_TABLE, 100)
+        sample_sqls.append(conn.executed[1])
+
+    assert sample_sqls[0] == sample_sqls[1]
+    sql = sample_sqls[0]
+    # num_rows=1000, n=100 → bucket = max(1000//100, 1) = 10. Inline-predicate
+    # shape (sample_hash_in_projection=False): the masked xxhash64 expression
+    # sits directly in WHERE / ORDER BY (no Snowflake-style projection subquery).
+    assert "(xxhash64(to_json(struct(*))) & 9223372036854775807)" in sql
+    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 10) < 1" in sql
+    assert "ORDER BY (xxhash64(to_json(struct(*))) & 9223372036854775807)" in sql
+    assert "LIMIT 100" in sql
+    assert "EXCLUDE" not in sql  # not the projection-subquery shape
+    # Per-component backtick quoting, folded to lower (#124): catalog "main",
+    # schema "sales", table "orders".
+    assert "`main`.`sales`.`orders`" in sql
+
+
+def test_sample_sql_folds_mixed_case_identifiers_to_lower() -> None:
+    """Identifier_case='lower' folds a mixed-case manifest identifier so the
+    quoted (case-sensitive) name resolves against the real Unity Catalog object —
+    the same fold the prune compiler applies (CREATE-vs-REFERENCE parity)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
+    adapter = _make_adapter(conn)
+
+    table = TableRef(project="Main", dataset="Sales", name="Orders")
+    adapter.sample_rows(table, 100)
+
+    assert "`main`.`sales`.`orders`" in conn.executed[1]
+
+
+# ---- Sizing branches (DEC-003) --------------------------------------------
+
+
+def test_get_row_count_returns_count() -> None:
+    """The Databricks override returns ``SELECT COUNT(*)`` — the seam the prune
+    engine calls under ``prune.scope: sample``."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(2_500_000,)])
+    adapter = _make_adapter(conn)
+
+    assert adapter.get_row_count(_TABLE) == 2_500_000
+
+
+def test_get_row_count_query_is_quoted_count_star() -> None:
+    """The COUNT query targets the fold-then-quoted table ref."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(10,)])
+    adapter = _make_adapter(conn)
+
+    adapter.get_row_count(_TABLE)
+
+    assert conn.executed[0] == "SELECT COUNT(*) AS row_count FROM `main`.`sales`.`orders`"
+
+
+def test_get_row_count_shapes_dict_row() -> None:
+    """A dict-cursor-style mapping row is handled — the first value is the count."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[{"row_count": 42}])
+    adapter = _make_adapter(conn)
+
+    assert adapter.get_row_count(_TABLE) == 42
+
+
+def test_get_row_count_returns_none_on_warehouse_error() -> None:
+    """A mapped :class:`WarehouseError` (e.g. table not found) → ``None``
+    (DEC-003) so the shared sizing pathway decides what to do."""
+    dbe = _dbe()
+    err = dbe.ServerOperationError(  # type: ignore[attr-defined]
+        "[TABLE_OR_VIEW_NOT_FOUND] Table or view not found: main.sales.orders"
+    )
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=err)
+    adapter = _make_adapter(conn)
+
+    assert adapter.get_row_count(_TABLE) is None
+
+
+def test_get_row_count_returns_none_on_empty_result() -> None:
+    """An empty fetchall (no row) → ``None``."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[])
+    adapter = _make_adapter(conn)
+
+    assert adapter.get_row_count(_TABLE) is None
+
+
+def test_get_row_count_propagates_non_warehouse_error() -> None:
+    """An UNMAPPED transient (non-:class:`WarehouseError`) propagates unchanged —
+    get_row_count only swallows WarehouseError."""
+    sentinel = RuntimeError("transient network blip")
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=sentinel)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        adapter.get_row_count(_TABLE)
+    assert exc_info.value is sentinel
+    # And the sentinel is NOT a WarehouseError (proves the catch is scoped).
+    assert not isinstance(sentinel, WarehouseError)
+
+
+def test_unknown_size_no_filter_raises_unknown_table_size() -> None:
+    """COUNT unresolvable (error → None) + no partition_filter → fail loud."""
+    dbe = _dbe()
+    err = dbe.ServerOperationError("[TABLE_OR_VIEW_NOT_FOUND] not found")  # type: ignore[attr-defined]
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=err)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(UnknownTableSizeError):
+        adapter.sample_rows(_TABLE, 100)
+
+
+def test_zero_count_no_filter_raises_unknown_table_size() -> None:
+    """A COUNT of 0 + no partition_filter routes through the unknown-size
+    pathway (mirrors BigQuery's ``num_rows == 0`` branch) → fail loud."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(0,)])
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(UnknownTableSizeError):
+        adapter.sample_rows(_TABLE, 100)
+
+
+def test_unknown_size_with_filter_uses_bucket_1000() -> None:
+    """COUNT unresolvable + partition_filter present → bucket=1000 fallback."""
+    dbe = _dbe()
+    err = dbe.ServerOperationError("[TABLE_OR_VIEW_NOT_FOUND] not found")  # type: ignore[attr-defined]
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=err)
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
+    adapter = _make_adapter(conn)
+
+    pf = PartitionFilter(column="dt", op=">=", value=date(2024, 1, 1))
+    adapter.sample_rows(_TABLE, 100, partition_filter=pf)
+
+    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 1000) < 1" in conn.executed[1]
+
+
+def test_huge_count_no_filter_raises_requires_partition_filter() -> None:
+    """COUNT ``>= 100M`` + no partition_filter → fail loud."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(100_000_000,)])
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(SamplingRequiresPartitionFilterError):
+        adapter.sample_rows(_TABLE, 100)
+
+
+def test_huge_count_with_filter_proceeds() -> None:
+    """COUNT ``>= 100M`` + a partition_filter → proceeds (bucket sized)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(200_000_000,)])
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
+    adapter = _make_adapter(conn)
+
+    pf = PartitionFilter(column="dt", op=">=", value=date(2024, 1, 1))
+    adapter.sample_rows(_TABLE, 100, partition_filter=pf)
+
+    # bucket = max(200_000_000 // 100, 1) = 2_000_000.
+    assert (
+        "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 2000000) < 1" in conn.executed[1]
+    )
+
+
+def test_normal_count_buckets_num_rows_over_n() -> None:
+    """``bucket = max(num_rows // n, 1)`` for a normal-sized table."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(5000,)])
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
+    adapter = _make_adapter(conn)
+
+    adapter.sample_rows(_TABLE, 100)
+
+    # bucket = max(5000 // 100, 1) = 50.
+    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 50) < 1" in conn.executed[1]
+
+
+def test_tiny_table_buckets_floor_at_one() -> None:
+    """``num_rows < n`` → ``bucket = max(num_rows // n, 1) = 1`` (floor)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(5,)])
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
+    adapter = _make_adapter(conn)
+
+    adapter.sample_rows(_TABLE, 100)
+
+    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 1) < 1" in conn.executed[1]
+
+
+# ---- n <= 0 guard ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad_n", [0, -1, -100])
+def test_non_positive_n_raises_value_error(bad_n: int) -> None:
+    """``n <= 0`` → ``ValueError`` BEFORE any warehouse contact."""
+    conn = FakeDatabricksConnection()  # no expectations → any query raises loudly
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(ValueError, match="requires n > 0"):
+        adapter.sample_rows(_TABLE, bad_n)
+
+
+# ---- Dict shaping via cursor.description (DEC-002) -------------------------
+
+
+def test_tuple_rows_shaped_into_dicts_via_description() -> None:
+    """Tuple ``fetchall()`` results + a ``description`` → list of dicts keyed by
+    column name (no dict-cursor dependency)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+    conn.expect_execute(
+        matching=_SAMPLE_QUERY,
+        returns=[(1, "alice"), (2, "bob")],
+        description=[("id", "INT"), ("name", "STRING")],
+    )
+    adapter = _make_adapter(conn)
+
+    rows = adapter.sample_rows(_TABLE, 100)
+
+    assert rows == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+
+
+def test_sample_rows_passes_through_dict_rows_unchanged() -> None:
+    """A connection that vends mapping rows is handled by the dict passthrough
+    branch — no description needed."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+    conn.expect_execute(
+        matching=_SAMPLE_QUERY,
+        returns=[{"id": 1, "amount": 10}, {"id": 2, "amount": 20}],
+    )
+    adapter = _make_adapter(conn)
+
+    rows = adapter.sample_rows(_TABLE, 100)
+
+    assert rows == [{"id": 1, "amount": 10}, {"id": 2, "amount": 20}]
+
+
+# ---- Partition filter rendering (DEC-008) ---------------------------------
+
+
+def test_datetime_partition_filter_renders_timestamp_literal() -> None:
+    """A ``datetime`` value renders via the ``TIMESTAMP '…'`` template and is
+    ANDed into the WHERE; the column is fold-then-quoted."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
+    adapter = _make_adapter(conn)
+
+    pf = PartitionFilter(column="created_at", op=">=", value=datetime(2024, 1, 2, 3, 4, 5))
+    adapter.sample_rows(_TABLE, 100, partition_filter=pf)
+
+    sql = conn.executed[1]
+    assert "TIMESTAMP '2024-01-02T03:04:05'" in sql
+    assert "`created_at` >= " in sql
+    assert " AND " in sql
+
+
+def test_date_partition_filter_renders_date_literal() -> None:
+    """A ``date`` value renders via the ``DATE '…'`` template."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
+    adapter = _make_adapter(conn)
+
+    pf = PartitionFilter(column="dt", op="=", value=date(2024, 6, 15))
+    adapter.sample_rows(_TABLE, 100, partition_filter=pf)
+
+    assert "DATE '2024-06-15'" in conn.executed[1]
+
+
+def test_str_partition_filter_value_is_escaped_inside_single_quotes() -> None:
+    """A ``str`` value is escaped (single-quote → backslash-quote) inside the
+    single-quoted literal — defends against breaking out of the literal."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
+    adapter = _make_adapter(conn)
+
+    pf = PartitionFilter(column="region", op="=", value="o'hare")
+    adapter.sample_rows(_TABLE, 100, partition_filter=pf)
+
+    sql = conn.executed[1]
+    assert "'o\\'hare'" in sql
+    assert "`region` = " in sql
+
+
+# ---- project=None (two-part quoting) --------------------------------------
+
+
+def test_project_none_uses_two_part_quoting() -> None:
+    """When ``table.project`` is ``None`` the COUNT + sample queries use two-part
+    `` `schema`.`table` `` quoting."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
+    adapter = _make_adapter(conn)
+
+    table = TableRef(project=None, dataset="sales", name="orders")
+    adapter.sample_rows(table, 100)
+
+    assert "`sales`.`orders`" in conn.executed[0]
+    assert "`sales`.`orders`" in conn.executed[1]
+
+
+# ---- SDK exception mapping (DEC-009) --------------------------------------
+
+
+def test_sample_query_programming_error_maps_to_query_syntax_error() -> None:
+    """A connector error from the sample query maps to :class:`QuerySyntaxError`
+    via ``map_databricks_exception`` (the ``_execute_to_dicts`` mapped branch)."""
+    dbe = _dbe()
+    err = dbe.ServerOperationError("[PARSE_SYNTAX_ERROR] bad syntax")  # type: ignore[attr-defined]
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=err)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError):
+        adapter.sample_rows(_TABLE, 100)
+
+
+def test_sample_query_unmapped_error_passes_through_unchanged() -> None:
+    """An unmapped exception from the sample query is re-raised unchanged from
+    ``_execute_to_dicts`` — the passthrough branch."""
+    sentinel = RuntimeError("transient network blip")
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_SAMPLE_QUERY, returns=sentinel)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        adapter.sample_rows(_TABLE, 100)
+    assert exc_info.value is sentinel
