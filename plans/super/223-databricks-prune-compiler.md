@@ -5,7 +5,7 @@
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/223
 - **Epic:** #219 (Databricks adapter). Depends on #221 (skeleton). Models on #121 (Snowflake compiler dialect).
 - **Branch / worktree:** `feat/223-databricks-prune-compiler` @ `/home/wesd/Projects/worktrees/SignalForge/223-databricks-prune-compiler`
-- **Phase:** detailing
+- **Phase:** published
 - **Sessions:** 1 (2026-06-24)
 - **Scoping resolved:** Q1 → ungated parse-guard (DEC-002 stands); Q2 → mirror Snowflake 16+16 (DEC-003 stands).
 
