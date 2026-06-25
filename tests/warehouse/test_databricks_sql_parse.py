@@ -127,6 +127,31 @@ def _emitted_run_test_sqls(*, capture_failures: int) -> list[str]:
     return conn.executed
 
 
+_STATS_QUERY = r"COUNT\(DISTINCT"
+_STATS_DESCRIPTION = [
+    ("non_null_count",),
+    ("distinct_count",),
+    ("null_count",),
+    ("min_value",),
+    ("max_value",),
+    ("data_type",),
+]
+
+
+def _emitted_column_stats_sql(table: TableRef, column: str) -> str:
+    """Drive ``column_stats`` once and return the single aggregate SQL it
+    executed."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(1, 1, 0, 5, 5, "int")],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = DatabricksAdapter(connection=conn)
+    adapter.column_stats(table, column)
+    return conn.executed[0]
+
+
 # Cases covering: three-part + two-part quoting; no filter + datetime/date/str
 # partition filters (each exercises a distinct literal-template branch). The
 # COUNT query is emitted on every case too, so both statement shapes are parsed.
@@ -238,3 +263,30 @@ def test_parse_guard_rejects_malformed_databricks_sql() -> None:
     """
     with pytest.raises(ParseError):
         sqlglot.parse_one("SELECT FROM WHERE )(", dialect="databricks")
+
+
+@pytest.mark.parametrize(
+    ("table", "column"),
+    [
+        (_THREE_PART, "amount"),
+        (_TWO_PART, "amount"),
+        (_THREE_PART, "OrderAmount"),  # mixed-case → fold-to-lower backtick
+    ],
+    ids=["three_part", "two_part", "mixed_case_column"],
+)
+def test_column_stats_sql_parses_under_databricks_dialect(
+    table: TableRef,
+    column: str,
+) -> None:
+    """The single aggregate SQL ``column_stats`` emits (COUNT / COUNT DISTINCT /
+    COUNT_IF / MIN / MAX / ``typeof``) must parse under sqlglot's ``databricks``
+    dialect (#224 US-005).
+
+    A ``ParseError`` here means the adapter emitted invalid Spark/Databricks
+    aggregate SQL — a fold-then-quote slip or a bad ``COUNT_IF`` / ``typeof``
+    fragment. Real-Spark ``typeof`` / ``MIN`` / ``MAX`` semantics are a #226
+    live-cert item (sqlglot parses SQL, it does not run it).
+    """
+    sql = _emitted_column_stats_sql(table, column)
+    parsed = sqlglot.parse_one(sql, dialect="databricks")
+    assert parsed is not None

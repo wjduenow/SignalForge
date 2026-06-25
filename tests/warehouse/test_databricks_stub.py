@@ -10,10 +10,10 @@ Snowflake). Tests pin the issue ACs:
 2. :meth:`dialect` returns :data:`DATABRICKS_DIALECT` by identity.
 3. :meth:`__repr__` shows only safe fields (``host`` / ``http_path`` /
    ``catalog``), never ``token`` / ``client_secret`` / ``schema``.
-4. ``column_stats`` / ``run_test_sql`` raise :class:`NotImplementedError`
-   naming the epic (#219). (``sample_rows`` + ``get_row_count`` graduated to
-   real implementations in #224 US-003 — covered in
-   ``tests/warehouse/test_databricks_adapter.py``.)
+4. The real-I/O methods graduated to implementations covered in
+   ``tests/warehouse/test_databricks_adapter.py``: ``sample_rows`` +
+   ``get_row_count`` (#224 US-003), ``materialise_sample`` + ``run_test_sql``
+   (#224 US-004), ``column_stats`` (#224 US-005).
 5. ``materialise_sample`` / ``estimate_query_bytes`` / ``run_stats_query``
    inherit the ABC typed degrade.
 6. SDK type-ignores are confined to ``_databricks_client.py`` — pinned by
@@ -33,7 +33,7 @@ from signalforge.warehouse import (
     StatsQueryNotSupportedError,
 )
 from signalforge.warehouse.base import WarehouseAdapter
-from signalforge.warehouse.models import DATABRICKS_DIALECT, Dialect, TableRef
+from signalforge.warehouse.models import DATABRICKS_DIALECT, Dialect
 from signalforge.warehouse.profiles import DbtProfileTarget
 
 # ---------------------------------------------------------------------------
@@ -123,18 +123,10 @@ def test_init_stores_forward_compat_oauth_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# column_stats still raises NotImplementedError (AC-4)
-# (sample_rows graduated in #224 US-003; materialise_sample + run_test_sql
-# graduated in #224 US-004 — see tests/warehouse/test_databricks_adapter.py)
+# Real-I/O methods (sample_rows / get_row_count / materialise_sample /
+# run_test_sql / column_stats) graduated to implementations covered in
+# tests/warehouse/test_databricks_adapter.py (#224 US-003 … US-005).
 # ---------------------------------------------------------------------------
-
-
-def test_column_stats_raises_not_implemented() -> None:
-    adapter = DatabricksAdapter()
-    table = TableRef(project=None, dataset="analytics", name="t")
-    with pytest.raises(NotImplementedError) as exc_info:
-        adapter.column_stats(table, "id")
-    assert "issue #219" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
