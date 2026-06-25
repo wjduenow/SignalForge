@@ -45,8 +45,10 @@ Scope (deliberately minimal):
   :class:`NotImplementedError` stub: wraps a candidate failing-rows SELECT in a
   ``COUNT(*)`` aggregate (plus a per-row ``to_json(struct(*))`` LIMIT capture
   query when ``capture_failures > 0``) and returns a typed :class:`TestResult`.
-* :meth:`column_stats` raises :class:`NotImplementedError` naming the epic
-  (#219) — implemented in #224 US-005.
+* :meth:`column_stats` is implemented (#224 US-005, DEC-011) — overrides the
+  :class:`NotImplementedError` stub with a single aggregate query (count /
+  distinct / nulls / min / max / data_type). Databricks ships this AHEAD of
+  Snowflake (which stubs it); the Snowflake-parity decision is GitHub issue #258.
 * :meth:`estimate_query_bytes` / :meth:`run_stats_query` inherit the ABC typed
   degrade (``EstimateNotSupportedError`` / ``StatsQueryNotSupportedError``) — a
   clean, operator-actionable signal until #225 lands.
@@ -116,8 +118,9 @@ class DatabricksAdapter(WarehouseAdapter):
     sizing, all on a connection wired via :meth:`_get_connection` with a fail-soft
     ``__exit__`` cleanup. US-004 adds :meth:`materialise_sample` (session-scoped
     qualified ``CREATE TEMPORARY TABLE``) and :meth:`run_test_sql` (``COUNT(*)``
-    failing-rows wrap + per-row ``to_json`` capture). :meth:`column_stats` still
-    raises :class:`NotImplementedError`; :meth:`estimate_query_bytes` /
+    failing-rows wrap + per-row ``to_json`` capture). US-005 adds
+    :meth:`column_stats` (single aggregate-only profiling query) — shipped AHEAD
+    of Snowflake, whose parity is tracked as issue #258. :meth:`estimate_query_bytes` /
     :meth:`run_stats_query` inherit their typed ``*NotSupportedError`` degrade
     until #225 lands.
     """
@@ -736,7 +739,68 @@ class DatabricksAdapter(WarehouseAdapter):
         return temp_ref
 
     def column_stats(self, table: TableRef, column: str) -> ColumnStats:
-        raise NotImplementedError(f"column_stats: {_SKELETON_REMEDIATION}")
+        """Return an aggregate profile for one column (DEC-011 of issue #224).
+
+        Overrides the v0.x ``NotImplementedError`` stub. Databricks implements
+        ``column_stats`` AHEAD of Snowflake (which stubs it); the Snowflake-parity
+        decision is tracked as GitHub issue #258.
+
+        A SINGLE aggregate query over the fold-then-quoted table computes the
+        :class:`ColumnStats` contract for the fold-then-quoted column — mirroring
+        :meth:`BigQueryAdapter.column_stats`'s semantics in Spark SQL:
+
+        * ``count`` — ``COUNT(<col>)`` (NON-null count, matching BigQuery).
+        * ``distinct`` — ``COUNT(DISTINCT <col>)``.
+        * ``nulls`` — ``COUNT_IF(<col> IS NULL)`` (Spark's ``COUNTIF`` analogue).
+        * ``min`` / ``max`` — ``MIN(<col>)`` / ``MAX(<col>)``.
+        * ``data_type`` — ``MAX(typeof(<col>))`` (Spark's DDL type string; an
+          empty table yields ``NULL`` → coerced to ``""``, matching BigQuery's
+          "type unknown → empty string" precedent).
+
+        Unlike BigQuery (DEC-008/DEC-025), there is NO context-manager batching:
+        the call runs its own single round-trip on
+        :meth:`_get_connection`'s connection, mirroring this adapter's
+        :meth:`sample_rows` / :meth:`run_test_sql` / :meth:`get_row_count`. The
+        column is validated by
+        :func:`signalforge.warehouse._sql_safety.validate_identifier` before it
+        reaches the SQL string (DEC-013); SDK errors route through
+        :func:`map_databricks_exception` (via :meth:`_execute_to_dicts`).
+
+        .. note::
+
+            Real-Spark ``typeof`` / ``MIN`` / ``MAX`` semantics against a live
+            Unity Catalog table are a **#226 live-cert item** — certified here
+            against the fake + the ``sqlglot`` parse-guard only.
+        """
+        validate_identifier("column", column)
+
+        quoted_col = self._quote_identifier(column)
+        sql = (
+            f"SELECT COUNT({quoted_col}) AS non_null_count, "
+            f"COUNT(DISTINCT {quoted_col}) AS distinct_count, "
+            f"COUNT_IF({quoted_col} IS NULL) AS null_count, "
+            f"MIN({quoted_col}) AS min_value, "
+            f"MAX({quoted_col}) AS max_value, "
+            f"MAX(typeof({quoted_col})) AS data_type "
+            f"FROM {self._quote(table)}"
+        )
+
+        rows = self._execute_to_dicts(sql, table=table)
+        if not rows:  # pragma: no cover - aggregate always returns one row
+            raise RuntimeError(f"column_stats aggregate returned no rows for table {table}")
+
+        # Databricks folds the unquoted aliases to lower, but resolve
+        # case-insensitively so a fake / dict-cursor that preserved case works too.
+        lowered = {str(k).lower(): v for k, v in rows[0].items()}
+        raw_type = lowered.get("data_type")
+        return ColumnStats(
+            count=int(lowered["non_null_count"]),
+            distinct=int(lowered["distinct_count"]),
+            nulls=int(lowered["null_count"]),
+            min=lowered.get("min_value"),
+            max=lowered.get("max_value"),
+            data_type=str(raw_type) if raw_type is not None else "",
+        )
 
     # ------------------------------------------------------------------
     # run_test_sql — DEC-007 of issue #224.

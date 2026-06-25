@@ -30,6 +30,7 @@ from signalforge.warehouse.adapters._databricks_client import (
 from signalforge.warehouse.adapters.databricks import DatabricksAdapter
 from signalforge.warehouse.errors import (
     ColumnNotFoundError,
+    InvalidIdentifierError,
     MaterialisationFailedError,
     QuerySyntaxError,
     SamplingRequiresPartitionFilterError,
@@ -38,7 +39,12 @@ from signalforge.warehouse.errors import (
     WarehouseAuthError,
     WarehouseError,
 )
-from signalforge.warehouse.models import DATABRICKS_DIALECT, PartitionFilter, TableRef
+from signalforge.warehouse.models import (
+    DATABRICKS_DIALECT,
+    ColumnStats,
+    PartitionFilter,
+    TableRef,
+)
 from tests.warehouse._fake_databricks import FakeDatabricksConnection
 
 _LOGGER_NAME = "signalforge.warehouse"
@@ -1249,3 +1255,205 @@ def test_run_test_sql_unmapped_error_passes_through_unchanged() -> None:
     with pytest.raises(RuntimeError) as exc_info:
         adapter.run_test_sql("SELECT `id` FROM `main`.`sales`.`orders` WHERE `id` IS NULL")
     assert exc_info.value is sentinel
+
+
+# ---------------------------------------------------------------------------
+# column_stats (#224 US-005, DEC-011) — aggregate-only profiling.
+#
+# Databricks implements column_stats AHEAD of Snowflake (which stubs it); the
+# Snowflake-parity decision is tracked as GitHub issue #258.
+# ---------------------------------------------------------------------------
+
+_STATS_QUERY = r"COUNT\(DISTINCT"
+
+# Full DB-API descriptor for the single aggregate row, in projected order.
+_STATS_DESCRIPTION = [
+    ("non_null_count",),
+    ("distinct_count",),
+    ("null_count",),
+    ("min_value",),
+    ("max_value",),
+    ("data_type",),
+]
+
+
+def test_column_stats_returns_populated_columnstats() -> None:
+    """A single aggregate round-trip shapes into a fully-populated
+    :class:`ColumnStats`, mapped field-for-field from the result row
+    (count=non-null, distinct, nulls, min, max, data_type)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(900, 750, 100, 1, 9999, "int")],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "amount")
+
+    assert isinstance(stats, ColumnStats)
+    assert stats.count == 900
+    assert stats.distinct == 750
+    assert stats.nulls == 100
+    assert stats.min == 1
+    assert stats.max == 9999
+    assert stats.data_type == "int"
+    conn.assert_all_expectations_met()
+
+
+def test_column_stats_carries_through_string_and_none_minmax() -> None:
+    """``min``/``max`` pass through whatever the connector returns (here STRING
+    bounds); a NULL min/max from an all-null column surfaces as ``None``."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(0, 0, 500, None, None, "string")],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "region")
+
+    assert stats.count == 0
+    assert stats.distinct == 0
+    assert stats.nulls == 500
+    assert stats.min is None
+    assert stats.max is None
+    assert stats.data_type == "string"
+
+
+def test_column_stats_query_shape_and_folding() -> None:
+    """The emitted aggregate SQL reuses ``_quote`` (three-part backtick table)
+    and fold-then-quotes the column, computing the full metric set."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(1, 1, 0, 5, 5, "int")],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    adapter.column_stats(_TABLE, "amount")
+
+    sql = conn.executed[0]
+    assert sql.startswith("SELECT COUNT(`amount`) AS non_null_count")
+    assert "COUNT(DISTINCT `amount`) AS distinct_count" in sql
+    assert "COUNT_IF(`amount` IS NULL) AS null_count" in sql
+    assert "MIN(`amount`) AS min_value" in sql
+    assert "MAX(`amount`) AS max_value" in sql
+    assert "MAX(typeof(`amount`)) AS data_type" in sql
+    assert sql.endswith("FROM `main`.`sales`.`orders`")
+
+
+def test_column_stats_folds_mixed_case_column_to_lower() -> None:
+    """A conventionally-cased manifest column is fold-then-quoted to lowercase
+    backtick (``identifier_case='lower'``), reusing ``_quote_identifier``."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(1, 1, 0, 5, 5, "int")],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    adapter.column_stats(_TABLE, "OrderAmount")
+
+    sql = conn.executed[0]
+    assert "`orderamount`" in sql
+    assert "OrderAmount" not in sql
+
+
+def test_column_stats_resolves_aliases_case_insensitively() -> None:
+    """A connection that preserved the alias case (UPPER) still maps — the
+    adapter lowercases the result keys before reading them."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(7, 4, 3, 0, 10, "bigint")],
+        description=[
+            ("NON_NULL_COUNT",),
+            ("DISTINCT_COUNT",),
+            ("NULL_COUNT",),
+            ("MIN_VALUE",),
+            ("MAX_VALUE",),
+            ("DATA_TYPE",),
+        ],
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "qty")
+
+    assert stats.count == 7
+    assert stats.distinct == 4
+    assert stats.nulls == 3
+    assert stats.data_type == "bigint"
+
+
+def test_column_stats_none_data_type_coerces_to_empty_string() -> None:
+    """An empty table yields ``MAX(typeof(...)) = NULL`` → ``data_type`` is
+    coerced to ``""`` (matching BigQuery's "type unknown → empty string")."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(0, 0, 0, None, None, None)],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "amount")
+
+    assert stats.data_type == ""
+
+
+def test_column_stats_validates_column_identifier() -> None:
+    """A malformed column name is rejected by ``validate_identifier`` BEFORE any
+    query is issued (DEC-013) — no expectation is consumed."""
+    conn = FakeDatabricksConnection()
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(InvalidIdentifierError):
+        adapter.column_stats(_TABLE, "amount; DROP TABLE x")
+
+
+def test_column_stats_two_part_table_quoting() -> None:
+    """``project=None`` yields a two-part ``schema``.``table`` FROM clause."""
+    two_part = TableRef(project=None, dataset="sales", name="orders")
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(1, 1, 0, 5, 5, "int")],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    adapter.column_stats(two_part, "amount")
+
+    assert conn.executed[0].endswith("FROM `sales`.`orders`")
+
+
+def test_column_stats_programming_error_maps_to_query_syntax_error() -> None:
+    """A connector error from the aggregate maps via ``map_databricks_exception``
+    (the ``_execute_to_dicts`` mapped branch) — here to :class:`QuerySyntaxError`."""
+    dbe = _dbe()
+    err = dbe.ServerOperationError("[PARSE_SYNTAX_ERROR] bad syntax")  # type: ignore[attr-defined]
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_QUERY, returns=err)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError):
+        adapter.column_stats(_TABLE, "amount")
+
+
+def test_column_stats_column_not_found_maps_with_context() -> None:
+    """An unresolved-column connector error maps to :class:`ColumnNotFoundError`
+    (the table context flows through ``_execute_to_dicts``)."""
+    dbe = _dbe()
+    err = dbe.ServerOperationError(  # type: ignore[attr-defined]
+        "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column or function `nope` cannot be resolved"
+    )
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_QUERY, returns=err)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(ColumnNotFoundError):
+        adapter.column_stats(_TABLE, "amount")
