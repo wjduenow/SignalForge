@@ -69,8 +69,11 @@ with WarehouseAdapter.from_profile(profile) as adapter:
 `profile.type == "bigquery"` is fully implemented; `profile.type ==
 "postgres"` (v0.2 stub, #53), `profile.type == "snowflake"` (v0.2
 skeleton, #119), and `profile.type == "databricks"` (v0.x skeleton, #221)
-dispatch to their adapters, whose warehouse-operation methods raise
-`NotImplementedError` until the full implementations land.
+dispatch to their adapters. Those adapters' not-yet-implemented warehouse
+operations either raise `NotImplementedError` (for Databricks:
+`sample_rows` / `column_stats` / `run_test_sql`) or inherit the ABC's typed
+`*NotSupportedError` degrade (`materialise_sample` / `estimate_query_bytes`
+/ `get_row_count` / `run_stats_query`), until each implementation lands.
 Any other `profile.type` raises `UnsupportedProfileTypeError` with a
 remediation pointing at the roadmap entry.
 
@@ -797,7 +800,7 @@ on a `↳ Remediation:` line by `__str__`.
 | ---------------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `WarehouseError`                         | Base class; never raised directly.                                                                       | `message`, `remediation`                             | _(no remediation set — base class)_                                                             |
 | `WarehouseAuthError`                     | Wraps `google.auth.exceptions.DefaultCredentialsError` / `RefreshError`.                                 | `message`                                            | Run `gcloud auth application-default login` to set up ADC.                                      |
-| `UnsupportedProfileTypeError`            | dbt profile's `type` is not `"bigquery"`, `"postgres"`, `"snowflake"`, or `"databricks"`.                 | `profile_type`                                       | `bigquery` is fully implemented; `postgres`/`snowflake`/`databricks` dispatch to v0.x stub/skeleton adapters (warehouse ops raise `NotImplementedError`). Other types are unsupported.  |
+| `UnsupportedProfileTypeError`            | dbt profile's `type` is not `"bigquery"`, `"postgres"`, `"snowflake"`, or `"databricks"`.                 | `profile_type`                                       | `bigquery` is fully implemented; `postgres` (v0.2 stub), `snowflake` (v0.2), and `databricks` (v0.x skeleton) are recognised but their warehouse ops are not yet fully implemented. Other types are unsupported. (Matches `UnsupportedProfileTypeError.default_remediation`.)  |
 | `UnsupportedAuthMethodError`             | dbt profile's `method` is not `"oauth"` (or unset).                                                      | `method`                                             | v0.1 supports `method: oauth` (or unset) only; run `gcloud auth application-default login`.     |
 | `ProfileNotFoundError`                   | None of the three search paths yielded a `profiles.yml` (or the project file is missing/malformed).      | `searched_paths`                                     | Create a `profiles.yml` at one of the searched paths, or set `DBT_PROFILES_DIR`.                |
 | `ProfileTargetNotFoundError`             | The profile resolved but the requested `target` is missing. Inherits `ProfileNotFoundError`.             | `profile_name`, `target`, `searched_paths`           | Add the target to `profiles.yml`, or pass an explicit `target=` that exists in the profile.     |

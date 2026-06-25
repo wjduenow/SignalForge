@@ -88,13 +88,19 @@ class WarehouseAuthError(WarehouseError):
 
 
 class UnsupportedProfileTypeError(WarehouseError):
-    """The dbt profile's ``type`` field is not ``"bigquery"``.
+    """The dbt profile's ``type`` is not a recognised warehouse.
 
-    v0.1 ships the BigQuery adapter only; Snowflake/Postgres land in v0.2.
+    ``bigquery`` is fully implemented; ``postgres`` (v0.2 stub), ``snowflake``
+    (v0.2), and ``databricks`` (v0.x skeleton) are recognised and dispatch to
+    their adapters, whose warehouse operations may still raise
+    ``NotImplementedError`` until each implementation lands. Any other type is
+    unsupported.
     """
 
     default_remediation: ClassVar[str] = (
-        "v0.1 supports `type: bigquery` only. Snowflake and Postgres adapters are tracked for v0.2."
+        "`type: bigquery` is fully supported. `postgres` (v0.2 stub), `snowflake` "
+        "(v0.2), and `databricks` (v0.x skeleton) are recognised but their warehouse "
+        "operations are not yet fully implemented. Other profile types are unsupported."
     )
 
     def __init__(self, profile_type: str, *, remediation: str | None = None) -> None:
