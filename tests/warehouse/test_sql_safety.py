@@ -5,11 +5,73 @@ from __future__ import annotations
 import pytest
 
 from signalforge.warehouse._sql_safety import (
+    validate_catalog_or_project,
     validate_databricks_hostname,
     validate_databricks_http_path,
     validate_snowflake_account,
 )
 from signalforge.warehouse.errors import InvalidIdentifierError
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "value",
+    [
+        "main",  # short Unity Catalog catalog (4 chars — below the project floor)
+        "workspace",  # default Unity Catalog catalog
+        "db",  # short Snowflake database (2 chars)
+        "my_fake_db",  # underscored identifier
+        "my-gcp-proj-123",  # hyphenated GCP project id
+        "fake_project",  # existing fixture-style id
+        "PROD",  # uppercase identifier
+    ],
+)
+def test_validate_catalog_or_project_accepts_identifiers_and_project_ids(value: str) -> None:
+    """DEC-005: accepts EITHER a strict SQL identifier (short Unity Catalog
+    catalogs / short Snowflake databases) OR a hyphen-permissive GCP project
+    id — composing the two existing validators without weakening either."""
+    # Does not raise.
+    validate_catalog_or_project("project", value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "a b",
+        "a'b",
+        'a"b',
+        "a;b",
+        "a`b",
+        "a\nb",
+        "a\tb",
+        "a\x00b",
+        "bad project!",
+        "-leading-hyphen",
+    ],
+)
+def test_validate_catalog_or_project_rejects_injection_shapes(value: str) -> None:
+    """Injection-shaped values fail BOTH composed validators and still raise:
+    the relaxed project value stays identifier-shape-gated (no SQL-breaking
+    chars admitted), so this opens no injection vector."""
+    with pytest.raises(InvalidIdentifierError):
+        validate_catalog_or_project("project", value)
+
+
+@pytest.mark.unit
+def test_validate_catalog_or_project_error_carries_field_and_repr_value() -> None:
+    """The raised error names the field and renders the offending value via
+    ``repr()`` so crafted input can't inject into logs."""
+    adversarial = "a'; DROP TABLE bar; --"
+    with pytest.raises(InvalidIdentifierError) as exc_info:
+        validate_catalog_or_project("project", adversarial)
+    err = exc_info.value
+    assert err.field == "project"
+    assert err.value == adversarial
+    rendered = str(err)
+    assert "project" in rendered
+    assert repr(adversarial) in rendered
 
 
 @pytest.mark.unit

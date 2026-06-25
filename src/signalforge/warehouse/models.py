@@ -401,16 +401,19 @@ class TableRef:
 
     def __post_init__(self) -> None:
         # Validate non-None fields (project is allowed to be None — DEC-027).
-        # ``project`` follows GCP's hyphen-permissive grammar; ``dataset``
-        # and ``name`` use the strict identifier regex (BigQuery rejects
-        # hyphens in unquoted dataset / table names anyway).
+        # ``project`` is dialect-neutral (a BigQuery project ID, a Snowflake
+        # database, or a Unity Catalog catalog), so it accepts EITHER a strict
+        # SQL identifier (admits short catalogs like ``main`` — DEC-005 of #224)
+        # OR GCP's hyphen-permissive project grammar; ``dataset`` and ``name``
+        # use the strict identifier regex (warehouses reject hyphens in
+        # unquoted dataset / table names anyway).
         from signalforge.warehouse._sql_safety import (
+            validate_catalog_or_project,
             validate_identifier,
-            validate_project_id,
         )
 
         if self.project is not None:
-            validate_project_id("project", self.project)
+            validate_catalog_or_project("project", self.project)
         validate_identifier("dataset", self.dataset)
         validate_identifier("name", self.name)
 
