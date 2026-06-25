@@ -148,3 +148,17 @@ Each Databricks snapshot test asserts the distinguishing markers: `xxhash64` pre
   - `bd_1-scaffolding-129.4` — US-004 sqlglot parse-guard + docs (blocked → .3)
   - `bd_1-scaffolding-129.5` — Quality Gate (blocked → .1 .2 .3 .4)
   - `bd_1-scaffolding-129.6` — Patterns & Memory (blocked → .5)
+
+---
+
+## Run complete (2026-06-25)
+
+All 6 beads landed on `feat/223-databricks-prune-compiler` (sequential in-place; US-002/003/004 share `tests/prune/test_compiler.py`):
+- US-001 `d89c935` — import-guard `databricks` prefix (planted count 9→14)
+- US-002 `b0d7cea` — 7 Databricks dialect unit tests
+- US-003 `1518a26` — 32 byte-exact fixtures + ungated snapshot tests
+- US-004 `5b8b9a9` — ungated sqlglot `databricks` parse-guard (34 tests) + docstring/ops
+- US-005 (Quality Gate) — 4 diverse review passes, **no real bugs**; two minor single-angle, self-mitigated test-signal observations (leakage assert is supplementary; snapshot equality is the real gate). CodeRabbit runs async on PR #256.
+- US-006 `bf69b38` — `prune-engine.md` + `warehouse-adapters.md` patterns; `databricks` marker note; memory.
+
+Final: `uv run pytest` → 4264 passed / 6 skipped; pyright 0 errors; ruff + format clean. No `DATABRICKS_DIALECT` field change needed (verified correct from #221). Live execution cert remains #226.
