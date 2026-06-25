@@ -6,7 +6,8 @@
 - **Epic:** [#219](https://github.com/wjduenow/SignalForge/issues/219) — Databricks warehouse adapter (v0.x). **#221 (skeleton) landed; #222 grows the profile model so the rest of the epic (#223 compiler, #224 sampling, #226 live e2e) has typed inputs.**
 - **Depends on:** #221 (skeleton — landed). **Models on:** #120 (Snowflake profile — landed; this is the per-warehouse twin).
 - **Branch:** `feature/222-databricks-profile` (off `dev`; PR targets `dev`)
-- **Phase:** detailing
+- **PR:** [#255](https://github.com/wjduenow/SignalForge/pull/255) (draft)
+- **Phase:** published
 - **Sessions:** 1 (2026-06-24)
 
 ---
