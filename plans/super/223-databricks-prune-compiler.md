@@ -5,7 +5,7 @@
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/223
 - **Epic:** #219 (Databricks adapter). Depends on #221 (skeleton). Models on #121 (Snowflake compiler dialect).
 - **Branch / worktree:** `feat/223-databricks-prune-compiler` @ `/home/wesd/Projects/worktrees/SignalForge/223-databricks-prune-compiler`
-- **Phase:** published
+- **Phase:** devolved
 - **Sessions:** 1 (2026-06-24)
 - **Scoping resolved:** Q1 → ungated parse-guard (DEC-002 stands); Q2 → mirror Snowflake 16+16 (DEC-003 stands).
 
@@ -134,3 +134,17 @@ Each Databricks snapshot test asserts the distinguishing markers: `xxhash64` pre
 
 1. **Parse-guard gating** (DEC-002): **ungated** default-suite parse-guard. ✅ Confirmed.
 2. **Fixture-set scope** (DEC-003): **mirror Snowflake's 16+16**. ✅ Confirmed.
+
+---
+
+## Beads Manifest (devolved 2026-06-25)
+
+- **Epic:** `bd_1-scaffolding-129`
+- **Worktree:** `/home/wesd/Projects/worktrees/SignalForge/223-databricks-prune-compiler` (`feat/223-databricks-prune-compiler`)
+- **Tasks:**
+  - `bd_1-scaffolding-129.1` — US-001 Import-guard (ready)
+  - `bd_1-scaffolding-129.2` — US-002 Dialect unit tests (ready)
+  - `bd_1-scaffolding-129.3` — US-003 Fixtures + snapshot tests (ready)
+  - `bd_1-scaffolding-129.4` — US-004 sqlglot parse-guard + docs (blocked → .3)
+  - `bd_1-scaffolding-129.5` — Quality Gate (blocked → .1 .2 .3 .4)
+  - `bd_1-scaffolding-129.6` — Patterns & Memory (blocked → .5)
