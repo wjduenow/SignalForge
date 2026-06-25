@@ -7,7 +7,7 @@
 - **Depends on:** #221 (skeleton — landed). **Models on:** #120 (Snowflake profile — landed; this is the per-warehouse twin).
 - **Branch:** `feature/222-databricks-profile` (off `dev`; PR targets `dev`)
 - **PR:** [#255](https://github.com/wjduenow/SignalForge/pull/255) (draft)
-- **Phase:** published
+- **Phase:** devolved
 - **Sessions:** 1 (2026-06-24)
 
 ---
@@ -128,4 +128,11 @@ Validation command (all stories): `uv sync --dev && uv run ruff check . && uv ru
 
 ## Beads Manifest
 
-_Pending devolve._
+- **Epic:** `bd_1-scaffolding-4zs` — #222: parse type:databricks dbt profile target
+- **Worktree:** `../worktrees/SignalForge/222-databricks-profile` (branch `feature/222-databricks-profile`, off `dev`)
+- **Tasks (serial chain):**
+  - `bd_1-scaffolding-4zs.1` — US-001 host/http_path validators *(ready)*
+  - `bd_1-scaffolding-4zs.2` — US-002 fields + validator arm *(← .1)*
+  - `bd_1-scaffolding-4zs.3` — US-003 from_profile + drift + e2e *(← .2)*
+  - `bd_1-scaffolding-4zs.4` — Quality Gate *(← .3)*
+  - `bd_1-scaffolding-4zs.5` — Patterns & Memory, P4 *(← .4)*
