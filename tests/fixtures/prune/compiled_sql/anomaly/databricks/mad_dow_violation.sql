@@ -1,0 +1,1 @@
+SELECT 1 FROM `fake_project`.`dataset`.`orders` WHERE `event_date` >= DATE '2026-05-01' AND `event_date` < DATE '2026-05-01' + INTERVAL 1 DAY

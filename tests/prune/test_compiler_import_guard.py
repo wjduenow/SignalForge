@@ -4,9 +4,10 @@ The prune layer is warehouse-agnostic *by construction*: it emits dialect-
 correct SQL purely from the :class:`signalforge.warehouse.models.Dialect`
 value object, never by importing a warehouse SDK or branching on a dialect
 *name* (DEC-025). This AST-based scan enforces that no ``import snowflake`` /
-``from snowflake`` / ``import google.cloud`` / ``from google.cloud``
-statement appears anywhere under ``src/signalforge/prune/`` — a regression
-that reached for a vendor SDK in the compiler would break the seam silently.
+``from snowflake`` / ``import google.cloud`` / ``from google.cloud`` /
+``import databricks`` / ``from databricks`` statement appears anywhere under
+``src/signalforge/prune/`` — a regression that reached for a vendor SDK in the
+compiler would break the seam silently.
 
 AST-based (not per-line regex) per ``testing-signal.md`` § "Source-scan
 gates: AST over per-line regex": a multi-line / parenthesised / aliased
@@ -26,7 +27,7 @@ _PRUNE_DIR = Path(__file__).resolve().parents[2] / "src" / "signalforge" / "prun
 # matches when it equals the prefix or begins with ``<prefix>.`` (so
 # ``google.cloud.bigquery`` matches ``google.cloud`` but ``google_leftover``
 # does not).
-_FORBIDDEN_PREFIXES = ("snowflake", "google.cloud")
+_FORBIDDEN_PREFIXES = ("snowflake", "google.cloud", "databricks")
 
 
 def _module_matches_forbidden(module: str | None) -> bool:
@@ -73,7 +74,7 @@ def _forbidden_imports(source: str) -> list[str]:
 
 
 def test_no_warehouse_sdk_import_under_prune() -> None:
-    """No ``snowflake`` / ``google.cloud`` import anywhere under prune/."""
+    """No ``snowflake`` / ``google.cloud`` / ``databricks`` import under prune/."""
     offenders: list[str] = []
     for py in sorted(_PRUNE_DIR.rglob("*.py")):
         source = py.read_text(encoding="utf-8")
@@ -103,10 +104,15 @@ def test_detector_flags_planted_violations() -> None:
         "import google.cloud.bigquery as bq\n"
         # namespace-split: module='google', imported name completes 'google.cloud'
         "from google import cloud\n"
+        "import databricks\n"
+        "import databricks.sql\n"
+        "import databricks.sql as dbx\n"
+        "from databricks import sql\n"
+        "from databricks.sql import connect\n"
     )
     hits = _forbidden_imports(planted)
-    # Every line above is a violation — 9 statements.
-    assert len(hits) == 9, hits
+    # Every line above is a violation — 14 statements.
+    assert len(hits) == 14, hits
 
 
 def test_detector_does_not_false_positive() -> None:
@@ -117,6 +123,7 @@ def test_detector_does_not_false_positive() -> None:
         "from pathlib import Path\n"
         "import googleapiclient\n"  # starts with 'google' but not 'google.cloud'
         "from snowflakeish import thing\n"  # starts with 'snowflake' but not 'snowflake.'
+        "import databricksutils\n"  # starts with 'databricks' but not 'databricks.'
         "from . import compiler\n"  # relative import, module is None
     )
     assert _forbidden_imports(innocent) == []

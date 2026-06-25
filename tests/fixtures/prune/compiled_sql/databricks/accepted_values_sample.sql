@@ -1,0 +1,1 @@
+WITH sample AS (SELECT * FROM `fake_project`.`dataset`.`orders` AS t WHERE MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 10) < 1 LIMIT 100000) SELECT `status` FROM sample WHERE `status` IS NOT NULL AND `status` NOT IN ('placed', 'shipped', 'cancelled')

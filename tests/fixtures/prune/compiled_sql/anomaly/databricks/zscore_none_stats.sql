@@ -1,0 +1,1 @@
+WITH history AS (SELECT DATE_TRUNC('DAY', `event_date`) AS period, COUNT(*) AS cnt FROM `fake_project`.`dataset`.`orders` WHERE `event_date` >= DATE '2026-05-01' - INTERVAL 28 DAY AND `event_date` < DATE '2026-05-01' GROUP BY period) SELECT AVG(cnt) AS mean, STDDEV(cnt) AS stddev, COUNT(*) AS n FROM history
