@@ -51,6 +51,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from signalforge.warehouse._sample_id import _hash_session_id
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.models import (
     DATABRICKS_DIALECT,
@@ -164,6 +165,29 @@ class DatabricksAdapter(WarehouseAdapter):
         # ``__exit__`` is a no-op.
         self._cleanup_active_session()
 
+    @staticmethod
+    def _read_session_id(conn: _DatabricksClientProtocol) -> str | None:
+        """Best-effort read of the connection's opaque session id.
+
+        Read defensively — a minimal fake exposes a plain ``session_id``
+        attribute (mirroring how the Snowflake adapter reads ``conn.session_id``),
+        while the real ``databricks.sql`` ``Connection`` exposes
+        ``get_session_id_hex()`` instead. Try the attribute first, fall back to
+        the getter (wrapped so a broken connection can't raise out of the
+        cleanup boundary). Returns ``None`` when neither surfaces a value.
+        """
+        raw = getattr(conn, "session_id", None)
+        if raw is not None:
+            return str(raw)
+        getter = getattr(conn, "get_session_id_hex", None)
+        if callable(getter):
+            try:
+                value = getter()
+            except Exception:  # noqa: BLE001 - cleanup boundary must never raise
+                return None
+            return None if value is None else str(value)
+        return None
+
     def _cleanup_active_session(self) -> None:
         """Best-effort, fail-soft session cleanup (cleanup-boundary fail-soft).
 
@@ -175,24 +199,47 @@ class DatabricksAdapter(WarehouseAdapter):
         conn = self._active_session
         if conn is None:
             return
+        # The hashed form is used on the happy path (redaction); the raw form is
+        # the deliberate narrow exception in the cleanup-failure WARNING only
+        # (mirrors Snowflake #122 DEC-014).
+        raw_session_id = self._read_session_id(conn)
         try:
             try:
                 conn.close()
             except Exception as exc:  # noqa: BLE001 - cleanup-boundary swallows all
-                # Cleanup-boundary fail-soft: swallow the failure and emit ONE
-                # operator-actionable WARNING. A Databricks SQL-warehouse session
-                # is reaped server-side when the connection drops, so there is no
-                # manual cleanup command. ``--quiet`` does NOT suppress this
-                # WARNING (it floors at WARNING). Lazy-format JSON for ANSI
-                # safety (warehouse-layer convention).
+                # Cleanup-boundary fail-soft (mirrors Snowflake #122 DEC-014):
+                # swallow the failure and emit ONE operator-actionable WARNING.
+                # Like Snowflake there is NO manual cleanup command — a Databricks
+                # session-local temp object is unreachable outside its owning
+                # session, so the honest durable fallback is Databricks' server-side
+                # reap of the session when the SQL warehouse drops the connection.
+                # The raw ``session_id`` is the deliberate narrow exception to the
+                # redaction rule so the operator can correlate the orphaned session
+                # in Databricks' query history; the WARNING quotes NO client-side
+                # ``auto-expire in <N>s`` countdown (the reap is server-side and not
+                # locally computable). ``--quiet`` does NOT suppress this WARNING (it
+                # floors at WARNING). Lazy-format ``%s`` for ANSI safety
+                # (warehouse-layer convention).
                 _LOGGER.warning(
                     "Databricks session cleanup failed; the connection's "
-                    "server-side session will be reaped when the SQL warehouse "
-                    "drops the connection. Reason: %s",
+                    "session-local temp objects will be dropped when Databricks "
+                    "reaps the session server-side (when the SQL warehouse drops "
+                    "the connection). No manual cleanup command is possible — a "
+                    "session-local temp object is unreachable outside its owning "
+                    "session.\n"
+                    "  Session ID: %s\n"
+                    "  Reason: %s",
+                    raw_session_id,
                     type(exc).__name__,
                 )
             else:
-                _LOGGER.info("session closed: %s", json.dumps({}))
+                # Happy path — redacted INFO log. The raw ``session_id`` never
+                # leaves the adapter; only the hash correlates records. Lazy-format
+                # JSON for ANSI safety (warehouse-layer convention).
+                payload: dict[str, str] = {}
+                if raw_session_id is not None:
+                    payload["session_id_hash"] = _hash_session_id(raw_session_id)
+                _LOGGER.info("session closed: %s", json.dumps(payload))
         finally:
             # Reset only the session-tracking state — NOT ``self._connection``.
             # Idempotency comes from the ``_active_session is None`` early-return;
