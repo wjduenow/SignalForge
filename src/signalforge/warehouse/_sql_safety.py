@@ -95,6 +95,39 @@ def validate_project_id(field: str, value: str) -> None:
         raise InvalidIdentifierError(field=field, value=value)
 
 
+def validate_catalog_or_project(field: str, value: str) -> None:
+    """Raise InvalidIdentifierError unless value is a valid identifier OR GCP project ID.
+
+    DEC-005 of #224. ``TableRef.project`` is dialect-neutral: it may hold a
+    BigQuery project ID, a Snowflake database name, or a Unity Catalog catalog
+    name. The strict :func:`validate_project_id` grammar (6-30 chars) wrongly
+    rejects short Unity Catalog catalogs (``main`` — 4 chars) and short
+    Snowflake databases. This helper *composes* the two existing validators
+    without weakening either: a value passes if it satisfies EITHER
+    :func:`validate_identifier` (the strict SQL-identifier rule — admits short
+    identifiers like ``main`` / ``workspace``) OR :func:`validate_project_id`
+    (the hyphen-permissive GCP grammar — admits ``my-gcp-proj-123``).
+
+    Injection-shaped values (whitespace, quoting, ``;``, backticks, newlines,
+    control characters) fail BOTH validators and so still raise: the relaxed
+    value stays identifier-shape-gated and is always quoted downstream, so this
+    opens no injection vector.
+    """
+    from signalforge.warehouse.errors import InvalidIdentifierError
+
+    try:
+        validate_identifier(field, value)
+        return
+    except InvalidIdentifierError:
+        pass
+    try:
+        validate_project_id(field, value)
+        return
+    except InvalidIdentifierError:
+        pass
+    raise InvalidIdentifierError(field=field, value=value)
+
+
 def validate_snowflake_account(field: str, value: str) -> None:
     """Raise InvalidIdentifierError if value is not a plausible Snowflake account.
 
