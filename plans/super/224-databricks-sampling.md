@@ -5,7 +5,7 @@
 - **Ticket:** [#224](https://github.com/wjduenow/SignalForge/issues/224) — *Databricks: deterministic sampling + materialise_sample + get_row_count sizing*
 - **Epic:** [#219](https://github.com/wjduenow/SignalForge/issues/219) (Databricks adapter). Depends on #221 (skeleton), #222 (profile), #223 (prune compiler). Models on Snowflake #122 / #139 / #140.
 - **Branch / worktree:** `feature/224-databricks-sampling`
-- **Phase:** devolved
+- **Phase:** complete — implemented + reviewed on PR [#257](https://github.com/wjduenow/SignalForge/pull/257) (epic `bd_1-scaffolding-v4o`)
 - **Sessions:** 1 (2026-06-25)
 
 ---
@@ -158,4 +158,4 @@ No open **blockers**. The two residual risks (qualified-temp-table validity, cap
   - `bd_1-scaffolding-v4o.7` — US-007 Patterns & Memory *(deps .6)*
 - **Worktree:** `feature/224-databricks-sampling`
 - **Snowflake column_stats parity follow-up:** [#258](https://github.com/wjduenow/SignalForge/issues/258)
-- **Phase:** devolved
+- **Phase:** complete — all 7 stories merged on PR #257; live cert deferred to #226

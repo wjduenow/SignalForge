@@ -536,6 +536,63 @@ def test_get_row_count_query_is_quoted_count_star() -> None:
     assert conn.executed[0] == "SELECT COUNT(*) AS row_count FROM `main`.`sales`.`orders`"
 
 
+# ---- Cursor-handle release (PR #257 review — no server-side cursor leak) ----
+
+
+def test_execute_closes_cursor_on_success() -> None:
+    """``_execute`` releases the cursor after a successful query so repeated
+    queries on the long-lived connection don't leak server-side handles."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(10,)])
+    adapter = _make_adapter(conn)
+
+    adapter.get_row_count(_TABLE)
+
+    assert conn.cursors, "expected the adapter to open at least one cursor"
+    assert all(c.closed for c in conn.cursors)
+
+
+def test_execute_closes_cursor_on_failure() -> None:
+    """The cursor is released even when the query raises (the ``finally`` arm)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=RuntimeError("boom"))
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(RuntimeError):
+        adapter.get_row_count(_TABLE)
+
+    assert conn.cursors and all(c.closed for c in conn.cursors)
+
+
+def test_execute_to_dicts_closes_cursor_after_shaping_rows() -> None:
+    """``sample_rows`` (via ``_execute_to_dicts``) closes the cursor only after
+    ``cursor.description`` has been read to shape the rows."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+    conn.expect_execute(
+        matching=_SAMPLE_QUERY, returns=[(1, 10)], description=[("id",), ("amount",)]
+    )
+    adapter = _make_adapter(conn)
+
+    rows = adapter.sample_rows(_TABLE, 100)
+
+    assert rows == [{"id": 1, "amount": 10}]
+    assert conn.cursors and all(c.closed for c in conn.cursors)
+
+
+def test_materialise_closes_cursor() -> None:
+    """``materialise_sample`` releases the CTAS cursor; the temp table lives on
+    the pinned connection, not the cursor."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    adapter = _make_adapter(conn)
+
+    adapter.materialise_sample(_TABLE, 100)
+
+    assert conn.cursors and all(c.closed for c in conn.cursors)
+
+
 def test_get_row_count_shapes_dict_row() -> None:
     """A dict-cursor-style mapping row is handled — the first value is the count."""
     conn = FakeDatabricksConnection()

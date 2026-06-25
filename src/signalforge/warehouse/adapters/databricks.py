@@ -391,6 +391,11 @@ class DatabricksAdapter(WarehouseAdapter):
             if mapped is exc:
                 raise
             raise mapped from exc
+        finally:
+            # Release the server-side cursor handle on both the success and
+            # failure paths so repeated queries on the long-lived connection
+            # don't leak cursors.
+            cursor.close()
 
     def _execute_to_dicts(self, sql: str, *, table: TableRef | None = None) -> list[dict[str, Any]]:
         """Run ``sql`` and shape tuple ``fetchall()`` rows into dicts (DEC-002).
@@ -405,14 +410,19 @@ class DatabricksAdapter(WarehouseAdapter):
         context = {"table": table.qualified_name} if table is not None else None
         cursor = self._get_connection().cursor()
         try:
-            cursor.execute(sql)
-            rows = list(cursor.fetchall())
-        except Exception as exc:
-            mapped = map_databricks_exception(exc, context=context)
-            if mapped is exc:
-                raise
-            raise mapped from exc
-        return self._rows_to_dicts(cursor, rows)
+            try:
+                cursor.execute(sql)
+                rows = list(cursor.fetchall())
+            except Exception as exc:
+                mapped = map_databricks_exception(exc, context=context)
+                if mapped is exc:
+                    raise
+                raise mapped from exc
+            # _rows_to_dicts reads cursor.description, so shape the rows BEFORE
+            # the finally closes the cursor.
+            return self._rows_to_dicts(cursor, rows)
+        finally:
+            cursor.close()
 
     @staticmethod
     def _rows_to_dicts(cursor: _DatabricksCursorProtocol, rows: list[Any]) -> list[dict[str, Any]]:
@@ -720,6 +730,10 @@ class DatabricksAdapter(WarehouseAdapter):
                 message=f"sample materialisation failed for {table.qualified_name}: {cause}",
                 cause=cause,
             ) from exc
+        finally:
+            # Release the cursor handle (the temp table lives on the pinned
+            # connection/session, not the cursor, so it stays reachable).
+            cursor.close()
 
         # INFO log uses the HASHED session id, never the raw value. Lazy-format
         # JSON for ANSI safety (warehouse-layer convention).

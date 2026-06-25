@@ -71,6 +71,11 @@ class _FakeDatabricksCursor:
     def description(self) -> list[Any] | None:
         return self._description
 
+    @property
+    def closed(self) -> bool:
+        """Whether :meth:`close` has been called (cursor-leak regression check)."""
+        return self._closed
+
     def execute(self, operation: str, *args: Any, **kwargs: Any) -> _FakeDatabricksCursor:
         rows, description = self._connection._consume_execute(operation)
         self._fetch_rows = rows
@@ -106,6 +111,8 @@ class FakeDatabricksConnection:
         self._close_raises = close_raises
         self.close_call_count = 0
         self._execute_expectations: list[_ExecuteExpectation] = []
+        # Every cursor this connection vends, for cursor-leak regression checks.
+        self.cursors: list[_FakeDatabricksCursor] = []
 
     # ---- expectation API --------------------------------------------------
 
@@ -140,7 +147,9 @@ class FakeDatabricksConnection:
     # ---- databricks.sql connection surface --------------------------------
 
     def cursor(self) -> _FakeDatabricksCursor:
-        return _FakeDatabricksCursor(self)
+        cur = _FakeDatabricksCursor(self)
+        self.cursors.append(cur)
+        return cur
 
     def close(self) -> None:
         self.close_call_count += 1
