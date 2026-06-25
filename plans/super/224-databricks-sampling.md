@@ -5,7 +5,7 @@
 - **Ticket:** [#224](https://github.com/wjduenow/SignalForge/issues/224) — *Databricks: deterministic sampling + materialise_sample + get_row_count sizing*
 - **Epic:** [#219](https://github.com/wjduenow/SignalForge/issues/219) (Databricks adapter). Depends on #221 (skeleton), #222 (profile), #223 (prune compiler). Models on Snowflake #122 / #139 / #140.
 - **Branch / worktree:** `feature/224-databricks-sampling`
-- **Phase:** detailing (awaiting approval)
+- **Phase:** devolved
 - **Sessions:** 1 (2026-06-25)
 
 ---
@@ -147,4 +147,15 @@ No open **blockers**. The two residual risks (qualified-temp-table validity, cap
 
 ## Beads Manifest
 
-*(filled on devolve)*
+- **Epic:** `bd_1-scaffolding-v4o`
+- **Tasks:**
+  - `bd_1-scaffolding-v4o.1` — US-001 Relax TableRef.project *(ready)*
+  - `bd_1-scaffolding-v4o.2` — US-002 Connection seam + fake + cleanup + errors *(ready)*
+  - `bd_1-scaffolding-v4o.3` — US-003 get_row_count + sizing + sample_rows *(deps .1, .2)*
+  - `bd_1-scaffolding-v4o.4` — US-004 materialise_sample + run_test_sql *(deps .3)*
+  - `bd_1-scaffolding-v4o.5` — US-005 column_stats + Snowflake-parity follow-up *(deps .2)*
+  - `bd_1-scaffolding-v4o.6` — US-006 Quality Gate *(deps .1–.5)*
+  - `bd_1-scaffolding-v4o.7` — US-007 Patterns & Memory *(deps .6)*
+- **Worktree:** `feature/224-databricks-sampling`
+- **Snowflake column_stats parity follow-up:** [#258](https://github.com/wjduenow/SignalForge/issues/258)
+- **Phase:** devolved
