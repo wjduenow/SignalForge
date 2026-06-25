@@ -305,6 +305,80 @@ rather than reaching into adapter modules.
 """
 
 
+DATABRICKS_DIALECT = Dialect(
+    name="databricks",
+    supports_tablesample=True,
+    supports_qualify=True,
+    quote_char="`",
+    identifier_case="lower",
+    # Sign-bit MASK, not ABS: xxhash64 returns a SIGNED 64-bit long, and Spark's
+    # ABS(Long.MIN_VALUE) stays negative in non-ANSI mode (no positive equivalent
+    # fits a signed long), so MOD(ABS(...), bucket) would admit a stray negative
+    # residue class and skew the deterministic sample. `& 9223372036854775807`
+    # (Long.MAX_VALUE) clears the sign bit — always non-negative, no overflow,
+    # uniform — and the renderer's MOD(<expr>, bucket) wrapper stays correct.
+    sample_row_hash_expr="(xxhash64(to_json(struct(*))) & 9223372036854775807)",
+    timestamp_literal_template="TIMESTAMP '{value}'",
+    date_literal_template="DATE '{value}'",
+    # Spark/Databricks has no distinct DATETIME type — TIMESTAMP is the
+    # wall-clock type — so the DATETIME literal reuses the TIMESTAMP form.
+    datetime_literal_template="TIMESTAMP '{value}'",
+    quote_qualified_per_component=True,
+    sample_hash_in_projection=False,
+    # Issue #171 DEC-011 — Databricks overrides for the row-count-anomaly variant.
+    date_trunc_expr_template="DATE_TRUNC('{unit}', {date})",
+    interval_expr_template="INTERVAL {n} {unit}",
+    extract_dow_expr_template="DAYOFWEEK({date})",
+    dow_sunday_index=1,
+    percentile_cont_expr_template="PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})",
+)
+"""Databricks/Spark-SQL :class:`Dialect` for the v0.x adapter (issue #221, epic #219).
+
+Decided at the skeleton stage; the values the prune compiler keys on are
+**certified offline by the #223 ``sqlglot`` ``databricks``-dialect parse-guard
+and live by #226** — at the skeleton stage the prune compiler is never invoked
+for a Databricks profile (every op raises ``NotImplementedError`` / inherits the
+ABC degrade), so these are provisional-but-grounded, not yet executed.
+
+* ``quote_char='`'`` — Databricks quotes identifiers with backticks (Spark SQL),
+  unlike Snowflake/Postgres double-quote.
+* ``identifier_case='lower'`` — Unity Catalog folds unquoted metadata
+  identifiers to **lowercase** (the *opposite* of Snowflake's ``'upper'``, like
+  Postgres). ⚠️ Load-bearing for #223 identifier matching; verify against a real
+  ``CREATE TABLE`` round-trip before the compiler locks on it.
+* ``supports_qualify=True`` — Databricks SQL supports ``QUALIFY`` (Spark 3.5+),
+  but ``unique`` stays on the portable ``GROUP BY … HAVING`` form per #121 (a
+  ``QUALIFY`` rewrite is a separate semantics decision, not a dialect flag).
+* ``sample_row_hash_expr='(xxhash64(to_json(struct(*))) & 9223372036854775807)'``
+  — the **64-bit** whole-row hash, sign-bit masked. Spark's bare ``hash(*)`` is
+  Murmur3-**32** (collision-prone at scale), so the 64-bit ``xxhash64`` over the
+  JSON-serialised row is chosen for sampling stability. The mask (``& Long.MAX``)
+  replaces ``ABS``: ``xxhash64`` is signed and Spark's ``ABS(Long.MIN_VALUE)``
+  stays negative in non-ANSI mode, which would skew ``MOD(<expr>, bucket) < 1``;
+  clearing the sign bit is non-negative + overflow-free + uniform. Same "``HASH``
+  is engine/release-stable, not cross-time" caveat Snowflake documented applies.
+* ``timestamp_literal_template="TIMESTAMP '{value}'"`` /
+  ``date_literal_template="DATE '{value}'"`` — Spark typed-literal form. Spark
+  has no separate ``DATETIME`` type, so ``datetime_literal_template`` reuses the
+  ``TIMESTAMP`` form.
+* ``quote_qualified_per_component=True`` — Unity Catalog three-part names are
+  quoted per component (`` `catalog`.`schema`.`table` ``), not as one
+  dotted literal.
+* ``sample_hash_in_projection=False`` — default inline ``WHERE``/``ORDER BY``
+  placement. #224 flips this to ``True`` (the Snowflake #139 projection-subquery
+  shape) only if Spark rejects the hash expression as a predicate.
+* date-arithmetic / percentile fields (issue #171): Spark's ``date_trunc`` takes
+  ``(unit, date)`` with a quoted unit (like Snowflake); ``DAYOFWEEK(date)``
+  returns ``1`` for Sunday (like BigQuery, hence ``dow_sunday_index=1``);
+  Databricks supports the standard-SQL ``PERCENTILE_CONT(p) WITHIN GROUP``
+  ordered-set aggregate.
+
+Lives alongside :data:`BIGQUERY_DIALECT` / :data:`POSTGRES_DIALECT` /
+:data:`SNOWFLAKE_DIALECT` per DEC-003 so every dialect-aware consumer imports
+each flavour from one place rather than reaching into adapter modules.
+"""
+
+
 # ---------------------------------------------------------------------------
 # TableRef
 # ---------------------------------------------------------------------------
