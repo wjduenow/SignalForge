@@ -335,10 +335,12 @@ DATABRICKS_DIALECT = Dialect(
 """Databricks/Spark-SQL :class:`Dialect` for the v0.x adapter (issue #221, epic #219).
 
 Decided at the skeleton stage; the values the prune compiler keys on are
-**certified offline by the #223 ``sqlglot`` ``databricks``-dialect parse-guard
-and live by #226** — at the skeleton stage the prune compiler is never invoked
-for a Databricks profile (every op raises ``NotImplementedError`` / inherits the
-ABC degrade), so these are provisional-but-grounded, not yet executed.
+**certified offline by the #223 ``sqlglot`` ``databricks``-dialect parse-guard**
+(``tests/prune/test_compiler_databricks.py`` — ungated, runs in the default
+suite) and will be certified **live by #226**. At the skeleton stage the prune
+compiler is never invoked for a Databricks profile (every op raises
+``NotImplementedError`` / inherits the ABC degrade), so these are
+grounded-and-parse-validated but not yet executed against real Spark.
 
 * ``quote_char='`'`` — Databricks quotes identifiers with backticks (Spark SQL),
   unlike Snowflake/Postgres double-quote.
