@@ -1,0 +1,1 @@
+WITH sample AS (SELECT * FROM `fake_project`.`dataset`.`orders` AS t WHERE MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 10) < 1 LIMIT 100000) SELECT `customer_id` FROM sample WHERE `customer_id` IS NULL

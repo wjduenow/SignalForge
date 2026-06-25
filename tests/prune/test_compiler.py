@@ -56,8 +56,10 @@ from signalforge.warehouse.models import (
 
 _FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "prune" / "compiled_sql"
 _SNOWFLAKE_FIXTURES_DIR = _FIXTURES_DIR / "snowflake"
+_DATABRICKS_FIXTURES_DIR = _FIXTURES_DIR / "databricks"
 _ANOMALY_BQ_FIXTURES_DIR = _FIXTURES_DIR / "anomaly" / "bigquery"
 _ANOMALY_SF_FIXTURES_DIR = _FIXTURES_DIR / "anomaly" / "snowflake"
+_ANOMALY_DB_FIXTURES_DIR = _FIXTURES_DIR / "anomaly" / "databricks"
 
 
 def _read_fixture(name: str) -> str:
@@ -70,6 +72,11 @@ def _read_snowflake_fixture(name: str) -> str:
     return (_SNOWFLAKE_FIXTURES_DIR / name).read_text(encoding="utf-8")
 
 
+def _read_databricks_fixture(name: str) -> str:
+    """Read a Databricks snapshot fixture file as raw text (no normalisation)."""
+    return (_DATABRICKS_FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+
 def _read_anomaly_bq_fixture(name: str) -> str:
     """Read a row-count-anomaly BigQuery snapshot fixture."""
     return (_ANOMALY_BQ_FIXTURES_DIR / name).read_text(encoding="utf-8")
@@ -78,6 +85,11 @@ def _read_anomaly_bq_fixture(name: str) -> str:
 def _read_anomaly_sf_fixture(name: str) -> str:
     """Read a row-count-anomaly Snowflake snapshot fixture."""
     return (_ANOMALY_SF_FIXTURES_DIR / name).read_text(encoding="utf-8")
+
+
+def _read_anomaly_db_fixture(name: str) -> str:
+    """Read a row-count-anomaly Databricks snapshot fixture."""
+    return (_ANOMALY_DB_FIXTURES_DIR / name).read_text(encoding="utf-8")
 
 
 def _make_orders_table_ref() -> TableRef:
@@ -2758,3 +2770,318 @@ def test_compile_row_count_anomaly_period_hour_returns_invalid_identifier() -> N
         f"expected _InvalidIdentifier for period='hour'; got {type(result).__name__}"
     )
     assert "period='hour'" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Databricks snapshot tests (#223 US-003) — byte-exact compiled SQL against
+# ``tests/fixtures/prune/compiled_sql/databricks/``. Fixtures are captured from
+# real compiler output with DATABRICKS_DIALECT, mirroring the Snowflake snapshot
+# inputs 1:1. They pin the backtick-quoted, per-component-qualified,
+# lower-folded, inline ``xxhash64``-sample shape. UNGATED — they run in the
+# default suite exactly like the Snowflake snapshots.
+#
+# Belt-and-braces leakage guard (DEC-005): every Databricks snapshot asserts the
+# BigQuery row-hash marker (``FARM_FINGERPRINT``), the Snowflake sample marker
+# (``HASH(*)``), and the Snowflake cast marker (``::``) are all absent. Backtick
+# presence is NOT a discriminator — BigQuery and Databricks both backtick.
+# ---------------------------------------------------------------------------
+
+
+def _assert_no_dialect_leakage(sql: str) -> None:
+    """No BigQuery / Snowflake markers leaked into the Databricks output."""
+    assert "FARM_FINGERPRINT" not in sql  # BigQuery row-hash marker
+    assert "HASH(*)" not in sql  # Snowflake sample marker
+    assert "::" not in sql  # Snowflake cast marker
+
+
+def test_compile_not_null_databricks_matches_snapshot() -> None:
+    expected = _read_databricks_fixture("not_null.sql")
+    test = CandidateTestNotNull(column="customer_id")
+    actual = _compile_test(test, _make_orders_table_ref(), DATABRICKS_DIALECT, _make_manifest())
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_unique_databricks_matches_snapshot() -> None:
+    expected = _read_databricks_fixture("unique.sql")
+    test = CandidateTestUnique(column="customer_id")
+    actual = _compile_test(test, _make_orders_table_ref(), DATABRICKS_DIALECT, _make_manifest())
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_accepted_values_databricks_matches_snapshot() -> None:
+    expected = _read_databricks_fixture("accepted_values.sql")
+    test = CandidateTestAcceptedValues(column="status", values=("placed", "shipped", "cancelled"))
+    actual = _compile_test(test, _make_orders_table_ref(), DATABRICKS_DIALECT, _make_manifest())
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_relationships_databricks_matches_snapshot() -> None:
+    expected = _read_databricks_fixture("relationships.sql")
+    test = CandidateTestRelationships(column="customer_id", to="customers", field="id")
+    actual = _compile_test(test, _make_orders_table_ref(), DATABRICKS_DIALECT, _make_manifest())
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_not_null_sample_databricks_matches_snapshot() -> None:
+    expected = _read_databricks_fixture("not_null_sample.sql")
+    test = CandidateTestNotNull(column="customer_id")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_unique_sample_databricks_matches_snapshot() -> None:
+    expected = _read_databricks_fixture("unique_sample.sql")
+    test = CandidateTestUnique(column="customer_id")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_accepted_values_sample_databricks_matches_snapshot() -> None:
+    expected = _read_databricks_fixture("accepted_values_sample.sql")
+    test = CandidateTestAcceptedValues(column="status", values=("placed", "shipped", "cancelled"))
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_relationships_sample_databricks_matches_snapshot() -> None:
+    """Sample-mode relationships samples the CHILD table only; the parent
+    stays at the full per-component-quoted qualified name (backtick form)."""
+    expected = _read_databricks_fixture("relationships_sample.sql")
+    test = CandidateTestRelationships(column="customer_id", to="customers", field="id")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+    # Belt-and-braces: the parent table is NOT sampled — the full
+    # per-component backtick-quoted parent identifier survives the wrap.
+    assert "LEFT JOIN `fake_project`.`dataset`.`customers` AS parent" in actual
+
+
+def test_compile_custom_sql_single_table_full_databricks_matches_snapshot() -> None:
+    """Single-table custom_sql, scope=full: the resolved SQL is returned
+    unchanged (the adapter wraps it with the ``COUNT(*)`` envelope). ``{{ this }}``
+    resolves to the unquoted qualified name via the bounded Jinja resolver."""
+    expected = _read_databricks_fixture("custom_sql.sql")
+    test = CandidateTestCustomSQL(sql="select order_id from {{ this }} where total < 0")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_custom_sql_single_table_sample_databricks_matches_snapshot() -> None:
+    """Single-table custom_sql, scope=sample: the model's own qualified table
+    name is substituted with the ``sample`` CTE alias and the deterministic-
+    sample CTE (Databricks-backtick-quoted, inline ``xxhash64``) is prepended.
+    The #116 materialised-sample substitution invariant under the Databricks
+    quote char: the body references the ``sample`` CTE alias, NEVER the source
+    table."""
+    expected = _read_databricks_fixture("custom_sql_sample.sql")
+    test = CandidateTestCustomSQL(sql="select order_id from {{ this }} where total < 0")
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+    # The test body after the CTE must read from the ``sample`` CTE alias,
+    # never re-name the source table.
+    assert "select order_id from sample where total < 0" in actual
+    body = actual.split(") select", 1)[1]
+    assert "orders" not in body
+    assert "fake_project.dataset.orders" not in body
+
+
+def test_compile_custom_sql_multi_table_full_scan_databricks_matches_snapshot() -> None:
+    """A custom_sql test with a JOIN runs full-scan (unsampled) even when
+    scope=sample is requested (DEC-006). Both ``{{ this }}`` and ``{{ ref() }}``
+    resolve to qualified names; no sample CTE is emitted."""
+    expected = _read_databricks_fixture("custom_sql_fullscan.sql")
+    test = CandidateTestCustomSQL(
+        sql=(
+            "select o.order_id from {{ this }} as o "
+            "join {{ ref('customers') }} as c on o.customer_id = c.id "
+            "where c.id is null"
+        )
+    )
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+    assert "WITH sample" not in actual
+
+
+def test_compile_row_count_between_databricks_no_where_matches_snapshot() -> None:
+    """Databricks dialect: per-component backtick-quoted, lower-folded
+    qualified name — pinned by the byte-exact snapshot fixture."""
+    expected = _read_databricks_fixture("row_count_between.sql")
+    test = CandidateTestRowCountBetween(minimum=1, maximum=1_000_000)
+    actual = _compile_test(test, _make_orders_table_ref(), DATABRICKS_DIALECT, _make_manifest())
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_row_count_between_databricks_with_where_matches_snapshot() -> None:
+    """Databricks dialect + `where`: per-component quoting on the table,
+    `where` interpolated verbatim (no fold on operator-supplied SQL)."""
+    expected = _read_databricks_fixture("row_count_between_where.sql")
+    test = CandidateTestRowCountBetween(
+        minimum=1, maximum=1_000_000, where="event_date >= '2024-01-01'"
+    )
+    actual = _compile_test(test, _make_orders_table_ref(), DATABRICKS_DIALECT, _make_manifest())
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_unique_combination_databricks_pair_matches_snapshot() -> None:
+    """Databricks dialect: per-component backtick-quoted, lower-folded
+    qualified name + lower-folded column identifiers — pinned by the
+    byte-exact snapshot fixture."""
+    expected = _read_databricks_fixture("unique_combination_pair.sql")
+    test = CandidateTestUniqueCombination(columns=("customer_id", "order_date"))
+    actual = _compile_test(test, _make_orders_table_ref(), DATABRICKS_DIALECT, _make_manifest())
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_unique_combination_databricks_with_where_matches_snapshot() -> None:
+    """Databricks dialect + ``where``: per-component quoting + lower fold on
+    the columns; ``where`` interpolated verbatim (no fold on
+    operator-supplied SQL — that would corrupt literals)."""
+    expected = _read_databricks_fixture("unique_combination_with_where.sql")
+    test = CandidateTestUniqueCombination(
+        columns=("customer_id", "order_date"),
+        where="status = 'placed'",
+    )
+    actual = _compile_test(test, _make_orders_table_ref(), DATABRICKS_DIALECT, _make_manifest())
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+def test_compile_unique_combination_databricks_three_columns_matches_snapshot() -> None:
+    """Databricks dialect, three-column tuple: pinned by byte-exact snapshot.
+    Confirms the comma-join + per-column fold/quote scales beyond two."""
+    expected = _read_databricks_fixture("unique_combination_three_columns.sql")
+    test = CandidateTestUniqueCombination(columns=("customer_id", "order_date", "region"))
+    actual = _compile_test(test, _make_orders_table_ref(), DATABRICKS_DIALECT, _make_manifest())
+    assert actual == expected
+    assert isinstance(actual, str)
+    _assert_no_dialect_leakage(actual)
+
+
+@pytest.mark.parametrize("method", ["mad", "zscore", "percentile", "min_max"])
+@pytest.mark.parametrize("seasonality", ["none", "dow"])
+def test_compile_row_count_anomaly_databricks_stats_matches_snapshot(
+    method: str, seasonality: str
+) -> None:
+    """8 Databricks stats-query snapshots — lower-folded per-component
+    backtick-quoted identifiers, ``DATE_TRUNC('DAY', …)`` argument-order,
+    ``DATE '…'`` cast literals, ``INTERVAL 28 DAY`` payload form, and the
+    ``DAYOFWEEK(…)`` DOW extraction — every one read from :class:`Dialect`
+    (DEC-011), not hard-coded."""
+    test = _make_anomaly_test(method=method, seasonality=seasonality)
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, tuple)
+    stats_sql, _ = result
+    expected = _read_anomaly_db_fixture(f"{method}_{seasonality}_stats.sql")
+    assert stats_sql == expected
+    _assert_no_dialect_leakage(stats_sql)
+
+
+@pytest.mark.parametrize("method", ["mad", "zscore", "percentile", "min_max"])
+@pytest.mark.parametrize("seasonality", ["none", "dow"])
+def test_compile_row_count_anomaly_databricks_violation_matches_snapshot(
+    method: str, seasonality: str
+) -> None:
+    """8 Databricks violation-query snapshots."""
+    test = _make_anomaly_test(method=method, seasonality=seasonality)
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        as_of=_ANOMALY_AS_OF,
+    )
+    assert isinstance(result, tuple)
+    _, violation_sql = result
+    expected = _read_anomaly_db_fixture(f"{method}_{seasonality}_violation.sql")
+    assert violation_sql == expected
+    _assert_no_dialect_leakage(violation_sql)
