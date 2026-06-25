@@ -5,7 +5,7 @@
 - **Ticket:** [#225](https://github.com/wjduenow/SignalForge/issues/225) — `Databricks: estimate_query_bytes (degrade-first, then EXPLAIN COST)`
 - **Epic:** #219 (Databricks adapter). Depends on #221 (skeleton). Models on Snowflake estimate #123 (degrade) + #130 (EXPLAIN).
 - **Milestone:** v0.x (Databricks adapter epic #219)
-- **Phase:** discovery
+- **Phase:** published
 - **Branch:** `feature/225-databricks-estimate` (based on `dev`)
 - **Sessions:** 1 (2026-06-25)
 
