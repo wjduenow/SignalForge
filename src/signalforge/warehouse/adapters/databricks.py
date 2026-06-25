@@ -36,14 +36,20 @@ Scope (deliberately minimal):
   with a ``SELECT COUNT(*)`` (``DESCRIBE DETAIL`` has no reliable ``numRows``;
   COUNT is metadata-cheap on Delta), returning ``None`` on a
   :class:`WarehouseError` so the shared sizing pathway decides.
-* :meth:`column_stats` / :meth:`run_test_sql` raise
-  :class:`NotImplementedError` naming the epic (#219) — implemented in #224
-  US-004 / US-005.
-* :meth:`materialise_sample` / :meth:`estimate_query_bytes` /
-  :meth:`run_stats_query` inherit the ABC typed degrade
-  (``MaterialisationNotSupportedError`` / ``EstimateNotSupportedError`` /
-  ``StatsQueryNotSupportedError``) — a clean, operator-actionable signal until
-  #224 US-004 / #225 land.
+* :meth:`materialise_sample` is implemented (#224 US-004) — overrides the ABC
+  degrade with a session-scoped, qualified ``CREATE TEMPORARY TABLE
+  <cat>.<sch>._sf_sample_<run_id> AS <deterministic sample body>`` (``run_id``
+  from the shared :mod:`signalforge.warehouse._sample_id` recipe), pinning the
+  connection so a follow-up :meth:`run_test_sql` reaches the temp table.
+* :meth:`run_test_sql` is implemented (#224 US-004) — overrides the
+  :class:`NotImplementedError` stub: wraps a candidate failing-rows SELECT in a
+  ``COUNT(*)`` aggregate (plus a per-row ``to_json(struct(*))`` LIMIT capture
+  query when ``capture_failures > 0``) and returns a typed :class:`TestResult`.
+* :meth:`column_stats` raises :class:`NotImplementedError` naming the epic
+  (#219) — implemented in #224 US-005.
+* :meth:`estimate_query_bytes` / :meth:`run_stats_query` inherit the ABC typed
+  degrade (``EstimateNotSupportedError`` / ``StatsQueryNotSupportedError``) — a
+  clean, operator-actionable signal until #225 lands.
 * :meth:`WarehouseAdapter.from_profile` dispatches ``profile.type ==
   "databricks"`` here so an operator with a Databricks profile sees a typed
   "v0.x pending" ``NotImplementedError`` rather than the v0.1
@@ -62,10 +68,12 @@ import logging
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
-from signalforge.warehouse._sample_id import _hash_session_id
+from signalforge.warehouse._sample_id import _compute_run_id, _hash_session_id
 from signalforge.warehouse._sample_sql import render_sample_select
+from signalforge.warehouse._sql_safety import validate_identifier, validate_test_sql
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
+    MaterialisationFailedError,
     SamplingRequiresPartitionFilterError,
     UnknownTableSizeError,
     WarehouseError,
@@ -106,10 +114,12 @@ class DatabricksAdapter(WarehouseAdapter):
     (deterministic inline-predicate hash-mod), :meth:`get_row_count`
     (``SELECT COUNT(*)``), and the shared fail-loud :meth:`_resolve_sample_bucket`
     sizing, all on a connection wired via :meth:`_get_connection` with a fail-soft
-    ``__exit__`` cleanup. :meth:`column_stats` / :meth:`run_test_sql` still raise
-    :class:`NotImplementedError`; :meth:`materialise_sample` /
-    :meth:`estimate_query_bytes` / :meth:`run_stats_query` inherit their typed
-    ``*NotSupportedError`` degrade until #224 US-004 / #225 land.
+    ``__exit__`` cleanup. US-004 adds :meth:`materialise_sample` (session-scoped
+    qualified ``CREATE TEMPORARY TABLE``) and :meth:`run_test_sql` (``COUNT(*)``
+    failing-rows wrap + per-row ``to_json`` capture). :meth:`column_stats` still
+    raises :class:`NotImplementedError`; :meth:`estimate_query_bytes` /
+    :meth:`run_stats_query` inherit their typed ``*NotSupportedError`` degrade
+    until #225 lands.
     """
 
     def __init__(
@@ -563,11 +573,247 @@ class DatabricksAdapter(WarehouseAdapter):
 
         return self._execute_to_dicts(sql, table=table)
 
+    # ------------------------------------------------------------------
+    # materialise_sample — DEC-004 / DEC-006 / DEC-008 of issue #224.
+    # ------------------------------------------------------------------
+
+    def materialise_sample(
+        self,
+        table: TableRef,
+        n: int,
+        *,
+        partition_filter: PartitionFilter | None = None,
+        ttl_seconds: int = 3600,
+    ) -> TableRef:
+        """Materialise a deterministic sample into a session-scoped Databricks
+        ``TEMPORARY TABLE``; return a :class:`TableRef` pointing at it (DEC-004).
+
+        Overrides the ABC default (which raises
+        :class:`MaterialisationNotSupportedError`). Mirrors the Snowflake
+        adapter's :meth:`materialise_sample` (issue #122) verbatim, Databricks-
+        flavoured:
+
+        DEC-008 — the ``run_id`` reuses the shared
+        :func:`signalforge.warehouse._sample_id._compute_run_id` recipe so the
+        temp-table name ``_sf_sample_<run_id>`` is byte-identical to the
+        BigQuery / Snowflake adapters' for the same ``(table, n,
+        partition_filter)`` tuple under the same ``signalforge.__version__``.
+
+        DEC-006 — the temp table is created on the live connection's session
+        (the connection embodies the session that scopes the temp table). The
+        connection is pinned as ``self._active_session`` (via
+        :meth:`_get_connection`) so a subsequent :meth:`run_test_sql` on the
+        same connection reaches the temp table.
+
+        DEC-004 — the deterministic sample SELECT body is built by the shared
+        :func:`signalforge.warehouse._sample_sql.render_sample_select` helper
+        (``order_by_hash=True``), which for Databricks
+        (``sample_hash_in_projection=False``) emits the inline-predicate shape
+        (Databricks has NO Snowflake-style ``HASH(*)`` predicate restriction).
+        The hash expression and shape are read from :data:`DATABRICKS_DIALECT`
+        (NOT hard-coded) so the CTAS bytes stay consistent with
+        :meth:`sample_rows` and the prune compiler's sample CTE (Architectural
+        Commitment #5). ``partition_filter`` lands ONCE here, in the CTAS
+        ``WHERE`` (rendered by :meth:`_render_partition_filter`, passed to the
+        helper as ``extra_where``).
+
+        The ``TEMP TABLE`` is colocated with the SOURCE (created as
+        ``<source catalog>.<source schema>._sf_sample_<run_id>``, per-component
+        backtick-quoted + fold-to-lower, identical to how the compiler will
+        REFERENCE it) and the returned :class:`TableRef` is fully-qualified via
+        the source catalog / schema.
+
+        .. note::
+
+            Whether Databricks accepts a **qualified** temporary-table name in
+            ``CREATE TEMPORARY TABLE <cat>.<sch>.<temp> AS ...`` AND whether the
+            ``databricks-sql-connector`` persists the session across queries (so
+            the temp table is reachable from a follow-up
+            :meth:`run_test_sql`) are **#226 live-cert items** — this story
+            certifies SHAPE only (fakes + the ungated sqlglot parse-guard), NOT
+            live validity. The documented fallback if rejected live is a
+            bare-name temp table or ``CREATE OR REPLACE TABLE`` in the
+            configured schema + an explicit ``DROP`` (plan DEC-004).
+
+        Args:
+            table: Source production table to sample from.
+            n: Target sample size; bucket sizing mirrors :meth:`sample_rows`
+                (deterministic hash-mod, fail-loud size guards).
+            partition_filter: Optional :class:`PartitionFilter` applied ONCE
+                inside the CTAS ``WHERE`` clause.
+            ttl_seconds: accepted for ABC parity but IGNORED by Databricks —
+                there is no client-side TTL knob; the connection's session-local
+                temp objects are reaped server-side when the warehouse drops the
+                connection (mirrors Snowflake; the cleanup WARNING quotes no
+                countdown).
+
+        Returns:
+            :class:`TableRef` with ``project=table.project``,
+            ``dataset=table.dataset``, ``name="_sf_sample_<run_id>"`` — the
+            session-scoped temp table, fully-qualified via the source catalog /
+            schema.
+
+        Raises:
+            ValueError: ``n <= 0``.
+            MaterialisationFailedError: any SDK / network / quota failure during
+                the CTAS (wraps the original via ``cause=``).
+            UnknownTableSizeError, SamplingRequiresPartitionFilterError:
+                propagated from :meth:`_resolve_sample_bucket` (the shared
+                fail-loud sizing contract).
+        """
+        if n <= 0:
+            raise ValueError(f"materialise_sample requires n > 0; got n={n}")
+
+        # DEC-008 — byte-identical recipe to BigQuery / Snowflake (shared helper).
+        run_id = _compute_run_id(table=table, n=n, partition_filter=partition_filter)
+        temp_name = f"_sf_sample_{run_id}"
+        # The temp-table identifier MUST pass validate_identifier before
+        # quoting. blake2b-8 lowercase hex is alphanumeric so the regex always
+        # passes; the explicit call documents the contract and catches any
+        # future drift in _compute_run_id.
+        validate_identifier("temp_table_name", temp_name)
+
+        # Shared fail-loud sizing pathway (same as sample_rows; DEC-003).
+        bucket = self._resolve_sample_bucket(table, n, partition_filter=partition_filter)
+
+        quoted_source = self._quote(table)
+        # The TEMP TABLE is colocated with the source (DEC-004): same catalog /
+        # schema, per-component fold-then-quote, with the deterministic temp name.
+        temp_ref = TableRef(project=table.project, dataset=table.dataset, name=temp_name)
+        quoted_temp = self._quote(temp_ref)
+
+        extra_where = (
+            self._render_partition_filter(partition_filter)
+            if partition_filter is not None
+            else None
+        )
+        # Inline-predicate sample body (DEC-002): the masked xxhash64 expression
+        # sits directly in WHERE / ORDER BY (Databricks has no HASH(*)
+        # predicate restriction). Read from the dialect, not hard-coded.
+        select_body = render_sample_select(
+            quoted_source,
+            dialect=DATABRICKS_DIALECT,
+            sample_bucket=bucket,
+            sample_size=n,
+            extra_where=extra_where,
+            order_by_hash=True,
+        )
+        sql = f"CREATE TEMPORARY TABLE {quoted_temp} AS {select_body}"
+
+        # Open / reuse the connection (also sets self._active_session) so the
+        # follow-up run_test_sql reaches the temp table (DEC-006).
+        conn = self._get_connection()
+        from signalforge.warehouse.adapters._databricks_client import map_databricks_exception
+
+        cursor = conn.cursor()
+        try:
+            cursor.execute(sql)
+        except Exception as exc:
+            # DEC-009 / DEC-004 — route the SDK failure through the Databricks
+            # exception mapper first, then wrap in the typed
+            # MaterialisationFailedError (mirrors Snowflake / BigQuery). The
+            # raise-from chain preserves the original SDK exception via
+            # __cause__.
+            mapped = map_databricks_exception(exc, context={"table": table.qualified_name})
+            cause: BaseException = mapped if mapped is not exc else exc
+            raise MaterialisationFailedError(
+                message=f"sample materialisation failed for {table.qualified_name}: {cause}",
+                cause=cause,
+            ) from exc
+
+        # INFO log uses the HASHED session id, never the raw value. Lazy-format
+        # JSON for ANSI safety (warehouse-layer convention).
+        raw_session_id = self._read_session_id(conn)
+        payload: dict[str, Any] = {
+            "table": table.qualified_name,
+            "sample_rows": n,
+            "run_id": run_id,
+        }
+        if raw_session_id is not None:
+            payload["session_id_hash"] = _hash_session_id(raw_session_id)
+        _LOGGER.info("materialised sample: %s", json.dumps(payload))
+
+        return temp_ref
+
     def column_stats(self, table: TableRef, column: str) -> ColumnStats:
         raise NotImplementedError(f"column_stats: {_SKELETON_REMEDIATION}")
 
+    # ------------------------------------------------------------------
+    # run_test_sql — DEC-007 of issue #224.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_failure_row(row: dict[str, Any]) -> dict[str, Any]:
+        """Parse one captured failing row (DEC-007).
+
+        Each captured row carries a single ``to_json(struct(*))`` column whose
+        value is a JSON **string** (Spark's ``to_json`` returns a string per
+        row — NOT a VARIANT / array like Snowflake's ``OBJECT_CONSTRUCT``, so
+        each value is ``json.loads``-ed individually, never a single outer
+        decode). A connection that already vended a parsed mapping (a fake / a
+        dict-cursor) passes through via :func:`dict`.
+        """
+        value: Any = next(iter(row.values()), None)
+        parsed: Any = json.loads(value) if isinstance(value, str) else value
+        return dict(parsed)
+
     def run_test_sql(self, sql: str, *, capture_failures: int = 0) -> TestResult:
-        raise NotImplementedError(f"run_test_sql: {_SKELETON_REMEDIATION}")
+        """Run a candidate failing-rows SELECT and return a typed
+        :class:`TestResult` (DEC-007).
+
+        Overrides the :class:`NotImplementedError` stub. The candidate is
+        sanity-checked by
+        :func:`signalforge.warehouse._sql_safety.validate_test_sql` (no ``;``,
+        no ``--`` comments, balanced parens) before wrapping.
+
+        The failing-row ``COUNT(*)`` is always computed via
+        ``SELECT COUNT(*) AS failures FROM (<sql>) AS t``. When
+        ``capture_failures > 0`` a SECOND query captures up to
+        ``capture_failures`` example failing rows via Spark's
+        ``SELECT to_json(struct(*)) AS failure_row FROM (<sql>) AS s LIMIT
+        <capture_failures>`` — per-row ``to_json`` (NOT ``collect_list`` →
+        ``ARRAY<STRING>``), so each row's JSON string is ``json.loads``-ed
+        individually (DEC-007). Columns resolve case-insensitively via
+        ``cursor.description`` (Databricks folds unquoted aliases to lower).
+
+        Both queries execute on ``self._active_session`` (the connection
+        :meth:`_get_connection` returns / a prior :meth:`materialise_sample`
+        pinned), so a materialised temp table is reachable. SDK errors route
+        through :func:`map_databricks_exception` (via :meth:`_execute_to_dicts`);
+        ``row_schema`` is ``None`` in v0.x (mirrors BigQuery / Snowflake).
+
+        .. note::
+
+            The ``to_json(struct(*))`` per-row capture shape (and the JSON-
+            string marshalling assumption) is a **#226 live-cert item** —
+            certified here against the fake + sqlglot parse only, not live.
+        """
+        validate_test_sql(sql)
+
+        count_rows = self._execute_to_dicts(f"SELECT COUNT(*) AS failures FROM ({sql}) AS t")
+        if not count_rows:  # pragma: no cover - aggregate always returns one row
+            raise RuntimeError("run_test_sql COUNT wrapper returned no rows")
+        # Databricks folds the unquoted ``failures`` alias to lower, but resolve
+        # case-insensitively so a fake / dict-cursor that preserved case works too.
+        lowered = {str(k).lower(): v for k, v in count_rows[0].items()}
+        failure_count = int(lowered["failures"])
+
+        sample_failures: list[dict[str, Any]] | None
+        if capture_failures > 0:
+            capture_rows = self._execute_to_dicts(
+                f"SELECT to_json(struct(*)) AS failure_row "
+                f"FROM ({sql}) AS s LIMIT {capture_failures}"
+            )
+            sample_failures = [self._parse_failure_row(r) for r in capture_rows]
+        else:
+            sample_failures = None
+
+        return TestResult(
+            passed=(failure_count == 0),
+            failure_count=failure_count,
+            sample_failures=sample_failures,
+            row_schema=None,
+        )
 
 
 __all__ = ["DATABRICKS_DIALECT", "DatabricksAdapter"]

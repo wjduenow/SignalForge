@@ -30,7 +30,6 @@ import pytest
 from signalforge.warehouse import (
     DatabricksAdapter,
     EstimateNotSupportedError,
-    MaterialisationNotSupportedError,
     StatsQueryNotSupportedError,
 )
 from signalforge.warehouse.base import WarehouseAdapter
@@ -124,9 +123,9 @@ def test_init_stores_forward_compat_oauth_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# column_stats / run_test_sql still raise NotImplementedError (AC-4)
-# (sample_rows graduated to a real impl in #224 US-003 — see
-# tests/warehouse/test_databricks_adapter.py)
+# column_stats still raises NotImplementedError (AC-4)
+# (sample_rows graduated in #224 US-003; materialise_sample + run_test_sql
+# graduated in #224 US-004 — see tests/warehouse/test_databricks_adapter.py)
 # ---------------------------------------------------------------------------
 
 
@@ -138,23 +137,10 @@ def test_column_stats_raises_not_implemented() -> None:
     assert "issue #219" in str(exc_info.value)
 
 
-def test_run_test_sql_raises_not_implemented() -> None:
-    adapter = DatabricksAdapter()
-    with pytest.raises(NotImplementedError) as exc_info:
-        adapter.run_test_sql("SELECT 1")
-    assert "issue #219" in str(exc_info.value)
-
-
 # ---------------------------------------------------------------------------
 # Degrade-default ABC methods inherit their typed *NotSupportedError (AC-5)
+# (materialise_sample graduated to a real impl in #224 US-004)
 # ---------------------------------------------------------------------------
-
-
-def test_materialise_sample_inherits_typed_degrade() -> None:
-    adapter = DatabricksAdapter()
-    table = TableRef(project=None, dataset="analytics", name="t")
-    with pytest.raises(MaterialisationNotSupportedError):
-        adapter.materialise_sample(table, 100)
 
 
 def test_estimate_query_bytes_inherits_typed_degrade() -> None:

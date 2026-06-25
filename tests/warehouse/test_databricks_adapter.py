@@ -20,7 +20,7 @@ from datetime import date, datetime
 
 import pytest
 
-from signalforge.warehouse._sample_id import _hash_session_id
+from signalforge.warehouse._sample_id import _compute_run_id, _hash_session_id
 from signalforge.warehouse.adapters._databricks_client import (
     _DatabricksClientProtocol,
     _DatabricksCursorProtocol,
@@ -30,6 +30,7 @@ from signalforge.warehouse.adapters._databricks_client import (
 from signalforge.warehouse.adapters.databricks import DatabricksAdapter
 from signalforge.warehouse.errors import (
     ColumnNotFoundError,
+    MaterialisationFailedError,
     QuerySyntaxError,
     SamplingRequiresPartitionFilterError,
     TableNotFoundError,
@@ -37,7 +38,7 @@ from signalforge.warehouse.errors import (
     WarehouseAuthError,
     WarehouseError,
 )
-from signalforge.warehouse.models import PartitionFilter, TableRef
+from signalforge.warehouse.models import DATABRICKS_DIALECT, PartitionFilter, TableRef
 from tests.warehouse._fake_databricks import FakeDatabricksConnection
 
 _LOGGER_NAME = "signalforge.warehouse"
@@ -809,4 +810,442 @@ def test_sample_query_unmapped_error_passes_through_unchanged() -> None:
 
     with pytest.raises(RuntimeError) as exc_info:
         adapter.sample_rows(_TABLE, 100)
+    assert exc_info.value is sentinel
+
+
+# ---------------------------------------------------------------------------
+# materialise_sample + run_test_sql (#224 US-004)
+#
+# #226 LIVE-CERT CAVEATS (shape-only here — fakes + the ungated sqlglot
+# parse-guard): whether Databricks accepts a QUALIFIED temporary-table name in
+# ``CREATE TEMPORARY TABLE <cat>.<sch>.<temp> AS ...`` AND whether the
+# ``databricks-sql-connector`` persists the session across queries (so a
+# materialised temp table is reachable from a follow-up ``run_test_sql``) are
+# #226 live-cert items, NOT certified by these offline tests. Likewise the
+# per-row ``to_json(struct(*))`` capture marshalling (JSON-string assumption) is
+# a #226 cert item.
+# ---------------------------------------------------------------------------
+
+# Distinct regexes so the sizing COUNT, the CTAS, the run_test_sql COUNT, and the
+# capture query can never cross-match in the fake's expectation queue.
+_SIZE_QUERY = r"AS row_count"
+_CTAS_QUERY = r"CREATE TEMPORARY TABLE"
+_FAILURES_QUERY = r"COUNT\(\*\) AS failures"
+_CAPTURE_QUERY = r"to_json\(struct"
+
+
+def _expected_run_id() -> str:
+    return _compute_run_id(table=_TABLE, n=100, partition_filter=None)
+
+
+# ---- materialise_sample — CTAS shape + deterministic temp name (DEC-004/008) ---
+
+
+def test_materialise_ctas_sql_shape_and_temp_name() -> None:
+    """The CTAS contains ``CREATE TEMPORARY TABLE``, the deterministic
+    ``_sf_sample_<run_id>`` name (run_id byte-identical to the shared recipe),
+    and the inline-predicate sample body (DEC-002) — masked ``xxhash64`` in
+    ``WHERE``/``ORDER BY``, ``LIMIT n``, source + temp per-component
+    backtick-quoted and folded to lower.
+
+    #226 live-cert: qualified-temp-name acceptance is shape-only here.
+    """
+    conn = _RecordingDatabricksConnection()
+    # num_rows=1000, n=100 → bucket = max(1000//100, 1) = 10.
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    adapter = _make_adapter(conn)
+
+    adapter.materialise_sample(_TABLE, 100)
+
+    ctas = conn.executed[1]
+    run_id = _expected_run_id()
+    temp_name = f"_sf_sample_{run_id}"
+
+    assert ctas.startswith("CREATE TEMPORARY TABLE")
+    # Inline-predicate shape (sample_hash_in_projection=False) — NOT Snowflake's
+    # projection subquery. The temp name (lowercase hex) appears verbatim.
+    assert temp_name in ctas
+    assert "EXCLUDE" not in ctas
+    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 10) < 1" in ctas
+    assert "ORDER BY (xxhash64(to_json(struct(*))) & 9223372036854775807)" in ctas
+    assert ctas.rstrip().endswith("LIMIT 100")
+    # Source per-component quoted + fold-to-lower.
+    assert "`main`.`sales`.`orders`" in ctas
+    # Temp table colocated with the source catalog / schema, per-component
+    # quoted, lower-folded — byte-identical to how the compiler REFERENCEs it.
+    assert f"`main`.`sales`.`{temp_name}`" in ctas
+
+
+def test_materialise_returns_fully_qualified_temp_ref() -> None:
+    """The returned :class:`TableRef` is fully-qualified via the source catalog /
+    schema with the deterministic temp name (DEC-004)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    adapter = _make_adapter(conn)
+
+    result = adapter.materialise_sample(_TABLE, 100)
+
+    run_id = _expected_run_id()
+    assert result == TableRef(
+        project=_TABLE.project, dataset=_TABLE.dataset, name=f"_sf_sample_{run_id}"
+    )
+
+
+def test_materialise_pins_active_session() -> None:
+    """``materialise_sample`` pins ``_active_session`` to the connection so a
+    follow-up ``run_test_sql`` reaches the session-scoped temp table (DEC-006)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    adapter = _make_adapter(conn)
+
+    adapter.materialise_sample(_TABLE, 100)
+
+    assert adapter._active_session is conn
+
+
+def test_materialise_run_id_byte_identical_across_calls() -> None:
+    """Identical ``(table, n, partition_filter)`` → byte-identical temp-table
+    name across two fresh adapters (DEC-008)."""
+    names: list[str] = []
+    for _ in range(2):
+        conn = _RecordingDatabricksConnection()
+        conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+        conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+        adapter = _make_adapter(conn)
+        names.append(adapter.materialise_sample(_TABLE, 100).name)
+    assert names[0] == names[1]
+    assert names[0] == f"_sf_sample_{_expected_run_id()}"
+
+
+def test_materialise_rejects_non_positive_n() -> None:
+    """``n <= 0`` → ``ValueError`` before any warehouse contact."""
+    conn = FakeDatabricksConnection()  # no expectations → any query raises loudly
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(ValueError, match="n > 0"):
+        adapter.materialise_sample(_TABLE, 0)
+
+    conn.assert_all_expectations_met()
+
+
+def test_materialise_ctas_sdk_failure_wraps_in_materialisation_failed() -> None:
+    """A CTAS SDK failure → :class:`MaterialisationFailedError` with the
+    underlying exception preserved on ``cause`` AND in the raise-from chain."""
+    boom = RuntimeError("network blip during CTAS")
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=boom)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(MaterialisationFailedError) as exc_info:
+        adapter.materialise_sample(_TABLE, 100)
+
+    assert exc_info.value.cause is boom
+    assert exc_info.value.__cause__ is boom
+    assert "main.sales.orders" in str(exc_info.value)
+
+
+def test_materialise_ctas_mapped_error_wraps_in_materialisation_failed() -> None:
+    """A mapped connector error (table not found) is routed through
+    ``map_databricks_exception`` first, then wrapped — the mapped typed error is
+    the ``cause`` (and the raise-from chain still preserves the original SDK
+    exception)."""
+    dbe = _dbe()
+    err = dbe.ServerOperationError(  # type: ignore[attr-defined]
+        "[TABLE_OR_VIEW_NOT_FOUND] Table or view not found: main.sales.orders"
+    )
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=err)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(MaterialisationFailedError) as exc_info:
+        adapter.materialise_sample(_TABLE, 100)
+
+    assert isinstance(exc_info.value.cause, TableNotFoundError)
+    assert exc_info.value.__cause__ is err
+
+
+def test_materialise_logs_hashed_session_id_never_raw(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The success INFO log carries ``session_id_hash`` (blake2b-4), the source
+    table, sample_rows, and run_id — never the raw connection ``session_id``."""
+    conn = _RecordingDatabricksConnection(session_id="super-secret-session-xyz")
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    adapter = _make_adapter(conn)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        adapter.materialise_sample(_TABLE, 100)
+
+    records = [r for r in caplog.records if "materialised sample" in r.getMessage()]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "session_id_hash" in message
+    assert "super-secret-session-xyz" not in message
+    assert _hash_session_id("super-secret-session-xyz") in message
+    assert "main.sales.orders" in message
+    assert _expected_run_id() in message
+
+
+def test_materialise_applies_partition_filter_in_ctas() -> None:
+    """A ``PartitionFilter`` lands ONCE in the CTAS ``WHERE`` (rendered via the
+    Databricks dialect literal template) alongside the hash-mod predicate."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    adapter = _make_adapter(conn)
+
+    pf = PartitionFilter(column="dt", op=">=", value=date(2026, 1, 1))
+    adapter.materialise_sample(_TABLE, 100, partition_filter=pf)
+
+    ctas = conn.executed[1]
+    # bucket=10; the partition predicate is ANDed after the hash-mod predicate.
+    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 10) < 1 AND " in ctas
+    assert "DATE '2026-01-01'" in ctas
+    assert ctas.count("DATE '2026-01-01'") == 1
+
+
+# ---- Reachability — follow-up run_test_sql on the SAME connection (DEC-006) ---
+
+
+def test_materialised_temp_table_is_reachable_via_same_connection() -> None:
+    """After ``materialise_sample``, a follow-up ``run_test_sql`` executes on the
+    SAME connection object — so the session-scoped temp table is reachable
+    (DEC-006). The fake records all executes on one connection.
+
+    #226 live-cert: real connector session persistence is shape-only here.
+    """
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    conn.expect_execute(matching=_FAILURES_QUERY, returns=[(0,)], description=[("failures",)])
+    adapter = _make_adapter(conn)
+
+    temp_ref = adapter.materialise_sample(_TABLE, 100)
+    test_sql = f"SELECT `id` FROM `main`.`sales`.`{temp_ref.name}` WHERE `id` IS NULL"
+    adapter.run_test_sql(test_sql)
+
+    assert len(conn.executed) == 3
+    assert conn.executed[1].startswith("CREATE TEMPORARY TABLE")
+    assert conn.executed[2].startswith("SELECT COUNT(*) AS failures")
+    # The COUNT wrapper references the temp table, not the source.
+    assert temp_ref.name in conn.executed[2]
+    assert "orders" not in conn.executed[2]
+    assert adapter._active_session is conn
+
+
+# ---- #116 substitution — compiler references the TEMP table, NOT the source ---
+
+
+def test_compiler_substitutes_temp_table_not_source() -> None:
+    """The #116 materialised-sample-substitution gotcha, exercised on the test
+    type that can ACTUALLY bypass it: a self-FROM ``custom_sql`` singular test
+    (``SELECT ... FROM {{ this }} ...``). Fed the materialised temp
+    :class:`TableRef` with :data:`DATABRICKS_DIALECT` at ``scope="full"`` (the
+    shape the engine uses after materialising), the compiler must rewrite the
+    resolved ``{{ this }}`` source name to the ``_sf_sample_<run_id>`` temp
+    table. A bypass here would silently full-scan production under the
+    materialised strategy.
+
+    (The four built-in variants — ``not_null`` etc. — always ``FROM`` the passed
+    ``table_ref`` and so can never bypass substitution; only the self-FROM
+    ``custom_sql`` path can, which is why the gotcha is pinned here.)
+    """
+    from signalforge.draft.models import CandidateTestCustomSQL
+    from signalforge.manifest.models import Column, Manifest, Model
+    from signalforge.prune.compiler import _compile_test
+
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    adapter = _make_adapter(conn)
+
+    temp_ref = adapter.materialise_sample(_TABLE, 100)
+
+    # A model whose ``resolve_this()`` == the SOURCE table (main.sales.orders),
+    # so the custom_sql ``{{ this }}`` resolves to the source and the compiler
+    # must rewrite it to the temp ``table_ref`` (because temp != source).
+    model = Model(
+        unique_id="model.shop.orders",
+        name="orders",
+        resource_type="model",
+        package_name="shop",
+        original_file_path="models/orders.sql",
+        path="orders.sql",
+        database="main",
+        schema="sales",  # type: ignore[call-arg]
+        columns={"amount": Column(name="amount")},
+        raw_code="select 1",
+    )
+    manifest = Manifest(
+        metadata={"dbt_schema_version": "v12"},
+        nodes={"model.shop.orders": model},
+    )
+
+    compiled = _compile_test(
+        CandidateTestCustomSQL(sql="SELECT * FROM {{ this }} WHERE amount < 0"),
+        temp_ref,
+        DATABRICKS_DIALECT,
+        manifest,
+        model=model,
+        scope="full",
+    )
+
+    assert isinstance(compiled, str)
+    # The self-FROM ``{{ this }}`` was rewritten to the materialised temp table ...
+    assert temp_ref.name in compiled
+    # ... and the source table's bare name never leaks (a bypass would leave the
+    # resolved source ``orders`` here, full-scanning production).
+    assert "orders" not in compiled
+
+
+# ---- run_test_sql — COUNT(*) wrap + per-row to_json capture (DEC-007) ---------
+
+
+def test_run_test_sql_validates_sql_first() -> None:
+    """``validate_test_sql`` rejects a SQL with a ``;`` before any execute."""
+    conn = FakeDatabricksConnection()
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError, match="single statement"):
+        adapter.run_test_sql("SELECT 1; DROP TABLE t")
+
+    conn.assert_all_expectations_met()
+
+
+def test_run_test_sql_zero_failures_passes() -> None:
+    """Zero failing rows → ``passed=True``, ``failure_count=0``,
+    ``sample_failures=None``."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_FAILURES_QUERY, returns=[(0,)], description=[("failures",)])
+    adapter = _make_adapter(conn)
+
+    result = adapter.run_test_sql("SELECT `id` FROM `main`.`sales`.`orders` WHERE `id` IS NULL")
+
+    assert result.passed is True
+    assert result.failure_count == 0
+    assert result.sample_failures is None
+    assert result.row_schema is None
+
+
+def test_run_test_sql_nonzero_failures_fails() -> None:
+    """Non-zero failing rows → ``passed=False``, ``failure_count=N``."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_FAILURES_QUERY, returns=[(7,)], description=[("failures",)])
+    adapter = _make_adapter(conn)
+
+    result = adapter.run_test_sql("SELECT `id` FROM `main`.`sales`.`orders` WHERE `id` IS NULL")
+
+    assert result.passed is False
+    assert result.failure_count == 7
+
+
+def test_run_test_sql_count_alias_resolves_case_insensitively() -> None:
+    """A folded / preserved-case ``FAILURES`` alias still resolves — the count
+    is read case-insensitively (Databricks folds unquoted aliases to lower, but
+    a dict-cursor that preserved case must work too)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_FAILURES_QUERY, returns=[(3,)], description=[("FAILURES",)])
+    adapter = _make_adapter(conn)
+
+    result = adapter.run_test_sql("SELECT `id` FROM `main`.`sales`.`orders` WHERE `id` IS NULL")
+
+    assert result.failure_count == 3
+
+
+def test_run_test_sql_capture_json_loads_each_row() -> None:
+    """``capture_failures > 0`` issues a SECOND ``to_json(struct(*))`` LIMIT
+    capture query; each row's JSON STRING is ``json.loads``-ed individually into
+    a dict (NOT a single outer decode like Snowflake's VARIANT — DEC-007).
+
+    #226 live-cert: the per-row ``to_json`` marshalling shape is shape-only here.
+    """
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_FAILURES_QUERY, returns=[(2,)], description=[("failures",)])
+    conn.expect_execute(
+        matching=_CAPTURE_QUERY,
+        returns=[('{"id": 1, "name": "alice"}',), ('{"id": 2, "name": "bob"}',)],
+        description=[("failure_row",)],
+    )
+    adapter = _make_adapter(conn)
+
+    result = adapter.run_test_sql(
+        "SELECT `id` FROM `main`.`sales`.`orders` WHERE `id` IS NULL", capture_failures=5
+    )
+
+    assert result.passed is False
+    assert result.failure_count == 2
+    assert result.sample_failures == [
+        {"id": 1, "name": "alice"},
+        {"id": 2, "name": "bob"},
+    ]
+    # The capture query is a SECOND query (count first) carrying per-row to_json
+    # + a LIMIT bounded at capture_failures.
+    assert conn.executed[0].startswith("SELECT COUNT(*) AS failures")
+    assert "to_json(struct(*))" in conn.executed[1]
+    assert "LIMIT 5" in conn.executed[1]
+
+
+def test_run_test_sql_capture_empty_yields_empty_list() -> None:
+    """Zero captured rows → ``sample_failures == []`` (capture still ran)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_FAILURES_QUERY, returns=[(0,)], description=[("failures",)])
+    conn.expect_execute(matching=_CAPTURE_QUERY, returns=[], description=[("failure_row",)])
+    adapter = _make_adapter(conn)
+
+    result = adapter.run_test_sql(
+        "SELECT `id` FROM `main`.`sales`.`orders` WHERE `id` IS NULL", capture_failures=5
+    )
+
+    assert result.failure_count == 0
+    assert result.sample_failures == []
+
+
+def test_run_test_sql_capture_passes_through_dict_rows() -> None:
+    """A connection that already vends parsed mapping rows (a dict-cursor) is
+    handled by the ``dict`` passthrough in ``_parse_failure_row`` — no
+    ``json.loads`` needed."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_FAILURES_QUERY, returns=[(1,)], description=[("failures",)])
+    conn.expect_execute(
+        matching=_CAPTURE_QUERY,
+        returns=[{"failure_row": {"id": 9, "amount": -3}}],
+    )
+    adapter = _make_adapter(conn)
+
+    result = adapter.run_test_sql(
+        "SELECT `id` FROM `main`.`sales`.`orders` WHERE `id` IS NULL", capture_failures=5
+    )
+
+    assert result.sample_failures == [{"id": 9, "amount": -3}]
+
+
+def test_run_test_sql_programming_error_maps_to_query_syntax_error() -> None:
+    """A connector error from the COUNT(*) wrap maps to :class:`QuerySyntaxError`
+    via ``map_databricks_exception`` (the ``_execute_to_dicts`` mapped branch)."""
+    dbe = _dbe()
+    err = dbe.ServerOperationError("[PARSE_SYNTAX_ERROR] bad syntax")  # type: ignore[attr-defined]
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_FAILURES_QUERY, returns=err)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError):
+        adapter.run_test_sql("SELECT `id` FROM `main`.`sales`.`orders` WHERE `id` IS NULL")
+
+
+def test_run_test_sql_unmapped_error_passes_through_unchanged() -> None:
+    """An exception ``map_databricks_exception`` does not map is re-raised
+    unchanged from ``run_test_sql`` — the passthrough branch."""
+    sentinel = RuntimeError("transient network blip")
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_FAILURES_QUERY, returns=sentinel)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        adapter.run_test_sql("SELECT `id` FROM `main`.`sales`.`orders` WHERE `id` IS NULL")
     assert exc_info.value is sentinel
