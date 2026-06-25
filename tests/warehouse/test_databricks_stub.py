@@ -188,14 +188,24 @@ def test_run_stats_query_inherits_typed_degrade() -> None:
 
 def test_from_profile_dispatches_databricks_to_skeleton() -> None:
     """The factory routes ``type: databricks`` to the skeleton adapter (NOT
-    raise :class:`UnsupportedProfileTypeError`). Pre-#222 the profile model
-    carries only the generic fields, so the factory maps ``catalog<-project``
-    and ``schema<-dataset`` (the real host / http_path / token fields land in
-    the profile-parsing child #222)."""
+    raise :class:`UnsupportedProfileTypeError`). Since #222 the profile model
+    parses the real Databricks connection fields (``host`` / ``http_path`` /
+    ``token`` / ``catalog``), so the dispatch input is a valid full target.
+
+    ``base.py``'s ``from_profile`` databricks branch still carries the #221
+    skeleton mapping (``catalog<-profile.project`` / ``schema<-profile.dataset``)
+    — rewiring it to read the real ``profile.host`` / ``profile.catalog`` is
+    US-003. Until then the dispatch routes correctly but ``_catalog`` stays
+    ``None`` (``profile.project`` is now a forbidden BigQuery-only field on a
+    databricks target). This assertion flips in US-003 alongside the base.py
+    rewire."""
     profile = DbtProfileTarget.model_validate(
         {
             "type": "databricks",
-            "project": "main",
+            "host": "dbc-ab12cd34.cloud.databricks.com",
+            "http_path": "/sql/1.0/warehouses/abc123",
+            "token": "dapi-token",
+            "catalog": "main",
             "schema": "analytics",
         }
     )
@@ -203,8 +213,10 @@ def test_from_profile_dispatches_databricks_to_skeleton() -> None:
     adapter = WarehouseAdapter.from_profile(profile)
 
     assert isinstance(adapter, DatabricksAdapter)
-    assert adapter._catalog == "main"
+    # `schema:` hydrates profile.dataset, which base.py still maps to _schema.
     assert adapter._schema == "analytics"
+    # base.py maps _catalog from profile.project (None here) until US-003.
+    assert adapter._catalog is None
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +238,14 @@ from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.profiles import DbtProfileTarget
 
 profile = DbtProfileTarget.model_validate(
-    {"type": "databricks", "project": "main", "schema": "analytics"}
+    {
+        "type": "databricks",
+        "host": "dbc-ab12cd34.cloud.databricks.com",
+        "http_path": "/sql/1.0/warehouses/abc123",
+        "token": "dapi-token",
+        "catalog": "main",
+        "schema": "analytics",
+    }
 )
 adapter = WarehouseAdapter.from_profile(profile)
 

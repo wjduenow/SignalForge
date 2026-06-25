@@ -617,6 +617,196 @@ def test_bigquery_with_threads_parses() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 6d. Databricks profile parsing + cross-field validator (US-002, #222)
+# ---------------------------------------------------------------------------
+
+
+def _databricks_target(**overrides: object) -> dict[str, object]:
+    """A representative valid ``type: databricks`` PAT target dict."""
+    base: dict[str, object] = {
+        "type": "databricks",
+        "host": "dbc-ab12cd34.cloud.databricks.com",
+        "http_path": "/sql/1.0/warehouses/abc123def456",
+        "token": "dapi-secret-token",
+        "catalog": "analytics",
+        "schema": "public",
+        "threads": 4,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_databricks_target_parses_full() -> None:
+    """A representative Databricks PAT target parses; every new field populates."""
+    target = DbtProfileTarget.model_validate(_databricks_target())
+
+    assert target.type == "databricks"
+    assert target.host == "dbc-ab12cd34.cloud.databricks.com"
+    assert target.http_path == "/sql/1.0/warehouses/abc123def456"
+    assert target.token == "dapi-secret-token"
+    assert target.catalog == "analytics"
+    # Databricks's `schema:` key continues to populate `dataset` (alias).
+    assert target.dataset == "public"
+    assert target.threads == 4
+
+
+def test_databricks_oauth_target_parses() -> None:
+    """An OAuth-M2M target (auth_type=oauth + client_id + client_secret, NO
+    token) parses cleanly."""
+    target_dict = _databricks_target(
+        auth_type="oauth",
+        client_id="oauth-client-id",
+        client_secret="oauth-client-secret",
+    )
+    del target_dict["token"]
+    target = DbtProfileTarget.model_validate(target_dict)
+
+    assert target.auth_type == "oauth"
+    assert target.client_id == "oauth-client-id"
+    assert target.client_secret == "oauth-client-secret"
+    assert target.token is None
+
+
+def test_databricks_secrets_excluded_from_repr() -> None:
+    """`repr()` / `str()` must NOT leak `token` (PAT) or `client_secret`
+    (OAuth-M2M) — both carry `repr=False`."""
+    target = DbtProfileTarget.model_validate(
+        _databricks_target(
+            token="dapi-supersecret",
+            auth_type="oauth",
+            client_id="visible-client-id",
+            client_secret="oauth-supersecret",
+        )
+    )
+    rendered = repr(target)
+
+    assert "dapi-supersecret" not in rendered
+    assert "oauth-supersecret" not in rendered
+    # Values are still accessible via attribute — only the repr is redacted.
+    assert target.token == "dapi-supersecret"
+    assert target.client_secret == "oauth-supersecret"
+    # A non-secret identifying field still renders (sanity: repr isn't empty).
+    assert "dbc-ab12cd34.cloud.databricks.com" in rendered
+    # client_id is NOT a secret and should render.
+    assert "visible-client-id" in rendered
+
+
+def test_databricks_missing_http_path_raises() -> None:
+    """Missing `http_path` → IncompleteProfileError naming the key."""
+    target = _databricks_target()
+    del target["http_path"]
+
+    with pytest.raises(IncompleteProfileError) as excinfo:
+        DbtProfileTarget.model_validate(target)
+    assert "http_path" in str(excinfo.value)
+
+
+def test_databricks_pat_missing_token_raises() -> None:
+    """A default-PAT target (no auth_type) missing `token` → IncompleteProfileError."""
+    target = _databricks_target()
+    del target["token"]
+
+    with pytest.raises(IncompleteProfileError) as excinfo:
+        DbtProfileTarget.model_validate(target)
+    assert "token" in str(excinfo.value)
+
+
+def test_databricks_oauth_missing_client_creds_raises() -> None:
+    """`auth_type: oauth` missing client_id / client_secret →
+    IncompleteProfileError listing BOTH (collect-all)."""
+    target = _databricks_target(auth_type="oauth")
+    del target["token"]  # token is irrelevant under oauth
+
+    with pytest.raises(IncompleteProfileError) as excinfo:
+        DbtProfileTarget.model_validate(target)
+    msg = str(excinfo.value)
+    assert "client_id" in msg
+    assert "client_secret" in msg
+
+
+def test_databricks_unknown_auth_type_raises() -> None:
+    """An unsupported `auth_type` (e.g. azure-ad) → UnsupportedAuthMethodError,
+    NOT a confusing missing-key error."""
+    with pytest.raises(UnsupportedAuthMethodError) as excinfo:
+        DbtProfileTarget.model_validate(_databricks_target(auth_type="azure-ad"))
+    assert "azure-ad" in str(excinfo.value)
+
+
+def test_databricks_foreign_bigquery_field_rejected() -> None:
+    """A BigQuery-only field (location) on a databricks target → ValidationError."""
+    with pytest.raises(ValidationError) as excinfo:
+        DbtProfileTarget.model_validate(_databricks_target(location="US"))
+    assert "location" in str(excinfo.value)
+
+
+def test_databricks_foreign_snowflake_field_rejected() -> None:
+    """A Snowflake-only field (account) on a databricks target → ValidationError."""
+    with pytest.raises(ValidationError) as excinfo:
+        DbtProfileTarget.model_validate(_databricks_target(account="xy12345"))
+    assert "account" in str(excinfo.value)
+
+
+def test_bigquery_foreign_databricks_field_rejected() -> None:
+    """A Databricks-only field (host) on a bigquery target → ValidationError."""
+    with pytest.raises(ValidationError) as excinfo:
+        DbtProfileTarget.model_validate(
+            {
+                "type": "bigquery",
+                "method": "oauth",
+                "project": "p",
+                "schema": "d",
+                "host": "dbc-ab12.cloud.databricks.com",
+            }
+        )
+    assert "host" in str(excinfo.value)
+
+
+def test_snowflake_foreign_databricks_field_rejected() -> None:
+    """A Databricks-only field (host) on a snowflake target → ValidationError."""
+    with pytest.raises(ValidationError) as excinfo:
+        DbtProfileTarget.model_validate(_snowflake_target(host="dbc-ab12.cloud.databricks.com"))
+    assert "host" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("bad_catalog", ["a-b", "a;b"])
+def test_databricks_bad_catalog_raises(bad_catalog: str) -> None:
+    """A catalog name outside the strict SQL-identifier grammar →
+    InvalidIdentifierError (it becomes SQL via `USE CATALOG`)."""
+    with pytest.raises(InvalidIdentifierError) as excinfo:
+        DbtProfileTarget.model_validate(_databricks_target(catalog=bad_catalog))
+    assert bad_catalog in str(excinfo.value)
+
+
+def test_databricks_bad_schema_raises() -> None:
+    """A schema name outside the strict SQL-identifier grammar → InvalidIdentifierError."""
+    with pytest.raises(InvalidIdentifierError) as excinfo:
+        DbtProfileTarget.model_validate(_databricks_target(schema="sch;ema"))
+    assert "sch;ema" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "bad_host",
+    ["https://dbc-ab12.cloud.databricks.com", "has space.com", "host;DROP"],
+)
+def test_databricks_bad_host_raises(bad_host: str) -> None:
+    """A garbage / scheme-prefixed host → InvalidIdentifierError."""
+    with pytest.raises(InvalidIdentifierError) as excinfo:
+        DbtProfileTarget.model_validate(_databricks_target(host=bad_host))
+    assert bad_host in str(excinfo.value) or "host" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "bad_path",
+    ["sql/1.0/warehouses/abc", "/sql/1.0;DROP", "/path with space"],
+)
+def test_databricks_bad_http_path_raises(bad_path: str) -> None:
+    """A path missing the leading slash or carrying garbage → InvalidIdentifierError."""
+    with pytest.raises(InvalidIdentifierError) as excinfo:
+        DbtProfileTarget.model_validate(_databricks_target(http_path=bad_path))
+    assert bad_path in str(excinfo.value) or "http_path" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
 # 7. Drift detector (DEC-017)
 # ---------------------------------------------------------------------------
 

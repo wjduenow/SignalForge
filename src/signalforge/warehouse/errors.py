@@ -30,6 +30,17 @@ _SNOWFLAKE_DEFERRED_AUTH_REMEDIATION = (
     "later release."
 )
 
+# Reused by the profiles model validator (US-002, #222) to remediate a
+# Databricks profile that declares an `auth_type` SignalForge's v0.x adapter
+# does not yet support. Names the supported methods so the operator knows the
+# working set; names the deferred ones so the message isn't a dead end.
+_DATABRICKS_DEFERRED_AUTH_REMEDIATION = (
+    "v0.x Databricks auth supports: PAT (set `token:`, the default when "
+    "`auth_type:` is unset) and OAuth-M2M (set `auth_type: oauth` with "
+    "`client_id:` + `client_secret:`). Other methods (Azure AD, OAuth-U2M, "
+    "etc.) are deferred to a later release."
+)
+
 
 def _format_value(v: object) -> str:
     """Quote a user-supplied value via ``repr()`` for safe inclusion in
