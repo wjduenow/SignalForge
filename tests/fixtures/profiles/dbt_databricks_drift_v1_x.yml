@@ -1,0 +1,37 @@
+# Drift-detector fixture for dbt-databricks (issue #222). Mirrors the
+# commonly-documented field set for a dbt-databricks 1.x target
+# (https://docs.getdbt.com/docs/core/connect-data-platform/databricks-setup).
+#
+# The drift test constructs a one-off `StrictDatabricksModel(BaseModel)` with
+# `extra="forbid"` and validates this fixture's outputs.dev block against it.
+# If a future dbt-databricks release adds a new top-level target field and
+# someone mirrors it here without also adding it to StrictDatabricksModel (and,
+# if SignalForge needs it, to `DbtProfileTarget`), the strict model fails to
+# validate and the test trips loudly. (DEC-017.)
+#
+# Bump this file when dbt-databricks releases a new minor version: rename to
+# `dbt_databricks_drift_v1_X.yml`, refresh the fields, and update
+# `DbtProfileTarget` for any field SignalForge needs to surface.
+#
+# This is a PAT-shaped target (token set, auth_type omitted ⇒ default PAT) so
+# it parses as a valid full target; the OAuth-M2M fields (auth_type / client_id
+# / client_secret) are mirrored too so the strict model covers them.
+signalforge_test:
+  target: dev
+  outputs:
+    dev:
+      type: databricks
+      host: dbc-ab12cd34.cloud.databricks.com
+      http_path: /sql/1.0/warehouses/abc123def456
+      token: dapi-secret-token
+      catalog: analytics
+      schema: public
+      threads: 4
+      auth_type: null
+      client_id: null
+      client_secret: null
+      connect_retries: 1
+      connect_timeout: 10
+      connect_max_idle: 60
+      retry_all: false
+      session_properties: null
