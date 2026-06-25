@@ -67,14 +67,13 @@ with WarehouseAdapter.from_profile(profile) as adapter:
 
 `WarehouseAdapter.from_profile` dispatches on `profile.type`.
 `profile.type == "bigquery"` is fully implemented; `profile.type ==
-"postgres"` (v0.2 stub, #53), `profile.type == "snowflake"` (v0.2
-skeleton, #119), and `profile.type == "databricks"` (v0.x skeleton, #221)
-dispatch to their adapters. Those adapters' not-yet-implemented warehouse
-operations either raise `NotImplementedError` (for Databricks:
-`sample_rows` / `column_stats` / `run_test_sql`) or inherit the ABC's typed
-`*NotSupportedError` degrade (`materialise_sample` / `estimate_query_bytes`
-/ `get_row_count` / `run_stats_query`), until each implementation lands.
-Any other `profile.type` raises `UnsupportedProfileTypeError` with a
+"postgres"` (v0.2 stub, #53), `profile.type == "snowflake"` (v0.2, #119),
+and `profile.type == "databricks"` dispatch to their adapters. The
+Databricks adapter implements its sampling surface as of #224 —
+`sample_rows`, `get_row_count`, `materialise_sample`, `run_test_sql`, and
+`column_stats`; only `estimate_query_bytes` / `run_stats_query` still
+inherit the ABC's typed `*NotSupportedError` degrade (pending #225). Any
+other `profile.type` raises `UnsupportedProfileTypeError` with a
 remediation pointing at the roadmap entry.
 
 A `type: databricks` target parses end-to-end (#222) into a
@@ -88,7 +87,40 @@ raises `IncompleteProfileError`; an unsupported `auth_type` raises
 `UnsupportedAuthMethodError` (PAT + OAuth-M2M are supported in v0.x; the
 OAuth *connection* is deferred — the connector uses PAT). A BigQuery-only
 (`location:`) or Snowflake-only (`account:`) field on a `databricks`
-target fails loud, and vice versa. The connection is opened in #226.
+target fails loud, and vice versa.
+
+### Databricks adapter — sampling surface (#224)
+
+The Databricks adapter samples and profiles via the connector's
+connection-bound session (the connection *is* the session, as with
+Snowflake): `_get_connection()` lazily opens one connection and every op
+runs on it; `with adapter:` closes it on exit (fail-soft — a close failure
+emits one WARNING, never aborts; session-scoped temp objects are reaped by
+the server, so there is no manual cleanup command). Deterministic sampling
+uses an inline `MOD((xxhash64(to_json(struct(*))) & 9223372036854775807),
+<bucket>) < 1` predicate (Databricks, unlike Snowflake, accepts the hash in
+`WHERE`/`ORDER BY`). Table sizing uses `SELECT COUNT(*)` (Delta keeps this
+metadata-cheap); `DESCRIBE DETAIL` is **not** used because it carries no
+reliable `numRows`. As with every adapter, a table ≥ 100M rows requires a
+`partition_filter` or sampling fails loud.
+
+**Sample strategy.** Both `prune.sample_strategy: materialised` (default —
+a session-scoped `CREATE TEMPORARY TABLE` sample) and `oneshot` (per-test
+hash-mod sampling via the `get_row_count` seam) work against Databricks.
+`safety: aggregate-only` profiling (`column_stats`) is also supported for
+scalar columns.
+
+**Live certification is #226.** The #224 surface is certified for SQL
+*shape* (against a fake connection + a `sqlglot` `databricks`-dialect
+parse-guard), not yet against a live Databricks SQL warehouse. The items
+deferred to the #226 gated live Free-Edition run are: whether a *qualified*
+`CREATE TEMPORARY TABLE <catalog>.<schema>.<temp>` is accepted; whether the
+connector persists the session across queries (so a materialised temp table
+is reachable from a follow-up test); the `to_json(struct(*))` failure-row
+capture marshalling; and `column_stats` `MIN`/`MAX` on complex-typed
+(ARRAY/STRUCT/MAP/JSON/…) columns, which currently diverge from BigQuery's
+skip-and-`None` contract. Until #226 lands, treat Databricks support as
+shape-certified.
 
 ## dbt profile resolution
 
@@ -800,7 +832,7 @@ on a `↳ Remediation:` line by `__str__`.
 | ---------------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `WarehouseError`                         | Base class; never raised directly.                                                                       | `message`, `remediation`                             | _(no remediation set — base class)_                                                             |
 | `WarehouseAuthError`                     | Wraps `google.auth.exceptions.DefaultCredentialsError` / `RefreshError`.                                 | `message`                                            | Run `gcloud auth application-default login` to set up ADC.                                      |
-| `UnsupportedProfileTypeError`            | dbt profile's `type` is not `"bigquery"`, `"postgres"`, `"snowflake"`, or `"databricks"`.                 | `profile_type`                                       | `bigquery` is fully implemented; `postgres` (v0.2 stub), `snowflake` (v0.2), and `databricks` (v0.x skeleton) are recognised but their warehouse ops are not yet fully implemented. Other types are unsupported. (Matches `UnsupportedProfileTypeError.default_remediation`.)  |
+| `UnsupportedProfileTypeError`            | dbt profile's `type` is not `"bigquery"`, `"postgres"`, `"snowflake"`, or `"databricks"`.                 | `profile_type`                                       | `bigquery` is fully implemented; `postgres` (v0.2 stub), `snowflake` (v0.2), and `databricks` (sampling surface #224, shape-certified — live cert #226) are recognised. Other types are unsupported. (Matches `UnsupportedProfileTypeError.default_remediation`.)  |
 | `UnsupportedAuthMethodError`             | dbt profile's `method` is not `"oauth"` (or unset).                                                      | `method`                                             | v0.1 supports `method: oauth` (or unset) only; run `gcloud auth application-default login`.     |
 | `ProfileNotFoundError`                   | None of the three search paths yielded a `profiles.yml` (or the project file is missing/malformed).      | `searched_paths`                                     | Create a `profiles.yml` at one of the searched paths, or set `DBT_PROFILES_DIR`.                |
 | `ProfileTargetNotFoundError`             | The profile resolved but the requested `target` is missing. Inherits `ProfileNotFoundError`.             | `profile_name`, `target`, `searched_paths`           | Add the target to `profiles.yml`, or pass an explicit `target=` that exists in the profile.     |

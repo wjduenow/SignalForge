@@ -10,10 +10,12 @@ Snowflake). Tests pin the issue ACs:
 2. :meth:`dialect` returns :data:`DATABRICKS_DIALECT` by identity.
 3. :meth:`__repr__` shows only safe fields (``host`` / ``http_path`` /
    ``catalog``), never ``token`` / ``client_secret`` / ``schema``.
-4. ``sample_rows`` / ``column_stats`` / ``run_test_sql`` raise
-   :class:`NotImplementedError` naming the epic (#219).
-5. ``materialise_sample`` / ``estimate_query_bytes`` / ``get_row_count`` /
-   ``run_stats_query`` inherit the ABC typed degrade.
+4. The real-I/O methods graduated to implementations covered in
+   ``tests/warehouse/test_databricks_adapter.py``: ``sample_rows`` +
+   ``get_row_count`` (#224 US-003), ``materialise_sample`` + ``run_test_sql``
+   (#224 US-004), ``column_stats`` (#224 US-005).
+5. ``estimate_query_bytes`` / ``run_stats_query`` inherit the ABC typed degrade
+   (``materialise_sample`` graduated to a real implementation in #224 US-004).
 6. SDK type-ignores are confined to ``_databricks_client.py`` — pinned by
    ``tests/warehouse/test_databricks_client_confinement.py``, not here.
 """
@@ -28,12 +30,10 @@ import pytest
 from signalforge.warehouse import (
     DatabricksAdapter,
     EstimateNotSupportedError,
-    MaterialisationNotSupportedError,
-    RowCountNotSupportedError,
     StatsQueryNotSupportedError,
 )
 from signalforge.warehouse.base import WarehouseAdapter
-from signalforge.warehouse.models import DATABRICKS_DIALECT, Dialect, TableRef
+from signalforge.warehouse.models import DATABRICKS_DIALECT, Dialect
 from signalforge.warehouse.profiles import DbtProfileTarget
 
 # ---------------------------------------------------------------------------
@@ -123,56 +123,22 @@ def test_init_stores_forward_compat_oauth_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# sample_rows / column_stats / run_test_sql raise NotImplementedError (AC-4)
+# Real-I/O methods (sample_rows / get_row_count / materialise_sample /
+# run_test_sql / column_stats) graduated to implementations covered in
+# tests/warehouse/test_databricks_adapter.py (#224 US-003 … US-005).
 # ---------------------------------------------------------------------------
-
-
-def test_sample_rows_raises_not_implemented() -> None:
-    adapter = DatabricksAdapter()
-    table = TableRef(project=None, dataset="analytics", name="t")
-    with pytest.raises(NotImplementedError) as exc_info:
-        adapter.sample_rows(table, 100)
-    assert "issue #219" in str(exc_info.value)
-
-
-def test_column_stats_raises_not_implemented() -> None:
-    adapter = DatabricksAdapter()
-    table = TableRef(project=None, dataset="analytics", name="t")
-    with pytest.raises(NotImplementedError) as exc_info:
-        adapter.column_stats(table, "id")
-    assert "issue #219" in str(exc_info.value)
-
-
-def test_run_test_sql_raises_not_implemented() -> None:
-    adapter = DatabricksAdapter()
-    with pytest.raises(NotImplementedError) as exc_info:
-        adapter.run_test_sql("SELECT 1")
-    assert "issue #219" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
 # Degrade-default ABC methods inherit their typed *NotSupportedError (AC-5)
+# (materialise_sample graduated to a real impl in #224 US-004)
 # ---------------------------------------------------------------------------
-
-
-def test_materialise_sample_inherits_typed_degrade() -> None:
-    adapter = DatabricksAdapter()
-    table = TableRef(project=None, dataset="analytics", name="t")
-    with pytest.raises(MaterialisationNotSupportedError):
-        adapter.materialise_sample(table, 100)
 
 
 def test_estimate_query_bytes_inherits_typed_degrade() -> None:
     adapter = DatabricksAdapter()
     with pytest.raises(EstimateNotSupportedError):
         adapter.estimate_query_bytes("SELECT 1")
-
-
-def test_get_row_count_inherits_typed_degrade() -> None:
-    adapter = DatabricksAdapter()
-    table = TableRef(project=None, dataset="analytics", name="t")
-    with pytest.raises(RowCountNotSupportedError):
-        adapter.get_row_count(table)
 
 
 def test_run_stats_query_inherits_typed_degrade() -> None:

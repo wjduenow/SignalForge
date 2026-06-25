@@ -19,11 +19,14 @@ query execution lives on the *cursor*, not the connection (a
 ``conn.cursor().execute(...)`` path type-checks against a protocol that actually
 describes what ``databricks.sql.connect()`` returns.
 
-:func:`map_databricks_exception` is a **minimal stub** at the skeleton stage
-(auth-flavoured failures → :class:`WarehouseAuthError`; everything else returned
-unchanged); the full taxonomy (table-not-found / column-not-found / query-syntax
-splits, mirroring ``map_snowflake_exception``) is fleshed out in the test-harness
-child (#226).
+:func:`map_databricks_exception` (#224 US-002) translates a connector exception
+into a typed :class:`signalforge.warehouse.errors.WarehouseError` subclass —
+auth → :class:`WarehouseAuthError`; table-not-found → :class:`TableNotFoundError`;
+unresolved-column → :class:`ColumnNotFoundError`; residual Spark/SQL error →
+:class:`QuerySyntaxError`; everything else unchanged — mirroring
+``map_snowflake_exception``. The ``databricks.sql.exc`` import is lazy inside the
+function body so the one-shim-per-vendor rule holds; an auth-flavoured message
+still maps without the connector installed.
 
 The ``from databricks import sql`` import is lazy — confined to the body of
 :func:`make_real_client` — so importing this shim does not require the connector
@@ -37,6 +40,7 @@ adapter where the stage label is known (mirrors ``_client.py`` / ``_snowflake_cl
 
 from __future__ import annotations
 
+import re
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -126,34 +130,129 @@ _AUTH_MARKERS: tuple[str, ...] = (
     "permission denied",
 )
 
+# Spark / Databricks SQL surfaces object-not-found via the ``TABLE_OR_VIEW_NOT_FOUND``
+# error class (and the legacy "Table or view not found" message). Markers are
+# matched case-insensitively against the lower-cased message.
+_TABLE_NOT_FOUND_MARKERS: tuple[str, ...] = (
+    "table_or_view_not_found",
+    "table or view not found",
+)
+
+# Unresolved-column surfaces via the ``UNRESOLVED_COLUMN`` error class / the
+# "cannot be resolved" message ("A column ... with name `x` cannot be resolved").
+_COLUMN_NOT_FOUND_MARKERS: tuple[str, ...] = (
+    "unresolved_column",
+    "cannot be resolved",
+)
+
+_UNRESOLVED_COLUMN_RE = re.compile(
+    r"(?:with name|cannot resolve)\s+[`'\"]?([A-Za-z_][A-Za-z0-9_.$]*)[`'\"]?",
+    re.IGNORECASE,
+)
+
+
+def _extract_unresolved_column(message: str) -> str:
+    """Best-effort pull of a column identifier out of Databricks' unresolved-column
+    message (``... with name `bad_col` cannot be resolved`` / ``cannot resolve
+    'bad_col'``).
+
+    Returns the bare identifier if found; otherwise the full message. Falling
+    back to the message keeps :class:`ColumnNotFoundError`'s ``column`` field
+    non-empty even when Spark's wording shifts (mirrors the Snowflake shim's
+    ``_extract_invalid_identifier``).
+    """
+    m = _UNRESOLVED_COLUMN_RE.search(message)
+    if m:
+        return m.group(1)
+    return message
+
 
 def map_databricks_exception(exc: Exception, *, context: dict[str, Any] | None = None) -> Exception:
     """Translate a ``databricks.sql`` exception into a typed warehouse error
-    (skeleton stub — issue #221).
+    (#224 US-002, mirroring ``map_snowflake_exception``).
 
     Mirrors :func:`signalforge.warehouse.adapters._snowflake_client.map_snowflake_exception`'s
-    return convention: returns the *new* exception so the caller can ``raise
-    mapped from exc``; returns ``exc`` unchanged when no specific mapping fits —
-    the caller should re-raise the original in that case rather than swallow it.
+    shape and return convention: returns the *new* exception so the caller can
+    ``raise mapped from exc``; returns ``exc`` unchanged when no specific mapping
+    fits — the caller should re-raise the original in that case rather than
+    swallow it.
 
-    **Minimal at the skeleton stage:** an auth-flavoured failure (message
-    carrying one of :data:`_AUTH_MARKERS`) maps to :class:`WarehouseAuthError`;
-    everything else is returned unchanged. The full taxonomy (object-does-not-exist
-    → :class:`TableNotFoundError`, invalid-identifier → :class:`ColumnNotFoundError`,
-    residual → :class:`QuerySyntaxError`) is fleshed out in #226, keyed on the
-    ``databricks.sql.exc`` hierarchy. No SDK import is needed for this stub — the
-    auth detection is message-marker based — so the mapper works whether or not
-    the connector is installed.
+    Taxonomy:
+
+    * A Spark SQL execution / DB-API programming error
+      (``ServerOperationError`` / ``ProgrammingError``) carrying a
+      table-not-found marker (:data:`_TABLE_NOT_FOUND_MARKERS`) →
+      :class:`TableNotFoundError` (``table`` from ``context`` or ``"<unknown>"``).
+    * The same scope carrying an unresolved-column marker
+      (:data:`_COLUMN_NOT_FOUND_MARKERS`) → :class:`ColumnNotFoundError`
+      (``column`` extracted from the message).
+    * The same scope carrying an auth marker → :class:`WarehouseAuthError`.
+    * Any residual ``ServerOperationError`` / ``ProgrammingError`` (SQL
+      compilation / syntax) → :class:`QuerySyntaxError`.
+    * Any OTHER exception carrying an auth marker (connect-time
+      ``RequestError`` / ``OperationalError``, or — with the connector absent —
+      a plain exception) → :class:`WarehouseAuthError`.
+    * Anything else → returned unchanged (so a transient network blip falls
+      through to the caller).
+
+    The Table/Column split runs BEFORE the broad ``QuerySyntaxError``
+    fallthrough, and is scoped to the SQL-error connector types so a transient
+    ``OperationalError`` is NOT mis-mapped to ``QuerySyntaxError``. No new
+    ``WarehouseError`` subclass is introduced (that would force exit-code-table
+    + AST-scan changes), and ``BytesBilledExceededError`` is deliberately
+    omitted because Databricks has no bytes-billed cap.
+
+    The ``databricks.sql.exc`` import is **lazy** — confined to this function
+    body — so the one-shim-per-vendor rule holds (every databricks-sql-connector
+    type-ignore lives only in this file) and importing this shim never requires
+    the connector to be installed. If the connector is absent, only the
+    message-marker auth detection runs (everything else passes through).
 
     The optional ``context`` kwarg carries adapter-side state the raw connector
     exception doesn't expose (e.g. ``{"table": ...}``), mirroring the Snowflake
-    mapper; it is unused by this stub but kept in the signature so #226 can fill
-    in the Table/Column arms without a call-site change.
+    mapper; it supplies the ``table`` identifier for the Table/Column arms.
     """
     msg_lower = str(exc).lower()
-    if any(marker in msg_lower for marker in _AUTH_MARKERS):
-        from signalforge.warehouse.errors import WarehouseAuthError
 
+    try:
+        from databricks.sql import exc as dbe
+    except ImportError:  # pragma: no cover - connector ships under [databricks]
+        # Connector absent: message-marker auth detection only; everything else
+        # passes through unchanged.
+        if any(marker in msg_lower for marker in _AUTH_MARKERS):
+            from signalforge.warehouse.errors import WarehouseAuthError
+
+            return WarehouseAuthError(message=str(exc))
+        return exc
+
+    from signalforge.warehouse.errors import (
+        ColumnNotFoundError,
+        QuerySyntaxError,
+        TableNotFoundError,
+        WarehouseAuthError,
+    )
+
+    table_id = str(context["table"]) if context is not None and "table" in context else "<unknown>"
+
+    # Scope the Table/Column/Syntax split to the SQL-error connector types
+    # (Spark execution errors surface as ``ServerOperationError``; DB-API
+    # programming errors as ``ProgrammingError``). A transient
+    # ``OperationalError`` / ``RequestError`` is deliberately NOT in scope so a
+    # network blip falls through to passthrough rather than mis-mapping to
+    # ``QuerySyntaxError``.
+    if isinstance(exc, (dbe.ServerOperationError, dbe.ProgrammingError)):
+        if any(marker in msg_lower for marker in _TABLE_NOT_FOUND_MARKERS):
+            return TableNotFoundError(table=table_id)
+        if any(marker in msg_lower for marker in _COLUMN_NOT_FOUND_MARKERS):
+            return ColumnNotFoundError(table=table_id, column=_extract_unresolved_column(str(exc)))
+        if any(marker in msg_lower for marker in _AUTH_MARKERS):
+            return WarehouseAuthError(message=str(exc))
+        # Residual SQL error — "your SQL is malformed".
+        return QuerySyntaxError(detail=str(exc))
+
+    # Connect-time / transient errors: only an auth-flavoured message maps to
+    # auth; everything else passes through unchanged.
+    if any(marker in msg_lower for marker in _AUTH_MARKERS):
         return WarehouseAuthError(message=str(exc))
     return exc
 
