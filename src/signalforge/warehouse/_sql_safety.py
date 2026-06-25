@@ -38,6 +38,25 @@ _PROJECT_RE = re.compile(
 # alphanumerics, dot, underscore, hyphen; must start alphanumeric; length 2-254.
 _SF_ACCOUNT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,253}$")
 
+# Databricks server hostnames are NEVER interpolated into SQL — the connector
+# consumes them to open the connection — so this regex is deliberately
+# *permissive*: log-injection hygiene + a fail-loud "obvious garbage" gate, NOT
+# the strict SQL-identifier rule. It must accept the dotted hostnames Databricks
+# workspaces carry (``dbc-ab12.cloud.databricks.com``,
+# ``adb-123.4.azuredatabricks.net``) while rejecting a scheme prefix
+# (``https://``, whose ``//`` and ``:`` fall outside the alphabet), whitespace,
+# quoting, ``;``, backticks, and control characters. Allowed alphabet:
+# alphanumerics, dot, hyphen; must start alphanumeric; length 2-254.
+_DATABRICKS_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{1,253}$")
+
+# Databricks HTTP paths are NEVER interpolated into SQL either (the connector
+# consumes them), so the same permissive posture applies. A real path looks like
+# ``/sql/1.0/warehouses/abc123`` or ``/sql/protocolv1/o/0/abc``: a leading slash
+# is required, followed by permissive path characters (alphanumerics, ``/``,
+# ``.``, ``_``, ``-``). Rejects a missing leading slash, whitespace, quoting,
+# ``;``, backticks, and control characters. Length bound 1-512 after the slash.
+_DATABRICKS_HTTP_PATH_RE = re.compile(r"^/[A-Za-z0-9/._-]{1,511}$")
+
 
 def validate_identifier(field: str, value: str) -> None:
     """Raise InvalidIdentifierError if value is not a valid SQL identifier.
@@ -103,6 +122,59 @@ def validate_snowflake_account(field: str, value: str) -> None:
     from signalforge.warehouse.errors import InvalidIdentifierError
 
     if not _SF_ACCOUNT_RE.fullmatch(value):
+        raise InvalidIdentifierError(field=field, value=value)
+
+
+def validate_databricks_hostname(field: str, value: str) -> None:
+    """Raise InvalidIdentifierError if value is not a plausible Databricks host.
+
+    Databricks server hostnames are **never** interpolated into SQL — the
+    connector consumes them to open the connection — so this is deliberately a
+    permissive validator: log-injection hygiene plus a fail-loud "obvious
+    garbage" gate, NOT the strict SQL-identifier rule. Do NOT route hostnames
+    through :func:`validate_identifier`; its regex rejects the dots and hyphens
+    that real workspace hostnames require.
+
+    Accepts the shapes Databricks actually uses:
+
+    - AWS workspace host: ``dbc-ab12.cloud.databricks.com``
+    - Azure workspace host: ``adb-123.4.azuredatabricks.net``
+
+    Rejects a scheme prefix (``https://dbc-ab12.cloud.databricks.com`` — the
+    ``//`` and ``:`` fall outside the alphabet), empty input, whitespace,
+    quoting (``'`` / ``"``), ``;``, backticks, control characters, and over-long
+    (> 254 char) values. The host must start with an alphanumeric.
+    """
+    from signalforge.warehouse.errors import InvalidIdentifierError
+
+    if not _DATABRICKS_HOST_RE.fullmatch(value):
+        raise InvalidIdentifierError(field=field, value=value)
+
+
+def validate_databricks_http_path(field: str, value: str) -> None:
+    """Raise InvalidIdentifierError if value is not a plausible Databricks path.
+
+    Databricks HTTP paths are **never** interpolated into SQL — the connector
+    consumes them to open the connection — so this is deliberately a permissive
+    validator: log-injection hygiene plus a fail-loud "obvious garbage" gate,
+    NOT the strict SQL-identifier rule. Do NOT route HTTP paths through
+    :func:`validate_identifier`; its regex rejects the slashes and dots that
+    real warehouse / cluster paths require.
+
+    Accepts the shapes Databricks actually uses:
+
+    - SQL warehouse path: ``/sql/1.0/warehouses/abc123``
+    - legacy protocol path: ``/sql/protocolv1/o/0/abc``
+
+    A leading slash is required. Rejects a missing leading slash
+    (``sql/1.0/warehouses/abc``), empty input, whitespace, quoting
+    (``'`` / ``"``), ``;``, backticks, control characters, and over-long
+    (> 512 char) values. Allowed alphabet: alphanumerics, ``/``, ``.``,
+    ``_``, ``-``.
+    """
+    from signalforge.warehouse.errors import InvalidIdentifierError
+
+    if not _DATABRICKS_HTTP_PATH_RE.fullmatch(value):
         raise InvalidIdentifierError(field=field, value=value)
 
 
