@@ -75,9 +75,11 @@ _EXPECTED_MIN_FIXTURES = 32
 
 
 def _fixture_id(path: Path) -> str:
-    """Readable parametrize id: ``<parent>/<name>`` so anomaly + top-level fixtures
-    of the same stem stay distinguishable in the test report."""
-    return f"{path.parent.name}/{path.name}"
+    """Readable parametrize id relative to the fixtures root, so anomaly
+    (``anomaly/databricks/…``) and top-level (``databricks/…``) fixtures stay
+    distinguishable in the test report — ``path.parent.name`` is ``databricks``
+    for BOTH dirs, so it can't tell them apart."""
+    return str(path.relative_to(_FIXTURES_ROOT))
 
 
 def test_databricks_fixture_set_is_non_empty() -> None:
