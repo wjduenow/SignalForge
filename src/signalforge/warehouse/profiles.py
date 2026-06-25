@@ -167,6 +167,15 @@ class DbtProfileTarget(BaseModel):
     # BigQuery) profiles set `threads`; adding it here keeps extra="forbid"
     # from tripping on a routine connection knob.
     threads: int | None = None
+    # Shared connection knobs SignalForge accepts but does NOT consume
+    # (accepted-but-unused, exactly like `threads`). Real dbt-snowflake AND
+    # dbt-databricks profiles routinely set these, so `extra="forbid"` must
+    # not reject an operator's working profile. NOT in any `_*_ONLY` set —
+    # they are valid across warehouse types, so foreign-field rejection
+    # leaves them alone.
+    connect_retries: int | None = None
+    connect_timeout: int | None = None
+    connect_max_idle: int | None = None
 
     # BigQuery-shaped fields.
     method: str | None = None
@@ -282,7 +291,14 @@ class DbtProfileTarget(BaseModel):
             else:
                 # None or "pat" → default PAT auth.
                 required += ["token"]
-            missing = [k for k in required if getattr(self, k) is None]
+            # Treat empty / whitespace-only as MISSING, not just `is None`.
+            # The credential fields (token / client_id / client_secret) are
+            # deliberately NOT shape-validated (opaque secrets), so without
+            # this an empty string slips through both gates. Realistic
+            # trigger: `token: "{{ env_var('DATABRICKS_TOKEN', '') }}"` with
+            # the var unset renders to "" — fail loud at profile load rather
+            # than as a cryptic connection error much later.
+            missing = [k for k in required if not str(getattr(self, k) or "").strip()]
             if missing:
                 raise IncompleteProfileError(profile_type="databricks", missing=sorted(missing))
 

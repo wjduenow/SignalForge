@@ -792,7 +792,9 @@ def test_databricks_bad_host_raises(bad_host: str) -> None:
     """A garbage / scheme-prefixed host → InvalidIdentifierError."""
     with pytest.raises(InvalidIdentifierError) as excinfo:
         DbtProfileTarget.model_validate(_databricks_target(host=bad_host))
-    assert bad_host in str(excinfo.value) or "host" in str(excinfo.value)
+    # The offending value must reach the message (no field-name fallback —
+    # "host" is unconditionally present, which would make the check vacuous).
+    assert bad_host in str(excinfo.value)
 
 
 @pytest.mark.parametrize(
@@ -803,7 +805,58 @@ def test_databricks_bad_http_path_raises(bad_path: str) -> None:
     """A path missing the leading slash or carrying garbage → InvalidIdentifierError."""
     with pytest.raises(InvalidIdentifierError) as excinfo:
         DbtProfileTarget.model_validate(_databricks_target(http_path=bad_path))
-    assert bad_path in str(excinfo.value) or "http_path" in str(excinfo.value)
+    # The offending value must reach the message (no field-name fallback).
+    assert bad_path in str(excinfo.value)
+
+
+def test_databricks_explicit_pat_auth_type_parses() -> None:
+    """An explicit `auth_type: pat` (with token) parses — `pat` is in the
+    supported set, not just the omitted-auth_type default. Guards against a
+    regression dropping `pat` from `_DATABRICKS_SUPPORTED_AUTH`."""
+    target = DbtProfileTarget.model_validate(_databricks_target(auth_type="pat"))
+    assert target.auth_type == "pat"
+    assert target.token == "dapi-secret-token"
+
+
+def test_databricks_short_catalog_accepted() -> None:
+    """A short Unity Catalog name like `main` (4 chars) parses — `catalog`
+    uses `validate_identifier` (no length bound), NOT the 6-30-char
+    `validate_project_id`. Locks in the behaviour the rule file warns about
+    (the TableRef.project length gotcha does NOT reach the profile layer)."""
+    target = DbtProfileTarget.model_validate(_databricks_target(catalog="main"))
+    assert target.catalog == "main"
+
+
+def test_databricks_empty_token_rejected() -> None:
+    """An empty-string `token` (e.g. an unset `env_var(..., '')`) is treated as
+    MISSING → IncompleteProfileError, not silently accepted. The credential
+    fields are not shape-validated, so the required-key check must catch ''."""
+    with pytest.raises(IncompleteProfileError) as excinfo:
+        DbtProfileTarget.model_validate(_databricks_target(token=""))
+    assert "token" in str(excinfo.value)
+
+
+def test_databricks_oauth_empty_client_creds_rejected() -> None:
+    """Empty-string OAuth credentials are treated as MISSING (collect-all)."""
+    target = _databricks_target(auth_type="oauth", client_id="", client_secret="")
+    del target["token"]
+    with pytest.raises(IncompleteProfileError) as excinfo:
+        DbtProfileTarget.model_validate(target)
+    msg = str(excinfo.value)
+    assert "client_id" in msg
+    assert "client_secret" in msg
+
+
+def test_databricks_accepts_connection_knobs() -> None:
+    """Common dbt-databricks connection knobs (connect_retries /
+    connect_timeout / connect_max_idle) are accepted-but-unused — a real
+    operator profile carrying them parses rather than tripping extra="forbid"."""
+    target = DbtProfileTarget.model_validate(
+        _databricks_target(connect_retries=3, connect_timeout=30, connect_max_idle=60)
+    )
+    assert target.connect_retries == 3
+    assert target.connect_timeout == 30
+    assert target.connect_max_idle == 60
 
 
 # ---------------------------------------------------------------------------

@@ -54,7 +54,8 @@ _DATABRICKS_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.-]{1,253}$")
 # ``/sql/1.0/warehouses/abc123`` or ``/sql/protocolv1/o/0/abc``: a leading slash
 # is required, followed by permissive path characters (alphanumerics, ``/``,
 # ``.``, ``_``, ``-``). Rejects a missing leading slash, whitespace, quoting,
-# ``;``, backticks, and control characters. Length bound 1-512 after the slash.
+# ``;``, backticks, and control characters. Length bound: 1-511 chars after the
+# leading slash (512 total).
 _DATABRICKS_HTTP_PATH_RE = re.compile(r"^/[A-Za-z0-9/._-]{1,511}$")
 
 
