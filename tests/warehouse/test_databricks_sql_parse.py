@@ -1,5 +1,9 @@
 """Ungated ``sqlglot`` ``databricks``-dialect parse-guard over the SQL the
-:class:`DatabricksAdapter` emits (#224 US-003).
+:class:`DatabricksAdapter` emits (#224 US-003 + US-004).
+
+Covers ``sample_rows`` (COUNT sizing + sample SELECT), ``materialise_sample``
+(COUNT sizing + ``CREATE TEMPORARY TABLE ... AS ...`` CTAS), and ``run_test_sql``
+(the ``COUNT(*)`` wrap + the per-row ``to_json(struct(*))`` LIMIT capture query).
 
 This is the adapter-side analogue of the prune-compiler parse-guard
 (``tests/prune/test_compiler_databricks.py``, #223): it captures the SQL the
@@ -68,6 +72,11 @@ class _RecordingDatabricksConnection(FakeDatabricksConnection):
         return super()._consume_execute(sql)
 
 
+_CTAS_QUERY = r"CREATE TEMPORARY TABLE"
+_FAILURES_QUERY = r"COUNT\(\*\) AS failures"
+_CAPTURE_QUERY = r"to_json\(struct"
+
+
 def _emitted_sample_sqls(
     table: TableRef,
     *,
@@ -80,6 +89,41 @@ def _emitted_sample_sqls(
     conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
     adapter = DatabricksAdapter(connection=conn)
     adapter.sample_rows(table, 100, partition_filter=partition_filter)
+    return conn.executed
+
+
+def _emitted_materialise_sqls(
+    table: TableRef,
+    *,
+    partition_filter: PartitionFilter | None = None,
+) -> list[str]:
+    """Drive ``materialise_sample`` once and return the exact SQL it executed
+    (the COUNT sizing query + the ``CREATE TEMPORARY TABLE ... AS ...`` CTAS)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    adapter = DatabricksAdapter(connection=conn)
+    adapter.materialise_sample(table, 100, partition_filter=partition_filter)
+    return conn.executed
+
+
+def _emitted_run_test_sqls(*, capture_failures: int) -> list[str]:
+    """Drive ``run_test_sql`` once and return the exact SQL it executed (the
+    ``COUNT(*)`` wrap, plus the per-row ``to_json(struct(*))`` LIMIT capture
+    query when ``capture_failures > 0``)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_FAILURES_QUERY, returns=[(0,)], description=[("failures",)])
+    if capture_failures > 0:
+        conn.expect_execute(
+            matching=_CAPTURE_QUERY,
+            returns=[],
+            description=[("failure_row",)],
+        )
+    adapter = DatabricksAdapter(connection=conn)
+    adapter.run_test_sql(
+        "SELECT `id` FROM `main`.`sales`.`orders` WHERE `id` IS NULL",
+        capture_failures=capture_failures,
+    )
     return conn.executed
 
 
@@ -131,6 +175,52 @@ def test_every_emitted_statement_parses_under_databricks_dialect(
     """
     statements = _emitted_sample_sqls(table, partition_filter=partition_filter)
     assert len(statements) == 2  # COUNT sizing query + the sample SELECT
+    for sql in statements:
+        parsed = sqlglot.parse_one(sql, dialect="databricks")
+        assert parsed is not None
+
+
+@pytest.mark.parametrize(
+    ("table", "partition_filter"),
+    [(t, pf) for _id, t, pf in _PARSE_CASES],
+    ids=[c[0] for c in _PARSE_CASES],
+)
+def test_every_emitted_materialise_statement_parses_under_databricks_dialect(
+    table: TableRef,
+    partition_filter: PartitionFilter | None,
+) -> None:
+    """Every statement ``materialise_sample`` emits (COUNT sizing + the
+    ``CREATE TEMPORARY TABLE <qualified temp> AS <sample body>`` CTAS) must parse
+    under sqlglot's ``databricks`` dialect.
+
+    Certifies the CTAS SHAPE only — whether Databricks *accepts* a QUALIFIED
+    temporary-table name and persists the session is a **#226 live-cert item**
+    (sqlglot parses SQL, it does not run it).
+    """
+    statements = _emitted_materialise_sqls(table, partition_filter=partition_filter)
+    assert len(statements) == 2  # COUNT sizing query + the CTAS
+    assert statements[1].startswith("CREATE TEMPORARY TABLE")
+    for sql in statements:
+        parsed = sqlglot.parse_one(sql, dialect="databricks")
+        assert parsed is not None
+
+
+@pytest.mark.parametrize("capture_failures", [0, 5], ids=["no_capture", "capture"])
+def test_every_emitted_run_test_sql_statement_parses_under_databricks_dialect(
+    capture_failures: int,
+) -> None:
+    """Every statement ``run_test_sql`` emits (the ``COUNT(*)`` wrap, plus the
+    per-row ``to_json(struct(*))`` LIMIT capture query) must parse under
+    sqlglot's ``databricks`` dialect.
+
+    Certifies the wrap / capture SHAPE only — the per-row ``to_json`` JSON-string
+    marshalling is a **#226 live-cert item**.
+    """
+    statements = _emitted_run_test_sqls(capture_failures=capture_failures)
+    assert len(statements) == (2 if capture_failures > 0 else 1)
+    assert statements[0].startswith("SELECT COUNT(*) AS failures")
+    if capture_failures > 0:
+        assert "to_json(struct(*))" in statements[1]
     for sql in statements:
         parsed = sqlglot.parse_one(sql, dialect="databricks")
         assert parsed is not None
