@@ -14,8 +14,8 @@ Snowflake). Tests pin the issue ACs:
    ``tests/warehouse/test_databricks_adapter.py``: ``sample_rows`` +
    ``get_row_count`` (#224 US-003), ``materialise_sample`` + ``run_test_sql``
    (#224 US-004), ``column_stats`` (#224 US-005).
-5. ``materialise_sample`` / ``estimate_query_bytes`` / ``run_stats_query``
-   inherit the ABC typed degrade.
+5. ``estimate_query_bytes`` / ``run_stats_query`` inherit the ABC typed degrade
+   (``materialise_sample`` graduated to a real implementation in #224 US-004).
 6. SDK type-ignores are confined to ``_databricks_client.py`` — pinned by
    ``tests/warehouse/test_databricks_client_confinement.py``, not here.
 """

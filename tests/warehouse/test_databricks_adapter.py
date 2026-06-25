@@ -926,6 +926,25 @@ def test_materialise_run_id_byte_identical_across_calls() -> None:
     assert names[0] == f"_sf_sample_{_expected_run_id()}"
 
 
+def test_materialise_run_id_varies_with_partition_filter() -> None:
+    """The ``partition_filter`` is threaded into the deterministic ``run_id``:
+    no-filter and two distinct filters yield three distinct temp-table names —
+    guarding against a Databricks-specific call dropping the filter arg."""
+    names: set[str] = set()
+    filters: list[PartitionFilter | None] = [
+        None,
+        PartitionFilter(column="dt", op=">=", value=date(2026, 1, 1)),
+        PartitionFilter(column="dt", op=">=", value=date(2026, 2, 1)),
+    ]
+    for pf in filters:
+        conn = _RecordingDatabricksConnection()
+        conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+        conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+        adapter = _make_adapter(conn)
+        names.add(adapter.materialise_sample(_TABLE, 100, partition_filter=pf).name)
+    assert len(names) == 3
+
+
 def test_materialise_rejects_non_positive_n() -> None:
     """``n <= 0`` → ``ValueError`` before any warehouse contact."""
     conn = FakeDatabricksConnection()  # no expectations → any query raises loudly

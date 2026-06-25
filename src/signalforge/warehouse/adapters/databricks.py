@@ -1,13 +1,14 @@
-"""Databricks adapter — v0.x skeleton (issue #221; epic #219).
+"""Databricks adapter — deterministic sampling surface (issue #224; epic #219).
 
-The skeleton exists to validate the warehouse-agnostic seam — Architectural
-Commitment #3 of ``CLAUDE.md`` — through a *fourth* concrete adapter code path
-(after BigQuery, the Postgres stub, and the Snowflake adapter). Wiring the ABC +
-factory seam through Databricks right now surfaces any remaining BigQuery-ism
-here rather than during the real implementation (#223 compiler, #224 sampling).
-It mirrors the Snowflake skeleton (#119) closely.
+Implements the warehouse-agnostic seam — Architectural Commitment #3 of
+``CLAUDE.md`` — through a *fourth* concrete adapter code path (after BigQuery,
+the Postgres stub, and the Snowflake adapter), mirroring the Snowflake adapter
+(#119 skeleton, #122 sampling) closely. The #221 skeleton wired the ABC +
+factory seam and #223 landed the prune-compiler dialect; #224 (this surface)
+lands the first real warehouse I/O. Live validity against a Databricks SQL
+warehouse is certified in #226.
 
-Scope (deliberately minimal):
+Surface:
 
 * :meth:`__init__` captures connection params (``host`` / ``http_path`` /
   ``token`` / ``catalog`` / ``schema``) plus the forward-compat OAuth-M2M auth
@@ -104,13 +105,9 @@ _LOGGER = logging.getLogger("signalforge.warehouse")
 # across vendors (mirrors the Snowflake adapter's same re-declaration).
 _LARGE_TABLE_THRESHOLD: int = 100_000_000
 
-_SKELETON_REMEDIATION = (
-    "DatabricksAdapter is a v0.x skeleton (issue #219) — full implementation pending."
-)
-
 
 class DatabricksAdapter(WarehouseAdapter):
-    """:class:`WarehouseAdapter` for Databricks SQL profiles (v0.x skeleton).
+    """:class:`WarehouseAdapter` for Databricks SQL profiles.
 
     Issue #224 (US-003) lands the first real warehouse I/O: :meth:`sample_rows`
     (deterministic inline-predicate hash-mod), :meth:`get_row_count`
@@ -752,7 +749,16 @@ class DatabricksAdapter(WarehouseAdapter):
         * ``count`` — ``COUNT(<col>)`` (NON-null count, matching BigQuery).
         * ``distinct`` — ``COUNT(DISTINCT <col>)``.
         * ``nulls`` — ``COUNT_IF(<col> IS NULL)`` (Spark's ``COUNTIF`` analogue).
-        * ``min`` / ``max`` — ``MIN(<col>)`` / ``MAX(<col>)``.
+        * ``min`` / ``max`` — ``MIN(<col>)`` / ``MAX(<col>)``. **Known
+          divergence from BigQuery (DEC-011 follow-up):** BigQuery skips MIN/MAX
+          and sets ``min = max = None`` for complex types (ARRAY / STRUCT / MAP /
+          JSON / BINARY / GEOGRAPHY), per the :class:`ColumnStats` contract. This
+          adapter emits MIN/MAX unconditionally because ``data_type`` is derived
+          inline (``typeof``) in the same single aggregate, so the column's type
+          is not known before the query is built. On a complex column Spark
+          either raises (mapped → :class:`QuerySyntaxError`) or returns a
+          non-scalar; honouring the skip-for-complex contract needs a type
+          pre-fetch and is a **#226 live-cert item** (see the note below).
         * ``data_type`` — ``MAX(typeof(<col>))`` (Spark's DDL type string; an
           empty table yields ``NULL`` → coerced to ``""``, matching BigQuery's
           "type unknown → empty string" precedent).
@@ -770,7 +776,11 @@ class DatabricksAdapter(WarehouseAdapter):
 
             Real-Spark ``typeof`` / ``MIN`` / ``MAX`` semantics against a live
             Unity Catalog table are a **#226 live-cert item** — certified here
-            against the fake + the ``sqlglot`` parse-guard only.
+            against the fake + the ``sqlglot`` parse-guard only. The
+            complex-type MIN/MAX divergence noted above (BigQuery skips MIN/MAX
+            for ARRAY / STRUCT / MAP / JSON / BINARY / GEOGRAPHY; this adapter
+            emits them unconditionally) is part of that #226 live cert — the
+            scalar-column path is the supported surface for v0.x.
         """
         validate_identifier("column", column)
 
@@ -779,6 +789,9 @@ class DatabricksAdapter(WarehouseAdapter):
             f"SELECT COUNT({quoted_col}) AS non_null_count, "
             f"COUNT(DISTINCT {quoted_col}) AS distinct_count, "
             f"COUNT_IF({quoted_col} IS NULL) AS null_count, "
+            # MIN/MAX are emitted unconditionally; complex-typed columns
+            # (ARRAY/STRUCT/MAP/JSON/BINARY/GEOGRAPHY) diverge from BigQuery's
+            # skip-and-None contract — a #226 live-cert item (see docstring).
             f"MIN({quoted_col}) AS min_value, "
             f"MAX({quoted_col}) AS max_value, "
             f"MAX(typeof({quoted_col})) AS data_type "
