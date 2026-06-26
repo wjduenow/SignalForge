@@ -1,0 +1,16 @@
+== Optimized Logical Plan ==
+Aggregate [region#3], [region#3, count(1) AS cnt#27L], Statistics(sizeInBytes=64.0 B, rowCount=2)
++- Project [region#3], Statistics(sizeInBytes=4.0 MiB, rowCount=1.00E+6)
+   +- Filter (isnotnull(trip_id#1) AND (trip_id#1 > 0)), Statistics(sizeInBytes=4.0 MiB, rowCount=1.00E+6)
+      +- Relation workspace.default.trips[trip_id#1,region#3,start_time#4] parquet, Statistics(sizeInBytes=128.0 MiB, rowCount=1.00E+6)
+
+== Physical Plan ==
+*(2) HashAggregate(keys=[region#3], functions=[count(1)], output=[region#3, cnt#27L])
++- AQEShuffleRead coalesced
+   +- ShuffleQueryStage 0
+      +- Exchange hashpartitioning(region#3, 200), ENSURE_REQUIREMENTS, [plan_id=42]
+         +- *(1) HashAggregate(keys=[region#3], functions=[partial_count(1)], output=[region#3, count#31L])
+            +- *(1) Project [region#3]
+               +- *(1) Filter (isnotnull(trip_id#1) AND (trip_id#1 > 0))
+                  +- *(1) ColumnarToRow
+                     +- FileScan parquet workspace.default.trips[trip_id#1,region#3,start_time#4] Batched: true, DataFilters: [isnotnull(trip_id#1), (trip_id#1 > 0)], Format: Parquet, Location: PreparedDeltaFileIndex(1 paths)[dbfs:/...], PartitionFilters: [], PushedFilters: [IsNotNull(trip_id), GreaterThan(trip_id,0)], ReadSchema: struct<trip_id:int,region:string,start_time:timestamp>, Statistics(sizeInBytes=128.0 MiB, rowCount=1.00E+6)
