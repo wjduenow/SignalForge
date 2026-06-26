@@ -56,9 +56,15 @@ with sql.connect(
 PY
 ```
 
-For the no-stats variant, run the same one-liner against a table that has NOT
-had `ANALYZE TABLE` run (or a fresh external table) — every node shows
-`Statistics(sizeInBytes=8.0 EiB)` — and write it to `explain_cost_no_stats.txt`.
+For the no-stats variant, capture a plan whose leaf shows
+`Statistics(sizeInBytes=8.0 EiB)` and write it to `explain_cost_no_stats.txt`.
+Note: an un-`ANALYZE`d **Delta** table usually will NOT reproduce this — Delta
+carries leaf size in its transaction log regardless of `ANALYZE TABLE`, so its
+leaf scan shows a real size. The all-`8.0 EiB` (Spark `defaultSizeInBytes` =
+`Long.MaxValue`) shape genuinely arises for a **non-Delta / external table** or
+certain **views / federated sources** that have no stats — use one of those to
+reproduce. (`ANALYZE TABLE … COMPUTE STATISTICS` is the right operator fix for
+the non-Delta statless case, which is what the degrade `detail` hints at.)
 
 After swapping in a real capture, update the asserted byte count in
 `tests/warehouse/test_databricks_estimate.py` to the leaf scan's real

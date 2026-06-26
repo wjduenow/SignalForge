@@ -61,6 +61,18 @@ def test_gib_conversion() -> None:
     assert _parse_explain_cost_bytes(_stats("2.0 GiB")) == 2 * 1024**3
 
 
+def test_tib_conversion() -> None:
+    # TiB (power 4) — a distinct regex alternation arm + _SIZE_UNIT_POWERS key
+    # that no other test exercises (a dropped `TiB` arm would slip line coverage).
+    assert _parse_explain_cost_bytes(_stats("3.0 TiB")) == 3 * 1024**4
+
+
+def test_pib_conversion() -> None:
+    # PiB (power 5) — likewise a distinct arm/key; EiB is only reachable via the
+    # no-stats sentinel, so PiB is the largest unit pinned as a real estimate.
+    assert _parse_explain_cost_bytes(_stats("2.0 PiB")) == 2 * 1024**5
+
+
 def test_decimal_value() -> None:
     """A decimal mantissa (``12.3 MiB``) truncates to int after scaling."""
     assert _parse_explain_cost_bytes(_stats("12.3 MiB")) == int(12.3 * 1024**2)
@@ -300,6 +312,32 @@ def test_estimate_query_bytes_empty_result_raises_unavailable() -> None:
 
     with pytest.raises(EstimateUnavailableError):
         adapter.estimate_query_bytes("SELECT 1")
+
+
+def test_estimate_query_bytes_reraises_unmapped_connector_exception() -> None:
+    """An exception ``map_databricks_exception`` does NOT recognise passes
+    through ``_execute_scalar`` unchanged (the ``mapped is exc`` → bare ``raise``
+    arm) — the original object surfaces, NOT a wrapped ``WarehouseError``."""
+    original = RuntimeError("transient cursor failure")
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_EXPLAIN_COST_QUERY, returns=original)
+    adapter = DatabricksAdapter(connection=conn)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        adapter.estimate_query_bytes("SELECT 1")
+    assert excinfo.value is original
+
+
+def test_estimate_query_bytes_normalises_dict_row_to_first_cell() -> None:
+    """A dict-cursor row (``{"plan": "<text>"}``) has its first VALUE fed to the
+    parser, not the whole mapping — otherwise the parser would see a dict and
+    trip a false degrade."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_EXPLAIN_COST_QUERY, returns=[{"plan": _REALISTIC_PLAN}])
+    adapter = DatabricksAdapter(connection=conn)
+
+    assert adapter.estimate_query_bytes("SELECT 1") == int(12.0 * 1024**2)
+    conn.assert_all_expectations_met()
 
 
 # ===========================================================================

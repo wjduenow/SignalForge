@@ -205,6 +205,9 @@ def _parse_explain_cost_bytes(cell: object) -> int:
     for match in _SIZE_IN_BYTES_RE.finditer(cell):
         raw_num = match.group("num")
         value = float(raw_num)
+        # The ``num`` group cannot capture a leading ``-``, so ``value < 0`` is
+        # defensive (unreachable via the public parser); ``isfinite`` IS reached
+        # by an overflowing scientific literal (e.g. ``1E+400`` → ``inf``).
         if not math.isfinite(value) or value < 0:
             raise EstimateUnavailableError(
                 detail=f"EXPLAIN COST plan carried a non-finite or negative sizeInBytes ({raw_num})"
