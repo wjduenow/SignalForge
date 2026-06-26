@@ -18,6 +18,7 @@ The parser needs no connection — it is a module-level pure function.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -299,3 +300,49 @@ def test_estimate_query_bytes_empty_result_raises_unavailable() -> None:
 
     with pytest.raises(EstimateUnavailableError):
         adapter.estimate_query_bytes("SELECT 1")
+
+
+# ===========================================================================
+# Committed-fixture parser pin (US-005, DEC-010 / DEC-007 of issue #225).
+#
+# The inline snippets above pin the parser against *synthetic* plan text. These
+# two tests pin it against committed FILE fixtures shaped like real Databricks
+# ``EXPLAIN COST`` output (an Optimized Logical Plan + Physical Plan over a
+# parquet ``Relation`` leaf). The fixtures are DOCUMENTED-FORMAT PLACEHOLDERS —
+# a maintainer captures the real plan from Databricks Free Edition (the regen
+# command lives in ``tests/fixtures/warehouse/databricks/README.md``) and swaps
+# them in; live end-to-end validity is certified by issue #226. See that README
+# for the capture one-liner + the "TO BE REPLACED" note.
+#
+# Engineered determinism: ``explain_cost_sample.txt`` bakes its leaf-scan node at
+# ``Statistics(sizeInBytes=128.0 MiB)`` — the MAX node — so the parser returns
+# exactly ``int(128.0 * 1024**2)``, NEVER whatever the parser happens to compute.
+# ===========================================================================
+
+_DATABRICKS_FIXTURE_DIR = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "warehouse" / "databricks"
+)
+
+# The leaf-scan ``sizeInBytes`` baked into ``explain_cost_sample.txt`` (128.0 MiB).
+_SAMPLE_FIXTURE_LEAF_BYTES = int(128.0 * 1024**2)
+
+
+def test_explain_cost_sample_fixture_parses_to_known_leaf_scan_bytes() -> None:
+    """The committed ``explain_cost_sample.txt`` (a multi-node Optimized Logical
+    Plan + Physical Plan whose parquet ``Relation`` leaf carries
+    ``Statistics(sizeInBytes=128.0 MiB)``) parses to exactly the leaf-scan byte
+    count — the MAX across nodes (DEC-003). A leading provenance line / blank
+    lines must NOT perturb the extracted max."""
+    plan = (_DATABRICKS_FIXTURE_DIR / "explain_cost_sample.txt").read_text()
+    assert _parse_explain_cost_bytes(plan) == _SAMPLE_FIXTURE_LEAF_BYTES
+
+
+def test_explain_cost_no_stats_fixture_raises_unavailable() -> None:
+    """The committed ``explain_cost_no_stats.txt`` (every node showing Spark's
+    ``8.0 EiB`` no-CBO-statistics sentinel) raises
+    :class:`EstimateUnavailableError`, never a fabricated 9-exabyte figure
+    (DEC-004). The ``detail`` names ``ANALYZE TABLE`` as the remediation."""
+    plan = (_DATABRICKS_FIXTURE_DIR / "explain_cost_no_stats.txt").read_text()
+    with pytest.raises(EstimateUnavailableError) as excinfo:
+        _parse_explain_cost_bytes(plan)
+    assert "ANALYZE TABLE" in excinfo.value.detail
