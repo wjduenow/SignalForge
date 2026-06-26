@@ -68,6 +68,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import re
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -76,6 +78,7 @@ from signalforge.warehouse._sample_sql import render_sample_select
 from signalforge.warehouse._sql_safety import validate_identifier, validate_test_sql
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
+    EstimateUnavailableError,
     MaterialisationFailedError,
     SamplingRequiresPartitionFilterError,
     UnknownTableSizeError,
@@ -104,6 +107,119 @@ _LOGGER = logging.getLogger("signalforge.warehouse")
 # adapter — the value is the load-bearing contract: identical sizing behaviour
 # across vendors (mirrors the Snowflake adapter's same re-declaration).
 _LARGE_TABLE_THRESHOLD: int = 100_000_000
+
+# Spark's ``spark.sql.defaultSizeInBytes`` (= ``Long.MaxValue`` ≈ ``8.0 EiB``)
+# is the size a plan node carries when it has NO cost-based-optimizer statistics
+# (DEC-004 of issue #225). ``8 * 1024**6`` == ``2**63`` == ``9223372036854775808``;
+# Spark's ``Utils.bytesToString`` formats both ``Long.MaxValue`` and ``2**63`` as
+# ``8.0 EiB`` (it rounds the EiB division to one decimal), so a parsed ``8.0 EiB``
+# converts to exactly this sentinel and trips the ``>=`` check below. Reporting a
+# ~9-exabyte "cost" would conflate "no table statistics" with "a genuinely huge
+# scan" — so a max at-or-above this value routes to ``EstimateUnavailableError``.
+_SPARK_DEFAULT_SIZE_SENTINEL_BYTES: int = 8 * 1024**6
+
+# 1024-based binary unit → power-of-1024 exponent. ``EXPLAIN COST`` renders
+# ``Statistics(sizeInBytes=<num> <unit>)`` with these human-readable units.
+_SIZE_UNIT_POWERS: dict[str, int] = {
+    "B": 0,
+    "KiB": 1,
+    "MiB": 2,
+    "GiB": 3,
+    "TiB": 4,
+    "PiB": 5,
+    "EiB": 6,
+}
+
+# Match every ``sizeInBytes=<num> <unit>`` occurrence in the plan text. ``<num>``
+# accepts an integer (``512``), a decimal (``12.3``), or scientific notation
+# (``5.0E+2`` / ``5.00E+5``); ``<unit>`` is one of the binary units above. The
+# multi-char units are listed before the bare ``B`` so the alternation prefers the
+# longest match (regex alternation is ordered left-to-right at each position).
+_SIZE_IN_BYTES_RE = re.compile(
+    r"sizeInBytes=\s*"
+    r"(?P<num>\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*"
+    r"(?P<unit>KiB|MiB|GiB|TiB|PiB|EiB|B)"
+)
+
+
+def _parse_explain_cost_bytes(cell: object) -> int:
+    """Extract the planner's estimated-bytes figure from a Spark/Databricks
+    ``EXPLAIN COST <sql>`` result cell (DEC-002 / DEC-003 / DEC-004 / DEC-005 /
+    DEC-006 / DEC-007 of issue #225).
+
+    ``EXPLAIN COST <sql>`` returns a single cell carrying the multi-line text of
+    the optimized logical plan. Each plan node is annotated with cost-based
+    statistics of the form ``Statistics(sizeInBytes=<num> <unit>[, rowCount=...])``
+    — ``<unit>`` is a 1024-based binary unit (``B`` / ``KiB`` / ``MiB`` / ``GiB`` /
+    ``TiB`` / ``PiB`` / ``EiB``) and ``<num>`` may be an integer, decimal, or
+    scientific notation. This is the Databricks analogue of Snowflake's
+    ``GlobalStats.bytesAssigned`` (:func:`_parse_explain_json_bytes`) — but Spark
+    emits plan *text*, not JSON.
+
+    The function takes the MAX ``sizeInBytes`` across all plan nodes (DEC-003).
+    The maximum is almost always the leaf table scan — the "bytes scanned" cost
+    proxy, the closest analogue to BigQuery's ``total_bytes_processed``. The root
+    (top of the optimized logical plan) reflects *output* size, which understates
+    scan cost (tiny for a ``SELECT COUNT(*)``); leaf-node string matching is
+    fragile. The no-stats sentinel (below) propagates from a stats-less leaf up
+    through its ancestors, so ``max == sentinel`` cleanly signals "the scan has no
+    statistics."
+
+    Pure: no connection, no warehouse call, no logging.
+
+    Every failure to extract a usable byte count raises
+    :class:`EstimateUnavailableError` with an operator-useful ``detail`` (DEC-006 —
+    the existing error is reused; never fabricate a ``0``, which would silently
+    report a ``$0`` cost on a future plan-shape change). Five failure shapes route
+    here:
+
+    * ``cell`` is not a ``str`` (e.g. ``None`` or a ``list`` — a defensive guard
+      for a malformed connector return).
+    * No ``Statistics(sizeInBytes=...)`` matches at all (DEC-005 — a plan-shape
+      change across Databricks runtime versions, or a metadata-only query).
+    * A parsed value is negative or non-finite (a pathological scientific-notation
+      overflow such as ``1E+400`` → ``inf``).
+    * The computed max is at-or-above the Spark ``8.0 EiB`` no-stats sentinel
+      (DEC-004) — the plan node had no CBO statistics; the ``detail`` names
+      ``ANALYZE TABLE`` as the remediation.
+
+    :param cell: the ``EXPLAIN COST`` result cell — the optimized-logical-plan
+        text ``str``.
+    :returns: the maximum ``sizeInBytes`` across all plan nodes, in bytes —
+        a non-negative ``int`` strictly below the no-stats sentinel.
+    :raises EstimateUnavailableError: on a non-``str`` cell, a plan carrying no
+        ``sizeInBytes`` statistics, a negative/non-finite parsed value, or a
+        max at-or-above the Spark default-size (no-stats) sentinel.
+    """
+    if not isinstance(cell, str):
+        raise EstimateUnavailableError(
+            detail=f"EXPLAIN COST cell was not plan text (got {type(cell).__name__})"
+        )
+
+    max_bytes: int | None = None
+    for match in _SIZE_IN_BYTES_RE.finditer(cell):
+        raw_num = match.group("num")
+        value = float(raw_num)
+        if not math.isfinite(value) or value < 0:
+            raise EstimateUnavailableError(
+                detail=f"EXPLAIN COST plan carried a non-finite or negative sizeInBytes ({raw_num})"
+            )
+        node_bytes = int(value * 1024 ** _SIZE_UNIT_POWERS[match.group("unit")])
+        if max_bytes is None or node_bytes > max_bytes:
+            max_bytes = node_bytes
+
+    if max_bytes is None:
+        raise EstimateUnavailableError(detail="EXPLAIN COST plan carried no sizeInBytes statistics")
+
+    if max_bytes >= _SPARK_DEFAULT_SIZE_SENTINEL_BYTES:
+        raise EstimateUnavailableError(
+            detail=(
+                "EXPLAIN COST plan reported the Spark default size (no table "
+                "statistics; run ANALYZE TABLE <table> COMPUTE STATISTICS)"
+            )
+        )
+
+    return max_bytes
 
 
 class DatabricksAdapter(WarehouseAdapter):
