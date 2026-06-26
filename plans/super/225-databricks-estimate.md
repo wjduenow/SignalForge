@@ -5,7 +5,7 @@
 - **Ticket:** [#225](https://github.com/wjduenow/SignalForge/issues/225) — `Databricks: estimate_query_bytes (degrade-first, then EXPLAIN COST)`
 - **Epic:** #219 (Databricks adapter). Depends on #221 (skeleton). Models on Snowflake estimate #123 (degrade) + #130 (EXPLAIN).
 - **Milestone:** v0.x (Databricks adapter epic #219)
-- **Phase:** published
+- **Phase:** devolved
 - **Branch:** `feature/225-databricks-estimate` (based on `dev`)
 - **Sessions:** 1 (2026-06-25)
 
@@ -225,4 +225,9 @@ Pinned by **synthetic inline table-driven cases** (US-001) AND a **maintainer-ca
 
 ## Beads Manifest
 
-_(filled on devolve)_
+- **Epic:** `bd_1-scaffolding-90q`
+- **Tasks:** `bd_1-scaffolding-90q.1` … `.8` (US-001…US-006 + Quality Gate + Patterns & Memory)
+- **Dependency chain:** `.1 → .2 → .3 → .4 → .6`; `.1 → .5`; Quality Gate `.7 ← {.5, .6}`; Patterns & Memory `.8 ← .7`
+- **Ready now:** `bd_1-scaffolding-90q.1` (US-001 — pure parser)
+- **Branch:** `feature/225-databricks-estimate`
+- **Note:** US-005 (`.5`) carries a manual maintainer step — capture a real `EXPLAIN COST` plan from Databricks Free Edition and commit it as the fixture (the worker provides the capture command + a faithful placeholder so CI stays green). Live end-to-end validity is certified by #226.
