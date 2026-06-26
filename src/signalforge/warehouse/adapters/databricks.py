@@ -50,9 +50,14 @@ Surface:
   :class:`NotImplementedError` stub with a single aggregate query (count /
   distinct / nulls / min / max / data_type). Databricks ships this AHEAD of
   Snowflake (which stubs it); the Snowflake-parity decision is GitHub issue #258.
-* :meth:`estimate_query_bytes` / :meth:`run_stats_query` inherit the ABC typed
-  degrade (``EstimateNotSupportedError`` / ``StatsQueryNotSupportedError``) — a
-  clean, operator-actionable signal until #225 lands.
+* :meth:`estimate_query_bytes` is implemented (#225, US-002) — it runs
+  ``EXPLAIN COST <sql>`` and parses the MAX Spark CBO
+  ``Statistics(sizeInBytes=...)`` across plan nodes via
+  :func:`_parse_explain_cost_bytes`, overriding the ABC
+  ``EstimateNotSupportedError`` degrade. Live validity is certified in #226.
+* :meth:`run_stats_query` inherits the ABC typed degrade
+  (``StatsQueryNotSupportedError``) — a clean, operator-actionable signal (out
+  of scope for #225).
 * :meth:`WarehouseAdapter.from_profile` dispatches ``profile.type ==
   "databricks"`` here so an operator with a Databricks profile sees a typed
   "v0.x pending" ``NotImplementedError`` rather than the v0.1
@@ -233,9 +238,10 @@ class DatabricksAdapter(WarehouseAdapter):
     qualified ``CREATE TEMPORARY TABLE``) and :meth:`run_test_sql` (``COUNT(*)``
     failing-rows wrap + per-row ``to_json`` capture). US-005 adds
     :meth:`column_stats` (single aggregate-only profiling query) — shipped AHEAD
-    of Snowflake, whose parity is tracked as issue #258. :meth:`estimate_query_bytes` /
-    :meth:`run_stats_query` inherit their typed ``*NotSupportedError`` degrade
-    until #225 lands.
+    of Snowflake, whose parity is tracked as issue #258. :meth:`estimate_query_bytes`
+    is implemented (#225) via ``EXPLAIN COST`` (parse Spark CBO ``sizeInBytes``);
+    :meth:`run_stats_query` inherits its typed ``StatsQueryNotSupportedError``
+    degrade (out of scope for #225).
     """
 
     def __init__(
@@ -1021,6 +1027,91 @@ class DatabricksAdapter(WarehouseAdapter):
             sample_failures=sample_failures,
             row_schema=None,
         )
+
+    # ------------------------------------------------------------------
+    # estimate_query_bytes — DEC-002 / DEC-008 / DEC-009 / DEC-012 of #225.
+    # ------------------------------------------------------------------
+
+    def _execute_scalar(self, sql: str) -> Any:
+        """Run ``sql`` and return the first row's first cell (DEC-009).
+
+        A no-:class:`TableRef`-in-scope sibling of :meth:`_execute` — the
+        ``--estimate`` path has only the caller-supplied SQL, no table context.
+        Keeps ONE cursor-handling path per operation while passing an empty
+        ``context`` to :func:`map_databricks_exception`: a mapped typed error is
+        re-raised ``from`` the original; an unchanged passthrough re-raises the
+        original.
+
+        Closes the cursor in a ``finally`` on both the success and failure paths
+        (the #224 cursor-leak convention) so repeated estimate calls on the
+        long-lived connection don't leak server-side handles.
+
+        Returns ``None`` when the query produced no rows (the caller decides
+        whether that is a degrade — :meth:`estimate_query_bytes` treats an empty
+        result as an unparseable estimate).
+        """
+        from signalforge.warehouse.adapters._databricks_client import map_databricks_exception
+
+        cursor = self._get_connection().cursor()
+        try:
+            try:
+                cursor.execute(sql)
+                rows = list(cursor.fetchall())
+            except Exception as exc:
+                mapped = map_databricks_exception(exc, context={})
+                if mapped is exc:
+                    raise
+                raise mapped from exc
+        finally:
+            cursor.close()
+        if not rows:
+            return None
+        first = rows[0]
+        # Normalise a row to its first cell. A dict-cursor-style connection hands
+        # back mapping rows (e.g. {"plan": "<text>"}); returning the whole dict
+        # would feed the ROW (not the plan text) to the parser and trip a false
+        # degrade, so extract the first value for mappings too.
+        if isinstance(first, dict):
+            return next(iter(first.values()), None)
+        return first[0] if isinstance(first, (list, tuple)) else first
+
+    def estimate_query_bytes(self, sql: str) -> int:
+        """Estimate bytes Databricks/Spark would scan for ``sql`` via
+        ``EXPLAIN COST`` (DEC-002 / DEC-008 / DEC-009 / DEC-012 of issue #225).
+
+        Overrides the ABC default (which raises
+        :class:`EstimateNotSupportedError`). Mirrors
+        :meth:`SnowflakeAdapter.estimate_query_bytes`'s shape:
+
+        1. Validate the caller-supplied SQL via
+           :func:`signalforge.warehouse._sql_safety.validate_test_sql` FIRST
+           (no ``;``, no ``--`` comments, balanced parens). The ``EXPLAIN COST ``
+           prefix is trusted constant text prepended AFTER validation (DEC-008),
+           so it never trips the user-SQL rejects.
+        2. Run ``EXPLAIN COST <validated-sql>`` through the shared
+           cursor-handling helper (:meth:`_execute_scalar`); SDK failures route
+           through :func:`map_databricks_exception` (DEC-009). The ``--estimate``
+           engine catches the mapped :class:`WarehouseError` as a supplementary
+           failure and degrades to a price-only preview.
+        3. Hand the single-row / single-cell plan-text result to the pure
+           :func:`_parse_explain_cost_bytes` parser, which reads the MAX
+           ``Statistics(sizeInBytes=...)`` across plan nodes (DEC-002 / DEC-003).
+
+        An empty result (no rows) is an unparseable estimate →
+        :class:`EstimateUnavailableError` (NEVER a fabricated number / ``0``).
+
+        .. note::
+
+            ``EXPLAIN COST`` plan-text shape + ``sizeInBytes`` accuracy against a
+            live Databricks SQL warehouse is a **#226 live-cert item** — certified
+            here against the fake only, not live.
+        """
+        validate_test_sql(sql)
+
+        cell = self._execute_scalar(f"EXPLAIN COST {sql}")
+        if cell is None:
+            raise EstimateUnavailableError(detail="EXPLAIN COST returned no rows")
+        return _parse_explain_cost_bytes(cell)
 
 
 __all__ = ["DATABRICKS_DIALECT", "DatabricksAdapter"]
