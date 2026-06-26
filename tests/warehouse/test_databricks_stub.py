@@ -14,8 +14,10 @@ Snowflake). Tests pin the issue ACs:
    ``tests/warehouse/test_databricks_adapter.py``: ``sample_rows`` +
    ``get_row_count`` (#224 US-003), ``materialise_sample`` + ``run_test_sql``
    (#224 US-004), ``column_stats`` (#224 US-005).
-5. ``estimate_query_bytes`` / ``run_stats_query`` inherit the ABC typed degrade
-   (``materialise_sample`` graduated to a real implementation in #224 US-004).
+5. ``run_stats_query`` inherits the ABC typed degrade (``materialise_sample``
+   graduated to a real implementation in #224 US-004; ``estimate_query_bytes``
+   graduated to an ``EXPLAIN COST`` implementation in #225 US-002, covered in
+   ``tests/warehouse/test_databricks_estimate.py``).
 6. SDK type-ignores are confined to ``_databricks_client.py`` — pinned by
    ``tests/warehouse/test_databricks_client_confinement.py``, not here.
 """
@@ -29,7 +31,6 @@ import pytest
 
 from signalforge.warehouse import (
     DatabricksAdapter,
-    EstimateNotSupportedError,
     StatsQueryNotSupportedError,
 )
 from signalforge.warehouse.base import WarehouseAdapter
@@ -131,14 +132,10 @@ def test_init_stores_forward_compat_oauth_fields() -> None:
 
 # ---------------------------------------------------------------------------
 # Degrade-default ABC methods inherit their typed *NotSupportedError (AC-5)
-# (materialise_sample graduated to a real impl in #224 US-004)
+# (materialise_sample graduated to a real impl in #224 US-004;
+# estimate_query_bytes graduated to EXPLAIN COST in #225 US-002 — its impl is
+# covered in tests/warehouse/test_databricks_estimate.py)
 # ---------------------------------------------------------------------------
-
-
-def test_estimate_query_bytes_inherits_typed_degrade() -> None:
-    adapter = DatabricksAdapter()
-    with pytest.raises(EstimateNotSupportedError):
-        adapter.estimate_query_bytes("SELECT 1")
 
 
 def test_run_stats_query_inherits_typed_degrade() -> None:

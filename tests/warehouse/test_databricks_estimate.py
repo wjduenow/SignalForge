@@ -18,13 +18,21 @@ The parser needs no connection — it is a module-level pure function.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from signalforge.warehouse.adapters.databricks import (
     _SPARK_DEFAULT_SIZE_SENTINEL_BYTES,
+    DatabricksAdapter,
     _parse_explain_cost_bytes,
 )
-from signalforge.warehouse.errors import EstimateUnavailableError
+from signalforge.warehouse.errors import (
+    EstimateUnavailableError,
+    QuerySyntaxError,
+    TableNotFoundError,
+)
+from tests.warehouse._fake_databricks import FakeDatabricksConnection
 
 
 def _stats(size: str) -> str:
@@ -159,3 +167,135 @@ def test_list_cell_raises() -> None:
     """A ``list`` cell (malformed connector return) → raises."""
     with pytest.raises(EstimateUnavailableError):
         _parse_explain_cost_bytes(["not", "plan", "text"])
+
+
+# ===========================================================================
+# DatabricksAdapter.estimate_query_bytes override (US-002, DEC-002 / DEC-008 /
+# DEC-009 / DEC-012). These drive the real adapter through the injected
+# FakeDatabricksConnection (no live warehouse). The EXPLAIN COST plan-text
+# returned by the fake is a faithful synthetic optimized-logical-plan; the
+# byte assertion is engineered-deterministic against a known leaf sizeInBytes.
+# ===========================================================================
+
+_EXPLAIN_COST_QUERY = r"^EXPLAIN COST"
+
+# A faithful synthetic ``EXPLAIN COST`` optimized-logical-plan whose leaf scan
+# carries Statistics(sizeInBytes=12.0 MiB) — the MAX node, so the parser
+# returns exactly that.
+_REALISTIC_PLAN = (
+    "== Optimized Logical Plan ==\n"
+    "Aggregate [region#3], [region#3, count(1) AS cnt#10L], "
+    "Statistics(sizeInBytes=48.0 B, rowCount=2)\n"
+    "+- Project [region#3], Statistics(sizeInBytes=3.0 MiB, rowCount=5.00E+5)\n"
+    "   +- Relation spark_catalog.default.trips[id#1,region#3] parquet, "
+    "Statistics(sizeInBytes=12.0 MiB, rowCount=1.00E+6)\n"
+)
+
+
+class _RecordingDatabricksConnection(FakeDatabricksConnection):
+    """A :class:`FakeDatabricksConnection` that records every executed SQL so a
+    test can assert the exact statement the adapter dispatched."""
+
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.executed: list[str] = []
+
+    def _consume_execute(self, sql: str) -> tuple[list[Any], list[Any] | None]:  # type: ignore[override]
+        self.executed.append(sql)
+        return super()._consume_execute(sql)
+
+
+def test_estimate_query_bytes_happy_path_returns_leaf_scan_bytes() -> None:
+    """``EXPLAIN COST`` plan text → the MAX (leaf-scan) ``sizeInBytes`` =
+    12.0 MiB in bytes."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_EXPLAIN_COST_QUERY, returns=[(_REALISTIC_PLAN,)])
+    adapter = DatabricksAdapter(connection=conn)
+
+    assert adapter.estimate_query_bytes("SELECT 1") == int(12.0 * 1024**2)
+    conn.assert_all_expectations_met()
+
+
+def test_estimate_query_bytes_injection_guard_rejects_before_any_cursor() -> None:
+    """``validate_test_sql`` rejects a ``;``-bearing statement BEFORE any
+    ``EXPLAIN COST`` is dispatched — the fake records no execute."""
+    conn = _RecordingDatabricksConnection()
+    # No expectation queued: if the adapter reached the cursor it would raise
+    # AssertionError("unexpected query"), not the validation error.
+    adapter = DatabricksAdapter(connection=conn)
+
+    with pytest.raises(QuerySyntaxError):
+        adapter.estimate_query_bytes("SELECT 1; DROP TABLE x")
+
+    assert conn.executed == []
+
+
+def test_estimate_query_bytes_maps_connector_exception() -> None:
+    """An SDK error from ``EXPLAIN COST`` routes through
+    ``map_databricks_exception`` and surfaces as the mapped
+    :class:`WarehouseError` (chained ``from`` the original)."""
+    from databricks.sql import exc as dbe
+
+    err = dbe.ServerOperationError(  # type: ignore[attr-defined]
+        "[TABLE_OR_VIEW_NOT_FOUND] Table or view not found: main.sch.foo"
+    )
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_EXPLAIN_COST_QUERY, returns=err)
+    adapter = DatabricksAdapter(connection=conn)
+
+    with pytest.raises(TableNotFoundError) as excinfo:
+        adapter.estimate_query_bytes("SELECT 1")
+    assert excinfo.value.__cause__ is err
+
+
+def test_estimate_query_bytes_dispatches_explain_cost_prefix_with_verbatim_sql() -> None:
+    """The dispatched statement starts with ``EXPLAIN COST `` and embeds the
+    validated user SQL verbatim (DEC-008)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_EXPLAIN_COST_QUERY, returns=[(_REALISTIC_PLAN,)])
+    adapter = DatabricksAdapter(connection=conn)
+    user_sql = "SELECT `id` FROM `main`.`sales`.`orders` WHERE `id` IS NULL"
+
+    adapter.estimate_query_bytes(user_sql)
+
+    assert conn.executed == [f"EXPLAIN COST {user_sql}"]
+
+
+def test_estimate_query_bytes_closes_cursor_on_success() -> None:
+    """``_execute_scalar`` releases the cursor after a successful EXPLAIN COST."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_EXPLAIN_COST_QUERY, returns=[(_REALISTIC_PLAN,)])
+    adapter = DatabricksAdapter(connection=conn)
+
+    adapter.estimate_query_bytes("SELECT 1")
+
+    assert conn.cursors, "expected the adapter to open at least one cursor"
+    assert all(c.closed for c in conn.cursors)
+
+
+def test_estimate_query_bytes_closes_cursor_on_mapped_exception() -> None:
+    """The cursor is released even when EXPLAIN COST raises (the ``finally`` arm)."""
+    from databricks.sql import exc as dbe
+
+    err = dbe.ServerOperationError(  # type: ignore[attr-defined]
+        "[TABLE_OR_VIEW_NOT_FOUND] Table or view not found: main.sch.foo"
+    )
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_EXPLAIN_COST_QUERY, returns=err)
+    adapter = DatabricksAdapter(connection=conn)
+
+    with pytest.raises(TableNotFoundError):
+        adapter.estimate_query_bytes("SELECT 1")
+
+    assert conn.cursors and all(c.closed for c in conn.cursors)
+
+
+def test_estimate_query_bytes_empty_result_raises_unavailable() -> None:
+    """No rows from EXPLAIN COST → :class:`EstimateUnavailableError`, never a
+    fabricated 0."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_EXPLAIN_COST_QUERY, returns=[])
+    adapter = DatabricksAdapter(connection=conn)
+
+    with pytest.raises(EstimateUnavailableError):
+        adapter.estimate_query_bytes("SELECT 1")
