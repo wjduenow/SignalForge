@@ -137,6 +137,7 @@ _CRITERION_TEXT_PREVIEW_LEN: int = 60
 _ESTIMATE_SOURCE_LABELS: dict[str, str] = {
     "BigQueryAdapter": "BigQuery dryRun",
     "SnowflakeAdapter": "Snowflake EXPLAIN",
+    "DatabricksAdapter": "Databricks EXPLAIN COST",
 }
 """Human label for the warehouse primitive behind ``estimate_query_bytes``,
 keyed by concrete adapter class name. Unknown adapters fall back to a generic
