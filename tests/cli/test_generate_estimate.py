@@ -33,6 +33,7 @@ from signalforge.cli import main
 from signalforge.llm.errors import LLMAuthError
 from signalforge.warehouse import (
     BigQueryAdapter,
+    DatabricksAdapter,
     SnowflakeAdapter,
     WarehouseAdapter,
     WarehouseAuthError,
@@ -40,15 +41,24 @@ from signalforge.warehouse import (
 from tests.cli._factories import make_fake_dbt_project, make_manifest, make_model
 from tests.llm._fake import FakeAnthropicClient, FakeCountTokensResponse
 from tests.warehouse._fake import FakeBigQueryClient
+from tests.warehouse._fake_databricks import FakeDatabricksConnection
 from tests.warehouse._fake_snowflake import FakeSnowflakeConnection
 
 _SNOWFLAKE_FIXTURES: Path = (
     Path(__file__).resolve().parents[1] / "fixtures" / "warehouse" / "snowflake"
 )
 
+_DATABRICKS_FIXTURES: Path = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "warehouse" / "databricks"
+)
+
 
 def _load_snowflake_fixture(name: str) -> str:
     return (_SNOWFLAKE_FIXTURES / name).read_text(encoding="utf-8")
+
+
+def _load_databricks_fixture(name: str) -> str:
+    return (_DATABRICKS_FIXTURES / name).read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -467,6 +477,109 @@ def test_from_profile_dispatches_snowflake_to_snowflake_adapter() -> None:
     adapter = WarehouseAdapter.from_profile(profile)
 
     assert isinstance(adapter, SnowflakeAdapter)
+
+
+# ---------------------------------------------------------------------------
+# #225 US-004 — Databricks adapter reports a real EXPLAIN COST estimate
+# (happy) and degrades cleanly on a no-stats plan. Mirrors the Snowflake
+# pair above, Databricks-flavoured: the adapter runs ``EXPLAIN COST <sql>``
+# and parses the MAX Spark CBO ``Statistics(sizeInBytes=...)`` across plan
+# nodes (DEC-002/DEC-003 of #225); the no-stats ``8.0 EiB`` sentinel routes
+# through ``EstimateUnavailableError`` (DEC-004), the #36 DEC-005 conservative
+# degrade, and the renderer's ``<unavailable: ...>``.
+# ---------------------------------------------------------------------------
+
+
+def _make_databricks_adapter(fake_conn: FakeDatabricksConnection) -> DatabricksAdapter:
+    """Build a :class:`DatabricksAdapter` over a fake connection with dummy
+    (non-credential) profile params — the ``--estimate`` path only runs
+    ``EXPLAIN COST`` through the injected connection, so the host / http_path /
+    catalog / schema values are never dereferenced by the engine."""
+    return DatabricksAdapter(
+        connection=fake_conn,
+        host="dbc-fake.cloud.databricks.com",
+        http_path="/sql/1.0/warehouses/fakewh",
+        token="dapi-fake",
+        catalog="main",
+        schema="sales",
+    )
+
+
+def test_generate_estimate_databricks_adapter_reports_real_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#225 US-004: the full ``--estimate`` short-circuit reports a REAL
+    warehouse-bytes estimate when the adapter is a :class:`DatabricksAdapter`
+    wired to a fake connection returning an ``EXPLAIN COST`` plan whose MAX leaf
+    ``Statistics(sizeInBytes=...)`` is a known value.
+
+    The adapter runs ``EXPLAIN COST <sql>`` and parses the MAX
+    ``sizeInBytes`` across plan nodes (replacing the ABC ``EstimateNotSupportedError``
+    degrade). The command exits 0, prints a real estimate (no ``<unavailable: ...>``)
+    labelled ``Databricks EXPLAIN COST``, and no traceback leaks.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    fake_conn = FakeDatabricksConnection()
+    fake_conn.expect_execute(
+        matching=r"^EXPLAIN COST ",
+        returns=[(_load_databricks_fixture("explain_cost_sample.txt"),)],
+    )
+    fa, _fb = _install_estimate_patches(monkeypatch, adapter=_make_databricks_adapter(fake_conn))
+    _queue_default_count_tokens(fa)
+
+    code = main(["generate", "--estimate", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 0, f"stderr={captured.err}"
+    assert "<unavailable:" not in captured.out
+    assert "Total estimated warehouse: <unknown>" not in captured.out
+    assert "Total estimated warehouse:" in captured.out
+    assert "Databricks EXPLAIN COST" in captured.out
+    assert "Traceback" not in captured.err
+    fake_conn.assert_all_expectations_met()
+    fa.assert_all_expectations_met()
+
+
+def test_generate_estimate_databricks_adapter_degrades_to_exit_zero(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """#225 DEC-004: the full ``--estimate`` short-circuit degrades cleanly when
+    the Databricks ``EXPLAIN COST`` plan carries only the Spark ``8.0 EiB``
+    no-CBO-statistics sentinel.
+
+    The :class:`DatabricksAdapter` raises :class:`EstimateUnavailableError` (a
+    ``WarehouseError`` subclass) rather than fabricating a ~9-exabyte figure; the
+    estimate engine's #36 DEC-005 conservative-bias degrade captures that into
+    ``warehouse_unavailable_reason``; the renderer prints
+    ``<unavailable: EstimateUnavailableError>`` and the command exits 0 — the
+    LLM-cost half of the report still computes via the ``count_tokens`` calls.
+    DEC-016: no traceback leaks.
+    """
+    project_dir = make_fake_dbt_project(tmp_path)
+    monkeypatch.chdir(project_dir)
+    fake_conn = FakeDatabricksConnection()
+    fake_conn.expect_execute(
+        matching=r"^EXPLAIN COST ",
+        returns=[(_load_databricks_fixture("explain_cost_no_stats.txt"),)],
+    )
+    fa, _fb = _install_estimate_patches(monkeypatch, adapter=_make_databricks_adapter(fake_conn))
+    _queue_default_count_tokens(fa)
+
+    code = main(["generate", "--estimate", "model.shop.customers"])
+    captured = capsys.readouterr()
+
+    assert code == 0, f"stderr={captured.err}"
+    assert "<unavailable: EstimateUnavailableError>" in captured.out
+    assert "Traceback" not in captured.err
+    # Strictness: pin exact count_tokens consumption so a drift to fewer calls
+    # (which would leave queued expectations unconsumed) fails loud.
+    fake_conn.assert_all_expectations_met()
+    fa.assert_all_expectations_met()
 
 
 # ---------------------------------------------------------------------------
