@@ -32,15 +32,49 @@ from signalforge.llm.pricing import PRICE_TABLE_VERSION
 from signalforge.llm.pricing import lookup as pricing_lookup
 from signalforge.manifest.models import Column, Manifest, Model
 from signalforge.prune.config import PruneConfig
-from signalforge.warehouse import BigQueryAdapter, SnowflakeAdapter, WarehouseAuthError
+from signalforge.warehouse import (
+    BigQueryAdapter,
+    DatabricksAdapter,
+    SnowflakeAdapter,
+    WarehouseAuthError,
+)
 from tests.llm._fake import FakeAnthropicClient, FakeCountTokensResponse
 from tests.warehouse._fake import FakeBigQueryClient
+from tests.warehouse._fake_databricks import FakeDatabricksConnection
 from tests.warehouse._fake_snowflake import FakeSnowflakeConnection
 
 _SNOWFLAKE_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "warehouse" / "snowflake"
 # The sample EXPLAIN fixture encodes 100 MiB; pinned so the warehouse-bytes
 # assertion is mathematically guaranteed (engineered determinism).
 _SNOWFLAKE_EXPLAIN_BYTES = 104_857_600
+
+# A Databricks ``EXPLAIN COST`` plan whose leaf table scan carries
+# ``Statistics(sizeInBytes=12.0 MiB, ...)`` — the MAX node, so the parser
+# (DEC-003 of #225) returns ``int(12.0 * 1024**2)`` bytes. The root aggregate
+# carries a tiny output-size figure (8.0 B) which must NOT be selected.
+_DATABRICKS_EXPLAIN_COST_PLAN = (
+    "== Optimized Logical Plan ==\n"
+    "Aggregate [count(1) AS count#42L], Statistics(sizeInBytes=8.0 B, rowCount=1)\n"
+    "+- Project [id#10], Statistics(sizeInBytes=12.0 MiB)\n"
+    "   +- Relation spark_catalog.default.foo[id#10] parquet, "
+    "Statistics(sizeInBytes=12.0 MiB, rowCount=5.00E+5)\n"
+    "\n"
+    "== Physical Plan ==\n"
+    "*(1) HashAggregate(...)\n"
+)
+# ``12.0 MiB`` → ``int(12.0 * 1024**2)``. Pinned so the warehouse-bytes
+# assertion is mathematically guaranteed (engineered determinism).
+_DATABRICKS_EXPLAIN_COST_BYTES = 12 * 1024 * 1024
+
+# A no-stats plan whose only ``Statistics`` is Spark's ``8.0 EiB``
+# default-size sentinel (``Long.MaxValue``) — routes to
+# ``EstimateUnavailableError`` (DEC-004 of #225), never a ~9-exabyte cost.
+_DATABRICKS_EXPLAIN_COST_NO_STATS = (
+    "== Optimized Logical Plan ==\n"
+    "Aggregate [count(1) AS count#42L], Statistics(sizeInBytes=8.0 EiB)\n"
+    "+- Relation spark_catalog.default.foo[id#10] parquet, "
+    "Statistics(sizeInBytes=8.0 EiB)\n"
+)
 
 
 def _load_snowflake_fixture(name: str) -> str:
@@ -470,6 +504,134 @@ def test_estimate_degrades_on_snowflake_explain_missing_stat(
     # Strictness: a drift to FEWER count_tokens calls would leave queued
     # expectations unconsumed (extra calls already raise). Pin exact
     # consumption so the LLM-cost half stays load-bearing under refactor.
+    fake_conn.assert_all_expectations_met()
+    fake_anthropic.assert_all_expectations_met()
+
+
+def test_estimate_reports_real_bytes_for_databricks_explain_cost(
+    model: Model,
+    manifest: Manifest,
+    draft_config: DraftConfig,
+    grade_config: GradeConfig,
+    prune_config: PruneConfig,
+    fake_anthropic: FakeAnthropicClient,
+) -> None:
+    """#225 US-003: a real ``DatabricksAdapter`` now runs ``EXPLAIN COST`` and
+    parses a real byte count — it no longer inherits the ABC default that raised
+    ``EstimateNotSupportedError``.
+
+    Inject a :class:`FakeDatabricksConnection` returning a real-shaped
+    ``EXPLAIN COST`` plan whose MAX node is a ``12.0 MiB`` leaf scan; assert the
+    engine reports a real ``warehouse_total_bytes`` with NO degrade
+    (``warehouse_unavailable_reason is None``). The warehouse total is the
+    per-test EXPLAIN-COST bytes multiplied by the test-count heuristic, so it is
+    a positive multiple of the fixture's parsed bytes.
+    """
+    n_criteria = len(DEFAULT_RUBRIC)
+    _queue_count_tokens(fake_anthropic, draft=1000, per_criterion=500, n_criteria=n_criteria)
+    fake_conn = FakeDatabricksConnection()
+    fake_conn.expect_execute(
+        matching=r"^EXPLAIN COST ",
+        returns=[(_DATABRICKS_EXPLAIN_COST_PLAN,)],
+    )
+    adapter = DatabricksAdapter(
+        connection=fake_conn,
+        host="dummy-host",
+        http_path="dummy-http-path",
+        token="dummy-token",
+        catalog="dummy_catalog",
+        schema="dummy_schema",
+    )
+
+    report = estimate(
+        model,
+        manifest,
+        draft_config,
+        grade_config,
+        prune_config,
+        adapter,
+        fake_anthropic,
+    )
+
+    assert report.warehouse_unavailable_reason is None
+    assert report.warehouse_total_bytes is not None
+    # The engine multiplies the per-test EXPLAIN-COST bytes by the test-count
+    # heuristic, so the total is a positive multiple of the fixture's stat.
+    assert report.warehouse_total_bytes > 0
+    assert report.warehouse_total_bytes % _DATABRICKS_EXPLAIN_COST_BYTES == 0
+    assert report.total_llm_usd > 0
+
+    # DEC-011: the source label is adapter-derived, not hardcoded — a Databricks
+    # EXPLAIN COST estimate must not be mislabelled "BigQuery dryRun".
+    assert report.warehouse_estimate_source == "Databricks EXPLAIN COST"
+
+    rendered = render(report)
+    assert "<unavailable:" not in rendered
+    assert "Total estimated warehouse: <unknown>" not in rendered
+    assert "Databricks EXPLAIN COST" in rendered
+    assert "BigQuery dryRun" not in rendered
+
+    fake_conn.assert_all_expectations_met()
+    fake_anthropic.assert_all_expectations_met()
+
+
+def test_estimate_degrades_on_databricks_explain_cost_no_stats(
+    model: Model,
+    manifest: Manifest,
+    draft_config: DraftConfig,
+    grade_config: GradeConfig,
+    prune_config: PruneConfig,
+    fake_anthropic: FakeAnthropicClient,
+) -> None:
+    """DEC-005 + #225 DEC-004/DEC-012: when the Databricks ``EXPLAIN COST`` plan
+    carries only the Spark ``8.0 EiB`` no-stats sentinel,
+    ``estimate_query_bytes`` raises :class:`EstimateUnavailableError` (a
+    ``WarehouseError`` subclass). The engine catches it at the
+    supplementary-source boundary, degrades the warehouse-bytes section into
+    ``warehouse_unavailable_reason``, and still computes the LLM-cost half.
+
+    The assertion keys specifically on the ``EstimateUnavailableError`` class
+    name (NOT the ``WarehouseError`` parent) per the #123 rule note — so a
+    narrowing of the engine's ``except WarehouseError`` that excluded the
+    subclass would break this test.
+    """
+    n_criteria = len(DEFAULT_RUBRIC)
+    _queue_count_tokens(fake_anthropic, draft=1000, per_criterion=500, n_criteria=n_criteria)
+    fake_conn = FakeDatabricksConnection()
+    fake_conn.expect_execute(
+        matching=r"^EXPLAIN COST ",
+        returns=[(_DATABRICKS_EXPLAIN_COST_NO_STATS,)],
+    )
+    adapter = DatabricksAdapter(
+        connection=fake_conn,
+        host="dummy-host",
+        http_path="dummy-http-path",
+        token="dummy-token",
+        catalog="dummy_catalog",
+        schema="dummy_schema",
+    )
+
+    report = estimate(
+        model,
+        manifest,
+        draft_config,
+        grade_config,
+        prune_config,
+        adapter,
+        fake_anthropic,
+    )
+
+    assert report.warehouse_unavailable_reason is not None
+    assert report.warehouse_unavailable_reason.startswith("EstimateUnavailableError:")
+    assert report.warehouse_total_bytes is None
+    assert report.warehouse_bytes_per_row is None
+    # The LLM-cost half of the report is unaffected by the warehouse degrade.
+    assert report.total_llm_usd > 0
+
+    rendered = render(report)
+    assert "<unavailable: EstimateUnavailableError>" in rendered
+    assert "Total estimated warehouse: <unknown>" in rendered
+
     fake_conn.assert_all_expectations_met()
     fake_anthropic.assert_all_expectations_met()
 
