@@ -5,7 +5,7 @@
 - **Ticket:** [#226](https://github.com/wjduenow/SignalForge/issues/226) — `Databricks: test harness + gated live e2e + ops docs`
 - **Epic:** [#219](https://github.com/wjduenow/SignalForge/issues/219) (Databricks adapter) — **the epic-closer; lands last**
 - **Models on:** Snowflake test+docs [#124](https://github.com/wjduenow/SignalForge/issues/124)
-- **Phase:** detailing
+- **Phase:** published
 - **Branch:** `feature/226-databricks-test-docs` (based on `dev`)
 - **Worktree:** `../worktrees/SignalForge/226-databricks-test-docs`
 - **Sessions:** 1 (2026-06-29)
