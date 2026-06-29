@@ -92,11 +92,11 @@ Full reference: [Claude Code skill](docs/skills.md) — covers the install path 
 
 ## Supported warehouses
 
-SignalForge ships two production warehouse adapters today: **BigQuery** (the original target — exercised end-to-end by `signalforge init-demo` and the quick start below) and **Snowflake** (full sampling, materialised-sample CTAS, and `EXPLAIN`-based bytes estimation; one combination — `safety: aggregate-only` / Snowflake `column_stats` — is not yet implemented, every other mode/scope/strategy combination is functional). **Postgres** ships as a typed `NotImplementedError` stub; **Databricks** and **Redshift** remain on the roadmap.
+SignalForge ships three production warehouse adapters today: **BigQuery** (the original target — exercised end-to-end by `signalforge init-demo` and the quick start below), **Snowflake** (full sampling, materialised-sample CTAS, and `EXPLAIN`-based bytes estimation; one combination — `safety: aggregate-only` / Snowflake `column_stats` — is not yet implemented, every other mode/scope/strategy combination is functional), and **Databricks** (full sampling, both materialised + oneshot strategies, `EXPLAIN COST`-based bytes estimation, and `column_stats` — so `safety: aggregate-only` works too, unlike Snowflake; shipped across #224–#225 and reaching gated live certification in #226). **Postgres** ships as a typed `NotImplementedError` stub; **Redshift** remains on the roadmap.
 
 The architecture is warehouse-agnostic — adapters plug in behind a thin sampling/profiling interface (`WarehouseAdapter.from_profile`), so new vendors slot in without touching the draft / prune / grade / diff stages. Per-warehouse setup (auth, cost guardrails, profile-field requirements) lives in [Configuration](#configuration).
 
-> **Live on PyPI** — `pip install signalforge-dbt`. The quick start below runs against BigQuery (the bundled `init-demo` fixture targets the Austin bikeshare public dataset). Snowflake users wire their own dbt profile and project — see [Configuration](#configuration) and [docs/snowflake-e2e-setup.md](docs/snowflake-e2e-setup.md).
+> **Live on PyPI** — `pip install signalforge-dbt`. The quick start below runs against BigQuery (the bundled `init-demo` fixture targets the Austin bikeshare public dataset). Snowflake and Databricks users wire their own dbt profile and project — see [Configuration](#configuration), [docs/snowflake-e2e-setup.md](docs/snowflake-e2e-setup.md), and [docs/warehouse-adapter-ops.md § Databricks adapter](docs/warehouse-adapter-ops.md).
 
 ## Supported LLM providers
 
@@ -489,6 +489,53 @@ known limitations) is in
 > **Known limitation:** `safety: aggregate-only` (Snowflake `column_stats`)
 > is not yet implemented. Every other combination is functional.
 
+### Databricks
+
+A standard `type: databricks` dbt target works — `host`, `http_path`, and a
+`token` (a `dapi…` personal access token; PAT auth is the v0.x connection
+path). `catalog` (the Unity Catalog catalog — Databricks' analogue of
+BigQuery `project` / Snowflake `database`) and `schema` are optional. A
+typical profile reads its credentials from the environment so the secret
+never lands in `profiles.yml`:
+
+```yaml
+type: databricks
+host: "{{ env_var('DATABRICKS_SERVER_HOSTNAME') }}"
+http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+token: "{{ env_var('DATABRICKS_TOKEN', '') }}"
+catalog: workspace
+schema: my_schema
+```
+
+Install the adapter dependency with the `[databricks]` extra
+(`pip install "signalforge-dbt[databricks]"`); the base install never pulls
+`databricks-sql-connector` in. Unlike Snowflake, **`column_stats` is
+available**, so `safety: aggregate-only` is functional. Both
+`prune.sample_strategy` values work — `materialised` (a session-scoped
+`CREATE TEMPORARY TABLE` in the source catalog, so it needs a writable
+catalog) and `oneshot` (per-test hash-mod, no CTAS).
+
+The live target is **Databricks Free Edition** (serverless-only). Cost
+guardrails before pointing it at a real warehouse: it ships a single
+**serverless `2X-Small` SQL warehouse that auto-stops when idle** (steady-state
+cost is zero), and the **fair-use quota** is the load-bearing guardrail (the
+Free-Edition analogue of Snowflake's resource monitor — exceeding the
+daily/monthly quota shuts the warehouse down for the period), so keep live
+scans tiny and target the writable `workspace` catalog for materialised
+samples. PATs carry the creating user's full workspace permissions — guard the
+token like any credential. Adapter reference (sampling, connection-bound
+session cleanup, `EXPLAIN COST`-based bytes estimation, the dialect, the error
+taxonomy, and the live-certification ledger) is in
+[docs/warehouse-adapter-ops.md § Databricks adapter](docs/warehouse-adapter-ops.md);
+the Free-Edition setup walkthrough is in
+[docs/research/databricks-test-environment.md](docs/research/databricks-test-environment.md).
+
+> **Shape-certified, live cert in flight (#226).** The Databricks surface
+> (#221–#225) is certified for SQL *shape* — against a fake connection and an
+> ungated `sqlglot` parse-guard — with the gated live Free-Edition
+> certification landing in #226. Treat Databricks as shape-certified until
+> then.
+
 ### Pipeline-stage configuration
 
 Cross-cutting behaviour (sampling mode, prune scope, grade thresholds,
@@ -646,9 +693,11 @@ Planned:
 | v0.9    | **Rubric customization** — project-specific grading criteria; organization-wide style profiles                   |
 | v1.0    | **dbt Fusion engine compatibility** — dbt MCP server consumption; first-class Fusion integration                 |
 
-Warehouse coverage beyond BigQuery + Snowflake — Postgres (stub today),
-Databricks, Redshift — slots in behind the existing `WarehouseAdapter`
-ABC and is roadmap-tracked but not version-pinned; PRs welcome.
+Warehouse coverage beyond BigQuery + Snowflake + Databricks (the latter
+shape-certified across #221–#225, with gated live certification in #226) —
+Postgres (stub today), Redshift — slots in behind the existing
+`WarehouseAdapter` ABC and is roadmap-tracked but not version-pinned; PRs
+welcome.
 
 Detail is tracked in GitHub Issues against this repo.
 
