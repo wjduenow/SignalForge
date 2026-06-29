@@ -889,8 +889,10 @@ def test_sample_query_unmapped_error_passes_through_unchanged() -> None:
 # into a real ``CREATE OR REPLACE TABLE`` colocated with the source (dropped at
 # session cleanup); the ``databricks-sql-connector`` DOES persist the session
 # across queries (the materialised table is reachable from a follow-up
-# ``run_test_sql``). The per-row ``to_json(struct(*))`` capture marshalling was
-# also certified live (the remaining #226 ledger items are tracked in the plan).
+# ``run_test_sql``), and the COUNT(*) failing-rows wrap is live-certified.
+# SHAPE-ONLY residual: the per-row ``to_json(struct(*))`` CAPTURE branch was NOT
+# exercised live (the engineered always-pass tests return 0 failing rows, so the
+# capture branch never fires) — it stays fake + ``sqlglot``-parse certified only.
 # ---------------------------------------------------------------------------
 
 # Distinct regexes so the sizing COUNT, the CTAS, the run_test_sql COUNT, and the

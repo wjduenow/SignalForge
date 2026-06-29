@@ -1,20 +1,27 @@
 """Gated live materialised-sample prune e2e against a real Databricks (#226 US-004).
 
 This is the **live certification for the Databricks materialised sample path** —
-the ``CREATE TEMPORARY TABLE <cat>.<sch>._sf_sample_<run_id> AS <inline-predicate
-sample body>`` CTAS that :meth:`DatabricksAdapter.materialise_sample` emits and the
-prune compiler then REFERENCEs. The offline surface (hand-rolled fakes in
-``tests/warehouse/_fake_databricks.py`` + the ungated ``sqlglot`` parse-guard in
-``test_databricks_sql_parse.py`` / ``test_databricks_adapter.py``) pins the emitted
-Databricks SQL's *shape* and ``sqlglot`` parse-validity, but neither certifies that
-a **real** Databricks SQL warehouse accepts the SQL — a snapshot pins invalid SQL
-byte-for-byte (the #121/#124/#171 lesson). Only a live run certifies, end to end:
+the ``CREATE OR REPLACE TABLE <cat>.<sch>._sf_sample_<run_id> AS <projection-
+subquery sample body>`` CTAS that :meth:`DatabricksAdapter.materialise_sample`
+emits and the prune compiler then REFERENCEs. The offline surface (hand-rolled
+fakes in ``tests/warehouse/_fake_databricks.py`` + the ungated ``sqlglot``
+parse-guard in ``test_databricks_sql_parse.py`` / ``test_databricks_adapter.py``)
+pins the emitted Databricks SQL's *shape* and ``sqlglot`` parse-validity, but
+neither certifies that a **real** Databricks SQL warehouse accepts the SQL — a
+snapshot pins invalid SQL byte-for-byte (the #121/#124/#171 lesson). Indeed this
+live run is what FOUND the shape was wrong: it proved Databricks rejects a
+qualified ``CREATE TEMPORARY TABLE`` name (→ a real ``CREATE OR REPLACE TABLE`` +
+explicit DROP) and rejects ``struct(*)`` in a Sort node (→ the projection-subquery
+sample shape). Only a live run certifies, end to end:
 
-1. ``materialise_sample`` — whether Databricks accepts a **qualified** temporary
-   table name in ``CREATE TEMPORARY TABLE <cat>.<sch>.<temp> AS ...`` AND whether
-   the ``databricks-sql-connector`` persists the session across queries (so the
-   temp table is reachable from the follow-up ``run_test_sql``). Both are flagged
-   as #226 live-cert items in the adapter's ``materialise_sample`` docstring.
+1. ``materialise_sample`` — that Databricks accepts the qualified
+   ``CREATE OR REPLACE TABLE <cat>.<sch>.<temp> AS ...`` (a **real**, not session-
+   local, table — explicitly DROPped at cleanup) AND that the
+   ``databricks-sql-connector`` persists the session across queries (so the table
+   is reachable from the follow-up ``run_test_sql``). Both are now CERTIFIED by
+   this test (#226); the originally-assumed ``CREATE TEMPORARY TABLE`` / inline
+   sample shape was reversed here — see the adapter's ``materialise_sample``
+   docstring.
 2. ``get_row_count`` (``SELECT COUNT(*)``) — the sizing seam the materialised
    path shares (``_resolve_sample_bucket``).
 3. ``run_test_sql`` — the ``SELECT COUNT(*) AS failures FROM (<sql>) AS t`` wrap
@@ -57,7 +64,7 @@ shared :func:`skip_reason`):
 The engineered table is created in the **WRITABLE** ``workspace.default`` namespace
 (the Databricks Free-Edition default catalog is writable; overridable via
 ``DATABRICKS_CATALOG`` / ``DATABRICKS_SCHEMA``). ``materialise_sample`` colocates
-its ``CREATE TEMPORARY TABLE`` in the source catalog / schema, so the source MUST
+its ``CREATE OR REPLACE TABLE`` in the source catalog / schema, so the source MUST
 live in a writable namespace; the engineered table is dropped in a ``finally``.
 
 **Cost guidance — use a small Databricks SQL warehouse with aggressive
@@ -173,7 +180,7 @@ def test_prune_drops_always_passes_not_null_live_materialised_sample() -> None:
        ``workspace.default`` namespace — two columns where ``region`` is the
        literal ``'austin'`` on every row (guaranteed non-null). The table MUST be
        in a writable namespace: ``materialise_sample`` colocates its
-       ``CREATE TEMPORARY TABLE`` in the source catalog / schema.
+       ``CREATE OR REPLACE TABLE`` in the source catalog / schema.
     2. **Warm-up guard** — asserts ``COUNT_IF(region IS NULL) == 0`` before the
        engineered-determinism contract is relied upon.
     3. **Thin ``column_stats`` live assert** — calls
@@ -184,20 +191,23 @@ def test_prune_drops_always_passes_not_null_live_materialised_sample() -> None:
        :class:`CandidateSchema` carrying ONE :class:`CandidateTestNotNull` over
        the guaranteed-non-null ``region`` column.
     5. Calls :func:`prune_tests` with ``scope="sample"`` +
-       ``sample_strategy="materialised"`` — the engine materialises a temp-table
-       sample via the inline-predicate CTAS (``CREATE TEMPORARY TABLE
-       <cat>.<sch>._sf_sample_<run_id> AS SELECT * FROM <src> AS t WHERE
-       MOD((xxhash64(...) & 9223372036854775807), <bucket>) < 1 ...``) and runs
-       the compiled ``not_null`` against it. This certifies the #226 live items:
-       a qualified temp-table name in ``CREATE TEMPORARY TABLE`` AND the
-       connector persisting the session so the follow-up ``run_test_sql`` reaches
-       the temp table.
+       ``sample_strategy="materialised"`` — the engine materialises a sample via
+       the projection-subquery CTAS (``CREATE OR REPLACE TABLE
+       <cat>.<sch>._sf_sample_<run_id> AS SELECT * EXCEPT (_sf_sample_hash) FROM
+       (SELECT t.*, (xxhash64(...) & 9223372036854775807) AS _sf_sample_hash FROM
+       <src> AS t) WHERE MOD(_sf_sample_hash, <bucket>) < 1 ...``) and runs the
+       compiled ``not_null`` against it. This certifies the #226 items: Databricks
+       accepts the qualified ``CREATE OR REPLACE TABLE`` AND the connector persists
+       the session so the follow-up ``run_test_sql`` reaches the materialised
+       table.
     6. Asserts at least one :class:`PruneDecision` is ``decision == "dropped"``
        with ``reason == "always-passes"`` — the v0.1 differentiator
        (Architectural Commitment #1).
     7. Tears the engineered table down with ``DROP TABLE IF EXISTS`` in a
-       ``finally`` (idempotent). The materialised temp table is session-scoped
-       and reaped when ``prune_tests`` closes the prune adapter's connection.
+       ``finally`` (idempotent). The materialised sample table is a real
+       ``CREATE OR REPLACE TABLE`` explicitly ``DROP TABLE IF EXISTS``-ed at the
+       adapter's cleanup boundary when ``prune_tests`` closes the prune adapter's
+       connection (it does NOT auto-reap — it is not session-local).
     """
     if reason := skip_reason():
         pytest.skip(reason)
@@ -211,11 +221,12 @@ def test_prune_drops_always_passes_not_null_live_materialised_sample() -> None:
     table_ref = TableRef(project=catalog, dataset=schema, name=table_name)
 
     # --- Setup: create the engineered table (own short-lived adapter). --------
-    # ``prune_tests`` (scope=sample, materialised) materialises a temp-table
-    # sample FROM this source table on its OWN adapter/connection, so the source
-    # must persist beyond the setup session — a regular (non-temp) table created
-    # here, dropped in teardown. (The materialised sample temp table is
-    # session-scoped and reaped when the prune adapter closes its connection.)
+    # ``prune_tests`` (scope=sample, materialised) materialises a sample FROM this
+    # source table on its OWN adapter/connection, so the source must persist
+    # beyond the setup session — a regular table created here, dropped in
+    # teardown. (The materialised sample table is a real ``CREATE OR REPLACE
+    # TABLE`` explicitly DROPped at the prune adapter's cleanup boundary, not
+    # session-reaped.)
     setup_adapter = build_live_adapter()
     with setup_adapter:
         cursor = setup_adapter._get_connection().cursor()
@@ -311,11 +322,11 @@ def test_prune_drops_always_passes_not_null_live_materialised_sample() -> None:
         )
 
         # ``scope="sample"`` + ``sample_strategy="materialised"`` — the engine
-        # materialises a temp-table sample via the inline-predicate CTAS, then
-        # runs the compiled ``not_null`` against it. This exercises the exact
-        # #226 live-cert path: a qualified ``CREATE TEMPORARY TABLE`` + the
-        # connector persisting the session across queries. The engineered table
-        # is a handful of rows, so the CTAS + COUNT(*) are cheap.
+        # materialises a sample via the projection-subquery CTAS, then runs the
+        # compiled ``not_null`` against it. This exercises the exact #226
+        # live-cert path: a qualified ``CREATE OR REPLACE TABLE`` + the connector
+        # persisting the session across queries. The engineered table is a
+        # handful of rows, so the CTAS + COUNT(*) are cheap.
         config = PruneConfig(scope="sample", sample_strategy="materialised")
 
         # ``prune_tests`` owns the ``with adapter:`` block — pass a NOT-entered

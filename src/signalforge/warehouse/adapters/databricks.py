@@ -783,11 +783,12 @@ class DatabricksAdapter(WarehouseAdapter):
         BigQuery / Snowflake adapters' for the same ``(table, n,
         partition_filter)`` tuple under the same ``signalforge.__version__``.
 
-        DEC-006 — the temp table is created on the live connection's session
-        (the connection embodies the session that scopes the temp table). The
-        connection is pinned as ``self._active_session`` (via
+        DEC-006 — the materialised table is created on the live connection.
+        The connection is pinned as ``self._active_session`` (via
         :meth:`_get_connection`) so a subsequent :meth:`run_test_sql` on the
-        same connection reaches the temp table.
+        same connection reaches it. (It is a real ``CREATE OR REPLACE TABLE``,
+        NOT a session-local temp — see the note below — so it persists until the
+        explicit ``DROP`` at cleanup rather than auto-reaping with the session.)
 
         DEC-004 — the deterministic sample SELECT body is built by the shared
         :func:`signalforge.warehouse._sample_sql.render_sample_select` helper
@@ -841,8 +842,9 @@ class DatabricksAdapter(WarehouseAdapter):
         Returns:
             :class:`TableRef` with ``project=table.project``,
             ``dataset=table.dataset``, ``name="_sf_sample_<run_id>"`` — the
-            session-scoped temp table, fully-qualified via the source catalog /
-            schema.
+            materialised table (a real ``CREATE OR REPLACE TABLE``, NOT
+            session-scoped; dropped explicitly at cleanup), fully-qualified via
+            the source catalog / schema.
 
         Raises:
             ValueError: ``n <= 0``.

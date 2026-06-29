@@ -71,8 +71,8 @@ with WarehouseAdapter.from_profile(profile) as adapter:
 and `profile.type == "databricks"` dispatch to their adapters. The
 Databricks adapter implements its sampling surface as of #224 —
 `sample_rows`, `get_row_count`, `materialise_sample`, `run_test_sql`, and
-`column_stats` — plus `estimate_query_bytes` via `EXPLAIN COST` as of
-#225; only `run_stats_query` still inherits the ABC's typed
+`column_stats` — plus `estimate_query_bytes` via `EXPLAIN COST` as of #225;
+only `run_stats_query` still inherits the ABC's typed
 `*NotSupportedError` degrade. Any
 other `profile.type` raises `UnsupportedProfileTypeError` with a
 remediation pointing at the roadmap entry.
@@ -507,8 +507,8 @@ reads the stats written by `ANALYZE TABLE … COMPUTE STATISTICS` (and the
 Delta transaction-log size), which can be stale or absent. It is a cost
 *preview* — "roughly cheap or roughly expensive" — not a billing
 guarantee. **Certified live (#226).** The `EXPLAIN COST` plan-text shape was
-certified for *shape* by #225 (maintainer-captured fixture + synthetic cases);
-#226's gated `estimate_live` test confirms a live Databricks SQL warehouse
+certified for *shape* by #225 (maintainer-captured fixture + synthetic cases); the #226
+gated `estimate_live` test confirms a live Databricks SQL warehouse
 accepts `EXPLAIN COST`, returns the plan-text shape the parser reads, and holds
 the single-row-result assumption (asserting a positive int). The `sizeInBytes`
 *accuracy* still depends on CBO / `ANALYZE TABLE` stats freshness (the
@@ -638,8 +638,8 @@ reuse the manual recovery command above with the per-row
 
 ## Snowflake adapter (v0.2, epic #118)
 
-The Snowflake seam ships across issues #119 (skeleton), #120 (profile),
-#121 (compiler dialect), #122 (sampling + session), #130 (EXPLAIN
+The Snowflake seam ships across issues #119 (skeleton), #120 (profile), #121
+(compiler dialect), #122 (sampling + session), #130 (EXPLAIN
 estimate), and #124 (test harness + ops docs). This section consolidates
 what an operator running SignalForge against Snowflake needs; the
 cross-cutting sections above (sampling, materialised sampling, estimation,
@@ -779,8 +779,8 @@ case-folding are certified only by the gated live tests.
 
 ## Databricks adapter (v0.x, epic #219)
 
-The Databricks seam ships across issues #221 (skeleton), #222 (profile),
-#223 (compiler dialect), #224 (sampling + session + profiling), #225
+The Databricks seam ships across issues #221 (skeleton), #222 (profile), #223
+(compiler dialect), #224 (sampling + session + profiling), #225
 (EXPLAIN estimate), and #226 (test harness + gated live cert + ops docs).
 This section consolidates what an operator running SignalForge against
 Databricks needs; the cross-cutting sections above (sampling, materialised
@@ -937,8 +937,8 @@ works.** This is a **deliberate divergence from Snowflake**, whose
 implemented**. The Databricks adapter ships `column_stats` (issue #224,
 DEC-011) as a single aggregate query — `count` / `distinct` / `nulls` /
 `min` / `max` / `data_type` (the last via `MAX(typeof(<col>))`) — over the
-fold-then-quoted column. The Snowflake-parity follow-up is tracked as issue
-#258. **Known divergence:** BigQuery skips `MIN`/`MAX` (→ `None`) for complex
+fold-then-quoted column. The Snowflake-parity follow-up is tracked as issue #258.
+**Known divergence:** BigQuery skips `MIN`/`MAX` (→ `None`) for complex
 types (ARRAY / STRUCT / MAP / JSON / BINARY / GEOGRAPHY); Databricks emits
 them unconditionally because `data_type` is derived inline (`typeof`) in the
 same aggregate, so the column's type isn't known before the query is built.
