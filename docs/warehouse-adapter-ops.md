@@ -71,8 +71,9 @@ with WarehouseAdapter.from_profile(profile) as adapter:
 and `profile.type == "databricks"` dispatch to their adapters. The
 Databricks adapter implements its sampling surface as of #224 —
 `sample_rows`, `get_row_count`, `materialise_sample`, `run_test_sql`, and
-`column_stats`; only `estimate_query_bytes` / `run_stats_query` still
-inherit the ABC's typed `*NotSupportedError` degrade (pending #225). Any
+`column_stats` — plus `estimate_query_bytes` via `EXPLAIN COST` as of
+#225; only `run_stats_query` still inherits the ABC's typed
+`*NotSupportedError` degrade. Any
 other `profile.type` raises `UnsupportedProfileTypeError` with a
 remediation pointing at the roadmap entry.
 
@@ -110,17 +111,29 @@ hash-mod sampling via the `get_row_count` seam) work against Databricks.
 `safety: aggregate-only` profiling (`column_stats`) is also supported for
 scalar columns.
 
-**Live certification is #226.** The #224 surface is certified for SQL
-*shape* (against a fake connection + a `sqlglot` `databricks`-dialect
-parse-guard), not yet against a live Databricks SQL warehouse. The items
+**Query-bytes estimation (#225).** `signalforge generate --estimate`
+returns a real cost preview for Databricks: `estimate_query_bytes` runs
+`EXPLAIN COST <sql>` and parses the maximum Spark CBO
+`Statistics(sizeInBytes=...)` across plan nodes, degrading to
+`EstimateUnavailableError` when the plan reports the `8.0 EiB` no-stats
+sentinel or carries no parseable figure. See § "Query-bytes estimation"
+for the full mechanism and the planner-estimate / `ANALYZE TABLE`
+freshness caveat.
+
+**Live certification is #226.** The #224 / #225 Databricks surface is
+certified for SQL *shape* (against a fake connection + a `sqlglot`
+`databricks`-dialect parse-guard, plus a maintainer-captured `EXPLAIN COST`
+fixture), not yet against a live Databricks SQL warehouse. The items
 deferred to the #226 gated live Free-Edition run are: whether a *qualified*
 `CREATE TEMPORARY TABLE <catalog>.<schema>.<temp>` is accepted; whether the
 connector persists the session across queries (so a materialised temp table
 is reachable from a follow-up test); the `to_json(struct(*))` failure-row
-capture marshalling; and `column_stats` `MIN`/`MAX` on complex-typed
+capture marshalling; `column_stats` `MIN`/`MAX` on complex-typed
 (ARRAY/STRUCT/MAP/JSON/…) columns, which currently diverge from BigQuery's
-skip-and-`None` contract. Until #226 lands, treat Databricks support as
-shape-certified.
+skip-and-`None` contract; and whether a live warehouse accepts
+`EXPLAIN COST`, returns the plan-text shape the parser reads, and holds the
+single-row-result assumption (#225 estimate). Until #226 lands, treat
+Databricks support as shape-certified.
 
 ## dbt profile resolution
 
@@ -429,7 +442,9 @@ actually scanning the source table. The BigQuery override uses
 `QueryJobConfig(dry_run=True)` and reads `job.total_bytes_processed`
 off the returned job; the Snowflake override (issue #130) runs
 `EXPLAIN USING JSON` and parses `GlobalStats.bytesAssigned` from the
-returned plan. Adapters without their own primitive inherit the ABC's
+returned plan; the Databricks override (issue #225) runs `EXPLAIN COST`
+and parses the maximum Spark CBO `Statistics(sizeInBytes=...)` across
+plan nodes. Adapters without their own primitive inherit the ABC's
 default `EstimateNotSupportedError` raise.
 
 ABC signature (`signalforge.warehouse.base`):
@@ -441,8 +456,9 @@ def estimate_query_bytes(self, sql: str) -> int: ...
 The default ABC implementation raises `EstimateNotSupportedError` with
 the locked remediation: `"Use --estimate with a BigQuery profile, or
 wait for v0.3 multi-warehouse estimation support."` Concrete adapters
-override; v0.2 ships the BigQuery override (`dry_run`) and the Snowflake
-override (`EXPLAIN USING JSON`, issue #130). The Postgres stub still
+override; v0.2 ships the BigQuery override (`dry_run`), the Snowflake
+override (`EXPLAIN USING JSON`, issue #130), and the Databricks override
+(`EXPLAIN COST`, issue #225). The Postgres stub still
 inherits the default raise pending its own `EXPLAIN` override.
 
 **BigQuery override mechanism.** A `dry_run=True` query asks BigQuery
@@ -490,6 +506,52 @@ estimation, it just couldn't extract the figure for THIS query. The
 (issue #36 DEC-005) and renders `<unavailable: EstimateUnavailableError>`,
 falling back to a price-only preview rather than aborting the run.
 
+**Databricks override mechanism (issue #225).** Databricks has no
+BigQuery-style `dry_run`; the closest primitive is Spark's `EXPLAIN COST`,
+which annotates each optimized-logical-plan node with cost-based-optimizer
+`Statistics(sizeInBytes=...)`. The override validates the caller SQL
+through the same `_sql_safety.validate_test_sql` cheap-reject pass, then
+prepends the trusted literal `EXPLAIN COST ` prefix and runs it through the
+connection cursor. **Unlike Snowflake's `EXPLAIN USING JSON`, `EXPLAIN
+COST` returns the plan as multi-line *text* in a single cell, not JSON.**
+The pure `_parse_explain_cost_bytes` parser regex-extracts every
+`Statistics(sizeInBytes=<num> <unit>)`, converts the 1024-based binary
+units (`B` / `KiB` / `MiB` / `GiB` / `TiB` / `PiB` / `EiB`) to bytes —
+`<num>` may be an integer, decimal, or scientific notation — and takes the
+**maximum** across plan nodes. The max is almost always the leaf table
+scan, the closest analogue to BigQuery's `total_bytes_processed` /
+Snowflake's `bytesAssigned`; the root reflects *output* size and
+understates scan cost. `EXPLAIN COST` is planner-only — it scans no
+partitions and bills no DBUs beyond planning.
+
+**Databricks no-stats `8.0 EiB` sentinel → `EstimateUnavailableError`.**
+When a plan node has no CBO statistics, Spark prints
+`spark.sql.defaultSizeInBytes` (= `Long.MaxValue` = `8 * 1024**6` ≈
+`8.0 EiB`) instead of a real figure. The parser detects a maximum
+at-or-above that sentinel and raises the **reused** `EstimateUnavailableError`
+(no new error class — DEC-006 of #225) with a `detail` naming
+`ANALYZE TABLE <table> COMPUTE STATISTICS`; it NEVER reports the
+~9-exabyte figure, which would conflate "no table statistics" with "a
+genuinely huge scan." A plan carrying no parseable `sizeInBytes` at all
+(a plan-shape change across Databricks runtimes, a metadata-only query)
+routes to the same `EstimateUnavailableError` rather than fabricating a
+`0`. As with Snowflake, the `--estimate` engine catches it at the
+supplementary-source boundary (issue #36 DEC-005) and renders
+`<unavailable: EstimateUnavailableError>`.
+
+**Databricks planner-estimate accuracy caveat.** Like Snowflake's
+`EXPLAIN`, the `EXPLAIN COST` figure is a CBO *estimate*, not a measured
+scan. Its accuracy depends on table-statistics freshness — Spark's CBO
+reads the stats written by `ANALYZE TABLE … COMPUTE STATISTICS` (and the
+Delta transaction-log size), which can be stale or absent. It is a cost
+*preview* — "roughly cheap or roughly expensive" — not a billing
+guarantee. **Live validity is #226.** The `EXPLAIN COST` plan-text shape
+and `sizeInBytes` figures are certified for *shape* against a
+maintainer-captured fixture plus synthetic cases; whether a live Databricks
+SQL warehouse accepts `EXPLAIN COST`, the real plan-text matches the
+fixture, and the single-row-result assumption holds are **#226 live-cert
+items** — never claimed certified by #225.
+
 **v0.2 → v0.3 migration story for remaining adapters.** The Postgres stub
 still inherits the default `estimate_query_bytes` →
 `EstimateNotSupportedError` raise until it grows its own override
@@ -498,7 +560,9 @@ flow surfaces the typed error with the locked remediation so operators
 see the expansion plan inline. Snowflake's `--estimate` path is no longer
 a degrade: it returns a real EXPLAIN-based estimate (issue #130), having
 graduated from the issue #123 `<unavailable: EstimateNotSupportedError>`
-placeholder once the connection seam landed (#122).
+placeholder once the connection seam landed (#122). Databricks likewise
+graduated to a real `EXPLAIN COST` estimate (issue #225); only Postgres
+remains a degrade.
 
 ## Session cleanup & manual recovery
 
