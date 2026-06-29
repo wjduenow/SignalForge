@@ -5,7 +5,7 @@
 - **Ticket:** [#226](https://github.com/wjduenow/SignalForge/issues/226) — `Databricks: test harness + gated live e2e + ops docs`
 - **Epic:** [#219](https://github.com/wjduenow/SignalForge/issues/219) (Databricks adapter) — **the epic-closer; lands last**
 - **Models on:** Snowflake test+docs [#124](https://github.com/wjduenow/SignalForge/issues/124)
-- **Phase:** published
+- **Phase:** devolved
 - **Branch:** `feature/226-databricks-test-docs` (based on `dev`)
 - **Worktree:** `../worktrees/SignalForge/226-databricks-test-docs`
 - **Sessions:** 1 (2026-06-29)
@@ -192,4 +192,21 @@ _(pending)_
 
 ## Beads Manifest
 
-_(pending devolve)_
+- **Epic:** `bd_1-scaffolding-fe4`
+- **Worktree:** `../worktrees/SignalForge/226-databricks-test-docs`
+- **Stories** (note: bead suffix ≠ US-number — suffixes are creation order):
+
+| Story | Bead ID | Depends on (beads) |
+|---|---|---|
+| US-001 fixture + seed + generator | `bd_1-scaffolding-fe4.1` | — |
+| US-002 loads-only test | `bd_1-scaffolding-fe4.2` | .1 |
+| US-003 estimate_live + shared gate helper | `bd_1-scaffolding-fe4.3` | — |
+| US-004 prune_live + column_stats assert | `bd_1-scaffolding-fe4.4` | .3 |
+| US-005 e2e_smoke full pipeline | `bd_1-scaffolding-fe4.7` | .1, .2, .3 |
+| US-006 ops-doc § Databricks adapter | `bd_1-scaffolding-fe4.5` | — |
+| US-007 README + CHANGELOG | `bd_1-scaffolding-fe4.6` | — |
+| US-008 maintainer live cert + inline fixes | `bd_1-scaffolding-fe4.8` | .2, .4, .7, .5, .6 |
+| US-009 Quality Gate | `bd_1-scaffolding-fe4.9` | .8 |
+| US-010 Patterns & Memory | `bd_1-scaffolding-fe4.10` | .9 |
+
+Ready set at devolve: `.1` (US-001), `.3` (US-003), `.5` (US-006), `.6` (US-007).
