@@ -27,9 +27,11 @@ Surface:
   swallows-and-warns on failure. With no opened connection
   (``_active_session is None``) the ``with adapter:`` block is a clean no-op.
 * :meth:`dialect` returns the :data:`DATABRICKS_DIALECT` constant.
-* :meth:`sample_rows` is implemented (#224 US-003) — deterministic hash-mod
-  sampling (the inline-predicate shape: ``MOD((xxhash64(to_json(struct(*))) &
-  9223372036854775807), bucket) < 1``) sized from :meth:`get_row_count`
+* :meth:`sample_rows` is implemented (#224 US-003; sample shape corrected by
+  #226) — deterministic hash-mod sampling (the projection-subquery shape: the
+  masked ``xxhash64`` whole-row hash is computed in an inner projection alias,
+  ``SELECT * EXCEPT (_sf_sample_hash) FROM (... AS _sf_sample_hash)``, because
+  Spark rejects ``struct(*)`` in a Sort node) sized from :meth:`get_row_count`
   (``SELECT COUNT(*)``), with the fail-loud sizing the Snowflake / BigQuery
   adapters share (:class:`UnknownTableSizeError` /
   :class:`SamplingRequiresPartitionFilterError`).
@@ -236,7 +238,7 @@ class DatabricksAdapter(WarehouseAdapter):
     """:class:`WarehouseAdapter` for Databricks SQL profiles.
 
     Issue #224 (US-003) lands the first real warehouse I/O: :meth:`sample_rows`
-    (deterministic inline-predicate hash-mod), :meth:`get_row_count`
+    (deterministic projection-subquery hash-mod — #226), :meth:`get_row_count`
     (``SELECT COUNT(*)``), and the shared fail-loud :meth:`_resolve_sample_bucket`
     sizing, all on a connection wired via :meth:`_get_connection` with a fail-soft
     ``__exit__`` cleanup. US-004 adds :meth:`materialise_sample` (qualified
@@ -395,12 +397,15 @@ class DatabricksAdapter(WarehouseAdapter):
                     finally:
                         drop_cursor.close()
                 except Exception as exc:  # noqa: BLE001 - cleanup-boundary swallows all
+                    # Echo the EXACT executed (per-component backtick-quoted)
+                    # form so the manual command is copy-paste-safe for catalogs
+                    # / schemas that require quoting.
                     _LOGGER.warning(
                         "Databricks materialised-sample cleanup failed; drop it "
                         "manually:\n"
                         "  DROP TABLE IF EXISTS %s\n"
                         "  Reason: %s",
-                        ref.qualified_name,
+                        self._quote(ref),
                         type(exc).__name__,
                     )
             try:
@@ -408,24 +413,24 @@ class DatabricksAdapter(WarehouseAdapter):
             except Exception as exc:  # noqa: BLE001 - cleanup-boundary swallows all
                 # Cleanup-boundary fail-soft (mirrors Snowflake #122 DEC-014):
                 # swallow the failure and emit ONE operator-actionable WARNING.
-                # Like Snowflake there is NO manual cleanup command — a Databricks
-                # session-local temp object is unreachable outside its owning
-                # session, so the honest durable fallback is Databricks' server-side
-                # reap of the session when the SQL warehouse drops the connection.
-                # The raw ``session_id`` is the deliberate narrow exception to the
-                # redaction rule so the operator can correlate the orphaned session
-                # in Databricks' query history; the WARNING quotes NO client-side
-                # ``auto-expire in <N>s`` countdown (the reap is server-side and not
-                # locally computable). ``--quiet`` does NOT suppress this WARNING (it
-                # floors at WARNING). Lazy-format ``%s`` for ANSI safety
-                # (warehouse-layer convention).
+                # The materialised-sample tables (real CREATE OR REPLACE TABLEs)
+                # were already dropped in the loop above — or, if a per-table drop
+                # failed, named in a preceding WARNING with a manual DROP command
+                # — so this close-failure path concerns only the SESSION itself,
+                # which Databricks reaps server-side when the SQL warehouse drops
+                # the idle connection. The raw ``session_id`` is the deliberate
+                # narrow exception to the redaction rule so the operator can
+                # correlate the orphaned session in Databricks' query history; the
+                # WARNING quotes NO client-side ``auto-expire in <N>s`` countdown
+                # (the reap is server-side and not locally computable).
+                # ``--quiet`` does NOT suppress this WARNING (it floors at
+                # WARNING). Lazy-format ``%s`` for ANSI safety.
                 _LOGGER.warning(
-                    "Databricks session cleanup failed; the connection's "
-                    "session-local temp objects will be dropped when Databricks "
-                    "reaps the session server-side (when the SQL warehouse drops "
-                    "the connection). No manual cleanup command is possible — a "
-                    "session-local temp object is unreachable outside its owning "
-                    "session.\n"
+                    "Databricks session cleanup (connection close) failed; the "
+                    "session will be reaped server-side when the SQL warehouse "
+                    "drops the idle connection. Any materialised-sample tables "
+                    "were already dropped above (or named in a preceding WARNING "
+                    "with a manual DROP command).\n"
                     "  Session ID: %s\n"
                     "  Reason: %s",
                     raw_session_id,
@@ -704,15 +709,18 @@ class DatabricksAdapter(WarehouseAdapter):
         3. Emit the deterministic sample SELECT via the shared
            :func:`signalforge.warehouse._sample_sql.render_sample_select` helper
            (``order_by_hash=True``). For Databricks
-           (``sample_hash_in_projection=False``) this is the **inline-predicate**
-           shape — Databricks has NO Snowflake-style ``HASH(*)`` predicate
-           restriction, so ``xxhash64(...)`` and the masked ``MOD(...)`` are
-           legal directly in ``WHERE``/``ORDER BY``::
+           (``sample_hash_in_projection=True``, #226) this is the
+           **projection-subquery** shape — Spark rejects ``struct(*)`` in a Sort
+           node (``[INVALID_USAGE_OF_STAR_OR_REGEX] Invalid usage of '*' in
+           Sort``), so the masked ``xxhash64`` hash is computed once in an inner
+           projection alias and the outer ``WHERE``/``ORDER BY`` reference it::
 
-               SELECT * FROM `cat`.`sch`.`tbl` AS t
-               WHERE MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), <bucket>) < 1
+               SELECT * EXCEPT (_sf_sample_hash) FROM
+               (SELECT t.*, (xxhash64(to_json(struct(*))) & 9223372036854775807)
+                       AS _sf_sample_hash FROM `cat`.`sch`.`tbl` AS t)
+               WHERE MOD(_sf_sample_hash, <bucket>) < 1
                  [AND <partition_filter>]
-               ORDER BY (xxhash64(to_json(struct(*))) & 9223372036854775807)
+               ORDER BY _sf_sample_hash
                LIMIT n
 
         The hash-mod approach is deterministic across runs (same input → same
@@ -784,9 +792,10 @@ class DatabricksAdapter(WarehouseAdapter):
         DEC-004 — the deterministic sample SELECT body is built by the shared
         :func:`signalforge.warehouse._sample_sql.render_sample_select` helper
         (``order_by_hash=True``), which for Databricks
-        (``sample_hash_in_projection=False``) emits the inline-predicate shape
-        (Databricks has NO Snowflake-style ``HASH(*)`` predicate restriction).
-        The hash expression and shape are read from :data:`DATABRICKS_DIALECT`
+        (``sample_hash_in_projection=True``, #226) emits the projection-subquery
+        shape (Spark rejects ``struct(*)`` in a Sort node, so the hash is
+        computed in an inner projection alias referenced by ``WHERE``/``ORDER
+        BY``). The hash expression and shape are read from :data:`DATABRICKS_DIALECT`
         (NOT hard-coded) so the CTAS bytes stay consistent with
         :meth:`sample_rows` and the prune compiler's sample CTE (Architectural
         Commitment #5). ``partition_filter`` lands ONCE here, in the CTAS
@@ -859,8 +868,8 @@ class DatabricksAdapter(WarehouseAdapter):
         bucket = self._resolve_sample_bucket(table, n, partition_filter=partition_filter)
 
         quoted_source = self._quote(table)
-        # The TEMP TABLE is colocated with the source (DEC-004): same catalog /
-        # schema, per-component fold-then-quote, with the deterministic temp name.
+        # The materialised table is colocated with the source (DEC-004): same
+        # catalog / schema, per-component fold-then-quote, deterministic name.
         temp_ref = TableRef(project=table.project, dataset=table.dataset, name=temp_name)
         quoted_temp = self._quote(temp_ref)
 
@@ -869,9 +878,10 @@ class DatabricksAdapter(WarehouseAdapter):
             if partition_filter is not None
             else None
         )
-        # Inline-predicate sample body (DEC-002): the masked xxhash64 expression
-        # sits directly in WHERE / ORDER BY (Databricks has no HASH(*)
-        # predicate restriction). Read from the dialect, not hard-coded.
+        # Projection-subquery sample body (#226, sample_hash_in_projection=True):
+        # the masked xxhash64 whole-row hash is computed once in an inner
+        # projection alias and referenced from WHERE / ORDER BY — Spark rejects
+        # struct(*) in a Sort node. Read from the dialect, not hard-coded.
         select_body = render_sample_select(
             quoted_source,
             dialect=DATABRICKS_DIALECT,
@@ -890,6 +900,17 @@ class DatabricksAdapter(WarehouseAdapter):
         # explicitly dropped in :meth:`_cleanup_active_session` (it does NOT
         # auto-reap with the session like a true TEMP TABLE would).
         sql = f"CREATE OR REPLACE TABLE {quoted_temp} AS {select_body}"
+
+        # Track the table BEFORE issuing the CTAS (issue #226): a real
+        # CREATE OR REPLACE TABLE does NOT auto-reap, and ``cursor.execute`` can
+        # raise AFTER the server has committed the table (e.g. a client
+        # read-timeout / network blip over the Thrift-HTTP transport once the
+        # Delta CTAS has landed). Tracking after a successful execute would leak
+        # that committed table with no DROP and no operator WARNING. Tracking
+        # first closes the window — ``DROP TABLE IF EXISTS`` at cleanup is a
+        # harmless no-op when the table was never created.
+        if temp_ref not in self._materialised_tables:
+            self._materialised_tables.append(temp_ref)
 
         # Open / reuse the connection (also sets self._active_session) so the
         # follow-up run_test_sql reaches the materialised table (DEC-006).
@@ -915,11 +936,6 @@ class DatabricksAdapter(WarehouseAdapter):
             # Release the cursor handle (the materialised table lives in the
             # source schema, not on the cursor, so it stays reachable).
             cursor.close()
-
-        # Track the created table so the session-cleanup boundary drops it
-        # (issue #226 — a real CREATE OR REPLACE TABLE does not auto-reap).
-        if temp_ref not in self._materialised_tables:
-            self._materialised_tables.append(temp_ref)
 
         # INFO log uses the HASHED session id, never the raw value. Lazy-format
         # JSON for ANSI safety (warehouse-layer convention).
@@ -958,7 +974,8 @@ class DatabricksAdapter(WarehouseAdapter):
           is not known before the query is built. On a complex column Spark
           either raises (mapped → :class:`QuerySyntaxError`) or returns a
           non-scalar; honouring the skip-for-complex contract needs a type
-          pre-fetch and is a **#226 live-cert item** (see the note below).
+          pre-fetch and is a **follow-up** (#226's live pass exercised only
+          scalar ``column_stats`` — see the note below).
         * ``data_type`` — ``MAX(typeof(<col>))`` (Spark's DDL type string; an
           empty table yields ``NULL`` → coerced to ``""``, matching BigQuery's
           "type unknown → empty string" precedent).
@@ -974,13 +991,16 @@ class DatabricksAdapter(WarehouseAdapter):
 
         .. note::
 
-            Real-Spark ``typeof`` / ``MIN`` / ``MAX`` semantics against a live
-            Unity Catalog table are a **#226 live-cert item** — certified here
-            against the fake + the ``sqlglot`` parse-guard only. The
+            Real-Spark ``column_stats`` on a **scalar** column is **certified
+            live (#226)** — ``tests/warehouse/test_databricks_prune_live.py``
+            asserts ``count`` / ``distinct`` / ``nulls`` / ``data_type`` against
+            the real rig. Complex-type ``MIN`` / ``MAX`` semantics were NOT
+            exercised by the live pass (scalar-only) and remain shape-only. The
             complex-type MIN/MAX divergence noted above (BigQuery skips MIN/MAX
             for ARRAY / STRUCT / MAP / JSON / BINARY / GEOGRAPHY; this adapter
-            emits them unconditionally) is part of that #226 live cert — the
-            scalar-column path is the supported surface for v0.x.
+            emits them unconditionally) was not exercised by the live pass and
+            remains a follow-up — the scalar-column path is the supported,
+            live-certified surface for v0.x.
         """
         validate_identifier("column", column)
 
@@ -991,7 +1011,7 @@ class DatabricksAdapter(WarehouseAdapter):
             f"COUNT_IF({quoted_col} IS NULL) AS null_count, "
             # MIN/MAX are emitted unconditionally; complex-typed columns
             # (ARRAY/STRUCT/MAP/JSON/BINARY/GEOGRAPHY) diverge from BigQuery's
-            # skip-and-None contract — a #226 live-cert item (see docstring).
+            # skip-and-None contract — a follow-up (scalar-only live pass; see docstring).
             f"MIN({quoted_col}) AS min_value, "
             f"MAX({quoted_col}) AS max_value, "
             f"MAX(typeof({quoted_col})) AS data_type "
@@ -1061,9 +1081,12 @@ class DatabricksAdapter(WarehouseAdapter):
 
         .. note::
 
-            The ``to_json(struct(*))`` per-row capture shape (and the JSON-
-            string marshalling assumption) is a **#226 live-cert item** —
-            certified here against the fake + sqlglot parse only, not live.
+            The COUNT(*) failing-rows wrap is **certified live (#226)** (the
+            prune / e2e live tests run it against the real rig). The
+            ``to_json(struct(*))`` per-row CAPTURE branch (and its JSON-string
+            marshalling assumption) was NOT exercised by the live pass — the
+            engineered always-pass tests return 0 failing rows, so the capture
+            branch never fires — and remains shape-only (fake + sqlglot parse).
         """
         validate_test_sql(sql)
 
@@ -1166,9 +1189,11 @@ class DatabricksAdapter(WarehouseAdapter):
 
         .. note::
 
-            ``EXPLAIN COST`` plan-text shape + ``sizeInBytes`` accuracy against a
-            live Databricks SQL warehouse is a **#226 live-cert item** — certified
-            here against the fake only, not live.
+            ``EXPLAIN COST`` against a live Databricks SQL warehouse is
+            **certified live (#226)** — ``tests/warehouse/test_databricks_estimate_live.py``
+            runs it against the real rig and asserts a positive int. ``sizeInBytes``
+            *accuracy* still depends on CBO / ``ANALYZE TABLE`` stats freshness
+            (planner-estimate caveat).
         """
         validate_test_sql(sql)
 

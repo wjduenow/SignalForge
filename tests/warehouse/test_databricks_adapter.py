@@ -202,10 +202,13 @@ def test_exit_swallows_close_failure_and_warns_with_raw_session_id(
     msg = rec.getMessage()
     assert "sess-abc" in msg  # raw id present in the failure WARNING
     assert "RuntimeError" in msg
-    # No manual cleanup command (no DROP statement) and no auto-expire countdown.
+    # The close-failure WARNING concerns the SESSION (reaped server-side); it
+    # quotes no client-side auto-expire countdown and embeds no DROP statement
+    # of its own (materialised tables are handled by the per-table DROP loop
+    # above — there are none here since this test never materialised).
     assert "auto-expire" not in msg
-    assert "DROP TABLE" not in msg.upper()
-    assert "No manual cleanup command is possible" in msg
+    assert "DROP TABLE IF EXISTS" not in msg.upper()
+    assert "reaped server-side" in msg
     # State reset even on the failure path.
     assert adapter._active_session is None
 
@@ -986,8 +989,12 @@ def test_materialise_then_exit_swallows_drop_failure_and_warns(
         adapter.__exit__(None, None, None)  # must NOT raise
 
     assert any("DROP TABLE IF EXISTS" in rec.message for rec in caplog.records)
+    # The drop failure must NOT mask the connection close — close still fires
+    # after the per-table swallow (the DROP loop precedes conn.close()).
+    assert conn.close_call_count == 1
     # State still reset despite the drop failure (idempotent second exit).
     assert adapter._materialised_tables == []
+    conn.assert_all_expectations_met()
 
 
 def test_materialise_returns_fully_qualified_temp_ref() -> None:

@@ -92,7 +92,7 @@ Full reference: [Claude Code skill](docs/skills.md) — covers the install path 
 
 ## Supported warehouses
 
-SignalForge ships three production warehouse adapters today: **BigQuery** (the original target — exercised end-to-end by `signalforge init-demo` and the quick start below), **Snowflake** (full sampling, materialised-sample CTAS, and `EXPLAIN`-based bytes estimation; one combination — `safety: aggregate-only` / Snowflake `column_stats` — is not yet implemented, every other mode/scope/strategy combination is functional), and **Databricks** (full sampling, both materialised + oneshot strategies, `EXPLAIN COST`-based bytes estimation, and `column_stats` — so `safety: aggregate-only` works too, unlike Snowflake; shipped across #224–#225 and reaching gated live certification in #226). **Postgres** ships as a typed `NotImplementedError` stub; **Redshift** remains on the roadmap.
+SignalForge ships three production warehouse adapters today: **BigQuery** (the original target — exercised end-to-end by `signalforge init-demo` and the quick start below), **Snowflake** (full sampling, materialised-sample CTAS, and `EXPLAIN`-based bytes estimation; one combination — `safety: aggregate-only` / Snowflake `column_stats` — is not yet implemented, every other mode/scope/strategy combination is functional), and **Databricks** (full sampling, both materialised + oneshot strategies, `EXPLAIN COST`-based bytes estimation, and `column_stats` — so `safety: aggregate-only` works too, unlike Snowflake; shipped across #224–#225 and live-certified against Databricks Free Edition in #226). **Postgres** ships as a typed `NotImplementedError` stub; **Redshift** remains on the roadmap.
 
 The architecture is warehouse-agnostic — adapters plug in behind a thin sampling/profiling interface (`WarehouseAdapter.from_profile`), so new vendors slot in without touching the draft / prune / grade / diff stages. Per-warehouse setup (auth, cost guardrails, profile-field requirements) lives in [Configuration](#configuration).
 
@@ -511,9 +511,10 @@ Install the adapter dependency with the `[databricks]` extra
 (`pip install "signalforge-dbt[databricks]"`); the base install never pulls
 `databricks-sql-connector` in. Unlike Snowflake, **`column_stats` is
 available**, so `safety: aggregate-only` is functional. Both
-`prune.sample_strategy` values work — `materialised` (a session-scoped
-`CREATE TEMPORARY TABLE` in the source catalog, so it needs a writable
-catalog) and `oneshot` (per-test hash-mod, no CTAS).
+`prune.sample_strategy` values work — `materialised` (a `CREATE OR REPLACE
+TABLE` in the source catalog — Databricks rejects a qualified temp name — so it
+needs a writable catalog; the table is dropped at session cleanup) and
+`oneshot` (per-test hash-mod, no CTAS).
 
 The live target is **Databricks Free Edition** (serverless-only). Cost
 guardrails before pointing it at a real warehouse: it ships a single
@@ -530,11 +531,14 @@ taxonomy, and the live-certification ledger) is in
 the Free-Edition setup walkthrough is in
 [docs/research/databricks-test-environment.md](docs/research/databricks-test-environment.md).
 
-> **Shape-certified, live cert in flight (#226).** The Databricks surface
-> (#221–#225) is certified for SQL *shape* — against a fake connection and an
-> ungated `sqlglot` parse-guard — with the gated live Free-Edition
-> certification landing in #226. Treat Databricks as shape-certified until
-> then.
+> **Live-certified against Free Edition (#226).** The Databricks surface
+> (#221–#225) was certified for SQL *shape* (fake connection + ungated `sqlglot`
+> parse-guard); #226 added the gated live Free-Edition certification —
+> `EXPLAIN COST` estimation, materialised-sample prune, and a full-pipeline
+> `generate` smoke all pass against a real `2X-Small` warehouse. (The live pass
+> surfaced and fixed three real adapter bugs; the only residual shape-only paths
+> are complex-type `column_stats` MIN/MAX and the `to_json` failing-row capture
+> branch.)
 
 ### Pipeline-stage configuration
 

@@ -506,12 +506,13 @@ scan. Its accuracy depends on table-statistics freshness — Spark's CBO
 reads the stats written by `ANALYZE TABLE … COMPUTE STATISTICS` (and the
 Delta transaction-log size), which can be stale or absent. It is a cost
 *preview* — "roughly cheap or roughly expensive" — not a billing
-guarantee. **Live validity is #226.** The `EXPLAIN COST` plan-text shape
-and `sizeInBytes` figures are certified for *shape* against a
-maintainer-captured fixture plus synthetic cases; whether a live Databricks
-SQL warehouse accepts `EXPLAIN COST`, the real plan-text matches the
-fixture, and the single-row-result assumption holds are **#226 live-cert
-items** — never claimed certified by #225.
+guarantee. **Certified live (#226).** The `EXPLAIN COST` plan-text shape was
+certified for *shape* by #225 (maintainer-captured fixture + synthetic cases);
+#226's gated `estimate_live` test confirms a live Databricks SQL warehouse
+accepts `EXPLAIN COST`, returns the plan-text shape the parser reads, and holds
+the single-row-result assumption (asserting a positive int). The `sizeInBytes`
+*accuracy* still depends on CBO / `ANALYZE TABLE` stats freshness (the
+planner-estimate caveat above).
 
 **v0.2 → v0.3 migration story for remaining adapters.** The Postgres stub
 still inherits the default `estimate_query_bytes` →
@@ -855,38 +856,49 @@ always non-negative and uniform. `xxhash64` (not Spark's bare 32-bit
 unlike BigQuery, which threads a server-side `session_id` on every query),
 the Databricks *connection* holds the session: `_get_connection()` lazily
 opens one connection and every op runs on it. Deterministic sampling uses
-the **inline-predicate** shape —
-`MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), <bucket>) < 1`
-directly in `WHERE`/`ORDER BY` — because Databricks, **unlike Snowflake**,
-accepts the hash in a predicate position (no `HASH(*)`-projection-only
-restriction). Table sizing uses `SELECT COUNT(*)` (metadata-cheap on Delta);
+the **projection-subquery** shape — the masked
+`(xxhash64(to_json(struct(*))) & 9223372036854775807)` whole-row hash is
+computed once in an inner projection alias (`_sf_sample_hash`) and the outer
+`WHERE`/`ORDER BY` reference that alias, with `SELECT * EXCEPT (_sf_sample_hash)`
+stripping the helper column. Like Snowflake (whose `HASH(*)` is rejected as a
+predicate), this is required because Spark rejects `struct(*)` inside a Sort
+node (`[INVALID_USAGE_OF_STAR_OR_REGEX] Invalid usage of '*' in Sort`) — #226's
+live cert corrected the originally-assumed inline shape. Table sizing uses
+`SELECT COUNT(*)` (metadata-cheap on Delta);
 `DESCRIBE DETAIL` is **not** used because it carries no reliable `numRows`
 (the figure lives in the Delta `statistics` map, populated only after
 `ANALYZE TABLE COMPUTE STATISTICS` and commonly NULL/stale). As with every
 adapter, a table ≥ 100M rows requires a `partition_filter` or sampling fails
 loud (`SamplingRequiresPartitionFilterError` / `UnknownTableSizeError`).
-`materialise_sample` runs a session-scoped, **qualified**
-`CREATE TEMPORARY TABLE <catalog>.<schema>._sf_sample_<run_id> AS <sample
-body>` **colocated with the source** (the temp table lives in the source
+`materialise_sample` runs a **qualified**
+`CREATE OR REPLACE TABLE <catalog>.<schema>._sf_sample_<run_id> AS <sample
+body>` **colocated with the source** (the table lives in the source
 catalog/schema, fold-then-quoted per-component, so the prune compiler's
 `REFERENCE` matches the adapter's `CREATE`); the connection is pinned so a
-follow-up `run_test_sql` reaches the temp table. The `run_id` reuses the
-shared `_compute_run_id` recipe, so the temp-table name is byte-identical to
-the BigQuery / Snowflake adapters' for the same `(table, n,
-partition_filter)` tuple. **Both `prune.sample_strategy` values work:**
-`materialised` (the session-scoped temp table — needs a **writable** source
-catalog, e.g. the Free-Edition `workspace`) and `oneshot` (per-test hash-mod
-via the vendor-neutral `get_row_count` seam — no CTAS, so no writable source
-needed).
+follow-up `run_test_sql` reaches it. #226's live cert found Databricks rejects
+a *qualified* temp name (`[TEMP_TABLE_CREATION_REQUIRES_SINGLE_PART_NAME]`) and
+a `TableRef` cannot express a bare single-part name, so a **real** table is
+used — it does NOT auto-reap with the session and is explicitly
+`DROP TABLE IF EXISTS`-ed at session cleanup (see below). The `run_id` reuses
+the shared `_compute_run_id` recipe, so the table name is byte-identical to the
+BigQuery / Snowflake adapters' for the same `(table, n, partition_filter)`
+tuple. **Both `prune.sample_strategy` values work:** `materialised` (the
+`CREATE OR REPLACE TABLE` — needs a **writable** source catalog, e.g. the
+Free-Edition `workspace`) and `oneshot` (per-test hash-mod via the
+vendor-neutral `get_row_count` seam — no CTAS, so no writable source needed).
 
-**Session cleanup is fail-soft with no manual command.** A Databricks
-session-local temp table is unreachable outside its owning session, so —
-exactly like Snowflake — there is no `bq`-style abort command and no
-`auto-expire in <N>s` countdown: the honest durable fallback is Databricks'
-server-side reap when the SQL warehouse drops the connection. On a cleanup
-failure the adapter swallows the error and emits one operator-actionable
-WARNING quoting the raw `session_id` (the only path where the raw id
-appears; success logs hash it). `--quiet` does **not** suppress this WARNING.
+**Session cleanup is fail-soft, per-table.** At `__exit__` the adapter first
+drops each materialised-sample table (`DROP TABLE IF EXISTS <table>`) on the
+session connection, then closes the connection. Because the materialised
+tables are **real** `CREATE OR REPLACE TABLE`s (not session-local temps), a
+manual command **does** exist: a per-table drop failure is swallowed and emits
+one operator-actionable WARNING naming the exact `DROP TABLE IF EXISTS
+<backtick-quoted-name>` to run. A separate connection-close failure is likewise
+swallowed with one WARNING quoting the raw `session_id` — the session itself is
+reaped server-side when the SQL warehouse drops the idle connection (no
+`auto-expire in <N>s` countdown; the reap is not locally computable). The raw
+`session_id` appears only in these failure WARNINGs (success logs hash it).
+`--quiet` does **not** suppress them.
 
 **Estimate.** `signalforge generate --estimate` runs `EXPLAIN COST <sql>`
 and parses the maximum Spark CBO `Statistics(sizeInBytes=...)` across plan
@@ -915,8 +927,10 @@ fold-then-quoted column. The Snowflake-parity follow-up is tracked as issue
 types (ARRAY / STRUCT / MAP / JSON / BINARY / GEOGRAPHY); Databricks emits
 them unconditionally because `data_type` is derived inline (`typeof`) in the
 same aggregate, so the column's type isn't known before the query is built.
-The scalar-column path is the supported v0.x surface; complex-type handling
-is a #226 live-cert item.
+The scalar-column path is the supported, **live-certified** v0.x surface
+(#226's prune-live test asserts `count` / `distinct` / `nulls` / `data_type`
+against the real rig); complex-type `MIN`/`MAX` was not exercised by the live
+pass (scalar-only) and remains a follow-up.
 
 **Error taxonomy.** `map_databricks_exception` mirrors `map_snowflake_exception`
 / `map_bq_exception`, scoping the Table/Column/Syntax split to the SQL-error
@@ -935,21 +949,29 @@ warehouse size + auto-stop, see below).
 | Other (connect-time `RequestError` / `OperationalError`, or connector absent) | auth     | `WarehouseAuthError`  |
 | Anything else                                                  | _(none)_                        | _(passes through unchanged)_ |
 
-**Known limitations + live certification (#226).** The #221–#225 Databricks
-surface is certified for SQL *shape* (against a fake connection + an ungated
-`sqlglot` `databricks`-dialect parse-guard, plus a maintainer-captured
-`EXPLAIN COST` fixture), **not yet against a live Databricks SQL warehouse**
-— until #226 lands, treat Databricks support as shape-certified. The items
-deferred to the #226 gated live Free-Edition run are: whether a *qualified*
-`CREATE TEMPORARY TABLE <catalog>.<schema>.<temp>` is accepted; whether the
-connector persists the session across queries (so a materialised temp table
-is reachable from a follow-up test); the `to_json(struct(*))` per-row
-failure-capture marshalling; `column_stats` `MIN`/`MAX` on complex-typed
-columns (the BigQuery skip-and-`None` divergence noted above); and whether a
-live warehouse accepts `EXPLAIN COST`, returns the plan-text shape the parser
-reads, and holds the single-row-result assumption. `run_stats_query` (for the
-`row_count_anomaly_by_period` primitive) still inherits the ABC's typed
-`StatsQueryNotSupportedError` degrade — out of scope until its own ticket.
+**Live certification (#226) + residual limitations.** The #221–#225 Databricks
+surface was certified for SQL *shape* (fake connection + ungated `sqlglot`
+`databricks`-dialect parse-guard + a maintainer-captured `EXPLAIN COST`
+fixture); **#226 adds the gated live Free-Edition certification.** Three gated
+`@pytest.mark.databricks` tests pass against a real `2X-Small` warehouse:
+`estimate_live` (`EXPLAIN COST` returns a positive int — confirming the live
+warehouse accepts it, the plan-text shape the parser reads, and the
+single-row-result assumption), prune-live `materialised` (a real qualified
+`CREATE OR REPLACE TABLE` is created, persists across queries on the pinned
+connection, is reachable from a follow-up test, and is dropped at cleanup —
+plus scalar `column_stats`), and a full-pipeline `generate` smoke. **The live
+pass surfaced and fixed three real adapter bugs:** a qualified-temp-name
+rejection (`CREATE TEMPORARY TABLE` → `CREATE OR REPLACE TABLE` + explicit
+DROP), `struct(*)` rejected in a Sort node (inline → projection-subquery
+sample shape), and a cross-vendor `QuerySyntaxError` message (made
+vendor-neutral). The remaining **shape-only** (not live-exercised) paths are:
+`column_stats` `MIN`/`MAX` on complex-typed columns (the BigQuery
+skip-and-`None` divergence noted above — the live pass exercised only scalar
+columns) and the `to_json(struct(*))` per-row failure-capture branch (the
+engineered always-pass tests return zero failing rows, so the capture branch
+never fires live). `run_stats_query` (for the `row_count_anomaly_by_period`
+primitive) still inherits the ABC's typed `StatsQueryNotSupportedError`
+degrade — out of scope until its own ticket.
 
 **Cost guidance — read before running any live Databricks test.** The live
 target is **Databricks Free Edition** (serverless-only). Its single SQL
@@ -1079,7 +1101,7 @@ on a `↳ Remediation:` line by `__str__`.
 | ---------------------------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | `WarehouseError`                         | Base class; never raised directly.                                                                       | `message`, `remediation`                             | _(no remediation set — base class)_                                                             |
 | `WarehouseAuthError`                     | Wraps `google.auth.exceptions.DefaultCredentialsError` / `RefreshError`.                                 | `message`                                            | Run `gcloud auth application-default login` to set up ADC.                                      |
-| `UnsupportedProfileTypeError`            | dbt profile's `type` is not `"bigquery"`, `"postgres"`, `"snowflake"`, or `"databricks"`.                 | `profile_type`                                       | `bigquery` is fully implemented; `postgres` (v0.2 stub), `snowflake` (v0.2), and `databricks` (sampling surface #224, shape-certified — live cert #226) are recognised. Other types are unsupported. (Matches `UnsupportedProfileTypeError.default_remediation`.)  |
+| `UnsupportedProfileTypeError`            | dbt profile's `type` is not `"bigquery"`, `"postgres"`, `"snowflake"`, or `"databricks"`.                 | `profile_type`                                       | `bigquery` is fully implemented; `postgres` (v0.2 stub), `snowflake` (v0.2), and `databricks` (sampling surface #224, live-certified against Free Edition #226) are recognised. Other types are unsupported. (Matches `UnsupportedProfileTypeError.default_remediation`.)  |
 | `UnsupportedAuthMethodError`             | dbt profile's `method` is not `"oauth"` (or unset).                                                      | `method`                                             | v0.1 supports `method: oauth` (or unset) only; run `gcloud auth application-default login`.     |
 | `ProfileNotFoundError`                   | None of the three search paths yielded a `profiles.yml` (or the project file is missing/malformed).      | `searched_paths`                                     | Create a `profiles.yml` at one of the searched paths, or set `DBT_PROFILES_DIR`.                |
 | `ProfileTargetNotFoundError`             | The profile resolved but the requested `target` is missing. Inherits `ProfileNotFoundError`.             | `profile_name`, `target`, `searched_paths`           | Add the target to `profiles.yml`, or pass an explicit `target=` that exists in the profile.     |
@@ -1090,7 +1112,7 @@ on a `↳ Remediation:` line by `__str__`.
 | `BytesBilledExceededError`               | BigQuery rejected a query because `maximum_bytes_billed` was exceeded.                                   | `job_id`, `bytes_billed`, `limit`                    | Narrow the query (partition filter / smaller sample) or raise `max_bytes_billed`.                |
 | `TableNotFoundError`                     | BigQuery 404 for the requested `TableRef`.                                                               | `table`                                              | Verify the `project.dataset.table` exists and credentials have read access.                      |
 | `ColumnNotFoundError`                    | A column reference does not exist on the resolved table schema.                                          | `table`, `column`                                    | Verify the column name against the table schema (`INFORMATION_SCHEMA.COLUMNS`).                  |
-| `QuerySyntaxError`                       | BigQuery rejected a query as malformed (separates from `BytesBilledExceededError` despite both being 400). | `detail`                                             | Inspect the BigQuery error detail and fix the SQL (or update the drafter prompt if recurring).   |
+| `QuerySyntaxError`                       | The warehouse rejected a query as malformed (on BigQuery, separates from `BytesBilledExceededError` despite both being 400; also raised by the Snowflake / Databricks mappers). | `detail`                                             | Inspect the warehouse error detail and fix the SQL (or update the drafter prompt if recurring).   |
 | `SamplingError`                          | Parent for sampling-time failures; never raised directly. Catch it to handle both subclasses uniformly.  | _(none)_                                             | Inspect the subclass remediation; fail-loud is preferred to silent over-spend.                   |
 | `SamplingRequiresPartitionFilterError`   | `Table.num_rows >= 100_000_000` and no `PartitionFilter` was supplied.                                   | `table`, `num_rows`                                  | Pass a `PartitionFilter` to scope the sample.                                                    |
 | `UnknownTableSizeError`                  | `Table.num_rows` is `None`/`0` and no `PartitionFilter` was supplied.                                    | `table`                                              | Provide `partition_filter`, or call `adapter.refresh_table_metadata` once `num_rows` is populated. |
