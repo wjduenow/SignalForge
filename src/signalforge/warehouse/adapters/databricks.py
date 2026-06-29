@@ -37,11 +37,13 @@ Surface:
   with a ``SELECT COUNT(*)`` (``DESCRIBE DETAIL`` has no reliable ``numRows``;
   COUNT is metadata-cheap on Delta), returning ``None`` on a
   :class:`WarehouseError` so the shared sizing pathway decides.
-* :meth:`materialise_sample` is implemented (#224 US-004) — overrides the ABC
-  degrade with a session-scoped, qualified ``CREATE TEMPORARY TABLE
+* :meth:`materialise_sample` is implemented (#224 US-004; revised live by #226)
+  — overrides the ABC degrade with a qualified ``CREATE OR REPLACE TABLE
   <cat>.<sch>._sf_sample_<run_id> AS <deterministic sample body>`` (``run_id``
   from the shared :mod:`signalforge.warehouse._sample_id` recipe), pinning the
-  connection so a follow-up :meth:`run_test_sql` reaches the temp table.
+  connection so a follow-up :meth:`run_test_sql` reaches the table. A real table
+  (NOT ``TEMPORARY TABLE``) because Databricks rejects a qualified temp name;
+  it is dropped at the session-cleanup boundary (see :meth:`materialise_sample`).
 * :meth:`run_test_sql` is implemented (#224 US-004) — overrides the
   :class:`NotImplementedError` stub: wraps a candidate failing-rows SELECT in a
   ``COUNT(*)`` aggregate (plus a per-row ``to_json(struct(*))`` LIMIT capture
@@ -237,8 +239,9 @@ class DatabricksAdapter(WarehouseAdapter):
     (deterministic inline-predicate hash-mod), :meth:`get_row_count`
     (``SELECT COUNT(*)``), and the shared fail-loud :meth:`_resolve_sample_bucket`
     sizing, all on a connection wired via :meth:`_get_connection` with a fail-soft
-    ``__exit__`` cleanup. US-004 adds :meth:`materialise_sample` (session-scoped
-    qualified ``CREATE TEMPORARY TABLE``) and :meth:`run_test_sql` (``COUNT(*)``
+    ``__exit__`` cleanup. US-004 adds :meth:`materialise_sample` (qualified
+    ``CREATE OR REPLACE TABLE``, dropped at cleanup — #226) and
+    :meth:`run_test_sql` (``COUNT(*)``
     failing-rows wrap + per-row ``to_json`` capture). US-005 adds
     :meth:`column_stats` (single aggregate-only profiling query) — shipped AHEAD
     of Snowflake, whose parity is tracked as issue #258. :meth:`estimate_query_bytes`
@@ -283,6 +286,16 @@ class DatabricksAdapter(WarehouseAdapter):
         # :meth:`_get_connection`; reset to ``None`` in
         # :meth:`_cleanup_active_session` so a second ``__exit__`` is a no-op.
         self._active_session: _DatabricksClientProtocol | None = None
+
+        # Materialised-sample tables created on the active session (issue #226).
+        # Databricks rejects a qualified ``CREATE TEMPORARY TABLE`` name
+        # (``[TEMP_TABLE_CREATION_REQUIRES_SINGLE_PART_NAME]``), so
+        # :meth:`materialise_sample` creates a real ``CREATE OR REPLACE TABLE``
+        # colocated with the source instead — which does NOT auto-reap with the
+        # session. Each created ref is tracked here and explicitly
+        # ``DROP TABLE IF EXISTS``-ed (fail-soft) in
+        # :meth:`_cleanup_active_session` before the connection closes.
+        self._materialised_tables: list[TableRef] = []
 
     def __repr__(self) -> str:
         # Render ONLY non-credential identifying fields. NEVER token, schema, or
@@ -367,6 +380,29 @@ class DatabricksAdapter(WarehouseAdapter):
         # (mirrors Snowflake #122 DEC-014).
         raw_session_id = self._read_session_id(conn)
         try:
+            # Issue #226: drop materialised-sample tables (real
+            # ``CREATE OR REPLACE TABLE``s that do NOT auto-reap with the
+            # session) BEFORE closing the connection. Fail-soft PER table — a
+            # drop failure must neither abort cleanup nor mask the close; it
+            # emits ONE operator-actionable WARNING naming the exact manual
+            # ``DROP`` command (a real table IS reachable outside the session,
+            # unlike a session-temp object, so a manual command exists here).
+            for ref in self._materialised_tables:
+                try:
+                    drop_cursor = conn.cursor()
+                    try:
+                        drop_cursor.execute(f"DROP TABLE IF EXISTS {self._quote(ref)}")
+                    finally:
+                        drop_cursor.close()
+                except Exception as exc:  # noqa: BLE001 - cleanup-boundary swallows all
+                    _LOGGER.warning(
+                        "Databricks materialised-sample cleanup failed; drop it "
+                        "manually:\n"
+                        "  DROP TABLE IF EXISTS %s\n"
+                        "  Reason: %s",
+                        ref.qualified_name,
+                        type(exc).__name__,
+                    )
             try:
                 conn.close()
             except Exception as exc:  # noqa: BLE001 - cleanup-boundary swallows all
@@ -410,6 +446,9 @@ class DatabricksAdapter(WarehouseAdapter):
             # the lazy-build branch and silently discard a test-injected fake
             # (mirrors Snowflake / BigQuery cleanup).
             self._active_session = None
+            # The materialised tables were dropped above (or WARNING-ed);
+            # clear the list so a second ``__exit__`` is a no-op (issue #226).
+            self._materialised_tables = []
 
     def dialect(self) -> Dialect:
         return DATABRICKS_DIALECT
@@ -720,8 +759,10 @@ class DatabricksAdapter(WarehouseAdapter):
         partition_filter: PartitionFilter | None = None,
         ttl_seconds: int = 3600,
     ) -> TableRef:
-        """Materialise a deterministic sample into a session-scoped Databricks
-        ``TEMPORARY TABLE``; return a :class:`TableRef` pointing at it (DEC-004).
+        """Materialise a deterministic sample into a Databricks table
+        (``CREATE OR REPLACE TABLE`` colocated with the source); return a
+        :class:`TableRef` pointing at it (DEC-004; revised live by issue #226 —
+        see the note below on why a real table, not ``TEMPORARY TABLE``).
 
         Overrides the ABC default (which raises
         :class:`MaterialisationNotSupportedError`). Mirrors the Snowflake
@@ -752,7 +793,7 @@ class DatabricksAdapter(WarehouseAdapter):
         ``WHERE`` (rendered by :meth:`_render_partition_filter`, passed to the
         helper as ``extra_where``).
 
-        The ``TEMP TABLE`` is colocated with the SOURCE (created as
+        The materialised table is colocated with the SOURCE (created as
         ``<source catalog>.<source schema>._sf_sample_<run_id>``, per-component
         backtick-quoted + fold-to-lower, identical to how the compiler will
         REFERENCE it) and the returned :class:`TableRef` is fully-qualified via
@@ -760,15 +801,20 @@ class DatabricksAdapter(WarehouseAdapter):
 
         .. note::
 
-            Whether Databricks accepts a **qualified** temporary-table name in
-            ``CREATE TEMPORARY TABLE <cat>.<sch>.<temp> AS ...`` AND whether the
-            ``databricks-sql-connector`` persists the session across queries (so
-            the temp table is reachable from a follow-up
-            :meth:`run_test_sql`) are **#226 live-cert items** — this story
-            certifies SHAPE only (fakes + the ungated sqlglot parse-guard), NOT
-            live validity. The documented fallback if rejected live is a
-            bare-name temp table or ``CREATE OR REPLACE TABLE`` in the
-            configured schema + an explicit ``DROP`` (plan DEC-004).
+            **Certified live against Databricks Free Edition (issue #226).** The
+            live run proved Databricks REJECTS a qualified ``CREATE TEMPORARY
+            TABLE <cat>.<sch>.<temp>`` name
+            (``[TEMP_TABLE_CREATION_REQUIRES_SINGLE_PART_NAME]``), and a
+            :class:`TableRef` cannot express a bare single-part name (``dataset``
+            is required, so the compiler always emits a qualified reference).
+            The shipped behaviour is therefore the documented fallback (plan
+            DEC-004): a real ``CREATE OR REPLACE TABLE`` colocated with the
+            source — reachable by its qualified name from a follow-up
+            :meth:`run_test_sql` on the same connection, and explicitly
+            ``DROP TABLE IF EXISTS``-ed (fail-soft) in
+            :meth:`_cleanup_active_session`, since a real table does NOT
+            auto-reap with the session. The ``databricks-sql-connector`` DOES
+            persist the session across queries (also certified live).
 
         Args:
             table: Source production table to sample from.
@@ -777,10 +823,11 @@ class DatabricksAdapter(WarehouseAdapter):
             partition_filter: Optional :class:`PartitionFilter` applied ONCE
                 inside the CTAS ``WHERE`` clause.
             ttl_seconds: accepted for ABC parity but IGNORED by Databricks —
-                there is no client-side TTL knob; the connection's session-local
-                temp objects are reaped server-side when the warehouse drops the
-                connection (mirrors Snowflake; the cleanup WARNING quotes no
-                countdown).
+                there is no client-side TTL knob. The materialised table is
+                dropped explicitly at the session-cleanup boundary
+                (:meth:`_cleanup_active_session`); if that drop fails, the
+                cleanup WARNING names the exact manual ``DROP`` command (issue
+                #226 — a real table is reachable outside the session).
 
         Returns:
             :class:`TableRef` with ``project=table.project``,
@@ -833,10 +880,19 @@ class DatabricksAdapter(WarehouseAdapter):
             extra_where=extra_where,
             order_by_hash=True,
         )
-        sql = f"CREATE TEMPORARY TABLE {quoted_temp} AS {select_body}"
+        # Issue #226 (live-cert): Databricks rejects a *qualified* temp-table
+        # name in ``CREATE TEMPORARY TABLE <cat>.<sch>.<temp>``
+        # (``[TEMP_TABLE_CREATION_REQUIRES_SINGLE_PART_NAME]``), and a TableRef
+        # cannot express a bare single-part name (``dataset`` is required), so we
+        # materialise into a real ``CREATE OR REPLACE TABLE`` colocated with the
+        # source (the documented fallback). It is reachable by the qualified name
+        # from a follow-up ``run_test_sql`` on the same connection, and is
+        # explicitly dropped in :meth:`_cleanup_active_session` (it does NOT
+        # auto-reap with the session like a true TEMP TABLE would).
+        sql = f"CREATE OR REPLACE TABLE {quoted_temp} AS {select_body}"
 
         # Open / reuse the connection (also sets self._active_session) so the
-        # follow-up run_test_sql reaches the temp table (DEC-006).
+        # follow-up run_test_sql reaches the materialised table (DEC-006).
         conn = self._get_connection()
         from signalforge.warehouse.adapters._databricks_client import map_databricks_exception
 
@@ -856,9 +912,14 @@ class DatabricksAdapter(WarehouseAdapter):
                 cause=cause,
             ) from exc
         finally:
-            # Release the cursor handle (the temp table lives on the pinned
-            # connection/session, not the cursor, so it stays reachable).
+            # Release the cursor handle (the materialised table lives in the
+            # source schema, not on the cursor, so it stays reachable).
             cursor.close()
+
+        # Track the created table so the session-cleanup boundary drops it
+        # (issue #226 — a real CREATE OR REPLACE TABLE does not auto-reap).
+        if temp_ref not in self._materialised_tables:
+            self._materialised_tables.append(temp_ref)
 
         # INFO log uses the HASHED session id, never the raw value. Lazy-format
         # JSON for ANSI safety (warehouse-layer convention).

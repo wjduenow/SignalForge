@@ -1258,11 +1258,14 @@ def test_qualified_table_name_per_component_two_part_for_databricks() -> None:
 
 
 def test_databricks_sample_cte_uses_xxhash64_mask_not_farm_fingerprint() -> None:
-    """The Databricks sample CTE uses the inline
-    ``MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), bucket) < 1``
-    form (``sample_hash_in_projection=False``, like BigQuery). The BigQuery
-    ``FARM_FINGERPRINT`` form and the Snowflake ``HASH(*)`` form never
-    appear."""
+    """The Databricks sample CTE uses the projection-subquery form
+    (``sample_hash_in_projection=True``, issue #226): the sign-bit-masked
+    ``xxhash64`` whole-row hash is computed ONCE in an inner projection bound to
+    ``_sf_sample_hash`` and the outer ``WHERE`` references that alias. Spark
+    rejects ``struct(*)`` inside a Sort/predicate over the bare relation
+    (``[INVALID_USAGE_OF_STAR_OR_REGEX]``), so the hash MUST live in the
+    projection. The BigQuery ``FARM_FINGERPRINT`` form and the Snowflake
+    ``HASH(*)`` form never appear."""
     test = CandidateTestNotNull(column="customer_id")
     sql = _compile_test(
         test,
@@ -1274,8 +1277,13 @@ def test_databricks_sample_cte_uses_xxhash64_mask_not_farm_fingerprint() -> None
         sample_bucket=10,
     )
     assert isinstance(sql, str)
-    # The sign-bit-masked xxhash64 expression, inline in the WHERE predicate.
-    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 10) < 1" in sql
+    # The sign-bit-masked xxhash64 expression, computed ONCE in the inner
+    # projection bound to the helper alias; the outer WHERE references the alias.
+    assert "(xxhash64(to_json(struct(*))) & 9223372036854775807) AS _sf_sample_hash" in sql
+    assert "MOD(_sf_sample_hash, 10) < 1" in sql
+    # Databricks strips the helper column with ``EXCEPT`` (Spark), not Snowflake's
+    # ``EXCLUDE``.
+    assert "SELECT * EXCEPT (_sf_sample_hash)" in sql
     # Folded + backtick-quoted identifier.
     assert "`customer_id`" in sql
     # Cross-dialect leakage guards (backtick is NOT a discriminator — both

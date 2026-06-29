@@ -2,7 +2,7 @@
 :class:`DatabricksAdapter` emits (#224 US-003 + US-004).
 
 Covers ``sample_rows`` (COUNT sizing + sample SELECT), ``materialise_sample``
-(COUNT sizing + ``CREATE TEMPORARY TABLE ... AS ...`` CTAS), and ``run_test_sql``
+(COUNT sizing + ``CREATE OR REPLACE TABLE ... AS ...`` CTAS), and ``run_test_sql``
 (the ``COUNT(*)`` wrap + the per-row ``to_json(struct(*))`` LIMIT capture query).
 
 This is the adapter-side analogue of the prune-compiler parse-guard
@@ -72,7 +72,7 @@ class _RecordingDatabricksConnection(FakeDatabricksConnection):
         return super()._consume_execute(sql)
 
 
-_CTAS_QUERY = r"CREATE TEMPORARY TABLE"
+_CTAS_QUERY = r"CREATE OR REPLACE TABLE"
 _FAILURES_QUERY = r"COUNT\(\*\) AS failures"
 _CAPTURE_QUERY = r"to_json\(struct"
 
@@ -98,7 +98,7 @@ def _emitted_materialise_sqls(
     partition_filter: PartitionFilter | None = None,
 ) -> list[str]:
     """Drive ``materialise_sample`` once and return the exact SQL it executed
-    (the COUNT sizing query + the ``CREATE TEMPORARY TABLE ... AS ...`` CTAS)."""
+    (the COUNT sizing query + the ``CREATE OR REPLACE TABLE ... AS ...`` CTAS)."""
     conn = _RecordingDatabricksConnection()
     conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
     conn.expect_execute(matching=_CTAS_QUERY, returns=[])
@@ -215,16 +215,16 @@ def test_every_emitted_materialise_statement_parses_under_databricks_dialect(
     partition_filter: PartitionFilter | None,
 ) -> None:
     """Every statement ``materialise_sample`` emits (COUNT sizing + the
-    ``CREATE TEMPORARY TABLE <qualified temp> AS <sample body>`` CTAS) must parse
-    under sqlglot's ``databricks`` dialect.
+    ``CREATE OR REPLACE TABLE <qualified temp> AS <sample body>`` CTAS) must
+    parse under sqlglot's ``databricks`` dialect.
 
-    Certifies the CTAS SHAPE only — whether Databricks *accepts* a QUALIFIED
-    temporary-table name and persists the session is a **#226 live-cert item**
-    (sqlglot parses SQL, it does not run it).
+    Certified live (#226): Databricks rejects a *qualified* ``TEMPORARY TABLE``
+    name, so the adapter materialises into a real ``CREATE OR REPLACE TABLE``
+    colocated with the source and drops it at session cleanup.
     """
     statements = _emitted_materialise_sqls(table, partition_filter=partition_filter)
     assert len(statements) == 2  # COUNT sizing query + the CTAS
-    assert statements[1].startswith("CREATE TEMPORARY TABLE")
+    assert statements[1].startswith("CREATE OR REPLACE TABLE")
     for sql in statements:
         parsed = sqlglot.parse_one(sql, dialect="databricks")
         assert parsed is not None
