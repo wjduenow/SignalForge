@@ -90,50 +90,11 @@ OAuth *connection* is deferred — the connector uses PAT). A BigQuery-only
 (`location:`) or Snowflake-only (`account:`) field on a `databricks`
 target fails loud, and vice versa.
 
-### Databricks adapter — sampling surface (#224)
-
-The Databricks adapter samples and profiles via the connector's
-connection-bound session (the connection *is* the session, as with
-Snowflake): `_get_connection()` lazily opens one connection and every op
-runs on it; `with adapter:` closes it on exit (fail-soft — a close failure
-emits one WARNING, never aborts; session-scoped temp objects are reaped by
-the server, so there is no manual cleanup command). Deterministic sampling
-uses an inline `MOD((xxhash64(to_json(struct(*))) & 9223372036854775807),
-<bucket>) < 1` predicate (Databricks, unlike Snowflake, accepts the hash in
-`WHERE`/`ORDER BY`). Table sizing uses `SELECT COUNT(*)` (Delta keeps this
-metadata-cheap); `DESCRIBE DETAIL` is **not** used because it carries no
-reliable `numRows`. As with every adapter, a table ≥ 100M rows requires a
-`partition_filter` or sampling fails loud.
-
-**Sample strategy.** Both `prune.sample_strategy: materialised` (default —
-a session-scoped `CREATE TEMPORARY TABLE` sample) and `oneshot` (per-test
-hash-mod sampling via the `get_row_count` seam) work against Databricks.
-`safety: aggregate-only` profiling (`column_stats`) is also supported for
-scalar columns.
-
-**Query-bytes estimation (#225).** `signalforge generate --estimate`
-returns a real cost preview for Databricks: `estimate_query_bytes` runs
-`EXPLAIN COST <sql>` and parses the maximum Spark CBO
-`Statistics(sizeInBytes=...)` across plan nodes, degrading to
-`EstimateUnavailableError` when the plan reports the `8.0 EiB` no-stats
-sentinel or carries no parseable figure. See § "Query-bytes estimation"
-for the full mechanism and the planner-estimate / `ANALYZE TABLE`
-freshness caveat.
-
-**Live certification is #226.** The #224 / #225 Databricks surface is
-certified for SQL *shape* (against a fake connection + a `sqlglot`
-`databricks`-dialect parse-guard, plus a maintainer-captured `EXPLAIN COST`
-fixture), not yet against a live Databricks SQL warehouse. The items
-deferred to the #226 gated live Free-Edition run are: whether a *qualified*
-`CREATE TEMPORARY TABLE <catalog>.<schema>.<temp>` is accepted; whether the
-connector persists the session across queries (so a materialised temp table
-is reachable from a follow-up test); the `to_json(struct(*))` failure-row
-capture marshalling; `column_stats` `MIN`/`MAX` on complex-typed
-(ARRAY/STRUCT/MAP/JSON/…) columns, which currently diverge from BigQuery's
-skip-and-`None` contract; and whether a live warehouse accepts
-`EXPLAIN COST`, returns the plan-text shape the parser reads, and holds the
-single-row-result assumption (#225 estimate). Until #226 lands, treat
-Databricks support as shape-certified.
+The cross-cutting sections below (sampling, materialised sampling,
+estimation, error reference) carry the BigQuery / Snowflake / Databricks
+detail inline; the consolidated [§ Databricks adapter](#databricks-adapter-v0x-epic-219)
+section gathers everything an operator running SignalForge against
+Databricks needs in one place.
 
 ## dbt profile resolution
 
@@ -814,6 +775,228 @@ gate that caught the `"sample"` reserved-word bug. A hand-rolled
 `FakeSnowflakeConnection` (`expect_execute` / `assert_all_expectations_met`)
 covers session/cleanup/error-mapping behaviour. Real `HASH` execution +
 case-folding are certified only by the gated live tests.
+
+## Databricks adapter (v0.x, epic #219)
+
+The Databricks seam ships across issues #221 (skeleton), #222 (profile),
+#223 (compiler dialect), #224 (sampling + session + profiling), #225
+(EXPLAIN estimate), and #226 (test harness + gated live cert + ops docs).
+This section consolidates what an operator running SignalForge against
+Databricks needs; the cross-cutting sections above (sampling, materialised
+sampling, estimation, error reference) carry the BigQuery / Snowflake /
+Databricks detail inline.
+
+**Install.** `pip install "signalforge-dbt[databricks]"` (or `uv pip install
+"signalforge-dbt[databricks]"`). The base install never pulls
+`databricks-sql-connector`; it lives only under the `[databricks]` extra.
+
+**Profile keys.** A `type: databricks` target requires `host` + `http_path`
+always, plus the auth-conditional credential: `token` for PAT (the default,
+or explicit `auth_type: pat`) or `client_id` + `client_secret` for
+`auth_type: oauth` (OAuth-M2M). `catalog` (the Unity Catalog catalog —
+Databricks' analogue of BigQuery `project` / Snowflake `database`) and
+`schema` are optional. A missing required key — **including an empty-string
+credential**, e.g. an unset `env_var('DATABRICKS_TOKEN', '')` that renders to
+`""` — raises `IncompleteProfileError` listing every missing key; an
+unsupported `auth_type` raises `UnsupportedAuthMethodError`. **PAT auth is
+the only v0.x *connection* path** — the OAuth-M2M fields are validated
+coherently now, but the connector uses the PAT (`token`); the OAuth
+connection is deferred. A BigQuery-only (`location:`) or Snowflake-only
+(`account:`) field on a `databricks` target fails loud, and vice versa.
+`catalog` / `schema` are validated as strict SQL identifiers (no length
+bound, so short Unity Catalog catalogs like `main` / `workspace` pass);
+`host` / `http_path` use a permissive non-SQL grammar (they never become
+SQL — log-injection hygiene only).
+
+A typical PAT profile reads its credentials from the environment so the
+secret never lands in `profiles.yml`:
+
+```yaml
+my_databricks_project:
+  target: dev
+  outputs:
+    dev:
+      type: databricks
+      host: "{{ env_var('DATABRICKS_SERVER_HOSTNAME') }}"
+      http_path: "{{ env_var('DATABRICKS_HTTP_PATH') }}"
+      token: "{{ env_var('DATABRICKS_TOKEN', '') }}"
+      catalog: workspace
+      schema: my_schema
+```
+
+The env-var contract mirrors the `databricks-sql-connector` SDK and the
+gated live tests:
+
+| Env var                     | Source (Databricks UI)                                                            |
+| --------------------------- | -------------------------------------------------------------------------------- |
+| `DATABRICKS_SERVER_HOSTNAME` | SQL warehouse → **Connection details** → *Server hostname* (`dbc-…​.cloud.databricks.com`). |
+| `DATABRICKS_HTTP_PATH`      | SQL warehouse → **Connection details** → *HTTP path* (`/sql/1.0/warehouses/…`).    |
+| `DATABRICKS_TOKEN`          | User Settings → **Developer** → **Access tokens** → *Generate new token* (a `dapi…` PAT). |
+
+**Dialect.** `DATABRICKS_DIALECT` sets `quote_char='`'` (backtick — Spark
+SQL, unlike Snowflake/Postgres double-quote), `identifier_case='lower'`
+(Unity Catalog folds unquoted identifiers to **lower**-case — the *opposite*
+of Snowflake's `'upper'`, so the adapter and compiler fold-then-quote so a
+conventionally-cased manifest identifier resolves against the real object
+and a CREATEd temp table matches the name the compiler REFERENCEs),
+per-component qualified-name quoting (`` `catalog`.`schema`.`table` ``,
+because `quote_qualified_per_component=True` — a single backtick-quoted
+string spanning dots would read as ONE identifier literally named
+`catalog.schema.table`), and the masked sampling hash
+`(xxhash64(to_json(struct(*))) & 9223372036854775807)`. The sign-bit
+**mask** (`& 9223372036854775807` = `Long.MAX_VALUE`), not `ABS`, is
+load-bearing: `xxhash64` returns a *signed* 64-bit long and Spark's
+`ABS(Long.MIN_VALUE)` stays negative in non-ANSI mode, which would skew the
+deterministic `MOD(<expr>, bucket) < 1` sample; clearing the sign bit is
+always non-negative and uniform. `xxhash64` (not Spark's bare 32-bit
+`hash(*)`) is chosen for collision stability.
+
+**Connection-bound session + materialised sampling.** Like Snowflake (and
+unlike BigQuery, which threads a server-side `session_id` on every query),
+the Databricks *connection* holds the session: `_get_connection()` lazily
+opens one connection and every op runs on it. Deterministic sampling uses
+the **inline-predicate** shape —
+`MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), <bucket>) < 1`
+directly in `WHERE`/`ORDER BY` — because Databricks, **unlike Snowflake**,
+accepts the hash in a predicate position (no `HASH(*)`-projection-only
+restriction). Table sizing uses `SELECT COUNT(*)` (metadata-cheap on Delta);
+`DESCRIBE DETAIL` is **not** used because it carries no reliable `numRows`
+(the figure lives in the Delta `statistics` map, populated only after
+`ANALYZE TABLE COMPUTE STATISTICS` and commonly NULL/stale). As with every
+adapter, a table ≥ 100M rows requires a `partition_filter` or sampling fails
+loud (`SamplingRequiresPartitionFilterError` / `UnknownTableSizeError`).
+`materialise_sample` runs a session-scoped, **qualified**
+`CREATE TEMPORARY TABLE <catalog>.<schema>._sf_sample_<run_id> AS <sample
+body>` **colocated with the source** (the temp table lives in the source
+catalog/schema, fold-then-quoted per-component, so the prune compiler's
+`REFERENCE` matches the adapter's `CREATE`); the connection is pinned so a
+follow-up `run_test_sql` reaches the temp table. The `run_id` reuses the
+shared `_compute_run_id` recipe, so the temp-table name is byte-identical to
+the BigQuery / Snowflake adapters' for the same `(table, n,
+partition_filter)` tuple. **Both `prune.sample_strategy` values work:**
+`materialised` (the session-scoped temp table — needs a **writable** source
+catalog, e.g. the Free-Edition `workspace`) and `oneshot` (per-test hash-mod
+via the vendor-neutral `get_row_count` seam — no CTAS, so no writable source
+needed).
+
+**Session cleanup is fail-soft with no manual command.** A Databricks
+session-local temp table is unreachable outside its owning session, so —
+exactly like Snowflake — there is no `bq`-style abort command and no
+`auto-expire in <N>s` countdown: the honest durable fallback is Databricks'
+server-side reap when the SQL warehouse drops the connection. On a cleanup
+failure the adapter swallows the error and emits one operator-actionable
+WARNING quoting the raw `session_id` (the only path where the raw id
+appears; success logs hash it). `--quiet` does **not** suppress this WARNING.
+
+**Estimate.** `signalforge generate --estimate` runs `EXPLAIN COST <sql>`
+and parses the maximum Spark CBO `Statistics(sizeInBytes=...)` across plan
+nodes (see [§ Query-bytes estimation](#query-bytes-estimation-v02-issue-36)
+for the full mechanism). Unlike Snowflake's `EXPLAIN USING JSON`, `EXPLAIN
+COST` returns the plan as multi-line **text**. When a plan node has no CBO
+statistics, Spark prints `spark.sql.defaultSizeInBytes` (`Long.MaxValue` ≈
+`8.0 EiB`); the parser detects a maximum at-or-above that sentinel and
+raises the **reused** `EstimateUnavailableError` (naming `ANALYZE TABLE
+<table> COMPUTE STATISTICS`) rather than ever reporting the ~9-exabyte
+figure. A plan carrying no parseable `sizeInBytes` at all routes to the same
+`EstimateUnavailableError`. EXPLAIN COST figures are CBO *planner estimates*
+whose accuracy depends on table-statistics freshness — a cost preview, not a
+billing guarantee. The `--estimate` engine catches the degrade at the
+supplementary-source boundary and renders `<unavailable:
+EstimateUnavailableError>`, falling back to a price-only preview.
+
+**`column_stats` is AVAILABLE for Databricks — `safety: aggregate-only`
+works.** This is a **deliberate divergence from Snowflake**, whose
+`column_stats` (and therefore `safety.mode: aggregate-only`) is **not yet
+implemented**. The Databricks adapter ships `column_stats` (issue #224,
+DEC-011) as a single aggregate query — `count` / `distinct` / `nulls` /
+`min` / `max` / `data_type` (the last via `MAX(typeof(<col>))`) — over the
+fold-then-quoted column. The Snowflake-parity follow-up is tracked as issue
+#258. **Known divergence:** BigQuery skips `MIN`/`MAX` (→ `None`) for complex
+types (ARRAY / STRUCT / MAP / JSON / BINARY / GEOGRAPHY); Databricks emits
+them unconditionally because `data_type` is derived inline (`typeof`) in the
+same aggregate, so the column's type isn't known before the query is built.
+The scalar-column path is the supported v0.x surface; complex-type handling
+is a #226 live-cert item.
+
+**Error taxonomy.** `map_databricks_exception` mirrors `map_snowflake_exception`
+/ `map_bq_exception`, scoping the Table/Column/Syntax split to the SQL-error
+connector types so a transient `OperationalError` / `RequestError` falls
+through to passthrough rather than mis-mapping. No new `WarehouseError`
+subclass is introduced, and there is **no `BytesBilledExceededError`
+equivalent** — Databricks has no bytes-billed cap (cost is governed by
+warehouse size + auto-stop, see below).
+
+| Connector exception                                            | Marker                          | Mapped error          |
+| -------------------------------------------------------------- | ------------------------------- | --------------------- |
+| `ServerOperationError` / `ProgrammingError`                    | table-not-found                 | `TableNotFoundError`  |
+| `ServerOperationError` / `ProgrammingError`                    | unresolved-column               | `ColumnNotFoundError` |
+| `ServerOperationError` / `ProgrammingError`                    | auth                            | `WarehouseAuthError`  |
+| `ServerOperationError` / `ProgrammingError`                    | residual (SQL compile / syntax) | `QuerySyntaxError`    |
+| Other (connect-time `RequestError` / `OperationalError`, or connector absent) | auth     | `WarehouseAuthError`  |
+| Anything else                                                  | _(none)_                        | _(passes through unchanged)_ |
+
+**Known limitations + live certification (#226).** The #221–#225 Databricks
+surface is certified for SQL *shape* (against a fake connection + an ungated
+`sqlglot` `databricks`-dialect parse-guard, plus a maintainer-captured
+`EXPLAIN COST` fixture), **not yet against a live Databricks SQL warehouse**
+— until #226 lands, treat Databricks support as shape-certified. The items
+deferred to the #226 gated live Free-Edition run are: whether a *qualified*
+`CREATE TEMPORARY TABLE <catalog>.<schema>.<temp>` is accepted; whether the
+connector persists the session across queries (so a materialised temp table
+is reachable from a follow-up test); the `to_json(struct(*))` per-row
+failure-capture marshalling; `column_stats` `MIN`/`MAX` on complex-typed
+columns (the BigQuery skip-and-`None` divergence noted above); and whether a
+live warehouse accepts `EXPLAIN COST`, returns the plan-text shape the parser
+reads, and holds the single-row-result assumption. `run_stats_query` (for the
+`row_count_anomaly_by_period` primitive) still inherits the ABC's typed
+`StatsQueryNotSupportedError` degrade — out of scope until its own ticket.
+
+**Cost guidance — read before running any live Databricks test.** The live
+target is **Databricks Free Edition** (serverless-only). Its single SQL
+warehouse is limited to a **`2X-Small`** that **auto-stops** when idle, so an
+idle warehouse stops billing promptly and the steady-state cost is zero;
+cold-start from stopped is ~5–30s (budget the live-test timeout accordingly).
+⚠️ **Fair-use quota** is the load-bearing guardrail (the Free-Edition analogue
+of Snowflake's resource monitor): exceeding the Free-Edition daily/monthly
+quota shuts the warehouse down for the period, so the gated live tests keep
+scans tiny (a handful of rows, `LIMIT`-bounded) and target the writable
+`workspace` catalog for materialised samples. PATs have no per-API scopes —
+a generated token inherits the creating user's full workspace permissions —
+so guard the token like any credential.
+
+**Offline test harness.** The adapter's emitted SQL is validated offline
+without a live warehouse two ways: (1) a hand-rolled `FakeDatabricksConnection`
+(`expect_execute` / `assert_all_expectations_met` + cursor-leak assertions)
+drives session / cleanup / error-mapping / sampling / capture behaviour with
+rule-semantic assertions; (2) the emitted statements (COUNT, sample, CTAS,
+`run_test_sql` capture, `column_stats`, `EXPLAIN COST`) are asserted to
+**parse** under `sqlglot`'s `databricks` dialect. Crucially these `sqlglot`
+parse-guards are **ungated** — they run in the default `pytest` suite (no
+marker) because `sqlglot` is a base dependency and Databricks has **no
+offline execution fake** (no `fakesnow`/DuckDB equivalent for Spark), so the
+parse-guard is the *sole* automated validity gate until the #226 live run.
+Snapshot/parse equality certifies *shape* and *syntactic validity*, never
+that a live warehouse *accepts* the SQL — that is the #226 live cert.
+
+**Live tests.** The gated live leg runs against a real Free-Edition
+warehouse:
+
+```bash
+# Databricks — Free Edition 2X-Small auto-stops; mind the fair-use quota
+export SF_RUN_DATABRICKS=1
+export DATABRICKS_SERVER_HOSTNAME=dbc-xxxxxxxx-xxxx.cloud.databricks.com
+export DATABRICKS_HTTP_PATH=/sql/1.0/warehouses/xxxxxxxxxxxxxxxx
+export DATABRICKS_TOKEN=dapi...
+uv run pytest -m databricks --no-cov
+```
+
+`SF_RUN_DATABRICKS=1` gates the live leg on top of the `databricks` marker
+(belt-and-suspenders); each live test self-skips with a distinct reason when
+a prerequisite is missing. The `databricks` marker also covers the
+fake-driven offline suites (which run with no env vars). The ungated
+`sqlglot` parse-guards run in the *default* suite, NOT under the marker. See
+[`docs/research/databricks-test-environment.md`](research/databricks-test-environment.md)
+for the full Free-Edition setup and the certified-tiers ledger.
 
 ## Integration tests (maintainer-only)
 
