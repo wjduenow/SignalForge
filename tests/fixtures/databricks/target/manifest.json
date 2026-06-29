@@ -1,0 +1,295 @@
+{
+    "metadata": {
+        "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+        "dbt_version": "1.8.9",
+        "generated_at": null,
+        "invocation_id": null,
+        "env": {},
+        "project_name": "signalforge_test_nyctaxi",
+        "project_id": "signalforgenyctaxi00000000000000",
+        "user_id": null,
+        "send_anonymous_usage_stats": null,
+        "adapter_type": null
+    },
+    "nodes": {
+        "model.signalforge_test_nyctaxi.stg_nyctaxi_trips": {
+            "database": "samples",
+            "schema": "nyctaxi",
+            "name": "stg_nyctaxi_trips",
+            "resource_type": "model",
+            "package_name": "signalforge_test_nyctaxi",
+            "path": "staging/stg_nyctaxi_trips.sql",
+            "original_file_path": "models/staging/stg_nyctaxi_trips.sql",
+            "unique_id": "model.signalforge_test_nyctaxi.stg_nyctaxi_trips",
+            "fqn": [
+                "signalforge_test_nyctaxi",
+                "staging",
+                "stg_nyctaxi_trips"
+            ],
+            "alias": "trips",
+            "checksum": {
+                "name": "sha256",
+                "checksum": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "config": {
+                "enabled": true,
+                "alias": null,
+                "schema": null,
+                "database": null,
+                "tags": [],
+                "meta": {},
+                "group": null,
+                "materialized": "view",
+                "incremental_strategy": null,
+                "persist_docs": {},
+                "post-hook": [],
+                "pre-hook": [],
+                "quoting": {},
+                "column_types": {},
+                "full_refresh": null,
+                "unique_key": null,
+                "on_schema_change": "ignore",
+                "on_configuration_change": "apply",
+                "grants": {},
+                "packages": [],
+                "docs": {
+                    "show": true,
+                    "node_color": null
+                },
+                "contract": {
+                    "enforced": false,
+                    "alias_types": true
+                },
+                "access": "protected"
+            },
+            "tags": [],
+            "description": "Source-as-model passthrough over the Databricks Unity Catalog sample table `samples.nyctaxi.trips`. Each row is one NYC taxi trip. Exposes a curated subset of REAL source columns so the SignalForge generate-pipeline live e2e has a deterministic prune drop signal \u2014 a drafted `not_null` on the natural NOT NULL pickup timestamp `tpep_pickup_datetime` prunes as always-passes. The model's `alias` is overridden to `trips` so `relation_name` resolves directly to `samples.nyctaxi.trips`, sidestepping a `dbt run` materialisation step.",
+            "columns": {
+                "tpep_pickup_datetime": {
+                    "name": "tpep_pickup_datetime",
+                    "description": "Trip pickup timestamp. NATURAL NOT NULL: every source row has a value, so a drafted `not_null` on it returns zero failing rows and prunes as always-passes (the full-pipeline e2e drop signal).",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "tpep_dropoff_datetime": {
+                    "name": "tpep_dropoff_datetime",
+                    "description": "Trip dropoff timestamp. TIMESTAMP; non-null in the nyctaxi sample.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "trip_distance": {
+                    "name": "trip_distance",
+                    "description": "Trip distance in miles. DOUBLE; non-null.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "fare_amount": {
+                    "name": "fare_amount",
+                    "description": "Fare amount in USD. DOUBLE; may be small but is non-null.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "pickup_zip": {
+                    "name": "pickup_zip",
+                    "description": "ZIP code of the pickup location. INT; non-null.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "dropoff_zip": {
+                    "name": "dropoff_zip",
+                    "description": "ZIP code of the dropoff location. INT; non-null.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                }
+            },
+            "meta": {},
+            "group": null,
+            "docs": {
+                "show": true,
+                "node_color": null
+            },
+            "patch_path": null,
+            "build_path": null,
+            "unrendered_config": {
+                "materialized": "view"
+            },
+            "created_at": 0,
+            "relation_name": "samples.nyctaxi.trips",
+            "raw_code": "-- Hand-crafted nyctaxi seed model (issue #226, US-001). The model's `alias`\n-- is overridden to `trips` so its relation resolves directly to the\n-- read-only Unity Catalog sample `samples.nyctaxi.trips` (SignalForge\n-- runs against the materialised relation; no `dbt run` needed). Declares\n-- only REAL nyctaxi source columns \u2014 the `always-passes` drop signal for\n-- the full-pipeline e2e relies on a NATURAL NOT NULL column\n-- (`tpep_pickup_datetime`, the pickup timestamp) because under `oneshot`\n-- prune queries the source table directly (mirrors the Austin bikeshare\n-- natural-NOT-NULL pattern).\nSELECT\n    tpep_pickup_datetime,\n    tpep_dropoff_datetime,\n    trip_distance,\n    fare_amount,\n    pickup_zip,\n    dropoff_zip\nFROM {{ source('nyctaxi', 'trips') }}\n",
+            "language": "sql",
+            "refs": [],
+            "sources": [
+                [
+                    "nyctaxi",
+                    "trips"
+                ]
+            ],
+            "metrics": [],
+            "depends_on": {
+                "macros": [],
+                "nodes": [
+                    "source.signalforge_test_nyctaxi.nyctaxi.trips"
+                ]
+            },
+            "compiled_path": null,
+            "contract": {
+                "enforced": false,
+                "alias_types": true,
+                "checksum": null
+            },
+            "access": "protected",
+            "constraints": [],
+            "version": null,
+            "latest_version": null,
+            "deprecation_date": null
+        }
+    },
+    "sources": {
+        "source.signalforge_test_nyctaxi.nyctaxi.trips": {
+            "database": "samples",
+            "schema": "nyctaxi",
+            "name": "trips",
+            "resource_type": "source",
+            "package_name": "signalforge_test_nyctaxi",
+            "path": "models/staging/sources.yml",
+            "original_file_path": "models/staging/sources.yml",
+            "unique_id": "source.signalforge_test_nyctaxi.nyctaxi.trips",
+            "fqn": [
+                "signalforge_test_nyctaxi",
+                "nyctaxi",
+                "trips"
+            ],
+            "source_name": "nyctaxi",
+            "source_description": "Databricks Unity Catalog nyctaxi sample dataset.",
+            "loader": "",
+            "identifier": "trips",
+            "quoting": {
+                "database": null,
+                "schema": null,
+                "identifier": null,
+                "column": null
+            },
+            "loaded_at_field": null,
+            "freshness": {
+                "warn_after": {
+                    "count": null,
+                    "period": null
+                },
+                "error_after": {
+                    "count": null,
+                    "period": null
+                },
+                "filter": null
+            },
+            "external": null,
+            "description": "One row per NYC taxi trip.",
+            "columns": {
+                "tpep_pickup_datetime": {
+                    "name": "tpep_pickup_datetime",
+                    "description": "Trip pickup timestamp.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "tpep_dropoff_datetime": {
+                    "name": "tpep_dropoff_datetime",
+                    "description": "Trip dropoff timestamp.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "trip_distance": {
+                    "name": "trip_distance",
+                    "description": "Trip distance in miles.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "fare_amount": {
+                    "name": "fare_amount",
+                    "description": "Fare amount in USD.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "pickup_zip": {
+                    "name": "pickup_zip",
+                    "description": "ZIP code of the pickup location.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                },
+                "dropoff_zip": {
+                    "name": "dropoff_zip",
+                    "description": "ZIP code of the dropoff location.",
+                    "meta": {},
+                    "data_type": null,
+                    "constraints": [],
+                    "quote": null,
+                    "tags": []
+                }
+            },
+            "meta": {},
+            "source_meta": {},
+            "tags": [],
+            "config": {
+                "enabled": true
+            },
+            "patch_path": null,
+            "unrendered_config": {},
+            "relation_name": "samples.nyctaxi.trips",
+            "created_at": 0
+        }
+    },
+    "macros": {},
+    "docs": {},
+    "exposures": {},
+    "metrics": {},
+    "groups": {},
+    "selectors": {},
+    "disabled": {},
+    "parent_map": {
+        "model.signalforge_test_nyctaxi.stg_nyctaxi_trips": [
+            "source.signalforge_test_nyctaxi.nyctaxi.trips"
+        ],
+        "source.signalforge_test_nyctaxi.nyctaxi.trips": []
+    },
+    "child_map": {
+        "model.signalforge_test_nyctaxi.stg_nyctaxi_trips": [],
+        "source.signalforge_test_nyctaxi.nyctaxi.trips": [
+            "model.signalforge_test_nyctaxi.stg_nyctaxi_trips"
+        ]
+    },
+    "group_map": {},
+    "saved_queries": {},
+    "semantic_models": {},
+    "unit_tests": {}
+}
