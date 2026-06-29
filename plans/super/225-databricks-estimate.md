@@ -64,7 +64,7 @@ The #224 sampling surface merged into `dev` (commit `7d1c9a1`, 2026-06-25). The 
 
 Snowflake's `EXPLAIN USING JSON` returns a machine-readable JSON cell (`GlobalStats.bytesAssigned`). Spark/Databricks `EXPLAIN COST` returns a multi-line **plan-text** string in a single cell (column `plan`), shaped roughly:
 
-```
+```text
 == Optimized Logical Plan ==
 Aggregate [...], Statistics(sizeInBytes=8.0 B, rowCount=1)
 +- Project [...], Statistics(sizeInBytes=12.3 MiB)
@@ -98,7 +98,7 @@ A single issue shipping **both phases** (mirroring #130): pin the Phase-1 degrad
 
 | Area | Rating | Finding |
 |---|---|---|
-| Security | **pass** | `validate_test_sql(sql)` gates injection (rejects `;`, `--`, unbalanced parens) BEFORE the trusted-constant `EXPLAIN COST ` prefix is prepended (DEC-008). No new credential surface; `__repr__` redaction unchanged. `EXPLAIN COST` is planner-only — no scan, no mutation. |
+| Security | **pass** | `validate_test_sql(sql)` gates injection (rejects `;`, `--`, unbalanced parens) BEFORE the trusted-constant `EXPLAIN COST` prefix is prepended (DEC-008). No new credential surface; `__repr__` redaction unchanged. `EXPLAIN COST` is planner-only — no scan, no mutation. |
 | Performance | **pass** | `EXPLAIN COST` is a planner-only call — no partition scan, no DBU compute beyond planning. The estimate engine makes exactly one `estimate_query_bytes` call per `--estimate` (#36). |
 | Data model | **pass** | No schema / migration. Reuses the existing `EstimateUnavailableError`; adds one (or two) captured fixtures. |
 | API design | **pass** | Overrides an existing ABC method; same `int`-bytes contract the `--estimate` engine already consumes. No signature change. |
@@ -130,7 +130,7 @@ A single issue shipping **both phases** (mirroring #130): pin the Phase-1 degrad
 - Defensive: a parsed value that is negative or non-finite raises. (No `bool` path — the text parse yields floats, not Python bools.)
 Pinned by **synthetic inline table-driven cases** (US-001) AND a **maintainer-captured fixture** (US-005). Engineer determinism: assert the parsed int equals the fixture's known `sizeInBytes`, never a live planner value.
 
-**DEC-008 — Validate inner SQL FIRST, then prepend trusted `EXPLAIN COST `.** Call `validate_test_sql(sql)` (already imported in the adapter) on the caller SQL, THEN build `f"EXPLAIN COST {sql}"`. The injection boundary is the user SQL; the literal prefix is trusted constant text (mirrors #130 DEC-004).
+**DEC-008 — Validate inner SQL FIRST, then prepend trusted `EXPLAIN COST`.** Call `validate_test_sql(sql)` (already imported in the adapter) on the caller SQL, THEN build `f"EXPLAIN COST {sql}"`. The injection boundary is the user SQL; the literal prefix is trusted constant text (mirrors #130 DEC-004).
 
 **DEC-009 — Add a `_execute_scalar` sibling; route SDK errors through `map_databricks_exception`.** The estimate path has no `TableRef` in scope, so it needs a no-table cursor helper (mirrors Snowflake DEC-008). Add `DatabricksAdapter._execute_scalar(sql) -> Any`: open a cursor, `execute` + `fetchall` in a `try`, map any exception via `map_databricks_exception(exc, context={})` (`raise mapped from exc`; passthrough re-raises), close the cursor in `finally` (the per-method cursor-close convention #224 established). Return the first row's first cell (mapping rows → first value; tuple/list rows → `[0]`), or `None` for an empty result. *Single-row assumption* (Spark EXPLAIN returns one row holding the whole plan) is a documented #226 live-cert item.
 
@@ -160,7 +160,7 @@ Pinned by **synthetic inline table-driven cases** (US-001) AND a **maintainer-ca
 ### US-002 — `_execute_scalar` sibling + `DatabricksAdapter.estimate_query_bytes` override
 - **Description:** Add `_execute_scalar(sql) -> Any` (DEC-009) and override `estimate_query_bytes(sql) -> int`: `validate_test_sql(sql)` → `f"EXPLAIN COST {sql}"` → `_execute_scalar(...)` → `_parse_explain_cost_bytes(cell)`. An empty result (`None`) → `EstimateUnavailableError`. Update the adapter module + class docstrings (remove the "`estimate_query_bytes` inherits the ABC degrade until #225 lands" note; add the EXPLAIN-COST + #226-live-cert note).
 - **Traces to:** DEC-002, DEC-008, DEC-009, DEC-012.
-- **TDD:** inject `FakeDatabricksConnection.expect_execute(matching=r"^EXPLAIN COST", returns=<fixture cell rows>, description=...)` → returns the expected int; SQL with `;` → `validate_test_sql` rejects BEFORE any cursor call; a connector exception → mapped `WarehouseError` re-raised `from`; the executed SQL starts with `EXPLAIN COST ` and embeds the validated SQL verbatim; `_execute_scalar` closes the cursor on success AND failure (the #224 cursor-leak regression shape); an empty `fetchall` → `EstimateUnavailableError`.
+- **TDD:** inject `FakeDatabricksConnection.expect_execute(matching=r"^EXPLAIN COST", returns=<fixture cell rows>, description=...)` → returns the expected int; SQL with `;` → `validate_test_sql` rejects BEFORE any cursor call; a connector exception → mapped `WarehouseError` re-raised `from`; the executed SQL starts with `EXPLAIN COST` and embeds the validated SQL verbatim; `_execute_scalar` closes the cursor on success AND failure (the #224 cursor-leak regression shape); an empty `fetchall` → `EstimateUnavailableError`.
 - **Files:** `src/signalforge/warehouse/adapters/databricks.py`, `tests/warehouse/test_databricks_estimate.py`.
 - **AC:** the method no longer inherits the ABC degrade; fake-driven happy + injection-guard + mapped-error + cursor-close paths pinned.
 - **Done when:** `EXPLAIN COST` happy path returns real bytes via the fake; the one-shim rule holds (no `databricks.sql` import in the adapter).
