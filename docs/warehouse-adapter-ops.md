@@ -900,6 +900,21 @@ reaped server-side when the SQL warehouse drops the idle connection (no
 `session_id` appears only in these failure WARNINGs (success logs hash it).
 `--quiet` does **not** suppress them.
 
+**Concurrency caveat (v0.x known limitation).** The materialised-sample table
+name is the shared deterministic `_compute_run_id` recipe (`(table, n,
+partition_filter)` → byte-stable name, the `compiled_sql` audit-reproducibility
+invariant). Because a Databricks materialised sample is a **real**
+globally-visible table (not session-isolated like BigQuery's `_SESSION` dataset
+or Snowflake's `CREATE TEMPORARY TABLE`), two **concurrent** SignalForge runs
+against the same `(table, n, partition_filter)` on the same catalog collide on
+it — one run's cleanup `DROP` can remove the other's sample mid-prune. The
+failure is **safe**: the affected `run_test_sql` hits table-not-found and routes
+to the conservative `kept-without-evidence` degrade (no corruption — the
+deterministic SELECT yields identical rows either way; no crash). A per-session
+suffix would avoid the collision but break the audit-reproducibility invariant,
+so it is deliberately not applied. Operators running **concurrent** Databricks
+prunes against the same model should serialise them or vary `prune.sample_size`.
+
 **Estimate.** `signalforge generate --estimate` runs `EXPLAIN COST <sql>`
 and parses the maximum Spark CBO `Statistics(sizeInBytes=...)` across plan
 nodes (see [§ Query-bytes estimation](#query-bytes-estimation-v02-issue-36)

@@ -909,6 +909,23 @@ class DatabricksAdapter(WarehouseAdapter):
         # that committed table with no DROP and no operator WARNING. Tracking
         # first closes the window — ``DROP TABLE IF EXISTS`` at cleanup is a
         # harmless no-op when the table was never created.
+        #
+        # Concurrency caveat (v0.x known limitation): ``temp_name`` is the SHARED
+        # deterministic ``_compute_run_id`` recipe, so two concurrent SignalForge
+        # runs against the same ``(table, n, partition_filter)`` on the same
+        # catalog collide on this name. Unlike BigQuery (``_SESSION`` dataset) and
+        # Snowflake (``CREATE TEMPORARY TABLE``), a Databricks materialised sample
+        # is a REAL globally-visible table, so one run's cleanup ``DROP`` can
+        # remove a concurrent run's sample mid-prune. The failure is SAFE — the
+        # affected ``run_test_sql`` hits table-not-found → ``WarehouseError`` →
+        # the conservative ``kept-without-evidence`` degrade (the content is
+        # identical anyway: ``CREATE OR REPLACE`` with the same deterministic
+        # SELECT yields the same rows). A per-session suffix would avoid the
+        # collision but break the load-bearing ``compiled_sql`` audit
+        # reproducibility invariant (#22: same inputs → byte-stable temp name
+        # across runs), so it is deliberately NOT applied; operators running
+        # concurrent Databricks prunes against the same model should serialise or
+        # vary ``prune.sample_size``. See ``docs/warehouse-adapter-ops.md``.
         if temp_ref not in self._materialised_tables:
             self._materialised_tables.append(temp_ref)
 

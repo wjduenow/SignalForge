@@ -988,7 +988,14 @@ def test_materialise_then_exit_swallows_drop_failure_and_warns(
     with caplog.at_level(logging.WARNING):
         adapter.__exit__(None, None, None)  # must NOT raise
 
-    assert any("DROP TABLE IF EXISTS" in rec.message for rec in caplog.records)
+    # Exactly ONE drop-failure WARNING for the single materialised table — the
+    # documented one-WARNING-per-table contract (not "at least one").
+    drop_warnings = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING and "DROP TABLE IF EXISTS" in rec.getMessage()
+    ]
+    assert len(drop_warnings) == 1
     # The drop failure must NOT mask the connection close — close still fires
     # after the per-table swallow (the DROP loop precedes conn.close()).
     assert conn.close_call_count == 1
