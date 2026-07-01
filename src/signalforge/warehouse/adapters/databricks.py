@@ -150,6 +150,37 @@ _SIZE_IN_BYTES_RE = re.compile(
     r"(?P<unit>KiB|MiB|GiB|TiB|PiB|EiB|B)"
 )
 
+# Spark ``typeof()`` returns LOWERCASE DDL type strings. Mirrors BigQuery's
+# ``_is_complex_type`` (DEC-016 of the ``ColumnStats`` contract): the scalar
+# complex types where ``MIN``/``MAX`` is not meaningful, plus the parametric
+# ones detected by their type-name prefix. Spark has no ``GEOGRAPHY`` and
+# renders JSON as ``string`` — so the sets differ from BigQuery's.
+_COMPLEX_SPARK_TYPES: frozenset[str] = frozenset({"binary", "variant"})
+"""Scalar complex Spark types where ``MIN``/``MAX`` is omitted (R1/DEC-001)."""
+
+_PARAMETRIC_COMPLEX_SPARK_PREFIXES: frozenset[str] = frozenset({"array", "struct", "map"})
+"""Parametric complex Spark types (``array<…>`` / ``struct<…>`` / ``map<…>``)."""
+
+
+def _is_complex_spark_type(type_str: str) -> bool:
+    """Return True for Spark types where ``MIN``/``MAX`` is not meaningful.
+
+    Mirrors :func:`signalforge.warehouse.adapters.bigquery._is_complex_type`
+    with Databricks/Spark semantics (R1/DEC-001 of issue #227). Handles both
+    the scalar complex types (``binary``, ``variant``) and the parametric ones
+    (``array<…>``, ``struct<…>``, ``map<…>``); the prefix split keeps the check
+    resilient against arbitrary nested-type bodies. Spark ``typeof()`` returns
+    lowercase DDL strings, so the comparison is lower-folded defensively.
+
+    An empty string (``data_type == ""`` — the empty-table case) is NOT complex,
+    so ``MIN``/``MAX`` are preserved for it.
+    """
+    lowered = type_str.strip().lower()
+    if lowered in _COMPLEX_SPARK_TYPES:
+        return True
+    head = lowered.split("<", 1)[0]
+    return head in _PARAMETRIC_COMPLEX_SPARK_PREFIXES
+
 
 def _parse_explain_cost_bytes(cell: object) -> int:
     """Extract the planner's estimated-bytes figure from a Spark/Databricks
@@ -984,17 +1015,18 @@ class DatabricksAdapter(WarehouseAdapter):
         * ``count`` — ``COUNT(<col>)`` (NON-null count, matching BigQuery).
         * ``distinct`` — ``COUNT(DISTINCT <col>)``.
         * ``nulls`` — ``COUNT_IF(<col> IS NULL)`` (Spark's ``COUNTIF`` analogue).
-        * ``min`` / ``max`` — ``MIN(<col>)`` / ``MAX(<col>)``. **Known
-          divergence from BigQuery (DEC-011 follow-up):** BigQuery skips MIN/MAX
-          and sets ``min = max = None`` for complex types (ARRAY / STRUCT / MAP /
-          JSON / BINARY / GEOGRAPHY), per the :class:`ColumnStats` contract. This
-          adapter emits MIN/MAX unconditionally because ``data_type`` is derived
-          inline (``typeof``) in the same single aggregate, so the column's type
-          is not known before the query is built. On a complex column Spark
-          either raises (mapped → :class:`QuerySyntaxError`) or returns a
-          non-scalar; honouring the skip-for-complex contract needs a type
-          pre-fetch and is a **follow-up** (#226's live pass exercised only
-          scalar ``column_stats`` — see the note below).
+        * ``min`` / ``max`` — ``MIN(<col>)`` / ``MAX(<col>)``, then **nulled out
+          for complex Spark types** (R1/DEC-001 of issue #227). The aggregate
+          emits ``MIN``/``MAX`` unconditionally (``data_type`` is derived inline
+          via ``typeof`` in the same single round-trip, so the type isn't known
+          before the query is built), but AFTER the row returns a pure
+          post-process sets ``min = max = None`` when :func:`_is_complex_spark_type`
+          matches the returned ``data_type`` — honouring the same
+          :class:`ColumnStats` DEC-016 contract BigQuery does (skip MIN/MAX for
+          ARRAY / STRUCT / MAP / BINARY / VARIANT). No extra query / round-trip.
+          Scalar columns keep the byte-identical pass-through path; the
+          empty-table case (``data_type == ""``) is not complex, so its MIN/MAX
+          are preserved.
         * ``data_type`` — ``MAX(typeof(<col>))`` (Spark's DDL type string; an
           empty table yields ``NULL`` → coerced to ``""``, matching BigQuery's
           "type unknown → empty string" precedent).
@@ -1013,13 +1045,13 @@ class DatabricksAdapter(WarehouseAdapter):
             Real-Spark ``column_stats`` on a **scalar** column is **certified
             live (#226)** — ``tests/warehouse/test_databricks_prune_live.py``
             asserts ``count`` / ``distinct`` / ``nulls`` / ``data_type`` against
-            the real rig. Complex-type ``MIN`` / ``MAX`` semantics were NOT
-            exercised by the live pass (scalar-only) and remain shape-only. The
-            complex-type MIN/MAX divergence noted above (BigQuery skips MIN/MAX
-            for ARRAY / STRUCT / MAP / JSON / BINARY / GEOGRAPHY; this adapter
-            emits them unconditionally) was not exercised by the live pass and
-            remains a follow-up — the scalar-column path is the supported,
-            live-certified surface for v0.x.
+            the real rig. Complex-type ``MIN`` / ``MAX`` handling
+            (R1/DEC-001 of issue #227: nulled out for array / struct / map /
+            binary / variant, matching the BigQuery :class:`ColumnStats`
+            DEC-016 contract) is a pure post-process pinned by offline unit
+            tests; the live pass exercised only scalar columns, so the
+            scalar-column path is the supported, live-certified surface for
+            v0.x.
         """
         validate_identifier("column", column)
 
@@ -1028,9 +1060,9 @@ class DatabricksAdapter(WarehouseAdapter):
             f"SELECT COUNT({quoted_col}) AS non_null_count, "
             f"COUNT(DISTINCT {quoted_col}) AS distinct_count, "
             f"COUNT_IF({quoted_col} IS NULL) AS null_count, "
-            # MIN/MAX are emitted unconditionally; complex-typed columns
-            # (ARRAY/STRUCT/MAP/JSON/BINARY/GEOGRAPHY) diverge from BigQuery's
-            # skip-and-None contract — a follow-up (scalar-only live pass; see docstring).
+            # MIN/MAX are emitted unconditionally, then nulled out for complex
+            # Spark types (array/struct/map/binary/variant) in a pure
+            # post-process after the row returns (R1/DEC-001; see docstring).
             f"MIN({quoted_col}) AS min_value, "
             f"MAX({quoted_col}) AS max_value, "
             f"MAX(typeof({quoted_col})) AS data_type "
@@ -1045,13 +1077,27 @@ class DatabricksAdapter(WarehouseAdapter):
         # case-insensitively so a fake / dict-cursor that preserved case works too.
         lowered = {str(k).lower(): v for k, v in rows[0].items()}
         raw_type = lowered.get("data_type")
+        data_type = str(raw_type) if raw_type is not None else ""
+
+        # R1/DEC-001 (issue #227): honour the ColumnStats DEC-016 contract —
+        # MIN/MAX is not meaningful on complex Spark types (array/struct/map/
+        # binary/variant), so null them out. This is a PURE POST-PROCESS on the
+        # already-fetched ``data_type`` (no extra query / round-trip). The
+        # empty-table case (data_type == "") is NOT complex, so its MIN/MAX are
+        # preserved. Scalar columns keep the byte-identical pass-through path.
+        min_value = lowered.get("min_value")
+        max_value = lowered.get("max_value")
+        if _is_complex_spark_type(data_type):
+            min_value = None
+            max_value = None
+
         return ColumnStats(
             count=int(lowered["non_null_count"]),
             distinct=int(lowered["distinct_count"]),
             nulls=int(lowered["null_count"]),
-            min=lowered.get("min_value"),
-            max=lowered.get("max_value"),
-            data_type=str(raw_type) if raw_type is not None else "",
+            min=min_value,
+            max=max_value,
+            data_type=data_type,
         )
 
     # ------------------------------------------------------------------
