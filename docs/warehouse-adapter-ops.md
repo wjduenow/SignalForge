@@ -71,9 +71,10 @@ with WarehouseAdapter.from_profile(profile) as adapter:
 and `profile.type == "databricks"` dispatch to their adapters. The
 Databricks adapter implements its sampling surface as of #224 —
 `sample_rows`, `get_row_count`, `materialise_sample`, `run_test_sql`, and
-`column_stats` — plus `estimate_query_bytes` via `EXPLAIN COST` as of #225;
-only `run_stats_query` still inherits the ABC's typed
-`*NotSupportedError` degrade. Any
+`column_stats` — plus `estimate_query_bytes` via `EXPLAIN COST` as of #225
+and `run_stats_query` as of #227 (so `row_count_anomaly_by_period`
+evaluates on Databricks rather than degrading); no Databricks op inherits
+the ABC's typed `*NotSupportedError` degrade any longer. Any
 other `profile.type` raises `UnsupportedProfileTypeError` with a
 remediation pointing at the roadmap entry.
 
@@ -938,14 +939,17 @@ implemented**. The Databricks adapter ships `column_stats` (issue #224,
 DEC-011) as a single aggregate query — `count` / `distinct` / `nulls` /
 `min` / `max` / `data_type` (the last via `MAX(typeof(<col>))`) — over the
 fold-then-quoted column. The Snowflake-parity follow-up is tracked as issue #258.
-**Known divergence:** BigQuery skips `MIN`/`MAX` (→ `None`) for complex
-types (ARRAY / STRUCT / MAP / JSON / BINARY / GEOGRAPHY); Databricks emits
-them unconditionally because `data_type` is derived inline (`typeof`) in the
-same aggregate, so the column's type isn't known before the query is built.
-The scalar-column path is the supported, **live-certified** v0.x surface
+**Complex-type `MIN`/`MAX` parity (#227 US-001):** like BigQuery, Databricks
+now skips `MIN`/`MAX` (→ `None`) for complex Spark types (`array` / `struct` /
+`map` / `binary` / `variant`), honouring the `ColumnStats` DEC-016 contract.
+Because `data_type` is derived inline (`typeof`) in the same aggregate, the
+column's type isn't known before the query is built, so the skip is a
+post-process step: `_is_complex_spark_type(data_type)` sets `min = max = None`
+after the row returns (no extra query / round-trip). Scalar columns keep the
+byte-identical pass-through path, and are the **live-certified** v0.x surface
 (#226's prune-live test asserts `count` / `distinct` / `nulls` / `data_type`
-against the real rig); complex-type `MIN`/`MAX` was not exercised by the live
-pass (scalar-only) and remains a follow-up.
+against the real rig); the complex-type skip is shape-verified (fake +
+unit tests), not exercised by the scalar-only live pass.
 
 **Error taxonomy.** `map_databricks_exception` mirrors `map_snowflake_exception`
 / `map_bq_exception`, scoping the Table/Column/Syntax split to the SQL-error
@@ -964,29 +968,49 @@ warehouse size + auto-stop, see below).
 | Other (connect-time `RequestError` / `OperationalError`, or connector absent) | auth     | `WarehouseAuthError`  |
 | Anything else                                                  | _(none)_                        | _(passes through unchanged)_ |
 
-**Live certification (#226) + residual limitations.** The #221–#225 Databricks
-surface was certified for SQL *shape* (fake connection + ungated `sqlglot`
-`databricks`-dialect parse-guard + a maintainer-captured `EXPLAIN COST`
-fixture); **#226 adds the gated live Free-Edition certification.** Three gated
-`@pytest.mark.databricks` tests pass against a real `2X-Small` warehouse:
-`estimate_live` (`EXPLAIN COST` returns a positive int — confirming the live
-warehouse accepts it, the plan-text shape the parser reads, and the
-single-row-result assumption), prune-live `materialised` (a real qualified
-`CREATE OR REPLACE TABLE` is created, persists across queries on the pinned
-connection, is reachable from a follow-up test, and is dropped at cleanup —
-plus scalar `column_stats`), and a full-pipeline `generate` smoke. **The live
-pass surfaced and fixed three real adapter bugs:** a qualified-temp-name
-rejection (`CREATE TEMPORARY TABLE` → `CREATE OR REPLACE TABLE` + explicit
-DROP), `struct(*)` rejected in a Sort node (inline → projection-subquery
-sample shape), and a cross-vendor `QuerySyntaxError` message (made
-vendor-neutral). The remaining **shape-only** (not live-exercised) paths are:
-`column_stats` `MIN`/`MAX` on complex-typed columns (the BigQuery
-skip-and-`None` divergence noted above — the live pass exercised only scalar
-columns) and the `to_json(struct(*))` per-row failure-capture branch (the
-engineered always-pass tests return zero failing rows, so the capture branch
-never fires live). `run_stats_query` (for the `row_count_anomaly_by_period`
-primitive) still inherits the ABC's typed `StatsQueryNotSupportedError`
-degrade — out of scope until its own ticket.
+**Live certification (#226, extended by #227) + residual limitations.** The
+#221–#225 Databricks surface was certified for SQL *shape* (fake connection +
+ungated `sqlglot` `databricks`-dialect parse-guard + a maintainer-captured
+`EXPLAIN COST` fixture); **#226 added the gated live Free-Edition
+certification** and **#227 (the epic-#219 closer) reconciled the residual set
+so nothing is silently dropped.** The full gated `@pytest.mark.databricks`
+suite — `SF_RUN_DATABRICKS=1 uv run pytest -m databricks --no-cov` — is now
+**5 tests green** against a real `2X-Small` warehouse:
+
+- `estimate_live` (`EXPLAIN COST` returns a positive int — confirming the live
+  warehouse accepts it, the plan-text shape the parser reads, and the
+  single-row-result assumption).
+- prune-live `materialised` (a real qualified `CREATE OR REPLACE TABLE` is
+  created, persists across queries on the pinned connection, is reachable from
+  a follow-up test, and is dropped at cleanup — plus scalar `column_stats`).
+- the **anomaly two-query cert** (#227 US-004) — `row_count_anomaly_by_period`
+  `run_stats_query` + violation query actually EXECUTE (previously only
+  `sqlglot`-parsed), yielding a genuine evaluated `PruneDecision` with a
+  populated `AnomalyTestStats` (proving it did NOT degrade to
+  `StatsQueryNotSupportedError`).
+- the **`to_json(struct(*))` capture cert** (#227 US-004) — the failing-row
+  capture branch of `run_test_sql` runs a constant failing SELECT with
+  `capture_failures > 0` and decodes the `to_json` payload into
+  `sample_failures` (never fired live before #227, since #226's candidates
+  were all always-pass).
+- a full-pipeline `generate` smoke.
+
+**The #226 live pass surfaced and fixed three real adapter bugs:** a
+qualified-temp-name rejection (`CREATE TEMPORARY TABLE` → `CREATE OR REPLACE
+TABLE` + explicit DROP), `struct(*)` rejected in a Sort node (inline →
+projection-subquery sample shape), and a cross-vendor `QuerySyntaxError`
+message (made vendor-neutral). **#227 resolved the four items #226 left
+tracked:** complex-type `column_stats` `MIN`/`MAX` is now skipped-and-`None`d
+per the `ColumnStats` contract (US-001, implemented); the `str`-valued
+partition-filter escape uses a Spark-correct `_escape_spark_string_literal`
+(US-002, fixed); `run_stats_query` overrides the ABC degrade so anomaly
+detection evaluates (US-003, implemented); and the anomaly two-query stats
+path + the `to_json(struct(*))` capture branch are live-certified (US-004,
+above). The remaining **shape-only** (not live-exercised) path is
+`column_stats` `MIN`/`MAX` on complex-typed columns — the skip-and-`None`
+post-process is unit-tested but the live pass exercised only scalar columns.
+(Snowflake `column_stats` parity is separate — issue #258, out of scope for
+epic #219.)
 
 **Cost guidance — read before running any live Databricks test.** The live
 target is **Databricks Free Edition** (serverless-only). Its single SQL
