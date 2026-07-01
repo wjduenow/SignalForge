@@ -1851,6 +1851,69 @@ def test_column_stats_empty_table_preserves_min_max() -> None:
     conn.assert_all_expectations_met()
 
 
+# Reduced description for the retry aggregate (no min_value / max_value columns).
+_STATS_DESCRIPTION_REDUCED = [
+    ("non_null_count",),
+    ("distinct_count",),
+    ("null_count",),
+    ("data_type",),
+]
+
+
+def test_column_stats_non_orderable_complex_retries_reduced_aggregate() -> None:
+    """Non-orderable complex types (``map`` / ``variant``) reject ``MIN``/``MAX``
+    at Spark ANALYSIS time (``INVALID_ORDERING_TYPE``), failing the whole
+    aggregate. ``column_stats`` catches that specific ``QuerySyntaxError`` and
+    re-runs a REDUCED aggregate (no MIN/MAX), returning ``min = max = None``
+    while still surfacing count / distinct / nulls / data_type (R1 fix, #227).
+
+    Verified live: ``MIN(map<…>)`` raises but ``COUNT``/``COUNT DISTINCT``/
+    ``typeof`` all succeed against the real warehouse.
+    """
+    conn = FakeDatabricksConnection()
+    # Full aggregate (carries ``MIN(``) raises the ordering error.
+    conn.expect_execute(
+        matching=r"MIN\(",
+        returns=QuerySyntaxError(
+            '[DATATYPE_MISMATCH.INVALID_ORDERING_TYPE] Cannot resolve "min(m)" '
+            "due to data type mismatch: The `min` does not support ordering on "
+            'type "MAP<STRING, INT>".'
+        ),
+    )
+    # Reduced aggregate (``MAX(typeof`` but no ``MIN(``) returns the 4-col row.
+    conn.expect_execute(
+        matching=r"MAX\(typeof",
+        returns=[(2, 2, 1, "map<string,int>")],
+        description=_STATS_DESCRIPTION_REDUCED,
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "payload")
+
+    assert stats.count == 2
+    assert stats.distinct == 2
+    assert stats.nulls == 1
+    assert stats.min is None
+    assert stats.max is None
+    assert stats.data_type == "map<string,int>"
+    conn.assert_all_expectations_met()
+
+
+def test_column_stats_non_ordering_query_error_propagates() -> None:
+    """A ``QuerySyntaxError`` that is NOT the ordering-mismatch does NOT trigger
+    the reduced-aggregate retry — it propagates unchanged (no silent swallow)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=r"MIN\(",
+        returns=QuerySyntaxError("some other malformed-SQL problem"),
+    )
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError, match="some other malformed-SQL problem"):
+        adapter.column_stats(_TABLE, "amount")
+    conn.assert_all_expectations_met()
+
+
 @pytest.mark.parametrize(
     ("type_str", "expected"),
     [
