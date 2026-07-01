@@ -943,13 +943,24 @@ fold-then-quoted column. The Snowflake-parity follow-up is tracked as issue #258
 now skips `MIN`/`MAX` (→ `None`) for complex Spark types (`array` / `struct` /
 `map` / `binary` / `variant`), honouring the `ColumnStats` DEC-016 contract.
 Because `data_type` is derived inline (`typeof`) in the same aggregate, the
-column's type isn't known before the query is built, so the skip is a
-post-process step: `_is_complex_spark_type(data_type)` sets `min = max = None`
-after the row returns (no extra query / round-trip). Scalar columns keep the
-byte-identical pass-through path, and are the **live-certified** v0.x surface
-(#226's prune-live test asserts `count` / `distinct` / `nulls` / `data_type`
-against the real rig); the complex-type skip is shape-verified (fake +
-unit tests), not exercised by the scalar-only live pass.
+column's type isn't known before the query is built, so Databricks can't omit
+`MIN`/`MAX` up front the way BigQuery (which reads the schema first) does. #227
+handles complex types in two paths:
+
+- **Orderable** complex types (`array` / `struct` / `binary`): Spark computes a
+  `MIN`/`MAX` value, so the aggregate succeeds and a pure post-process —
+  `_is_complex_spark_type(data_type)` — sets `min = max = None` after the row
+  returns (no extra query / round-trip).
+- **Non-orderable** complex types (`map` / `variant`): Spark rejects `MIN`/`MAX`
+  at *analysis* time (`INVALID_ORDERING_TYPE`), failing the whole aggregate, so
+  `column_stats` catches that specific `QuerySyntaxError` and re-runs a
+  **reduced** aggregate (count / distinct / nulls / typeof, no `MIN`/`MAX`),
+  returning `None` bounds. The reduced re-query fires only for these columns.
+
+Scalar columns keep the byte-identical single-query pass-through path and are the
+**live-certified** v0.x surface (#226's prune-live test asserts `count` /
+`distinct` / `nulls` / `data_type` against the real rig); the non-orderable
+reduced-aggregate retry was verified live against the real warehouse (#227).
 
 **Error taxonomy.** `map_databricks_exception` mirrors `map_snowflake_exception`
 / `map_bq_exception`, scoping the Table/Column/Syntax split to the SQL-error

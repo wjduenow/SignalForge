@@ -465,17 +465,20 @@ def test_row_count_anomaly_by_period_evaluates_live_two_query_stats(tmp_path) ->
         values_parts.append(f"({row_id}, DATE '{_ANOMALY_AS_OF.isoformat()}')")
     values_clause = ", ".join(values_parts)
 
-    setup_adapter = build_live_adapter()
-    with setup_adapter:
-        cursor = setup_adapter._get_connection().cursor()
-        try:
-            cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
-            cursor.execute(f"CREATE TABLE {quoted} (id INT, event_date DATE)")
-            cursor.execute(f"INSERT INTO {quoted} (id, event_date) VALUES {values_clause}")
-        finally:
-            cursor.close()
-
     try:
+        # Setup lives INSIDE the teardown try/finally so a partial CREATE (e.g.
+        # the INSERT failing after the table exists) still hits the DROP below,
+        # never leaking a live table.
+        setup_adapter = build_live_adapter()
+        with setup_adapter:
+            cursor = setup_adapter._get_connection().cursor()
+            try:
+                cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
+                cursor.execute(f"CREATE TABLE {quoted} (id INT, event_date DATE)")
+                cursor.execute(f"INSERT INTO {quoted} (id, event_date) VALUES {values_clause}")
+            finally:
+                cursor.close()
+
         # ``data_type="DATE"`` on the date column so the ``--as-of`` bound
         # literal is type-matched (``_date_value_literal`` — the DEC-012
         # partition-pruning predicate compares the bare column against a

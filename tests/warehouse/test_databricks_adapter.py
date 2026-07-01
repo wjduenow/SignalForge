@@ -1880,9 +1880,11 @@ def test_column_stats_non_orderable_complex_retries_reduced_aggregate() -> None:
             'type "MAP<STRING, INT>".'
         ),
     )
-    # Reduced aggregate (``MAX(typeof`` but no ``MIN(``) returns the 4-col row.
+    # Reduced aggregate: matches ONLY a query with NO ``MIN(``/``MAX(<col>)`` —
+    # the negative lookahead ensures the test fails loudly if the retry still
+    # emitted the full min/max aggregate (it would no longer match here).
     conn.expect_execute(
-        matching=r"MAX\(typeof",
+        matching=r"^(?!.*MIN\()(?!.*MAX\(`payload`).*MAX\(typeof",
         returns=[(2, 2, 1, "map<string,int>")],
         description=_STATS_DESCRIPTION_REDUCED,
     )

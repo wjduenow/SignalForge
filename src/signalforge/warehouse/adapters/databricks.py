@@ -1134,8 +1134,10 @@ class DatabricksAdapter(WarehouseAdapter):
             # WHOLE aggregate — the post-process below never runs. Re-run the
             # reduced aggregate (no MIN/MAX) and treat min/max as None per the
             # ColumnStats DEC-016 contract. Only THIS specific error triggers the
-            # retry; every other QuerySyntaxError propagates unchanged.
-            if _SPARK_NON_ORDERABLE_MARKER not in str(exc):
+            # retry; every other QuerySyntaxError propagates unchanged. Key on the
+            # raw warehouse message (``exc.detail``), not ``str(exc)`` — the latter
+            # wraps the detail in operator-facing prose that can drift.
+            if _SPARK_NON_ORDERABLE_MARKER not in exc.detail:
                 raise
             rows = self._execute_to_dicts(_stats_sql(include_min_max=False), table=table)
             min_max_computed = False
