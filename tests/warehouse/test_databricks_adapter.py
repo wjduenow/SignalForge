@@ -29,6 +29,7 @@ from signalforge.warehouse.adapters._databricks_client import (
 )
 from signalforge.warehouse.adapters.databricks import (
     DatabricksAdapter,
+    _escape_spark_string_literal,
     _is_complex_spark_type,
 )
 from signalforge.warehouse.errors import (
@@ -820,8 +821,9 @@ def test_date_partition_filter_renders_date_literal() -> None:
 
 
 def test_str_partition_filter_value_is_escaped_inside_single_quotes() -> None:
-    """A ``str`` value is escaped (single-quote → backslash-quote) inside the
-    single-quoted literal — defends against breaking out of the literal."""
+    """A ``str`` value is escaped Spark-correct (single-quote → doubled quote)
+    inside the single-quoted literal — defends against breaking out of the
+    literal (R3/DEC-005 of issue #227)."""
     conn = _RecordingDatabricksConnection()
     conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
     conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
@@ -831,8 +833,55 @@ def test_str_partition_filter_value_is_escaped_inside_single_quotes() -> None:
     adapter.sample_rows(_TABLE, 100, partition_filter=pf)
 
     sql = conn.executed[1]
-    assert "'o\\'hare'" in sql
+    assert "'o''hare'" in sql
     assert "`region` = " in sql
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("a'b", "a''b"),  # single-quote doubled
+        ("a\\b", "a\\\\b"),  # one backslash → two backslashes
+        ("a'b\\c", "a''b\\\\c"),  # both, in one value
+        ("plain", "plain"),  # no escaping needed
+    ],
+)
+def test_escape_spark_string_literal(raw: str, expected: str) -> None:
+    """``_escape_spark_string_literal`` returns the escaped INNER content
+    (no surrounding quotes): doubles ``'`` and ``\\`` (backslash FIRST, so the
+    quote-doubling is not re-escaped) — Spark-correct for the default
+    ``escapedStringLiterals=false`` session mode (R3/DEC-005 of issue #227)."""
+    assert _escape_spark_string_literal(raw) == expected
+
+
+def test_render_partition_filter_str_value_doubles_quote() -> None:
+    """A ``str``-valued ``PartitionFilter`` renders a valid single-quoted literal
+    with the embedded quote doubled, and the column fold-then-quoted per the
+    adapter's ``_quote_identifier`` (R3/DEC-005)."""
+    adapter = _make_adapter(_RecordingDatabricksConnection())
+    pf = PartitionFilter(column="region", op="=", value="us'ca")
+
+    assert adapter._render_partition_filter(pf) == "`region` = 'us''ca'"
+
+
+def test_render_partition_filter_datetime_value_is_byte_identical() -> None:
+    """Regression: a ``datetime``-valued ``PartitionFilter`` renders exactly as
+    today (via ``timestamp_literal_template``) — the R3/DEC-005 str change must
+    not perturb the ``datetime`` branch."""
+    adapter = _make_adapter(_RecordingDatabricksConnection())
+    pf = PartitionFilter(column="created_at", op=">=", value=datetime(2024, 1, 2, 3, 4, 5))
+
+    assert adapter._render_partition_filter(pf) == "`created_at` >= TIMESTAMP '2024-01-02T03:04:05'"
+
+
+def test_render_partition_filter_date_value_is_byte_identical() -> None:
+    """Regression: a ``date``-valued ``PartitionFilter`` renders exactly as today
+    (via ``date_literal_template``) — the R3/DEC-005 str change must not perturb
+    the ``date`` branch."""
+    adapter = _make_adapter(_RecordingDatabricksConnection())
+    pf = PartitionFilter(column="dt", op="=", value=date(2024, 6, 15))
+
+    assert adapter._render_partition_filter(pf) == "`dt` = DATE '2024-06-15'"
 
 
 # ---- project=None (two-part quoting) --------------------------------------
