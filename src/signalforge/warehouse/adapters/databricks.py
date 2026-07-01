@@ -162,6 +162,26 @@ _PARAMETRIC_COMPLEX_SPARK_PREFIXES: frozenset[str] = frozenset({"array", "struct
 """Parametric complex Spark types (``array<…>`` / ``struct<…>`` / ``map<…>``)."""
 
 
+def _escape_spark_string_literal(value: str) -> str:
+    """Escape the INNER content of a Spark/Databricks single-quoted string literal.
+
+    Returns the escaped body WITHOUT the surrounding single quotes (the caller
+    wraps it in ``'…'``). Spark-correct escaping (R3/DEC-005 of issue #227), NOT
+    the BigQuery :func:`escape_bq_string_literal` the partition-filter renderer
+    used to borrow:
+
+    * ``\\`` → ``\\\\`` — under Spark's default ``escapedStringLiterals=false`` the
+      backslash IS an escape character, so a literal backslash must be doubled.
+      Done FIRST, so the quote-doubling below is not itself re-escaped.
+    * ``'`` → ``''`` — Spark-idiomatic quote doubling; safe for the quote char in
+      BOTH ``escapedStringLiterals`` modes.
+
+    No ``SET spark.sql.…`` conf is issued anywhere — the escape is correct for
+    the default session mode.
+    """
+    return value.replace("\\", "\\\\").replace("'", "''")
+
+
 def _is_complex_spark_type(type_str: str) -> bool:
     """Return True for Spark types where ``MIN``/``MAX`` is not meaningful.
 
@@ -548,9 +568,12 @@ class DatabricksAdapter(WarehouseAdapter):
 
         ``datetime`` → ``TIMESTAMP '…'``; ``date`` → ``DATE '…'`` (via the
         dialect literal templates — Spark typed-literal form); ``str`` is escaped
-        via :func:`escape_bq_string_literal` for safe inclusion inside a
-        single-quoted literal. The column name is fold-then-quoted (per-component
-        backtick) and already validated on :class:`PartitionFilter` construction.
+        via :func:`_escape_spark_string_literal` — a Databricks-local, Spark-correct
+        escape (backslash doubling under the default ``escapedStringLiterals=false``
+        plus quote doubling), NOT the BigQuery :func:`escape_bq_string_literal` —
+        for safe inclusion inside a single-quoted literal. The column name is
+        fold-then-quoted (per-component backtick) and already validated on
+        :class:`PartitionFilter` construction.
 
         Mirrors the Snowflake adapter's ``_render_partition_filter`` and the
         prune compiler's ``_render_partition_filter(pf, dialect)`` — the
@@ -565,9 +588,7 @@ class DatabricksAdapter(WarehouseAdapter):
         elif isinstance(pf.value, date):
             rendered = DATABRICKS_DIALECT.date_literal_template.format(value=pf.value.isoformat())
         else:
-            from signalforge.warehouse._sql_safety import escape_bq_string_literal
-
-            rendered = f"'{escape_bq_string_literal(str(pf.value))}'"
+            rendered = f"'{_escape_spark_string_literal(str(pf.value))}'"
         return f"{self._quote_identifier(pf.column)} {pf.op} {rendered}"
 
     def _execute(self, sql: str, *, table: TableRef | None = None) -> list[Any]:
