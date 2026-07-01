@@ -6,7 +6,7 @@
 - **Epic:** [#219](https://github.com/wjduenow/SignalForge/issues/219) — Databricks warehouse adapter (this is the final child, #226 → #227)
 - **Branch:** `feature/227-databricks-followups`
 - **Worktree:** `../worktrees/SignalForge/227-databricks-followups`
-- **Phase:** discovery
+- **Phase:** published
 - **Sessions:** 1 (2026-06-30)
 
 ---
@@ -173,7 +173,8 @@ Ordering: adapter methods (serialized — all edit `databricks.py`, so same-file
 
 ## Phase 5 — Publish PR
 
-_(pending)_
+- Draft PR: https://github.com/wjduenow/SignalForge/pull/261 (base `dev`)
+- Awaiting review + approval to devolve.
 
 ## Beads Manifest
 
