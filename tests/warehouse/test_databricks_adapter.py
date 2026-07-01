@@ -202,10 +202,13 @@ def test_exit_swallows_close_failure_and_warns_with_raw_session_id(
     msg = rec.getMessage()
     assert "sess-abc" in msg  # raw id present in the failure WARNING
     assert "RuntimeError" in msg
-    # No manual cleanup command (no DROP statement) and no auto-expire countdown.
+    # The close-failure WARNING concerns the SESSION (reaped server-side); it
+    # quotes no client-side auto-expire countdown and embeds no DROP statement
+    # of its own (materialised tables are handled by the per-table DROP loop
+    # above — there are none here since this test never materialised).
     assert "auto-expire" not in msg
-    assert "DROP TABLE" not in msg.upper()
-    assert "No manual cleanup command is possible" in msg
+    assert "DROP TABLE IF EXISTS" not in msg.upper()
+    assert "reaped server-side" in msg
     # State reset even on the failure path.
     assert adapter._active_session is None
 
@@ -472,7 +475,8 @@ def _make_adapter(conn: FakeDatabricksConnection) -> DatabricksAdapter:
 
 def test_sample_sql_is_byte_identical_across_two_calls() -> None:
     """Identical ``(table, n, partition_filter)`` → byte-identical executed
-    sample SQL. Pins the deterministic hash-mod contract and the inline shape."""
+    sample SQL. Pins the deterministic hash-mod contract and the
+    projection-subquery shape (#226)."""
     sample_sqls: list[str] = []
     for _ in range(2):
         conn = _RecordingDatabricksConnection()
@@ -484,14 +488,17 @@ def test_sample_sql_is_byte_identical_across_two_calls() -> None:
 
     assert sample_sqls[0] == sample_sqls[1]
     sql = sample_sqls[0]
-    # num_rows=1000, n=100 → bucket = max(1000//100, 1) = 10. Inline-predicate
-    # shape (sample_hash_in_projection=False): the masked xxhash64 expression
-    # sits directly in WHERE / ORDER BY (no Snowflake-style projection subquery).
-    assert "(xxhash64(to_json(struct(*))) & 9223372036854775807)" in sql
-    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 10) < 1" in sql
-    assert "ORDER BY (xxhash64(to_json(struct(*))) & 9223372036854775807)" in sql
+    # num_rows=1000, n=100 → bucket = max(1000//100, 1) = 10. Projection-subquery
+    # shape (sample_hash_in_projection=True, #226): the masked xxhash64 hash is
+    # computed once in the inner projection alias; WHERE/ORDER BY reference it
+    # (Spark rejects struct(*) in a Sort node, so it cannot be inline).
+    assert "(xxhash64(to_json(struct(*))) & 9223372036854775807) AS _sf_sample_hash" in sql
+    assert "MOD(_sf_sample_hash, 10) < 1" in sql
+    assert "ORDER BY _sf_sample_hash" in sql
     assert "LIMIT 100" in sql
-    assert "EXCLUDE" not in sql  # not the projection-subquery shape
+    # Databricks strips the helper column with ``EXCEPT`` (Spark), not ``EXCLUDE``.
+    assert "SELECT * EXCEPT (_sf_sample_hash)" in sql
+    assert "EXCLUDE" not in sql
     # Per-component backtick quoting, folded to lower (#124): catalog "main",
     # schema "sales", table "orders".
     assert "`main`.`sales`.`orders`" in sql
@@ -675,7 +682,7 @@ def test_unknown_size_with_filter_uses_bucket_1000() -> None:
     pf = PartitionFilter(column="dt", op=">=", value=date(2024, 1, 1))
     adapter.sample_rows(_TABLE, 100, partition_filter=pf)
 
-    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 1000) < 1" in conn.executed[1]
+    assert "MOD(_sf_sample_hash, 1000) < 1" in conn.executed[1]
 
 
 def test_huge_count_no_filter_raises_requires_partition_filter() -> None:
@@ -699,9 +706,7 @@ def test_huge_count_with_filter_proceeds() -> None:
     adapter.sample_rows(_TABLE, 100, partition_filter=pf)
 
     # bucket = max(200_000_000 // 100, 1) = 2_000_000.
-    assert (
-        "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 2000000) < 1" in conn.executed[1]
-    )
+    assert "MOD(_sf_sample_hash, 2000000) < 1" in conn.executed[1]
 
 
 def test_normal_count_buckets_num_rows_over_n() -> None:
@@ -714,7 +719,7 @@ def test_normal_count_buckets_num_rows_over_n() -> None:
     adapter.sample_rows(_TABLE, 100)
 
     # bucket = max(5000 // 100, 1) = 50.
-    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 50) < 1" in conn.executed[1]
+    assert "MOD(_sf_sample_hash, 50) < 1" in conn.executed[1]
 
 
 def test_tiny_table_buckets_floor_at_one() -> None:
@@ -726,7 +731,7 @@ def test_tiny_table_buckets_floor_at_one() -> None:
 
     adapter.sample_rows(_TABLE, 100)
 
-    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 1) < 1" in conn.executed[1]
+    assert "MOD(_sf_sample_hash, 1) < 1" in conn.executed[1]
 
 
 # ---- n <= 0 guard ---------------------------------------------------------
@@ -879,20 +884,21 @@ def test_sample_query_unmapped_error_passes_through_unchanged() -> None:
 # ---------------------------------------------------------------------------
 # materialise_sample + run_test_sql (#224 US-004)
 #
-# #226 LIVE-CERT CAVEATS (shape-only here — fakes + the ungated sqlglot
-# parse-guard): whether Databricks accepts a QUALIFIED temporary-table name in
-# ``CREATE TEMPORARY TABLE <cat>.<sch>.<temp> AS ...`` AND whether the
-# ``databricks-sql-connector`` persists the session across queries (so a
-# materialised temp table is reachable from a follow-up ``run_test_sql``) are
-# #226 live-cert items, NOT certified by these offline tests. Likewise the
-# per-row ``to_json(struct(*))`` capture marshalling (JSON-string assumption) is
-# a #226 cert item.
+# #226 CERTIFIED LIVE: the live run proved Databricks REJECTS a qualified
+# ``CREATE TEMPORARY TABLE <cat>.<sch>.<temp>`` name, so the adapter materialises
+# into a real ``CREATE OR REPLACE TABLE`` colocated with the source (dropped at
+# session cleanup); the ``databricks-sql-connector`` DOES persist the session
+# across queries (the materialised table is reachable from a follow-up
+# ``run_test_sql``), and the COUNT(*) failing-rows wrap is live-certified.
+# SHAPE-ONLY residual: the per-row ``to_json(struct(*))`` CAPTURE branch was NOT
+# exercised live (the engineered always-pass tests return 0 failing rows, so the
+# capture branch never fires) — it stays fake + ``sqlglot``-parse certified only.
 # ---------------------------------------------------------------------------
 
 # Distinct regexes so the sizing COUNT, the CTAS, the run_test_sql COUNT, and the
 # capture query can never cross-match in the fake's expectation queue.
 _SIZE_QUERY = r"AS row_count"
-_CTAS_QUERY = r"CREATE TEMPORARY TABLE"
+_CTAS_QUERY = r"CREATE OR REPLACE TABLE"
 _FAILURES_QUERY = r"COUNT\(\*\) AS failures"
 _CAPTURE_QUERY = r"to_json\(struct"
 
@@ -905,13 +911,14 @@ def _expected_run_id() -> str:
 
 
 def test_materialise_ctas_sql_shape_and_temp_name() -> None:
-    """The CTAS contains ``CREATE TEMPORARY TABLE``, the deterministic
+    """The CTAS contains ``CREATE OR REPLACE TABLE``, the deterministic
     ``_sf_sample_<run_id>`` name (run_id byte-identical to the shared recipe),
     and the inline-predicate sample body (DEC-002) — masked ``xxhash64`` in
     ``WHERE``/``ORDER BY``, ``LIMIT n``, source + temp per-component
     backtick-quoted and folded to lower.
 
-    #226 live-cert: qualified-temp-name acceptance is shape-only here.
+    #226: a real qualified table (NOT ``TEMPORARY TABLE``) — Databricks rejects
+    a qualified temp name; the table is dropped at session cleanup.
     """
     conn = _RecordingDatabricksConnection()
     # num_rows=1000, n=100 → bucket = max(1000//100, 1) = 10.
@@ -925,19 +932,78 @@ def test_materialise_ctas_sql_shape_and_temp_name() -> None:
     run_id = _expected_run_id()
     temp_name = f"_sf_sample_{run_id}"
 
-    assert ctas.startswith("CREATE TEMPORARY TABLE")
-    # Inline-predicate shape (sample_hash_in_projection=False) — NOT Snowflake's
-    # projection subquery. The temp name (lowercase hex) appears verbatim.
+    assert ctas.startswith("CREATE OR REPLACE TABLE")
+    # Projection-subquery shape (sample_hash_in_projection=True, #226): the hash
+    # is computed in the inner projection alias; Spark rejects struct(*) in a
+    # Sort node, so the ORDER BY references the alias. Databricks strips the
+    # helper column with EXCEPT, not Snowflake's EXCLUDE. The temp name appears.
     assert temp_name in ctas
+    assert "SELECT * EXCEPT (_sf_sample_hash)" in ctas
     assert "EXCLUDE" not in ctas
-    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 10) < 1" in ctas
-    assert "ORDER BY (xxhash64(to_json(struct(*))) & 9223372036854775807)" in ctas
+    assert "(xxhash64(to_json(struct(*))) & 9223372036854775807) AS _sf_sample_hash" in ctas
+    assert "MOD(_sf_sample_hash, 10) < 1" in ctas
+    assert "ORDER BY _sf_sample_hash" in ctas
     assert ctas.rstrip().endswith("LIMIT 100")
     # Source per-component quoted + fold-to-lower.
     assert "`main`.`sales`.`orders`" in ctas
     # Temp table colocated with the source catalog / schema, per-component
     # quoted, lower-folded — byte-identical to how the compiler REFERENCEs it.
     assert f"`main`.`sales`.`{temp_name}`" in ctas
+
+
+def test_materialise_then_exit_drops_table() -> None:
+    """A materialised table is a real ``CREATE OR REPLACE TABLE`` (NOT a
+    session-temp), so ``__exit__`` explicitly ``DROP TABLE IF EXISTS``-es it
+    before closing the connection and clears the tracking list (issue #226)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    conn.expect_execute(matching=r"DROP TABLE IF EXISTS", returns=[])
+    adapter = _make_adapter(conn)
+
+    temp_ref = adapter.materialise_sample(_TABLE, 100)
+    assert adapter._materialised_tables == [temp_ref]
+
+    adapter.__exit__(None, None, None)
+
+    drops = [q for q in conn.executed if q.startswith("DROP TABLE IF EXISTS")]
+    assert len(drops) == 1
+    assert temp_ref.name in drops[0]
+    # Tracking list cleared so a second ``__exit__`` is a no-op.
+    assert adapter._materialised_tables == []
+    conn.assert_all_expectations_met()
+
+
+def test_materialise_then_exit_swallows_drop_failure_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A ``DROP`` failure at the cleanup boundary is swallowed (``__exit__`` must
+    NOT raise) and emits ONE WARNING naming the manual ``DROP`` command — the
+    cleanup-boundary fail-soft contract (issue #226)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
+    conn.expect_execute(matching=_CTAS_QUERY, returns=[])
+    conn.expect_execute(matching=r"DROP TABLE IF EXISTS", returns=RuntimeError("boom"))
+    adapter = _make_adapter(conn)
+
+    adapter.materialise_sample(_TABLE, 100)
+    with caplog.at_level(logging.WARNING):
+        adapter.__exit__(None, None, None)  # must NOT raise
+
+    # Exactly ONE drop-failure WARNING for the single materialised table — the
+    # documented one-WARNING-per-table contract (not "at least one").
+    drop_warnings = [
+        rec
+        for rec in caplog.records
+        if rec.levelno == logging.WARNING and "DROP TABLE IF EXISTS" in rec.getMessage()
+    ]
+    assert len(drop_warnings) == 1
+    # The drop failure must NOT mask the connection close — close still fires
+    # after the per-table swallow (the DROP loop precedes conn.close()).
+    assert conn.close_call_count == 1
+    # State still reset despite the drop failure (idempotent second exit).
+    assert adapter._materialised_tables == []
+    conn.assert_all_expectations_met()
 
 
 def test_materialise_returns_fully_qualified_temp_ref() -> None:
@@ -958,7 +1024,7 @@ def test_materialise_returns_fully_qualified_temp_ref() -> None:
 
 def test_materialise_pins_active_session() -> None:
     """``materialise_sample`` pins ``_active_session`` to the connection so a
-    follow-up ``run_test_sql`` reaches the session-scoped temp table (DEC-006)."""
+    follow-up ``run_test_sql`` reaches the materialised table (DEC-006)."""
     conn = _RecordingDatabricksConnection()
     conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
     conn.expect_execute(matching=_CTAS_QUERY, returns=[])
@@ -1087,7 +1153,7 @@ def test_materialise_applies_partition_filter_in_ctas() -> None:
 
     ctas = conn.executed[1]
     # bucket=10; the partition predicate is ANDed after the hash-mod predicate.
-    assert "MOD((xxhash64(to_json(struct(*))) & 9223372036854775807), 10) < 1 AND " in ctas
+    assert "MOD(_sf_sample_hash, 10) < 1 AND " in ctas
     assert "DATE '2026-01-01'" in ctas
     assert ctas.count("DATE '2026-01-01'") == 1
 
@@ -1097,10 +1163,11 @@ def test_materialise_applies_partition_filter_in_ctas() -> None:
 
 def test_materialised_temp_table_is_reachable_via_same_connection() -> None:
     """After ``materialise_sample``, a follow-up ``run_test_sql`` executes on the
-    SAME connection object — so the session-scoped temp table is reachable
-    (DEC-006). The fake records all executes on one connection.
+    SAME connection object — so the materialised table is reachable by its
+    qualified name (DEC-006). The fake records all executes on one connection.
 
-    #226 live-cert: real connector session persistence is shape-only here.
+    #226 (certified live): the ``databricks-sql-connector`` persists the session
+    across queries, so the follow-up reaches the materialised table.
     """
     conn = _RecordingDatabricksConnection()
     conn.expect_execute(matching=_SIZE_QUERY, returns=[(1000,)])
@@ -1113,7 +1180,7 @@ def test_materialised_temp_table_is_reachable_via_same_connection() -> None:
     adapter.run_test_sql(test_sql)
 
     assert len(conn.executed) == 3
-    assert conn.executed[1].startswith("CREATE TEMPORARY TABLE")
+    assert conn.executed[1].startswith("CREATE OR REPLACE TABLE")
     assert conn.executed[2].startswith("SELECT COUNT(*) AS failures")
     # The COUNT wrapper references the temp table, not the source.
     assert temp_ref.name in conn.executed[2]

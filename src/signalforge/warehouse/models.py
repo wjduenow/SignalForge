@@ -94,13 +94,17 @@ class Dialect:
 
     * ``sample_hash_in_projection`` — when ``False`` (BigQuery default) the
       hash expression is placed inline in ``WHERE``/``ORDER BY``; when ``True``
-      (Snowflake) the hash is computed once in an inner ``SELECT`` projection
-      and referenced by alias in the outer ``WHERE``/``ORDER BY``. Snowflake's
-      ``HASH(*)`` is rejected as a predicate (``002079: Use of * as a function
-      argument``) and is legal **only** in the SELECT projection.
+      (Snowflake AND Databricks) the hash is computed once in an inner
+      ``SELECT`` projection and referenced by alias in the outer
+      ``WHERE``/``ORDER BY``. Snowflake's ``HASH(*)`` is rejected as a predicate
+      (``002079: Use of * as a function argument``); Databricks' ``struct(*)``
+      is rejected inside a Sort node (``[INVALID_USAGE_OF_STAR_OR_REGEX]``, issue
+      #226) — both are legal **only** in the SELECT projection.
     * ``sample_hash_alias`` — the column alias the projected hash binds to in
-      the projection-subquery shape (emitted unquoted; Snowflake folds it
-      consistently in both the projection and the ``EXCLUDE`` clause).
+      the projection-subquery shape (emitted unquoted).
+    * ``sample_star_except_keyword`` — the keyword that strips the helper hash
+      column in the projection-subquery shape: Snowflake ``EXCLUDE`` (default)
+      vs Databricks/Spark ``EXCEPT`` (issue #226).
 
     Five further fields (issue #171, DEC-011) describe **date arithmetic** and
     **percentile** SQL forms for the v0.3 row-count-anomaly variant. Reserved
@@ -158,6 +162,11 @@ class Dialect:
     sample_cte_alias: str = "sample"
     sample_hash_in_projection: bool = False
     sample_hash_alias: str = "_sf_sample_hash"
+    # Keyword that strips the helper hash column in the projection-subquery
+    # sample shape: Snowflake ``SELECT * EXCLUDE (col)`` vs Databricks/Spark
+    # ``SELECT * EXCEPT (col)`` (issue #226 — only consulted when
+    # ``sample_hash_in_projection`` is True).
+    sample_star_except_keyword: str = "EXCLUDE"
     # Issue #171 DEC-011 — date arithmetic + percentile SQL forms for the
     # row-count-anomaly variant. Reserved at the dialect surface in US-002;
     # the compiler arm that reads them lands in US-008.
@@ -324,7 +333,17 @@ DATABRICKS_DIALECT = Dialect(
     # wall-clock type — so the DATETIME literal reuses the TIMESTAMP form.
     datetime_literal_template="TIMESTAMP '{value}'",
     quote_qualified_per_component=True,
-    sample_hash_in_projection=False,
+    # Issue #226 (corrects #224 DEC-002): the whole-row hash is ``struct(*)``,
+    # and Spark REJECTS ``*`` inside a Sort/``ORDER BY`` node
+    # (``[INVALID_USAGE_OF_STAR_OR_REGEX] Invalid usage of '*' in Sort``) — unlike
+    # BigQuery, whose hash uses the table alias ``t`` (no star). Spark has no
+    # inline-alias trick for the whole row, so the hash MUST be computed once in
+    # a projection alias and referenced from ``WHERE``/``ORDER BY`` — the
+    # projection-subquery shape (proven live; the original inline shape errored).
+    sample_hash_in_projection=True,
+    # Databricks strips the helper column with ``SELECT * EXCEPT (col)`` (Spark),
+    # NOT Snowflake's ``EXCLUDE``.
+    sample_star_except_keyword="EXCEPT",
     # Issue #171 DEC-011 — Databricks overrides for the row-count-anomaly variant.
     date_trunc_expr_template="DATE_TRUNC('{unit}', {date})",
     interval_expr_template="INTERVAL {n} {unit}",
@@ -366,9 +385,15 @@ grounded-and-parse-validated but not yet executed against real Spark.
 * ``quote_qualified_per_component=True`` — Unity Catalog three-part names are
   quoted per component (`` `catalog`.`schema`.`table` ``), not as one
   dotted literal.
-* ``sample_hash_in_projection=False`` — default inline ``WHERE``/``ORDER BY``
-  placement. #224 flips this to ``True`` (the Snowflake #139 projection-subquery
-  shape) only if Spark rejects the hash expression as a predicate.
+* ``sample_hash_in_projection=True`` (issue #226, correcting #224's inline
+  default) — the whole-row hash is ``struct(*)``, and Spark REJECTS ``*`` inside
+  a Sort/``ORDER BY`` node (``[INVALID_USAGE_OF_STAR_OR_REGEX] Invalid usage of
+  '*' in Sort``; proven live). BigQuery avoids this because its hash uses the
+  table alias ``t`` (no star); Spark has no inline-alias trick for the whole
+  row, so the hash MUST be computed once in an inner projection alias and
+  referenced from ``WHERE``/``ORDER BY`` (the Snowflake #139 shape).
+* ``sample_star_except_keyword="EXCEPT"`` — Databricks strips the helper hash
+  column with ``SELECT * EXCEPT (col)`` (Spark), not Snowflake's ``EXCLUDE``.
 * date-arithmetic / percentile fields (issue #171): Spark's ``date_trunc`` takes
   ``(unit, date)`` with a quoted unit (like Snowflake); ``DAYOFWEEK(date)``
   returns ``1`` for Sunday (like BigQuery, hence ``dow_sunday_index=1``);

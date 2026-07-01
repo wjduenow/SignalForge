@@ -366,18 +366,24 @@ class ColumnNotFoundError(WarehouseError):
 
 
 class QuerySyntaxError(WarehouseError):
-    """Wraps BigQuery's ``BadRequest`` for SQL parse errors so callers can
-    distinguish "your SQL is malformed" from other ``BadRequest`` flavours
-    (e.g. :class:`BytesBilledExceededError`)."""
+    """Wraps a warehouse's malformed-SQL error so callers can distinguish
+    "your SQL is malformed" from other request-rejection flavours (e.g.
+    :class:`BytesBilledExceededError`).
+
+    Vendor-neutral by design — raised from the BigQuery, Snowflake, AND
+    Databricks exception mappers (and ``_sql_safety``), so the rendered message
+    must not name a single warehouse. The original vendor error detail rides on
+    ``detail`` / ``__cause__`` for the operator who needs the vendor-specific
+    text (issue #226 — a Databricks error previously surfaced BigQuery wording)."""
 
     default_remediation: ClassVar[str] = (
-        "Inspect the BigQuery error detail and fix the SQL. The drafter's "
+        "Inspect the warehouse error detail and fix the SQL. The drafter's "
         "prompt should be updated if this recurs."
     )
 
     def __init__(self, detail: str, *, remediation: str | None = None) -> None:
         self.detail = detail
-        message = f"BigQuery rejected the query: {_format_value(detail)}"
+        message = f"The warehouse rejected the query: {_format_value(detail)}"
         super().__init__(message, remediation=remediation)
 
 
