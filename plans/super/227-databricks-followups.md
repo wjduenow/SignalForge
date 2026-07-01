@@ -6,7 +6,7 @@
 - **Epic:** [#219](https://github.com/wjduenow/SignalForge/issues/219) — Databricks warehouse adapter (this is the final child, #226 → #227)
 - **Branch:** `feature/227-databricks-followups`
 - **Worktree:** `../worktrees/SignalForge/227-databricks-followups`
-- **Phase:** published
+- **Phase:** devolved
 - **Sessions:** 1 (2026-06-30)
 
 ---
@@ -178,4 +178,9 @@ Ordering: adapter methods (serialized — all edit `databricks.py`, so same-file
 
 ## Beads Manifest
 
-_(pending devolve)_
+- **Epic:** `bd_1-scaffolding-b9v` — #227: Databricks known-quirk follow-ups (epic-#219 closer)
+- **Tasks:** `.1`–`.8` (US-001 … US-008)
+- **Dependency chain:** US-001 → US-002 → US-003 → US-004 → {US-005, US-006} → US-007 (QG) → US-008 (P&M)
+- **Ready to start:** `bd_1-scaffolding-b9v.1` (US-001)
+- **Worktree:** `../worktrees/SignalForge/227-databricks-followups`
+- **PR:** #261 (base `dev`)
