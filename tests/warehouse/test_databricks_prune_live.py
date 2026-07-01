@@ -100,10 +100,16 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import date, timedelta
 
 import pytest
 
-from signalforge.draft.models import CandidateColumn, CandidateSchema, CandidateTestNotNull
+from signalforge.draft.models import (
+    CandidateColumn,
+    CandidateSchema,
+    CandidateTestNotNull,
+    CandidateTestRowCountAnomalyByPeriod,
+)
 from signalforge.manifest.models import Column, Config, Manifest, Model
 from signalforge.prune import PruneConfig, prune_tests
 from signalforge.warehouse.models import DATABRICKS_DIALECT, TableRef
@@ -355,3 +361,309 @@ def test_prune_drops_always_passes_not_null_live_materialised_sample() -> None:
                 teardown_cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
             finally:
                 teardown_cursor.close()
+
+
+# ---------------------------------------------------------------------------
+# #227 US-004 — two gated live-certification tests for the Databricks adapter.
+#
+# These certify two code paths that the #226 offline shape tier (hand-rolled
+# fakes + the ungated ``sqlglot`` parse-guard) pins for SHAPE but that a REAL
+# Databricks SQL warehouse has never EXECUTED — exactly the class of "the parser
+# certifies syntax, not acceptance" gap the #226 live pass surfaced three times
+# (a qualified ``CREATE TEMPORARY TABLE``, ``struct(*)`` in a Sort node, a
+# BigQuery-branded error string — all ``sqlglot``-parseable, all rejected live).
+#
+#   * Test A (R4/DEC-003) — the ``row_count_anomaly_by_period`` two-query
+#     (stats + violation) Spark SQL, which has only ever been ``sqlglot``-parsed
+#     (#223), never RUN. The prior #226 prune live cert exercised only the
+#     ``not_null`` single-query path.
+#   * Test B (R2/DEC-004) — the ``to_json(struct(*))`` per-row failing-row
+#     capture branch of ``run_test_sql``, which never fired live because #226's
+#     engineered candidates were all always-pass (0 failing rows → capture
+#     branch skipped; see the adapter's ``run_test_sql`` docstring note).
+#
+# Both carry ``@pytest.mark.databricks`` (deselected by default) AND the shared
+# runtime :func:`skip_reason` gate, so they SELF-SKIP cleanly with no rig. The
+# live run itself is a MAINTAINER step (a later bead) — here we only ship
+# correct, gracefully-skipping test code.
+# ---------------------------------------------------------------------------
+
+# ``--as-of`` for the anomaly cert. The engineered table carries a stable band
+# of history days ending BEFORE this date plus an "as-of" bucket ON it, so the
+# lookback window ``[as_of - 28d, as_of)`` holds far more than the
+# ``min_samples_per_bucket`` floor (3) — the decision is a GENUINE evaluated
+# outcome, not a cold-start degrade. Pinned so the two-query stats/violation
+# windows are reproducible at ``(model, as_of)`` (the #171 DEC-001 carve-out).
+_ANOMALY_AS_OF = date(2024, 3, 1)
+
+
+@pytest.mark.databricks
+def test_row_count_anomaly_by_period_evaluates_live_two_query_stats(tmp_path) -> None:
+    """Prune a hand-crafted ``row_count_anomaly_by_period`` against a live
+    engineered table and certify the two-query (stats + violation) path RAN.
+
+    Skips cleanly under ``pytest -m databricks`` when any prerequisite is
+    missing. With credentials present:
+
+    1. Creates a tiny engineered table in the writable ``workspace.default``
+       namespace with an ``event_date`` DATE column carrying a stable band of
+       history days (2024-02-05 .. 2024-02-28) plus rows ON the ``--as-of``
+       day (2024-03-01) — enough per-day buckets in the 28-day lookback to
+       clear the cold-start floor (``min_samples_per_bucket=3``), so the
+       decision is a genuine evaluated outcome.
+    2. Builds an in-process :class:`Model` / :class:`Manifest` /
+       :class:`CandidateSchema` carrying ONE model-level
+       :class:`CandidateTestRowCountAnomalyByPeriod` over ``event_date``.
+    3. Calls :func:`prune_tests` with ``scope="full"`` and
+       ``as_of=_ANOMALY_AS_OF``. Under full scope the anomaly variant queries
+       the SOURCE table directly (no sampling / materialise), so the engine
+       issues the compiled **stats** query via
+       :meth:`DatabricksAdapter.run_stats_query` and then the **violation**
+       query via :meth:`run_test_sql` — the exact two-query split that has only
+       ever been ``sqlglot``-parsed (#223), never executed on a real warehouse.
+    4. Asserts a real :class:`PruneDecision` for the anomaly variant is
+       produced with an *evaluated* ``reason`` (``kept`` / ``dropped`` /
+       ``kept-without-evidence``), and — the load-bearing pin — that the
+       decision carries a populated :class:`AnomalyTestStats`. Populated
+       ``stats`` proves the stats query EXECUTED on the live warehouse and its
+       rows parsed into the discriminated union; a degrade to
+       ``StatsQueryNotSupportedError`` (or any live SQL rejection of the stats
+       query) would route to ``kept-without-evidence`` with ``stats=None``, so
+       ``stats is not None`` is precisely the "``run_stats_query`` did NOT
+       degrade" certification.
+    5. Tears the engineered table down with ``DROP TABLE IF EXISTS`` in a
+       ``finally`` (idempotent).
+
+    Traces to: #227 US-004 (R4/DEC-003 — live cert of the anomaly two-query
+    stats path); #171 (the variant); epic #219.
+    """
+    if reason := skip_reason():
+        pytest.skip(reason)
+
+    catalog = _WRITABLE_CATALOG
+    schema = _WRITABLE_SCHEMA
+    table_name = _unique_table_name()
+    quoted = _quoted_table(catalog, schema, table_name)
+
+    # --- Build the engineered VALUES: a stable band of history days plus the
+    # as-of bucket. Each day carries the same row count so the anomaly band is
+    # tight and the stats window has ample samples (>> min_samples_per_bucket).
+    # The as-of day itself gets rows so the violation query has a "current"
+    # bucket to evaluate. The exact kept-vs-dropped outcome is deliberately NOT
+    # asserted (any evaluated outcome certifies the path); the load-bearing
+    # signal is that the two-query stats path RAN (stats populated).
+    row_id = 0
+    values_parts: list[str] = []
+    history_start = date(2024, 2, 5)
+    for offset in range(24):  # 24 distinct history days, all inside the lookback
+        day = history_start + timedelta(days=offset)
+        for _ in range(3):
+            row_id += 1
+            values_parts.append(f"({row_id}, DATE '{day.isoformat()}')")
+    for _ in range(3):  # rows ON the as-of day → a real "current" bucket
+        row_id += 1
+        values_parts.append(f"({row_id}, DATE '{_ANOMALY_AS_OF.isoformat()}')")
+    values_clause = ", ".join(values_parts)
+
+    setup_adapter = build_live_adapter()
+    with setup_adapter:
+        cursor = setup_adapter._get_connection().cursor()
+        try:
+            cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
+            cursor.execute(f"CREATE TABLE {quoted} (id INT, event_date DATE)")
+            cursor.execute(f"INSERT INTO {quoted} (id, event_date) VALUES {values_clause}")
+        finally:
+            cursor.close()
+
+    try:
+        # ``data_type="DATE"`` on the date column so the ``--as-of`` bound
+        # literal is type-matched (``_date_value_literal`` — the DEC-012
+        # partition-pruning predicate compares the bare column against a
+        # type-matched literal). The model's ``name`` == the
+        # ``CandidateSchema.name`` (the diff/anchor cross-stage convention).
+        model = Model.model_validate(
+            {
+                "unique_id": f"model.signalforge_live.{table_name}",
+                "name": table_name,
+                "resource_type": "model",
+                "package_name": "signalforge_live",
+                "original_file_path": f"models/{table_name}.sql",
+                "path": f"{table_name}.sql",
+                "database": catalog,
+                "schema": schema,
+                "columns": {
+                    "id": Column(name="id"),
+                    "event_date": Column(name="event_date", data_type="DATE"),
+                },
+                "config": Config(materialized="table"),
+            }
+        )
+        manifest = Manifest(metadata={}, nodes={model.unique_id: model})
+
+        candidates = CandidateSchema(
+            name=table_name,
+            description="engineered anomaly live-e2e table",
+            columns=(),
+            tests=(
+                CandidateTestRowCountAnomalyByPeriod(
+                    date_column="event_date",
+                    rationale="per-period row-count anomaly over the engineered daily band",
+                ),
+            ),
+        )
+
+        # ``scope="full"`` — the anomaly variant queries the SOURCE table
+        # directly (no sampling / materialise), so the engine runs the compiled
+        # stats query via ``run_stats_query`` then the violation query via
+        # ``run_test_sql``. The engineered table is a handful of rows, so both
+        # queries are cheap.
+        config = PruneConfig(scope="full")
+
+        # ``prune_tests`` owns the ``with adapter:`` block — pass a NOT-entered
+        # adapter and thread the reproducibility ``as_of``.
+        result = prune_tests(
+            model,
+            build_live_adapter(),
+            candidates,
+            manifest,
+            config=config,
+            as_of=_ANOMALY_AS_OF,
+        )
+
+        anomaly_decisions = [
+            d for d in result.decisions if d.test.type == "row_count_anomaly_by_period"
+        ]
+        assert anomaly_decisions, (
+            "expected exactly one row_count_anomaly_by_period PruneDecision — the "
+            "hand-crafted candidate must reach the engine, compile to the "
+            "(stats_sql, violation_sql) tuple, and produce a decision. Got "
+            f"decision test types: {sorted({d.test.type for d in result.decisions})}"
+        )
+        decision = anomaly_decisions[0]
+
+        # An *evaluated* reason — NOT a crash. All three are genuine engine
+        # verdicts (kept/dropped are with-evidence; kept-without-evidence is the
+        # documented degrade arm). The load-bearing distinction from a broken
+        # path is that a decision exists at all AND that ``stats`` populated.
+        assert decision.reason in {"kept", "dropped", "kept-without-evidence"}, (
+            f"anomaly decision must carry an evaluated reason; got {decision.reason!r}"
+        )
+        assert decision.decision in {"kept", "dropped"}, (
+            f"anomaly decision must be kept or dropped; got {decision.decision!r}"
+        )
+
+        # THE load-bearing pin: populated ``AnomalyTestStats`` proves the stats
+        # query EXECUTED on the live warehouse and parsed into the discriminated
+        # union. A degrade to StatsQueryNotSupportedError (or any live rejection
+        # of the stats SQL) leaves ``stats=None`` and routes to
+        # kept-without-evidence — so this assertion is exactly the "run_stats_query
+        # did NOT degrade + the two-query stats path ran" certification.
+        assert decision.stats is not None, (
+            "expected AnomalyTestStats to populate on the decision — this proves "
+            "run_stats_query executed the compiled Spark stats SQL live and its "
+            "rows parsed (it did NOT degrade to StatsQueryNotSupportedError, which "
+            "would leave stats=None and route to kept-without-evidence). This is "
+            "the R4/DEC-003 certification the offline sqlglot parse-guard cannot "
+            f"give. Got decision={decision!r}, reason={decision.reason!r}."
+        )
+        assert decision.stats.method in {"mad", "zscore", "percentile", "min_max"}, (
+            f"AnomalyTestStats.method must be one of the four supported methods; "
+            f"got {decision.stats.method!r}"
+        )
+        assert decision.stats.n_periods >= 1, (
+            "AnomalyTestStats.n_periods must be >= 1 on a decision whose stats "
+            f"query ran; got n_periods={decision.stats.n_periods!r}"
+        )
+    finally:
+        teardown_adapter = build_live_adapter()
+        with teardown_adapter:
+            teardown_cursor = teardown_adapter._get_connection().cursor()
+            try:
+                teardown_cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
+            finally:
+                teardown_cursor.close()
+
+
+@pytest.mark.databricks
+def test_run_test_sql_captures_failing_rows_live_to_json_struct() -> None:
+    """Certify the ``to_json(struct(*))`` failing-row CAPTURE branch of
+    :meth:`DatabricksAdapter.run_test_sql` against a live warehouse.
+
+    Skips cleanly under ``pytest -m databricks`` when any prerequisite is
+    missing. With credentials present, drives a real
+    :meth:`DatabricksAdapter.run_test_sql` with a ``custom_sql``-shaped
+    failing-rows SELECT that is GUARANTEED to return >= 1 row
+    (``SELECT 1 AS failing_id, 'engineered-failure' AS reason`` — a constant
+    single row, no table needed) and ``capture_failures=3`` (> 0), so the
+    SECOND query (``SELECT to_json(struct(*)) AS failure_row FROM (<sql>) AS s
+    LIMIT 3``) FIRES. This branch never ran during the #226 live pass because
+    every engineered candidate there was always-pass (0 failing rows → capture
+    skipped; see the adapter's ``run_test_sql`` docstring note), so the per-row
+    ``to_json`` → ``json.loads`` marshalling (:meth:`_parse_failure_row`) has
+    only ever been fake-driven + ``sqlglot``-parsed.
+
+    Asserts:
+
+    * ``passed is False`` and ``failure_count >= 1`` — the COUNT(*) wrap saw
+      the failing row.
+    * ``sample_failures`` is a non-empty list — the capture branch produced
+      structured rows (NOT ``None``, which is the ``capture_failures == 0``
+      shape).
+    * Each captured row is a ``dict`` decoded from the ``to_json`` payload, and
+      the first row carries the engineered columns/values (case-folded lookup,
+      since Databricks lower-folds unquoted ``struct(*)`` field names) — proving
+      the ``json.loads`` marshalling produced real structured content, not an
+      empty / stringified blob.
+
+    Traces to: #227 US-004 (R2/DEC-004 — live cert of the to_json(struct(*))
+    failing-row capture); #224 DEC-007 (the capture branch); epic #219.
+    """
+    if reason := skip_reason():
+        pytest.skip(reason)
+
+    # A constant single-row failing-rows SELECT — no table needed, guaranteed
+    # to return exactly one row so the COUNT(*) wrap sees failure_count == 1 and
+    # the capture branch has a row to marshal. Two columns (an int + a string)
+    # so the decoded ``struct(*)`` dict is genuinely structured, not trivial.
+    failing_sql = "SELECT 1 AS failing_id, 'engineered-failure' AS reason"
+
+    adapter = build_live_adapter()
+    with adapter:
+        result = adapter.run_test_sql(failing_sql, capture_failures=3)
+
+    # The COUNT(*) wrap saw the engineered failing row.
+    assert result.passed is False, "the engineered failing-rows SELECT must NOT pass"
+    assert result.failure_count >= 1, (
+        f"expected failure_count >= 1 from the constant failing row; got {result.failure_count!r}"
+    )
+
+    # The capture branch fired (capture_failures > 0) and produced structured
+    # rows — NOT ``None`` (the capture_failures == 0 shape).
+    assert result.sample_failures is not None, (
+        "sample_failures must be a list (capture_failures=3 > 0 → the "
+        "to_json(struct(*)) capture branch must fire), not None"
+    )
+    assert len(result.sample_failures) >= 1, (
+        "expected at least one captured failing row from the to_json(struct(*)) "
+        f"branch; got {result.sample_failures!r}"
+    )
+
+    first = result.sample_failures[0]
+    assert isinstance(first, dict), (
+        f"each captured row must be a dict decoded from to_json(struct(*)); got {type(first)!r}"
+    )
+    assert first, "the captured row must be non-empty (decoded from the to_json payload)"
+
+    # Databricks lower-folds unquoted struct(*) field names; look up
+    # case-insensitively so the assertion survives the fold. This pins that the
+    # json.loads marshalling produced the REAL engineered content — the honest
+    # certification that the capture branch decodes structured rows, not blobs.
+    lowered = {str(k).lower(): v for k, v in first.items()}
+    assert lowered.get("failing_id") == 1, (
+        "the captured row must carry the engineered ``failing_id`` == 1 "
+        f"(decoded from to_json(struct(*))); got row {first!r}"
+    )
+    assert "engineered-failure" in str(lowered.get("reason")), (
+        "the captured row must carry the engineered ``reason`` string "
+        f"(decoded from to_json(struct(*))); got row {first!r}"
+    )
