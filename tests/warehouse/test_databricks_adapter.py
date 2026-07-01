@@ -27,7 +27,10 @@ from signalforge.warehouse.adapters._databricks_client import (
     _extract_unresolved_column,
     map_databricks_exception,
 )
-from signalforge.warehouse.adapters.databricks import DatabricksAdapter
+from signalforge.warehouse.adapters.databricks import (
+    DatabricksAdapter,
+    _is_complex_spark_type,
+)
 from signalforge.warehouse.errors import (
     ColumnNotFoundError,
     InvalidIdentifierError,
@@ -1600,3 +1603,110 @@ def test_column_stats_column_not_found_maps_with_context() -> None:
 
     with pytest.raises(ColumnNotFoundError):
         adapter.column_stats(_TABLE, "amount")
+
+
+# ---------------------------------------------------------------------------
+# column_stats complex-type MIN/MAX skip (R1/DEC-001 of issue #227).
+#
+# Mirrors BigQuery's ColumnStats DEC-016 contract: MIN/MAX is not meaningful on
+# complex Spark types (array/struct/map/binary/variant), so it's nulled out in a
+# pure post-process after the aggregate returns. Scalar + empty-table cases keep
+# their min/max.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "data_type",
+    [
+        "struct<a:int,b:string>",
+        "array<string>",
+        "map<string,int>",
+        "binary",
+    ],
+)
+def test_column_stats_complex_type_nulls_min_max(data_type: str) -> None:
+    """A complex ``data_type`` (array / struct / map / binary) nulls out
+    ``min``/``max`` even though the aggregate returned non-null bounds."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(900, 750, 100, 1, 9999, data_type)],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "payload")
+
+    assert stats.min is None
+    assert stats.max is None
+    # count / distinct / nulls / data_type are untouched by the skip.
+    assert stats.count == 900
+    assert stats.distinct == 750
+    assert stats.nulls == 100
+    assert stats.data_type == data_type
+    conn.assert_all_expectations_met()
+
+
+def test_column_stats_scalar_type_preserves_min_max() -> None:
+    """A scalar ``data_type`` (bigint) passes the fake's returned min/max
+    straight through — byte-identical to the pre-#227 path."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(900, 750, 100, 1, 9999, "bigint")],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "amount")
+
+    assert stats.min == 1
+    assert stats.max == 9999
+    assert stats.data_type == "bigint"
+    conn.assert_all_expectations_met()
+
+
+def test_column_stats_empty_table_preserves_min_max() -> None:
+    """The empty-table case (``data_type == ""``) is NOT complex, so whatever
+    the aggregate returned for min/max is preserved (here ``None``, unchanged)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(0, 0, 0, None, None, None)],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "amount")
+
+    assert stats.data_type == ""
+    assert stats.min is None
+    assert stats.max is None
+    conn.assert_all_expectations_met()
+
+
+@pytest.mark.parametrize(
+    ("type_str", "expected"),
+    [
+        ("struct<a:int,b:string>", True),
+        ("array<string>", True),
+        ("map<string,int>", True),
+        ("binary", True),
+        ("variant", True),
+        # Case / whitespace resilience (Spark returns lowercase, but be defensive).
+        ("ARRAY<STRING>", True),
+        ("  struct<a:int>  ", True),
+        # Scalars are not complex.
+        ("int", False),
+        ("bigint", False),
+        ("string", False),
+        ("timestamp", False),
+        ("double", False),
+        # Empty-table sentinel is not complex.
+        ("", False),
+    ],
+)
+def test_is_complex_spark_type(type_str: str, expected: bool) -> None:
+    """The helper classifies Spark DDL type strings: parametric (array/struct/
+    map) + scalar-complex (binary/variant) are complex; scalars + "" are not."""
+    assert _is_complex_spark_type(type_str) is expected
