@@ -59,9 +59,11 @@ Surface:
   ``Statistics(sizeInBytes=...)`` across plan nodes via
   :func:`_parse_explain_cost_bytes`, overriding the ABC
   ``EstimateNotSupportedError`` degrade. Live validity is certified in #226.
-* :meth:`run_stats_query` inherits the ABC typed degrade
-  (``StatsQueryNotSupportedError``) — a clean, operator-actionable signal (out
-  of scope for #225).
+* :meth:`run_stats_query` is implemented (#227 US-003, DEC-002) — it runs the
+  verbatim anomaly stats SELECT via :meth:`_execute_to_dicts` (NO ``COUNT(*)``
+  wrap; contrast :meth:`run_test_sql`) and returns every row as a dict,
+  overriding the ABC ``StatsQueryNotSupportedError`` degrade so
+  ``row_count_anomaly_by_period`` actually runs on Databricks.
 * :meth:`WarehouseAdapter.from_profile` dispatches ``profile.type ==
   "databricks"`` here so an operator with a Databricks profile sees a typed
   "v0.x pending" ``NotImplementedError`` rather than the v0.1
@@ -298,9 +300,10 @@ class DatabricksAdapter(WarehouseAdapter):
     failing-rows wrap + per-row ``to_json`` capture). US-005 adds
     :meth:`column_stats` (single aggregate-only profiling query) — shipped AHEAD
     of Snowflake, whose parity is tracked as issue #258. :meth:`estimate_query_bytes`
-    is implemented (#225) via ``EXPLAIN COST`` (parse Spark CBO ``sizeInBytes``);
-    :meth:`run_stats_query` inherits its typed ``StatsQueryNotSupportedError``
-    degrade (out of scope for #225).
+    is implemented (#225) via ``EXPLAIN COST`` (parse Spark CBO ``sizeInBytes``).
+    :meth:`run_stats_query` is implemented (#227 US-003) — it runs the verbatim
+    anomaly stats SELECT via :meth:`_execute_to_dicts`, overriding the ABC
+    ``StatsQueryNotSupportedError`` degrade.
     """
 
     def __init__(
@@ -1200,6 +1203,39 @@ class DatabricksAdapter(WarehouseAdapter):
             sample_failures=sample_failures,
             row_schema=None,
         )
+
+    def run_stats_query(self, sql: str) -> tuple[dict[str, object], ...]:
+        """Run an anomaly stats SELECT and return every row as a dict (#227 US-003,
+        DEC-002).
+
+        Overrides the ABC default (which raises
+        :class:`StatsQueryNotSupportedError`) so
+        ``row_count_anomaly_by_period`` actually runs on Databricks instead of
+        routing to ``kept-without-evidence``. Mirrors
+        :meth:`BigQueryAdapter.run_stats_query`'s shape:
+
+        * NO wrap — the stats SQL is the verbatim SELECT, not a failing-rows
+          ``COUNT(*)`` wrap (contrast :meth:`run_test_sql`). The stats query is
+          composed by the prune compiler and returns per-period aggregate rows.
+        * ``sql`` is subject to the same cheap rejects as :meth:`run_test_sql`
+          via :func:`signalforge.warehouse._sql_safety.validate_test_sql`. The
+          compiler already runs the same check at compose time; the
+          adapter-level call is defence-in-depth.
+        * Execution runs on the connection-bound session (via
+          :meth:`_execute_to_dicts`); SDK errors route through
+          :func:`map_databricks_exception`, so the prune engine catches them as
+          any other :class:`WarehouseError`. Unlike BigQuery there is no
+          ``session_id`` string to thread — the Databricks connection embodies
+          the session (a prior :meth:`materialise_sample` would have pinned it).
+          In practice the engine bypasses the sample substitution for
+          ``row_count_anomaly_by_period`` (the source-override helper routes it
+          to the source qualified name), so a materialised temp table is not
+          consulted on this path.
+        """
+        validate_test_sql(sql)
+
+        rows = self._execute_to_dicts(sql)
+        return tuple(rows)
 
     # ------------------------------------------------------------------
     # estimate_query_bytes — DEC-002 / DEC-008 / DEC-009 / DEC-012 of #225.

@@ -1453,6 +1453,123 @@ def test_run_test_sql_unmapped_error_passes_through_unchanged() -> None:
 
 
 # ---------------------------------------------------------------------------
+# run_stats_query (#227 US-003, DEC-002) — verbatim anomaly stats SELECT.
+#
+# Overrides the ABC ``StatsQueryNotSupportedError`` degrade so
+# ``row_count_anomaly_by_period`` actually runs on Databricks. Mirrors
+# ``BigQueryAdapter.run_stats_query``: no COUNT wrap (contrast ``run_test_sql``);
+# the verbatim SELECT runs via ``_execute_to_dicts`` and every row is returned.
+# ---------------------------------------------------------------------------
+
+_STATS_SELECT = "SELECT `period`, COUNT(*) AS n FROM `main`.`sales`.`orders` GROUP BY `period`"
+_STATS_MATCH = r"GROUP BY"
+
+
+def test_run_stats_query_returns_rows_verbatim() -> None:
+    """Every stats row is returned verbatim, in order, as a ``tuple[dict, ...]``."""
+    conn = FakeDatabricksConnection()
+    canned = [{"period": "2026-01", "n": 100}, {"period": "2026-02", "n": 90}]
+    conn.expect_execute(matching=_STATS_MATCH, returns=canned)
+    adapter = _make_adapter(conn)
+
+    rows = adapter.run_stats_query(_STATS_SELECT)
+
+    assert rows == ({"period": "2026-01", "n": 100}, {"period": "2026-02", "n": 90})
+    assert isinstance(rows, tuple)
+    conn.assert_all_expectations_met()
+
+
+def test_run_stats_query_no_wrap_executes_verbatim_select() -> None:
+    """The stats SQL runs verbatim — NO ``SELECT COUNT(*) AS failures`` wrap
+    (contrast :meth:`run_test_sql`)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=[{"period": "2026-01", "n": 5}])
+    adapter = _make_adapter(conn)
+
+    adapter.run_stats_query(_STATS_SELECT)
+
+    assert conn.executed == [_STATS_SELECT]
+    assert "COUNT(*) AS failures" not in conn.executed[0]
+
+
+def test_run_stats_query_validates_sql_first() -> None:
+    """``validate_test_sql`` rejects a SQL with a ``;`` BEFORE any execute — the
+    fake's expectation is never consumed (no query ran)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=[{"period": "2026-01", "n": 5}])
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError, match="single statement"):
+        adapter.run_stats_query(f"{_STATS_SELECT}; DROP TABLE t")
+
+    # The expectation is UNCONSUMED — nothing executed.
+    with pytest.raises(AssertionError, match="Unconsumed expectations"):
+        conn.assert_all_expectations_met()
+    assert not conn.cursors
+
+
+def test_run_stats_query_does_not_raise_stats_query_not_supported() -> None:
+    """A valid stats SELECT no longer degrades to
+    :class:`StatsQueryNotSupportedError` (#227 US-003 overrides the ABC default)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=[{"period": "2026-01", "n": 1}])
+    adapter = _make_adapter(conn)
+
+    # No StatsQueryNotSupportedError — the override runs the query and returns rows.
+    rows = adapter.run_stats_query(_STATS_SELECT)
+    assert rows == ({"period": "2026-01", "n": 1},)
+
+
+def test_run_stats_query_closes_cursor_on_success() -> None:
+    """The cursor is released after a successful stats query (no handle leak)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=[{"period": "2026-01", "n": 1}])
+    adapter = _make_adapter(conn)
+
+    adapter.run_stats_query(_STATS_SELECT)
+
+    assert conn.cursors and all(c.closed for c in conn.cursors)
+
+
+def test_run_stats_query_closes_cursor_on_failure() -> None:
+    """The cursor is released even when the query raises (the ``finally`` arm)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=RuntimeError("boom"))
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(RuntimeError):
+        adapter.run_stats_query(_STATS_SELECT)
+
+    assert conn.cursors and all(c.closed for c in conn.cursors)
+
+
+def test_run_stats_query_programming_error_maps_to_query_syntax_error() -> None:
+    """A connector error maps to :class:`QuerySyntaxError` via
+    ``map_databricks_exception`` (the ``_execute_to_dicts`` mapped branch)."""
+    dbe = _dbe()
+    err = dbe.ServerOperationError("[PARSE_SYNTAX_ERROR] bad syntax")  # type: ignore[attr-defined]
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=err)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError):
+        adapter.run_stats_query(_STATS_SELECT)
+
+
+def test_run_stats_query_unmapped_error_passes_through_unchanged() -> None:
+    """An exception ``map_databricks_exception`` does not map is re-raised
+    unchanged — the passthrough branch."""
+    sentinel = RuntimeError("transient network blip")
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=sentinel)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        adapter.run_stats_query(_STATS_SELECT)
+    assert exc_info.value is sentinel
+
+
+# ---------------------------------------------------------------------------
 # column_stats (#224 US-005, DEC-011) — aggregate-only profiling.
 #
 # Databricks implements column_stats AHEAD of Snowflake (which stubs it); the
