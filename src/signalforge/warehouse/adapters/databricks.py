@@ -1173,9 +1173,11 @@ class DatabricksAdapter(WarehouseAdapter):
             The COUNT(*) failing-rows wrap is **certified live (#226)** (the
             prune / e2e live tests run it against the real rig). The
             ``to_json(struct(*))`` per-row CAPTURE branch (and its JSON-string
-            marshalling assumption) was NOT exercised by the live pass — the
-            engineered always-pass tests return 0 failing rows, so the capture
-            branch never fires — and remains shape-only (fake + sqlglot parse).
+            marshalling assumption) is **certified live (#227 US-004)** — a
+            gated test runs a constant failing SELECT with
+            ``capture_failures > 0`` and decodes the ``to_json`` payload into
+            ``sample_failures`` (it never fired under #226, whose candidates
+            were all always-pass).
         """
         validate_test_sql(sql)
 
