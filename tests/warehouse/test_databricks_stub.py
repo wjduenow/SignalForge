@@ -14,10 +14,11 @@ Snowflake). Tests pin the issue ACs:
    ``tests/warehouse/test_databricks_adapter.py``: ``sample_rows`` +
    ``get_row_count`` (#224 US-003), ``materialise_sample`` + ``run_test_sql``
    (#224 US-004), ``column_stats`` (#224 US-005).
-5. ``run_stats_query`` inherits the ABC typed degrade (``materialise_sample``
-   graduated to a real implementation in #224 US-004; ``estimate_query_bytes``
-   graduated to an ``EXPLAIN COST`` implementation in #225 US-002, covered in
-   ``tests/warehouse/test_databricks_estimate.py``).
+5. The degrade-default ABC methods have all graduated to real implementations:
+   ``materialise_sample`` (#224 US-004), ``estimate_query_bytes`` via
+   ``EXPLAIN COST`` (#225 US-002, covered in
+   ``tests/warehouse/test_databricks_estimate.py``), and ``run_stats_query``
+   (#227 US-003, covered in ``tests/warehouse/test_databricks_adapter.py``).
 6. SDK type-ignores are confined to ``_databricks_client.py`` — pinned by
    ``tests/warehouse/test_databricks_client_confinement.py``, not here.
 """
@@ -27,11 +28,8 @@ from __future__ import annotations
 import subprocess
 import sys
 
-import pytest
-
 from signalforge.warehouse import (
     DatabricksAdapter,
-    StatsQueryNotSupportedError,
 )
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.models import DATABRICKS_DIALECT, Dialect
@@ -131,17 +129,11 @@ def test_init_stores_forward_compat_oauth_fields() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Degrade-default ABC methods inherit their typed *NotSupportedError (AC-5)
-# (materialise_sample graduated to a real impl in #224 US-004;
-# estimate_query_bytes graduated to EXPLAIN COST in #225 US-002 — its impl is
-# covered in tests/warehouse/test_databricks_estimate.py)
+# The degrade-default ABC methods have all graduated to real implementations
+# (AC-5): materialise_sample (#224 US-004), estimate_query_bytes via EXPLAIN
+# COST (#225 US-002 — tests/warehouse/test_databricks_estimate.py), and
+# run_stats_query (#227 US-003 — tests/warehouse/test_databricks_adapter.py).
 # ---------------------------------------------------------------------------
-
-
-def test_run_stats_query_inherits_typed_degrade() -> None:
-    adapter = DatabricksAdapter()
-    with pytest.raises(StatsQueryNotSupportedError):
-        adapter.run_stats_query("SELECT 1")
 
 
 # ---------------------------------------------------------------------------
