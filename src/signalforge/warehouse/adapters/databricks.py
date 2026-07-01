@@ -59,9 +59,11 @@ Surface:
   ``Statistics(sizeInBytes=...)`` across plan nodes via
   :func:`_parse_explain_cost_bytes`, overriding the ABC
   ``EstimateNotSupportedError`` degrade. Live validity is certified in #226.
-* :meth:`run_stats_query` inherits the ABC typed degrade
-  (``StatsQueryNotSupportedError``) — a clean, operator-actionable signal (out
-  of scope for #225).
+* :meth:`run_stats_query` is implemented (#227 US-003, DEC-002) — it runs the
+  verbatim anomaly stats SELECT via :meth:`_execute_to_dicts` (NO ``COUNT(*)``
+  wrap; contrast :meth:`run_test_sql`) and returns every row as a dict,
+  overriding the ABC ``StatsQueryNotSupportedError`` degrade so
+  ``row_count_anomaly_by_period`` actually runs on Databricks.
 * :meth:`WarehouseAdapter.from_profile` dispatches ``profile.type ==
   "databricks"`` here so an operator with a Databricks profile sees a typed
   "v0.x pending" ``NotImplementedError`` rather than the v0.1
@@ -89,6 +91,7 @@ from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
     EstimateUnavailableError,
     MaterialisationFailedError,
+    QuerySyntaxError,
     SamplingRequiresPartitionFilterError,
     UnknownTableSizeError,
     WarehouseError,
@@ -149,6 +152,65 @@ _SIZE_IN_BYTES_RE = re.compile(
     r"(?P<num>\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*"
     r"(?P<unit>KiB|MiB|GiB|TiB|PiB|EiB|B)"
 )
+
+# Spark ``typeof()`` returns LOWERCASE DDL type strings. Mirrors BigQuery's
+# ``_is_complex_type`` (DEC-016 of the ``ColumnStats`` contract): the scalar
+# complex types where ``MIN``/``MAX`` is not meaningful, plus the parametric
+# ones detected by their type-name prefix. Spark has no ``GEOGRAPHY`` and
+# renders JSON as ``string`` — so the sets differ from BigQuery's.
+_COMPLEX_SPARK_TYPES: frozenset[str] = frozenset({"binary", "variant"})
+"""Scalar complex Spark types where ``MIN``/``MAX`` is omitted (R1/DEC-001)."""
+
+_PARAMETRIC_COMPLEX_SPARK_PREFIXES: frozenset[str] = frozenset({"array", "struct", "map"})
+"""Parametric complex Spark types (``array<…>`` / ``struct<…>`` / ``map<…>``)."""
+
+_SPARK_NON_ORDERABLE_MARKER = "INVALID_ORDERING_TYPE"
+"""Spark error-class token raised (at analysis time) when ``MIN``/``MAX`` is
+applied to a non-orderable type (``map<…>`` / ``variant``). The token is a
+stable Spark error-class identifier — ``DATATYPE_MISMATCH.INVALID_ORDERING_TYPE``
+— and survives :func:`map_databricks_exception`'s wrap into
+:class:`QuerySyntaxError`, so :meth:`DatabricksAdapter.column_stats` can key its
+reduced-aggregate retry on it (R1 fix, issue #227 US-007)."""
+
+
+def _escape_spark_string_literal(value: str) -> str:
+    """Escape the INNER content of a Spark/Databricks single-quoted string literal.
+
+    Returns the escaped body WITHOUT the surrounding single quotes (the caller
+    wraps it in ``'…'``). Spark-correct escaping (R3/DEC-005 of issue #227), NOT
+    the BigQuery :func:`escape_bq_string_literal` the partition-filter renderer
+    used to borrow:
+
+    * ``\\`` → ``\\\\`` — under Spark's default ``escapedStringLiterals=false`` the
+      backslash IS an escape character, so a literal backslash must be doubled.
+      Done FIRST, so the quote-doubling below is not itself re-escaped.
+    * ``'`` → ``''`` — Spark-idiomatic quote doubling; safe for the quote char in
+      BOTH ``escapedStringLiterals`` modes.
+
+    No ``SET spark.sql.…`` conf is issued anywhere — the escape is correct for
+    the default session mode.
+    """
+    return value.replace("\\", "\\\\").replace("'", "''")
+
+
+def _is_complex_spark_type(type_str: str) -> bool:
+    """Return True for Spark types where ``MIN``/``MAX`` is not meaningful.
+
+    Mirrors :func:`signalforge.warehouse.adapters.bigquery._is_complex_type`
+    with Databricks/Spark semantics (R1/DEC-001 of issue #227). Handles both
+    the scalar complex types (``binary``, ``variant``) and the parametric ones
+    (``array<…>``, ``struct<…>``, ``map<…>``); the prefix split keeps the check
+    resilient against arbitrary nested-type bodies. Spark ``typeof()`` returns
+    lowercase DDL strings, so the comparison is lower-folded defensively.
+
+    An empty string (``data_type == ""`` — the empty-table case) is NOT complex,
+    so ``MIN``/``MAX`` are preserved for it.
+    """
+    lowered = type_str.strip().lower()
+    if lowered in _COMPLEX_SPARK_TYPES:
+        return True
+    head = lowered.split("<", 1)[0]
+    return head in _PARAMETRIC_COMPLEX_SPARK_PREFIXES
 
 
 def _parse_explain_cost_bytes(cell: object) -> int:
@@ -247,9 +309,10 @@ class DatabricksAdapter(WarehouseAdapter):
     failing-rows wrap + per-row ``to_json`` capture). US-005 adds
     :meth:`column_stats` (single aggregate-only profiling query) — shipped AHEAD
     of Snowflake, whose parity is tracked as issue #258. :meth:`estimate_query_bytes`
-    is implemented (#225) via ``EXPLAIN COST`` (parse Spark CBO ``sizeInBytes``);
-    :meth:`run_stats_query` inherits its typed ``StatsQueryNotSupportedError``
-    degrade (out of scope for #225).
+    is implemented (#225) via ``EXPLAIN COST`` (parse Spark CBO ``sizeInBytes``).
+    :meth:`run_stats_query` is implemented (#227 US-003) — it runs the verbatim
+    anomaly stats SELECT via :meth:`_execute_to_dicts`, overriding the ABC
+    ``StatsQueryNotSupportedError`` degrade.
     """
 
     def __init__(
@@ -517,9 +580,12 @@ class DatabricksAdapter(WarehouseAdapter):
 
         ``datetime`` → ``TIMESTAMP '…'``; ``date`` → ``DATE '…'`` (via the
         dialect literal templates — Spark typed-literal form); ``str`` is escaped
-        via :func:`escape_bq_string_literal` for safe inclusion inside a
-        single-quoted literal. The column name is fold-then-quoted (per-component
-        backtick) and already validated on :class:`PartitionFilter` construction.
+        via :func:`_escape_spark_string_literal` — a Databricks-local, Spark-correct
+        escape (backslash doubling under the default ``escapedStringLiterals=false``
+        plus quote doubling), NOT the BigQuery :func:`escape_bq_string_literal` —
+        for safe inclusion inside a single-quoted literal. The column name is
+        fold-then-quoted (per-component backtick) and already validated on
+        :class:`PartitionFilter` construction.
 
         Mirrors the Snowflake adapter's ``_render_partition_filter`` and the
         prune compiler's ``_render_partition_filter(pf, dialect)`` — the
@@ -534,9 +600,7 @@ class DatabricksAdapter(WarehouseAdapter):
         elif isinstance(pf.value, date):
             rendered = DATABRICKS_DIALECT.date_literal_template.format(value=pf.value.isoformat())
         else:
-            from signalforge.warehouse._sql_safety import escape_bq_string_literal
-
-            rendered = f"'{escape_bq_string_literal(str(pf.value))}'"
+            rendered = f"'{_escape_spark_string_literal(str(pf.value))}'"
         return f"{self._quote_identifier(pf.column)} {pf.op} {rendered}"
 
     def _execute(self, sql: str, *, table: TableRef | None = None) -> list[Any]:
@@ -984,17 +1048,33 @@ class DatabricksAdapter(WarehouseAdapter):
         * ``count`` — ``COUNT(<col>)`` (NON-null count, matching BigQuery).
         * ``distinct`` — ``COUNT(DISTINCT <col>)``.
         * ``nulls`` — ``COUNT_IF(<col> IS NULL)`` (Spark's ``COUNTIF`` analogue).
-        * ``min`` / ``max`` — ``MIN(<col>)`` / ``MAX(<col>)``. **Known
-          divergence from BigQuery (DEC-011 follow-up):** BigQuery skips MIN/MAX
-          and sets ``min = max = None`` for complex types (ARRAY / STRUCT / MAP /
-          JSON / BINARY / GEOGRAPHY), per the :class:`ColumnStats` contract. This
-          adapter emits MIN/MAX unconditionally because ``data_type`` is derived
-          inline (``typeof``) in the same single aggregate, so the column's type
-          is not known before the query is built. On a complex column Spark
-          either raises (mapped → :class:`QuerySyntaxError`) or returns a
-          non-scalar; honouring the skip-for-complex contract needs a type
-          pre-fetch and is a **follow-up** (#226's live pass exercised only
-          scalar ``column_stats`` — see the note below).
+        * ``min`` / ``max`` — ``MIN(<col>)`` / ``MAX(<col>)``, then **nulled out
+          for complex Spark types** (R1/DEC-001 of issue #227), honouring the same
+          :class:`ColumnStats` DEC-016 contract BigQuery does (skip MIN/MAX for
+          ARRAY / STRUCT / MAP / BINARY / VARIANT). ``data_type`` is derived
+          inline via ``typeof`` in the same round-trip, so the type isn't known
+          before the query is built — Databricks can't omit MIN/MAX up front the
+          way BigQuery (which reads the schema first) does. Two cases:
+
+          - **Orderable complex types** (``array<…>`` / ``struct<…>`` /
+            ``binary``): Spark computes a MIN/MAX value, so the aggregate
+            succeeds and a pure post-process sets ``min = max = None`` when
+            :func:`_is_complex_spark_type` matches the returned ``data_type``.
+            No extra query — the scalar happy path is a single round-trip.
+          - **Non-orderable complex types** (``map<…>`` / ``variant``): Spark
+            rejects ``MIN``/``MAX`` at *analysis* time
+            (``DATATYPE_MISMATCH.INVALID_ORDERING_TYPE``), failing the WHOLE
+            aggregate. The call catches that specific
+            :class:`QuerySyntaxError` and re-runs a **reduced** aggregate
+            (count / distinct / nulls / typeof, no MIN/MAX), returning
+            ``min = max = None``. The reduced re-query fires only for these
+            columns — verified live against the real warehouse (issue #227
+            US-007), where ``MIN(map<…>)`` raises but ``COUNT``/``COUNT
+            DISTINCT``/``typeof`` all succeed.
+
+          Scalar columns keep the byte-identical single-query pass-through path;
+          the empty-table case (``data_type == ""``) is not complex, so its
+          MIN/MAX are preserved.
         * ``data_type`` — ``MAX(typeof(<col>))`` (Spark's DDL type string; an
           empty table yields ``NULL`` → coerced to ``""``, matching BigQuery's
           "type unknown → empty string" precedent).
@@ -1013,31 +1093,55 @@ class DatabricksAdapter(WarehouseAdapter):
             Real-Spark ``column_stats`` on a **scalar** column is **certified
             live (#226)** — ``tests/warehouse/test_databricks_prune_live.py``
             asserts ``count`` / ``distinct`` / ``nulls`` / ``data_type`` against
-            the real rig. Complex-type ``MIN`` / ``MAX`` semantics were NOT
-            exercised by the live pass (scalar-only) and remain shape-only. The
-            complex-type MIN/MAX divergence noted above (BigQuery skips MIN/MAX
-            for ARRAY / STRUCT / MAP / JSON / BINARY / GEOGRAPHY; this adapter
-            emits them unconditionally) was not exercised by the live pass and
-            remains a follow-up — the scalar-column path is the supported,
-            live-certified surface for v0.x.
+            the real rig. Complex-type ``MIN`` / ``MAX`` handling (R1/DEC-001 of
+            issue #227: nulled out for array / struct / map / binary / variant,
+            matching the BigQuery :class:`ColumnStats` DEC-016 contract) is
+            pinned by offline unit tests; the non-orderable (``map`` / ``variant``)
+            reduced-aggregate retry path was verified live against the real
+            warehouse (issue #227 US-007). The scalar-column path remains the
+            primary live-certified surface for v0.x.
         """
         validate_identifier("column", column)
 
         quoted_col = self._quote_identifier(column)
-        sql = (
-            f"SELECT COUNT({quoted_col}) AS non_null_count, "
-            f"COUNT(DISTINCT {quoted_col}) AS distinct_count, "
-            f"COUNT_IF({quoted_col} IS NULL) AS null_count, "
-            # MIN/MAX are emitted unconditionally; complex-typed columns
-            # (ARRAY/STRUCT/MAP/JSON/BINARY/GEOGRAPHY) diverge from BigQuery's
-            # skip-and-None contract — a follow-up (scalar-only live pass; see docstring).
-            f"MIN({quoted_col}) AS min_value, "
-            f"MAX({quoted_col}) AS max_value, "
-            f"MAX(typeof({quoted_col})) AS data_type "
-            f"FROM {self._quote(table)}"
-        )
+        quoted_table = self._quote(table)
 
-        rows = self._execute_to_dicts(sql, table=table)
+        def _stats_sql(*, include_min_max: bool) -> str:
+            # ``data_type`` is derived inline via ``typeof`` in the same round-trip,
+            # so the type isn't known before the query is built. MIN/MAX ride the
+            # aggregate for the happy path; the reduced form (no MIN/MAX) is the
+            # fallback for non-orderable complex types (R1, issue #227 US-007).
+            min_max = (
+                f"MIN({quoted_col}) AS min_value, MAX({quoted_col}) AS max_value, "
+                if include_min_max
+                else ""
+            )
+            return (
+                f"SELECT COUNT({quoted_col}) AS non_null_count, "
+                f"COUNT(DISTINCT {quoted_col}) AS distinct_count, "
+                f"COUNT_IF({quoted_col} IS NULL) AS null_count, "
+                f"{min_max}"
+                f"MAX(typeof({quoted_col})) AS data_type "
+                f"FROM {quoted_table}"
+            )
+
+        try:
+            rows = self._execute_to_dicts(_stats_sql(include_min_max=True), table=table)
+            min_max_computed = True
+        except QuerySyntaxError as exc:
+            # Non-orderable complex types (map / variant) reject MIN/MAX at Spark
+            # ANALYSIS time (DATATYPE_MISMATCH.INVALID_ORDERING_TYPE), failing the
+            # WHOLE aggregate — the post-process below never runs. Re-run the
+            # reduced aggregate (no MIN/MAX) and treat min/max as None per the
+            # ColumnStats DEC-016 contract. Only THIS specific error triggers the
+            # retry; every other QuerySyntaxError propagates unchanged. Key on the
+            # raw warehouse message (``exc.detail``), not ``str(exc)`` — the latter
+            # wraps the detail in operator-facing prose that can drift.
+            if _SPARK_NON_ORDERABLE_MARKER not in exc.detail:
+                raise
+            rows = self._execute_to_dicts(_stats_sql(include_min_max=False), table=table)
+            min_max_computed = False
+
         if not rows:  # pragma: no cover - aggregate always returns one row
             raise RuntimeError(f"column_stats aggregate returned no rows for table {table}")
 
@@ -1045,13 +1149,29 @@ class DatabricksAdapter(WarehouseAdapter):
         # case-insensitively so a fake / dict-cursor that preserved case works too.
         lowered = {str(k).lower(): v for k, v in rows[0].items()}
         raw_type = lowered.get("data_type")
+        data_type = str(raw_type) if raw_type is not None else ""
+
+        # R1/DEC-001 (issue #227): honour the ColumnStats DEC-016 contract —
+        # MIN/MAX is not meaningful on complex Spark types (array/struct/map/
+        # binary/variant), so null them out. Orderable complex types
+        # (array/struct/binary) RETURN a value from the full aggregate → nulled
+        # here by the post-process; non-orderable ones (map/variant) took the
+        # reduced-query path above (``min_max_computed`` is False) and never
+        # computed a value. The empty-table case (data_type == "") is NOT complex,
+        # so its MIN/MAX are preserved. Scalar columns keep the pass-through path.
+        min_value = lowered.get("min_value")
+        max_value = lowered.get("max_value")
+        if not min_max_computed or _is_complex_spark_type(data_type):
+            min_value = None
+            max_value = None
+
         return ColumnStats(
             count=int(lowered["non_null_count"]),
             distinct=int(lowered["distinct_count"]),
             nulls=int(lowered["null_count"]),
-            min=lowered.get("min_value"),
-            max=lowered.get("max_value"),
-            data_type=str(raw_type) if raw_type is not None else "",
+            min=min_value,
+            max=max_value,
+            data_type=data_type,
         )
 
     # ------------------------------------------------------------------
@@ -1103,9 +1223,11 @@ class DatabricksAdapter(WarehouseAdapter):
             The COUNT(*) failing-rows wrap is **certified live (#226)** (the
             prune / e2e live tests run it against the real rig). The
             ``to_json(struct(*))`` per-row CAPTURE branch (and its JSON-string
-            marshalling assumption) was NOT exercised by the live pass — the
-            engineered always-pass tests return 0 failing rows, so the capture
-            branch never fires — and remains shape-only (fake + sqlglot parse).
+            marshalling assumption) is **certified live (#227 US-004)** — a
+            gated test runs a constant failing SELECT with
+            ``capture_failures > 0`` and decodes the ``to_json`` payload into
+            ``sample_failures`` (it never fired under #226, whose candidates
+            were all always-pass).
         """
         validate_test_sql(sql)
 
@@ -1133,6 +1255,39 @@ class DatabricksAdapter(WarehouseAdapter):
             sample_failures=sample_failures,
             row_schema=None,
         )
+
+    def run_stats_query(self, sql: str) -> tuple[dict[str, object], ...]:
+        """Run an anomaly stats SELECT and return every row as a dict (#227 US-003,
+        DEC-002).
+
+        Overrides the ABC default (which raises
+        :class:`StatsQueryNotSupportedError`) so
+        ``row_count_anomaly_by_period`` actually runs on Databricks instead of
+        routing to ``kept-without-evidence``. Mirrors
+        :meth:`BigQueryAdapter.run_stats_query`'s shape:
+
+        * NO wrap — the stats SQL is the verbatim SELECT, not a failing-rows
+          ``COUNT(*)`` wrap (contrast :meth:`run_test_sql`). The stats query is
+          composed by the prune compiler and returns per-period aggregate rows.
+        * ``sql`` is subject to the same cheap rejects as :meth:`run_test_sql`
+          via :func:`signalforge.warehouse._sql_safety.validate_test_sql`. The
+          compiler already runs the same check at compose time; the
+          adapter-level call is defence-in-depth.
+        * Execution runs on the connection-bound session (via
+          :meth:`_execute_to_dicts`); SDK errors route through
+          :func:`map_databricks_exception`, so the prune engine catches them as
+          any other :class:`WarehouseError`. Unlike BigQuery there is no
+          ``session_id`` string to thread — the Databricks connection embodies
+          the session (a prior :meth:`materialise_sample` would have pinned it).
+          In practice the engine bypasses the sample substitution for
+          ``row_count_anomaly_by_period`` (the source-override helper routes it
+          to the source qualified name), so a materialised temp table is not
+          consulted on this path.
+        """
+        validate_test_sql(sql)
+
+        rows = self._execute_to_dicts(sql)
+        return tuple(rows)
 
     # ------------------------------------------------------------------
     # estimate_query_bytes — DEC-002 / DEC-008 / DEC-009 / DEC-012 of #225.

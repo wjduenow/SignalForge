@@ -27,7 +27,11 @@ from signalforge.warehouse.adapters._databricks_client import (
     _extract_unresolved_column,
     map_databricks_exception,
 )
-from signalforge.warehouse.adapters.databricks import DatabricksAdapter
+from signalforge.warehouse.adapters.databricks import (
+    DatabricksAdapter,
+    _escape_spark_string_literal,
+    _is_complex_spark_type,
+)
 from signalforge.warehouse.errors import (
     ColumnNotFoundError,
     InvalidIdentifierError,
@@ -817,8 +821,9 @@ def test_date_partition_filter_renders_date_literal() -> None:
 
 
 def test_str_partition_filter_value_is_escaped_inside_single_quotes() -> None:
-    """A ``str`` value is escaped (single-quote → backslash-quote) inside the
-    single-quoted literal — defends against breaking out of the literal."""
+    """A ``str`` value is escaped Spark-correct (single-quote → doubled quote)
+    inside the single-quoted literal — defends against breaking out of the
+    literal (R3/DEC-005 of issue #227)."""
     conn = _RecordingDatabricksConnection()
     conn.expect_execute(matching=_COUNT_QUERY, returns=[(1000,)])
     conn.expect_execute(matching=_SAMPLE_QUERY, returns=[(1,)], description=[("id",)])
@@ -828,8 +833,55 @@ def test_str_partition_filter_value_is_escaped_inside_single_quotes() -> None:
     adapter.sample_rows(_TABLE, 100, partition_filter=pf)
 
     sql = conn.executed[1]
-    assert "'o\\'hare'" in sql
+    assert "'o''hare'" in sql
     assert "`region` = " in sql
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("a'b", "a''b"),  # single-quote doubled
+        ("a\\b", "a\\\\b"),  # one backslash → two backslashes
+        ("a'b\\c", "a''b\\\\c"),  # both, in one value
+        ("plain", "plain"),  # no escaping needed
+    ],
+)
+def test_escape_spark_string_literal(raw: str, expected: str) -> None:
+    """``_escape_spark_string_literal`` returns the escaped INNER content
+    (no surrounding quotes): doubles ``'`` and ``\\`` (backslash FIRST, so the
+    quote-doubling is not re-escaped) — Spark-correct for the default
+    ``escapedStringLiterals=false`` session mode (R3/DEC-005 of issue #227)."""
+    assert _escape_spark_string_literal(raw) == expected
+
+
+def test_render_partition_filter_str_value_doubles_quote() -> None:
+    """A ``str``-valued ``PartitionFilter`` renders a valid single-quoted literal
+    with the embedded quote doubled, and the column fold-then-quoted per the
+    adapter's ``_quote_identifier`` (R3/DEC-005)."""
+    adapter = _make_adapter(_RecordingDatabricksConnection())
+    pf = PartitionFilter(column="region", op="=", value="us'ca")
+
+    assert adapter._render_partition_filter(pf) == "`region` = 'us''ca'"
+
+
+def test_render_partition_filter_datetime_value_is_byte_identical() -> None:
+    """Regression: a ``datetime``-valued ``PartitionFilter`` renders exactly as
+    today (via ``timestamp_literal_template``) — the R3/DEC-005 str change must
+    not perturb the ``datetime`` branch."""
+    adapter = _make_adapter(_RecordingDatabricksConnection())
+    pf = PartitionFilter(column="created_at", op=">=", value=datetime(2024, 1, 2, 3, 4, 5))
+
+    assert adapter._render_partition_filter(pf) == "`created_at` >= TIMESTAMP '2024-01-02T03:04:05'"
+
+
+def test_render_partition_filter_date_value_is_byte_identical() -> None:
+    """Regression: a ``date``-valued ``PartitionFilter`` renders exactly as today
+    (via ``date_literal_template``) — the R3/DEC-005 str change must not perturb
+    the ``date`` branch."""
+    adapter = _make_adapter(_RecordingDatabricksConnection())
+    pf = PartitionFilter(column="dt", op="=", value=date(2024, 6, 15))
+
+    assert adapter._render_partition_filter(pf) == "`dt` = DATE '2024-06-15'"
 
 
 # ---- project=None (two-part quoting) --------------------------------------
@@ -1401,6 +1453,123 @@ def test_run_test_sql_unmapped_error_passes_through_unchanged() -> None:
 
 
 # ---------------------------------------------------------------------------
+# run_stats_query (#227 US-003, DEC-002) — verbatim anomaly stats SELECT.
+#
+# Overrides the ABC ``StatsQueryNotSupportedError`` degrade so
+# ``row_count_anomaly_by_period`` actually runs on Databricks. Mirrors
+# ``BigQueryAdapter.run_stats_query``: no COUNT wrap (contrast ``run_test_sql``);
+# the verbatim SELECT runs via ``_execute_to_dicts`` and every row is returned.
+# ---------------------------------------------------------------------------
+
+_STATS_SELECT = "SELECT `period`, COUNT(*) AS n FROM `main`.`sales`.`orders` GROUP BY `period`"
+_STATS_MATCH = r"GROUP BY"
+
+
+def test_run_stats_query_returns_rows_verbatim() -> None:
+    """Every stats row is returned verbatim, in order, as a ``tuple[dict, ...]``."""
+    conn = FakeDatabricksConnection()
+    canned = [{"period": "2026-01", "n": 100}, {"period": "2026-02", "n": 90}]
+    conn.expect_execute(matching=_STATS_MATCH, returns=canned)
+    adapter = _make_adapter(conn)
+
+    rows = adapter.run_stats_query(_STATS_SELECT)
+
+    assert rows == ({"period": "2026-01", "n": 100}, {"period": "2026-02", "n": 90})
+    assert isinstance(rows, tuple)
+    conn.assert_all_expectations_met()
+
+
+def test_run_stats_query_no_wrap_executes_verbatim_select() -> None:
+    """The stats SQL runs verbatim — NO ``SELECT COUNT(*) AS failures`` wrap
+    (contrast :meth:`run_test_sql`)."""
+    conn = _RecordingDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=[{"period": "2026-01", "n": 5}])
+    adapter = _make_adapter(conn)
+
+    adapter.run_stats_query(_STATS_SELECT)
+
+    assert conn.executed == [_STATS_SELECT]
+    assert "COUNT(*) AS failures" not in conn.executed[0]
+
+
+def test_run_stats_query_validates_sql_first() -> None:
+    """``validate_test_sql`` rejects a SQL with a ``;`` BEFORE any execute — the
+    fake's expectation is never consumed (no query ran)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=[{"period": "2026-01", "n": 5}])
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError, match="single statement"):
+        adapter.run_stats_query(f"{_STATS_SELECT}; DROP TABLE t")
+
+    # The expectation is UNCONSUMED — nothing executed.
+    with pytest.raises(AssertionError, match="Unconsumed expectations"):
+        conn.assert_all_expectations_met()
+    assert not conn.cursors
+
+
+def test_run_stats_query_does_not_raise_stats_query_not_supported() -> None:
+    """A valid stats SELECT no longer degrades to
+    :class:`StatsQueryNotSupportedError` (#227 US-003 overrides the ABC default)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=[{"period": "2026-01", "n": 1}])
+    adapter = _make_adapter(conn)
+
+    # No StatsQueryNotSupportedError — the override runs the query and returns rows.
+    rows = adapter.run_stats_query(_STATS_SELECT)
+    assert rows == ({"period": "2026-01", "n": 1},)
+
+
+def test_run_stats_query_closes_cursor_on_success() -> None:
+    """The cursor is released after a successful stats query (no handle leak)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=[{"period": "2026-01", "n": 1}])
+    adapter = _make_adapter(conn)
+
+    adapter.run_stats_query(_STATS_SELECT)
+
+    assert conn.cursors and all(c.closed for c in conn.cursors)
+
+
+def test_run_stats_query_closes_cursor_on_failure() -> None:
+    """The cursor is released even when the query raises (the ``finally`` arm)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=RuntimeError("boom"))
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(RuntimeError):
+        adapter.run_stats_query(_STATS_SELECT)
+
+    assert conn.cursors and all(c.closed for c in conn.cursors)
+
+
+def test_run_stats_query_programming_error_maps_to_query_syntax_error() -> None:
+    """A connector error maps to :class:`QuerySyntaxError` via
+    ``map_databricks_exception`` (the ``_execute_to_dicts`` mapped branch)."""
+    dbe = _dbe()
+    err = dbe.ServerOperationError("[PARSE_SYNTAX_ERROR] bad syntax")  # type: ignore[attr-defined]
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=err)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError):
+        adapter.run_stats_query(_STATS_SELECT)
+
+
+def test_run_stats_query_unmapped_error_passes_through_unchanged() -> None:
+    """An exception ``map_databricks_exception`` does not map is re-raised
+    unchanged — the passthrough branch."""
+    sentinel = RuntimeError("transient network blip")
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(matching=_STATS_MATCH, returns=sentinel)
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        adapter.run_stats_query(_STATS_SELECT)
+    assert exc_info.value is sentinel
+
+
+# ---------------------------------------------------------------------------
 # column_stats (#224 US-005, DEC-011) — aggregate-only profiling.
 #
 # Databricks implements column_stats AHEAD of Snowflake (which stubs it); the
@@ -1600,3 +1769,175 @@ def test_column_stats_column_not_found_maps_with_context() -> None:
 
     with pytest.raises(ColumnNotFoundError):
         adapter.column_stats(_TABLE, "amount")
+
+
+# ---------------------------------------------------------------------------
+# column_stats complex-type MIN/MAX skip (R1/DEC-001 of issue #227).
+#
+# Mirrors BigQuery's ColumnStats DEC-016 contract: MIN/MAX is not meaningful on
+# complex Spark types (array/struct/map/binary/variant), so it's nulled out in a
+# pure post-process after the aggregate returns. Scalar + empty-table cases keep
+# their min/max.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "data_type",
+    [
+        "struct<a:int,b:string>",
+        "array<string>",
+        "map<string,int>",
+        "binary",
+    ],
+)
+def test_column_stats_complex_type_nulls_min_max(data_type: str) -> None:
+    """A complex ``data_type`` (array / struct / map / binary) nulls out
+    ``min``/``max`` even though the aggregate returned non-null bounds."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(900, 750, 100, 1, 9999, data_type)],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "payload")
+
+    assert stats.min is None
+    assert stats.max is None
+    # count / distinct / nulls / data_type are untouched by the skip.
+    assert stats.count == 900
+    assert stats.distinct == 750
+    assert stats.nulls == 100
+    assert stats.data_type == data_type
+    conn.assert_all_expectations_met()
+
+
+def test_column_stats_scalar_type_preserves_min_max() -> None:
+    """A scalar ``data_type`` (bigint) passes the fake's returned min/max
+    straight through — byte-identical to the pre-#227 path."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(900, 750, 100, 1, 9999, "bigint")],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "amount")
+
+    assert stats.min == 1
+    assert stats.max == 9999
+    assert stats.data_type == "bigint"
+    conn.assert_all_expectations_met()
+
+
+def test_column_stats_empty_table_preserves_min_max() -> None:
+    """The empty-table case (``data_type == ""``) is NOT complex, so whatever
+    the aggregate returned for min/max is preserved (here ``None``, unchanged)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=_STATS_QUERY,
+        returns=[(0, 0, 0, None, None, None)],
+        description=_STATS_DESCRIPTION,
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "amount")
+
+    assert stats.data_type == ""
+    assert stats.min is None
+    assert stats.max is None
+    conn.assert_all_expectations_met()
+
+
+# Reduced description for the retry aggregate (no min_value / max_value columns).
+_STATS_DESCRIPTION_REDUCED = [
+    ("non_null_count",),
+    ("distinct_count",),
+    ("null_count",),
+    ("data_type",),
+]
+
+
+def test_column_stats_non_orderable_complex_retries_reduced_aggregate() -> None:
+    """Non-orderable complex types (``map`` / ``variant``) reject ``MIN``/``MAX``
+    at Spark ANALYSIS time (``INVALID_ORDERING_TYPE``), failing the whole
+    aggregate. ``column_stats`` catches that specific ``QuerySyntaxError`` and
+    re-runs a REDUCED aggregate (no MIN/MAX), returning ``min = max = None``
+    while still surfacing count / distinct / nulls / data_type (R1 fix, #227).
+
+    Verified live: ``MIN(map<…>)`` raises but ``COUNT``/``COUNT DISTINCT``/
+    ``typeof`` all succeed against the real warehouse.
+    """
+    conn = FakeDatabricksConnection()
+    # Full aggregate (carries ``MIN(``) raises the ordering error.
+    conn.expect_execute(
+        matching=r"MIN\(",
+        returns=QuerySyntaxError(
+            '[DATATYPE_MISMATCH.INVALID_ORDERING_TYPE] Cannot resolve "min(m)" '
+            "due to data type mismatch: The `min` does not support ordering on "
+            'type "MAP<STRING, INT>".'
+        ),
+    )
+    # Reduced aggregate: matches ONLY a query with NO ``MIN(``/``MAX(<col>)`` —
+    # the negative lookahead ensures the test fails loudly if the retry still
+    # emitted the full min/max aggregate (it would no longer match here).
+    conn.expect_execute(
+        matching=r"^(?!.*MIN\()(?!.*MAX\(`payload`).*MAX\(typeof",
+        returns=[(2, 2, 1, "map<string,int>")],
+        description=_STATS_DESCRIPTION_REDUCED,
+    )
+    adapter = _make_adapter(conn)
+
+    stats = adapter.column_stats(_TABLE, "payload")
+
+    assert stats.count == 2
+    assert stats.distinct == 2
+    assert stats.nulls == 1
+    assert stats.min is None
+    assert stats.max is None
+    assert stats.data_type == "map<string,int>"
+    conn.assert_all_expectations_met()
+
+
+def test_column_stats_non_ordering_query_error_propagates() -> None:
+    """A ``QuerySyntaxError`` that is NOT the ordering-mismatch does NOT trigger
+    the reduced-aggregate retry — it propagates unchanged (no silent swallow)."""
+    conn = FakeDatabricksConnection()
+    conn.expect_execute(
+        matching=r"MIN\(",
+        returns=QuerySyntaxError("some other malformed-SQL problem"),
+    )
+    adapter = _make_adapter(conn)
+
+    with pytest.raises(QuerySyntaxError, match="some other malformed-SQL problem"):
+        adapter.column_stats(_TABLE, "amount")
+    conn.assert_all_expectations_met()
+
+
+@pytest.mark.parametrize(
+    ("type_str", "expected"),
+    [
+        ("struct<a:int,b:string>", True),
+        ("array<string>", True),
+        ("map<string,int>", True),
+        ("binary", True),
+        ("variant", True),
+        # Case / whitespace resilience (Spark returns lowercase, but be defensive).
+        ("ARRAY<STRING>", True),
+        ("  struct<a:int>  ", True),
+        # Scalars are not complex.
+        ("int", False),
+        ("bigint", False),
+        ("string", False),
+        ("timestamp", False),
+        ("double", False),
+        # Empty-table sentinel is not complex.
+        ("", False),
+    ],
+)
+def test_is_complex_spark_type(type_str: str, expected: bool) -> None:
+    """The helper classifies Spark DDL type strings: parametric (array/struct/
+    map) + scalar-complex (binary/variant) are complex; scalars + "" are not."""
+    assert _is_complex_spark_type(type_str) is expected
