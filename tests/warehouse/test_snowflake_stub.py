@@ -13,9 +13,10 @@ pin the four issue ACs:
 4. SDK type-ignores are confined to ``_snowflake_client.py`` — pinned by
    ``tests/warehouse/test_snowflake_client_confinement.py``, not here.
 
-``column_stats`` still raises :class:`NotImplementedError` naming the epic
-(#118) — ``sample_rows`` (#122 US-003), ``materialise_sample`` / ``run_test_sql``
-(#122 US-004) are now implemented and exercised in the sampling / materialise
+``column_stats`` is implemented (#258, BigQuery-style batching + catalog
+pre-filter) and exercised in ``tests/warehouse/test_snowflake_adapter.py``;
+``sample_rows`` (#122 US-003), ``materialise_sample`` / ``run_test_sql``
+(#122 US-004) are implemented and exercised in the sampling / materialise
 suites. ``estimate_query_bytes`` is overridden by a real EXPLAIN-based
 implementation (#130 US-003): it runs ``EXPLAIN USING JSON <sql>`` and parses
 ``GlobalStats.bytesAssigned``, returning a real ``int`` on the happy path and
@@ -33,7 +34,7 @@ import pytest
 
 from signalforge.warehouse import EstimateUnavailableError, SnowflakeAdapter
 from signalforge.warehouse.base import WarehouseAdapter
-from signalforge.warehouse.models import SNOWFLAKE_DIALECT, Dialect, TableRef
+from signalforge.warehouse.models import SNOWFLAKE_DIALECT, Dialect
 from signalforge.warehouse.profiles import DbtProfileTarget
 from tests.warehouse._fake_snowflake import FakeSnowflakeConnection
 
@@ -125,22 +126,6 @@ def test_init_stores_key_pair_and_sso_auth_fields() -> None:
     assert adapter._private_key_path == "/keys/rsa_key.p8"
     assert adapter._private_key_passphrase == "topsecret"
     assert adapter._authenticator == "externalbrowser"
-
-
-# ---------------------------------------------------------------------------
-# Stub methods raise NotImplementedError naming the epic (#118)
-# ---------------------------------------------------------------------------
-
-
-def test_column_stats_raises_not_implemented() -> None:
-    """:meth:`column_stats` is part of the v0.2 skeleton surface."""
-    adapter = SnowflakeAdapter()
-    table = TableRef(project=None, dataset="public", name="t")
-
-    with pytest.raises(NotImplementedError) as exc_info:
-        adapter.column_stats(table, "id")
-
-    assert "issue #118" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
