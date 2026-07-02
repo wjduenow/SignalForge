@@ -34,18 +34,39 @@ What fakesnow CANNOT execute (so we DEGRADE those sub-cases to sqlglot-parse):
 * The ``capture_failures`` wrap uses ``ARRAY_AGG(OBJECT_CONSTRUCT(*))``;
   fakesnow's DuckDB has no ``OBJECT_CONSTRUCT(*)`` analogue, so it is parse-only.
 
+``column_stats`` (#258 US-003) is fully EXECUTABLE under fakesnow — both halves
+of the batched flush run end-to-end against DuckDB: the
+``INFORMATION_SCHEMA.COLUMNS`` catalog lookup (``_get_column_types`` — fakesnow
+returns Snowflake-flavoured ``DATA_TYPE`` strings ``NUMBER`` / ``TEXT`` /
+``VARIANT`` / ``TIMESTAMP_NTZ`` the adapter consumes verbatim) AND the aggregate
+(``COUNT`` / ``COUNT(DISTINCT)`` / ``COUNT(*) - COUNT(col)`` null count / ``MIN``
+/ ``MAX``). So every ``column_stats`` sub-case below is an EXECUTION test, none
+degrades to sqlglot-parse-only. The one thing fakesnow can NOT settle is whether
+real Snowflake *rejects* ``MIN``/``MAX`` on an unorderable type at analysis time
+— the adapter's DEC-003 catalog pre-filter SKIPS those aggregates, so the skip
+DECISION is validated here (VARIANT → ``min=max=None``), but the warehouse's
+actual rejection is the gated live cert's job (US-004; the #227 lesson).
+
+``ColumnStats`` needs NO drift detector — it is ``frozen=True``, produced
+in-process, and never read back from disk (mirrors the ingest-layer rule; the
+``extra="forbid"`` strict-mirror + fixture drift pattern is mandatory only for
+JSONL/sidecar models re-read from disk, which ``ColumnStats`` is not).
+
 Each parse-only sub-case carries an inline comment naming the fakesnow gap.
 
 Determinism is engineered by **rule semantics, not value-equality with real
 Snowflake** (``testing-signal.md`` § "Engineered determinism for LLM-driven
 assertions"): a ``not_null`` over a column with one NULL row returns
 ``failures >= 1``; over a column with no NULLs returns ``0`` — and so on for
-``unique`` / ``accepted_values`` / ``relationships``.
+``unique`` / ``accepted_values`` / ``relationships``; a ``column_stats`` over
+engineered rows with a known NULL / distinct / min / max profile returns those
+exact counts and bounds.
 
 Gated behind ``@pytest.mark.snowflake`` (excluded from the default ``addopts``
 deselection); run with ``uv run pytest -m snowflake --no-cov``.
 
-Traces to: plans/super/124-snowflake-test-harness-docs.md US-002.
+Traces to: plans/super/124-snowflake-test-harness-docs.md US-002;
+plans/super/258-snowflake-column-stats.md US-003 (DEC-008).
 """
 
 from __future__ import annotations
@@ -57,7 +78,7 @@ from typing import Any
 import pytest
 
 from signalforge.warehouse import SnowflakeAdapter
-from signalforge.warehouse.models import TableRef
+from signalforge.warehouse.models import ColumnStats, TableRef
 from tests.warehouse._fake_snowflake import FakeSnowflakeConnection
 
 pytestmark = pytest.mark.snowflake
@@ -426,3 +447,157 @@ def test_get_num_rows_emitted_sql_parses_under_snowflake_dialect() -> None:
     adapter._get_num_rows(_TABLE)
 
     _parse_snowflake(conn.executed[0])
+
+
+# ===========================================================================
+# EXECUTE: column_stats over engineered rows (#258 US-003, DEC-008).
+#
+# fakesnow's DuckDB backend executes BOTH halves of the column_stats flush:
+# the ``INFORMATION_SCHEMA.COLUMNS`` catalog lookup (``_get_column_types`` —
+# returning Snowflake-flavoured ``DATA_TYPE`` strings the adapter consumes
+# verbatim) AND the aggregate (``COUNT`` / ``COUNT(DISTINCT)`` /
+# ``COUNT(*) - COUNT(col)`` null count / ``MIN`` / ``MAX``). So the full adapter
+# ``column_stats`` path runs end-to-end and every sub-case below is an EXECUTION
+# test — NONE degrades to sqlglot-parse-only. Rule-semantic assertions on the
+# engineered rows, never HASH()/value-equality with real Snowflake.
+#
+# ``ColumnStats`` needs NO drift detector — frozen, produced in-process, never
+# read back from disk (see the module docstring; mirrors the ingest-layer rule).
+# ===========================================================================
+
+
+def _column_stats_in_block(conn: Any, table: TableRef, column: str) -> ColumnStats:
+    """Drive the real adapter's ``column_stats`` inside a ``with`` block.
+
+    ``column_stats`` requires an active context (the ``None`` batching sentinel
+    is the DEC-025 guard), so it must run under ``with adapter:``. The block's
+    ``__exit__`` closes the fakesnow connection (reaping the session); the outer
+    ``_fakesnow_connection`` ``finally`` double-closes, which fakesnow tolerates.
+    The returned :class:`ColumnStats` is in-memory, so asserting on it after the
+    block is safe.
+    """
+    adapter = SnowflakeAdapter(connection=conn)
+    with adapter:
+        return adapter.column_stats(table, column)
+
+
+def test_column_stats_scalar_column_executes_end_to_end() -> None:
+    """A NUMBER column with a known NULL / distinct / min / max profile flows
+    through the real catalog lookup + aggregate to a populated
+    :class:`ColumnStats`. Exercises ``COUNT`` / ``COUNT(DISTINCT)`` /
+    ``COUNT(*) - COUNT(col)`` null count / ``MIN`` / ``MAX`` executing against
+    DuckDB, plus the DEC-004 ``Decimal`` → ``float`` coercion on the real
+    ``NUMBER`` bounds. Values ``(10.50, 20.50, 20.50, NULL)`` →
+    count=3, distinct=2, nulls=1, min=10.5, max=20.5."""
+    with _fakesnow_connection() as conn:
+        _create_orders(
+            conn,
+            column_sql="AMOUNT NUMBER(10, 2)",
+            values_sql="(10.50), (20.50), (20.50), (NULL)",
+        )
+        stats = _column_stats_in_block(conn, _TABLE, "amount")
+
+    assert isinstance(stats, ColumnStats)
+    assert stats.count == 3  # non-null count
+    assert stats.distinct == 2  # 10.50 and 20.50
+    assert stats.nulls == 1  # COUNT(*) - COUNT(col) = 4 - 3
+    assert stats.min == 10.5
+    assert stats.max == 20.5
+    # DEC-004: NUMBER surfaces as Decimal from the connector; coerced to float.
+    assert isinstance(stats.min, float)
+    assert isinstance(stats.max, float)
+    # fakesnow returns Snowflake's bare ``DATA_TYPE`` name for NUMBER(10,2).
+    assert stats.data_type == "NUMBER"
+
+
+def test_column_stats_catalog_lookup_returns_real_data_type() -> None:
+    """The ``INFORMATION_SCHEMA.COLUMNS`` lookup (``_get_column_types``) executes
+    against fakesnow's real catalog and returns consumable Snowflake ``DATA_TYPE``
+    strings keyed by ``lower(COLUMN_NAME)``. fakesnow populates ``DATA_TYPE`` in
+    the same bare-name form real Snowflake does (``NUMBER`` / ``TEXT``), so this
+    is a full EXECUTION round-trip — NOT a parse-only degrade.
+
+    ``_get_column_types`` runs a plain SELECT and needs no ``with`` block."""
+    with _fakesnow_connection() as conn:
+        _create_orders(
+            conn,
+            column_sql="AMOUNT NUMBER(10, 2), REGION VARCHAR",
+            values_sql="(10.50, 'east'), (20.50, 'west')",
+        )
+        adapter = SnowflakeAdapter(connection=conn)
+        types = adapter._get_column_types(_TABLE)
+
+    # Keyed by lower(COLUMN_NAME); values are the real fakesnow-executed
+    # Snowflake DATA_TYPE strings (bare names, matching real Snowflake's
+    # INFORMATION_SCHEMA.COLUMNS.DATA_TYPE which carries precision separately).
+    assert types["amount"] == "NUMBER"
+    assert types["region"] == "TEXT"
+
+
+def test_column_stats_string_min_max_executes() -> None:
+    """A VARCHAR column's ``MIN`` / ``MAX`` string bounds execute end-to-end and
+    pass through unchanged (no coercion). Values ``('east', 'west', 'east')`` →
+    count=3, distinct=2, nulls=0, min='east', max='west', data_type='TEXT'."""
+    with _fakesnow_connection() as conn:
+        _create_orders(
+            conn,
+            column_sql="REGION VARCHAR",
+            values_sql="('east'), ('west'), ('east')",
+        )
+        stats = _column_stats_in_block(conn, _TABLE, "region")
+
+    assert stats.count == 3
+    assert stats.distinct == 2
+    assert stats.nulls == 0
+    assert stats.min == "east"
+    assert stats.max == "west"
+    assert stats.data_type == "TEXT"
+
+
+def test_column_stats_complex_type_skips_min_max_executes() -> None:
+    """A VARIANT column is DEC-003 complex, so the adapter OMITS ``MIN`` / ``MAX``
+    from the aggregate (catalog pre-filter) — ``min`` / ``max`` return ``None``
+    while ``count`` / ``distinct`` / ``nulls`` still execute. This validates the
+    SKIP DECISION end-to-end (fakesnow catalog reports ``VARIANT`` → adapter
+    skips), NOT the warehouse's analysis-time rejection of ``MIN(VARIANT)`` —
+    that (the #227 ``INVALID_ORDERING_TYPE`` failure a fake cannot reproduce) is
+    the gated live cert's job (US-004). Values ``(json, json, NULL)`` →
+    count=2, distinct=2, nulls=1, min=max=None."""
+    with _fakesnow_connection() as conn:
+        _create_orders(
+            conn,
+            column_sql="PAYLOAD VARIANT",
+            # PARSE_JSON is the Snowflake way to seed a VARIANT literal; fakesnow
+            # supports it in a VALUES clause.
+            values_sql="(PARSE_JSON('{\"a\": 1}')), (PARSE_JSON('{\"b\": 2}')), (NULL)",
+        )
+        stats = _column_stats_in_block(conn, _TABLE, "payload")
+
+    assert stats.count == 2
+    assert stats.distinct == 2
+    assert stats.nulls == 1
+    # MIN/MAX omitted from the aggregate for the complex type → None.
+    assert stats.min is None
+    assert stats.max is None
+    assert stats.data_type == "VARIANT"
+
+
+def test_column_stats_all_null_column_executes() -> None:
+    """An all-NULL scalar column exercises the ``COUNT(*) - COUNT(col)`` null-count
+    arithmetic and the empty-aggregate ``MIN`` / ``MAX`` → ``None`` path against
+    real DuckDB. Values ``(NULL, NULL)`` → count=0, distinct=0, nulls=2,
+    min=max=None (data_type still resolved from the catalog)."""
+    with _fakesnow_connection() as conn:
+        _create_orders(
+            conn,
+            column_sql="AMOUNT NUMBER(10, 2)",
+            values_sql="(NULL), (NULL)",
+        )
+        stats = _column_stats_in_block(conn, _TABLE, "amount")
+
+    assert stats.count == 0
+    assert stats.distinct == 0
+    assert stats.nulls == 2  # COUNT(*) - COUNT(col) = 2 - 0
+    assert stats.min is None
+    assert stats.max is None
+    assert stats.data_type == "NUMBER"
