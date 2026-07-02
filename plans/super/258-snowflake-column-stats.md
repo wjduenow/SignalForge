@@ -3,7 +3,7 @@
 ## Meta
 
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/258
-- **Phase:** published
+- **Phase:** devolved
 - **PR:** https://github.com/wjduenow/SignalForge/pull/262
 - **Branch:** `feature/258-snowflake-column-stats`
 - **Worktree:** `../worktrees/SignalForge/258-snowflake-column-stats`
@@ -321,3 +321,17 @@ format --check . && uv run pyright && uv run pytest`.
 
 
 
+
+## Beads Manifest (devolved, session 1)
+
+- **Epic:** `bd_1-scaffolding-om0`
+- **Tasks:**
+  - `bd_1-scaffolding-om0.1` — US-001 Cursor-leak fix (ready)
+  - `bd_1-scaffolding-om0.2` — US-002 column_stats full-batch impl + unit tests (dep .1)
+  - `bd_1-scaffolding-om0.3` — US-003 fakesnow offline execution tests (dep .2)
+  - `bd_1-scaffolding-om0.4` — US-004 Gated live certification (dep .2)
+  - `bd_1-scaffolding-om0.5` — US-005 Parity docs — ops/README/CHANGELOG (dep .2)
+  - `bd_1-scaffolding-om0.6` — US-006 Quality Gate (dep .3, .4, .5)
+  - `bd_1-scaffolding-om0.7` — US-007 Patterns & Memory — orchestrator-run (dep .6)
+- **Worktree:** `../worktrees/SignalForge/258-snowflake-column-stats`
+- **PR:** https://github.com/wjduenow/SignalForge/pull/262
