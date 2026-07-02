@@ -3,7 +3,8 @@
 ## Meta
 
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/258
-- **Phase:** detailing
+- **Phase:** published
+- **PR:** https://github.com/wjduenow/SignalForge/pull/262
 - **Branch:** `feature/258-snowflake-column-stats`
 - **Worktree:** `../worktrees/SignalForge/258-snowflake-column-stats`
 - **Base:** `dev`
