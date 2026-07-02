@@ -92,7 +92,7 @@ Full reference: [Claude Code skill](docs/skills.md) — covers the install path 
 
 ## Supported warehouses
 
-SignalForge ships three production warehouse adapters today: **BigQuery** (the original target — exercised end-to-end by `signalforge init-demo` and the quick start below), **Snowflake** (full sampling, materialised-sample CTAS, and `EXPLAIN`-based bytes estimation; one combination — `safety: aggregate-only` / Snowflake `column_stats` — is not yet implemented, every other mode/scope/strategy combination is functional), and **Databricks** (full sampling, both materialised + oneshot strategies, `EXPLAIN COST`-based bytes estimation, and `column_stats` — so `safety: aggregate-only` works too, unlike Snowflake; shipped across #224–#225 and live-certified against Databricks Free Edition in #226). **Postgres** ships as a typed `NotImplementedError` stub; **Redshift** remains on the roadmap.
+SignalForge ships three production warehouse adapters today: **BigQuery** (the original target — exercised end-to-end by `signalforge init-demo` and the quick start below), **Snowflake** (full sampling, materialised-sample CTAS, `EXPLAIN`-based bytes estimation, and `column_stats` — every mode/scope/strategy combination is functional, with `safety: aggregate-only` implemented in #258), and **Databricks** (full sampling, both materialised + oneshot strategies, `EXPLAIN COST`-based bytes estimation, and `column_stats` — so `safety: aggregate-only` works too; shipped across #224–#225 and live-certified against Databricks Free Edition in #226). **Postgres** ships as a typed `NotImplementedError` stub; **Redshift** remains on the roadmap.
 
 The architecture is warehouse-agnostic — adapters plug in behind a thin sampling/profiling interface (`WarehouseAdapter.from_profile`), so new vendors slot in without touching the draft / prune / grade / diff stages. Per-warehouse setup (auth, cost guardrails, profile-field requirements) lives in [Configuration](#configuration).
 
@@ -486,8 +486,9 @@ reference (sampling, session cleanup, `EXPLAIN`-based bytes estimation,
 known limitations) is in
 [docs/warehouse-adapter-ops.md § Snowflake adapter](docs/warehouse-adapter-ops.md).
 
-> **Known limitation:** `safety: aggregate-only` (Snowflake `column_stats`)
-> is not yet implemented. Every other combination is functional.
+> **Full parity (#258):** `safety: aggregate-only` is supported on Snowflake —
+> `column_stats` is implemented, so every safety mode / scope / strategy
+> combination is functional.
 
 ### Databricks
 
@@ -509,8 +510,9 @@ schema: my_schema
 
 Install the adapter dependency with the `[databricks]` extra
 (`pip install "signalforge-dbt[databricks]"`); the base install never pulls
-`databricks-sql-connector` in. Unlike Snowflake, **`column_stats` is
-available**, so `safety: aggregate-only` is functional. Both
+`databricks-sql-connector` in. **`column_stats` is available**, so
+`safety: aggregate-only` is functional (Snowflake reached the same parity in
+#258). Both
 `prune.sample_strategy` values work — `materialised` (a `CREATE OR REPLACE
 TABLE` in the source catalog — Databricks rejects a qualified temp name — so it
 needs a writable catalog; the table is dropped at session cleanup) and
