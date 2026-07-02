@@ -27,6 +27,7 @@ per cursor — never a ``MagicMock`` (``testing-signal.md``).
 from __future__ import annotations
 
 import logging
+from datetime import time
 from decimal import Decimal
 from typing import Any
 
@@ -546,6 +547,58 @@ def test_column_stats_decimal_min_max_coerced_to_float() -> None:
     assert isinstance(stats.max, float)
     assert stats.min == 1.50
     assert stats.max == 99.99
+
+
+def test_column_stats_binary_min_max_coerced_to_none() -> None:
+    """BINARY is SQL-orderable (MIN/MAX runs, NOT in the skip set), but the
+    connector returns ``bytearray`` — outside the ``ColumnStats`` union. The
+    coercion net nulls it rather than raising a ValidationError that would fail
+    the whole batch (#258 QG). count/distinct/nulls still populate."""
+    conn = _RecordingSnowflakeConnection()
+    conn.expect_execute(
+        matching=_COLUMNS_QUERY, returns=[("BLOB", "BINARY")], description=_CATALOG_DESCRIPTION
+    )
+    conn.expect_execute(
+        matching=_AGG_QUERY,
+        # min_0 / max_0 come back as bytearray (non-utf8 blob) from the connector.
+        returns=[(4, 4, 3, 1, bytearray(b"\x00\x01"), bytearray(b"\xff\xfe"))],
+        description=_scalar_agg_description(1),
+    )
+
+    with _make_adapter(conn) as adapter:
+        stats = adapter.column_stats(_TABLE, "blob")
+
+    # MIN/MAX ARE emitted for BINARY (not a skip-set type) ...
+    assert 'MIN("BLOB") AS min_0' in conn.executed[1]
+    # ... but the bytearray result is nulled by _coerce_min_max.
+    assert stats.min is None
+    assert stats.max is None
+    assert stats.count == 4
+    assert stats.distinct == 3
+    assert stats.nulls == 1
+    assert stats.data_type == "BINARY"
+
+
+def test_column_stats_time_min_max_coerced_to_none() -> None:
+    """TIME is SQL-orderable but the connector returns ``datetime.time``, which
+    is not in the ``ColumnStats`` union — the coercion net nulls it (#258 QG)."""
+    conn = FakeSnowflakeConnection()
+    conn.expect_execute(
+        matching=_COLUMNS_QUERY, returns=[("T", "TIME")], description=_CATALOG_DESCRIPTION
+    )
+    conn.expect_execute(
+        matching=_AGG_QUERY,
+        returns=[(6, 6, 5, 1, time(8, 30), time(17, 45))],
+        description=_scalar_agg_description(1),
+    )
+
+    with _make_adapter(conn) as adapter:
+        stats = adapter.column_stats(_TABLE, "t")
+
+    assert stats.min is None
+    assert stats.max is None
+    assert stats.count == 6
+    assert stats.data_type == "TIME"
 
 
 # ---------------------------------------------------------------------------

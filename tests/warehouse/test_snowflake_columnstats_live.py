@@ -224,19 +224,25 @@ def test_column_stats_live_scalar_populated_and_complex_skipped() -> None:
             cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
             cursor.execute(
                 f"CREATE TABLE {quoted} "
-                f"(id NUMBER, name VARCHAR, tags ARRAY, meta OBJECT, payload VARIANT)"
+                f"(id NUMBER, name VARCHAR, tags ARRAY, meta OBJECT, payload VARIANT, "
+                f"blob BINARY, t TIME)"
             )
             # Complex constructors are not constant expressions, so INSERT …
             # VALUES is rejected — use INSERT … SELECT … UNION ALL SELECT ….
-            # Row 1 populates every column; row 2 leaves the complex columns
-            # NULL (typed casts keep the UNION branch types unified) so the
-            # complex columns get count=1, nulls=1.
+            # Row 1 populates every column; row 2 leaves the ARRAY/OBJECT/VARIANT
+            # columns NULL (typed casts keep the UNION branch types unified) so
+            # they get count=1, nulls=1. ``blob`` (BINARY) and ``t`` (TIME) are
+            # populated on BOTH rows so their MIN/MAX return real ``bytearray`` /
+            # ``datetime.time`` values — exercising the ``_coerce_min_max`` net
+            # that nulls out-of-union return types (#258 QG).
             cursor.execute(
-                f"INSERT INTO {quoted} (id, name, tags, meta, payload) "
+                f"INSERT INTO {quoted} (id, name, tags, meta, payload, blob, t) "
                 f"SELECT 1, 'alpha', ARRAY_CONSTRUCT(1, 2, 3), "
-                f"OBJECT_CONSTRUCT('k', 'v1'), TO_VARIANT(100) "
+                f"OBJECT_CONSTRUCT('k', 'v1'), TO_VARIANT(100), "
+                f"TO_BINARY('DEADBEEF', 'HEX'), '08:30:00'::TIME "
                 f"UNION ALL "
-                f"SELECT 2, 'bravo', NULL::ARRAY, NULL::OBJECT, NULL::VARIANT"
+                f"SELECT 2, 'bravo', NULL::ARRAY, NULL::OBJECT, NULL::VARIANT, "
+                f"TO_BINARY('CAFE', 'HEX'), '17:45:00'::TIME"
             )
         finally:
             cursor.close()
@@ -258,6 +264,8 @@ def test_column_stats_live_scalar_populated_and_complex_skipped() -> None:
             tags_stats: ColumnStats = stats_adapter.column_stats(table_ref, "tags")
             meta_stats: ColumnStats = stats_adapter.column_stats(table_ref, "meta")
             payload_stats: ColumnStats = stats_adapter.column_stats(table_ref, "payload")
+            blob_stats: ColumnStats = stats_adapter.column_stats(table_ref, "blob")
+            time_stats: ColumnStats = stats_adapter.column_stats(table_ref, "t")
 
         # --- Scalar columns: fully populated, min/max present. ----------------
         for label, stats in (("id", id_stats), ("name", name_stats)):
@@ -318,6 +326,35 @@ def test_column_stats_live_scalar_populated_and_complex_skipped() -> None:
                 f"complex column {label!r}: data_type should be a non-empty "
                 f"warehouse type string (e.g. ARRAY/OBJECT/VARIANT); got "
                 f"{stats.data_type!r} ({stats!r})"
+            )
+
+        # --- Out-of-union return types: BINARY / TIME (#258 QG). --------------
+        # BINARY and TIME are SQL-orderable, so they are NOT in the skip-set and
+        # MIN/MAX IS emitted for them — but the connector returns ``bytearray`` /
+        # ``datetime.time``, which are outside ``ColumnStats.min``/``max``'s union.
+        # ``_coerce_min_max`` nulls them; without that net the ``ColumnStats(...)``
+        # construction would raise a Pydantic ValidationError and fail the whole
+        # batch (a non-WarehouseError panic-tier crash). Both rows are populated,
+        # so count/distinct are 2 and nulls is 0.
+        for label, stats in (("blob", blob_stats), ("t", time_stats)):
+            assert stats.min is None, (
+                f"orderable-but-out-of-union column {label!r}: min must be nulled "
+                f"by _coerce_min_max; got {stats.min!r} ({stats!r})"
+            )
+            assert stats.max is None, (
+                f"orderable-but-out-of-union column {label!r}: max must be nulled "
+                f"by _coerce_min_max; got {stats.max!r} ({stats!r})"
+            )
+            assert stats.count == 2, (
+                f"column {label!r}: both rows populated, so count should be 2; "
+                f"got {stats.count} ({stats!r})"
+            )
+            assert stats.nulls == 0, (
+                f"column {label!r}: no NULLs, so nulls should be 0; got {stats.nulls} ({stats!r})"
+            )
+            assert stats.data_type, (
+                f"column {label!r}: data_type should be a non-empty warehouse "
+                f"type string (BINARY/TIME); got {stats.data_type!r} ({stats!r})"
             )
     finally:
         # --- Teardown: drop the engineered table (idempotent). ----------------

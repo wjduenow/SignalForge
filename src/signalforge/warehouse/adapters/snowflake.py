@@ -124,13 +124,18 @@ flush. Module-level so tests can patch it down to (e.g.) 5 columns."""
 _COMPLEX_SNOWFLAKE_TYPES: frozenset[str] = frozenset(
     {"ARRAY", "OBJECT", "VARIANT", "GEOGRAPHY", "GEOMETRY"}
 )
-"""DEC-003 complex Snowflake types where ``MIN`` / ``MAX`` is not meaningful and
-is omitted from the aggregate. ``BINARY`` is deliberately NOT in the set — it is
-orderable in Snowflake, so its ``MIN`` / ``MAX`` runs. Conservative superset
-(DEC-003): an OVER-skipped orderable column merely returns ``min=max=None``
-(harmless), whereas an UNDER-skipped unorderable column would raise and fail the
-whole batch. The gated live complex-type cert validates the set is complete
-(the #227 lesson: only a live run settles which types the warehouse rejects)."""
+"""DEC-003 complex Snowflake types where ``MIN`` / ``MAX`` RAISES at SQL analysis
+and is omitted from the aggregate. Conservative superset (DEC-003): an OVER-skipped
+orderable column merely returns ``min=max=None`` (harmless), whereas an UNDER-skipped
+unorderable column would raise and fail the whole batch. The gated live complex-type
+cert validates the set is complete (the #227 lesson: only a live run settles which
+types the warehouse rejects).
+
+This set is the *SQL-analysis-raise* tier. A distinct hazard — types that are
+SQL-orderable (so ``MIN`` / ``MAX`` runs) but return a Python value outside the
+``ColumnStats.min`` / ``max`` union (``BINARY`` → ``bytearray``, ``TIME`` →
+``datetime.time``) — is handled by :func:`_coerce_min_max` nulling the value on
+read-back, NOT by this set. So ``BINARY`` / ``TIME`` are deliberately absent here."""
 
 
 def _is_complex_snowflake_type(type_str: str) -> bool:
@@ -150,17 +155,34 @@ def _is_complex_snowflake_type(type_str: str) -> bool:
 
 
 def _coerce_min_max(value: Any) -> Any:
-    """Coerce a Snowflake ``NUMBER`` min/max ``Decimal`` → ``float`` (DEC-004).
+    """Coerce a min/max value into the ``ColumnStats.min`` / ``max`` union, or ``None``.
 
-    Snowflake's ``NUMBER`` type surfaces through the connector as Python
-    :class:`~decimal.Decimal`, which is NOT in :data:`ColumnStats.min` /
-    :data:`~ColumnStats.max`'s ``int|float|str|bool|datetime|date|None`` union.
-    Float precision is ample for a min/max shown in an LLM prompt. Every other
-    value passes through unchanged.
+    ``ColumnStats.min`` / ``max`` is typed ``int|float|str|bool|datetime|date|None``.
+    A ``MIN`` / ``MAX`` result outside that union would raise a Pydantic
+    ``ValidationError`` at ``ColumnStats(...)`` construction — and because that is
+    NOT a :class:`~signalforge.warehouse.errors.WarehouseError`, it bypasses the
+    conservative-degrade path and fails the WHOLE batch (CLI panic tier). This is
+    the return-type analogue of :data:`_COMPLEX_SNOWFLAKE_TYPES`: the skip-set omits
+    ``MIN`` / ``MAX`` for types that RAISE at SQL analysis; this net nulls the values
+    of SQL-orderable types whose Python return type is unrepresentable.
+
+    Three cases:
+
+    * ``NUMBER`` → :class:`~decimal.Decimal` (DEC-004) → ``float`` (ample precision
+      for an LLM-prompt min/max).
+    * ``BINARY`` → ``bytearray`` and ``TIME`` → :class:`datetime.time` (and any other
+      future out-of-union type) → ``None``. Both types are SQL-orderable (so ``MIN`` /
+      ``MAX`` runs and they are deliberately NOT in :data:`_COMPLEX_SNOWFLAKE_TYPES`),
+      but neither is in the union. Nulling them matches the sibling adapters' posture
+      for their binary type (BigQuery ``BYTES`` / Databricks ``binary`` →
+      ``min=max=None``). Surfaced by the #258 quality gate (two independent reviewers).
+    * everything already in the union → passed through unchanged.
     """
     if isinstance(value, Decimal):
         return float(value)
-    return value
+    if value is None or isinstance(value, (bool, int, float, str, datetime, date)):
+        return value
+    return None
 
 
 def _parse_explain_json_bytes(cell: str | dict[str, Any]) -> int:
@@ -1209,6 +1231,17 @@ class SnowflakeAdapter(WarehouseAdapter):
             select_fragments.extend(
                 [
                     f"COUNT({quoted_col}) AS count_{i}",
+                    # KNOWN LIMITATION (#258 QG): COUNT(DISTINCT) is emitted
+                    # unconditionally (mirrors the BigQuery adapter). Snowflake
+                    # forbids DISTINCT on GEOGRAPHY / GEOMETRY, so profiling a
+                    # model that carries such a column fails the whole aggregate
+                    # (a typed WarehouseError, not the panic-tier crash the
+                    # _coerce_min_max net prevents) — those columns are not
+                    # profilable via `safety: aggregate-only` today. Whether
+                    # DISTINCT on VARIANT / ARRAY / OBJECT also raises is
+                    # unsettled offline; the gated live complex-type cert
+                    # (test_snowflake_columnstats_live.py) is where it is
+                    # confirmed. See docs/warehouse-adapter-ops.md.
                     f"COUNT(DISTINCT {quoted_col}) AS distinct_{i}",
                     # DEC-005 — null count via COUNT(*) - COUNT(col) (standard
                     # SQL, fakesnow-executable, portable; avoids COUNT_IF).

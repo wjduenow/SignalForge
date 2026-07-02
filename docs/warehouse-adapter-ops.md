@@ -736,8 +736,18 @@ with either `prune.sample_strategy: materialised` or `oneshot`:
   each column's declared type, then a full BigQuery-style per-table batched
   aggregate computes `count` / `distinct` / `nulls` / `min` / `max`, with
   `MIN`/`MAX` skipped (→ `None`) for unorderable Snowflake types (`ARRAY` /
-  `OBJECT` / `VARIANT` / `GEOGRAPHY` / `GEOMETRY`). `generate` with
+  `OBJECT` / `VARIANT` / `GEOGRAPHY` / `GEOMETRY`). Types that are SQL-orderable
+  but whose connector return type is outside the `ColumnStats.min`/`max` union
+  (`BINARY` → `bytearray`, `TIME` → `datetime.time`) have their `min`/`max`
+  nulled on read-back rather than raising. `generate` with
   `safety.mode: aggregate-only` now runs on Snowflake.
+  - **Known limitation (#258):** the aggregate emits `COUNT(DISTINCT <col>)` for
+    every column (mirroring the BigQuery adapter). Snowflake forbids `DISTINCT`
+    on `GEOGRAPHY` / `GEOMETRY`, so a model carrying such a column cannot be
+    profiled via `aggregate-only` — the aggregate fails with a typed
+    `WarehouseError`. Use `safety: schema-only` for models with geospatial
+    columns. (Whether `DISTINCT` on `VARIANT` / `ARRAY` / `OBJECT` also raises is
+    confirmed by the gated live complex-type cert.)
 
 **Fixed by #140:** `prune.scope: sample` + `prune.sample_strategy: oneshot` on a
 non-BigQuery adapter no longer raises at the engine seam. The sample row-count is
