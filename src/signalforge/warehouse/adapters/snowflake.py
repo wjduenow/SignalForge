@@ -552,6 +552,12 @@ class SnowflakeAdapter(WarehouseAdapter):
             if mapped is exc:
                 raise
             raise mapped from exc
+        finally:
+            # Release the server-side cursor handle on both the success and
+            # failure paths so repeated queries on the long-lived connection
+            # don't leak cursors (#258 US-001, mirroring _execute_scalar +
+            # the Databricks PR #257 shape).
+            cursor.close()
 
     def _execute_to_dicts(self, sql: str, *, table: TableRef) -> list[dict[str, Any]]:
         """Run ``sql`` and shape tuple ``fetchall()`` rows into dicts (DEC-010).
@@ -564,14 +570,19 @@ class SnowflakeAdapter(WarehouseAdapter):
 
         cursor = self._get_connection().cursor()
         try:
-            cursor.execute(sql)
-            rows = list(cursor.fetchall())
-        except Exception as exc:
-            mapped = map_snowflake_exception(exc, context={"table": table.qualified_name})
-            if mapped is exc:
-                raise
-            raise mapped from exc
-        return self._rows_to_dicts(cursor, rows)
+            try:
+                cursor.execute(sql)
+                rows = list(cursor.fetchall())
+            except Exception as exc:
+                mapped = map_snowflake_exception(exc, context={"table": table.qualified_name})
+                if mapped is exc:
+                    raise
+                raise mapped from exc
+            # _rows_to_dicts reads cursor.description, so shape the rows BEFORE
+            # the finally closes the cursor (#258 US-001).
+            return self._rows_to_dicts(cursor, rows)
+        finally:
+            cursor.close()
 
     @staticmethod
     def _rows_to_dicts(cursor: _SnowflakeCursorProtocol, rows: list[Any]) -> list[dict[str, Any]]:
@@ -855,14 +866,20 @@ class SnowflakeAdapter(WarehouseAdapter):
 
         cursor = self._get_connection().cursor()
         try:
-            cursor.execute(wrapped)
-            rows = list(cursor.fetchall())
-            description = cursor.description
-        except Exception as exc:
-            mapped = map_snowflake_exception(exc, context={})
-            if mapped is exc:
-                raise
-            raise mapped from exc
+            try:
+                cursor.execute(wrapped)
+                rows = list(cursor.fetchall())
+                description = cursor.description
+            except Exception as exc:
+                mapped = map_snowflake_exception(exc, context={})
+                if mapped is exc:
+                    raise
+                raise mapped from exc
+        finally:
+            # Release the server-side cursor handle on both paths (#258 US-001).
+            # ``rows`` / ``description`` are captured inside the inner try, so
+            # the post-processing below reads only locals — safe after close.
+            cursor.close()
 
         if not rows:  # pragma: no cover - aggregate always returns one row
             raise RuntimeError("run_test_sql wrapper returned no rows")
