@@ -298,6 +298,26 @@ def test_tableref_accepts_hyphenated_gcp_project() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("project", ["main", "workspace", "db", "my_fake_db", "my-co-prod-12345"])
+def test_tableref_accepts_short_catalog_and_project(project: str) -> None:
+    """DEC-005 of #224: ``project`` is dialect-neutral and accepts a short
+    Unity Catalog catalog (``main`` — 4 chars, below the GCP project floor),
+    a short Snowflake database, an underscored identifier, OR a hyphenated
+    GCP project id. Closes the TableRef.project length gotcha."""
+    ref = TableRef(project=project, dataset="d", name="t")
+    assert ref.project == project
+
+
+@pytest.mark.unit
+@pytest.mark.error
+def test_tableref_still_rejects_injection_project() -> None:
+    """The relaxed project gate still rejects SQL-injection-shaped values —
+    the value stays identifier-shape-gated (no ``;`` / quotes / whitespace)."""
+    with pytest.raises(InvalidIdentifierError):
+        TableRef(project="a;b", dataset="d", name="t")
+
+
+@pytest.mark.unit
 def test_tableref_accepts_none_project() -> None:
     """``project=None`` is allowed (DEC-027): defer to BQ client default."""
     ref = TableRef(project=None, dataset="d", name="t")

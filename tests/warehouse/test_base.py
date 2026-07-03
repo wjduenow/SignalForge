@@ -106,16 +106,17 @@ def test_from_profile_raises_for_unknown_type() -> None:
 
     DbtProfileTarget.type is typed ``str`` (no Literal narrowing) precisely
     so this dispatch path can reject unsupported warehouses with a typed
-    error rather than a Pydantic ValidationError. ``"databricks"`` is used as
+    error rather than a Pydantic ValidationError. ``"redshift"`` is used as
     the unsupported example because ``"bigquery"`` / ``"postgres"`` (issue #53)
-    / ``"snowflake"`` (issue #119) all now dispatch to a concrete adapter.
+    / ``"snowflake"`` (issue #119) / ``"databricks"`` (issue #221) all now
+    dispatch to a concrete adapter.
     """
-    profile = DbtProfileTarget.model_validate({"type": "databricks"})
+    profile = DbtProfileTarget.model_validate({"type": "redshift"})
 
     with pytest.raises(UnsupportedProfileTypeError) as exc_info:
         WarehouseAdapter.from_profile(profile)
 
-    assert exc_info.value.profile_type == "databricks"
+    assert exc_info.value.profile_type == "redshift"
 
 
 def test_from_profile_uses_default_max_bytes_when_unset() -> None:

@@ -1,0 +1,1 @@
+WITH sample AS (SELECT * EXCEPT (_sf_sample_hash) FROM (SELECT t.*, (xxhash64(to_json(struct(*))) & 9223372036854775807) AS _sf_sample_hash FROM `fake_project`.`dataset`.`orders` AS t) WHERE MOD(_sf_sample_hash, 10) < 1 LIMIT 100000) SELECT `status` FROM sample WHERE `status` IS NOT NULL AND `status` NOT IN ('placed', 'shipped', 'cancelled')

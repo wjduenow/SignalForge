@@ -1,0 +1,21 @@
+# Committed alongside the fixture so the maintainer regen note (README.md) can
+# invoke `dbt parse` against the live Unity Catalog samples.nyctaxi dataset.
+#
+# The connection fields below are placeholders. `samples` is a read-only shared
+# catalog present in every Databricks workspace, so the maintainer fills in
+# their own `host` / `http_path` / `token` before regenerating the manifest.
+# The Databricks live e2e overwrites this file in `tmp_path` from environment
+# variables (host / http_path / token) before invoking `signalforge generate`;
+# the committed values are regen-only. Do NOT run `signalforge generate`
+# directly against this directory without rewriting the profile first.
+nyctaxi:
+  target: dev
+  outputs:
+    dev:
+      type: databricks
+      host: REPLACE_WITH_HOST
+      http_path: REPLACE_WITH_HTTP_PATH
+      token: REPLACE_WITH_TOKEN
+      catalog: samples
+      schema: nyctaxi
+      threads: 1

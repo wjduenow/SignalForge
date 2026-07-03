@@ -94,13 +94,17 @@ class Dialect:
 
     * ``sample_hash_in_projection`` — when ``False`` (BigQuery default) the
       hash expression is placed inline in ``WHERE``/``ORDER BY``; when ``True``
-      (Snowflake) the hash is computed once in an inner ``SELECT`` projection
-      and referenced by alias in the outer ``WHERE``/``ORDER BY``. Snowflake's
-      ``HASH(*)`` is rejected as a predicate (``002079: Use of * as a function
-      argument``) and is legal **only** in the SELECT projection.
+      (Snowflake AND Databricks) the hash is computed once in an inner
+      ``SELECT`` projection and referenced by alias in the outer
+      ``WHERE``/``ORDER BY``. Snowflake's ``HASH(*)`` is rejected as a predicate
+      (``002079: Use of * as a function argument``); Databricks' ``struct(*)``
+      is rejected inside a Sort node (``[INVALID_USAGE_OF_STAR_OR_REGEX]``, issue
+      #226) — both are legal **only** in the SELECT projection.
     * ``sample_hash_alias`` — the column alias the projected hash binds to in
-      the projection-subquery shape (emitted unquoted; Snowflake folds it
-      consistently in both the projection and the ``EXCLUDE`` clause).
+      the projection-subquery shape (emitted unquoted).
+    * ``sample_star_except_keyword`` — the keyword that strips the helper hash
+      column in the projection-subquery shape: Snowflake ``EXCLUDE`` (default)
+      vs Databricks/Spark ``EXCEPT`` (issue #226).
 
     Five further fields (issue #171, DEC-011) describe **date arithmetic** and
     **percentile** SQL forms for the v0.3 row-count-anomaly variant. Reserved
@@ -158,6 +162,11 @@ class Dialect:
     sample_cte_alias: str = "sample"
     sample_hash_in_projection: bool = False
     sample_hash_alias: str = "_sf_sample_hash"
+    # Keyword that strips the helper hash column in the projection-subquery
+    # sample shape: Snowflake ``SELECT * EXCLUDE (col)`` vs Databricks/Spark
+    # ``SELECT * EXCEPT (col)`` (issue #226 — only consulted when
+    # ``sample_hash_in_projection`` is True).
+    sample_star_except_keyword: str = "EXCLUDE"
     # Issue #171 DEC-011 — date arithmetic + percentile SQL forms for the
     # row-count-anomaly variant. Reserved at the dialect surface in US-002;
     # the compiler arm that reads them lands in US-008.
@@ -305,6 +314,98 @@ rather than reaching into adapter modules.
 """
 
 
+DATABRICKS_DIALECT = Dialect(
+    name="databricks",
+    supports_tablesample=True,
+    supports_qualify=True,
+    quote_char="`",
+    identifier_case="lower",
+    # Sign-bit MASK, not ABS: xxhash64 returns a SIGNED 64-bit long, and Spark's
+    # ABS(Long.MIN_VALUE) stays negative in non-ANSI mode (no positive equivalent
+    # fits a signed long), so MOD(ABS(...), bucket) would admit a stray negative
+    # residue class and skew the deterministic sample. `& 9223372036854775807`
+    # (Long.MAX_VALUE) clears the sign bit — always non-negative, no overflow,
+    # uniform — and the renderer's MOD(<expr>, bucket) wrapper stays correct.
+    sample_row_hash_expr="(xxhash64(to_json(struct(*))) & 9223372036854775807)",
+    timestamp_literal_template="TIMESTAMP '{value}'",
+    date_literal_template="DATE '{value}'",
+    # Spark/Databricks has no distinct DATETIME type — TIMESTAMP is the
+    # wall-clock type — so the DATETIME literal reuses the TIMESTAMP form.
+    datetime_literal_template="TIMESTAMP '{value}'",
+    quote_qualified_per_component=True,
+    # Issue #226 (corrects #224 DEC-002): the whole-row hash is ``struct(*)``,
+    # and Spark REJECTS ``*`` inside a Sort/``ORDER BY`` node
+    # (``[INVALID_USAGE_OF_STAR_OR_REGEX] Invalid usage of '*' in Sort``) — unlike
+    # BigQuery, whose hash uses the table alias ``t`` (no star). Spark has no
+    # inline-alias trick for the whole row, so the hash MUST be computed once in
+    # a projection alias and referenced from ``WHERE``/``ORDER BY`` — the
+    # projection-subquery shape (proven live; the original inline shape errored).
+    sample_hash_in_projection=True,
+    # Databricks strips the helper column with ``SELECT * EXCEPT (col)`` (Spark),
+    # NOT Snowflake's ``EXCLUDE``.
+    sample_star_except_keyword="EXCEPT",
+    # Issue #171 DEC-011 — Databricks overrides for the row-count-anomaly variant.
+    date_trunc_expr_template="DATE_TRUNC('{unit}', {date})",
+    interval_expr_template="INTERVAL {n} {unit}",
+    extract_dow_expr_template="DAYOFWEEK({date})",
+    dow_sunday_index=1,
+    percentile_cont_expr_template="PERCENTILE_CONT({p}) WITHIN GROUP (ORDER BY {expr})",
+)
+"""Databricks/Spark-SQL :class:`Dialect` for the v0.x adapter (issue #221, epic #219).
+
+Decided at the skeleton stage; the values the prune compiler keys on are
+**certified offline by the #223 ``sqlglot`` ``databricks``-dialect parse-guard**
+(``tests/prune/test_compiler_databricks.py`` — ungated, runs in the default
+suite) and will be certified **live by #226**. At the skeleton stage the prune
+compiler is never invoked for a Databricks profile (every op raises
+``NotImplementedError`` / inherits the ABC degrade), so these are
+grounded-and-parse-validated but not yet executed against real Spark.
+
+* ``quote_char='`'`` — Databricks quotes identifiers with backticks (Spark SQL),
+  unlike Snowflake/Postgres double-quote.
+* ``identifier_case='lower'`` — Unity Catalog folds unquoted metadata
+  identifiers to **lowercase** (the *opposite* of Snowflake's ``'upper'``, like
+  Postgres). ⚠️ Load-bearing for #223 identifier matching; verify against a real
+  ``CREATE TABLE`` round-trip before the compiler locks on it.
+* ``supports_qualify=True`` — Databricks SQL supports ``QUALIFY`` (Spark 3.5+),
+  but ``unique`` stays on the portable ``GROUP BY … HAVING`` form per #121 (a
+  ``QUALIFY`` rewrite is a separate semantics decision, not a dialect flag).
+* ``sample_row_hash_expr='(xxhash64(to_json(struct(*))) & 9223372036854775807)'``
+  — the **64-bit** whole-row hash, sign-bit masked. Spark's bare ``hash(*)`` is
+  Murmur3-**32** (collision-prone at scale), so the 64-bit ``xxhash64`` over the
+  JSON-serialised row is chosen for sampling stability. The mask (``& Long.MAX``)
+  replaces ``ABS``: ``xxhash64`` is signed and Spark's ``ABS(Long.MIN_VALUE)``
+  stays negative in non-ANSI mode, which would skew ``MOD(<expr>, bucket) < 1``;
+  clearing the sign bit is non-negative + overflow-free + uniform. Same "``HASH``
+  is engine/release-stable, not cross-time" caveat Snowflake documented applies.
+* ``timestamp_literal_template="TIMESTAMP '{value}'"`` /
+  ``date_literal_template="DATE '{value}'"`` — Spark typed-literal form. Spark
+  has no separate ``DATETIME`` type, so ``datetime_literal_template`` reuses the
+  ``TIMESTAMP`` form.
+* ``quote_qualified_per_component=True`` — Unity Catalog three-part names are
+  quoted per component (`` `catalog`.`schema`.`table` ``), not as one
+  dotted literal.
+* ``sample_hash_in_projection=True`` (issue #226, correcting #224's inline
+  default) — the whole-row hash is ``struct(*)``, and Spark REJECTS ``*`` inside
+  a Sort/``ORDER BY`` node (``[INVALID_USAGE_OF_STAR_OR_REGEX] Invalid usage of
+  '*' in Sort``; proven live). BigQuery avoids this because its hash uses the
+  table alias ``t`` (no star); Spark has no inline-alias trick for the whole
+  row, so the hash MUST be computed once in an inner projection alias and
+  referenced from ``WHERE``/``ORDER BY`` (the Snowflake #139 shape).
+* ``sample_star_except_keyword="EXCEPT"`` — Databricks strips the helper hash
+  column with ``SELECT * EXCEPT (col)`` (Spark), not Snowflake's ``EXCLUDE``.
+* date-arithmetic / percentile fields (issue #171): Spark's ``date_trunc`` takes
+  ``(unit, date)`` with a quoted unit (like Snowflake); ``DAYOFWEEK(date)``
+  returns ``1`` for Sunday (like BigQuery, hence ``dow_sunday_index=1``);
+  Databricks supports the standard-SQL ``PERCENTILE_CONT(p) WITHIN GROUP``
+  ordered-set aggregate.
+
+Lives alongside :data:`BIGQUERY_DIALECT` / :data:`POSTGRES_DIALECT` /
+:data:`SNOWFLAKE_DIALECT` per DEC-003 so every dialect-aware consumer imports
+each flavour from one place rather than reaching into adapter modules.
+"""
+
+
 # ---------------------------------------------------------------------------
 # TableRef
 # ---------------------------------------------------------------------------
@@ -325,16 +426,19 @@ class TableRef:
 
     def __post_init__(self) -> None:
         # Validate non-None fields (project is allowed to be None — DEC-027).
-        # ``project`` follows GCP's hyphen-permissive grammar; ``dataset``
-        # and ``name`` use the strict identifier regex (BigQuery rejects
-        # hyphens in unquoted dataset / table names anyway).
+        # ``project`` is dialect-neutral (a BigQuery project ID, a Snowflake
+        # database, or a Unity Catalog catalog), so it accepts EITHER a strict
+        # SQL identifier (admits short catalogs like ``main`` — DEC-005 of #224)
+        # OR GCP's hyphen-permissive project grammar; ``dataset`` and ``name``
+        # use the strict identifier regex (warehouses reject hyphens in
+        # unquoted dataset / table names anyway).
         from signalforge.warehouse._sql_safety import (
+            validate_catalog_or_project,
             validate_identifier,
-            validate_project_id,
         )
 
         if self.project is not None:
-            validate_project_id("project", self.project)
+            validate_catalog_or_project("project", self.project)
         validate_identifier("dataset", self.dataset)
         validate_identifier("name", self.name)
 

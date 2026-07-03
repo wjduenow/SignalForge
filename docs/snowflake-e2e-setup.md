@@ -144,7 +144,10 @@ skip-with-reason rather than a confusing failure):
 | `SF_RUN_SNOWFLAKE=1`   | every live test   | Opt-in to the Snowflake-backed branch (the Snowflake analogue of `SF_RUN_BQ=1`). |
 | `SNOWFLAKE_ACCOUNT`    | every live test   | Your account identifier (e.g. `myorg-account1` or `xy12345.us-east-1`). |
 | `SNOWFLAKE_USER`       | every live test   | The login user.                                                         |
-| `SNOWFLAKE_PASSWORD`   | every live test   | The user's password (password auth is the v0.2 default).                |
+| `SNOWFLAKE_PASSWORD`   | auth (option A)   | Password auth. Set **either** this **or** `SNOWFLAKE_PRIVATE_KEY_PATH` (key-pair). |
+| `SNOWFLAKE_PRIVATE_KEY_PATH` | auth (option B) | Path to a PEM private-key file — **key-pair (JWT) auth**. The non-interactive path that works with **MFA-enforced accounts** (a bare password login is rejected there). Takes precedence over `SNOWFLAKE_PASSWORD` when both are set. |
+| `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE` | optional | Passphrase for an encrypted private key. Omit for an unencrypted PKCS#8 key (an empty value is treated as no passphrase, so an empty-passphrase-encrypted key must be re-exported unencrypted). |
+| `SNOWFLAKE_AUTHENTICATOR` | optional | Explicit authenticator — `externalbrowser` for SSO. Leave unset for password / key-pair. (`oauth` and `username_password_mfa` are deferred.) |
 | `SNOWFLAKE_WAREHOUSE`  | every live test   | The XS warehouse compute context for prune/sample queries.              |
 | `ANTHROPIC_API_KEY`    | full-stack e2e    | The LLM seam (draft + grade); starts with `sk-ant-...`.                 |
 | `SNOWFLAKE_ROLE`       | optional          | Override the user's default role if it lacks `SNOWFLAKE_SAMPLE_DATA` access. |
@@ -172,9 +175,55 @@ signalforge_test_tpch:
       schema: TPCH_SF1
 ```
 
+### Key-pair (certificate-based) auth
+
+Password auth **fails on any account that enforces MFA** — the
+non-interactive prune/grade path can't satisfy an MFA challenge. The
+supported non-interactive path there is **key-pair (JWT) auth**: swap
+`password:` for `private_key_path:` (plus an optional
+`private_key_passphrase:` for an encrypted key). SignalForge threads
+these onto the connector as `private_key_file` / `private_key_file_pwd`,
+and key-pair takes precedence over `password` when both are present.
+
+```yaml
+signalforge_test_tpch:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      # Only for an encrypted key — omit for an unencrypted PKCS#8 key:
+      private_key_passphrase: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PASSPHRASE') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', 'PUBLIC') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      database: SNOWFLAKE_SAMPLE_DATA
+      schema: TPCH_SF1
+```
+
+Generate the pair and register the public key on the Snowflake user
+once (per Snowflake's
+[key-pair authentication](https://docs.snowflake.com/en/user-guide/key-pair-auth)
+docs):
+
+```bash
+# Unencrypted PKCS#8 private key (no passphrase — simplest for headless CI):
+openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -nocrypt -out rsa_key.p8
+openssl rsa -in rsa_key.p8 -pubout -out rsa_key.pub
+# Then in Snowflake, as a role that can alter the user:
+#   ALTER USER <user> SET RSA_PUBLIC_KEY='<contents of rsa_key.pub, no header/footer>';
+```
+
+Point `SNOWFLAKE_PRIVATE_KEY_PATH` at `rsa_key.p8`. This is the path the
+`column_stats` and full-pipeline live certifications (#258) run under.
+SSO is also available via `authenticator: externalbrowser` for
+interactive use, but only key-pair works unattended.
+
 The live e2e test handles this friction for you — it copies the
 committed fixture into a per-run `tmp_path` and writes a profile
-target wired to your env vars, so you don't edit any committed file.
+target wired to your env vars (**either** `SNOWFLAKE_PASSWORD` **or**
+`SNOWFLAKE_PRIVATE_KEY_PATH`), so you don't edit any committed file.
 
 ## Running the tests
 
@@ -208,8 +257,12 @@ missing-variable reason.
 
 - Keep secrets in `.env` (gitignored), never inline in a committed
   file. `source` it into your shell; don't paste the password on the
-  command line where it lands in `~/.bash_history`.
+  command line where it lands in `~/.bash_history`. For key-pair auth,
+  keep the `.p8` private key out of the repo (e.g. `chmod 600`, store
+  it outside the working tree) and commit only the public key's
+  fingerprint if anything.
 - Use a fresh shell session, or `unset SNOWFLAKE_PASSWORD
+  SNOWFLAKE_PRIVATE_KEY_PATH SNOWFLAKE_PRIVATE_KEY_PASSPHRASE
   ANTHROPIC_API_KEY` after the run.
 - SignalForge never writes credentials to disk — they go from your
   environment straight into the in-memory Snowflake / Anthropic SDK

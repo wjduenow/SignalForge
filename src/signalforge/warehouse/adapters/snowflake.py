@@ -42,21 +42,19 @@ Scope (deliberately minimal):
   ``COUNT(*)`` aggregate (plus ``ARRAY_AGG(OBJECT_CONSTRUCT(*))`` sample-row
   capture when ``capture_failures > 0``) and returns a typed
   :class:`TestResult`.
-* :meth:`column_stats` still raises :class:`NotImplementedError` naming the
-  epic (#118) so the remaining v0.2 implementation work has a single grep
-  target (DEC-008).
+* :meth:`column_stats` is implemented (#258) — BigQuery-style context-manager
+  batching: :meth:`__enter__` opens per-table pending / results caches, the
+  first read flushes ONE ``INFORMATION_SCHEMA.COLUMNS`` catalog lookup (the
+  ``data_type`` field + the MIN/MAX pre-filter) plus ONE aggregate for every
+  queued column, and :meth:`__exit__` resets the caches. Enables ``safety:
+  aggregate-only`` on Snowflake, closing the last v0.2 parity gap with the
+  Databricks adapter.
 * :meth:`estimate_query_bytes` is implemented (#130) — it runs ``EXPLAIN USING
   JSON <validated-sql>`` and parses ``GlobalStats.bytesAssigned`` via the pure
   :func:`_parse_explain_json_bytes`, no longer inheriting the ABC degrade.
 * :meth:`WarehouseAdapter.from_profile` dispatches ``profile.type ==
-  "snowflake"`` here so an operator with a Snowflake profile sees a
-  ``NotImplementedError`` rather than the v0.1
-  :class:`UnsupportedProfileTypeError`.
-
-Still pending (NOT implemented here):
-
-* :meth:`column_stats` — raises :class:`NotImplementedError` naming the epic
-  (#118); the per-column profiling path lands in a later v0.2 issue.
+  "snowflake"`` here so an operator with a Snowflake profile is routed to this
+  adapter rather than the v0.1 :class:`UnsupportedProfileTypeError`.
 
 The ``snowflake.connector`` import stays confined to
 :mod:`signalforge.warehouse.adapters._snowflake_client` (the one-shim-per-vendor
@@ -70,6 +68,7 @@ import json
 import logging
 import time
 from datetime import date, datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from signalforge.warehouse._sample_id import _compute_run_id, _hash_session_id
@@ -77,6 +76,7 @@ from signalforge.warehouse._sample_sql import render_sample_select
 from signalforge.warehouse._sql_safety import validate_identifier, validate_test_sql
 from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
+    ColumnNotFoundError,
     EstimateUnavailableError,
     MaterialisationFailedError,
     SamplingRequiresPartitionFilterError,
@@ -116,7 +116,73 @@ _LARGE_TABLE_THRESHOLD: int = 100_000_000
 # compute, so ``_session_started_at`` is recorded for provenance only.
 _monotonic = time.monotonic
 
-_V02_REMEDIATION = "SnowflakeAdapter is a v0.2 skeleton (issue #118) — full implementation pending."
+_COLUMN_BATCH_WARN_AT: int = 500
+"""DEC-006 soft-warning threshold (mirrors BigQuery's ``_COLUMN_BATCH_WARN_AT``).
+Queued ``column_stats`` columns above this count produce one ``WARNING`` per
+flush. Module-level so tests can patch it down to (e.g.) 5 columns."""
+
+_COMPLEX_SNOWFLAKE_TYPES: frozenset[str] = frozenset(
+    {"ARRAY", "OBJECT", "VARIANT", "GEOGRAPHY", "GEOMETRY"}
+)
+"""DEC-003 complex Snowflake types where ``MIN`` / ``MAX`` RAISES at SQL analysis
+and is omitted from the aggregate. Conservative superset (DEC-003): an OVER-skipped
+orderable column merely returns ``min=max=None`` (harmless), whereas an UNDER-skipped
+unorderable column would raise and fail the whole batch. The gated live complex-type
+cert validates the set is complete (the #227 lesson: only a live run settles which
+types the warehouse rejects).
+
+This set is the *SQL-analysis-raise* tier. A distinct hazard — types that are
+SQL-orderable (so ``MIN`` / ``MAX`` runs) but return a Python value outside the
+``ColumnStats.min`` / ``max`` union (``BINARY`` → ``bytearray``, ``TIME`` →
+``datetime.time``) — is handled by :func:`_coerce_min_max` nulling the value on
+read-back, NOT by this set. So ``BINARY`` / ``TIME`` are deliberately absent here."""
+
+
+def _is_complex_snowflake_type(type_str: str) -> bool:
+    """Return True for Snowflake types where ``MIN`` / ``MAX`` is skipped (DEC-003).
+
+    Compares ``type_str.upper().strip()`` against :data:`_COMPLEX_SNOWFLAKE_TYPES`,
+    then strips any ``<...>`` parametric tail and re-checks the head — defensive
+    against a future parametric shape (Snowflake's ``INFORMATION_SCHEMA`` today
+    returns bare names like ``ARRAY`` / ``VARIANT``, but the strip keeps the
+    check resilient). ``BINARY`` is orderable and returns ``False``.
+    """
+    upper = type_str.upper().strip()
+    if upper in _COMPLEX_SNOWFLAKE_TYPES:
+        return True
+    head = upper.split("<", 1)[0].strip()
+    return head in _COMPLEX_SNOWFLAKE_TYPES
+
+
+def _coerce_min_max(value: Any) -> Any:
+    """Coerce a min/max value into the ``ColumnStats.min`` / ``max`` union, or ``None``.
+
+    ``ColumnStats.min`` / ``max`` is typed ``int|float|str|bool|datetime|date|None``.
+    A ``MIN`` / ``MAX`` result outside that union would raise a Pydantic
+    ``ValidationError`` at ``ColumnStats(...)`` construction — and because that is
+    NOT a :class:`~signalforge.warehouse.errors.WarehouseError`, it bypasses the
+    conservative-degrade path and fails the WHOLE batch (CLI panic tier). This is
+    the return-type analogue of :data:`_COMPLEX_SNOWFLAKE_TYPES`: the skip-set omits
+    ``MIN`` / ``MAX`` for types that RAISE at SQL analysis; this net nulls the values
+    of SQL-orderable types whose Python return type is unrepresentable.
+
+    Three cases:
+
+    * ``NUMBER`` → :class:`~decimal.Decimal` (DEC-004) → ``float`` (ample precision
+      for an LLM-prompt min/max).
+    * ``BINARY`` → ``bytearray`` and ``TIME`` → :class:`datetime.time` (and any other
+      future out-of-union type) → ``None``. Both types are SQL-orderable (so ``MIN`` /
+      ``MAX`` runs and they are deliberately NOT in :data:`_COMPLEX_SNOWFLAKE_TYPES`),
+      but neither is in the union. Nulling them matches the sibling adapters' posture
+      for their binary type (BigQuery ``BYTES`` / Databricks ``binary`` →
+      ``min=max=None``). Surfaced by the #258 quality gate (two independent reviewers).
+    * everything already in the union → passed through unchanged.
+    """
+    if isinstance(value, Decimal):
+        return float(value)
+    if value is None or isinstance(value, (bool, int, float, str, datetime, date)):
+        return value
+    return None
 
 
 def _parse_explain_json_bytes(cell: str | dict[str, Any]) -> int:
@@ -202,8 +268,8 @@ class SnowflakeAdapter(WarehouseAdapter):
     ``TEMPORARY TABLE``), and :meth:`run_test_sql` (``COUNT(*)`` failing-rows
     wrap), all on a connection wired via :meth:`_get_connection` with a
     fail-soft ``__exit__`` cleanup. :meth:`estimate_query_bytes` is implemented
-    (#130) via ``EXPLAIN USING JSON``. :meth:`column_stats` still raises
-    :class:`NotImplementedError` (a later v0.2 issue).
+    (#130) via ``EXPLAIN USING JSON``. :meth:`column_stats` is implemented
+    (#258) with BigQuery-style context-manager batching + a catalog pre-filter.
     """
 
     def __init__(
@@ -225,6 +291,11 @@ class SnowflakeAdapter(WarehouseAdapter):
         # ``client=``). ``None`` triggers a lazy ``make_real_client(...)`` build
         # on first :meth:`_get_connection`; tests inject a fake.
         self._connection = connection
+        # True once we LAZILY BUILD a real connection — so cleanup may null it
+        # for a rebuild on the next ``with`` block. An INJECTED connection stays
+        # ``False`` and is never nulled (a fake is reused across blocks). See
+        # :meth:`_cleanup_active_session` (#258 — the aggregate-only double-`with`).
+        self._owns_connection = False
         self._account = account
         self._user = user
         self._password = password
@@ -249,6 +320,16 @@ class SnowflakeAdapter(WarehouseAdapter):
         # the ``_monotonic`` note above).
         self._active_session: _SnowflakeClientProtocol | None = None
         self._session_started_at: float | None = None
+
+        # DEC-006 of #258 — BigQuery-style context-manager batching state for
+        # ``column_stats``. ``None`` outside an active ``with`` block; populated
+        # to empty dicts on ``__enter__`` and reset to ``None`` on ``__exit__``.
+        # Coexists with the connection-session state above (which the
+        # ``__exit__`` cleanup tears down independently). The ``None`` sentinel
+        # is the DEC-025 guard: ``column_stats`` outside a ``with`` block sees
+        # ``None`` and raises ``RuntimeError``.
+        self._column_stats_pending: dict[TableRef, list[str]] | None = None
+        self._column_stats_results: dict[TableRef, dict[str, ColumnStats]] | None = None
 
     def __repr__(self) -> str:
         # DEC-003: render ONLY non-credential identifying fields. NEVER user,
@@ -280,12 +361,21 @@ class SnowflakeAdapter(WarehouseAdapter):
                 warehouse=self._warehouse,
                 database=self._database,
                 schema=self._schema,
+                private_key_path=self._private_key_path,
+                private_key_passphrase=self._private_key_passphrase,
+                authenticator=self._authenticator,
             )
+            # We built it, so we own it — cleanup may null it for a rebuild.
+            self._owns_connection = True
         if self._active_session is None:
             self._active_session = self._connection
         return self._connection
 
     def __enter__(self) -> WarehouseAdapter:
+        # DEC-006 of #258 — open the column_stats batching caches for this
+        # ``with`` block (empty dicts; reset to ``None`` on ``__exit__``).
+        self._column_stats_pending = {}
+        self._column_stats_results = {}
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -293,7 +383,14 @@ class SnowflakeAdapter(WarehouseAdapter):
         # connection ends the Snowflake session and reaps its session-scoped
         # temp tables. Failure is swallowed-and-warned; state always resets so
         # a subsequent ``__exit__`` is a no-op.
-        self._cleanup_active_session()
+        try:
+            self._cleanup_active_session()
+        finally:
+            # DEC-006 of #258 — reset the column_stats batching state so the
+            # next ``with`` block starts from a known-empty cache and a stray
+            # ``column_stats`` call outside a block re-trips the DEC-025 guard.
+            self._column_stats_pending = None
+            self._column_stats_results = None
 
     def _cleanup_active_session(self) -> None:
         """DEC-003 of #122 — best-effort, fail-soft session cleanup.
@@ -344,16 +441,23 @@ class SnowflakeAdapter(WarehouseAdapter):
                     payload["session_id_hash"] = _hash_session_id(str(raw_session_id))
                 _LOGGER.info("session closed: %s", json.dumps(payload))
         finally:
-            # Reset only the session-tracking state — NOT ``self._connection``.
             # Idempotency comes from the ``_active_session is None`` early-return
-            # above, so a second ``__exit__`` is a no-op regardless. Nulling
-            # ``self._connection`` here would be wrong: a later call would route
-            # back through ``_get_connection()``'s lazy-build branch and
-            # silently construct a *real* connection from (possibly empty)
-            # creds, discarding a test-injected fake — mirrors BigQuery's
-            # cleanup, which resets ``_active_session_id`` but never the client.
+            # above, so a second ``__exit__`` is a no-op regardless.
             self._active_session = None
             self._session_started_at = None
+            # For a connection we OWN (lazily built), null it after the close so
+            # a subsequent ``with adapter:`` on the SAME instance rebuilds a
+            # fresh connection instead of reusing the now-closed one (which
+            # raises ``250002 (08003): Connection is closed``). This is
+            # load-bearing for aggregate-only end-to-end (#258): ``generate``
+            # with ``safety: aggregate-only`` enters two ``with adapter:`` blocks
+            # on one instance — the safety-aggregate ``column_stats`` pass, then
+            # ``prune_tests``. An INJECTED connection (tests) is deliberately
+            # left intact + non-nulled so a fake is reused across blocks, never
+            # silently rebuilt from (possibly empty) creds — the #122 concern.
+            if self._owns_connection:
+                self._connection = None
+                self._owns_connection = False
 
     def dialect(self) -> Dialect:
         return SNOWFLAKE_DIALECT
@@ -552,6 +656,12 @@ class SnowflakeAdapter(WarehouseAdapter):
             if mapped is exc:
                 raise
             raise mapped from exc
+        finally:
+            # Release the server-side cursor handle on both the success and
+            # failure paths so repeated queries on the long-lived connection
+            # don't leak cursors (#258 US-001, mirroring _execute_scalar +
+            # the Databricks PR #257 shape).
+            cursor.close()
 
     def _execute_to_dicts(self, sql: str, *, table: TableRef) -> list[dict[str, Any]]:
         """Run ``sql`` and shape tuple ``fetchall()`` rows into dicts (DEC-010).
@@ -564,14 +674,19 @@ class SnowflakeAdapter(WarehouseAdapter):
 
         cursor = self._get_connection().cursor()
         try:
-            cursor.execute(sql)
-            rows = list(cursor.fetchall())
-        except Exception as exc:
-            mapped = map_snowflake_exception(exc, context={"table": table.qualified_name})
-            if mapped is exc:
-                raise
-            raise mapped from exc
-        return self._rows_to_dicts(cursor, rows)
+            try:
+                cursor.execute(sql)
+                rows = list(cursor.fetchall())
+            except Exception as exc:
+                mapped = map_snowflake_exception(exc, context={"table": table.qualified_name})
+                if mapped is exc:
+                    raise
+                raise mapped from exc
+            # _rows_to_dicts reads cursor.description, so shape the rows BEFORE
+            # the finally closes the cursor (#258 US-001).
+            return self._rows_to_dicts(cursor, rows)
+        finally:
+            cursor.close()
 
     @staticmethod
     def _rows_to_dicts(cursor: _SnowflakeCursorProtocol, rows: list[Any]) -> list[dict[str, Any]]:
@@ -855,14 +970,20 @@ class SnowflakeAdapter(WarehouseAdapter):
 
         cursor = self._get_connection().cursor()
         try:
-            cursor.execute(wrapped)
-            rows = list(cursor.fetchall())
-            description = cursor.description
-        except Exception as exc:
-            mapped = map_snowflake_exception(exc, context={})
-            if mapped is exc:
-                raise
-            raise mapped from exc
+            try:
+                cursor.execute(wrapped)
+                rows = list(cursor.fetchall())
+                description = cursor.description
+            except Exception as exc:
+                mapped = map_snowflake_exception(exc, context={})
+                if mapped is exc:
+                    raise
+                raise mapped from exc
+        finally:
+            # Release the server-side cursor handle on both paths (#258 US-001).
+            # ``rows`` / ``description`` are captured inside the inner try, so
+            # the post-processing below reads only locals — safe after close.
+            cursor.close()
 
         if not rows:  # pragma: no cover - aggregate always returns one row
             raise RuntimeError("run_test_sql wrapper returned no rows")
@@ -980,8 +1101,214 @@ class SnowflakeAdapter(WarehouseAdapter):
             raise EstimateUnavailableError(detail="EXPLAIN USING JSON returned no rows")
         return _parse_explain_json_bytes(cell)
 
+    # ------------------------------------------------------------------
+    # column_stats — DEC-001 / DEC-002 / DEC-003 / DEC-004 / DEC-005 /
+    # DEC-006 of issue #258.
+    # ------------------------------------------------------------------
+
     def column_stats(self, table: TableRef, column: str) -> ColumnStats:
-        raise NotImplementedError(f"column_stats: {_V02_REMEDIATION}")
+        """Return a per-column profile, batched per-table inside a ``with``.
+
+        Overrides the v0.2 ``NotImplementedError`` stub (issue #258 — Snowflake
+        parity with the Databricks ``column_stats``, DEC-001). Enables
+        ``safety: aggregate-only`` on Snowflake.
+
+        Public contract per the ABC (DEC-008 of #22): one column at a time.
+        Inside an active context (``with adapter:``) calls accumulate per-table
+        and the first read flushes a single batched aggregate query for every
+        column queued for that table. Outside a context, raises
+        :class:`RuntimeError` (DEC-025 / DEC-006 of #258 — the ``None`` batching
+        sentinel is the guard).
+
+        Mirrors :meth:`BigQueryAdapter.column_stats`'s batching model — the
+        divergence from Databricks (which runs one query per column with inline
+        ``typeof``) is deliberate: Snowflake exposes the column type via the
+        catalog (``INFORMATION_SCHEMA.COLUMNS.DATA_TYPE``) BEFORE the aggregate
+        runs, so it pre-filters ``MIN`` / ``MAX`` for unorderable types
+        (BigQuery-style, DEC-002) rather than Databricks' post-process-null +
+        reduced-aggregate retry dance.
+        """
+        validate_identifier("column", column)
+
+        if self._column_stats_pending is None or self._column_stats_results is None:
+            raise RuntimeError("column_stats must be called inside a `with adapter:` block")
+
+        # Cache hit from a prior flush in this ``with`` block.
+        cached = self._column_stats_results.get(table, {}).get(column)
+        if cached is not None:
+            return cached
+
+        pending = self._column_stats_pending.setdefault(table, [])
+        if column not in pending:
+            pending.append(column)
+        if len(pending) > _COLUMN_BATCH_WARN_AT:
+            # Lazy-format JSON per the warehouse-layer logger convention (the
+            # grep-gate forbids f-strings in ``_LOGGER`` calls).
+            _LOGGER.warning(
+                "Large column_stats batch: %s",
+                json.dumps({"columns": len(pending), "table": table.qualified_name}),
+            )
+
+        # "First read flushes every column queued for `table`." Subsequent calls
+        # in the same block hit the cache above; columns queued after a flush are
+        # flushed on the next call in turn (mirrors BigQuery's simplified
+        # first-access-flushes semantics).
+        self._flush_column_stats_batch(table)
+
+        result = self._column_stats_results.get(table, {}).get(column)
+        if result is None:  # pragma: no cover - defensive; flush populates this
+            raise RuntimeError(f"column_stats internal error: {column!r} missing from flush result")
+        return result
+
+    def _get_column_types(self, table: TableRef) -> dict[str, str]:
+        """Look up ``{lower(COLUMN_NAME): DATA_TYPE}`` from
+        ``INFORMATION_SCHEMA.COLUMNS`` (DEC-002 / DEC-006 of #258).
+
+        Mirrors :meth:`_get_num_rows`'s escaping / qualification exactly: the
+        schema / name are embedded as single-quoted STRING LITERALS via
+        :func:`escape_bq_string_literal` (backslash escaping inside single
+        quotes is correct for Snowflake) even though they are already
+        identifier-validated on the :class:`TableRef`; the ``<database>`` prefix
+        is quoted per the dialect, and when ``table.project`` is ``None`` the
+        query is left **unqualified** (resolved against the connection's current
+        database — ``CURRENT_DATABASE().INFORMATION_SCHEMA`` is invalid because
+        ``CURRENT_DATABASE()`` is a scalar function, not a namespace qualifier).
+
+        The map is keyed by ``lower(COLUMN_NAME)`` so a requested manifest column
+        (dbt lowercases identifiers) resolves against the real upper-folded
+        Snowflake catalog entry case-insensitively. Rows with a NULL / absent
+        ``COLUMN_NAME`` or ``DATA_TYPE`` are skipped.
+        """
+        from signalforge.warehouse._sql_safety import escape_bq_string_literal
+
+        qc = SNOWFLAKE_DIALECT.quote_char
+        db_prefix = "" if table.project is None else f"{qc}{self._fold(table.project)}{qc}."
+        schema_lit = escape_bq_string_literal(table.dataset)
+        name_lit = escape_bq_string_literal(table.name)
+        sql = (
+            f"SELECT COLUMN_NAME, DATA_TYPE FROM {db_prefix}INFORMATION_SCHEMA.COLUMNS "
+            f"WHERE UPPER(TABLE_SCHEMA) = UPPER('{schema_lit}') "
+            f"AND UPPER(TABLE_NAME) = UPPER('{name_lit}')"
+        )
+        rows = self._execute_to_dicts(sql, table=table)
+        result: dict[str, str] = {}
+        for row in rows:
+            lowered = {str(k).lower(): v for k, v in row.items()}
+            name = lowered.get("column_name")
+            dtype = lowered.get("data_type")
+            if name is None or dtype is None:
+                continue
+            result[str(name).lower()] = str(dtype)
+        return result
+
+    def _flush_column_stats_batch(self, table: TableRef) -> None:
+        """Issue the batched aggregate for every column queued for ``table``.
+
+        Two queries per table per flush (DEC-006): one
+        ``INFORMATION_SCHEMA.COLUMNS`` catalog lookup for the column types (the
+        MIN/MAX pre-filter + the ``data_type`` field), then one aggregate over
+        the fold-then-quoted table computing ``COUNT`` / ``COUNT(DISTINCT)`` /
+        ``COUNT(*) - COUNT`` (null count, DEC-005) for every queued column, plus
+        ``MIN`` / ``MAX`` only for orderable (non-complex, DEC-003) columns.
+
+        Aliases carry a stable per-column INDEX suffix (``count_0``, ``min_1``,
+        …) rather than the raw column name — two columns sharing a prefix (or a
+        column named ``count``) can't collide on an alias, and the index avoids
+        re-embedding a case-folded identifier into the result-key lookup.
+
+        A requested column absent from the catalog map raises
+        :class:`ColumnNotFoundError` BEFORE the aggregate is issued — a stale
+        ``schema.yml`` referencing a dropped column fails loud rather than
+        silently profiling nothing.
+        """
+        if self._column_stats_pending is None or self._column_stats_results is None:
+            return  # pragma: no cover - guarded by caller
+        columns = list(self._column_stats_pending.get(table, []))
+        if not columns:
+            return
+
+        # Drain the attempted batch UP FRONT (#258 QG — Critical). If a column
+        # fails to resolve (``ColumnNotFoundError``, below) OR the aggregate
+        # raises (e.g. the documented ``COUNT(DISTINCT)`` restriction on
+        # ``GEOGRAPHY`` / ``GEOMETRY``), the exception must NOT leave the
+        # offending column in the pending queue — otherwise every subsequent
+        # ``column_stats()`` call for a *different, valid* column of the same
+        # table would re-include the stuck column and fail identically, so one
+        # unprofilable column would silently poison ``column_stats`` for the
+        # whole rest of the table within the ``with`` block. Clearing before the
+        # query scopes any failure to the offending call alone.
+        self._column_stats_pending[table] = []
+
+        # DEC-002 — catalog pre-filter: one lookup serves both the ``data_type``
+        # field and the MIN/MAX skip decision.
+        type_by_column = self._get_column_types(table)
+
+        # Resolve every queued column's type up front so a missing column raises
+        # ColumnNotFoundError BEFORE the (billable) aggregate is issued.
+        resolved: list[tuple[str, str]] = []
+        for col in columns:
+            dtype = type_by_column.get(col.lower())
+            if dtype is None:
+                raise ColumnNotFoundError(table=table.qualified_name, column=col)
+            resolved.append((col, dtype))
+
+        qc = SNOWFLAKE_DIALECT.quote_char
+        quoted_table = self._quote(table)
+        select_fragments: list[str] = ["COUNT(*) AS row_count"]
+        for i, (col, col_type) in enumerate(resolved):
+            quoted_col = f"{qc}{self._fold(col)}{qc}"
+            select_fragments.extend(
+                [
+                    f"COUNT({quoted_col}) AS count_{i}",
+                    # KNOWN LIMITATION (#258 QG): COUNT(DISTINCT) is emitted
+                    # unconditionally (mirrors the BigQuery adapter). Snowflake
+                    # forbids DISTINCT on GEOGRAPHY / GEOMETRY, so profiling a
+                    # model that carries such a column fails the whole aggregate
+                    # (a typed WarehouseError, not the panic-tier crash the
+                    # _coerce_min_max net prevents) — those columns are not
+                    # profilable via `safety: aggregate-only` today. Whether
+                    # DISTINCT on VARIANT / ARRAY / OBJECT also raises is
+                    # unsettled offline; the gated live complex-type cert
+                    # (test_snowflake_columnstats_live.py) is where it is
+                    # confirmed. See docs/warehouse-adapter-ops.md.
+                    f"COUNT(DISTINCT {quoted_col}) AS distinct_{i}",
+                    # DEC-005 — null count via COUNT(*) - COUNT(col) (standard
+                    # SQL, fakesnow-executable, portable; avoids COUNT_IF).
+                    f"(COUNT(*) - COUNT({quoted_col})) AS nulls_{i}",
+                ]
+            )
+            if not _is_complex_snowflake_type(col_type):
+                select_fragments.extend(
+                    [
+                        f"MIN({quoted_col}) AS min_{i}",
+                        f"MAX({quoted_col}) AS max_{i}",
+                    ]
+                )
+
+        sql = f"SELECT {', '.join(select_fragments)} FROM {quoted_table}"
+        rows = self._execute_to_dicts(sql, table=table)
+        if not rows:  # pragma: no cover - aggregate always returns one row
+            raise RuntimeError(f"column_stats aggregate returned no rows for table {table}")
+
+        # Snowflake folds unquoted aliases to UPPER (``COUNT_0`` etc.); resolve
+        # case-insensitively so the index-suffixed aliases map regardless of
+        # folding (and a DictCursor-style passthrough that preserved case).
+        lowered = {str(k).lower(): v for k, v in rows[0].items()}
+        results = self._column_stats_results.setdefault(table, {})
+        for i, (col, col_type) in enumerate(resolved):
+            is_complex = _is_complex_snowflake_type(col_type)
+            results[col] = ColumnStats(
+                count=int(lowered[f"count_{i}"]),
+                distinct=int(lowered[f"distinct_{i}"]),
+                nulls=int(lowered[f"nulls_{i}"]),
+                # DEC-004 — coerce a NUMBER Decimal min/max to float.
+                min=None if is_complex else _coerce_min_max(lowered.get(f"min_{i}")),
+                max=None if is_complex else _coerce_min_max(lowered.get(f"max_{i}")),
+                data_type=col_type,
+            )
+        # Pending was already drained up front (see the top of this method), so
+        # a follow-up call queues a fresh batch without re-flushing these.
+        _LOGGER.debug("Flushed column_stats batch for %s: %s", table, columns)
 
 
 __all__ = ["SNOWFLAKE_DIALECT", "SnowflakeAdapter"]

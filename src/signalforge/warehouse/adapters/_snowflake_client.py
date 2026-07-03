@@ -94,11 +94,14 @@ def make_real_client(
     *,
     account: str,
     user: str,
-    password: str,
+    password: str | None = None,
     role: str | None = None,
     warehouse: str | None = None,
     database: str | None = None,
     schema: str | None = None,
+    private_key_path: str | None = None,
+    private_key_passphrase: str | None = None,
+    authenticator: str | None = None,
 ) -> _SnowflakeClientProtocol:  # pragma: no cover - requires the SDK + live creds
     """Construct a real ``snowflake.connector`` connection.
 
@@ -107,18 +110,36 @@ def make_real_client(
     ``snowflake-connector-python`` ships only under the ``[snowflake]``
     optional-dependency extra. The single ``# type: ignore[import-not-found]``
     for the SDK import is confined here per DEC-005.
+
+    Auth precedence: **key-pair (JWT) auth** when ``private_key_path`` is set —
+    the connector reads the PEM private key from that path (``private_key_file``)
+    plus an optional ``private_key_passphrase`` (``private_key_file_pwd``); this
+    is the non-interactive path that works with MFA-enforced accounts (a bare
+    password login is rejected there). Otherwise password auth. An explicit
+    ``authenticator`` (e.g. ``externalbrowser`` for SSO) is passed through when
+    set. The key-pair / authenticator fields are the ones the #120 profile model
+    already parses and ``from_profile`` already threads onto the adapter.
     """
     import snowflake.connector  # type: ignore[import-not-found]
 
-    return snowflake.connector.connect(  # type: ignore[no-any-return]
-        account=account,
-        user=user,
-        password=password,
-        role=role,
-        warehouse=warehouse,
-        database=database,
-        schema=schema,
-    )
+    connect_kwargs: dict[str, Any] = {
+        "account": account,
+        "user": user,
+        "role": role,
+        "warehouse": warehouse,
+        "database": database,
+        "schema": schema,
+    }
+    if private_key_path:
+        connect_kwargs["private_key_file"] = private_key_path
+        if private_key_passphrase:
+            connect_kwargs["private_key_file_pwd"] = private_key_passphrase
+    elif password:
+        connect_kwargs["password"] = password
+    if authenticator:
+        connect_kwargs["authenticator"] = authenticator
+
+    return snowflake.connector.connect(**connect_kwargs)  # type: ignore[no-any-return]
 
 
 def map_snowflake_exception(exc: Exception, *, context: dict[str, Any] | None = None) -> Exception:

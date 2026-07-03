@@ -1,0 +1,24 @@
+version: 2
+
+sources:
+  - name: nyctaxi
+    description: Databricks Unity Catalog nyctaxi sample dataset.
+    database: samples
+    schema: nyctaxi
+    tables:
+      - name: trips
+        identifier: trips
+        description: One row per NYC taxi trip.
+        columns:
+          - name: tpep_pickup_datetime
+            description: Trip pickup timestamp.
+          - name: tpep_dropoff_datetime
+            description: Trip dropoff timestamp.
+          - name: trip_distance
+            description: Trip distance in miles.
+          - name: fare_amount
+            description: Fare amount in USD.
+          - name: pickup_zip
+            description: ZIP code of the pickup location.
+          - name: dropoff_zip
+            description: ZIP code of the dropoff location.

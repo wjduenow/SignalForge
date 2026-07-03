@@ -30,6 +30,17 @@ _SNOWFLAKE_DEFERRED_AUTH_REMEDIATION = (
     "later release."
 )
 
+# Reused by the profiles model validator (US-002, #222) to remediate a
+# Databricks profile that declares an `auth_type` SignalForge's v0.x adapter
+# does not yet support. Names the supported methods so the operator knows the
+# working set; names the deferred ones so the message isn't a dead end.
+_DATABRICKS_DEFERRED_AUTH_REMEDIATION = (
+    "v0.x Databricks auth supports: PAT (set `token:`, the default when "
+    "`auth_type:` is unset) and OAuth-M2M (set `auth_type: oauth` with "
+    "`client_id:` + `client_secret:`). Other methods (Azure AD, OAuth-U2M, "
+    "etc.) are deferred to a later release."
+)
+
 
 def _format_value(v: object) -> str:
     """Quote a user-supplied value via ``repr()`` for safe inclusion in
@@ -77,13 +88,19 @@ class WarehouseAuthError(WarehouseError):
 
 
 class UnsupportedProfileTypeError(WarehouseError):
-    """The dbt profile's ``type`` field is not ``"bigquery"``.
+    """The dbt profile's ``type`` is not a recognised warehouse.
 
-    v0.1 ships the BigQuery adapter only; Snowflake/Postgres land in v0.2.
+    ``bigquery`` is fully implemented; ``postgres`` (v0.2 stub), ``snowflake``
+    (v0.2), and ``databricks`` (v0.x skeleton) are recognised and dispatch to
+    their adapters, whose warehouse operations may still raise
+    ``NotImplementedError`` until each implementation lands. Any other type is
+    unsupported.
     """
 
     default_remediation: ClassVar[str] = (
-        "v0.1 supports `type: bigquery` only. Snowflake and Postgres adapters are tracked for v0.2."
+        "`type: bigquery` is fully supported. `postgres` (v0.2 stub), `snowflake` "
+        "(v0.2), and `databricks` (v0.x skeleton) are recognised but their warehouse "
+        "operations are not yet fully implemented. Other profile types are unsupported."
     )
 
     def __init__(self, profile_type: str, *, remediation: str | None = None) -> None:
@@ -349,18 +366,24 @@ class ColumnNotFoundError(WarehouseError):
 
 
 class QuerySyntaxError(WarehouseError):
-    """Wraps BigQuery's ``BadRequest`` for SQL parse errors so callers can
-    distinguish "your SQL is malformed" from other ``BadRequest`` flavours
-    (e.g. :class:`BytesBilledExceededError`)."""
+    """Wraps a warehouse's malformed-SQL error so callers can distinguish
+    "your SQL is malformed" from other request-rejection flavours (e.g.
+    :class:`BytesBilledExceededError`).
+
+    Vendor-neutral by design — raised from the BigQuery, Snowflake, AND
+    Databricks exception mappers (and ``_sql_safety``), so the rendered message
+    must not name a single warehouse. The original vendor error detail rides on
+    ``detail`` / ``__cause__`` for the operator who needs the vendor-specific
+    text (issue #226 — a Databricks error previously surfaced BigQuery wording)."""
 
     default_remediation: ClassVar[str] = (
-        "Inspect the BigQuery error detail and fix the SQL. The drafter's "
+        "Inspect the warehouse error detail and fix the SQL. The drafter's "
         "prompt should be updated if this recurs."
     )
 
     def __init__(self, detail: str, *, remediation: str | None = None) -> None:
         self.detail = detail
-        message = f"BigQuery rejected the query: {_format_value(detail)}"
+        message = f"The warehouse rejected the query: {_format_value(detail)}"
         super().__init__(message, remediation=remediation)
 
 

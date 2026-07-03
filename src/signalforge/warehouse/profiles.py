@@ -53,10 +53,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from signalforge.warehouse._path_safety import canonicalise_path
 from signalforge.warehouse._sql_safety import (
+    validate_databricks_hostname,
+    validate_databricks_http_path,
     validate_identifier,
     validate_snowflake_account,
 )
 from signalforge.warehouse.errors import (
+    _DATABRICKS_DEFERRED_AUTH_REMEDIATION,
     _SNOWFLAKE_DEFERRED_AUTH_REMEDIATION,
     IncompleteProfileError,
     ProfileEnvVarUnsetError,
@@ -105,6 +108,30 @@ _SNOWFLAKE_SUPPORTED_AUTHENTICATORS: frozenset[str] = frozenset({"snowflake", "e
 also accepted (means default password auth). Everything else (``oauth``,
 ``username_password_mfa``, …) is deferred."""
 
+_DATABRICKS_ONLY: frozenset[str] = frozenset(
+    {
+        "host",
+        "http_path",
+        "token",
+        "catalog",
+        "client_id",
+        "client_secret",
+        "auth_type",
+    }
+)
+"""Fields that only belong on a ``type: databricks`` target. Present on a
+BigQuery or Snowflake target → foreign-field rejection."""
+
+_DATABRICKS_REQUIRED: tuple[str, ...] = ("host", "http_path")
+"""Connection keys every Databricks target must declare, regardless of auth.
+Per-auth keys (``token`` for PAT; ``client_id`` + ``client_secret`` for
+OAuth-M2M) are required on top of these — see the validator arm."""
+
+_DATABRICKS_SUPPORTED_AUTH: frozenset[str] = frozenset({"pat", "oauth"})
+"""``auth_type`` values the v0.x Databricks adapter handles. ``None`` is also
+accepted (means default PAT auth). Everything else (Azure AD, OAuth-U2M, …)
+is deferred."""
+
 
 class DbtProfileTarget(BaseModel):
     """The subset of a dbt ``profiles.yml`` target SignalForge consumes.
@@ -140,6 +167,15 @@ class DbtProfileTarget(BaseModel):
     # BigQuery) profiles set `threads`; adding it here keeps extra="forbid"
     # from tripping on a routine connection knob.
     threads: int | None = None
+    # Shared connection knobs SignalForge accepts but does NOT consume
+    # (accepted-but-unused, exactly like `threads`). Real dbt-snowflake AND
+    # dbt-databricks profiles routinely set these, so `extra="forbid"` must
+    # not reject an operator's working profile. NOT in any `_*_ONLY` set —
+    # they are valid across warehouse types, so foreign-field rejection
+    # leaves them alone.
+    connect_retries: int | None = None
+    connect_timeout: int | None = None
+    connect_max_idle: int | None = None
 
     # BigQuery-shaped fields.
     method: str | None = None
@@ -165,6 +201,20 @@ class DbtProfileTarget(BaseModel):
     private_key_path: str | None = Field(default=None, repr=False)
     private_key_passphrase: str | None = Field(default=None, repr=False)
     authenticator: str | None = None
+
+    # Databricks-shaped fields (US-002, #222). `catalog` is the Databricks
+    # analogue of BigQuery `project` / Snowflake `database` — its own NEW
+    # field; Databricks's `schema:` key continues to hydrate `dataset` via the
+    # existing alias. `token` (PAT) and `client_secret` (OAuth-M2M) are secret
+    # material → `repr=False` so a debug print / log line / exception context
+    # can't leak them (mirrors `password` above).
+    host: str | None = None
+    http_path: str | None = None
+    catalog: str | None = None
+    client_id: str | None = None
+    auth_type: str | None = None
+    token: str | None = Field(default=None, repr=False)
+    client_secret: str | None = Field(default=None, repr=False)
 
     @field_validator("method")
     @classmethod
@@ -194,7 +244,7 @@ class DbtProfileTarget(BaseModel):
             # foreign-field typed error; raising a plain ValueError surfaces
             # loudly as a Pydantic ValidationError (same shape as a config
             # error from the `method` field_validator).
-            for name in _BIGQUERY_ONLY:
+            for name in _BIGQUERY_ONLY | _DATABRICKS_ONLY:
                 if getattr(self, name) is not None:
                     raise ValueError(f"field {name!r} is not valid for a snowflake profile target")
 
@@ -221,9 +271,60 @@ class DbtProfileTarget(BaseModel):
                     method=self.authenticator,
                     remediation=_SNOWFLAKE_DEFERRED_AUTH_REMEDIATION,
                 )
+        elif self.type == "databricks":
+            # Auth check runs FIRST: an unsupported `auth_type` must fail with
+            # the auth error, not a confusing missing-key error (a bad auth
+            # method changes WHICH keys are required, so reporting "missing
+            # client_id" for `auth_type: azure-ad` would mislead).
+            if self.auth_type is not None and self.auth_type not in _DATABRICKS_SUPPORTED_AUTH:
+                raise UnsupportedAuthMethodError(
+                    method=self.auth_type,
+                    remediation=_DATABRICKS_DEFERRED_AUTH_REMEDIATION,
+                )
+
+            # Required keys are auth-conditional. host/http_path always; then
+            # PAT (None or "pat") also needs token; OAuth-M2M needs client_id
+            # AND client_secret. Collect ALL missing keys into one error.
+            required = list(_DATABRICKS_REQUIRED)
+            if self.auth_type == "oauth":
+                required += ["client_id", "client_secret"]
+            else:
+                # None or "pat" → default PAT auth.
+                required += ["token"]
+            # Treat empty / whitespace-only as MISSING, not just `is None`.
+            # The credential fields (token / client_id / client_secret) are
+            # deliberately NOT shape-validated (opaque secrets), so without
+            # this an empty string slips through both gates. Realistic
+            # trigger: `token: "{{ env_var('DATABRICKS_TOKEN', '') }}"` with
+            # the var unset renders to "" — fail loud at profile load rather
+            # than as a cryptic connection error much later.
+            missing = [k for k in required if not str(getattr(self, k) or "").strip()]
+            if missing:
+                raise IncompleteProfileError(profile_type="databricks", missing=sorted(missing))
+
+            # Foreign-field rejection (same plain-ValueError shape as the
+            # snowflake arm; surfaces as a Pydantic ValidationError).
+            for name in _BIGQUERY_ONLY | _SNOWFLAKE_ONLY:
+                if getattr(self, name) is not None:
+                    raise ValueError(f"field {name!r} is not valid for a databricks profile target")
+
+            # Identifier hygiene on the names that become SQL downstream:
+            # `catalog` (interpolated as `USE CATALOG <catalog>`) and `schema`
+            # (qualified references) use the strict SQL-identifier rule;
+            # `host` / `http_path` use the permissive connection-string
+            # validators (US-001). `token` / `client_id` / `client_secret`
+            # are opaque secrets / ids — never SQL — so not shape-validated.
+            if self.catalog is not None:
+                validate_identifier("catalog", self.catalog)
+            if self.dataset is not None:
+                validate_identifier("schema", self.dataset)
+            if self.host is not None:
+                validate_databricks_hostname("host", self.host)
+            if self.http_path is not None:
+                validate_databricks_http_path("http_path", self.http_path)
         elif self.type == "bigquery":
             # Symmetric foreign-field rejection for BigQuery targets.
-            for name in _SNOWFLAKE_ONLY:
+            for name in _SNOWFLAKE_ONLY | _DATABRICKS_ONLY:
                 if getattr(self, name) is not None:
                     raise ValueError(f"field {name!r} is not valid for a bigquery profile target")
 

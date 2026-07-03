@@ -19,14 +19,18 @@ this helper and must stay name-agnostic):
   This reproduces the prune compiler's current sample-CTE body byte-for-byte
   (DEC-003), the load-bearing BigQuery regression gate.
 
-* **Projection-subquery** (``sample_hash_in_projection=True``, Snowflake) —
-  Snowflake's ``HASH(*)`` is rejected as a predicate (``002079``) and is legal
-  only in the SELECT projection, so the hash is computed once in an inner
-  projection bound to ``<alias>`` (``dialect.sample_hash_alias``) and the outer
-  ``WHERE``/``ORDER BY`` reference that alias; ``SELECT * EXCLUDE (<alias>)``
-  strips the helper column so returned rows carry only original columns::
+* **Projection-subquery** (``sample_hash_in_projection=True``, Snowflake AND
+  Databricks) — Snowflake's ``HASH(*)`` is rejected as a predicate (``002079``)
+  and Databricks' ``struct(*)`` is rejected inside a Sort node
+  (``[INVALID_USAGE_OF_STAR_OR_REGEX]``, issue #226); both are legal only in the
+  SELECT projection, so the hash is computed once in an inner projection bound to
+  ``<alias>`` (``dialect.sample_hash_alias``) and the outer ``WHERE``/``ORDER BY``
+  reference that alias. ``SELECT * <except_kw> (<alias>)`` strips the helper
+  column so returned rows carry only original columns, where ``<except_kw>`` is
+  ``dialect.sample_star_except_keyword`` (Snowflake ``EXCLUDE`` / Databricks
+  ``EXCEPT``)::
 
-      SELECT * EXCLUDE (<alias>) FROM
+      SELECT * <except_kw> (<alias>) FROM
       (SELECT t.*, <hash_expr> AS <alias> FROM <table_sql> AS t)
       WHERE MOD(<alias>, <bucket>) < 1[ AND <extra_where>]
       [ORDER BY <alias>] LIMIT <n>
@@ -76,8 +80,9 @@ def render_sample_select(
         if extra_where is not None:
             where_sql += f" AND {extra_where}"
         order_sql = f" ORDER BY {alias}" if order_by_hash else ""
+        except_kw = dialect.sample_star_except_keyword
         return (
-            f"SELECT * EXCLUDE ({alias}) FROM "
+            f"SELECT * {except_kw} ({alias}) FROM "
             f"(SELECT t.*, {expr} AS {alias} FROM {table_sql} AS t) "
             f"WHERE {where_sql}{order_sql} LIMIT {sample_size}"
         )

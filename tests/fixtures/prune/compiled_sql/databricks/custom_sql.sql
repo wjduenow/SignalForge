@@ -1,0 +1,1 @@
+select order_id from fake_project.dataset.orders where total < 0
