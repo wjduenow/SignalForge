@@ -725,10 +725,12 @@ auto-suspend, see below).
 
 **Live Snowflake (v0.2) — all safety modes supported.** After #139 fixed the
 `HASH(*)`-in-predicate bug, #140 added the vendor-neutral row-count seam, and
-#258 implemented `column_stats`, every `safety` × `scope` × `sample_strategy`
-combination is functional. The combinations certified green by the gated live
-e2e are `safety: schema-only` + `prune.scope: full`, or `prune.scope: sample`
-with either `prune.sample_strategy: materialised` or `oneshot`:
+issue #258 implemented `column_stats`, every `safety` × `scope` ×
+`sample_strategy` combination is functional. The combinations certified by the
+**maintainer-run gated live e2e** suite (opt-in — deselected from normal CI) are
+`safety: schema-only` + `prune.scope: full`, or `prune.scope: sample` with
+either `prune.sample_strategy: materialised` or `oneshot`; the `aggregate-only`
+live cert is written but pending a maintainer run (see below):
 
 - **`safety: aggregate-only` — supported as of #258.** Profiles columns via
   `adapter.column_stats`, now implemented on `SnowflakeAdapter` (parity with
@@ -747,7 +749,8 @@ with either `prune.sample_strategy: materialised` or `oneshot`:
     profiled via `aggregate-only` — the aggregate fails with a typed
     `WarehouseError`. Use `safety: schema-only` for models with geospatial
     columns. (Whether `DISTINCT` on `VARIANT` / `ARRAY` / `OBJECT` also raises is
-    confirmed by the gated live complex-type cert.)
+    to be confirmed by the maintainer-run gated live complex-type cert — written
+    in `tests/warehouse/test_snowflake_columnstats_live.py`, pending a live run.)
 
 **Fixed by #140:** `prune.scope: sample` + `prune.sample_strategy: oneshot` on a
 non-BigQuery adapter no longer raises at the engine seam. The sample row-count is

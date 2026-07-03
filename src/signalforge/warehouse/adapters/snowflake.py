@@ -1210,6 +1210,18 @@ class SnowflakeAdapter(WarehouseAdapter):
         if not columns:
             return
 
+        # Drain the attempted batch UP FRONT (#258 QG — Critical). If a column
+        # fails to resolve (``ColumnNotFoundError``, below) OR the aggregate
+        # raises (e.g. the documented ``COUNT(DISTINCT)`` restriction on
+        # ``GEOGRAPHY`` / ``GEOMETRY``), the exception must NOT leave the
+        # offending column in the pending queue — otherwise every subsequent
+        # ``column_stats()`` call for a *different, valid* column of the same
+        # table would re-include the stuck column and fail identically, so one
+        # unprofilable column would silently poison ``column_stats`` for the
+        # whole rest of the table within the ``with`` block. Clearing before the
+        # query scopes any failure to the offending call alone.
+        self._column_stats_pending[table] = []
+
         # DEC-002 — catalog pre-filter: one lookup serves both the ``data_type``
         # field and the MIN/MAX skip decision.
         type_by_column = self._get_column_types(table)
@@ -1277,9 +1289,8 @@ class SnowflakeAdapter(WarehouseAdapter):
                 max=None if is_complex else _coerce_min_max(lowered.get(f"max_{i}")),
                 data_type=col_type,
             )
-        # Drain the pending list so a follow-up call queues a fresh batch
-        # without re-flushing the just-resolved columns.
-        self._column_stats_pending[table] = []
+        # Pending was already drained up front (see the top of this method), so
+        # a follow-up call queues a fresh batch without re-flushing these.
         _LOGGER.debug("Flushed column_stats batch for %s: %s", table, columns)
 
 

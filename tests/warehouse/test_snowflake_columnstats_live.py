@@ -216,38 +216,41 @@ def test_column_stats_live_scalar_populated_and_complex_skipped() -> None:
     table_name = _unique_table_name()
     quoted = _quoted_table(database, schema, table_name)
 
-    # --- Setup: create + populate the engineered table (own short-lived adapter).
-    setup_adapter = _make_adapter()
-    with setup_adapter:
-        cursor = setup_adapter._get_connection().cursor()
-        try:
-            cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
-            cursor.execute(
-                f"CREATE TABLE {quoted} "
-                f"(id NUMBER, name VARCHAR, tags ARRAY, meta OBJECT, payload VARIANT, "
-                f"blob BINARY, t TIME)"
-            )
-            # Complex constructors are not constant expressions, so INSERT …
-            # VALUES is rejected — use INSERT … SELECT … UNION ALL SELECT ….
-            # Row 1 populates every column; row 2 leaves the ARRAY/OBJECT/VARIANT
-            # columns NULL (typed casts keep the UNION branch types unified) so
-            # they get count=1, nulls=1. ``blob`` (BINARY) and ``t`` (TIME) are
-            # populated on BOTH rows so their MIN/MAX return real ``bytearray`` /
-            # ``datetime.time`` values — exercising the ``_coerce_min_max`` net
-            # that nulls out-of-union return types (#258 QG).
-            cursor.execute(
-                f"INSERT INTO {quoted} (id, name, tags, meta, payload, blob, t) "
-                f"SELECT 1, 'alpha', ARRAY_CONSTRUCT(1, 2, 3), "
-                f"OBJECT_CONSTRUCT('k', 'v1'), TO_VARIANT(100), "
-                f"TO_BINARY('DEADBEEF', 'HEX'), '08:30:00'::TIME "
-                f"UNION ALL "
-                f"SELECT 2, 'bravo', NULL::ARRAY, NULL::OBJECT, NULL::VARIANT, "
-                f"TO_BINARY('CAFE', 'HEX'), '17:45:00'::TIME"
-            )
-        finally:
-            cursor.close()
-
+    # The setup (CREATE/INSERT) lives INSIDE the outer ``try`` whose ``finally``
+    # drops the table — so a mid-setup failure (e.g. the hand-crafted multi-branch
+    # INSERT) still hits teardown and never orphans the per-run table (#258 QG).
     try:
+        # --- Setup: create + populate the engineered table (own short-lived adapter).
+        setup_adapter = _make_adapter()
+        with setup_adapter:
+            cursor = setup_adapter._get_connection().cursor()
+            try:
+                cursor.execute(f"DROP TABLE IF EXISTS {quoted}")
+                cursor.execute(
+                    f"CREATE TABLE {quoted} "
+                    f"(id NUMBER, name VARCHAR, tags ARRAY, meta OBJECT, payload VARIANT, "
+                    f"blob BINARY, t TIME)"
+                )
+                # Complex constructors are not constant expressions, so INSERT …
+                # VALUES is rejected — use INSERT … SELECT … UNION ALL SELECT ….
+                # Row 1 populates every column; row 2 leaves the ARRAY/OBJECT/VARIANT
+                # columns NULL (typed casts keep the UNION branch types unified) so
+                # they get count=1, nulls=1. ``blob`` (BINARY) and ``t`` (TIME) are
+                # populated on BOTH rows so their MIN/MAX return real ``bytearray`` /
+                # ``datetime.time`` values — exercising the ``_coerce_min_max`` net
+                # that nulls out-of-union return types (#258 QG).
+                cursor.execute(
+                    f"INSERT INTO {quoted} (id, name, tags, meta, payload, blob, t) "
+                    f"SELECT 1, 'alpha', ARRAY_CONSTRUCT(1, 2, 3), "
+                    f"OBJECT_CONSTRUCT('k', 'v1'), TO_VARIANT(100), "
+                    f"TO_BINARY('DEADBEEF', 'HEX'), '08:30:00'::TIME "
+                    f"UNION ALL "
+                    f"SELECT 2, 'bravo', NULL::ARRAY, NULL::OBJECT, NULL::VARIANT, "
+                    f"TO_BINARY('CAFE', 'HEX'), '17:45:00'::TIME"
+                )
+            finally:
+                cursor.close()
+
         # ``project`` = the writable database; ``dataset`` = the schema; ``name``
         # = the engineered table. The adapter folds each to UPPER before quoting,
         # so the raw (lowercased) values here resolve to the same object created

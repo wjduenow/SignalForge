@@ -601,6 +601,39 @@ def test_column_stats_time_min_max_coerced_to_none() -> None:
     assert stats.data_type == "TIME"
 
 
+def test_column_stats_failed_column_does_not_poison_rest_of_table() -> None:
+    """A column that fails to resolve must not stay stuck in the pending queue:
+    a later ``column_stats`` for a DIFFERENT valid column of the same table must
+    still succeed (#258 QG — Critical). The pending batch is drained up front, so
+    the failed call's column is gone before the next call queues a fresh batch."""
+    conn = FakeSnowflakeConnection()
+    # Call 1 ("bogus"): catalog lookup returns only AMOUNT — bogus is absent, so
+    # column_stats raises ColumnNotFoundError before any aggregate.
+    conn.expect_execute(
+        matching=_COLUMNS_QUERY, returns=[("AMOUNT", "NUMBER")], description=_CATALOG_DESCRIPTION
+    )
+    # Call 2 ("amount"): a FRESH catalog lookup + the aggregate. This only runs
+    # if the pending queue was drained after call 1's failure — otherwise the
+    # stuck "bogus" column would re-poison this flush and raise again.
+    conn.expect_execute(
+        matching=_COLUMNS_QUERY, returns=[("AMOUNT", "NUMBER")], description=_CATALOG_DESCRIPTION
+    )
+    conn.expect_execute(
+        matching=_AGG_QUERY,
+        returns=[(3, 3, 3, 0, 1, 9)],
+        description=_scalar_agg_description(1),
+    )
+
+    with _make_adapter(conn) as adapter:
+        with pytest.raises(ColumnNotFoundError):
+            adapter.column_stats(_TABLE, "bogus")
+        # Pre-fix, this would ALSO raise ColumnNotFoundError (bogus re-included).
+        stats = adapter.column_stats(_TABLE, "amount")
+
+    assert stats.count == 3
+    assert stats.data_type == "NUMBER"
+
+
 # ---------------------------------------------------------------------------
 # Batching — multiple columns in one aggregate flush.
 # ---------------------------------------------------------------------------
