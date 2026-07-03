@@ -117,13 +117,13 @@ _MODEL_UNIQUE_ID = "model.signalforge_test_tpch.stg_tpch_customers"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-# The connection env vars the Snowflake adapter needs for password auth, plus
-# the warehouse so the prune/sample queries have compute context. Mirrors
-# ``tests/warehouse/test_snowflake_estimate_live.py``.
+# The connection env vars the Snowflake adapter always needs (compute context +
+# namespace). Auth is a separate axis: EITHER ``SNOWFLAKE_PASSWORD`` OR
+# ``SNOWFLAKE_PRIVATE_KEY_PATH`` (key-pair / JWT — the non-interactive path an
+# MFA-enforced account requires). Mirrors ``test_snowflake_columnstats_live.py``.
 _REQUIRED_CONN_VARS = (
     "SNOWFLAKE_ACCOUNT",
     "SNOWFLAKE_USER",
-    "SNOWFLAKE_PASSWORD",
     "SNOWFLAKE_WAREHOUSE",
 )
 
@@ -132,6 +132,23 @@ def _snowflake_runs_enabled() -> bool:
     """``SF_RUN_SNOWFLAKE`` is set to a truthy value (the Snowflake analogue of
     the ``SF_RUN_BQ`` opt-in; accepts ``1``/``true``/``yes``/``on``)."""
     return os.environ.get("SF_RUN_SNOWFLAKE", "").lower() in _TRUTHY
+
+
+def _auth_profile_fields() -> dict[str, object]:
+    """Auth fields for the generated ``profiles.yml``: key-pair (JWT) when
+    ``SNOWFLAKE_PRIVATE_KEY_PATH`` is set (MFA-exempt — required for
+    MFA-enforced accounts, where a bare password login is rejected), else
+    password. Threads through ``load_profile`` → ``DbtProfileTarget`` (#120) →
+    ``from_profile`` → the adapter's key-pair connect path (#258)."""
+    key_path = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH")
+    if key_path:
+        fields: dict[str, object] = {"private_key_path": key_path}
+        if passphrase := os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"):
+            fields["private_key_passphrase"] = passphrase
+        if authenticator := os.environ.get("SNOWFLAKE_AUTHENTICATOR"):
+            fields["authenticator"] = authenticator
+        return fields
+    return {"password": os.environ["SNOWFLAKE_PASSWORD"]}
 
 
 def _skip_reason() -> str | None:
@@ -154,6 +171,13 @@ def _skip_reason() -> str | None:
     for var in _REQUIRED_CONN_VARS:
         if not os.environ.get(var):
             return f"{var} required (Snowflake connection parameter for the live pipeline run)"
+    if not os.environ.get("SNOWFLAKE_PASSWORD") and not os.environ.get(
+        "SNOWFLAKE_PRIVATE_KEY_PATH"
+    ):
+        return (
+            "SNOWFLAKE_PASSWORD or SNOWFLAKE_PRIVATE_KEY_PATH required "
+            "(key-pair / JWT auth is the non-interactive path for MFA-enforced accounts)"
+        )
     return None
 
 
@@ -190,7 +214,6 @@ def test_e2e_signalforge_generate_against_tpch_sf1(
         "type": "snowflake",
         "account": os.environ["SNOWFLAKE_ACCOUNT"],
         "user": os.environ["SNOWFLAKE_USER"],
-        "password": os.environ["SNOWFLAKE_PASSWORD"],
         "warehouse": os.environ["SNOWFLAKE_WAREHOUSE"],
         "database": "SNOWFLAKE_SAMPLE_DATA",
         "schema": "TPCH_SF1",
@@ -198,6 +221,7 @@ def test_e2e_signalforge_generate_against_tpch_sf1(
     }
     if role := os.environ.get("SNOWFLAKE_ROLE"):
         output["role"] = role
+    output.update(_auth_profile_fields())
     profile = {"tpch": {"target": "dev", "outputs": {"dev": output}}}
     (project_dir / "profiles.yml").write_text(yaml.safe_dump(profile, sort_keys=False))
 
@@ -358,7 +382,6 @@ def test_e2e_signalforge_generate_aggregate_only_against_tpch_sf1(
         "type": "snowflake",
         "account": os.environ["SNOWFLAKE_ACCOUNT"],
         "user": os.environ["SNOWFLAKE_USER"],
-        "password": os.environ["SNOWFLAKE_PASSWORD"],
         "warehouse": os.environ["SNOWFLAKE_WAREHOUSE"],
         "database": "SNOWFLAKE_SAMPLE_DATA",
         "schema": "TPCH_SF1",
@@ -366,6 +389,7 @@ def test_e2e_signalforge_generate_aggregate_only_against_tpch_sf1(
     }
     if role := os.environ.get("SNOWFLAKE_ROLE"):
         output["role"] = role
+    output.update(_auth_profile_fields())
     profile = {"tpch": {"target": "dev", "outputs": {"dev": output}}}
     (project_dir / "profiles.yml").write_text(yaml.safe_dump(profile, sort_keys=False))
 

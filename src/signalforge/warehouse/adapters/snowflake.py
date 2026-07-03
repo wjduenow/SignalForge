@@ -291,6 +291,11 @@ class SnowflakeAdapter(WarehouseAdapter):
         # ``client=``). ``None`` triggers a lazy ``make_real_client(...)`` build
         # on first :meth:`_get_connection`; tests inject a fake.
         self._connection = connection
+        # True once we LAZILY BUILD a real connection — so cleanup may null it
+        # for a rebuild on the next ``with`` block. An INJECTED connection stays
+        # ``False`` and is never nulled (a fake is reused across blocks). See
+        # :meth:`_cleanup_active_session` (#258 — the aggregate-only double-`with`).
+        self._owns_connection = False
         self._account = account
         self._user = user
         self._password = password
@@ -360,6 +365,8 @@ class SnowflakeAdapter(WarehouseAdapter):
                 private_key_passphrase=self._private_key_passphrase,
                 authenticator=self._authenticator,
             )
+            # We built it, so we own it — cleanup may null it for a rebuild.
+            self._owns_connection = True
         if self._active_session is None:
             self._active_session = self._connection
         return self._connection
@@ -434,16 +441,23 @@ class SnowflakeAdapter(WarehouseAdapter):
                     payload["session_id_hash"] = _hash_session_id(str(raw_session_id))
                 _LOGGER.info("session closed: %s", json.dumps(payload))
         finally:
-            # Reset only the session-tracking state — NOT ``self._connection``.
             # Idempotency comes from the ``_active_session is None`` early-return
-            # above, so a second ``__exit__`` is a no-op regardless. Nulling
-            # ``self._connection`` here would be wrong: a later call would route
-            # back through ``_get_connection()``'s lazy-build branch and
-            # silently construct a *real* connection from (possibly empty)
-            # creds, discarding a test-injected fake — mirrors BigQuery's
-            # cleanup, which resets ``_active_session_id`` but never the client.
+            # above, so a second ``__exit__`` is a no-op regardless.
             self._active_session = None
             self._session_started_at = None
+            # For a connection we OWN (lazily built), null it after the close so
+            # a subsequent ``with adapter:`` on the SAME instance rebuilds a
+            # fresh connection instead of reusing the now-closed one (which
+            # raises ``250002 (08003): Connection is closed``). This is
+            # load-bearing for aggregate-only end-to-end (#258): ``generate``
+            # with ``safety: aggregate-only`` enters two ``with adapter:`` blocks
+            # on one instance — the safety-aggregate ``column_stats`` pass, then
+            # ``prune_tests``. An INJECTED connection (tests) is deliberately
+            # left intact + non-nulled so a fake is reused across blocks, never
+            # silently rebuilt from (possibly empty) creds — the #122 concern.
+            if self._owns_connection:
+                self._connection = None
+                self._owns_connection = False
 
     def dialect(self) -> Dialect:
         return SNOWFLAKE_DIALECT

@@ -738,3 +738,60 @@ def test_flush_column_stats_batch_no_op_when_no_columns_queued() -> None:
         adapter._flush_column_stats_batch(_TABLE)
 
     assert not conn.cursors
+
+
+# ---------------------------------------------------------------------------
+# Connection lifecycle across multiple `with adapter:` blocks (#258).
+# `generate` with `safety: aggregate-only` enters two `with adapter:` blocks on
+# one instance (safety-aggregate `column_stats`, then `prune_tests`); after the
+# first `__exit__` closes the session, the second must not reuse a dead one.
+# ---------------------------------------------------------------------------
+def test_owned_connection_rebuilt_after_close_across_with_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A LAZILY-BUILT (owned) connection is nulled on ``__exit__`` so a second
+    ``with adapter:`` rebuilds a fresh one instead of reusing the closed
+    connection (250002: Connection is closed). Regression for the #258
+    aggregate-only double-``with`` path."""
+    built: list[FakeSnowflakeConnection] = []
+
+    def _fake_builder(**_kwargs: object) -> FakeSnowflakeConnection:
+        conn = FakeSnowflakeConnection()
+        built.append(conn)
+        return conn
+
+    # Patch at the source module — ``_get_connection`` does a lazy
+    # ``from ..._snowflake_client import make_real_client`` at call time.
+    monkeypatch.setattr(
+        "signalforge.warehouse.adapters._snowflake_client.make_real_client",
+        _fake_builder,
+    )
+    adapter = SnowflakeAdapter(
+        account="acct", user="usr", password="pw", warehouse="wh", database="db", schema="sc"
+    )
+
+    with adapter:
+        first = adapter._get_connection()
+    # Owned → nulled after close so the next block rebuilds.
+    assert adapter._connection is None
+    assert adapter._owns_connection is False
+
+    with adapter:
+        second = adapter._get_connection()
+
+    assert len(built) == 2, "expected a fresh connection to be rebuilt, not the closed one reused"
+    assert first is not second  # the second block got a fresh connection, not the closed one
+
+
+def test_injected_connection_not_nulled_after_close() -> None:
+    """An INJECTED connection is left intact (never nulled) across ``__exit__``
+    so a fake is reused across blocks — the #122 concern the #258 owned-connection
+    rebuild deliberately preserves."""
+    conn = FakeSnowflakeConnection()
+    adapter = SnowflakeAdapter(connection=conn)
+
+    with adapter:
+        adapter._get_connection()
+
+    assert adapter._connection is conn
+    assert adapter._owns_connection is False
