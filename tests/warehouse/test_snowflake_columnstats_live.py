@@ -97,12 +97,14 @@ from signalforge.warehouse import ColumnStats, SnowflakeAdapter, TableRef
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-# Connection env vars the setup / stats / teardown adapters need for password
-# auth, plus the writable namespace the engineered table is created in.
+# Connection env vars the setup / stats / teardown adapters always need, plus
+# the writable namespace the engineered table is created in. Auth is a separate
+# axis: EITHER ``SNOWFLAKE_PASSWORD`` OR ``SNOWFLAKE_PRIVATE_KEY_PATH`` (key-pair
+# / JWT — the non-interactive path required by MFA-enforced accounts, since a
+# bare password login is rejected there).
 _REQUIRED_CONN_VARS = (
     "SNOWFLAKE_ACCOUNT",
     "SNOWFLAKE_USER",
-    "SNOWFLAKE_PASSWORD",
     "SNOWFLAKE_WAREHOUSE",
     "SNOWFLAKE_DATABASE",
     "SNOWFLAKE_SCHEMA",
@@ -144,6 +146,13 @@ def _skip_reason() -> str | None:
                 f"{var} required (Snowflake connection / writable-target parameter "
                 f"for the live column_stats e2e)"
             )
+    if not os.environ.get("SNOWFLAKE_PASSWORD") and not os.environ.get(
+        "SNOWFLAKE_PRIVATE_KEY_PATH"
+    ):
+        return (
+            "SNOWFLAKE_PASSWORD or SNOWFLAKE_PRIVATE_KEY_PATH required "
+            "(key-pair / JWT auth is the non-interactive path for MFA-enforced accounts)"
+        )
     return None
 
 
@@ -152,16 +161,21 @@ def _make_adapter() -> SnowflakeAdapter:
 
     A fresh adapter is built per use (setup / stats / teardown) so a ``with``
     block's session close does not strand another phase's cursors — each adapter
-    owns its own connection.
+    owns its own connection. Auth is key-pair (JWT) when
+    ``SNOWFLAKE_PRIVATE_KEY_PATH`` is set (with optional
+    ``SNOWFLAKE_PRIVATE_KEY_PASSPHRASE``), else password.
     """
     return SnowflakeAdapter(
         account=os.environ["SNOWFLAKE_ACCOUNT"],
         user=os.environ["SNOWFLAKE_USER"],
-        password=os.environ["SNOWFLAKE_PASSWORD"],
+        password=os.environ.get("SNOWFLAKE_PASSWORD"),
         warehouse=os.environ["SNOWFLAKE_WAREHOUSE"],
         database=os.environ["SNOWFLAKE_DATABASE"],
         schema=os.environ["SNOWFLAKE_SCHEMA"],
         role=os.environ.get("SNOWFLAKE_ROLE"),
+        private_key_path=os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH"),
+        private_key_passphrase=os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"),
+        authenticator=os.environ.get("SNOWFLAKE_AUTHENTICATOR"),
     )
 
 

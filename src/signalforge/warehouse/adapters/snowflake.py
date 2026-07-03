@@ -356,6 +356,9 @@ class SnowflakeAdapter(WarehouseAdapter):
                 warehouse=self._warehouse,
                 database=self._database,
                 schema=self._schema,
+                private_key_path=self._private_key_path,
+                private_key_passphrase=self._private_key_passphrase,
+                authenticator=self._authenticator,
             )
         if self._active_session is None:
             self._active_session = self._connection
