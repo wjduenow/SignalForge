@@ -730,7 +730,7 @@ issue #258 implemented `column_stats`, every `safety` × `scope` ×
 **maintainer-run gated live e2e** suite (opt-in — deselected from normal CI) are
 `safety: schema-only` + `prune.scope: full`, or `prune.scope: sample` with
 either `prune.sample_strategy: materialised` or `oneshot`; the `aggregate-only`
-live cert is written but pending a maintainer run (see below):
+`column_stats` path is **live-certified** too (#258, via key-pair auth — see below):
 
 - **`safety: aggregate-only` — supported as of #258.** Profiles columns via
   `adapter.column_stats`, now implemented on `SnowflakeAdapter` (parity with
@@ -748,9 +748,13 @@ live cert is written but pending a maintainer run (see below):
     on `GEOGRAPHY` / `GEOMETRY`, so a model carrying such a column cannot be
     profiled via `aggregate-only` — the aggregate fails with a typed
     `WarehouseError`. Use `safety: schema-only` for models with geospatial
-    columns. (Whether `DISTINCT` on `VARIANT` / `ARRAY` / `OBJECT` also raises is
-    to be confirmed by the maintainer-run gated live complex-type cert — written
-    in `tests/warehouse/test_snowflake_columnstats_live.py`, pending a live run.)
+    columns. `DISTINCT` on `VARIANT` / `ARRAY` / `OBJECT` does **not** raise —
+    confirmed by the gated live complex-type cert
+    (`tests/warehouse/test_snowflake_columnstats_live.py`), which profiles those
+    three types and asserts `min=max=None` without error against a real
+    warehouse (run 2026-07-03 via key-pair auth). The `GEOGRAPHY`/`GEOMETRY`
+    `COUNT(DISTINCT)` limit is by inspection of Snowflake's documented
+    restriction, not exercised by the cert (no geospatial column in the fixture).
 
 **Fixed by #140:** `prune.scope: sample` + `prune.sample_strategy: oneshot` on a
 non-BigQuery adapter no longer raises at the engine seam. The sample row-count is
