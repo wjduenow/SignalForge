@@ -68,6 +68,11 @@ class _FakeSnowflakeCursor:
     def description(self) -> list[Any] | None:
         return self._description
 
+    @property
+    def closed(self) -> bool:
+        """Whether :meth:`close` has been called (cursor-leak regression check)."""
+        return self._closed
+
     def execute(self, command: str, *args: Any, **kwargs: Any) -> _FakeSnowflakeCursor:
         rows, description = self._connection._consume_execute(command)
         self._fetch_rows = rows
@@ -103,6 +108,8 @@ class FakeSnowflakeConnection:
         self._close_raises = close_raises
         self.close_call_count = 0
         self._execute_expectations: list[_ExecuteExpectation] = []
+        # Every cursor this connection vends, for cursor-leak regression checks.
+        self.cursors: list[_FakeSnowflakeCursor] = []
 
     # ---- expectation API --------------------------------------------------
 
@@ -137,7 +144,9 @@ class FakeSnowflakeConnection:
     # ---- snowflake.connector connection surface ---------------------------
 
     def cursor(self) -> _FakeSnowflakeCursor:
-        return _FakeSnowflakeCursor(self)
+        cur = _FakeSnowflakeCursor(self)
+        self.cursors.append(cur)
+        return cur
 
     def close(self) -> None:
         self.close_call_count += 1

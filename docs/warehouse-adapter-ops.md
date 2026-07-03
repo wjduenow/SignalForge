@@ -393,7 +393,8 @@ the v0.2 stop-gap, not a permanent surface.
 > sample-mode prune now works on live Snowflake.** The `oneshot` strategy works
 > too since #140 routed its sample row-count through the vendor-neutral
 > `WarehouseAdapter.get_row_count` seam (it previously reached a BigQuery-only
-> `_get_client`); see "Known limitations on live Snowflake" below.
+> `_get_client`); see "Live Snowflake (v0.2) — all safety modes supported"
+> below.
 
 ## Query-bytes estimation (v0.2, issue #36)
 
@@ -722,17 +723,38 @@ passes through unchanged. No `BytesBilledExceededError` equivalent —
 Snowflake has no bytes-billed cap (cost is governed by warehouse size +
 auto-suspend, see below).
 
-**Known limitations on live Snowflake (v0.2) — use `safety: schema-only`.** One
-deferred path remains after #139 fixed the `HASH(*)`-in-predicate bug and #140
-added the vendor-neutral row-count seam. Both `prune.sample_strategy` values now
-work; the combinations certified green by the gated live e2e are
+**Live Snowflake (v0.2) — all safety modes supported.** After #139 fixed the
+`HASH(*)`-in-predicate bug, #140 added the vendor-neutral row-count seam, and
+issue #258 implemented `column_stats`, every `safety` × `scope` ×
+`sample_strategy` combination is functional. The combinations certified by the
+**maintainer-run gated live e2e** suite (opt-in — deselected from normal CI) are
 `safety: schema-only` + `prune.scope: full`, or `prune.scope: sample` with
-either `prune.sample_strategy: materialised` or `oneshot`:
+either `prune.sample_strategy: materialised` or `oneshot`; the `aggregate-only`
+`column_stats` path is **live-certified** too (#258, via key-pair auth — see below):
 
-- **`safety: aggregate-only` — unsupported.** Profiles columns via
-  `adapter.column_stats`, which `SnowflakeAdapter` leaves as a deferred
-  `NotImplementedError` (the one v0.2 method not yet implemented).
-  `generate` with `safety.mode: aggregate-only` fails (exit 1).
+- **`safety: aggregate-only` — supported as of #258.** Profiles columns via
+  `adapter.column_stats`, now implemented on `SnowflakeAdapter` (parity with
+  Databricks): a catalog pre-filter over `INFORMATION_SCHEMA.COLUMNS` resolves
+  each column's declared type, then a full BigQuery-style per-table batched
+  aggregate computes `count` / `distinct` / `nulls` / `min` / `max`, with
+  `MIN`/`MAX` skipped (→ `None`) for unorderable Snowflake types (`ARRAY` /
+  `OBJECT` / `VARIANT` / `GEOGRAPHY` / `GEOMETRY`). Types that are SQL-orderable
+  but whose connector return type is outside the `ColumnStats.min`/`max` union
+  (`BINARY` → `bytearray`, `TIME` → `datetime.time`) have their `min`/`max`
+  nulled on read-back rather than raising. `generate` with
+  `safety.mode: aggregate-only` now runs on Snowflake.
+  - **Known limitation (#258):** the aggregate emits `COUNT(DISTINCT <col>)` for
+    every column (mirroring the BigQuery adapter). Snowflake forbids `DISTINCT`
+    on `GEOGRAPHY` / `GEOMETRY`, so a model carrying such a column cannot be
+    profiled via `aggregate-only` — the aggregate fails with a typed
+    `WarehouseError`. Use `safety: schema-only` for models with geospatial
+    columns. `DISTINCT` on `VARIANT` / `ARRAY` / `OBJECT` does **not** raise —
+    confirmed by the gated live complex-type cert
+    (`tests/warehouse/test_snowflake_columnstats_live.py`), which profiles those
+    three types and asserts `min=max=None` without error against a real
+    warehouse (run 2026-07-03 via key-pair auth). The `GEOGRAPHY`/`GEOMETRY`
+    `COUNT(DISTINCT)` limit is by inspection of Snowflake's documented
+    restriction, not exercised by the cert (no geospatial column in the fixture).
 
 **Fixed by #140:** `prune.scope: sample` + `prune.sample_strategy: oneshot` on a
 non-BigQuery adapter no longer raises at the engine seam. The sample row-count is
@@ -933,12 +955,11 @@ supplementary-source boundary and renders `<unavailable:
 EstimateUnavailableError>`, falling back to a price-only preview.
 
 **`column_stats` is AVAILABLE for Databricks — `safety: aggregate-only`
-works.** This is a **deliberate divergence from Snowflake**, whose
-`column_stats` (and therefore `safety.mode: aggregate-only`) is **not yet
-implemented**. The Databricks adapter ships `column_stats` (issue #224,
+works.** Snowflake reached the same capability in #258, so this is no longer
+a divergence. The Databricks adapter ships `column_stats` (issue #224,
 DEC-011) as a single aggregate query — `count` / `distinct` / `nulls` /
 `min` / `max` / `data_type` (the last via `MAX(typeof(<col>))`) — over the
-fold-then-quoted column. The Snowflake-parity follow-up is tracked as issue #258.
+fold-then-quoted column. Snowflake's `column_stats` parity shipped in issue #258.
 **Complex-type `MIN`/`MAX` parity (#227 US-001):** like BigQuery, Databricks
 now skips `MIN`/`MAX` (→ `None`) for complex Spark types (`array` / `struct` /
 `map` / `binary` / `variant`), honouring the `ColumnStats` DEC-016 contract.
@@ -1020,8 +1041,8 @@ path + the `to_json(struct(*))` capture branch are live-certified (US-004,
 above). The remaining **shape-only** (not live-exercised) path is
 `column_stats` `MIN`/`MAX` on complex-typed columns — the skip-and-`None`
 post-process is unit-tested but the live pass exercised only scalar columns.
-(Snowflake `column_stats` parity is separate — issue #258, out of scope for
-epic #219.)
+(Snowflake `column_stats` parity shipped separately in issue #258 — out of
+scope for epic #219.)
 
 **Cost guidance — read before running any live Databricks test.** The live
 target is **Databricks Free Edition** (serverless-only). Its single SQL

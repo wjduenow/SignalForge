@@ -117,13 +117,13 @@ _MODEL_UNIQUE_ID = "model.signalforge_test_tpch.stg_tpch_customers"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
-# The connection env vars the Snowflake adapter needs for password auth, plus
-# the warehouse so the prune/sample queries have compute context. Mirrors
-# ``tests/warehouse/test_snowflake_estimate_live.py``.
+# The connection env vars the Snowflake adapter always needs (compute context +
+# namespace). Auth is a separate axis: EITHER ``SNOWFLAKE_PASSWORD`` OR
+# ``SNOWFLAKE_PRIVATE_KEY_PATH`` (key-pair / JWT — the non-interactive path an
+# MFA-enforced account requires). Mirrors ``test_snowflake_columnstats_live.py``.
 _REQUIRED_CONN_VARS = (
     "SNOWFLAKE_ACCOUNT",
     "SNOWFLAKE_USER",
-    "SNOWFLAKE_PASSWORD",
     "SNOWFLAKE_WAREHOUSE",
 )
 
@@ -132,6 +132,23 @@ def _snowflake_runs_enabled() -> bool:
     """``SF_RUN_SNOWFLAKE`` is set to a truthy value (the Snowflake analogue of
     the ``SF_RUN_BQ`` opt-in; accepts ``1``/``true``/``yes``/``on``)."""
     return os.environ.get("SF_RUN_SNOWFLAKE", "").lower() in _TRUTHY
+
+
+def _auth_profile_fields() -> dict[str, object]:
+    """Auth fields for the generated ``profiles.yml``: key-pair (JWT) when
+    ``SNOWFLAKE_PRIVATE_KEY_PATH`` is set (MFA-exempt — required for
+    MFA-enforced accounts, where a bare password login is rejected), else
+    password. Threads through ``load_profile`` → ``DbtProfileTarget`` (#120) →
+    ``from_profile`` → the adapter's key-pair connect path (#258)."""
+    key_path = os.environ.get("SNOWFLAKE_PRIVATE_KEY_PATH")
+    if key_path:
+        fields: dict[str, object] = {"private_key_path": key_path}
+        if passphrase := os.environ.get("SNOWFLAKE_PRIVATE_KEY_PASSPHRASE"):
+            fields["private_key_passphrase"] = passphrase
+        if authenticator := os.environ.get("SNOWFLAKE_AUTHENTICATOR"):
+            fields["authenticator"] = authenticator
+        return fields
+    return {"password": os.environ["SNOWFLAKE_PASSWORD"]}
 
 
 def _skip_reason() -> str | None:
@@ -154,6 +171,13 @@ def _skip_reason() -> str | None:
     for var in _REQUIRED_CONN_VARS:
         if not os.environ.get(var):
             return f"{var} required (Snowflake connection parameter for the live pipeline run)"
+    if not os.environ.get("SNOWFLAKE_PASSWORD") and not os.environ.get(
+        "SNOWFLAKE_PRIVATE_KEY_PATH"
+    ):
+        return (
+            "SNOWFLAKE_PASSWORD or SNOWFLAKE_PRIVATE_KEY_PATH required "
+            "(key-pair / JWT auth is the non-interactive path for MFA-enforced accounts)"
+        )
     return None
 
 
@@ -190,7 +214,6 @@ def test_e2e_signalforge_generate_against_tpch_sf1(
         "type": "snowflake",
         "account": os.environ["SNOWFLAKE_ACCOUNT"],
         "user": os.environ["SNOWFLAKE_USER"],
-        "password": os.environ["SNOWFLAKE_PASSWORD"],
         "warehouse": os.environ["SNOWFLAKE_WAREHOUSE"],
         "database": "SNOWFLAKE_SAMPLE_DATA",
         "schema": "TPCH_SF1",
@@ -198,6 +221,7 @@ def test_e2e_signalforge_generate_against_tpch_sf1(
     }
     if role := os.environ.get("SNOWFLAKE_ROLE"):
         output["role"] = role
+    output.update(_auth_profile_fields())
     profile = {"tpch": {"target": "dev", "outputs": {"dev": output}}}
     (project_dir / "profiles.yml").write_text(yaml.safe_dump(profile, sort_keys=False))
 
@@ -297,6 +321,124 @@ def test_e2e_signalforge_generate_against_tpch_sf1(
     #    ``try / except Exception`` boundary plus the ``_safe_excepthook``
     #    install must prevent any traceback from leaking even if the pipeline
     #    raised internally).
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.err, (
+        f"stderr leaked a Python traceback (DEC-016 violation):\n{captured.err}"
+    )
+
+
+@pytest.mark.snowflake
+def test_e2e_signalforge_generate_aggregate_only_against_tpch_sf1(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Run ``signalforge generate`` with ``safety.mode: aggregate-only`` against
+    TPCH_SF1 — the live cert that Snowflake ``column_stats`` (issue #258) drives
+    the aggregate-only draft path end to end.
+
+    ``aggregate-only`` invokes :meth:`SnowflakeAdapter.column_stats` for every
+    column sampled into the LLM payload — the v0.2 method the Snowflake adapter
+    left as ``NotImplementedError`` until #258 backfilled it (DEC-001). Before
+    #258 this configuration raised; this test proves the implemented
+    ``column_stats`` (BigQuery-style catalog pre-filter + batched aggregate,
+    DEC-002/DEC-006) profiles the read-only ``TPCH_SF1.CUSTOMER`` columns and
+    the pipeline completes clean.
+
+    ``prune.scope: full`` is REQUIRED for the same reasons as the schema-only
+    sibling above: the read-only ``SNOWFLAKE_SAMPLE_DATA`` share rejects the
+    ``materialised`` ``CREATE TEMPORARY TABLE`` and the ``oneshot`` row-count
+    seam is out of scope here. ``column_stats`` itself is SELECT-only (an
+    ``INFORMATION_SCHEMA.COLUMNS`` lookup + a ``COUNT``/``MIN``/``MAX``
+    aggregate) — no CTAS — so it works against the read-only share.
+
+    Same FIVE-prerequisite gating as the schema-only sibling (this is a
+    full-stack warehouse + LLM test). Skips cleanly under ``pytest -m snowflake``
+    when any prerequisite is missing; the maintainer runs it once before merge.
+
+    Asserts the three invariants the plan (#258 US-004) pins for the
+    aggregate-only smoke:
+
+    1. ``signalforge.cli.main(...)`` returns ``0`` (the full draft → prune →
+       grade → diff pipeline completed with ``column_stats`` in the loop).
+    2. ``<project_dir>/.signalforge/diff.json`` exists (a diff sidecar was
+       written).
+    3. ``"Traceback" not in stderr`` (DEC-016 of ``cli-layer.md`` — no traceback
+       ever leaks).
+
+    Traces to: #258 US-004 (aggregate-only ``generate`` smoke), DEC-008.
+    """
+    if reason := _skip_reason():
+        pytest.skip(reason)
+
+    # Copy the read-only seed to ``tmp_path`` so the audit JSONLs + diff sidecar
+    # land in the per-run temp dir, not the committed fixture (DEC-008 of #10).
+    project_dir = copy_fixture_to_tmp(_FIXTURE_DIR, tmp_path)
+
+    # Rewrite the per-run profile from env vars (same shape as the schema-only
+    # sibling — a structured mapping via ``yaml.safe_dump``, never raw-string
+    # interpolation of credentials). ``database`` / ``schema`` point at the
+    # read-only shared sample database; ``column_stats`` is SELECT-only so the
+    # read-only share is fine.
+    output: dict[str, object] = {
+        "type": "snowflake",
+        "account": os.environ["SNOWFLAKE_ACCOUNT"],
+        "user": os.environ["SNOWFLAKE_USER"],
+        "warehouse": os.environ["SNOWFLAKE_WAREHOUSE"],
+        "database": "SNOWFLAKE_SAMPLE_DATA",
+        "schema": "TPCH_SF1",
+        "threads": 1,
+    }
+    if role := os.environ.get("SNOWFLAKE_ROLE"):
+        output["role"] = role
+    output.update(_auth_profile_fields())
+    profile = {"tpch": {"target": "dev", "outputs": {"dev": output}}}
+    (project_dir / "profiles.yml").write_text(yaml.safe_dump(profile, sort_keys=False))
+
+    # The seed ships no ``signalforge.yml``; write one pinning
+    # ``safety.mode: aggregate-only`` (the #258 path under test) +
+    # ``prune.scope: full`` (both sample strategies are non-functional against
+    # the read-only share — see the schema-only sibling's rationale).
+    # ``column_stats`` runs a SELECT-only catalog lookup + aggregate, so it works
+    # against read-only TPCH. ``total_budget_seconds`` is bumped above the 300s
+    # default so the sequential grade calls fit at p99 LLM latency.
+    (project_dir / "signalforge.yml").write_text(
+        textwrap.dedent(
+            """\
+            # Snowflake aggregate-only live e2e config (issue #258, US-004).
+            # ``safety.mode: aggregate-only`` invokes the #258 column_stats impl;
+            # ``prune.scope: full`` is load-bearing (sample-mode prune is not
+            # functional against the read-only SNOWFLAKE_SAMPLE_DATA share).
+            llm:
+              model: claude-sonnet-4-6
+            safety:
+              mode: aggregate-only
+            prune:
+              scope: full
+            grade:
+              total_budget_seconds: 600
+            """
+        )
+    )
+
+    exit_code = main(
+        [
+            "generate",
+            _MODEL_UNIQUE_ID,
+            "--project-dir",
+            str(project_dir),
+        ]
+    )
+
+    # 1. Exit code 0 — the full pipeline completed with column_stats
+    #    (aggregate-only) in the loop, without a typed-error escape.
+    assert exit_code == 0, f"expected clean exit; got exit_code={exit_code}"
+
+    # 2. Diff sidecar landed at the default path — proves the pipeline ran all
+    #    the way through diff after the aggregate-only draft.
+    sidecar = project_dir / ".signalforge" / "diff.json"
+    assert sidecar.is_file(), f"diff sidecar missing at {sidecar}"
+
+    # 3. No traceback in stderr (DEC-016 of cli-layer.md — no traceback ever
+    #    leaks even if the pipeline raised internally).
     captured = capsys.readouterr()
     assert "Traceback" not in captured.err, (
         f"stderr leaked a Python traceback (DEC-016 violation):\n{captured.err}"
