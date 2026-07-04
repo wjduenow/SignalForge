@@ -5,8 +5,10 @@
 - **Ticket:** #154 — Scope: dbt-expectations prune+grade adapter via manifest compiled_code
 - **Branch:** `feature/154-dbt-expectations-prune`
 - **Worktree:** in-place (main checkout, `feature/154-dbt-expectations-prune`)
-- **Phase:** detailing
+- **Phase:** published (draft PR #266, base `dev`)
 - **Sessions:** 1 (2026-07-03)
+- **Follow-up issues (deferred):** #267 (aggregate/scalar macros — source-table routing),
+  #268 (`scope=sample` via sqlglot AST relation-rewriting)
 - **Structural precedent:** #116 (custom_sql, the 5th test type) — single plan, devolved to beads. NOT the Airflow epic #228.
 
 ## Summary
@@ -259,8 +261,8 @@ is buildable.
   skip-recorded. **This is a correctness gate, not an optimization** — wrapping a scalar
   in `SELECT COUNT(*) AS failures FROM (<sql>) AS t` yields `failures=1` always → silent
   wrong `kept` verdicts (the `row_count_between` bug). Aggregate support (source-table
-  routing, the Direction-2 precedent) is an explicit follow-up. *(Scoping answer #3 + AR
-  row 10.)*
+  routing, the Direction-2 precedent) is an explicit follow-up — **filed as #267**.
+  *(Scoping answer #3 + AR row 10.)*
 
 - **DEC-005 — Opt-in `--from-manifest` flag on `prune-existing`.** Existing behavior
   byte-unchanged; operators opt in explicitly. 5-surface parity + SKILL.md (6th).
@@ -279,8 +281,8 @@ is buildable.
   silently degrades ingested tests to `kept-without-evidence`. Pass 1 evaluates ingested
   candidates at full scope regardless of `--scope`, emitting one INFO if `--scope=sample`
   was requested. `maximum_bytes_billed` still caps cost; the operator opted in via
-  `--from-manifest`. sqlglot AST relation-rewriting for true sampling is a follow-up.
-  *(User-confirmed; AR row 8.)*
+  `--from-manifest`. sqlglot AST relation-rewriting for true sampling is a follow-up —
+  **filed as #268**. *(User-confirmed; AR row 8.)*
 
 - **DEC-008 — Manifest test-node read surface: new `GenericTest` + `Manifest.tests`.**
   A frozen `GenericTest` read-back model (`extra="ignore"`, `populate_by_name=True`)
