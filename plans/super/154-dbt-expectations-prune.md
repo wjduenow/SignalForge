@@ -5,7 +5,7 @@
 - **Ticket:** #154 — Scope: dbt-expectations prune+grade adapter via manifest compiled_code
 - **Branch:** `feature/154-dbt-expectations-prune`
 - **Worktree:** in-place (main checkout, `feature/154-dbt-expectations-prune`)
-- **Phase:** published (draft PR #266, base `dev`)
+- **Phase:** devolved (draft PR #266, base `dev`; epic `bd_1-scaffolding-ajm`)
 - **Sessions:** 1 (2026-07-03)
 - **Follow-up issues (deferred):** #267 (aggregate/scalar macros — source-table routing),
   #268 (`scope=sample` via sqlglot AST relation-rewriting)
@@ -576,5 +576,23 @@ Ralph-sized (one context window). Validation command:
 
 ## Beads Manifest
 
-*(filled on devolve)*
+- **Epic:** `bd_1-scaffolding-ajm` — #154: dbt-expectations prune+grade adapter via manifest compiled_code
+- **Worktree:** in-place (`feature/154-dbt-expectations-prune`)
+- **Tasks (10):**
+
+| Bead | Story | Depends on |
+|---|---|---|
+| `bd_1-scaffolding-ajm.1` | US-001 Manifest `GenericTest` + `Manifest.tests` | — (ready) |
+| `bd_1-scaffolding-ajm.2` | US-002 sqlglot-AST helpers | — (ready) |
+| `bd_1-scaffolding-ajm.3` | US-003 Ingest bridge | .1, .2 |
+| `bd_1-scaffolding-ajm.4` | US-004 Prune wiring (full-scope) | .2, .3 |
+| `bd_1-scaffolding-ajm.5` | US-005 Diff macro-`why` | .3 |
+| `bd_1-scaffolding-ajm.6` | US-006 Compiled fixture + regen | — (ready) |
+| `bd_1-scaffolding-ajm.7` | US-007 CLI `--from-manifest` + `--grade` | .3, .4, .5 |
+| `bd_1-scaffolding-ajm.8` | US-008 Docs + worked example | .7 |
+| `bd_1-scaffolding-ajm.9` | US-009 Quality Gate | .1–.8 |
+| `bd_1-scaffolding-ajm.10` | US-010 Patterns & Memory | .9 |
+
+- **Ready at devolve:** `.1`, `.2`, `.6` (no blockers).
+- **Follow-up (deferred, separate issues):** #267 (aggregate macros), #268 (`scope=sample` AST rewrite).
 
