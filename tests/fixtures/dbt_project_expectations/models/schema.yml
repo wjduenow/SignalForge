@@ -1,0 +1,39 @@
+version: 2
+
+# dbt-expectations tests exercising all #154 manifest-compiled-SQL prune
+# outcomes. Determinism is engineered through the MACRO ARGS (dbt compiles them
+# statically), NOT through what the LLM drafts — mirroring the
+# tests/cli/test_e2e_row_count_between.py precedent.
+models:
+  - name: orders
+    description: "Synthetic orders fact (fixture only)."
+    columns:
+      - name: order_id
+        description: "Surrogate key — never null."
+        data_tests:
+          # ALWAYS-PASSES drop: natural NOT NULL column, zero failing rows.
+          - dbt_expectations.expect_column_values_to_not_be_null
+      - name: amount
+        description: "Order amount (100.00 / 200.00 in the two fixture rows)."
+        data_tests:
+          # KEPT (real signal): impossible bounds — every row is outside
+          # [1000, 2000], so the compiled test returns failing rows.
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1000
+              max_value: 2000
+          # ALWAYS-PASSES drop: vacuous bounds — every row is inside [0, 1e6].
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0
+              max_value: 1000000
+    data_tests:
+      # SKIP-recorded (aggregate / COUNT(*) shape): a scalar row-count body is
+      # semantically wrong to wrap in SELECT COUNT(*) ... AS failures.
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 1
+          max_value: 100
+      # SKIP-recorded (non-deterministic): compiled SQL references now() /
+      # current time, so it can't produce a reproducible prune decision.
+      - dbt_expectations.expect_row_values_to_have_recent_data:
+          column_name: ordered_at
+          datepart: day
+          interval: 1

@@ -32,6 +32,15 @@ tests/fixtures/
 │       └── manifest_v12.json  # dbt-core 1.8.x
 ├── dbt_project_medium/        # synthesised 55-model project (50 staging + 5 marts)
 │   └── target/manifest_v12.json
+├── dbt_project_expectations/  # #154: dbt-expectations tests, `dbt compile`d
+│   ├── dbt_project.yml        #   (test nodes carry populated `compiled_code`)
+│   ├── profiles.yml           # DuckDB — no warehouse needed (committed)
+│   ├── packages.yml           # dbt-expectations 0.10.4 (+ dbt_date transitive)
+│   ├── package-lock.yml       # committed for a reproducible `dbt deps` resolve
+│   ├── models/
+│   │   ├── orders.sql             # 2-row literal SELECT (amount 100/200)
+│   │   └── schema.yml             # 5 dbt-expectations tests (4 macros)
+│   └── target/manifest.json   # `dbt compile` output — 5 `test` nodes w/ SQL
 ├── error_paths/               # hand-derived JSON for negative tests
 │   ├── malformed.json             # truncated mid-structure
 │   ├── missing_version_url.json   # metadata.dbt_schema_version absent
@@ -104,6 +113,48 @@ jq '.metadata.generated_at = null
 rm -f target/manifest.json target/partial_parse.msgpack target/perf_info.json \
       target/semantic_manifest.json
 ```
+
+### dbt-expectations compiled fixture: `dbt_project_expectations/`
+
+The fixture under `dbt_project_expectations/` is the #154 seed: a manifest whose
+`resource_type == "test"` nodes carry **populated `compiled_code`**. Every other
+committed manifest is `dbt parse` output, where `compiled_code` is `null` and
+there are zero test nodes; #154 reads the Jinja-resolved SQL off test nodes, so
+it needs a `dbt compile` (not `dbt parse`) manifest.
+
+It is produced by the last block of `tests/fixtures/regenerate.sh` (run the whole
+script, or lift just that block):
+
+```bash
+cd tests/fixtures/dbt_project_expectations
+DBT_PROFILES_DIR="$PWD" uvx --python 3.11 \
+  --from "dbt-duckdb==1.8.*" --with "dbt-core==1.8.*" dbt deps       # network
+DBT_PROFILES_DIR="$PWD" uvx --python 3.11 \
+  --from "dbt-duckdb==1.8.*" --with "dbt-core==1.8.*" dbt compile
+# scrub metadata + null every per-node created_at (see regenerate.sh)
+```
+
+Notes:
+
+* **dbt-expectations 0.10.4** is the newest release compatible with dbt-core
+  1.8.x; it pulls `dbt_date` transitively. `package-lock.yml` is committed for a
+  reproducible resolve. `dbt deps` needs network access at regen time; the
+  committed `target/manifest.json` is what CI and the loads test consume.
+* The `dbt_date:time_zone` var (set to `UTC` in `dbt_project.yml`) is required
+  for the `expect_row_values_to_have_recent_data` macro to compile.
+* The scrub is broader than the parse fixtures': it also nulls every per-node
+  `created_at` epoch that `dbt compile` stamps, so the committed JSON diffs
+  cleanly across regens (verified: two independent compiles produce
+  byte-identical scrubbed output).
+* The five tests engineer the four #154 prune outcomes through the macro args
+  (dbt resolves them statically): impossible-bounds `expect_column_values_to_be_between`
+  → KEPT; vacuous-bounds `expect_column_values_to_be_between` +
+  `expect_column_values_to_not_be_null` on the natural-NOT-NULL `order_id` →
+  ALWAYS-PASSES; `expect_table_row_count_to_be_between` → aggregate SKIP;
+  `expect_row_values_to_have_recent_data` → non-deterministic SKIP.
+* `tests/manifest/test_expectations_fixture_loads.py` is the always-on,
+  network-free guard that the committed manifest loads via
+  `signalforge.manifest.load` and keeps its five compiled test nodes.
 
 ### Error-path JSON
 
