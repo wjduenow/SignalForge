@@ -26,6 +26,12 @@ Public API surface:
   tests (``tests/*.sql``) for one model into model-level
   :class:`~signalforge.draft.CandidateTestCustomSQL` records, so
   ``prune-existing`` can later prune them (DEC-013).
+* :func:`read_manifest_tests` (#154 US-003) — bridge a model's dbt-compiled
+  manifest test nodes (``resource_type == "test"``, already-Jinja-resolved
+  ``compiled_code``) into model-level
+  :class:`~signalforge.draft.CandidateTestCustomSQL` records so any
+  generator's tests (dbt-expectations / dbt-utils / in-house macros) prune
+  through the ``custom_sql`` pipeline.
 * :class:`IngestResult` / :class:`SkippedTest` / :data:`SkipReason`
   (US-002) — the reader's return shapes.
 * The :class:`IngestError` hierarchy (US-001): :class:`IngestError`,
@@ -47,7 +53,7 @@ from signalforge.ingest.errors import (
     IngestSchemaTooLargeError,
 )
 from signalforge.ingest.models import IngestResult, SkippedTest, SkipReason
-from signalforge.ingest.reader import read_schema, read_test_files
+from signalforge.ingest.reader import read_manifest_tests, read_schema, read_test_files
 
 __all__ = [
     # Errors (6)
@@ -64,4 +70,5 @@ __all__ = [
     # Reader orchestrators — the public entry points
     "read_schema",  # schema.yml (US-005)
     "read_test_files",  # tests/*.sql singular tests (US-013)
+    "read_manifest_tests",  # manifest compiled_code test nodes (#154 US-003)
 ]

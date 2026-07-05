@@ -37,6 +37,7 @@ the consuming prune / grade stages.
 
 from __future__ import annotations
 
+import re
 from hashlib import blake2b
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,11 @@ from signalforge.draft.models import (
     CandidateTest,
     CandidateTestCustomSQL,
 )
+from signalforge.ingest._compiled_sql import (
+    is_deterministic_sql,
+    is_row_returning,
+    validate_ingested_sql,
+)
 from signalforge.ingest.anchor import validate_anchor_contract
 from signalforge.ingest.errors import (
     IngestModelNotFoundError,
@@ -59,7 +65,7 @@ from signalforge.ingest.errors import (
 )
 from signalforge.ingest.models import IngestResult, SkippedTest
 from signalforge.ingest.parser import classify_singular_test, parse_test_entry
-from signalforge.manifest import Manifest, Model
+from signalforge.manifest import GenericTest, Manifest, Model, associate_test_model
 
 # DEC-005: size cap on the raw byte length checked BEFORE ``yaml.safe_load``
 # so the parser never sees a billion-laughs / deeply-nested-anchor payload.
@@ -456,4 +462,281 @@ def _read_sql_file(sql_path: Path) -> str:
         ) from exc
 
 
-__all__ = ("read_schema", "read_test_files")
+# ---------------------------------------------------------------------------
+# Manifest-test bridge: dbt-compiled test node -> CandidateTestCustomSQL (US-003)
+# ---------------------------------------------------------------------------
+#
+# DEC-001 — a dbt-compiled test node's already-Jinja-resolved ``compiled_code``
+# flows through the existing ``custom_sql`` prune pipeline as a model-level
+# ``CandidateTestCustomSQL(column=None)``. No 7th ``CandidateTest`` variant.
+#
+# DEC-011 — the ``<ARTIFACT>`` fence the grade layer wraps artifact text in is
+# broken by a literal ``</ARTIFACT>`` in the payload, which fails the WHOLE
+# grade run closed. A hostile macro arg (a regex / value-list containing that
+# tag) must NOT be able to do that, so the synthesized rationale is scrubbed of
+# the close tag — the literal form AND the whitespace-split ``</  ARTIFACT>``
+# variant — at construction time, before it becomes the frozen candidate's
+# ``rationale``.
+_ENVELOPE_CLOSE_RE = re.compile(r"</\s*ARTIFACT>")
+
+# DEC-010 — the ingest-layer surface for the "not a silent skip" AC. Each
+# no-``compiled_code`` test node is skip-recorded with this per-node detail
+# naming ``dbt compile``; when EVERY associated node lacks ``compiled_code`` a
+# single summary ``SkippedTest`` (see :func:`_all_missing_summary`) is prepended
+# so the operator gets one prominent "run ``dbt compile``" pointer rather than
+# only N per-node lines. Mirrors the catalog.json / ``data_type`` guidance
+# (#159): the manifest READER tolerates null ``compiled_code`` silently
+# (stage-0), and the surfacing is this bridge's concern.
+_MISSING_COMPILED_CODE_DETAIL = (
+    "no compiled_code on the manifest test node — dbt parse does not populate it. "
+    "Run `dbt compile` (or `dbt build` / `dbt docs generate`) and commit "
+    "target/manifest.json so SignalForge can prune this test."
+)
+_ALL_MISSING_SUMMARY_TEST_NAME = "(manifest tests)"
+_ALL_MISSING_SUMMARY_DETAIL = (
+    "None of this model's manifest test nodes carry compiled_code — nothing "
+    "could be pruned. dbt parse does not populate compiled_code; run "
+    "`dbt compile` (or `dbt build` / `dbt docs generate`) and commit "
+    "target/manifest.json, then re-run."
+)
+
+# DEC-004 (#267) / DEC-012 — the two structural skip causes, both routed to
+# ``malformed-supported-test`` (structurally unusable for the prune COUNT-wrap
+# or an irreproducible verdict). No-compiled_code routes to
+# ``custom-or-generic-test`` (a namespaced test with no body to evaluate).
+_AGGREGATE_SKIP_DETAIL = (
+    "aggregate/scalar-shaped compiled body (single-row): wrapping it in "
+    "SELECT COUNT(*) AS failures FROM (<sql>) would always report 1 failure, a "
+    "silent wrong verdict. Aggregate-macro support is tracked as a follow-up "
+    "(#267)."
+)
+_NONDETERMINISTIC_SKIP_DETAIL = (
+    "non-deterministic compiled body (TABLESAMPLE / RAND / CURRENT_TIMESTAMP / "
+    "NOW / UUID / …): the prune verdict would not be reproducible, violating "
+    "explainable-diffs."
+)
+
+
+def read_manifest_tests(
+    manifest: Manifest,
+    model: Model,
+    *,
+    project_dir: Path | None = None,
+) -> IngestResult:
+    """Bridge dbt-compiled manifest test nodes for ``model`` into an ``IngestResult``.
+
+    Walks :attr:`~signalforge.manifest.Manifest.tests` (the
+    ``resource_type == "test"`` nodes), selects the ones associated to ``model``
+    via :func:`signalforge.manifest.associate_test_model`, and for each one that
+    is **row-returning AND deterministic AND carries ``compiled_code``** builds a
+    model-level :class:`~signalforge.draft.CandidateTestCustomSQL` whose ``sql``
+    is the node's already-Jinja-resolved ``compiled_code`` and whose
+    ``rationale`` names the source macro + args (DEC-001, DEC-011).
+
+    Nodes that cannot be pruned are **skip-recorded, never silently dropped**
+    (DEC-010) into :attr:`IngestResult.skipped`, each with an actionable
+    ``detail``, using the closed 3-value :data:`~signalforge.ingest.SkipReason`
+    (never grown — DEC-014):
+
+    * absent / null ``compiled_code`` → ``custom-or-generic-test`` (a namespaced
+      test with no body to evaluate; ``detail`` names ``dbt compile``).
+    * NOT row-returning (aggregate/scalar-shaped) → ``malformed-supported-test``
+      (the ``COUNT`` wrap would report ``failures=1`` always; #154 DEC-004,
+      aggregate support deferred to #267).
+    * NOT deterministic (TABLESAMPLE / RAND / NOW / …) → ``malformed-supported-test``
+      (the verdict would be irreproducible; DEC-012).
+    * ``compiled_code`` that fails the comment-tolerant safety scan
+      (:func:`~signalforge.ingest._compiled_sql.validate_ingested_sql`) →
+      ``malformed-supported-test``.
+
+    When EVERY associated node lacks ``compiled_code`` a single summary
+    :class:`SkippedTest` is prepended (DEC-010) so the operator gets one
+    prominent "run ``dbt compile``" pointer. This is a **soft** surface — never
+    a hard abort.
+
+    Macro identity (DEC-015): the synthesized ``rationale`` begins with the
+    source macro label (``dbt-expectations expect_column_values_to_be_between(…)``),
+    so it flows through the diff ``why`` cascade unchanged (rationale → evidence
+    → fallback) and the operator sees which manifest test to remove. The macro
+    identity therefore rides on the candidate's ``rationale``; no new field is
+    needed on :class:`CandidateTestCustomSQL`.
+
+    Stage-0 reader: no logging, no warehouse / LLM calls, no SQL building — the
+    raw ``compiled_code`` string is carried verbatim; identifier / SQL safety is
+    (re-)validated in the prune compiler (#154 US-004).
+
+    Args:
+        manifest: The loaded manifest whose ``tests`` are walked.
+        model: The manifest model whose associated tests are ingested;
+            ``model.unique_id`` selects associated nodes.
+        project_dir: Accepted for adjacent-stage signature parity
+            (``read_schema`` / ``prune_tests`` / ``grade_artifacts``); this
+            bridge does no path I/O, so it is unused.
+
+    Returns:
+        An :class:`IngestResult` whose ``candidate`` is a model-level-only
+        :class:`CandidateSchema` (no columns) holding the ingested
+        ``custom_sql`` tests, plus the ``skipped`` records in
+        ``unique_id``-sorted encounter order.
+    """
+    del project_dir  # no path I/O in this bridge — accepted for API parity only.
+
+    associated: list[GenericTest] = [
+        test
+        for _, test in sorted(manifest.tests.items())
+        if associate_test_model(test) == model.unique_id
+    ]
+
+    tests: list[CandidateTest] = []
+    skipped: list[SkippedTest] = []
+    for test in associated:
+        outcome = _classify_manifest_test(test)
+        if isinstance(outcome, SkippedTest):
+            skipped.append(outcome)
+        else:
+            tests.append(outcome)
+
+    # DEC-010 — all-missing summary: at least one associated node, and every one
+    # lacks compiled_code. Prepend one prominent remediation pointer.
+    if associated and all(not _has_compiled_code(t) for t in associated):
+        skipped.insert(
+            0,
+            SkippedTest(
+                test_name=_ALL_MISSING_SUMMARY_TEST_NAME,
+                column=None,
+                reason="custom-or-generic-test",
+                detail=_ALL_MISSING_SUMMARY_DETAIL,
+            ),
+        )
+
+    candidate = CandidateSchema(
+        name=model.name,
+        description="",
+        columns=(),
+        tests=tuple(tests),
+    )
+    return IngestResult(candidate=candidate, skipped=tuple(skipped))
+
+
+def _has_compiled_code(test: GenericTest) -> bool:
+    """Return ``True`` iff ``test.compiled_code`` is present and non-blank."""
+    return test.compiled_code is not None and test.compiled_code.strip() != ""
+
+
+def _classify_manifest_test(test: GenericTest) -> CandidateTestCustomSQL | SkippedTest:
+    """Route one associated manifest test node to a candidate or a skip record.
+
+    The gate order is deliberate (cheapest / most-specific first): presence →
+    row-returning → deterministic → comment-tolerant safety scan. The first
+    failing gate wins; only a body that clears every gate becomes a
+    :class:`CandidateTestCustomSQL`.
+    """
+    label = _macro_label(test)
+    cc = test.compiled_code
+    if cc is None or not cc.strip():
+        return SkippedTest(
+            test_name=label,
+            column=test.column_name,
+            reason="custom-or-generic-test",
+            detail=_MISSING_COMPILED_CODE_DETAIL,
+        )
+    if not is_row_returning(cc):
+        return SkippedTest(
+            test_name=label,
+            column=test.column_name,
+            reason="malformed-supported-test",
+            detail=_AGGREGATE_SKIP_DETAIL,
+        )
+    if not is_deterministic_sql(cc):
+        return SkippedTest(
+            test_name=label,
+            column=test.column_name,
+            reason="malformed-supported-test",
+            detail=_NONDETERMINISTIC_SKIP_DETAIL,
+        )
+    try:
+        validate_ingested_sql(cc)
+    except Exception as exc:  # noqa: BLE001 — QuerySyntaxError (warehouse layer).
+        # Lazy import of the specific type keeps the cross-layer coupling out of
+        # module scope (mirrors _compiled_sql's posture); re-raise anything that
+        # is NOT the expected safety rejection.
+        from signalforge.warehouse.errors import QuerySyntaxError
+
+        if not isinstance(exc, QuerySyntaxError):
+            raise
+        return SkippedTest(
+            test_name=label,
+            column=test.column_name,
+            reason="malformed-supported-test",
+            detail=f"compiled_code failed the ingested-SQL safety scan: {exc}",
+        )
+
+    return CandidateTestCustomSQL(
+        sql=cc,
+        column=None,  # DEC-001 — model-level; the compiled body is self-contained.
+        rationale=_synthesize_rationale(test),
+    )
+
+
+def _macro_label(test: GenericTest) -> str:
+    """Human-facing label for a skip record's ``test_name``.
+
+    Prefers the generic test's macro name (``test_metadata.name``); falls back
+    to the node ``unique_id`` for a singular test (no ``test_metadata``).
+    """
+    if test.test_metadata is not None:
+        return test.test_metadata.name
+    return test.unique_id
+
+
+def _synthesize_rationale(test: GenericTest) -> str:
+    """Build the envelope-safe synthesized rationale (DEC-011, DEC-015).
+
+    Shape: ``<namespace-label> <macro>(<args>)`` — e.g.
+    ``dbt-expectations expect_column_values_to_be_between(column=amount,
+    min_value=1000, max_value=2000)``. A built-in test (no namespace) drops the
+    label prefix; a singular test (no ``test_metadata``) falls back to the node
+    ``unique_id``. The whole string is scrubbed of the ``</ARTIFACT>`` close tag
+    (literal + whitespace-split) so a hostile macro arg cannot fail-close the
+    grade run.
+    """
+    tm = test.test_metadata
+    if tm is None:
+        return _sanitize_envelope(test.unique_id)
+    prefix = f"{tm.namespace.replace('_', '-')} {tm.name}" if tm.namespace else tm.name
+    args = _format_kwargs(tm.kwargs, column_name=test.column_name)
+    return _sanitize_envelope(f"{prefix}({args})")
+
+
+def _format_kwargs(kwargs: dict[str, Any], *, column_name: str | None) -> str:
+    """Render a generic test's rendered macro kwargs into an arg summary.
+
+    ``column_name`` is surfaced first as ``column=<value>`` (from the kwargs
+    ``column_name`` if present, else the node's ``column_name``); the dbt-internal
+    ``model`` kwarg (a ``{{ get_where_subquery(ref(...)) }}`` Jinja string) is
+    dropped; every other kwarg renders ``key=value`` in kwargs-declaration order.
+    """
+    parts: list[str] = []
+    kw_col = kwargs.get("column_name")
+    col_value = kw_col if isinstance(kw_col, str) and kw_col else column_name
+    if col_value:
+        parts.append(f"column={col_value}")
+    for key, value in kwargs.items():
+        if key in ("model", "column_name"):
+            continue
+        parts.append(f"{key}={value}")
+    return ", ".join(parts)
+
+
+def _sanitize_envelope(text: str) -> str:
+    """Strip the ``</ARTIFACT>`` grade-envelope close tag from ``text`` (DEC-011).
+
+    Removes both the literal ``</ARTIFACT>`` and the whitespace-split
+    ``</  ARTIFACT>`` variant so the synthesized rationale can never reconstruct
+    the fence-terminating tag when it is later wrapped in ``<ARTIFACT>...`` by
+    the grade layer. The open tag alone is harmless data and is left untouched.
+    """
+    return _ENVELOPE_CLOSE_RE.sub("", text)
+
+
+__all__ = ("read_manifest_tests", "read_schema", "read_test_files")
