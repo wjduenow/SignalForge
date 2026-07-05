@@ -216,6 +216,69 @@ has more ways to be unevaluable (unsupported Jinja, unbuilt refs) than a
 generic schema test. That is the conservative-bias contract working as
 designed — an unevaluable business rule is shipped, never silently lost.
 
+### `custom_sql`: manifest-ingested and drafted
+
+`custom_sql` candidates reach the prune engine from **two** sources, and a
+boolean on the candidate — `from_manifest` — distinguishes them:
+
+- **Drafted** (`from_manifest=False`) — the LLM's business-rule SQL, or a
+  hand-authored `tests/*.sql` singular test. Its `{{ this }}` resolves to the
+  model's own relation, so it obeys the single-table-vs-multi-table sampling
+  above byte-for-byte.
+- **Manifest-ingested** (`from_manifest=True`) — a dbt-compiled generic test
+  node's `compiled_code`, brought in by
+  [`read_manifest_tests`](ingest-ops.md#recognition-of-dbt-compiled-manifest-tests)
+  via `signalforge prune-existing --from-manifest` (issue #154). The
+  already-Jinja-resolved body flows through the **same** `custom_sql` prune
+  pipeline — `resolve → safety-check → wrap → conservative-bias routing` — and
+  routes to the same five `DropReason` literals. No new drop reason; no 7th
+  test variant.
+
+Two routing details are specific to the manifest-ingested path:
+
+**Full-scope, always (DEC-007).** A manifest-ingested body is evaluated
+against the **source production table at `scope="full"`**, regardless of the
+configured or `--scope`-requested scope. dbt renders the relation with its
+*own* quoting (e.g. `` `proj`.`ds`.`tbl` `` on BigQuery — three backtick
+pairs), which matches neither substitution token the `{{ this }}`
+sample-CTE rewrite looks for. Under `scope="sample"` the substitution would
+silently no-op and every ingested test would degrade to
+`kept-without-evidence`, so the engine bypasses sampling for these candidates
+and runs them full-scope against the source instead. If you requested
+`--scope=sample`, the engine emits **one INFO line** naming the model +
+ingested-test count and proceeds full-scope; `maximum_bytes_billed` still
+caps cost (you opted in via `--from-manifest`). This is the same
+metadata/aggregate source-table routing `row_count_between` /
+`unique_combination` / `row_count_anomaly_by_period` use, centralised in the
+`_test_requires_source_table` helper — a *drafted* `custom_sql` is **not**
+bypassed. sqlglot-AST relation-rewriting for true sampling of ingested tests
+is a tracked follow-up (#268).
+
+**Comment-tolerant validation.** dbt's `compiled_code` routinely carries `--`
+line comments and `/* */` block comments. The `#116` `validate_test_sql` used
+for drafted `custom_sql` rejects both wholesale — which would mass-degrade
+real ingested bodies to `kept-without-evidence`. The ingested path instead
+uses the comment-tolerant `validate_ingested_sql`: it strips comments first
+(string-literal-aware, so a `--` inside a quoted string is preserved), then
+runs the same top-level-`;` and unbalanced-parentheses injection scan. A
+genuine injection signal still fails loud → `kept-without-evidence`; a
+comment-bearing but otherwise-clean body passes. The determinism check that
+already ran at ingest is kept as a belt-and-braces `kept-without-evidence`
+fallback in the compiler (the total-compilation choke point).
+
+**KEY FINDING — dbt-expectations bodies are row-returning, so they prune.**
+`dbt-expectations` compiles *every* macro — including
+`expect_table_row_count_to_be_between` — into a row-returning
+`validation_errors` shell whose `count(*)` sits inside a nested CTE, so the
+`COUNT(*)`-wrap the prune engine applies is semantically correct
+(`failures=1` ⇒ out of bounds). The aggregate-SKIP disposition — which the
+ingest bridge applies to a scalar/aggregate body to avoid the
+always-`failures=1` wrong-verdict trap — fires only on a **BARE
+`SELECT COUNT(*) …` body** (the shape `dbt-utils` / in-house generic tests can
+emit), never on a `dbt-expectations` macro. See
+[`docs/ingest-ops.md` § KEY FINDING](ingest-ops.md#key-finding-dbt-expectations-bodies-are-almost-all-prunable)
+for the full walk-through.
+
 ## Row-count cost model
 
 The sixth test variant, `row_count_between` (issue #169; see
