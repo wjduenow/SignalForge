@@ -1,0 +1,20 @@
+name: signalforge_test_expectations
+version: 1.0.0
+config-version: 2
+
+profile: signalforge_test_expectations
+
+model-paths: ["models"]
+target-path: target
+clean-targets:
+  - target
+  - dbt_packages
+
+# dbt-expectations depends on dbt_date, whose recent-data / now() macros need
+# a time zone var to compile. Fixed at UTC so `dbt compile` is deterministic.
+vars:
+  'dbt_date:time_zone': 'UTC'
+
+models:
+  signalforge_test_expectations:
+    +materialized: table
