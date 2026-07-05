@@ -125,6 +125,68 @@ class DependsOn(BaseModel):
     macros: list[str] = Field(default_factory=list)
 
 
+class TestMetadata(BaseModel):
+    """The ``test_metadata`` block on a generic (schema) test node (DEC-008 of #154).
+
+    dbt records the macro identity of a generic test here:
+
+    * ``name`` — the test macro name (e.g. ``not_null``,
+      ``expect_column_values_to_be_between``).
+    * ``namespace`` — the package the macro comes from (``dbt_expectations``,
+      ``dbt_utils``), or ``None`` for a built-in / bare test.
+    * ``kwargs`` — the rendered macro arguments (``column_name``, ``model``,
+      ``min_value``, ``max_value``, …).
+
+    Singular tests (``tests/*.sql``) carry no ``test_metadata``; the parent
+    :class:`GenericTest` types the field ``| None`` so those still round-trip.
+    """
+
+    model_config = _BASE_MODEL_CONFIG
+
+    name: str
+    namespace: str | None = None
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+
+
+class GenericTest(BaseModel):
+    """A ``resource_type == "test"`` entry from ``manifest.nodes`` (DEC-008 of #154).
+
+    dbt writes generic (schema) and singular (``tests/*.sql``) tests as nodes
+    under the same top-level ``nodes`` key as models; the loader filters them
+    into :attr:`Manifest.tests` (parallel to ``Manifest.nodes`` — ``nodes``
+    stays model-only). SignalForge reads a test node's already-Jinja-resolved
+    :attr:`compiled_code` so it can prune any generator's tests through the
+    ``custom_sql`` pipeline (#154).
+
+    Load-bearing field notes:
+
+    * :attr:`compiled_code` — ``null`` on a ``dbt parse`` manifest (only
+      ``dbt compile`` / ``dbt run`` / ``dbt docs generate`` populates it).
+      Tolerated silently at read time, exactly like
+      :attr:`Column.data_type` (#159); the "not a silent skip" surfacing is a
+      downstream (ingest) concern, not this reader's.
+    * :attr:`attached_node` — present from manifest schema v10+ (dbt 1.6+),
+      **absent in v9**. The association ladder
+      (:func:`signalforge.manifest.loader.associate_test_model`) feature-detects
+      on it rather than version-branching (the loader discards the detected
+      version), per DEC-009.
+    * :attr:`file_key_name` — dbt's ``<yaml_key>.<name>`` pointer
+      (``models.my_model``) to the resource the test is attached to; the v9
+      fallback disambiguator when ``depends_on.nodes`` carries more than one
+      model.
+    """
+
+    model_config = _BASE_MODEL_CONFIG
+
+    unique_id: str
+    compiled_code: str | None = None
+    test_metadata: TestMetadata | None = None
+    column_name: str | None = None
+    depends_on: DependsOn = Field(default_factory=DependsOn)
+    attached_node: str | None = None
+    file_key_name: str | None = None
+
+
 class Model(BaseModel):
     """A single ``resource_type == "model"`` entry from the manifest.
 
@@ -217,9 +279,16 @@ class Manifest(BaseModel):
     values are *lists* of ``Model`` (usually one entry, but dbt allows
     multiple disabled definitions to coexist).
 
-    Top-level keys SignalForge does not consume (``sources``, ``macros``,
-    ``parent_map``, ``child_map``, ``unit_tests``, …) are dropped silently
-    via ``extra="ignore"`` per DEC-017.
+    ``tests`` is a parallel dict of ``resource_type == "test"`` nodes
+    (DEC-008 of #154). dbt writes test nodes under the same top-level
+    ``nodes`` key as models; the loader filters them into ``tests`` (keeping
+    ``nodes`` model-only) so SignalForge can prune any generator's tests via
+    their ``compiled_code``. Empty dict for a ``dbt parse`` manifest that
+    carries no test nodes.
+
+    Top-level keys SignalForge does not consume (``macros``, ``parent_map``,
+    ``child_map``, ``unit_tests``, …) are dropped silently via
+    ``extra="ignore"`` per DEC-017.
     """
 
     model_config = _BASE_MODEL_CONFIG
@@ -231,6 +300,10 @@ class Manifest(BaseModel):
     # loader filters ``resource_type == "source"`` before construction (DEC-005
     # of #116). Empty dict for projects with no declared sources.
     sources: dict[str, Source] = Field(default_factory=dict)
+    # ``resource_type == "test"`` nodes, keyed by test unique_id (DEC-008 of
+    # #154). Parallel to ``nodes``/``sources``; the loader filters them here so
+    # ``nodes`` stays model-only. Empty dict for a parse-only manifest.
+    tests: dict[str, GenericTest] = Field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Thin method wrappers — delegate to free functions in ``loader.py``.
