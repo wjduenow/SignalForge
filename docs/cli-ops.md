@@ -745,6 +745,103 @@ synthesized macro rationale worth judging. `--grade` without
   up-front check. Off by default, existing `prune-existing` runs stay
   zero-credential / zero-cost.
 
+#### Worked example: pruning a dbt-expectations `schema.yml` (issue #154)
+
+This walks a real `dbt-expectations` project end-to-end. It is based on the
+committed test fixture `tests/fixtures/dbt_project_expectations/` — a
+two-row synthetic `orders` model whose `dbt-expectations` tests are
+engineered so each `--from-manifest` outcome is deterministic.
+
+**1. Build the manifest with `dbt compile`.** `--from-manifest` reads
+`compiled_code` off each test node — and only `dbt compile` (or `dbt build`
+/ `dbt docs generate`) populates it. `dbt parse` does **not**.
+
+```bash
+dbt deps        # pull dbt-expectations (writes package-lock.yml)
+dbt compile     # renders every test macro into target/manifest.json
+```
+
+**2. The `schema.yml` under prune** (`models/schema.yml`), declaring
+`dbt-expectations` tests on the `orders` model:
+
+```yaml
+version: 2
+models:
+  - name: orders
+    columns:
+      - name: order_id
+        data_tests:
+          - dbt_expectations.expect_column_values_to_not_be_null
+      - name: amount
+        data_tests:
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 1000       # impossible for the 100/200 rows -> KEPT
+              max_value: 2000
+          - dbt_expectations.expect_column_values_to_be_between:
+              min_value: 0          # vacuous -> ALWAYS-PASSES -> dropped
+              max_value: 1000000
+    data_tests:
+      - dbt_expectations.expect_table_row_count_to_be_between:
+          min_value: 1              # 2 rows is in-bounds -> dropped
+          max_value: 100
+      - dbt_expectations.expect_row_values_to_have_recent_data:
+          column_name: ordered_at   # compiles now() -> non-deterministic -> SKIP
+          datepart: day
+          interval: 1
+```
+
+**3. Prune the manifest tests.** The `--from-manifest` flag reads each
+`resource_type=='test'` node's `compiled_code` and routes the row-returning +
+deterministic bodies through the `custom_sql` prune pipeline:
+
+```bash
+signalforge prune-existing orders \
+  --schema models/schema.yml \
+  --from-manifest
+```
+
+Because `dbt-expectations` wraps *every* macro (including the row-count check)
+in a row-returning `validation_errors` shell, four of the five tests prune;
+only the `now()`-referencing recent-data test is skip-recorded
+(non-deterministic). A representative kept/dropped table (the outcomes are
+guaranteed by the fixture's known `amount` = 100 / 200 and `order_id` = 1 / 2):
+
+```text
+TIER      ARTIFACT           TEST        REASON          SCORE  WHY
+kept      test.model.custom  custom_sql  —               —      dbt-expectations expect_column_values_to_be_between(column=amount, min_value=1000, max_value=2000) — ran on sample; 2 failing rows
+dropped   test.model.custom  custom_sql  always-passes   —      dbt-expectations expect_column_values_to_be_between(column=amount, min_value=0, max_value=1000000) — 0 failing rows
+dropped   test.model.custom  custom_sql  always-passes   —      dbt-expectations expect_column_values_to_not_be_null(column=order_id) — 0 failing rows
+dropped   test.model.custom  custom_sql  always-passes   —      dbt-expectations expect_table_row_count_to_be_between(min_value=1, max_value=100) — 0 failing rows
+
+Skipped 1 unsupported test: malformed-supported-test×1
+```
+
+Every `why` names the **source macro + args** (issue #154 DEC-015), so you
+can locate and remove the always-passing tests in your real project. The one
+kept test — the impossible `[1000, 2000]` bound — is the only one carrying
+signal (it catches every row). The skipped `expect_row_values_to_have_recent_data`
+is listed in the stderr skip report with `--verbose` naming the
+non-deterministic `now()` cause. Nothing is written back to `schema.yml`
+(read-only); the ingested tests appear only on the table, never as proposed
+`.sql` files.
+
+**4. Add `--grade` to score the ingested tests.** Requires an API key
+(`ANTHROPIC_API_KEY` by default):
+
+```bash
+export ANTHROPIC_API_KEY=sk-...
+signalforge prune-existing orders \
+  --schema models/schema.yml \
+  --from-manifest --grade
+```
+
+The grade stage runs between prune and diff (progress renumbers to
+`[N/4]`), scores each ingested test's synthesized macro rationale against the
+rubric, writes `.signalforge/grade.json` + `.signalforge/grade.jsonl`, and
+enables the `flagged` tier — a test that survived prune but scored below the
+rubric threshold. See
+[`docs/grade-ops.md` § Grading ingested manifest tests](grade-ops.md#grading-ingested-manifest-tests-prune-existing-grade-issue-154).
+
 Exit codes (four-tier taxonomy; see § Four-tier exit-code taxonomy):
 
 - `0` — pipeline completed; diff printed to stdout.
@@ -754,10 +851,15 @@ Exit codes (four-tier taxonomy; see § Four-tier exit-code taxonomy):
   `ProfileNotFoundError`, the panic-path catch.
 - `2` — input-validation failure: `IngestModelNotFoundError` /
   `IngestAnchorContractError` (a test references a column absent from
-  the model), `ModelNotFoundError`.
+  the model), `ModelNotFoundError`, and `CliInputError` — the
+  `--grade`-without-`--from-manifest` coupling error (issue #154),
+  raised at handler entry before any project / warehouse work.
 - `3` — external-dependency / fail-closed audit-write failure:
   `WarehouseAuthError`, `BytesBilledExceededError`, the prune/diff
-  audit-write durability errors.
+  audit-write durability errors. Under `--grade` (issue #154), the grade
+  path adds `LLMAuthError` / `LLMRateLimitError` (a missing/invalid API
+  key or provider rate limit at grade-call time) and the
+  `GradeAuditWriteError` durability errors.
 
 No bespoke `CliPruneExisting*` wrapper classes exist (DEC-006): the
 five `IngestError` concretes are already first-class in

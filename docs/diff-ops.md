@@ -366,6 +366,39 @@ failed: …" / "identifier rejected by SQL safety check") that names
 the actual cause. The drafter's rationale and the grader's evidence
 are not meaningful for a test we couldn't evaluate.
 
+### Ingested manifest tests: macro identity in the `why`
+
+When `signalforge prune-existing --from-manifest` prunes a model's
+dbt-compiled manifest test nodes (issue #154; see
+[`docs/ingest-ops.md`](ingest-ops.md#recognition-of-dbt-compiled-manifest-tests)),
+each ingested test is a `custom_sql` candidate carrying its **source-macro
+identity** on `rationale` — the ingest bridge synthesizes it as
+`dbt-expectations expect_column_values_to_be_between(column=amount, min_value=1000, max_value=2000)`.
+The diff surfaces that identity so the operator can locate and remove the
+right test in their real dbt project:
+
+- **`dropped` and `kept-uncertain` rows** bypass the ordinary kept-row
+  rationale → evidence → fallback cascade and would otherwise show only the
+  prune `decision.why` (the drop reason / the `kept-without-evidence` cause).
+  For an ingested test, the macro identity is threaded into the `why`
+  **first** — `<macro-identity> — <prune why>` — so it survives the
+  `max_why_chars` head-cut, followed by the load-bearing prune prose. A
+  built-in / drafted test carries no macro `rationale`, so its `why` is
+  byte-identical to the pre-#154 behaviour.
+- **`kept` and `flagged` rows** already prefer `rationale` in their cascade,
+  so the macro identity surfaces there naturally.
+
+**Ingested tests appear on the table, never as proposed `.sql` files.** A
+drafted `custom_sql` test is SignalForge's own output, so a kept one is
+emitted as a standalone `tests/*.sql` proposal in `proposed_test_files`. An
+**ingested** test is the operator's existing test — it already lives in their
+dbt project. `prune-existing` is **read-only** and passes
+`emit_test_files=False` to `render_diff` (issue #154 DEC-015), so every
+ingested `custom_sql` test shows only as a row on the
+kept / kept-uncertain / dropped / flagged table and is **never** re-surfaced
+as a proposed file. There is nothing to write back — the diff tells you which
+of your existing tests to *remove*, not new ones to add.
+
 ## Operational notes
 
 ### Symlink-hardened path canonicalisation

@@ -68,6 +68,12 @@ Import from `signalforge.ingest`.
   reads the operator's **singular** dbt tests (`tests/*.sql`) for one
   model into `custom_sql` candidates (issue #116; see
   [Singular `tests/*.sql` tests](#singular-testssql-tests)).
+- **`read_manifest_tests(manifest, model, *, project_dir=None) -> IngestResult`** —
+  bridges the model's **dbt-compiled `manifest.json` test nodes**
+  (`dbt-expectations`, `dbt-utils`, in-house generic tests) into
+  `custom_sql` candidates by reading each node's already-Jinja-resolved
+  `compiled_code` (issue #154; see
+  [Recognition of dbt-compiled manifest tests](#recognition-of-dbt-compiled-manifest-tests)).
 
 The `schema` argument is overloaded **by type** — this str-vs-`Path` split
 is the contract:
@@ -384,6 +390,123 @@ other macro in the `dbt_utils` namespace (`expression_is_true`,
 `SkipReason="custom-or-generic-test"`. Extending recognition to other
 `dbt_utils` shapes is the same follow-up tracked for `dbt_expectations`
 under #154.
+
+## Recognition of dbt-compiled manifest tests
+
+`read_manifest_tests(manifest, model, *, project_dir=None) -> IngestResult`
+(issue #154) prunes the tests you already author with `dbt-expectations`,
+`dbt-utils`, or your own in-house generic macros — **without** teaching
+SignalForge each macro's semantics. It leans on work dbt already did: after
+`dbt compile`, every `resource_type == "test"` node in `manifest.json`
+carries `compiled_code`, the macro fully rendered to warehouse SQL. This
+bridge reads that string and routes it through the **existing `custom_sql`
+prune pipeline** ([`docs/prune-ops.md` § custom_sql](prune-ops.md#custom_sql-manifest-ingested-and-drafted)),
+so a manifest test gets the same kept / kept-uncertain / dropped / flagged
+treatment as everything else.
+
+Where the other two readers take a `schema.yml` (string or file), this one
+takes the loaded `Manifest` and reads `Manifest.tests` — the
+`resource_type == "test"` nodes the loader now surfaces as typed
+`GenericTest` read-back models (issue #154; the loader tolerates a null
+`compiled_code` silently, exactly like a null `catalog.json` `data_type`).
+Each test is associated to its model via `associate_test_model` (a
+feature-detect ladder across dbt manifest schema versions v9–v12), and only
+the ones belonging to `model.unique_id` are considered. `project_dir` is
+accepted for signature parity with the adjacent stages but is unused (this
+bridge does no path I/O — the raw `compiled_code` is carried verbatim; SQL
+safety is re-validated in the prune compiler).
+
+### Three gates decide prunable vs. skip-recorded
+
+For each associated node, the bridge runs four checks in order —
+**presence → row-returning → deterministic → comment-tolerant safety scan** —
+and the first failure wins. Only a body that clears every gate becomes a
+model-level `CandidateTestCustomSQL(column=None, sql=<compiled_code>)`.
+A node that fails a gate is **skip-recorded, never silently dropped**, using
+the same closed 3-value `SkipReason` (never grown):
+
+| Disposition | `SkipReason` | Trigger |
+|---|---|---|
+| **Pruned** (`custom_sql` candidate) | — | `compiled_code` present, row-returning, deterministic, passes the safety scan |
+| Absent / null `compiled_code` | `custom-or-generic-test` | `dbt parse` (not `dbt compile`) produced the manifest; the node has no body to evaluate. `detail` names the fix: run `dbt compile`. |
+| Aggregate / scalar-shaped body | `malformed-supported-test` | the outer `SELECT` is a single collapsing aggregate with no `GROUP BY` — wrapping it in `SELECT COUNT(*) AS failures FROM (<sql>)` would report `failures=1` **always** (a silent wrong `kept`). Aggregate-macro support is a follow-up (#267). |
+| Non-deterministic body | `malformed-supported-test` | `TABLESAMPLE` / `RAND` / `CURRENT_TIMESTAMP` / `NOW` / `GETDATE` / `UUID` / … — the prune verdict would not be reproducible (violates explainable-diffs). |
+| `compiled_code` fails the safety scan | `malformed-supported-test` | a top-level `;` (multiple statements) or unbalanced parentheses survive the comment-tolerant scan (see below). |
+
+The row-returning and determinism gates use **sqlglot AST inspection**, not
+regex/substring: a column literally named `random_id` or a `CURRENT_TIMESTAMP`
+token inside a string literal never false-positives, because membership is
+checked against AST *function nodes* only. Both gates are conservative —
+on a sqlglot parse failure they return the *permissive* verdict (treat as
+row-returning / deterministic), leaving a genuinely broken body to be caught
+by the safety scan or the warehouse adapter's `kept-without-evidence`
+routing downstream.
+
+### KEY FINDING — dbt-expectations bodies are almost all prunable
+
+`dbt-expectations` compiles **every** macro — including
+`expect_table_row_count_to_be_between` — into a **row-returning
+`validation_errors` shell**:
+
+```sql
+with grouped_expression as (
+    select ( 1=1 and count(*) >= 1 and count(*) <= 100 ) as expression
+    from "db"."schema"."orders"
+), validation_errors as (
+    select * from grouped_expression where not(expression = true)
+)
+select * from validation_errors
+```
+
+The outer query is `select * from validation_errors` — a genuine
+failing-rows `SELECT`. The `count(*)` lives *inside* the `grouped_expression`
+CTE (a nested query scope the row-returning walk deliberately stops at), so
+the aggregate gate does **not** fire and the test **is pruned**. Wrapping
+this shell in `SELECT COUNT(*) AS failures FROM (…)` is semantically correct:
+`failures=1` means "the row count is out of bounds", `failures=0` means "in
+bounds".
+
+The aggregate-SKIP disposition therefore fires **only on a BARE
+`SELECT COUNT(*) …` body** — the shape dbt-utils / hand-written in-house
+generic tests can emit — never on a `dbt-expectations` macro. In practice, of
+a typical `dbt-expectations` test set, the only common skip cause is a
+non-deterministic body (e.g. `expect_row_values_to_have_recent_data`, which
+compiles a `now()` comparison).
+
+### Macro identity travels into the diff `why`
+
+Each pruned candidate's `rationale` is synthesized at construction from the
+node's macro name + rendered args, e.g.
+`dbt-expectations expect_column_values_to_be_between(column=amount, min_value=1000, max_value=2000)`.
+That string flows through the diff `why` cascade unchanged
+([`docs/diff-ops.md` § ingested manifest tests](diff-ops.md#ingested-manifest-tests-macro-identity-in-the-why)),
+so a dropped or kept-uncertain manifest test names the source macro and the
+operator can locate and remove the right test. No new field is added to
+`CandidateTestCustomSQL` — the macro identity rides on `rationale`.
+
+The synthesized rationale is scrubbed of the grade layer's `</ARTIFACT>`
+envelope close tag (both the literal and the `</  ARTIFACT>` whitespace-split
+variant) at construction time, so a hostile macro arg (a regex / value list)
+cannot break the judge prompt fence and fail the whole `--grade` run closed.
+
+### The "not a silent skip" surface
+
+The manifest reader is stage-0 and tolerates a null `compiled_code`
+silently. The operator-facing surface lives in this bridge: each
+no-`compiled_code` node is skip-recorded with a `detail` naming `dbt compile`,
+and when **every** associated node lacks `compiled_code` a single prominent
+summary `SkippedTest` (`test_name="(manifest tests)"`) is prepended so the
+operator gets one "run `dbt compile` and commit `target/manifest.json`"
+pointer rather than only N per-node lines. This is soft — never a hard abort.
+It mirrors the `catalog.json` / `data_type` guidance: the same
+build-artifact gap surfaced at the layer that can act on it.
+
+### CLI entry point
+
+`read_manifest_tests` is wired into `signalforge prune-existing` behind the
+opt-in `--from-manifest` flag (issue #154; see
+[`docs/cli-ops.md` § dbt-compiled manifest tests](cli-ops.md#dbt-compiled-manifest-tests-from-manifest-issue-154)).
+Off by default, `prune-existing` behaves byte-for-byte as before.
 
 ## Safety posture
 

@@ -1307,6 +1307,46 @@ posture (report-only) is preserved: a below-threshold run with the
 default `fail_on_below_threshold: false` returns the report and the
 CLI exits 0 once the diff renders.
 
+### Grading ingested manifest tests (`prune-existing --grade`, issue #154)
+
+`signalforge prune-existing` is a read-only, **no-LLM** command by design —
+it runs ingest → prune → diff with zero credentials. Issue #154 adds an
+**opt-in** `--grade` flag that layers the grade stage onto the ingested
+dbt-compiled manifest tests (`--from-manifest`), so an operator can not only
+prune their existing `dbt-expectations` / `dbt-utils` tests but also have the
+LLM-as-judge score them.
+
+- **What is graded.** The judge scores each **manifest-ingested `custom_sql`
+  test** against the rubric. The artifact text is the test's **synthesized
+  rationale** — the macro name + rendered args the ingest bridge builds
+  (`dbt-expectations expect_column_values_to_be_between(column=amount, min_value=1000, max_value=2000)`).
+  This is why `--grade` **requires `--from-manifest`**: schema.yml and
+  `tests/*.sql` tests carry `rationale=None`, so grading them would be
+  noise. `--grade` without `--from-manifest` is an input-validation error
+  (exit 2), raised before any project or warehouse work.
+- **Off by default → zero-credential preserved.** Without `--grade`,
+  `prune-existing` makes no LLM call and needs no API key. The credential
+  gate is **implicit**: a missing `ANTHROPIC_API_KEY` (or the configured
+  provider's key) surfaces as an `LLMAuthError` (CLI tier 3, exit 3) at
+  grade-call time — there is no up-front key check. Costs are the standard
+  grade costs (see [Cost guidance](#cost-guidance-dec-014)), scaled by the
+  number of ingested tests × the rubric criteria.
+- **Pipeline placement.** The grade stage runs **between prune and diff**.
+  The `GradingReport` is fed to `render_diff`, enabling the `flagged` tier (a
+  test that survived prune but scored below the rubric threshold); the
+  `.signalforge/grade.json` + `.signalforge/grade.jsonl` sidecars are written
+  exactly as `generate --grade` writes them. Progress renumbers to `[N/4]`
+  (`ingest → prune → grade → diff`).
+- **Config.** Reuses the same `signalforge.yml` `grade:` block
+  ([Configuration](#configuration-signalforgeyml-grade-block)) and
+  `load_grade_config` — no prune-existing-specific grade knobs. The
+  `<ARTIFACT>` envelope breach guard applies to the synthesized rationale;
+  the ingest bridge pre-scrubs the `</ARTIFACT>` close tag from macro args
+  so a hostile value can't fail the whole grade run closed.
+
+Full flag reference + exit codes:
+[`docs/cli-ops.md` § Grade the ingested tests](cli-ops.md#grade-the-ingested-tests-grade-issue-154).
+
 ## References
 
 - Design record: [`plans/super/7-quality-grader.md`](../plans/super/7-quality-grader.md).
