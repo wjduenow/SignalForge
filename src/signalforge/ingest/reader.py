@@ -675,6 +675,13 @@ def _classify_manifest_test(test: GenericTest) -> CandidateTestCustomSQL | Skipp
         sql=cc,
         column=None,  # DEC-001 — model-level; the compiled body is self-contained.
         rationale=_synthesize_rationale(test),
+        # #154 US-004 / DEC-007 — mark the compiled body as manifest-ingested so
+        # the prune engine routes it to full-scope-against-source (dbt's own
+        # quoted relation cannot bind the {{ this }} sample substitution) and
+        # validates it comment-tolerantly (dbt compiled_code carries SQL
+        # comments the #116 validator rejects). A drafted custom_sql leaves this
+        # False and keeps its existing sample behaviour.
+        from_manifest=True,
     )
 
 
