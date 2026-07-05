@@ -541,9 +541,12 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
     12. Load + override :class:`DiffConfig` (``--format`` via
         ``model_validate``); ``--dry-run`` → ``write_sidecar=False``.
     13. ``render_diff(..., grading_report=None, existing_schema=<text>,
-        write_sidecar=not dry_run, ...)`` — ``grading_report=None`` means
-        the diff renders kept / kept-uncertain / dropped, never
-        ``flagged`` (DEC-004 / #104 DEC-011).
+        write_sidecar=not dry_run, emit_test_files=False, ...)`` —
+        ``grading_report=None`` means the diff renders kept /
+        kept-uncertain / dropped, never ``flagged`` (DEC-004 / #104
+        DEC-011). ``emit_test_files=False`` (#154 DEC-015): the ingested
+        ``custom_sql`` tests are read-only external tests, so they appear
+        on the table but are NOT re-surfaced as proposed ``.sql`` files.
     14. ``render_to_text`` → stdout (trailing newline as ``generate``).
     15. 3-stage progress to stderr (DEC-010): ``1/3 ingest``,
         ``2/3 prune``, ``3/3 diff``.
@@ -691,6 +694,13 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
             existing_schema=existing_schema_text,
             config=diff_config,
             write_sidecar=not dry_run,
+            # DEC-015 of #154 — prune-existing is read-only and never drafts,
+            # so every ``custom_sql`` it prunes is EXTERNAL / ingested (from
+            # the operator's schema.yml, tests/*.sql, or manifest test nodes).
+            # An external test must never be re-surfaced as a proposed ``.sql``
+            # file — it lives in the operator's dbt project already and shows
+            # only as a row on the kept/dropped/flagged table.
+            emit_test_files=False,
             project_dir=project_dir,
         )
         if progress_on:

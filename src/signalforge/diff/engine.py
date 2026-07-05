@@ -441,6 +441,37 @@ def _flagged_why(failing: GradingResult, *, max_chars: int) -> str:
     return f"{prefix}{reasoning}".rstrip()
 
 
+def _macro_why(rationale: str, base_why: str, *, max_chars: int) -> str:
+    """Combine an ingested test's macro-identity rationale with the prune why (DEC-015 of #154).
+
+    An ingested manifest test — a dbt-expectations / dbt-utils / in-house
+    macro whose ``compiled_code`` flows through the ``custom_sql`` prune
+    pipeline (issue #154, DEC-001) — carries its source-macro identity on
+    ``rationale``: the ingest bridge synthesises it as
+    ``"dbt-expectations expect_column_values_to_be_between(column=amount, …)"``
+    (``signalforge.ingest.reader._synthesize_rationale``). The **dropped**
+    and **kept-uncertain** tiers bypass the kept-row rationale → evidence →
+    fallback cascade and would otherwise surface only ``decision.why`` (the
+    prune verdict / the ``kept-without-evidence`` cause), leaving the
+    operator with no way to locate the test to remove in their real dbt
+    project.
+
+    This surfaces the macro identity **first** (so it survives the
+    ``max_chars`` truncation head-cut) followed by the prune ``base_why``
+    — the drop reason prose / the ``kept-without-evidence`` cause, which
+    stays load-bearing per the issue-#50 carve-out. When ``rationale`` is
+    empty the base why is returned unchanged (truncated); this is what a
+    built-in / non-ingested test hits, so its ``why`` is byte-identical to
+    the pre-#154 behaviour.
+    """
+    macro = rationale.strip() if rationale else ""
+    if not macro:
+        return _truncate_why(base_why, max_chars)
+    if base_why and base_why.strip():
+        return _truncate_why(f"{macro} — {base_why}", max_chars)
+    return _truncate_why(macro, max_chars)
+
+
 def _entry_for_test(
     decision: PruneDecision,
     args_hashes: dict[_StructuralKey, list[str | None]],
@@ -464,12 +495,28 @@ def _entry_for_test(
     """
     artifact_id = _resolve_test_artifact_id(decision, args_hashes)
     if decision.decision == "dropped":
+        # DEC-015 of #154 — a dropped INGESTED manifest test (a macro flowing
+        # through the ``custom_sql`` pipeline) names its source macro on
+        # ``rationale``. The dropped tier bypasses the kept-row cascade, so
+        # thread the macro identity into the ``why`` (ahead of the prune
+        # verdict) so the operator can locate + remove the right test. The
+        # drop-reason CATEGORY still rides the separate ``drop_reason``
+        # column. Scoped to ``custom_sql`` (the DEC-001 ingested variant):
+        # a built-in / drafted-schema test carries no macro rationale and
+        # its ``why`` stays ``decision.why`` verbatim (byte-identical to
+        # pre-#154, and it preserves the issue-#50 not_null behaviour).
+        if decision.test.type == "custom_sql":
+            dropped_why = _macro_why(
+                decision.test.rationale or "", decision.why, max_chars=max_why_chars
+            )
+        else:
+            dropped_why = decision.why
         return DiffEntry(
             artifact_id=artifact_id,
             test_type=decision.test.type,
             tier="dropped",
             drop_reason=_decision_to_drop_reason(decision),
-            why=decision.why,
+            why=dropped_why,
             score=None,
             passed=None,
         )
@@ -487,7 +534,18 @@ def _entry_for_test(
     # meaningful for a test we couldn't evaluate. Still truncated to
     # ``max_why_chars`` so the per-row budget is honoured.
     if tier == "kept-uncertain":
-        why = _truncate_why(decision.why, max_why_chars)
+        # DEC-015 of #154 — a kept-uncertain INGESTED manifest test names its
+        # source macro on ``rationale``; thread it into the ``why`` ahead of
+        # the ``kept-without-evidence`` cause so the operator can locate the
+        # test AND still see why it could not be evaluated (the issue-#50
+        # cause stays load-bearing). Scoped to ``custom_sql`` (DEC-001) so a
+        # built-in / drafted test with a drafter rationale keeps the issue-#50
+        # carve-out (``decision.why`` only — the drafter rationale would
+        # mislead for a test we couldn't evaluate).
+        if decision.test.type == "custom_sql":
+            why = _macro_why(decision.test.rationale or "", decision.why, max_chars=max_why_chars)
+        else:
+            why = _truncate_why(decision.why, max_why_chars)
     # Post-QG fix #3: a flipped-to-flagged row's why must reflect the
     # GRADING reason, not the prune reason — the row is flagged because
     # of a failing rubric criterion, and surfacing the prune why
@@ -806,6 +864,7 @@ def render_diff(
     output_path: Path | None = None,
     sidecar_path: Path | None = None,
     write_sidecar: bool = True,
+    emit_test_files: bool = True,
     project_dir: Path | None = None,
     as_of: date | None = None,
 ) -> DiffReport:
@@ -868,6 +927,19 @@ def render_diff(
             ``<project_dir>/.signalforge/diff.json`` default). When
             ``False``, no sidecar is written regardless of
             ``sidecar_path``. Post-QG fix #5 (Q1=A).
+        emit_test_files: when ``True`` (default), KEPT singular business-rule
+            tests (``custom_sql`` / ``row_count_anomaly_by_period``) are
+            surfaced as standalone ``.sql`` proposals on
+            :attr:`DiffReport.proposed_test_files`. When ``False``,
+            ``proposed_test_files`` is left empty. DEC-015 of #154: an
+            INGESTED manifest / external test is READ-ONLY — SignalForge did
+            not author it (its source of truth is the operator's dbt
+            project), so it must NOT be re-surfaced as a proposed ``.sql``
+            file; it appears only as a row on the kept/dropped/flagged table.
+            The read-only ``prune-existing`` command (which never drafts, so
+            every ``custom_sql`` it sees is external) passes ``False``;
+            ``generate`` (which authors its own tests) keeps the default
+            ``True``.
         project_dir: optional project-root override used to resolve
             symlink-hardened path canonicalisation for ``output_path``
             and ``sidecar_path``. ``None`` resolves to
@@ -959,11 +1031,23 @@ def render_diff(
     # ``as_of``. The dialect is BigQuery-pinned for v0.x — v0.3
     # multi-warehouse callers should override via a thread-through
     # ``dialect=`` kwarg sourced from the adapter.
-    proposed_test_files = emit_proposed_test_files(
-        candidate,
-        prune_result,
-        model=model,
-        as_of=as_of,
+    #
+    # DEC-015 of #154 — ingested manifest / external tests are read-only, so
+    # a caller consuming them (``prune-existing``) passes
+    # ``emit_test_files=False`` to suppress the proposed ``.sql`` files
+    # entirely: those tests belong on the kept/dropped/flagged table, never
+    # as an authored artefact. Skipping the emit call also avoids the
+    # anomaly-recompile cost + the ``model=None`` guard when no files are
+    # wanted.
+    proposed_test_files = (
+        emit_proposed_test_files(
+            candidate,
+            prune_result,
+            model=model,
+            as_of=as_of,
+        )
+        if emit_test_files
+        else ()
     )
 
     # 5. Compute unified diff.
