@@ -5401,3 +5401,270 @@ def test_as_of_reproducibility_byte_equal_compiled_sql(tmp_path: Path) -> None:
     )
     assert event_run_3.as_of == as_of_b
     assert as_of_b.isoformat() in event_run_3.compiled_sql
+
+
+# ---------------------------------------------------------------------------
+# #154 US-004: manifest-ingested custom_sql (from_manifest=True) prune routing.
+#
+# An ingested body is dbt's already-Jinja-resolved compiled_code referencing
+# dbt's OWN quoted relation. DEC-007 — evaluated full-scope against the source
+# under EITHER sample strategy (dbt's quoted relation cannot bind the
+# {{ this }} sample substitution). DEC-013 — comment-tolerant validation.
+# DEC-012 — determinism belt-and-braces fallback → kept-without-evidence.
+# The DropReason stays the locked 5-value Literal; conservative-bias preserved.
+# ---------------------------------------------------------------------------
+
+# dbt quotes the relation with backticks — the shape that would degrade to
+# kept-without-evidence under the {{ this }} sample substitution (#154 AR row 8).
+_INGESTED_SOURCE_BODY = "select id\nfrom `fake_project`.`dataset`.`orders`\nwhere status = 'BAD'"
+
+
+def _ingested_custom_sql_candidates(sql: str) -> CandidateSchema:
+    """A model-level CandidateSchema carrying one manifest-ingested custom_sql
+    (from_manifest=True) — the shape ``read_manifest_tests`` produces."""
+    return CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(CandidateTestCustomSQL(sql=sql, from_manifest=True),),
+    )
+
+
+def test_prune_tests_ingested_custom_sql_tautology_dropped_always_passes(
+    tmp_path: Path,
+) -> None:
+    """An ingested body that returns zero failing rows is dropped with
+    ``reason="always-passes"`` — pruned exactly like any other candidate."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _ingested_custom_sql_candidates(_INGESTED_SOURCE_BODY)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 1
+    decision = result.decisions[0]
+    assert decision.test_anchor == "model"
+    assert decision.decision == "dropped"
+    assert decision.reason == "always-passes"
+    assert decision.failures == 0
+    # The dispatched SQL is the compiled_code body verbatim.
+    assert decision.compiled_sql == _INGESTED_SOURCE_BODY
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_ingested_custom_sql_real_failure_kept(tmp_path: Path) -> None:
+    """An ingested body that returns failing rows on an untrusted model is
+    kept with ``reason="kept"`` — real signal survives the prune."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 4}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _ingested_custom_sql_candidates(_INGESTED_SOURCE_BODY)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.decision == "kept"
+    assert decision.reason == "kept"
+    assert decision.failures == 4
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_ingested_custom_sql_non_deterministic_kept_without_evidence(
+    tmp_path: Path,
+) -> None:
+    """DEC-012 belt-and-braces: a non-deterministic ingested body reaching the
+    compiler routes to ``kept-without-evidence`` (decision="kept") with NO
+    warehouse call — the DropReason enum stays the locked 5-value Literal."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Intentionally NO expect_query — the compiler's determinism fallback
+    # short-circuits before any dispatch; any warehouse call is unexpected.
+    adapter = _make_adapter(fake)
+
+    body = (
+        "select id\nfrom `fake_project`.`dataset`.`orders`\nwhere created_at > CURRENT_TIMESTAMP()"
+    )
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _ingested_custom_sql_candidates(body)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.decision == "kept"
+    assert decision.reason == "kept-without-evidence"
+    assert "non-deterministic" in decision.why
+    assert decision.compiled_sql == ""
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_ingested_custom_sql_under_sample_evaluates_full_scope(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DEC-007 (behavioural, not just a decision snapshot): an ingested body
+    requested under ``scope=sample`` is evaluated FULL-SCOPE against the
+    source. The dispatched SQL references the source relation and NEVER a
+    ``_SESSION._sf_sample_*`` temp table, no ``materialise_sample`` is called
+    (all candidates bypass to source), and exactly ONE INFO fires."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # Only expect the COUNT(*) — NO expect_materialise_sample / expect_get_table:
+    # the all-bypass short-circuit skips sampling pre-work for the ingested body.
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _ingested_custom_sql_candidates(_INGESTED_SOURCE_BODY)
+    # Default sample_strategy is "materialised"; scope=sample would normally
+    # materialise a temp table — the ingested body must bypass that entirely.
+    config = PruneConfig(scope="sample", sample_size=100_000, capture_failure_rows=0)
+
+    with caplog.at_level("INFO", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    decision = result.decisions[0]
+    # Behavioural assertion on the dispatched SQL (a decision snapshot alone
+    # pins shape, not routing): the body runs as-is against the source.
+    assert decision.compiled_sql == _INGESTED_SOURCE_BODY
+    assert "`fake_project`.`dataset`.`orders`" in decision.compiled_sql
+    assert "_SESSION" not in decision.compiled_sql
+    assert "_sf_sample_" not in decision.compiled_sql
+    # The verdict still lands (failures=0 → always-passes drop) — full-scope
+    # evaluation actually ran, it did not degrade to kept-without-evidence.
+    assert decision.decision == "dropped"
+    assert decision.reason == "always-passes"
+
+    info_records = [
+        r
+        for r in caplog.records
+        if r.levelname == "INFO" and "scope=sample requested" in r.getMessage()
+    ]
+    assert len(info_records) == 1, (
+        "expected exactly ONE ingested-full-scope INFO; got "
+        f"{[r.getMessage() for r in info_records]}"
+    )
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_mixed_ingested_and_drafted_per_test_routing(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The per-test override arm (NOT just the all-bypass short-circuit): a
+    batch mixing a drafted built-in (``not_null``, samples via the CTE) and a
+    manifest-ingested custom_sql (full-scope against source) under
+    ``scope=sample`` + ``oneshot`` routes each candidate independently. The
+    #170 QG Pass 3 lesson — a single-candidate test only exercises the
+    short-circuit; the mixed batch is what pins the per-test ``per_test_table_ref``
+    override."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # oneshot samples the built-in → one num_rows lookup for the bucket.
+    fake.expect_get_table(
+        ref=TableRef(project="fake_project", dataset="dataset", name="orders"),
+        returns=FakeTable(num_rows=1_000_000),
+    )
+    # Query 1: the not_null (sampled). Query 2: the ingested body (full-scope).
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="oneshot",
+    )
+
+    with caplog.at_level("INFO", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    # Iteration order: column tests first, then model-level tests.
+    not_null_decision = result.decisions[0]
+    ingested_decision = result.decisions[1]
+    assert not_null_decision.test_anchor == "column.id"
+    assert ingested_decision.test_anchor == "model"
+
+    # The drafted built-in is sampled: its compiled SQL wraps the sample CTE.
+    assert "WITH sample" in not_null_decision.compiled_sql
+
+    # The ingested body is full-scope against source: verbatim, NO sample CTE,
+    # NO temp table. This is the per-test routing divergence in action.
+    assert ingested_decision.compiled_sql == _INGESTED_SOURCE_BODY
+    assert "WITH sample" not in ingested_decision.compiled_sql
+    assert "_SESSION" not in ingested_decision.compiled_sql
+    assert "_sf_sample_" not in ingested_decision.compiled_sql
+
+    info_records = [
+        r
+        for r in caplog.records
+        if r.levelname == "INFO" and "scope=sample requested" in r.getMessage()
+    ]
+    assert len(info_records) == 1
+    fake.assert_all_expectations_met()

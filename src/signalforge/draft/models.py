@@ -166,6 +166,27 @@ class CandidateTestCustomSQL(BaseModel):
     sql: str
     column: str | None = None
     rationale: str | None = None
+    from_manifest: bool = Field(default=False, exclude=True)
+    """Runtime-only provenance flag: ``True`` when this ``custom_sql`` carries a
+    dbt-compiled ``manifest.json`` ``compiled_code`` body (the #154 ingest
+    bridge, :func:`signalforge.ingest.read_manifest_tests`), ``False`` for a
+    drafted / business-rule / ``tests/*.sql`` singular test.
+
+    The prune engine routes an ingested body to full-scope evaluation against
+    the source table (#154 DEC-007) and validates it comment-tolerantly
+    (#154 DEC-013) — a dbt-rendered relation is quoted with dbt's own scheme,
+    which the ``{{ this }}`` sample-substitution cannot bind, so under
+    ``scope=sample`` an ingested body would otherwise silently degrade to
+    ``kept-without-evidence``. A *drafted* ``custom_sql`` keeps its existing
+    sample behaviour unchanged.
+
+    ``exclude=True`` keeps the flag out of ``model_dump`` / ``model_dump_json``:
+    it is a routing hint, NOT part of the serialised candidate contract, so the
+    diff ``candidate_hash``, the proposed-YAML surface, and every committed
+    custom_sql fixture stay byte-identical (#154 DEC-016 — no serialised-shape
+    change). The macro identity a reviewer needs travels on ``rationale``, which
+    IS serialised.
+    """
 
     @field_validator("sql")
     @classmethod

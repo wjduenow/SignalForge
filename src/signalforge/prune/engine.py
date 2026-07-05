@@ -86,6 +86,7 @@ from signalforge._common.path_safety import PathContainmentError, canonicalise_p
 from signalforge.draft.models import (
     CandidateSchema,
     CandidateTest,
+    CandidateTestCustomSQL,
     CandidateTestRowCountAnomalyByPeriod,
     CandidateTestRowCountBetween,
     CandidateTestUniqueCombination,
@@ -529,8 +530,15 @@ def _test_requires_source_table(
       | :class:`CandidateTestRowCountAnomaly`   | True            | True     | False     |
       | :class:`CandidateTestRowCountBetween`   | True            | True     | False     |
       | :class:`CandidateTestUniqueCombination` | True            | True     | False     |
+      | ``custom_sql`` (``from_manifest=True``) | True            | True     | False     |
       | every other variant                     | False           | False    | False     |
       +-----------------------------------------+-----------------+----------+-----------+
+
+    A **manifest-ingested** ``custom_sql`` (#154 DEC-007) joins the bypass set:
+    its ``compiled_code`` references dbt's own quoted relation, which the
+    ``{{ this }}`` sample-substitution cannot bind, so it is evaluated
+    full-scope against the source under either sample strategy. A *drafted*
+    ``custom_sql`` (``from_manifest=False``) is NOT bypassed.
 
     Rationale:
       * **row_count_between / row_count_anomaly_by_period** —
@@ -571,6 +579,16 @@ def _test_requires_source_table(
         # ``scope="full"`` — no sampling; ``compile_table_ref`` already
         # resolves to source. No bypass needed.
         return False
+    # #154 DEC-007 — a manifest-ingested ``custom_sql`` body carries dbt's
+    # already-Jinja-resolved ``compiled_code``, which references the relation
+    # with dbt's OWN quoting scheme. The ``{{ this }}`` sample-substitution
+    # cannot bind it, so under ``scope=sample`` it would silently degrade to
+    # ``kept-without-evidence``. Route it to the source table (full-scope)
+    # under EITHER sample strategy — exactly like the metadata-aggregate
+    # variants below. A *drafted* ``custom_sql`` (``from_manifest=False``)
+    # is NOT bypassed and keeps its existing sample behaviour byte-unchanged.
+    if isinstance(test, CandidateTestCustomSQL) and test.from_manifest:
+        return True
     return isinstance(
         test,
         (
@@ -1330,6 +1348,33 @@ def prune_tests(
     dialect = adapter.dialect()
     is_trusted = model.unique_id in resolved_config.trusted_models
     scope: Scope = resolved_config.scope
+
+    # #154 DEC-007 — one INFO when the operator requested ``scope=sample`` but
+    # the batch carries manifest-ingested ``custom_sql`` candidates. Those are
+    # ALWAYS evaluated full-scope against the source (dbt's own quoted relation
+    # cannot bind the deterministic sample), so the sample request is a no-op
+    # for them; the routing lives in :func:`_test_requires_source_table`. Fires
+    # at most once per ``prune_tests`` call, and only on the sample path — a
+    # ``scope=full`` run (or a batch with no ingested candidates) stays
+    # log-silent. Lazy-format JSON per the DEC-017 logger gate; never
+    # f-string-interpolate user-controlled values.
+    if scope == "sample":
+        ingested_count = sum(
+            1
+            for _, test in pairs
+            if isinstance(test, CandidateTestCustomSQL) and test.from_manifest
+        )
+        if ingested_count:
+            _LOGGER.info(
+                "ingested custom_sql: scope=sample requested; "
+                "evaluating full-scope against source: %s",
+                json.dumps(
+                    {
+                        "model_unique_id": model.unique_id,
+                        "ingested_count": ingested_count,
+                    }
+                ),
+            )
 
     total_budget_ms = resolved_config.total_budget_seconds * 1000
 
