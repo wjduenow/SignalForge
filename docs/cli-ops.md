@@ -620,6 +620,8 @@ Flag reference:
 | `--manifest PATH` | no | `<project_dir>/target/manifest.json` | Override the manifest location. Canonicalised against the resolved project_dir. |
 | `--profiles-dir PATH` | no | dbt default search | Override the `profiles.yml` search location (mirrors dbt-core's flag). Sets `DBT_PROFILES_DIR` in the current process environment. |
 | `--tests-dir PATH` | no | `<project_dir>/tests` | Override the singular-test directory enumerated for model-level `tests/*.sql` files (US-014). Each `.sql` referencing this model is pruned alongside the schema.yml tests; unrelated files are ignored. The **default** directory is optional — when absent only the schema.yml tests are pruned; an **explicit** `--tests-dir` pointing at a missing directory fails loud (`IngestSchemaNotFoundError`). |
+| `--from-manifest` | no | off | Also prune the model's **dbt-compiled manifest test nodes** (dbt-expectations / dbt-utils / in-house generic tests). Reads the already-Jinja-resolved `compiled_code` off each `resource_type=='test'` node via `read_manifest_tests` and merges the **row-returning + deterministic** bodies into the prune set as model-level `custom_sql` candidates (issue #154 / DEC-005). Off by default: byte-identical to the schema.yml + `tests/*.sql` behaviour. Requires a manifest built by `dbt compile` (or `dbt build` / `dbt docs generate`); nodes without `compiled_code` are skip-recorded with a "run `dbt compile`" remediation (a single summary line when *every* node lacks it). Aggregate/scalar-shaped and non-deterministic bodies are skip-recorded too. |
+| `--grade` | no | off | Run the **LLM-as-judge grade stage** on the ingested manifest tests (issue #154 / DEC-002 / DEC-018). **Requires `--from-manifest`** — `--grade` alone is an input-validation error (exit 2), because schema.yml / singular tests carry `rationale=None` and grading them is noise; only manifest-ingested tests get the synthesized macro rationale worth judging. When set, the grade stage runs **between prune and diff**, feeds the grading report into `render_diff` (enabling the `flagged` tier), writes `.signalforge/grade.json` + `.signalforge/grade.jsonl`, and renumbers progress to `[N/4]`. Off by default the command stays zero-credential / zero-cost; the credential gate is **implicit** — a missing `ANTHROPIC_API_KEY` surfaces as `LLMAuthError` (exit 3) at grade-call time (no explicit key check). |
 | `--scope {sample,full}` | no | from config | Override `prune.scope`. Applied via `PruneConfig.model_validate` so validators re-run (DEC-002). |
 | `--sample-strategy {oneshot,materialised}` | no | from config | Override `prune.sample_strategy`. Applied via `PruneConfig.model_validate` (DEC-002). |
 | `--as-of YYYY-MM-DD` | no | resolves to `date.today()` at prune time | Evaluation date for the time-bound `row_count_anomaly_by_period` test variant (issue #171 / DEC-001). Drives both the partition-filter literal and the "most-recent period" bucket the engine evaluates against the predicted band. When omitted, the engine resolves to `date.today()` and emits one INFO log line naming the resolved value; the resolved value lands on every `PruneEvent.as_of` audit record for after-the-fact reproducibility (re-run with `--as-of <recorded value>` to reproduce). Threaded to `prune_tests` as the `as_of` kwarg. Strict ISO parsing via `date.fromisoformat`; a bad format → argparse usage error (exit 2, tier 2 input-validation). Inert when no `row_count_anomaly_by_period` candidate is in play. See [`docs/prune-ops.md` § `row_count_anomaly_by_period`](prune-ops.md#row_count_anomaly_by_period). |
@@ -691,6 +693,57 @@ AND singular — add no signal. Specifics:
 - **Read-only still holds:** kept `custom_sql` tests surface as
   standalone `.sql` proposals in the diff; nothing is written back to
   your test files.
+
+#### dbt-compiled manifest tests (`--from-manifest`, issue #154)
+
+`--from-manifest` closes the un-graded half of the prune gate for teams
+that already author `dbt-expectations` (and other generic / namespaced)
+tests. dbt itself does the hard work: after `dbt compile`, every test
+node in `manifest.json` carries `compiled_code` (already Jinja-resolved).
+`--from-manifest` reads that string off each `resource_type=='test'`
+node associated with the model and routes the **row-returning +
+deterministic** ones through the existing `custom_sql` prune pipeline —
+so they get the same kept / kept-uncertain / dropped / flagged treatment
+as everything else. It composes with `--schema` and `tests/*.sql`: all
+three sources merge into one prune run.
+
+- **What's required.** A manifest built by `dbt compile` (or `dbt build`
+  / `dbt docs generate`) — `dbt parse` does **not** populate
+  `compiled_code`. A test node whose `compiled_code` is absent / null is
+  skip-recorded with a "run `dbt compile`" remediation; when *every*
+  associated node lacks it, one prominent summary line names the fix.
+- **What's pruned vs. skipped.** Row-returning + deterministic bodies
+  become `custom_sql` candidates. Aggregate / scalar-shaped bodies
+  (`COUNT(*)`, a single numeric) are skip-recorded — wrapping a scalar in
+  `SELECT COUNT(*) AS failures FROM (<sql>)` would always report
+  `failures=1`, a silent wrong verdict (aggregate-macro support is
+  tracked as a follow-up). Non-deterministic bodies (`RAND` /
+  `CURRENT_TIMESTAMP` / `TABLESAMPLE` / …) are skip-recorded — the prune
+  verdict would not be reproducible.
+- **Macro identity in the diff.** Each ingested test's `why` names its
+  source macro (`dbt-expectations expect_column_values_to_be_between(…)`)
+  so you can locate and remove the right test in your dbt project.
+- **Off by default.** Without the flag, the run is byte-identical to the
+  schema.yml + `tests/*.sql` behaviour above.
+
+#### Grade the ingested tests (`--grade`, issue #154)
+
+`--grade` layers the LLM-as-judge grade stage onto the ingested manifest
+tests — the only `prune-existing` path that makes an LLM call. It
+**requires `--from-manifest`**: schema.yml / singular tests carry no
+rationale, so grading them is noise; only manifest-ingested tests get the
+synthesized macro rationale worth judging. `--grade` without
+`--from-manifest` is an input-validation error (exit 2). When set:
+
+- The grade stage runs **between prune and diff**; the grading report
+  feeds `render_diff`, enabling the `flagged` tier (a test that survived
+  prune but scored below the rubric threshold).
+- `.signalforge/grade.json` + `.signalforge/grade.jsonl` are written.
+- Progress renumbers to `[N/4]` (`ingest → prune → grade → diff`).
+- The credential gate is **implicit**: a missing `ANTHROPIC_API_KEY`
+  surfaces as `LLMAuthError` (exit 3) at grade-call time, not as an
+  up-front check. Off by default, existing `prune-existing` runs stay
+  zero-credential / zero-cost.
 
 Exit codes (four-tier taxonomy; see § Four-tier exit-code taxonomy):
 
