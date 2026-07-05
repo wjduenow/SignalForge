@@ -152,6 +152,26 @@ Where `<path>` is the `schema.yml` file containing the existing tests. The comma
 
 The same scope / sample-strategy flags from `generate` apply (`--scope`, `--sample-strategy`). The `--mode` flag is inert here — `prune-existing` never builds an LLM payload, so the safety policy has nothing to shape.
 
+### Prune dbt-compiled manifest tests (`--from-manifest`)
+
+If the user authors **`dbt-expectations` / `dbt-utils` / in-house generic tests**, SignalForge can prune those too — without teaching it each macro. After `dbt compile`, every test node in `manifest.json` carries `compiled_code` (already Jinja-resolved); `--from-manifest` reads it off each `resource_type=='test'` node and routes the **row-returning + deterministic** ones through the same `custom_sql` prune pipeline, merged with the `--schema` and `tests/*.sql` candidates:
+
+```bash
+signalforge prune-existing <model> --schema <path> --from-manifest
+```
+
+Requires a manifest built by `dbt compile` (or `dbt build` / `dbt docs generate`) — plain `dbt parse` does **not** populate `compiled_code`, so those nodes are skip-recorded with a "run `dbt compile`" remediation. Aggregate/scalar-shaped bodies (`COUNT(*)`, a single numeric) and non-deterministic bodies (`RAND` / `CURRENT_TIMESTAMP` / `TABLESAMPLE`) are also skip-recorded (they'd give a silent-wrong or irreproducible verdict). Off by default — the flag is opt-in.
+
+### Grade the ingested manifest tests (`--grade`)
+
+`--grade` layers the LLM-as-judge grade stage onto the ingested manifest tests (the only `prune-existing` path that makes an LLM call). It **requires `--from-manifest`** — schema.yml / singular tests carry no rationale, so grading them is noise; only manifest-ingested tests get the synthesized macro rationale worth judging:
+
+```bash
+signalforge prune-existing <model> --schema <path> --from-manifest --grade
+```
+
+Running `--grade` without `--from-manifest` is an input-validation error (exit 2). When set, the grade stage runs between prune and diff, feeds the grading report into the diff (enabling the `flagged` tier), and writes `.signalforge/grade.json` + `.signalforge/grade.jsonl`. The credential gate is implicit — a missing `ANTHROPIC_API_KEY` surfaces as an auth error (exit 3) at grade-call time. Off by default, `prune-existing` stays zero-credential / zero-cost.
+
 ## 5. Reading the diff
 
 Every kept / kept-uncertain / dropped / flagged row carries a one-line "why." The four tiers:
