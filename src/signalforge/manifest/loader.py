@@ -503,7 +503,7 @@ def iter_models(manifest: Manifest) -> Iterator[Model]:
     return iter(manifest.nodes.values())
 
 
-_REF_CALL_RE = re.compile(r"ref\(\s*'([^']+)'(?:\s*,\s*'([^']+)')?\s*\)")
+_REF_CALL_RE = re.compile(r"""ref\(\s*['\"]([^'\"]+)['\"](?:\s*,\s*['\"]([^'\"]+)['\"])?\s*\)""")
 """Bounded ``ref('name')`` / ``ref('pkg', 'name')`` extractor used to mine the
 tested-model name out of a generic test's ``test_metadata.kwargs.model`` Jinja
 string (e.g. ``{{ get_where_subquery(ref('my_model')) }}``). NO Jinja engine —

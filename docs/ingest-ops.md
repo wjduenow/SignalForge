@@ -416,7 +416,7 @@ accepted for signature parity with the adjacent stages but is unused (this
 bridge does no path I/O — the raw `compiled_code` is carried verbatim; SQL
 safety is re-validated in the prune compiler).
 
-### Three gates decide prunable vs. skip-recorded
+### Four gates decide prunable vs. skip-recorded
 
 For each associated node, the bridge runs four checks in order —
 **presence → row-returning → deterministic → comment-tolerant safety scan** —

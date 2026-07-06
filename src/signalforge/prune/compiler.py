@@ -701,7 +701,11 @@ def _compile_custom_sql(
         # NOW / … bodies), but a non-deterministic body reaching the compiler
         # still routes to ``kept-without-evidence`` here — a prune verdict that
         # changed run-to-run would violate Architectural Commitment #5.
-        if not is_deterministic_sql(test.sql):
+        # Pass the ACTIVE dialect (the Dialect names already match sqlglot's) so
+        # a Snowflake / Databricks compiled body parses under the right dialect —
+        # otherwise a parse failure returns the permissive (deterministic=True)
+        # verdict and a non-deterministic construct could slip through this gate.
+        if not is_deterministic_sql(test.sql, dialect=dialect.name):
             return _InvalidIdentifier(
                 reason=(
                     "ingested custom_sql is non-deterministic "

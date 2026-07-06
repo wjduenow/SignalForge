@@ -876,17 +876,19 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
             if progress_on:
                 emit_progress_entry(3, "grade", "scoring ingested tests...", total=total)
             _t0 = time.monotonic()
-            # DEC-002: grade scores ONLY the manifest-ingested ``custom_sql``
-            # tests — they alone carry the synthesized macro rationale worth
-            # judging. The operator's own schema.yml built-ins / singular tests
-            # (``rationale=""``) are deliberately NOT graded: doing so would
-            # spend LLM calls on empty rationales AND could flip a kept built-in
-            # into the ``flagged`` tier on a low empty-rationale score —
-            # surfacing the operator's existing tests as low-quality though they
-            # never opted in. The FULL ``candidate`` is still pruned + rendered;
-            # only the grade INPUT is narrowed (columns dropped, model-level
-            # tests filtered to ``from_manifest``). A narrowed grade report means
-            # only ingested tests can reach ``flagged`` in the diff.
+            # DEC-002: narrow the grade INPUT so the only TESTS scored are the
+            # manifest-ingested ``custom_sql`` ones — they alone carry the
+            # synthesized macro rationale worth judging. The operator's own
+            # schema.yml built-in / singular tests (``rationale=""``) are dropped
+            # here: grading them would spend LLM calls on empty rationales AND
+            # could flip a kept built-in into the ``flagged`` tier on a low
+            # empty-rationale score, surfacing the operator's existing tests as
+            # low-quality though they never opted in. (``grade_artifacts`` still
+            # scores the model-level ``description`` / ``rationale`` doc artifacts
+            # of the candidate — those are not a TEST and cannot flag one; the
+            # FULL ``candidate`` is still pruned + rendered.) Columns are dropped
+            # and the model-level tests filtered to ``from_manifest``, so a
+            # narrowed grade report means only ingested tests reach ``flagged``.
             grade_candidate = candidate.model_copy(
                 update={
                     "columns": (),

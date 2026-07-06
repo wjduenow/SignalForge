@@ -2396,3 +2396,36 @@ def test_render_diff_emit_test_files_default_true_still_emits(project_dir: Path)
     )
 
     assert len(report.proposed_test_files) == 1
+
+
+def test_macro_why_preserves_cause_when_macro_is_long() -> None:
+    """PR-review (CodeRabbit): the kept-uncertain CAUSE must survive truncation.
+
+    A long macro locator must NOT consume the whole ``max_chars`` budget and drop
+    the ``base_why`` (the ``kept-without-evidence`` cause) — that would regress the
+    load-bearing "why could not be evaluated" signal (issue-#50 carve-out). The
+    budget reserves space for the cause and shortens the macro locator instead.
+    """
+    from signalforge.diff.engine import _macro_why
+
+    long_macro = "dbt-expectations expect_column_values_to_be_between(" + "x" * 200 + ")"
+    cause = "identifier rejected by SQL safety check"
+    # Kept-uncertain tier (cause_priority=True): the cause must survive.
+    why = _macro_why(long_macro, cause, max_chars=60, cause_priority=True)
+
+    assert len(why) <= 60
+    # The operator-actionable cause is preserved verbatim (never truncated away).
+    assert cause in why
+    # The macro locator is present but shortened (its head survives).
+    assert "dbt-expectations" in why
+
+    # When everything fits, the full "macro — cause" is returned regardless of mode.
+    short = _macro_why("macro_x", cause, max_chars=200, cause_priority=True)
+    assert short == f"macro_x — {cause}"
+
+    # Dropped tier (cause_priority=False, default): the macro LOCATOR leads (the
+    # drop_reason column separately carries the category), so under a tight budget
+    # the full macro head survives and the prose cause is what truncates.
+    dropped_why = _macro_why(long_macro, cause, max_chars=60)
+    assert len(dropped_why) <= 60
+    assert dropped_why.startswith("dbt-expectations expect_column_values_to_be_between")

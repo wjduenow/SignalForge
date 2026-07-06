@@ -18,7 +18,7 @@ Close the **un-graded half** of the prune gate for teams that already author
 recognises these tests and routes them to `IngestResult.skipped` with
 `SkipReason="custom-or-generic-test"` — they pass through untouched, so
 "signal over volume" (Architectural Commitment #1) covers only the four built-ins
-+ `custom_sql`.
+and `custom_sql`.
 
 The cheap path leans on dbt's own work: after `dbt compile`, every test node in
 `manifest.json` carries `compiled_code` (already Jinja-resolved). We read that

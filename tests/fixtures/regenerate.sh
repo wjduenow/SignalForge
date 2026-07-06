@@ -78,7 +78,7 @@ scrub_manifest() {
     | .metadata.adapter_type = null
     | .metadata.env = {}
   ' "$in" >"$out.tmp"
-  mv "$out.tmp" "$out"
+  mv -f "$out.tmp" "$out"
 }
 
 run_version() {
@@ -149,7 +149,7 @@ scrub_compiled_manifest() {
     | .metadata.env = {}
     | walk(if type == "object" and has("created_at") then .created_at = null else . end)
   ' "$in" >"$out.tmp"
-  mv "$out.tmp" "$out"
+  mv -f "$out.tmp" "$out"
 }
 
 echo "==> Generating dbt_project_expectations/target/manifest.json via dbt compile (dbt-core==1.8.*)"

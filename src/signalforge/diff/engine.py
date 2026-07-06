@@ -442,7 +442,9 @@ def _flagged_why(failing: GradingResult, *, max_chars: int) -> str:
     return f"{prefix}{reasoning}".rstrip()
 
 
-def _macro_why(rationale: str, base_why: str, *, max_chars: int) -> str:
+def _macro_why(
+    rationale: str, base_why: str, *, max_chars: int, cause_priority: bool = False
+) -> str:
     """Combine an ingested test's macro-identity rationale with the prune why (DEC-015 of #154).
 
     An ingested manifest test — a dbt-expectations / dbt-utils / in-house
@@ -457,20 +459,42 @@ def _macro_why(rationale: str, base_why: str, *, max_chars: int) -> str:
     operator with no way to locate the test to remove in their real dbt
     project.
 
-    This surfaces the macro identity **first** (so it survives the
-    ``max_chars`` truncation head-cut) followed by the prune ``base_why``
-    — the drop reason prose / the ``kept-without-evidence`` cause, which
-    stays load-bearing per the issue-#50 carve-out. When ``rationale`` is
-    empty the base why is returned unchanged (truncated); this is what a
-    built-in / non-ingested test hits, so its ``why`` is byte-identical to
-    the pre-#154 behaviour.
+    Surfaces the macro identity followed by the prune ``base_why``, both capped
+    at ``max_chars``. The two tiers weight the truncation differently
+    (``cause_priority``):
+
+    - **Dropped** (``cause_priority=False``, default): the drop-reason CATEGORY
+      rides the SEPARATE ``drop_reason`` column, so the macro LOCATOR leads and
+      the prose ``base_why`` is what truncates if the budget runs out.
+    - **Kept-uncertain** (``cause_priority=True``): there is NO separate column
+      for the ``kept-without-evidence`` cause — the ``why`` is the ONLY place it
+      appears and it is load-bearing per the issue-#50 carve-out. A naive
+      head-truncation of ``f"{macro} — {base}"`` would let a long macro consume
+      the whole budget and DROP the cause; instead the cause is preserved (up to
+      leaving a minimal head for the locator) and the macro is shortened to fit.
+
+    When ``rationale`` is empty the base why is returned unchanged (truncated);
+    this is what a built-in / non-ingested test hits, so its ``why`` is
+    byte-identical to the pre-#154 behaviour.
     """
     macro = rationale.strip() if rationale else ""
     if not macro:
         return _truncate_why(base_why, max_chars)
-    if base_why and base_why.strip():
-        return _truncate_why(f"{macro} — {base_why}", max_chars)
-    return _truncate_why(macro, max_chars)
+    base = base_why.strip() if base_why else ""
+    if not base:
+        return _truncate_why(macro, max_chars)
+    separator = " — "
+    if len(macro) + len(separator) + len(base) <= max_chars:
+        return f"{macro}{separator}{base}"
+    if not cause_priority:
+        # Macro leads; the drop_reason column separately carries the category.
+        return _truncate_why(f"{macro}{separator}{base}", max_chars)
+    # Preserve the operator-actionable cause (reserve ≥1 char for the locator),
+    # then shorten the macro locator to whatever remains.
+    base_part = _truncate_why(base, min(len(base), max(1, max_chars - len(separator) - 1)))
+    macro_budget = max_chars - len(separator) - len(base_part)
+    macro_part = _truncate_why(macro, macro_budget) if macro_budget > 0 else ""
+    return f"{macro_part}{separator}{base_part}" if macro_part else base_part
 
 
 def _entry_for_test(
@@ -549,7 +573,12 @@ def _entry_for_test(
         # issue-#50 carve-out (``decision.why`` only — the drafter rationale
         # would mislead for a test we couldn't evaluate).
         if isinstance(decision.test, CandidateTestCustomSQL) and decision.test.from_manifest:
-            why = _macro_why(decision.test.rationale or "", decision.why, max_chars=max_why_chars)
+            why = _macro_why(
+                decision.test.rationale or "",
+                decision.why,
+                max_chars=max_why_chars,
+                cause_priority=True,
+            )
         else:
             why = _truncate_why(decision.why, max_why_chars)
     # Post-QG fix #3: a flipped-to-flagged row's why must reflect the
