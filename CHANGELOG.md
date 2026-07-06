@@ -4,7 +4,9 @@ All notable changes to SignalForge are documented here. The format is loosely ba
 
 ## [Unreleased]
 
-_Nothing yet — entries land here on `dev` and get promoted to a dated section at release time._
+### Changed
+
+- **Manifest-ingested count-of-rows dbt tests are now pruned + graded, not skip-recorded (#267, follow-up to #154).** A bare `SELECT count(*) …` scalar compiled test body (`COUNT(*)`, `COUNT(col)`, or `COUNT(DISTINCT)` — the count-of-rows idiom hand-written singular tests and non-`dbt-expectations` generic tests emit) previously skip-recorded as `malformed-supported-test`, because wrapping a scalar in the adapter's `SELECT COUNT(*) AS failures FROM (<sql>)` envelope reports `failures=1` **always** (a silent wrong `kept`). The ingest bridge (`read_manifest_tests`) now detects the count-of-rows shape via sqlglot-AST and graduates it to a `from_manifest` `custom_sql` candidate; the prune compiler restructures it to a failing-rows form (`SELECT sf_agg_value FROM (SELECT (<body>) AS sf_agg_value) AS sf_agg WHERE sf_agg_value <> 0`) so the envelope reflects the true verdict (0 rows ⇒ `always-passes`/dropped, ≥1 ⇒ kept), and it is evaluated against the **source table** under every sample strategy (reusing the existing `from_manifest` source-routing — no new engine arm, no 6th `DropReason`). This is sound under dbt's "returned rows = failures" convention: a `COUNT(*) [WHERE cond]` body's value **is** the failing-row count, so count 0 = pass. Non-count aggregate bodies (`AVG` / `SUM` / `MIN` / `MAX`, multi-aggregate, or arithmetic-on-count) carry no such convention and **still** skip-record as `malformed-supported-test` (the closed 3-value `SkipReason` is unchanged). See `docs/ingest-ops.md` and `docs/prune-ops.md`.
 
 ## [0.8.0] — 2026-07-03
 
