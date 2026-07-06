@@ -89,3 +89,36 @@ When the operator wants types but does NOT run `dbt docs generate` (e.g. a dbt-p
 ## Reference
 
 `plans/super/2-manifest-loader.md` — DEC-001, DEC-007, DEC-008, DEC-013, DEC-014, DEC-017. `plans/super/37-multi-model-select.md` — DEC-001, DEC-012, DEC-016 (selector grammar additions). `plans/super/159-drafter-column-types.md` — DEC-001, DEC-002, DEC-007, DEC-009, DEC-010 (catalog.json sibling merge). `src/signalforge/manifest/loader.py` — current implementation of all three traps + the `_apply_catalog_overlay` helper. `src/signalforge/manifest/select.py` — issue-#37 selector module (parse_selector / select_models / SelectorAtom).
+
+## Test-node read surface: `GenericTest` + `Manifest.tests` sibling filter (issue #154)
+
+`signalforge.manifest.load` now also surfaces dbt `resource_type == "test"` nodes so the
+prune pipeline can grade externally-authored dbt-expectations / dbt-utils / generic tests
+from their manifest `compiled_code`. The read surface is a **sibling filter**, mirroring the
+`sources` precedent — NOT a repurpose of the model-only `nodes` map.
+
+- **`GenericTest`** — frozen `extra="ignore", populate_by_name=True` read-back model carrying
+  `unique_id`, `compiled_code: str | None`, `test_metadata` (name/namespace/kwargs),
+  `column_name`, `depends_on`, `attached_node`, `file_key_name`. Surfaced into
+  `Manifest.tests: dict[str, GenericTest] = Field(default_factory=dict)` via a
+  `resource_type == "test"` arm in `_load` parallel to `filtered_sources`. Test nodes already
+  flowed through the model-only filter and were discarded — the arm keeps them instead.
+  **`Manifest.nodes` stays model-only** (invariant intact); `tests` defaulting empty breaks no
+  `Manifest(...)` construction site; the frozen `model_copy` catalog overlay passes `tests`
+  through untouched. Mandatory `StrictGenericTest(extra="forbid")` drift detector + committed
+  fixture (`tests/fixtures/manifest/generic_test_nodes.json`, both v9/v10 shapes).
+
+- **Test→model association FEATURE-DETECTS, never version-branches (DEC-009).** No single field
+  is authoritative across manifest v9–v12 (`attached_node` is dbt 1.6+/manifest v10+, ABSENT in
+  v9) AND the loader discards the detected version. `signalforge.manifest.associate_test_model`
+  uses a precedence ladder: `attached_node` → else `file_key_name` + `depends_on.nodes`
+  disambiguated by `column_name` / `test_metadata.kwargs.model` (bounded `ref('…')` scan).
+  Ambiguous → `None` (the ingest bridge simply doesn't associate it — matches the source-registry
+  "return None rather than guess" posture).
+
+- **`compiled_code` availability is the exact `data_type` / catalog.json analogue.** `dbt parse`
+  does NOT populate it; `dbt compile` / `dbt run` / `dbt docs generate` does. The reader stays
+  stage-0 silent on absent/null `compiled_code` (like `Column.data_type=None`, no drift detector
+  needed — an existing-field null). The AC's "not a silent skip" is satisfied DOWNSTREAM (the
+  ingest bridge skip-records a no-`compiled_code` node with a "run `dbt compile`" remediation).
+  No `_PROMPT_VERSION` change (manifest is not a prompt template).

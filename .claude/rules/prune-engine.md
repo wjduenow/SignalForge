@@ -225,3 +225,30 @@ New ABC method on `WarehouseAdapter`: `run_stats_query(sql: str) -> tuple[dict[s
 ## Reference
 
 `plans/super/6-prune-engine.md` — DEC-001 … DEC-028. `plans/super/22-temp-table-sample.md` — v0.2 materialised-sample additions. `plans/super/35-prune-enabled-doc-reframe.md` — operator-disable additions. `plans/super/51-kept-rate-warn-doc.md` — kept-rate WARNING + drop-rate doc. `plans/super/55-normalise-hash-recipe.md` — hash recipe normalisation. `plans/super/121-prune-snowflake-dialect.md` — Snowflake compiler dialect (DEC-001…008). `plans/super/171-row-count-anomaly.md` — `_test_requires_source_table` helper (DEC-009), DEC-010 stricter-bypass behavior change, two-query split + cold-start (DEC-008), `AnomalyTestStats` (DEC-005), `--as-of` reproducibility carve-out (DEC-001), `_PRUNE_AUDIT_SCHEMA_VERSION: 2 → 3` + serializer (DEC-013), `StatsQueryNotSupportedError` ABC graceful degrade. `src/signalforge/prune/` — current implementation. `docs/prune-ops.md` — operational reference. `tests/prune/test_drift_detector.py` — schema-drift gate. `tests/prune/test_compiler_import_guard.py` — `prune/` SDK-import confinement (DEC-008 of #121). `tests/prune/test_compiler_fakesnow.py` — gated `@pytest.mark.snowflake` fakesnow/sqlglot validation. `tests/test_audit_completeness.py` — AST-scan suite. `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate. `tests/fixtures/prune/prune_event_v1.jsonl` — committed audit fixture (v3 as of #171).
+
+## Ingested manifest-compiled tests: full-scope routing + determinism fallback (issue #154)
+
+Manifest-ingested `custom_sql` candidates (`from_manifest=True`, see `ingest-layer.md`
+§ `read_manifest_tests`) route differently from drafted `custom_sql`:
+
+- **`scope=full` regardless of `--scope` (DEC-007).** dbt's `compiled_code` renders the model
+  relation with dbt's own dialect-specific quoting, which the `custom_sql` string-substitution
+  CANNOT match — under `scope=sample` every ingested test would silently degrade to
+  `kept-without-evidence` (the fail-closed guard holds — NOT a prod full-scan — but sampling is
+  inert). So `_test_requires_source_table` returns `True` for `from_manifest` custom_sql under any
+  sample strategy (joins the metadata-aggregate bypass set → `source_table_ref`, both the
+  `all_bypass_to_source` short-circuit AND the per-test `per_test_table_ref` arm, in lockstep — the
+  #170 two-conditional rule). One INFO fires when `--scope=sample` was requested. The compiler's
+  ingested branch returns the compiled body VERBATIM (dbt's quoted relation already points at the
+  real table — no substitution). sqlglot AST relation-rewriting for true sampling is deferred (#268).
+- **Comment-tolerant validation on the compiled body (DEC-013).** The ingested compile path uses
+  `validate_ingested_sql` (strips `--`//`* */` before the safety scan) NOT the #116 `validate_test_sql`
+  — dbt-compiled SQL routinely carries comments the #116 validator rejects wholesale. Plus a
+  belt-and-braces `is_deterministic_sql → _InvalidIdentifier → kept-without-evidence` fallback at
+  the compiler (the primary determinism gate is in ingest).
+- **`DropReason` stays the 5-value LOCK.** Non-deterministic / unparseable / can't-evaluate ingested
+  tests route through the existing `kept-without-evidence` per the conservative-bias template — never
+  a 6th reason. No new `PruneEvent` field / no `_PRUNE_AUDIT_SCHEMA_VERSION` bump.
+- **sqlglot extension.** The compiler consumes `signalforge.ingest._compiled_sql` (the 3rd sqlglot
+  consumer after `draft/parser` and `ingest/_compiled_sql` itself); the `test_compiler_import_guard`
+  (no `google.cloud`/`snowflake` under `prune/`) is unaffected — sqlglot is dialect-neutral parsing.

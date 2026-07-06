@@ -215,3 +215,18 @@ The drafter's config block is `{ llm: { provider, model, cheap_model, max_output
 ## Reference
 
 `plans/super/5-llm-draft-pipeline.md` — DEC-001 … DEC-027. `plans/super/135-provider-neutral-llm-seam.md` — DEC-001 … DEC-012 (the provider-neutral seam: `call_llm`, `LLMProvider` ABC + registry, capability flags, `provider` config field). `plans/super/136-openai-grading-provider.md` — DEC-001 … DEC-014 (OpenAI as the second concrete provider: shim + `OpenAIProvider` + four pricing SKUs + `--estimate` strategy refactor + JSON-mode enforcement). `plans/super/137-gemini-grading.md` — DEC-001 … DEC-019 (Gemini as the third concrete provider: shim + `GeminiProvider` + `.messages`-over-`.models.generate_content` adapter + three pricing SKUs + native `models.count_tokens` for `--estimate` + safety-filter typed degrade + namespace-package AST confinement). `plans/super/188-bulk-cache-prefix.md` — DEC-001 … DEC-015 (project-scope shared cached prefix for `--select` batches: `DraftConfig.cache_scope`, `_render_project_summary` + `<PROJECT_MANIFEST>` envelope, dual `_PROMPT_VERSION` + `_prompt_version_for` dispatch, oversize catch-and-retry vs breach fail-closed, two cache-stability goldens). `src/signalforge/llm/` (incl. `providers.py` + `_anthropic_client.py` + `_openai_client.py` + `_gemini_client.py`), `src/signalforge/draft/` — current implementation. `tests/llm/_fake.py::FakeAnthropicClient` + `tests/llm/_fake_openai.py::FakeOpenAIClient` + `tests/llm/_fake_gemini.py::FakeGeminiClient` — `expect_*` API; `tests/llm/_fake_provider.py::FakeNoCacheProvider` + `tests/grade/test_provider_neutrality.py` + `tests/grade/test_provider_neutrality_openai.py` + `tests/grade/test_gemini_neutrality.py` + `tests/draft/test_gemini_neutrality.py` — the no-cache provider-neutrality proofs (synthetic + real OpenAI + real Gemini). `docs/draft-ops.md` / `docs/grade-ops.md` / `docs/cost-estimate-ops.md` — operational references. `tests/fixtures/draft/llm_response_*.json` / `tests/fixtures/estimate/anthropic_byte_identity_golden.txt` — fixture sets exercising happy + each error path + the DEC-013 Anthropic byte-identity floor.
+
+## sqlglot confinement — second/third importer (issue #154)
+
+The `#159` sqlglot-confinement convention ("confined to `signalforge.draft.parser`; future scan
+when a second module reaches for sqlglot") graduated in #154. sqlglot now has a SECOND importer —
+`signalforge.ingest._compiled_sql` (the `is_deterministic_sql` / `is_row_returning` /
+`validate_ingested_sql` helpers for dbt-compiled test SQL; #154 DEC-006) — and a third CONSUMER,
+`signalforge.prune.compiler`, which imports those helpers (not sqlglot directly). The rationale:
+dbt's `compiled_code` is FOREIGN-rendered SQL, so the `#116` string-substitution / substring-validation
+machinery is safe-but-wrong-tool — AST parsing is the only sound approach for a relation SignalForge
+did not render itself (regex false-positives on a `random_id` column; a scalar wrapped in
+`COUNT(*) AS failures` is `failures=1`-always). No AST confinement-scan was added (the convention
+remains documented, not gated); `tests/prune/test_compiler_import_guard.py` still passes (it forbids
+`google.cloud`/`snowflake` under `prune/`, not sqlglot). If a FOURTH sqlglot importer lands, promote
+the convention to a real confinement scan.

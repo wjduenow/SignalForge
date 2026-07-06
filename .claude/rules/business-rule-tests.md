@@ -190,3 +190,31 @@ Issue #184 closed a model-vs-column-scope mis-steering bug for `row_count_anomal
 4. **WARNING shape: positional `%s` + `json.dumps({...})` — and watch the AST grep gate's nested-`JoinedStr` recursion.** The `tests/llm/test_logger_grep_gate.py` AST visitor recursively walks every arg of `_LOGGER.<method>(...)` calls — so a nested f-string INSIDE a `json.dumps({...})` dict literal that is itself a `_LOGGER.warning` arg trips the gate. Use `"column=" + repr(value)` instead of `f"column={value!r}"` to construct identifier-quoted strings inside the dict. (#184 US-003 implementation finding — the spec's verbatim f-string template would have failed validation.) Mirror the cache-anomaly WARNING precedent from `signalforge.llm.client`: payload dict has 5 keys (`test_type`, `from_scope`, `to_scope`, `model_unique_id`, `reason`); fires unconditionally per re-attach; not gated by `--quiet` or any config flag.
 
 5. **Audit-event field bump for cross-stage forensic visibility.** When a parser carve-out mutates the LLM's output, `LLMResponseEvent.parsed_schema_hash` reflects the rebuilt candidate, not the LLM's original emission. To close that visibility gap: add a new field on the audit event (here, `parser_reshaped: tuple[ReshapeRecord, ...] = ()`), bump `audit_schema_version` ONE step (`1 → 2`), keep the field typed `int` (not `Literal`) so prior-version records still round-trip, default to empty so the no-mutation happy path stays byte-equal with the prior version's fixture. Drift detector validates BOTH the prior-version fixture (field absent → default) AND a new fixture exercising the populated path. The threading is end-to-end: parser appends ReshapeRecord to a caller-supplied list → `parse_draft_response` exposes the list via keyword-only kwarg → `draft_from_request` builds the list, threads it into the parse call, then passes `parser_reshaped=tuple(list)` to `_build_response_event(...)` (which is the SINGLE AST-gated `LLMResponseEvent` construction seam — do NOT instantiate from the orchestrator).
+
+## `custom_sql` now has a THIRD source: manifest-ingested dbt tests (issue #154)
+
+`custom_sql` (the 5th test type, #116) originally had two input paths (`meta.signalforge.business_rules`
+NL rules + LLM inference). Issue #154 added a THIRD: dbt-compiled test nodes read from
+`manifest.json` (`read_manifest_tests`, see `ingest-layer.md`). It reuses the `CandidateTestCustomSQL`
+variant WITHOUT a 7th-type extension — the differentiator is a per-candidate
+`from_manifest: bool = Field(default=False, exclude=True)` marker:
+
+- **`exclude=True` is load-bearing** — keeps `from_manifest` out of `model_dump_json` so the diff
+  `candidate_hash`, proposed YAML, and every committed `custom_sql` fixture stay byte-identical
+  (no DEC-016 schema/audit bump). This is the "carry the category as a typed field set at the source"
+  discriminator (`grade-layer.md`), NOT a serialized-shape change. **Guard the invariant with an
+  explicit test** (a mutation removing `exclude=True` passed the whole suite — the drift mirror
+  carries a default so it can't catch it).
+- **Ingested-vs-drafted must be scoped consistently across layers.** The QG caught two cross-bead
+  drifts: (1) the diff macro-`why` was gated on `type=="custom_sql"` (ALL custom_sql) instead of
+  `from_manifest`, leaking the drafter rationale into `generate`'s dropped/kept-uncertain `why` and
+  re-breaking the #50 carve-out; (2) `prune-existing --grade` graded the whole merged candidate
+  instead of only the `from_manifest` tests, risking flipping the operator's own kept built-ins to
+  `flagged`. **Rule: anywhere ingested-vs-drafted behaviour diverges (prune routing, diff `why`,
+  grade input), gate on `from_manifest`, never on `type=="custom_sql"`.**
+- **Ingested tests are READ-ONLY** — they appear on the kept/dropped/flagged table, NEVER as
+  `proposed_test_files` (we didn't author them). `prune-existing` passes `render_diff(emit_test_files=False)`
+  unconditionally. Macro identity rides the synthesized rationale → diff `why` (DEC-015 of #154).
+- **Full-scope only in pass 1** (`scope=sample` deferred, #268); aggregate/bare-`COUNT(*)` macros
+  skip-recorded (source-routing deferred, #267); dbt-expectations' `validation_errors` wrapper makes
+  even its `expect_table_row_count` macro row-returning/prunable.

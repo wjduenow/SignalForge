@@ -73,3 +73,37 @@ The bare-name model resolver was hoisted to `signalforge.cli._helpers._resolve_m
 ## Reference
 
 `plans/super/104-ingest-external-tests.md` — DEC-001 … DEC-011. `src/signalforge/ingest/` — current implementation. `docs/ingest-ops.md` — operational reference. `tests/ingest/` — test suite (`test_parser.py` variant matrix, `test_anchor.py` collect-all, `test_reader.py` orchestrator + the disabled-prune acceptance check, `test_models.py` with the no-drift-detector note). `tests/fixtures/ingest/schema_codegen_shaped.yml` — dbt-codegen-shaped fixture. See-Also: `manifest-readers.md` (the reader precedent), `prune-engine.md` (what `prune_tests` accepts), `cli-layer.md` (exit-code lockstep, the deferred CLI).
+
+## Manifest-compiled-SQL source: `read_manifest_tests` (issue #154)
+
+A SECOND ingest source alongside `read_schema` (schema.yml) and `read_test_files`
+(`tests/*.sql`): `signalforge.ingest.read_manifest_tests(manifest, model, *, project_dir=None)
+-> IngestResult` reads dbt-compiled test nodes (`Manifest.tests`, see `manifest-readers.md`
+§ GenericTest) and turns each into a prunable candidate. It closes the un-graded half of the
+prune gate for dbt-expectations / dbt-utils / in-house generic tests (Architectural Commitment #1).
+
+- **Reuses `CandidateTestCustomSQL`, no 7th variant (DEC-001).** A row-returning + deterministic
+  test with populated `compiled_code` becomes a model-level `CandidateTestCustomSQL(sql=compiled_code,
+  column=None, rationale=<synthesized>, from_manifest=True)`. The `from_manifest` marker
+  (`Field(default=False, exclude=True)`) distinguishes ingested-from-drafted downstream WITHOUT a
+  schema/audit bump (`exclude=True` keeps `candidate_hash` byte-identical — guard that invariant
+  with an explicit test; a mutation dropping it passed the whole suite at QG time).
+- **Four-gate classification, all reusing `signalforge.ingest._compiled_sql` (sqlglot-AST):**
+  presence (`compiled_code` non-null) → `is_row_returning` (skip bare-scalar `SELECT COUNT(*)`;
+  DEC-004) → `is_deterministic_sql` (skip `TABLESAMPLE`/`RAND`/`CURRENT_TIMESTAMP`/…; DEC-012) →
+  `validate_ingested_sql` (comment-tolerant safety scan; DEC-013). **Regex/substring is unsafe
+  here — a column named `random_id` false-positives; use AST.** NOTE: dbt-expectations wraps
+  EVERY macro (incl. `expect_table_row_count_to_be_between`) in a row-returning `validation_errors`
+  shell, so those ARE prunable; the aggregate-skip fires only on a BARE top-level `SELECT COUNT(*)`.
+- **`SkipReason` stays the closed 3-value Literal (DEC-014).** No-`compiled_code` / aggregate /
+  non-deterministic / unparseable → an existing reason (`custom-or-generic-test` /
+  `malformed-supported-test`), never a 4th. When EVERY associated node lacks `compiled_code`, emit
+  ONE summary `SkippedTest` with a "run `dbt compile`" remediation — the AC's "not a silent skip"
+  surface (soft, never a hard abort).
+- **Envelope-safe rationale (DEC-011).** The synthesized rationale (macro name + arg summary) is set
+  at frozen-model CONSTRUCTION (never mutated) and stripped of `</ARTIFACT>` (+ the `<\s*/ARTIFACT>`
+  whitespace-split variant) so a hostile macro arg can't fail-close the whole grade run. The macro
+  identity rides on the rationale → the diff `why` cascade surfaces it (DEC-015).
+- **Stage-0 preserved.** No logging, no warehouse/LLM calls, no SQL building, no `bigquery` import.
+  The `_compiled_sql` helpers are self-contained (they do NOT import the warehouse `_strip_string_literals`
+  private — a QG fix; a stage-0 reader must not couple to another layer's `_`-internal).
