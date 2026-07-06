@@ -279,10 +279,12 @@ SELECT sf_agg_value FROM (SELECT (<body>) AS sf_agg_value) AS sf_agg WHERE sf_ag
 
 so the outer envelope now reflects the true verdict — **0 rows ⇒
 `always-passes` (dropped), ≥ 1 row ⇒ `kept`** — matching `row_count_between`'s
-failing-rows contract. This is sound under dbt's "returned rows = failures"
-convention: the count body's value **is** the failing-row count, so
-`count == 0` is a pass (see
-[`docs/ingest-ops.md` § count-of-rows](ingest-ops.md#count-of-rows-scalar-bodies-are-pruned-267)).
+failing-rows contract. This **recovers the likely-intended failing-rows
+semantics** under dbt's "returned rows = failures" contract (`count == 0` ⇒
+pass); it deliberately reinterprets the body and does not mirror dbt's own
+verdict, which scores a raw `count(*)` body as always-failing — see
+[`docs/ingest-ops.md` § count-of-rows](ingest-ops.md#count-of-rows-scalar-bodies-are-pruned-267)
+for the full soundness note and the non-empty-smoke-test caveat.
 The restructure is a pure-string wrap (no sqlglot in the compiler); the
 composed SQL is re-run through `validate_ingested_sql`. Because the ingested
 body is a `from_manifest` `custom_sql`, `_test_requires_source_table` already

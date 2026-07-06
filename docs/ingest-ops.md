@@ -490,15 +490,26 @@ compiler restructures the scalar into a failing-rows form so the adapter's
 `COUNT(*) AS failures` envelope reflects the true verdict — see
 [`docs/prune-ops.md` § count-of-rows restructure](prune-ops.md#custom_sql-manifest-ingested-and-drafted).
 
-**The `0 = pass` soundness convention.** Under dbt's singular-test contract,
-**returned rows are the failures** and a passing test returns zero rows. A
-`COUNT(*) [WHERE cond]` body's value therefore **is** the failing-row count:
-`count == 0` means pass (no offending rows), `count ≥ 1` means fail. A bare
-no-`WHERE` `COUNT(*)` reads as "this table should be empty" (the reject-table
-pattern). The inverse assertion — "the count should be *positive*" — is not
-expressible as a dbt singular test at all (there is no row to return when the
-count is zero), so interpreting a count body as "0 = pass" is faithful to the
-convention, not a heuristic.
+**The `0 = pass` semantics.** Under dbt's singular-test contract, **returned
+rows are the failures** and a passing test returns zero rows. A count-of-rows
+body's value reads naturally as that failing-row count, so SignalForge
+restructures it to a failing-rows form where `count == 0` means pass (no
+offending rows) and `count ≥ 1` means fail. A bare no-`WHERE` `COUNT(*)` reads
+as "this table should be empty" (the reject-table pattern).
+
+This **recovers the likely-intended failing-rows semantics** — it does *not*
+mirror dbt's own verdict. dbt runs a singular test as `select count(*) as
+failures from (<body>)`, so a raw `SELECT count(*) …` body returns one value
+row and dbt scores it `failures = 1` — **always failing**, regardless of the
+count. SignalForge deliberately reinterprets the body as a failing-row count
+instead (DEC-004/DEC-011): the always-fail literal reading is itself a sign the
+test was authored to mean "these rows are failures," and the inverse assertion
+("the count should be *positive*") is not expressible as a dbt singular test at
+all (there is no row to return when the count is zero). Caveat for the operator:
+a body written to mean "this filtered set should be **non-empty**" (e.g. a
+`SELECT count(*) … WHERE status = 'active'` smoke test) gets the *opposite*
+verdict — `count = 0` drops it as `always-passes` — so such a check should be
+authored as a row-returning test, not a bare count.
 
 **Non-count scalars keep skip-recording.** A non-count aggregate
 (`AVG` / `SUM` / `MIN` / `MAX`), a multi-aggregate projection, or arithmetic on

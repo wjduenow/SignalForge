@@ -191,8 +191,15 @@ def test_is_prunable_count_scalar_unparseable_returns_false() -> None:
 
 
 def test_is_prunable_count_scalar_union_is_not_single_select() -> None:
-    """A ``UNION`` root is not a single SELECT → cannot claim count-scalar."""
-    assert is_prunable_count_scalar("SELECT 1 UNION SELECT 2") is False
+    """A ``UNION`` root is not a single SELECT → cannot claim count-scalar.
+
+    Both UNION arms are themselves bare count-scalars, so the ONLY thing that
+    makes this ``False`` is the non-``exp.Select`` (``exp.Union``) root check —
+    isolating that branch. A bare-literal ``SELECT 1 UNION SELECT 2`` would pass
+    this test even if the union-root guard regressed (its projections aren't
+    counts), so it wouldn't pin the branch.
+    """
+    assert is_prunable_count_scalar("SELECT count(*) FROM a UNION SELECT count(*) FROM b") is False
 
 
 # --------------------------------------------------------------------------- #
