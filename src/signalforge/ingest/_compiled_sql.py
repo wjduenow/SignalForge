@@ -216,10 +216,12 @@ def _strip_sql_comments(sql: str) -> str:
 
     A ``--`` / ``/*`` inside a ``'…'`` / ``"…"`` / `` `…` `` quoted span is NOT a
     comment, so the scan tracks the active quote (honouring doubled-quote escapes
-    ``''`` / ``""`` / `` `` ``) and only recognises a comment when outside a
-    quoted span. Comment bodies are dropped (block comments collapse to a single
-    space); string/identifier spans pass through untouched so the downstream
-    ``;`` / paren scan can blank them via
+    ``''`` / ``""`` / `` `` `` AND backslash escapes ``\\'`` / ``\\"`` inside
+    ``'…'`` / ``"…"`` spans, which BigQuery/standard string literals accept — a
+    dbt-expectations regex arg like ``'it\\'s'`` must not exit the span early)
+    and only recognises a comment when outside a quoted span. Comment bodies are
+    dropped (block comments collapse to a single space); string/identifier spans
+    pass through untouched so the downstream ``;`` / paren scan can blank them via
     :func:`signalforge.warehouse._sql_safety._strip_string_literals`.
     """
     out: list[str] = []
@@ -231,6 +233,13 @@ def _strip_sql_comments(sql: str) -> str:
         nxt = sql[i + 1] if i + 1 < n else ""
         if quote is not None:
             out.append(ch)
+            if ch == "\\" and quote in ("'", '"') and nxt:
+                # Backslash escape inside a string span: the next char is literal
+                # and can never close the span (``'it\\'s -- x'`` stays one string).
+                # Backtick-quoted identifiers do NOT honour backslash escapes.
+                out.append(nxt)
+                i += 2
+                continue
             if ch == quote:
                 if nxt == quote:  # doubled-quote escape stays inside the span
                     out.append(nxt)
@@ -261,6 +270,52 @@ def _strip_sql_comments(sql: str) -> str:
     return "".join(out)
 
 
+def _blank_sql_literals(sql: str) -> str:
+    """Replace the *contents* of quoted string/identifier spans with spaces.
+
+    Backslash-escape- and doubled-quote-aware (same quote tracking as
+    :func:`_strip_sql_comments`), so a ``;`` or paren hidden inside a literal is
+    neutralised while a genuine top-level one survives the scan. Self-contained
+    on purpose — it does NOT import the warehouse ``_strip_string_literals``
+    private helper, so a rename there can't silently break the ingested-SQL gate
+    (and this stage-0 reader stays free of a cross-layer coupling to a
+    ``_``-prefixed internal). The opening/closing quote delimiters are kept so
+    paren-balance accounting is unaffected.
+    """
+    out: list[str] = []
+    i = 0
+    n = len(sql)
+    quote: str | None = None
+    while i < n:
+        ch = sql[i]
+        nxt = sql[i + 1] if i + 1 < n else ""
+        if quote is not None:
+            if ch == "\\" and quote in ("'", '"') and nxt:
+                out.append("  ")  # blank the backslash-escape pair
+                i += 2
+                continue
+            if ch == quote:
+                if nxt == quote:  # doubled-quote escape stays inside the span
+                    out.append("  ")
+                    i += 2
+                    continue
+                out.append(ch)  # keep the closing delimiter
+                quote = None
+                i += 1
+                continue
+            out.append(" ")  # blank the literal content
+            i += 1
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch
+            out.append(ch)  # keep the opening delimiter
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def validate_ingested_sql(sql: str) -> None:
     """Comment-tolerant safety scan for dbt-compiled (manifest) test SQL.
 
@@ -278,13 +333,14 @@ def validate_ingested_sql(sql: str) -> None:
     NOT a reuse of the ``#116`` validator — it is a distinct comment-tolerant
     entry point for the ingested path.
     """
-    from signalforge.warehouse._sql_safety import _strip_string_literals
     from signalforge.warehouse.errors import QuerySyntaxError
 
     # Strip comments (string-aware) THEN blank string/identifier literals, so a
     # ``;`` or unbalanced paren hidden inside a comment or a string is ignored
-    # while a genuine top-level one still trips the scan.
-    body = _strip_string_literals(_strip_sql_comments(sql))
+    # while a genuine top-level one still trips the scan. Both passes share the
+    # same backslash-/doubled-quote-aware quote tracking (no warehouse-private
+    # import — see :func:`_blank_sql_literals`).
+    body = _blank_sql_literals(_strip_sql_comments(sql))
 
     if ";" in body:
         raise QuerySyntaxError(detail="ingested SQL must be a single statement (no `;`)")

@@ -620,7 +620,7 @@ Flag reference:
 | `--manifest PATH` | no | `<project_dir>/target/manifest.json` | Override the manifest location. Canonicalised against the resolved project_dir. |
 | `--profiles-dir PATH` | no | dbt default search | Override the `profiles.yml` search location (mirrors dbt-core's flag). Sets `DBT_PROFILES_DIR` in the current process environment. |
 | `--tests-dir PATH` | no | `<project_dir>/tests` | Override the singular-test directory enumerated for model-level `tests/*.sql` files (US-014). Each `.sql` referencing this model is pruned alongside the schema.yml tests; unrelated files are ignored. The **default** directory is optional — when absent only the schema.yml tests are pruned; an **explicit** `--tests-dir` pointing at a missing directory fails loud (`IngestSchemaNotFoundError`). |
-| `--from-manifest` | no | off | Also prune the model's **dbt-compiled manifest test nodes** (dbt-expectations / dbt-utils / in-house generic tests). Reads the already-Jinja-resolved `compiled_code` off each `resource_type=='test'` node via `read_manifest_tests` and merges the **row-returning + deterministic** bodies into the prune set as model-level `custom_sql` candidates (issue #154 / DEC-005). Off by default: byte-identical to the schema.yml + `tests/*.sql` behaviour. Requires a manifest built by `dbt compile` (or `dbt build` / `dbt docs generate`); nodes without `compiled_code` are skip-recorded with a "run `dbt compile`" remediation (a single summary line when *every* node lacks it). Aggregate/scalar-shaped and non-deterministic bodies are skip-recorded too. |
+| `--from-manifest` | no | off | Also prune the model's **dbt-compiled manifest test nodes** (dbt-expectations / dbt-utils / in-house generic tests). Reads the already-Jinja-resolved `compiled_code` off each `resource_type=='test'` node via `read_manifest_tests` and merges the **row-returning + deterministic** bodies into the prune set as model-level `custom_sql` candidates (issue #154 / DEC-005). Off by default: no manifest nodes are ingested (the pruned-test set matches the schema.yml + `tests/*.sql` behaviour). Requires a manifest built by `dbt compile` (or `dbt build` / `dbt docs generate`); nodes without `compiled_code` are skip-recorded with a "run `dbt compile`" remediation (a single summary line when *every* node lacks it). Aggregate/scalar-shaped and non-deterministic bodies are skip-recorded too. |
 | `--grade` | no | off | Run the **LLM-as-judge grade stage** on the ingested manifest tests (issue #154 / DEC-002 / DEC-018). **Requires `--from-manifest`** — `--grade` alone is an input-validation error (exit 2), because schema.yml / singular tests carry `rationale=None` and grading them is noise; only manifest-ingested tests get the synthesized macro rationale worth judging. When set, the grade stage runs **between prune and diff**, feeds the grading report into `render_diff` (enabling the `flagged` tier), writes `.signalforge/grade.json` + `.signalforge/grade.jsonl`, and renumbers progress to `[N/4]`. Off by default the command stays zero-credential / zero-cost; the credential gate is **implicit** — a missing `ANTHROPIC_API_KEY` surfaces as `LLMAuthError` (exit 3) at grade-call time (no explicit key check). |
 | `--scope {sample,full}` | no | from config | Override `prune.scope`. Applied via `PruneConfig.model_validate` so validators re-run (DEC-002). |
 | `--sample-strategy {oneshot,materialised}` | no | from config | Override `prune.sample_strategy`. Applied via `PruneConfig.model_validate` (DEC-002). |
@@ -723,8 +723,16 @@ three sources merge into one prune run.
 - **Macro identity in the diff.** Each ingested test's `why` names its
   source macro (`dbt-expectations expect_column_values_to_be_between(…)`)
   so you can locate and remove the right test in your dbt project.
-- **Off by default.** Without the flag, the run is byte-identical to the
-  schema.yml + `tests/*.sql` behaviour above.
+- **Off by default.** Without the flag, no manifest test nodes are ingested —
+  the set of pruned tests is identical to the schema.yml + `tests/*.sql`
+  behaviour above.
+- **Read-only: no proposed `.sql` files.** `prune-existing` never emits a
+  `proposed_test_files` section — every `custom_sql` it prunes is *external*
+  (authored by you in schema.yml, `tests/*.sql`, or a dbt-expectations macro),
+  so re-proposing it as a SignalForge-authored `.sql` would be wrong. Ingested
+  and singular tests appear only as rows on the kept/dropped/flagged table.
+  (This is a deliberate #154 change; the "off is unchanged" guarantee above is
+  about *which tests are ingested*, not this always-suppressed section.)
 
 #### Grade the ingested tests (`--grade`, issue #154)
 

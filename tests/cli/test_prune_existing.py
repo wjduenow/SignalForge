@@ -742,6 +742,47 @@ def test_singular_test_pruned_alongside_schema(
     assert any("custom_sql" in aid for aid in artifact_ids), artifact_ids
 
 
+def test_prune_existing_never_emits_proposed_test_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``prune-existing`` never emits ``proposed_test_files`` — even for a KEPT
+    singular ``custom_sql`` and even WITHOUT ``--from-manifest`` (DEC-015).
+
+    ``prune-existing`` is read-only: every ``custom_sql`` it sees is EXTERNAL
+    (authored by the operator in ``tests/*.sql`` / schema.yml / the manifest),
+    so re-proposing it as a SignalForge-authored ``.sql`` would be wrong. #154
+    (US-005) passes ``emit_test_files=False`` unconditionally, so the
+    ``proposed_test_files`` section stays empty. This is a deliberate departure
+    from the pre-#154 default-emit behaviour — the "``--from-manifest`` off is
+    byte-unchanged" guarantee is scoped to *which tests are ingested*, NOT to the
+    (now always-suppressed) proposed-files section. This pins the suppression for
+    a KEPT singular custom_sql (the only shape that would otherwise emit one).
+    """
+    import json
+
+    project_dir, _ = _setup_project(tmp_path)
+    # A singular test that returns FAILING rows -> KEPT (the tier that would
+    # otherwise produce a ProposedTestFile).
+    _write_singular_test(
+        project_dir,
+        "assert_trip_id_kept.sql",
+        "select * from {{ this }} where trip_id is null\n",
+    )
+    argv = [*_minimal_schema_argv(project_dir), "--format", "json"]  # no --from-manifest
+    # schema.yml not_null (kept) + singular custom_sql returns failing rows (kept).
+    factory = _make_fake_adapter_factory(failure_counts=(5, 7))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    out = capsys.readouterr().out
+    assert code == 0
+    payload = json.loads(out)
+    kept_custom_sql = [
+        e for e in payload["entries"] if e["test_type"] == "custom_sql" and e["tier"] == "kept"
+    ]
+    assert len(kept_custom_sql) == 1  # the singular test IS kept ...
+    assert payload["proposed_test_files"] == []  # ... but no proposed file is emitted.
+
+
 def test_singular_test_for_other_model_ignored(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1233,8 +1274,10 @@ def test_from_manifest_grade_runs_grade_stage(
 
     ``grade_artifacts`` is faked (mirrors ``generate``'s test harness) so the
     default suite covers the wiring with no live LLM call. The spy asserts the
-    grade stage saw the MERGED candidate — i.e. the manifest ``custom_sql``
-    tests reached the judge.
+    grade stage saw a candidate NARROWED to the manifest-ingested
+    ``custom_sql`` tests only (DEC-002) — NOT the operator's schema.yml
+    built-ins, which must not be graded (they carry no rationale and grading
+    them could flip a kept built-in to ``flagged``; QG finding).
     """
     from typing import Any
 
@@ -1259,10 +1302,49 @@ def test_from_manifest_grade_runs_grade_stage(
     err = capsys.readouterr().err
     assert code == 0, err
     assert captured.get("called") is True
-    # The grade stage saw the merged candidate carrying the manifest custom_sql
-    # tests (the artifacts worth judging).
+    # The grade stage saw a candidate NARROWED to the manifest-ingested tests:
+    # every graded test is a from_manifest custom_sql, and there is at least one
+    # (the operator's built-ins / columns were dropped from the grade input).
     graded_candidate = captured["candidate"]
-    assert any(t.type == "custom_sql" for t in graded_candidate.tests)
+    assert graded_candidate.columns == ()
+    assert len(graded_candidate.tests) >= 1
+    assert all(
+        t.type == "custom_sql" and getattr(t, "from_manifest", False)
+        for t in graded_candidate.tests
+    )
+
+
+def test_grade_missing_credential_exits_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A grade-stage ``LLMAuthError`` propagates to exit 3 with no traceback.
+
+    The credential gate is implicit (DEC-002 / DEC-018): ``prune-existing`` adds
+    no explicit ANTHROPIC_API_KEY check — a missing key surfaces as
+    ``LLMAuthError`` (tier 3) at grade-call time. This pins that the
+    ``prune-existing`` handler's single boundary catch maps the grade exception
+    to exit 3 (external-dependency tier) and never leaks a traceback. Faked so
+    the default suite covers the wiring with no live LLM call.
+    """
+    from typing import Any
+
+    from signalforge.cli import prune_existing as pe_mod
+    from signalforge.llm.errors import LLMAuthError
+
+    project_dir, schema_path = _setup_expectations_project(tmp_path)
+
+    def _raise_auth(*_a: Any, **_k: Any) -> Any:
+        raise LLMAuthError("no API key configured")
+
+    monkeypatch.setattr(pe_mod.grade_module, "grade_artifacts", _raise_auth)
+
+    argv = _expectations_argv(project_dir, schema_path, "--from-manifest", "--grade")
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "Traceback" not in err
 
 
 def test_grade_renumbers_progress_to_four(

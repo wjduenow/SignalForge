@@ -2117,6 +2117,7 @@ def _ingested_custom_sql(rationale: str = _INGESTED_MACRO_RATIONALE):
         sql="select * from `proj`.`ds`.`orders` where order_id not between 1 and 1000000",
         column=None,
         rationale=rationale,
+        from_manifest=True,
     )
 
 
@@ -2217,6 +2218,60 @@ def test_dropped_builtin_test_with_rationale_why_is_unchanged(project_dir: Path)
     assert len(dropped) == 1
     assert dropped[0].why == "ran on 1k sample, 0 failing rows"
     assert "drafter rationale" not in dropped[0].why
+
+
+def test_drafted_custom_sql_why_is_unchanged(project_dir: Path) -> None:
+    """DEC-015 macro-``why`` is scoped to ``from_manifest`` INGESTED custom_sql.
+
+    A DRAFTED business-rule ``custom_sql`` (``from_manifest=False``, #116) carries
+    a natural-language drafter rationale — NOT a macro locator. It must keep its
+    ``why`` as ``decision.why`` on BOTH the dropped and kept-uncertain tiers,
+    byte-identical to pre-#154. (Regression guard for the QG finding: gating the
+    macro-``why`` on ``type == "custom_sql"`` instead of ``from_manifest`` leaked
+    the drafter rationale into ``generate``'s output and re-broke the issue-#50
+    kept-uncertain carve-out.)
+    """
+    model = _make_model()
+    drafted = _ingested_custom_sql(rationale="drafted business rule: amounts positive")
+    # A DRAFTED custom_sql: same shape, but not sourced from the manifest.
+    drafted = drafted.model_copy(update={"from_manifest": False})
+    assert drafted.from_manifest is False
+    candidate = _ingested_candidate(drafted)
+
+    # Dropped tier — rationale must NOT be prepended.
+    dropped_decision = _custom_sql_decision(
+        drafted, decision="dropped", reason="always-passes", why="ran on 1k sample, 0 failing rows"
+    )
+    dropped_report = render_diff(
+        model,
+        candidate,
+        _make_prune_result(decisions=(dropped_decision,)),
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+    dropped = [e for e in dropped_report.entries if e.tier == "dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].why == "ran on 1k sample, 0 failing rows"
+    assert "drafted business rule" not in dropped[0].why
+
+    # Kept-uncertain tier — rationale must NOT be prepended (issue-#50 carve-out).
+    ku_decision = _custom_sql_decision(
+        drafted,
+        decision="kept",
+        reason="kept-without-evidence",
+        why="identifier rejected by SQL safety check",
+    )
+    ku_report = render_diff(
+        model,
+        candidate,
+        _make_prune_result(decisions=(ku_decision,)),
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+    ku = [e for e in ku_report.entries if e.tier == "kept-uncertain"]
+    assert len(ku) == 1
+    assert ku[0].why == "identifier rejected by SQL safety check"
+    assert "drafted business rule" not in ku[0].why
 
 
 def test_kept_uncertain_ingested_custom_sql_why_names_macro_and_cause(project_dir: Path) -> None:

@@ -26,8 +26,13 @@ models:
               min_value: 0
               max_value: 1000000
     data_tests:
-      # SKIP-recorded (aggregate / COUNT(*) shape): a scalar row-count body is
-      # semantically wrong to wrap in SELECT COUNT(*) ... AS failures.
+      # PRUNED (row-returning): dbt-expectations wraps EVERY macro — including
+      # this row-count one — in a `validation_errors` shell (the count(*) sits
+      # in a nested CTE, the outer query is `select * from validation_errors`),
+      # so is_row_returning() is True and it flows through as a prunable
+      # custom_sql candidate. The DEC-004 aggregate-SKIP disposition fires only
+      # on a BARE top-level `SELECT COUNT(*) ...` body (dbt-utils / in-house
+      # macros), NOT on dbt-expectations table tests.
       - dbt_expectations.expect_table_row_count_to_be_between:
           min_value: 1
           max_value: 100

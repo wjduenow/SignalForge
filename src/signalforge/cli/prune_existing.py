@@ -90,7 +90,7 @@ from signalforge.cli._helpers import (
     should_emit_progress,
 )
 from signalforge.cli.errors import CliInputError, CliPathError
-from signalforge.draft.models import CandidateSchema
+from signalforge.draft.models import CandidateSchema, CandidateTestCustomSQL
 from signalforge.warehouse.base import WarehouseAdapter
 
 __all__ = ["add_parser", "cmd_prune_existing"]
@@ -869,18 +869,37 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
         # credential gate. Off by default (``grade`` False) leaves
         # ``grade_report=None`` so the diff renders kept / kept-uncertain /
         # dropped only and no grade side files are written (byte-identical to
-        # the pre-#154 zero-credential path). The candidate passed here is the
-        # merged candidate — its manifest ``custom_sql`` tests carry the
-        # synthesized macro rationale the judge scores.
+        # the pre-#154 zero-credential path).
         grade_report = None
         if grade:
             grade_config = grade_module.load_grade_config(project_dir)
             if progress_on:
                 emit_progress_entry(3, "grade", "scoring ingested tests...", total=total)
             _t0 = time.monotonic()
+            # DEC-002: grade scores ONLY the manifest-ingested ``custom_sql``
+            # tests — they alone carry the synthesized macro rationale worth
+            # judging. The operator's own schema.yml built-ins / singular tests
+            # (``rationale=""``) are deliberately NOT graded: doing so would
+            # spend LLM calls on empty rationales AND could flip a kept built-in
+            # into the ``flagged`` tier on a low empty-rationale score —
+            # surfacing the operator's existing tests as low-quality though they
+            # never opted in. The FULL ``candidate`` is still pruned + rendered;
+            # only the grade INPUT is narrowed (columns dropped, model-level
+            # tests filtered to ``from_manifest``). A narrowed grade report means
+            # only ingested tests can reach ``flagged`` in the diff.
+            grade_candidate = candidate.model_copy(
+                update={
+                    "columns": (),
+                    "tests": tuple(
+                        t
+                        for t in candidate.tests
+                        if isinstance(t, CandidateTestCustomSQL) and t.from_manifest
+                    ),
+                }
+            )
             grade_report = grade_module.grade_artifacts(
                 model,
-                candidate,
+                grade_candidate,
                 prune_result,
                 config=grade_config,
                 client=None,

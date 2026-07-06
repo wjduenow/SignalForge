@@ -90,6 +90,7 @@ from signalforge.draft.models import (
     CandidateColumn,
     CandidateSchema,
     CandidateTest,
+    CandidateTestCustomSQL,
 )
 from signalforge.grade.models import GradingReport, GradingResult
 from signalforge.manifest.models import Model
@@ -501,11 +502,15 @@ def _entry_for_test(
         # thread the macro identity into the ``why`` (ahead of the prune
         # verdict) so the operator can locate + remove the right test. The
         # drop-reason CATEGORY still rides the separate ``drop_reason``
-        # column. Scoped to ``custom_sql`` (the DEC-001 ingested variant):
-        # a built-in / drafted-schema test carries no macro rationale and
-        # its ``why`` stays ``decision.why`` verbatim (byte-identical to
-        # pre-#154, and it preserves the issue-#50 not_null behaviour).
-        if decision.test.type == "custom_sql":
+        # column. Scoped to ``from_manifest`` INGESTED custom_sql only: a
+        # built-in, a drafted-schema test, OR a DRAFTED business-rule
+        # ``custom_sql`` (``from_manifest=False``, which DOES carry a drafter
+        # rationale) keeps its ``why`` as ``decision.why`` verbatim —
+        # byte-identical to pre-#154 and preserving the issue-#50 behaviour.
+        # (Only a manifest-ingested test has a macro identity worth surfacing;
+        # a drafted test is authored by SignalForge, so a macro-locator ``why``
+        # would be wrong.)
+        if isinstance(decision.test, CandidateTestCustomSQL) and decision.test.from_manifest:
             dropped_why = _macro_why(
                 decision.test.rationale or "", decision.why, max_chars=max_why_chars
             )
@@ -538,11 +543,12 @@ def _entry_for_test(
         # source macro on ``rationale``; thread it into the ``why`` ahead of
         # the ``kept-without-evidence`` cause so the operator can locate the
         # test AND still see why it could not be evaluated (the issue-#50
-        # cause stays load-bearing). Scoped to ``custom_sql`` (DEC-001) so a
-        # built-in / drafted test with a drafter rationale keeps the issue-#50
-        # carve-out (``decision.why`` only — the drafter rationale would
-        # mislead for a test we couldn't evaluate).
-        if decision.test.type == "custom_sql":
+        # cause stays load-bearing). Scoped to ``from_manifest`` INGESTED
+        # custom_sql only so a built-in OR a DRAFTED business-rule ``custom_sql``
+        # (``from_manifest=False``, which carries a drafter rationale) keeps the
+        # issue-#50 carve-out (``decision.why`` only — the drafter rationale
+        # would mislead for a test we couldn't evaluate).
+        if isinstance(decision.test, CandidateTestCustomSQL) and decision.test.from_manifest:
             why = _macro_why(decision.test.rationale or "", decision.why, max_chars=max_why_chars)
         else:
             why = _truncate_why(decision.why, max_why_chars)

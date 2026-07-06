@@ -183,3 +183,18 @@ def test_validate_ingested_sql_comment_only_semicolon_is_tolerated() -> None:
     """A ``;`` that exists ONLY inside a comment is not statement injection — the
     comment-aware strip removes it, so the body validates."""
     assert validate_ingested_sql("SELECT a FROM t WHERE a > 0 -- b; c") is None
+
+
+def test_validate_ingested_sql_backslash_escaped_quote_keeps_comment_inside_string() -> None:
+    """A backslash-escaped quote must not exit the string span early (QG hardening).
+
+    ``'it\\'s -- y'`` is a single BigQuery/standard string literal whose body
+    contains ``--``. The comment-stripper must honour the ``\\'`` escape and keep
+    the ``-- y`` inside the string, so validation neither false-rejects (spurious
+    QuerySyntaxError) nor mis-parses the trailing quote as an unterminated span.
+    """
+    # `--` lives inside the escaped-quote string → NOT a comment → body is safe.
+    assert validate_ingested_sql("SELECT * FROM t WHERE label = 'it\\'s -- fine' AND x > 0") is None
+    # A real statement separator outside any string is still rejected.
+    with pytest.raises(QuerySyntaxError):
+        validate_ingested_sql("SELECT * FROM t WHERE label = 'it\\'s ok'; DROP TABLE t")
