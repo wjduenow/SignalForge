@@ -67,7 +67,12 @@ from signalforge.draft.models import (
     CandidateTestUnique,
     CandidateTestUniqueCombination,
 )
-from signalforge.ingest._compiled_sql import is_deterministic_sql, validate_ingested_sql
+from signalforge.ingest._compiled_sql import (
+    is_deterministic_sql,
+    is_prunable_count_scalar,
+    is_row_returning,
+    validate_ingested_sql,
+)
 from signalforge.manifest.errors import (
     AmbiguousRefError,
     RefNotFoundError,
@@ -723,6 +728,52 @@ def _compile_custom_sql(
         except QuerySyntaxError:
             return _InvalidIdentifier(
                 reason="ingested custom_sql rejected by the comment-tolerant SQL safety scan"
+            )
+        # #267 US-003 (DEC-002 / DEC-007) — a SCALAR (one-row) ingested body must
+        # be restructured before it reaches the adapter's failing-rows envelope.
+        # The adapter wraps every compiler output as
+        # ``SELECT COUNT(*) AS failures FROM (<sql>) AS t``: a scalar body (a bare
+        # ``SELECT count(*) …``) collapses to ONE row, so the outer COUNT(*) is
+        # ``1`` ALWAYS regardless of the count's value — the same always-1 bug
+        # ``_compile_row_count_between`` was corrected for (US-007a). A
+        # row-returning body is faithful under the envelope and returns verbatim.
+        if not is_row_returning(test.sql, dialect=dialect.name):
+            if is_prunable_count_scalar(test.sql, dialect=dialect.name):
+                # DEC-002 — a single top-level COUNT-family scalar is soundly
+                # re-interpretable as a failing-rows count (dbt convention:
+                # returned rows = failures; a ``COUNT(*) [WHERE cond]`` scalar's
+                # value IS the failing-row count, so ``value = 0`` ⇒ pass). Wrap
+                # the scalar body as a scalar subquery and emit ONE failing row
+                # iff the count is non-zero, so the adapter's ``COUNT(*)``
+                # envelope yields 0 rows (pass) / 1 row (fail). Pure f-string —
+                # NO sqlglot in the compiler (avoids a 3rd importer + a new
+                # confinement scan); the body carries its own dialect quoting and
+                # only dialect-neutral literals wrap it (validated on BQ/SF/DB).
+                # Mirrors ``_compile_row_count_between``'s failing-rows contract.
+                composed = (
+                    "SELECT sf_agg_value FROM "
+                    f"(SELECT ({test.sql}) AS sf_agg_value) AS sf_agg "
+                    "WHERE sf_agg_value <> 0"
+                )
+                # Re-run the comment-tolerant safety scan on the COMPOSED SQL so a
+                # pathological body that only becomes injection-shaped once wrapped
+                # still fails loud → kept-without-evidence.
+                try:
+                    validate_ingested_sql(composed)
+                except QuerySyntaxError:
+                    return _InvalidIdentifier(
+                        reason=(
+                            "restructured ingested count custom_sql rejected by "
+                            "the comment-tolerant SQL safety scan"
+                        )
+                    )
+                return composed
+            # DEC-007 belt-and-braces — a scalar that is NOT a prunable count
+            # slipped past the ingest gate (which should already have
+            # skip-recorded it). It must NEVER hit the adapter's always-1 wrap,
+            # so route to kept-without-evidence rather than ship a wrong verdict.
+            return _InvalidIdentifier(
+                reason="ingested aggregate custom_sql is not a prunable count-of-rows shape"
             )
         return test.sql
 
