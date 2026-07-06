@@ -266,16 +266,44 @@ comment-bearing but otherwise-clean body passes. The determinism check that
 already ran at ingest is kept as a belt-and-braces `kept-without-evidence`
 fallback in the compiler (the total-compilation choke point).
 
+**Count-of-rows scalar restructure (#267).** A manifest-ingested body that is
+a bare count-of-rows scalar — `SELECT count(*) …`, `count(col)`, or
+`count(DISTINCT …)` — is **not** row-returning, so wrapping it directly in the
+adapter's `SELECT COUNT(*) AS failures FROM (<sql>)` envelope would report
+`failures=1` **always** (a silent wrong `kept`). Rather than skip-record it (as
+#154 did), the compiler restructures the scalar into a failing-rows form:
+
+```sql
+SELECT sf_agg_value FROM (SELECT (<body>) AS sf_agg_value) AS sf_agg WHERE sf_agg_value <> 0
+```
+
+so the outer envelope now reflects the true verdict — **0 rows ⇒
+`always-passes` (dropped), ≥ 1 row ⇒ `kept`** — matching `row_count_between`'s
+failing-rows contract. This is sound under dbt's "returned rows = failures"
+convention: the count body's value **is** the failing-row count, so
+`count == 0` is a pass (see
+[`docs/ingest-ops.md` § count-of-rows](ingest-ops.md#count-of-rows-scalar-bodies-are-pruned-267)).
+The restructure is a pure-string wrap (no sqlglot in the compiler); the
+composed SQL is re-run through `validate_ingested_sql`. Because the ingested
+body is a `from_manifest` `custom_sql`, `_test_requires_source_table` already
+routes it to the **source table** under every sample strategy — the same
+source-routing described under *Full-scope, always* above, with no new engine
+arm. **Belt-and-braces:** a scalar body that reaches the compiler but isn't a
+restructurable count (one that slipped the ingest gate) returns
+`_InvalidIdentifier` → `kept-without-evidence` rather than the always-`1` wrap;
+the 5-value `DropReason` is unchanged.
+
 **KEY FINDING — dbt-expectations bodies are row-returning, so they prune.**
 `dbt-expectations` compiles *every* macro — including
 `expect_table_row_count_to_be_between` — into a row-returning
 `validation_errors` shell whose `count(*)` sits inside a nested CTE, so the
 `COUNT(*)`-wrap the prune engine applies is semantically correct
 (`failures=1` ⇒ out of bounds). The aggregate-SKIP disposition — which the
-ingest bridge applies to a scalar/aggregate body to avoid the
-always-`failures=1` wrong-verdict trap — fires only on a **BARE
-`SELECT COUNT(*) …` body** (the shape `dbt-utils` / in-house generic tests can
-emit), never on a `dbt-expectations` macro. See
+ingest bridge applies to a **non-count** scalar/aggregate body (`AVG` / `SUM` /
+`MIN` / `MAX`, multi-aggregate, or arithmetic-on-count) to avoid the
+always-`failures=1` wrong-verdict trap — never fires on a `dbt-expectations`
+macro, and since #267 no longer fires on a bare count-of-rows body either (that
+is restructured and pruned, above). See
 [`docs/ingest-ops.md` § KEY FINDING](ingest-ops.md#key-finding-dbt-expectations-bodies-are-almost-all-prunable)
 for the full walk-through.
 
