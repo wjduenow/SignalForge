@@ -13,6 +13,7 @@ import pytest
 
 from signalforge.ingest._compiled_sql import (
     is_deterministic_sql,
+    is_prunable_count_scalar,
     is_row_returning,
     validate_ingested_sql,
 )
@@ -135,6 +136,63 @@ def test_is_row_returning_subquery_aggregate_is_not_top_level_scalar() -> None:
 
 def test_is_row_returning_unparseable_returns_true() -> None:
     assert is_row_returning("SELECT FROM WHERE ((( garbage") is True
+
+
+# --------------------------------------------------------------------------- #
+# is_prunable_count_scalar
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT count(*) FROM t",
+        "SELECT count(*) FROM t WHERE x < 0",
+        "SELECT count(id) AS n FROM t WHERE x < 0",
+        "SELECT count(DISTINCT u) FROM t",
+    ],
+)
+def test_is_prunable_count_scalar_true_for_single_count(sql: str) -> None:
+    """A no-GROUP-BY SELECT whose sole projection is a bare COUNT (incl.
+    COUNT(DISTINCT), #267 DEC-011) graduates to a prunable count scalar."""
+    assert is_prunable_count_scalar(sql) is True
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT avg(x) FROM t",
+        "SELECT sum(x) FROM t",
+        "SELECT count(*) + 1 AS c FROM t",
+        "SELECT count(*), max(x) FROM t",
+        "SELECT * FROM t WHERE x < 0",
+        "SELECT k, count(*) FROM t GROUP BY k",
+    ],
+)
+def test_is_prunable_count_scalar_false_for_non_count_scalar(sql: str) -> None:
+    """Non-count aggregates, arithmetic-on-count, multi-projection, a
+    row-returning body, and a GROUP-BY body are all rejected (#267 DEC-001)."""
+    assert is_prunable_count_scalar(sql) is False
+
+
+def test_is_prunable_count_scalar_arithmetic_on_count_is_not_bare_count() -> None:
+    """PLANTED NEGATIVE: ``COUNT(*) + 1`` is scalar (``is_row_returning`` False)
+    yet the projection is an ``exp.Add`` wrapping the Count, not a bare Count —
+    the narrower gate must reject it where ``is_row_returning`` does not
+    distinguish."""
+    assert is_row_returning("SELECT count(*) + 1 AS c FROM t") is False
+    assert is_prunable_count_scalar("SELECT count(*) + 1 AS c FROM t") is False
+
+
+def test_is_prunable_count_scalar_unparseable_returns_false() -> None:
+    """Skip-when-uncertain inverts vs the sibling helpers: the POSITIVE claim
+    ``is a prunable count scalar`` cannot be made of an unparseable body."""
+    assert is_prunable_count_scalar("SELECT FROM WHERE ((( garbage") is False
+
+
+def test_is_prunable_count_scalar_union_is_not_single_select() -> None:
+    """A ``UNION`` root is not a single SELECT → cannot claim count-scalar."""
+    assert is_prunable_count_scalar("SELECT 1 UNION SELECT 2") is False
 
 
 # --------------------------------------------------------------------------- #
