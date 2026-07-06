@@ -4,7 +4,7 @@
 
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/267
 - **Branch / worktree:** `feature/267-aggregate-macro-routing` @ `../worktrees/SignalForge/267-aggregate-macro-routing`
-- **Phase:** published
+- **Phase:** devolved
 - **Parent:** #154 (dbt-expectations prune+grade adapter via manifest `compiled_code`) — landed, PR #266, `plans/super/154-dbt-expectations-prune.md` DEC-004.
 - **Sibling follow-up (keep distinct):** #268 (`scope=sample` AST relation-rewrite for ingested tests).
 - **Sessions:** 1 (2026-07-05)
@@ -225,4 +225,17 @@ Ordering: ingest classifier → ingest gate → compiler restructure → engine 
 
 ## Phase 5+ — Beads Manifest
 
-_(pending devolve)_
+- **Epic:** `bd_1-scaffolding-3hz`
+- **Worktree:** `../worktrees/SignalForge/267-aggregate-macro-routing` (`feature/267-aggregate-macro-routing`)
+- **Plan PR:** #269 (draft, base `dev`)
+
+| Bead | Story | Depends on |
+|---|---|---|
+| `bd_1-scaffolding-3hz.1` | US-001 classifier | — (ready) |
+| `bd_1-scaffolding-3hz.2` | US-002 ingest gate | .1 |
+| `bd_1-scaffolding-3hz.3` | US-003 compiler restructure | .1 |
+| `bd_1-scaffolding-3hz.4` | US-004 engine pins | .2, .3 |
+| `bd_1-scaffolding-3hz.5` | US-005 fixture + loads test | .1, .2, .3 |
+| `bd_1-scaffolding-3hz.6` | US-006 docs + CHANGELOG | .2, .3, .4, .5 |
+| `bd_1-scaffolding-3hz.7` | Quality Gate | .1–.6 |
+| `bd_1-scaffolding-3hz.8` | Patterns & Memory | .7 |
