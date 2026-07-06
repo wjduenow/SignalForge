@@ -4,7 +4,7 @@
 
 - **Ticket:** https://github.com/wjduenow/SignalForge/issues/267
 - **Branch / worktree:** `feature/267-aggregate-macro-routing` @ `../worktrees/SignalForge/267-aggregate-macro-routing`
-- **Phase:** detailing
+- **Phase:** published
 - **Parent:** #154 (dbt-expectations prune+grade adapter via manifest `compiled_code`) — landed, PR #266, `plans/super/154-dbt-expectations-prune.md` DEC-004.
 - **Sibling follow-up (keep distinct):** #268 (`scope=sample` AST relation-rewrite for ingested tests).
 - **Sessions:** 1 (2026-07-05)
