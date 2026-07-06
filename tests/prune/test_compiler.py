@@ -1119,6 +1119,105 @@ def test_compile_ingested_custom_sql_needs_no_model() -> None:
     assert actual == _INGESTED_COMPILED_SQL
 
 
+# #267 US-003 (DEC-002 / DEC-007): a SCALAR count-of-rows ingested body is
+# restructured into a failing-rows form so the adapter's ``COUNT(*) AS failures``
+# envelope reflects the true verdict instead of the always-1 bug. A row-returning
+# ingested body still returns verbatim; a scalar that is NOT a prunable count
+# routes to _InvalidIdentifier (belt-and-braces).
+# ---------------------------------------------------------------------------
+
+# A realistic dbt-compiled COUNT-of-rows body: dbt quotes the relation with
+# backticks (the ingested-full-scope shape). A bare ``select count(*) …`` is a
+# scalar (one-row) body — is_row_returning=False, is_prunable_count_scalar=True.
+_INGESTED_COUNT_SCALAR_SQL = (
+    "select count(*)\nfrom `fake_project`.`dataset`.`orders`\nwhere total < 0"
+)
+
+
+def test_compile_ingested_count_scalar_restructured_to_failing_rows() -> None:
+    """A manifest-ingested count-of-rows scalar (from_manifest=True) is
+    restructured into the failing-rows scalar-subquery wrap so the adapter's
+    COUNT(*) envelope returns 0 rows (pass) / 1 row (fail) — NOT the always-1
+    bug a bare scalar under the envelope would produce (#267 DEC-002)."""
+    test = CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_SQL, from_manifest=True)
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert isinstance(actual, str)
+    # The exact failing-rows scalar-subquery restructure.
+    assert actual == (
+        "SELECT sf_agg_value FROM "
+        f"(SELECT ({_INGESTED_COUNT_SCALAR_SQL}) AS sf_agg_value) AS sf_agg "
+        "WHERE sf_agg_value <> 0"
+    )
+    # Load-bearing shape assertions: the failing-rows predicate and the
+    # scalar-subquery wrap that carries the body's own dialect quoting.
+    assert "WHERE sf_agg_value <> 0" in actual
+    assert f"({_INGESTED_COUNT_SCALAR_SQL}) AS sf_agg_value" in actual
+    # It must NEVER be routed through a materialised temp table.
+    assert "_sf_sample_" not in actual
+    assert "_SESSION" not in actual
+
+
+def test_compile_ingested_count_scalar_restructure_ignores_sample_scope() -> None:
+    """Even under scope=sample (+ sample args), the restructured ingested count
+    scalar is full-scope against the source — never a _SESSION._sf_sample_* temp
+    table (mirrors the row-returning ingested full-scope contract)."""
+    test = CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_SQL, from_manifest=True)
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="sample",
+        sample_size=100_000,
+        sample_bucket=10,
+    )
+    assert isinstance(actual, str)
+    assert "WHERE sf_agg_value <> 0" in actual
+    assert "WITH sample" not in actual
+    assert "_sf_sample_" not in actual
+    assert "_SESSION" not in actual
+
+
+def test_compile_ingested_row_returning_body_still_returns_verbatim() -> None:
+    """A row-returning ingested body (the failing-rows-returning shape) is NOT
+    restructured — is_row_returning=True, so the #267 scalar arm is skipped and
+    the body is returned unchanged for the adapter's COUNT(*) envelope."""
+    test = CandidateTestCustomSQL(sql=_INGESTED_COMPILED_SQL, from_manifest=True)
+    actual = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert actual == _INGESTED_COMPILED_SQL
+
+
+def test_compile_ingested_non_count_scalar_returns_sentinel() -> None:
+    """DEC-007 belt-and-braces: a scalar body that is NOT a prunable count (e.g.
+    an AVG aggregate) that reaches the compiler — the ingest gate should have
+    skip-recorded it — must NEVER hit the adapter's always-1 wrap. It routes to
+    _InvalidIdentifier → kept-without-evidence instead of a wrong verdict."""
+    body = "select avg(total)\nfrom `fake_project`.`dataset`.`orders`\nwhere total < 0"
+    test = CandidateTestCustomSQL(sql=body, from_manifest=True)
+    result = _compile_test(
+        test,
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "not a prunable count-of-rows shape" in result.reason
+
+
 def test_compile_drafted_custom_sql_still_samples_unchanged() -> None:
     """Regression guard: a DRAFTED custom_sql (from_manifest=False, the
     default) keeps its existing scope=sample behaviour byte-for-byte — the

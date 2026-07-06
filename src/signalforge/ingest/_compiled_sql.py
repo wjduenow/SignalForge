@@ -48,6 +48,7 @@ from sqlglot import exp
 
 __all__ = [
     "is_deterministic_sql",
+    "is_prunable_count_scalar",
     "is_row_returning",
     "validate_ingested_sql",
 ]
@@ -209,6 +210,67 @@ def is_row_returning(sql: str, *, dialect: str = "bigquery") -> bool:
         return True
 
     return not all(_projection_collapses(proj) for proj in projections)
+
+
+def is_prunable_count_scalar(sql: str, *, dialect: str = "bigquery") -> bool:
+    """Return ``True`` when ``sql`` is a single top-level ``COUNT`` scalar body.
+
+    Of the scalar bodies that :func:`is_row_returning` rejects (one-row,
+    aggregate-shaped), this is the NARROWER positive gate: it graduates only the
+    *count-of-rows* idiom — a ``SELECT`` with **no ``GROUP BY`` / ``HAVING``** whose **sole**
+    top-level projection is a bare ``exp.Count`` (``COUNT(*)``, ``COUNT(col)``,
+    and ``COUNT(DISTINCT col)`` all graduate; #267 DEC-011 — a ``COUNT(DISTINCT)``
+    is still a count that is ``0`` iff no matching rows, so the ``0 = pass``
+    interpretation holds). Those bodies are soundly re-interpretable as a
+    failing-rows count and so can be pruned rather than skip-recorded (#267
+    DEC-001).
+
+    Returns ``False`` for everything else:
+
+    * a non-count aggregate (``AVG`` / ``SUM`` / ``MIN`` / ``MAX``);
+    * arithmetic-on-count (``COUNT(*) + 1`` — the projection is an ``exp.Add``
+      *containing* a ``Count``, not a bare ``Count``);
+    * a multi-projection scalar (``SELECT COUNT(*), MAX(x) …``);
+    * a ``GROUP BY`` or ``HAVING`` body (``HAVING`` filters the aggregate on a
+      condition unrelated to the failing-row count, breaking ``0 = pass``);
+    * a non-``SELECT`` root or an unparseable body.
+
+    On a sqlglot parse failure (or a non-single-``SELECT`` root such as a
+    ``UNION``), returns ``False`` (skip-when-uncertain): "this is a prunable
+    count scalar" is the *positive* claim, and an unparseable / non-single-SELECT
+    body affords no such claim.
+    """
+    try:
+        tree = sqlglot.parse_one(sql, dialect=dialect)
+    except sqlglot.errors.SqlglotError:
+        return False
+    if tree is None:
+        return False
+
+    root: object = tree
+    while isinstance(root, (exp.Subquery, exp.Paren)):
+        root = root.this
+
+    if not isinstance(root, exp.Select):
+        return False
+    if root.args.get("group") is not None:
+        return False
+    # A HAVING clause (even without GROUP BY) filters the aggregate result, so a
+    # ``SELECT COUNT(*) … HAVING …`` body returns zero-or-one rows on a condition
+    # unrelated to "how many failing rows" — the ``0 = pass`` reinterpretation no
+    # longer holds. Reject it (it stays skip-recorded) rather than risk a silent
+    # wrong verdict.
+    if root.args.get("having") is not None:
+        return False
+
+    projections = root.expressions
+    if len(projections) != 1:
+        return False
+
+    proj: object = projections[0]
+    if isinstance(proj, exp.Alias):
+        proj = proj.this
+    return isinstance(proj, exp.Count)
 
 
 def _strip_sql_comments(sql: str) -> str:

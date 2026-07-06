@@ -53,6 +53,7 @@ from signalforge.draft.models import (
 )
 from signalforge.ingest._compiled_sql import (
     is_deterministic_sql,
+    is_prunable_count_scalar,
     is_row_returning,
     validate_ingested_sql,
 )
@@ -505,10 +506,13 @@ _ALL_MISSING_SUMMARY_DETAIL = (
 # or an irreproducible verdict). No-compiled_code routes to
 # ``custom-or-generic-test`` (a namespaced test with no body to evaluate).
 _AGGREGATE_SKIP_DETAIL = (
-    "aggregate/scalar-shaped compiled body (single-row): wrapping it in "
-    "SELECT COUNT(*) AS failures FROM (<sql>) would always report 1 failure, a "
-    "silent wrong verdict. Aggregate-macro support is tracked as a follow-up "
-    "(#267)."
+    "non-count aggregate/scalar-shaped compiled body (single-row) — a non-count "
+    "aggregate (AVG / SUM / MIN / MAX), arithmetic-on-count (COUNT(*) + 1), or a "
+    "multi-aggregate SELECT: it cannot be soundly re-interpreted as a "
+    "failing-rows count, so wrapping it in SELECT COUNT(*) AS failures FROM "
+    "(<sql>) would report a silent wrong verdict. Count-of-rows scalar bodies "
+    "(SELECT COUNT(*) / COUNT(col) / COUNT(DISTINCT col)) ARE now pruned as of "
+    "#267 and no longer skip; only these non-count residues remain unsupported."
 )
 _NONDETERMINISTIC_SKIP_DETAIL = (
     "non-deterministic compiled body (TABLESAMPLE / RAND / CURRENT_TIMESTAMP / "
@@ -540,9 +544,12 @@ def read_manifest_tests(
 
     * absent / null ``compiled_code`` → ``custom-or-generic-test`` (a namespaced
       test with no body to evaluate; ``detail`` names ``dbt compile``).
-    * NOT row-returning (aggregate/scalar-shaped) → ``malformed-supported-test``
-      (the ``COUNT`` wrap would report ``failures=1`` always; #154 DEC-004,
-      aggregate support deferred to #267).
+    * NOT row-returning AND not a count-of-rows scalar (a non-count aggregate /
+      arithmetic-on-count / multi-aggregate body) → ``malformed-supported-test``
+      (it cannot be soundly re-interpreted as a failing-rows count). A
+      count-of-rows scalar (``COUNT(*)`` / ``COUNT(col)`` / ``COUNT(DISTINCT col)``)
+      IS graduated to a candidate as of #267 (DEC-003) — it carries the compiled
+      body verbatim and the compiler does the ``COUNT``-wrap restructure.
     * NOT deterministic (TABLESAMPLE / RAND / NOW / …) → ``malformed-supported-test``
       (the verdict would be irreproducible; DEC-012).
     * ``compiled_code`` that fails the comment-tolerant safety scan
@@ -627,9 +634,11 @@ def _classify_manifest_test(test: GenericTest) -> CandidateTestCustomSQL | Skipp
     """Route one associated manifest test node to a candidate or a skip record.
 
     The gate order is deliberate (cheapest / most-specific first): presence →
-    row-returning → deterministic → comment-tolerant safety scan. The first
-    failing gate wins; only a body that clears every gate becomes a
-    :class:`CandidateTestCustomSQL`.
+    row-returning-or-count-scalar → deterministic → comment-tolerant safety scan.
+    The first failing gate wins; only a body that clears every gate becomes a
+    :class:`CandidateTestCustomSQL`. A scalar (one-row) body clears the second
+    gate only when it is a graduatable count-of-rows scalar (#267 DEC-003) — a
+    non-count scalar skip-records ``malformed-supported-test``.
     """
     label = _macro_label(test)
     cc = test.compiled_code
@@ -640,7 +649,13 @@ def _classify_manifest_test(test: GenericTest) -> CandidateTestCustomSQL | Skipp
             reason="custom-or-generic-test",
             detail=_MISSING_COMPILED_CODE_DETAIL,
         )
-    if not is_row_returning(cc):
+    # A scalar (one-row) body only skips when it is NOT a graduatable
+    # count-of-rows scalar (#267 DEC-003/DEC-005). A COUNT(*) / COUNT(col) /
+    # COUNT(DISTINCT col) scalar is soundly re-interpretable as a failing-rows
+    # count, so it FALLS THROUGH to the common determinism → safety → candidate
+    # tail (carrying the compiled body verbatim — the compiler, not ingest, does
+    # the COUNT-wrap restructure). A non-count scalar still skip-records.
+    if not is_row_returning(cc) and not is_prunable_count_scalar(cc):
         return SkippedTest(
             test_name=label,
             column=test.column_name,

@@ -215,6 +215,18 @@ variant WITHOUT a 7th-type extension — the differentiator is a per-candidate
 - **Ingested tests are READ-ONLY** — they appear on the kept/dropped/flagged table, NEVER as
   `proposed_test_files` (we didn't author them). `prune-existing` passes `render_diff(emit_test_files=False)`
   unconditionally. Macro identity rides the synthesized rationale → diff `why` (DEC-015 of #154).
-- **Full-scope only in pass 1** (`scope=sample` deferred, #268); aggregate/bare-`COUNT(*)` macros
-  skip-recorded (source-routing deferred, #267); dbt-expectations' `validation_errors` wrapper makes
-  even its `expect_table_row_count` macro row-returning/prunable.
+- **Full-scope only in pass 1** (`scope=sample` deferred, #268); dbt-expectations' `validation_errors`
+  wrapper makes even its `expect_table_row_count` macro row-returning/prunable.
+- **Count-of-rows scalar bodies now graduate (#267, LANDED).** A bare `SELECT count(*) …` scalar body
+  (`COUNT(*)`/`COUNT(col)`/`COUNT(DISTINCT)`) is detected by `is_prunable_count_scalar` (a new
+  `ingest/_compiled_sql` sqlglot classifier) and pruned, not skip-recorded. The compiler restructures it
+  to a failing-rows form — `SELECT sf_agg_value FROM (SELECT (<body>) AS sf_agg_value) AS sf_agg WHERE
+  sf_agg_value <> 0`, a **pure f-string** (no `import sqlglot` in the compiler, so no 4th sqlglot importer
+  / new scan) — so the adapter's `COUNT(*) AS failures` envelope reflects the true verdict (0=drop, ≥1=kept)
+  instead of the always-1 bug. Source-routing was already covered by `from_manifest` (#154). Non-count
+  aggregates (`AVG`/`SUM`/`MIN`/`MAX`/multi/arithmetic-on-count) still skip-record (`SkipReason` 3-value
+  unchanged); a scalar reaching the compiler that isn't a prunable count → `_InvalidIdentifier` →
+  `kept-without-evidence` (DropReason 5-value unchanged). **`0=pass` is a REINTERPRETATION, not faithful to
+  dbt** (dbt scores a raw `count(*)` body as always-fail) — the ops docs say so plainly. Deferred edges
+  (cross-dialect classify/compile drift, CTE-reprojected counts, comment-intolerant adapter validation,
+  `--tests-dir` asymmetry) → #270.

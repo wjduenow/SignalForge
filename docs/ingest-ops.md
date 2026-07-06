@@ -427,9 +427,9 @@ the same closed 3-value `SkipReason` (never grown):
 
 | Disposition | `SkipReason` | Trigger |
 |---|---|---|
-| **Pruned** (`custom_sql` candidate) | — | `compiled_code` present, row-returning, deterministic, passes the safety scan |
+| **Pruned** (`custom_sql` candidate) | — | `compiled_code` present, row-returning (or a count-of-rows scalar — see below), deterministic, passes the safety scan |
 | Absent / null `compiled_code` | `custom-or-generic-test` | `dbt parse` (not `dbt compile`) produced the manifest; the node has no body to evaluate. `detail` names the fix: run `dbt compile`. |
-| Aggregate / scalar-shaped body | `malformed-supported-test` | the outer `SELECT` is a single collapsing aggregate with no `GROUP BY` — wrapping it in `SELECT COUNT(*) AS failures FROM (<sql>)` would report `failures=1` **always** (a silent wrong `kept`). Aggregate-macro support is a follow-up (#267). |
+| Non-count aggregate / scalar-shaped body | `malformed-supported-test` | the outer `SELECT` is a single collapsing **non-count** aggregate (`AVG` / `SUM` / `MIN` / `MAX`), a multi-aggregate projection, or arithmetic on a count (`COUNT(*) + 1`) with no `GROUP BY` — no dbt "returned rows = failures" convention recovers a failing-rows form, so wrapping it in `SELECT COUNT(*) AS failures FROM (<sql>)` would report `failures=1` **always** (a silent wrong `kept`). A **count-of-rows** scalar is the exception and IS pruned (#267 — see below). |
 | Non-deterministic body | `malformed-supported-test` | `TABLESAMPLE` / `RAND` / `CURRENT_TIMESTAMP` / `NOW` / `GETDATE` / `UUID` / … — the prune verdict would not be reproducible (violates explainable-diffs). |
 | `compiled_code` fails the safety scan | `malformed-supported-test` | a top-level `;` (multiple statements) or unbalanced parentheses survive the comment-tolerant scan (see below). |
 
@@ -466,12 +466,59 @@ this shell in `SELECT COUNT(*) AS failures FROM (…)` is semantically correct:
 `failures=1` means "the row count is out of bounds", `failures=0` means "in
 bounds".
 
-The aggregate-SKIP disposition therefore fires **only on a BARE
-`SELECT COUNT(*) …` body** — the shape dbt-utils / hand-written in-house
-generic tests can emit — never on a `dbt-expectations` macro. In practice, of
-a typical `dbt-expectations` test set, the only common skip cause is a
-non-deterministic body (e.g. `expect_row_values_to_have_recent_data`, which
-compiles a `now()` comparison).
+The aggregate-SKIP disposition therefore never fires on a `dbt-expectations`
+macro. It fires only on a bare scalar body — the shape dbt-utils /
+hand-written in-house generic tests can emit — and, since #267, only when that
+scalar is a **non-count** aggregate (see below). In practice, of a typical
+`dbt-expectations` test set, the only common skip cause is a non-deterministic
+body (e.g. `expect_row_values_to_have_recent_data`, which compiles a `now()`
+comparison).
+
+### Count-of-rows scalar bodies are pruned (#267)
+
+A bare `SELECT count(*) …` body — the shape a hand-written singular test
+(`SELECT count(*) FROM {{ ref('orders') }} WHERE amount < 0`) or a non-`dbt-expectations`
+generic test compiles to — is **not** row-returning (its outer `SELECT` is a
+single collapsing aggregate), so #154's row-returning gate skip-recorded it.
+Follow-up #267 graduates the **count-of-rows idiom** — a single top-level
+`COUNT(*)`, `COUNT(col)`, or `COUNT(DISTINCT …)` projection with no `GROUP BY`
+— into a `from_manifest` `custom_sql` candidate instead. Detection is
+sqlglot-AST (`is_prunable_count_scalar`), so a column literally named
+`count_col` or a count nested inside a CTE never mis-classifies; skip-when-uncertain
+(unparseable / non-`SELECT` / `UNION`) returns the skip verdict. The prune
+compiler restructures the scalar into a failing-rows form so the adapter's
+`COUNT(*) AS failures` envelope reflects the true verdict — see
+[`docs/prune-ops.md` § count-of-rows restructure](prune-ops.md#custom_sql-manifest-ingested-and-drafted).
+
+**The `0 = pass` semantics.** Under dbt's singular-test contract, **returned
+rows are the failures** and a passing test returns zero rows. A count-of-rows
+body's value reads naturally as that failing-row count, so SignalForge
+restructures it to a failing-rows form where `count == 0` means pass (no
+offending rows) and `count ≥ 1` means fail. A bare no-`WHERE` `COUNT(*)` reads
+as "this table should be empty" (the reject-table pattern).
+
+This **recovers the likely-intended failing-rows semantics** — it does *not*
+mirror dbt's own verdict. dbt runs a singular test as `select count(*) as
+failures from (<body>)`, so a raw `SELECT count(*) …` body returns one value
+row and dbt scores it `failures = 1` — **always failing**, regardless of the
+count. SignalForge deliberately reinterprets the body as a failing-row count
+instead (DEC-004/DEC-011): the always-fail literal reading is itself a sign the
+test was authored to mean "these rows are failures," and the inverse assertion
+("the count should be *positive*") is not expressible as a dbt singular test at
+all (there is no row to return when the count is zero). Caveat for the operator:
+a body written to mean "this filtered set should be **non-empty**" (e.g. a
+`SELECT count(*) … WHERE status = 'active'` smoke test) gets the *opposite*
+verdict — `count = 0` drops it as `always-passes` — so such a check should be
+authored as a row-returning test, not a bare count.
+
+**Non-count scalars keep skip-recording.** A non-count aggregate
+(`AVG` / `SUM` / `MIN` / `MAX`), a multi-aggregate projection, or arithmetic on
+a count (`COUNT(*) + 1`) carries no such "returned rows = failures" convention
+— its threshold, if any, is not recoverable from the compiled SQL — so it
+**still** skip-records as `malformed-supported-test`. The closed 3-value
+`SkipReason` (`unsupported-test-type` / `custom-or-generic-test` /
+`malformed-supported-test`) is unchanged; #267 only narrows *which* bodies
+route to it.
 
 ### Macro identity travels into the diff `why`
 

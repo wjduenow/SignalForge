@@ -94,8 +94,14 @@ prune gate for dbt-expectations / dbt-utils / in-house generic tests (Architectu
   `validate_ingested_sql` (comment-tolerant safety scan; DEC-013). **Regex/substring is unsafe
   here — a column named `random_id` false-positives; use AST.** NOTE: dbt-expectations wraps
   EVERY macro (incl. `expect_table_row_count_to_be_between`) in a row-returning `validation_errors`
-  shell, so those ARE prunable; the aggregate-skip fires only on a BARE top-level `SELECT COUNT(*)`.
-- **`SkipReason` stays the closed 3-value Literal (DEC-014).** No-`compiled_code` / aggregate /
+  shell, so those ARE prunable. **Post-#267 the row-returning gate no longer skip-records a bare
+  count-of-rows scalar:** `is_prunable_count_scalar` (single top-level bare `exp.Count`, no GROUP BY;
+  incl. `COUNT(DISTINCT)`) graduates it to a `from_manifest` candidate (carrying `compiled_code`
+  verbatim — stage-0 builds no SQL), and the prune compiler restructures it to a failing-rows form
+  (pure f-string, no sqlglot in the compiler). Only a NON-count scalar (`AVG`/`SUM`/`MIN`/`MAX`,
+  multi-aggregate, arithmetic-on-count) still skip-records. Classify-at-ingest (bool) / restructure-at-
+  compiler is forced by the stage-0 no-SQL-building rule.
+- **`SkipReason` stays the closed 3-value Literal (DEC-014).** No-`compiled_code` / non-count aggregate /
   non-deterministic / unparseable → an existing reason (`custom-or-generic-test` /
   `malformed-supported-test`), never a 4th. When EVERY associated node lacks `compiled_code`, emit
   ONE summary `SkippedTest` with a "run `dbt compile`" remediation — the AC's "not a silent skip"

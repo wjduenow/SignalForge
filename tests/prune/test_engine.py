@@ -5668,3 +5668,330 @@ def test_prune_tests_mixed_ingested_and_drafted_per_test_routing(
     ]
     assert len(info_records) == 1
     fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# #267 US-004 (DEC-006 / DEC-002) — manifest-ingested COUNT-scalar custom_sql:
+# engineered-determinism verdict pins + the load-bearing mixed-candidate
+# routing pin.
+#
+# US-003 restructures a scalar count body (`SELECT count(*) FROM … WHERE …`)
+# into the failing-rows form
+# ``SELECT sf_agg_value FROM (SELECT (<body>) AS sf_agg_value) AS sf_agg
+# WHERE sf_agg_value <> 0`` so the adapter's ``SELECT COUNT(*) AS failures
+# FROM (<sql>) AS t`` envelope yields 0 rows (pass) / 1 row (fail) instead of
+# the always-1 scalar-collapse bug. Routing is already handled by
+# ``_test_requires_source_table`` (a ``from_manifest`` custom_sql bypasses to
+# the source under EVERY sample strategy) — so #267 adds NO new engine arm,
+# only these behavioural pins (per plans/super/267 DEC-006).
+#
+# Assertions key on the DISPATCHED SQL (``decision.compiled_sql``), not merely
+# the routed decision: a decision snapshot alone would pass even if the
+# per-test ``per_test_table_ref`` override regressed and the restructure
+# reached the sampled temp table.
+# ---------------------------------------------------------------------------
+
+# A bare top-level COUNT-of-rows scalar body carrying dbt's OWN backtick
+# quoting on the source relation (the shape ``read_manifest_tests`` produces
+# for a compiled singular test whose body is ``SELECT count(*) …``).
+_INGESTED_COUNT_SCALAR_BODY = (
+    "select count(*)\nfrom `fake_project`.`dataset`.`orders`\nwhere status = 'BAD'"
+)
+
+# The exact failing-rows restructure US-003's compiler emits for the body
+# above (pinned in ``tests/prune/test_compiler.py``; re-pinned here at the
+# engine level so a regression that changed the wrap OR dropped it is caught
+# from both surfaces).
+_EXPECTED_COUNT_SCALAR_RESTRUCTURE = (
+    "SELECT sf_agg_value FROM "
+    f"(SELECT ({_INGESTED_COUNT_SCALAR_BODY}) AS sf_agg_value) AS sf_agg "
+    "WHERE sf_agg_value <> 0"
+)
+
+
+def test_prune_tests_ingested_count_scalar_tautology_dropped_always_passes(
+    tmp_path: Path,
+) -> None:
+    """Engineered determinism (testing-signal.md): the restructured
+    count-scalar body returns zero failing rows (``failures=0``) → the engine
+    routes the decision to ``dropped`` / ``always-passes``.
+
+    The fake matches on ``sf_agg_value`` (a fragment of the restructure, NOT
+    the generic ``SELECT COUNT(*)`` envelope), so the match itself proves the
+    US-003 failing-rows restructure actually reached warehouse dispatch — the
+    scalar count did NOT slip through verbatim to the always-1 wrap.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _ingested_custom_sql_candidates(_INGESTED_COUNT_SCALAR_BODY)
+    config = PruneConfig(scope="full", capture_failure_rows=0)
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 1
+    decision = result.decisions[0]
+    assert decision.test.type == "custom_sql"
+    assert decision.test_anchor == "model"
+    assert decision.decision == "dropped"
+    assert decision.reason == "always-passes"
+    assert decision.failures == 0
+    # The dispatched SQL is the failing-rows restructure, run against the
+    # SOURCE relation (dbt's backticked qualified name), never a sample temp.
+    assert decision.compiled_sql == _EXPECTED_COUNT_SCALAR_RESTRUCTURE
+    assert "sf_agg_value <> 0" in decision.compiled_sql
+    assert "`fake_project`.`dataset`.`orders`" in decision.compiled_sql
+    assert "_SESSION" not in decision.compiled_sql
+    assert "_sf_sample_" not in decision.compiled_sql
+    fake.assert_all_expectations_met()
+
+    audit_rows = _read_audit_lines(audit_path)
+    assert len(audit_rows) == 1
+    assert audit_rows[0]["reason"] == "always-passes"
+
+
+def test_prune_tests_ingested_count_scalar_real_failure_kept(tmp_path: Path) -> None:
+    """Engineered determinism: the restructured count-scalar body returns a
+    failing row (``failures=1``) on an untrusted model → the engine routes
+    the decision to ``kept`` / ``reason="kept"`` (real signal survives).
+
+    The restructured ``… WHERE sf_agg_value <> 0`` wrap yields the adapter
+    ``failures`` count as **0 vs 1** (the row-count of the predicate, not the
+    underlying scalar COUNT), so this mirrors ``…_tautology_dropped_always_passes``
+    with the fake flipped to ``failures > 0``, bracketing both verdict outcomes.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 1}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = _ingested_custom_sql_candidates(_INGESTED_COUNT_SCALAR_BODY)
+    config = PruneConfig(scope="full", capture_failure_rows=0)  # untrusted default
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "custom_sql"
+    assert decision.decision == "kept"
+    assert decision.reason == "kept"
+    assert decision.failures == 1
+    # The verdict lands on the SAME restructured, source-routed SQL — proving
+    # the failing-rows form is what produced the kept decision.
+    assert decision.compiled_sql == _EXPECTED_COUNT_SCALAR_RESTRUCTURE
+    assert "`fake_project`.`dataset`.`orders`" in decision.compiled_sql
+    assert "_SESSION" not in decision.compiled_sql
+    assert "_sf_sample_" not in decision.compiled_sql
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_mixed_ingested_count_scalar_and_drafted_materialised(
+    tmp_path: Path,
+) -> None:
+    """LOAD-BEARING mixed-candidate routing pin (prune-engine.md § "#170
+    lessons" / business-rule-tests.md § "Materialised-sample substitution —
+    Direction 2"): one model, two candidates under ``sample_strategy=
+    "materialised"`` —
+
+      * 1× ingested COUNT-scalar (``from_manifest=True``) — bypasses to the
+        SOURCE table AND carries the US-003 restructured ``<> 0`` wrap; and
+      * 1× drafted built-in ``not_null`` (``from_manifest=False``) — routes to
+        the MATERIALISED ``_SESSION._sf_sample_*`` temp table.
+
+    The ``all_bypass_to_source`` short-circuit MUST NOT fire (the not_null does
+    not bypass), so the per-test ``per_test_table_ref`` override is exercised
+    directly. Assertions key on each DISPATCHED SQL (source vs temp table +
+    the restructure shape), NOT the routed decision alone — a decision
+    snapshot would pass even if the per-test override regressed and the
+    ingested restructure reached the temp table.
+
+    The two per-test COUNT queries carry DISTINCT matchers (``sf_agg_value``
+    for the ingested restructure, ``IS NULL`` for the not_null), so the fake
+    serves each regardless of candidate iteration order, and the verdicts are
+    engineered per-test: the ingested body is failing (kept), the not_null is
+    always-passing (dropped).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    # not_null does NOT bypass → the engine materialises the sample once.
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    # Distinct matchers make the pairing order-independent AND assert each
+    # dispatched shape reached the warehouse:
+    #   * the ingested restructure (``sf_agg_value <> 0``) → 1 failing row (kept)
+    #   * the drafted not_null (``IS NULL``) → always-passing (dropped)
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 1}])
+    fake.expect_query(matching=r"IS NULL", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_BODY, from_manifest=True),),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 2
+    # Route by anchor so the assertions do not depend on the engine's per-test
+    # iteration order.
+    by_anchor = {d.test_anchor: d for d in result.decisions}
+    assert {"model", "column.id"} == set(by_anchor)
+
+    ingested = by_anchor["model"]
+    not_null = by_anchor["column.id"]
+
+    # The ingested count-scalar bypasses to the SOURCE and carries the
+    # restructured failing-rows wrap; it must NEVER touch the temp table.
+    assert ingested.test.type == "custom_sql"
+    assert ingested.compiled_sql == _EXPECTED_COUNT_SCALAR_RESTRUCTURE
+    assert "sf_agg_value <> 0" in ingested.compiled_sql
+    assert "`fake_project`.`dataset`.`orders`" in ingested.compiled_sql
+    assert "_SESSION" not in ingested.compiled_sql
+    assert "_sf_sample_" not in ingested.compiled_sql
+    # Verdict lands on the restructured form (failing → kept).
+    assert ingested.decision == "kept"
+    assert ingested.reason == "kept"
+    assert ingested.failures == 1
+
+    # The drafted not_null routes to the MATERIALISED temp table (per-test
+    # override did NOT bypass it), and the SOURCE qualified name must NOT
+    # appear at table-position — else the override regressed.
+    assert not_null.test.type == "not_null"
+    assert "_SESSION._sf_sample_" in not_null.compiled_sql
+    assert "fake_project.dataset.orders" not in not_null.compiled_sql
+    assert not_null.decision == "dropped"
+    assert not_null.reason == "always-passes"
+
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_mixed_ingested_count_scalar_and_drafted_oneshot(
+    tmp_path: Path,
+) -> None:
+    """Strategy coverage for the mixed-candidate routing pin under
+    ``sample_strategy="oneshot"``: the ingested COUNT-scalar still bypasses to
+    the SOURCE with its restructured ``<> 0`` wrap, while the drafted not_null
+    samples via the ``WITH sample`` CTE. ``_test_requires_source_table``
+    returns True for a ``from_manifest`` custom_sql under BOTH ``materialised``
+    and ``oneshot``, so both strategies need independent per-test-override
+    coverage (a regression could narrow the bypass to one strategy).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    # oneshot samples the not_null via the CTE → one num_rows lookup for the
+    # sample bucket. The ingested body bypasses sampling entirely.
+    fake.expect_get_table(
+        ref=TableRef(project="fake_project", dataset="dataset", name="orders"),
+        returns=FakeTable(num_rows=1_000_000),
+    )
+    # Distinct matchers, order-independent, engineered verdicts per-test.
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 1}])
+    fake.expect_query(matching=r"IS NULL", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_BODY, from_manifest=True),),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="oneshot",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 2
+    by_anchor = {d.test_anchor: d for d in result.decisions}
+    assert {"model", "column.id"} == set(by_anchor)
+
+    ingested = by_anchor["model"]
+    not_null = by_anchor["column.id"]
+
+    # Ingested count-scalar: SOURCE-routed, restructured, no sample CTE / temp.
+    assert ingested.compiled_sql == _EXPECTED_COUNT_SCALAR_RESTRUCTURE
+    assert "`fake_project`.`dataset`.`orders`" in ingested.compiled_sql
+    assert "WITH sample" not in ingested.compiled_sql
+    assert "_SESSION" not in ingested.compiled_sql
+    assert "_sf_sample_" not in ingested.compiled_sql
+    assert ingested.decision == "kept"
+    assert ingested.reason == "kept"
+    assert ingested.failures == 1
+
+    # Drafted not_null: sampled via the CTE (per-test override did NOT bypass).
+    assert "WITH sample" in not_null.compiled_sql
+    assert not_null.decision == "dropped"
+    assert not_null.reason == "always-passes"
+
+    fake.assert_all_expectations_met()

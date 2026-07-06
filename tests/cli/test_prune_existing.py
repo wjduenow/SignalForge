@@ -1145,6 +1145,24 @@ def _setup_expectations_project(tmp_path: Path) -> tuple[Path, Path]:
     return project_dir, schema_path
 
 
+def _empty_tests_dir(project_dir: Path) -> Path:
+    """Create and return an empty ``empty_tests/`` directory INSIDE
+    ``project_dir`` (``--tests-dir`` is canonicalised under project_dir and must
+    stay contained).
+
+    The dbt-expectations fixture ships a ``tests/no_orders_above_threshold.sql``
+    singular test (#267 US-005) that ``prune-existing`` would otherwise pick up
+    via the *default* ``--tests-dir`` (``<project_dir>/tests``). The
+    manifest-vs-off tests below isolate their contract from that singular file
+    by pointing ``--tests-dir`` at this empty directory (an explicit override,
+    so the default enumeration is bypassed). The tests-dir ingestion path itself
+    is exercised by the ``test_singular_test_*`` suite above.
+    """
+    empty = project_dir / "empty_tests"
+    empty.mkdir()
+    return empty
+
+
 def _expectations_argv(project_dir: Path, schema_path: Path, *extra: str) -> list[str]:
     return [
         "prune-existing",
@@ -1194,11 +1212,23 @@ def test_from_manifest_off_ingests_no_manifest_tests(
     ``--from-manifest`` there are zero candidates and the prune engine's
     empty-candidate short-circuit fires — the fake adapter (queued with NO
     expectations) is never queried. Exactly the OFF contract.
+
+    ``--tests-dir`` is pointed at an empty directory so the fixture's committed
+    ``tests/no_orders_above_threshold.sql`` singular test (#267 US-005) — which
+    the default tests-dir would ingest independently of ``--from-manifest`` —
+    does not contribute a candidate here; this test isolates the manifest-off
+    contract.
     """
     import json
 
     project_dir, schema_path = _setup_expectations_project(tmp_path)
-    argv = [*_expectations_argv(project_dir, schema_path), "--format", "json"]
+    argv = [
+        *_expectations_argv(
+            project_dir, schema_path, "--tests-dir", str(_empty_tests_dir(project_dir))
+        ),
+        "--format",
+        "json",
+    ]
     # No --from-manifest: zero candidate tests → no warehouse query at all.
     factory = _make_fake_adapter_factory(failure_counts=())
     with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
@@ -1217,31 +1247,45 @@ def test_from_manifest_prunes_manifest_tests_onto_table(
     (as ``custom_sql`` candidates) into the prune run: they appear on the diff
     table (kept/dropped), NOT in proposed_test_files (read-only, DEC-015).
 
-    The fixture's orders model carries four row-returning + deterministic
-    dbt-expectations nodes (+ one non-deterministic skip). Engineered failure
-    counts give a real kept/dropped MIX so a prune regression to keep- or
-    drop-everything fails loud (testing-signal.md).
+    The fixture's orders model carries five row-returning + deterministic
+    manifest test nodes (four dbt-expectations macros + the #267-US-005
+    ``no_orders_above_threshold`` singular scalar-count test) plus one
+    non-deterministic skip. ``--tests-dir`` is pointed at an empty directory so
+    the singular test is counted ONCE (via ``--from-manifest``), not also via
+    the default tests-dir path. Engineered failure counts give a real
+    kept/dropped MIX so a prune regression to keep- or drop-everything fails
+    loud (testing-signal.md).
     """
     import json
 
     project_dir, schema_path = _setup_expectations_project(tmp_path)
-    argv = [*_expectations_argv(project_dir, schema_path, "--from-manifest"), "--format", "json"]
-    # Four manifest custom_sql tests → four COUNT(*) queries. (0, 5) × 2 →
-    # two always-passes drops + two kept.
-    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    argv = [
+        *_expectations_argv(
+            project_dir,
+            schema_path,
+            "--from-manifest",
+            "--tests-dir",
+            str(_empty_tests_dir(project_dir)),
+        ),
+        "--format",
+        "json",
+    ]
+    # Five manifest custom_sql tests → five COUNT(*) queries. Three 0s →
+    # always-passes drops; two 5s → kept.
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5, 0))
     with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
         code = main(argv)
     captured_io = capsys.readouterr()
     assert code == 0, captured_io.err
     payload = json.loads(captured_io.out)
     test_entries = [e for e in payload["entries"] if e["test_type"] is not None]
-    # All four manifest tests are custom_sql and were pruned.
-    assert len(test_entries) == 4
+    # All five manifest tests are custom_sql and were pruned.
+    assert len(test_entries) == 5
     assert all(e["test_type"] == "custom_sql" for e in test_entries)
     kept = [e for e in test_entries if e["tier"] == "kept"]
     dropped = [e for e in test_entries if e["tier"] == "dropped"]
     assert len(kept) == 2
-    assert len(dropped) == 2
+    assert len(dropped) == 3
     # grading_report=None (no --grade) → never flagged.
     assert payload["flagged_count"] == 0
     # Read-only: no proposed .sql files for the ingested external tests.
@@ -1255,8 +1299,16 @@ def test_from_manifest_skip_folds_into_report(
     recent-data body) is skip-recorded and folds into the stderr summary.
     """
     project_dir, schema_path = _setup_expectations_project(tmp_path)
-    argv = _expectations_argv(project_dir, schema_path, "--from-manifest")
-    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    # Empty --tests-dir isolates the manifest path from the fixture's committed
+    # singular test (#267 US-005); five manifest candidates → five COUNT queries.
+    argv = _expectations_argv(
+        project_dir,
+        schema_path,
+        "--from-manifest",
+        "--tests-dir",
+        str(_empty_tests_dir(project_dir)),
+    )
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5, 0))
     with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
         code = main(argv)
     err = capsys.readouterr().err
@@ -1295,8 +1347,15 @@ def test_from_manifest_grade_runs_grade_stage(
 
     monkeypatch.setattr(pe_mod.grade_module, "grade_artifacts", _fake_grade)
 
-    argv = _expectations_argv(project_dir, schema_path, "--from-manifest", "--grade")
-    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    argv = _expectations_argv(
+        project_dir,
+        schema_path,
+        "--from-manifest",
+        "--grade",
+        "--tests-dir",
+        str(_empty_tests_dir(project_dir)),
+    )
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5, 0))
     with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
         code = main(argv)
     err = capsys.readouterr().err
@@ -1338,8 +1397,15 @@ def test_grade_missing_credential_exits_3(
 
     monkeypatch.setattr(pe_mod.grade_module, "grade_artifacts", _raise_auth)
 
-    argv = _expectations_argv(project_dir, schema_path, "--from-manifest", "--grade")
-    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    argv = _expectations_argv(
+        project_dir,
+        schema_path,
+        "--from-manifest",
+        "--grade",
+        "--tests-dir",
+        str(_empty_tests_dir(project_dir)),
+    )
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5, 0))
     with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
         code = main(argv)
     err = capsys.readouterr().err
@@ -1364,8 +1430,16 @@ def test_grade_renumbers_progress_to_four(
         lambda model, candidate, prune_result, **kw: make_grading_report(model),
     )
 
-    argv = _expectations_argv(project_dir, schema_path, "--from-manifest", "--grade", "--verbose")
-    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    argv = _expectations_argv(
+        project_dir,
+        schema_path,
+        "--from-manifest",
+        "--grade",
+        "--verbose",
+        "--tests-dir",
+        str(_empty_tests_dir(project_dir)),
+    )
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5, 0))
     with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
         code = main(argv)
     err = capsys.readouterr().err
@@ -1383,8 +1457,15 @@ def test_no_grade_keeps_three_stage_progress(
     even under ``--from-manifest`` — the flag renumber is grade-driven only.
     """
     project_dir, schema_path = _setup_expectations_project(tmp_path)
-    argv = _expectations_argv(project_dir, schema_path, "--from-manifest", "--verbose")
-    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    argv = _expectations_argv(
+        project_dir,
+        schema_path,
+        "--from-manifest",
+        "--verbose",
+        "--tests-dir",
+        str(_empty_tests_dir(project_dir)),
+    )
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5, 0))
     with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
         code = main(argv)
     err = capsys.readouterr().err
