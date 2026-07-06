@@ -138,14 +138,49 @@ def test_blank_compiled_code_is_treated_as_absent() -> None:
     assert any(s.reason == "custom-or-generic-test" for s in result.skipped)
 
 
-def test_aggregate_body_is_skipped_not_wrong_kept() -> None:
-    """A scalar/aggregate-shaped body → skip (malformed), never a wrong verdict."""
+def test_count_of_rows_scalar_becomes_candidate() -> None:
+    """A count-of-rows scalar body IS now pruned (#267 DEC-003), not skip-recorded.
+
+    A ``SELECT COUNT(*) …`` body is soundly re-interpretable as a failing-rows
+    count, so it graduates to a ``CandidateTestCustomSQL`` (``from_manifest=True``)
+    carrying the compiled body VERBATIM — the compiler, not ingest, does the
+    ``COUNT``-wrap restructure. Previously this skip-recorded
+    ``malformed-supported-test``.
+    """
+    body = "select count(*) as n from orders where amount < 0"
     manifest = _manifest_with(
         _generic_test(
             unique_id="test.shop.rowcount",
-            compiled_code="select count(*) as n from orders",
+            compiled_code=body,
             macro="expect_table_row_count_to_be_between",
             kwargs={"min_value": 1, "max_value": 100},
+        )
+    )
+    result = read_manifest_tests(manifest, _make_model())
+
+    assert result.skipped == ()
+    assert len(result.candidate.tests) == 1
+    test = result.candidate.tests[0]
+    assert isinstance(test, CandidateTestCustomSQL)
+    assert test.type == "custom_sql"
+    assert test.column is None
+    # The compiled body is carried VERBATIM — ingest does no SQL building.
+    assert test.sql == body
+    assert test.from_manifest is True
+
+
+def test_non_count_aggregate_body_still_skips() -> None:
+    """A non-count aggregate scalar (AVG / SUM / MIN / MAX) still skip-records.
+
+    Only count-of-rows scalars graduate (#267 DEC-005); every other single-row
+    aggregate keeps skip-recording ``malformed-supported-test`` with the narrowed
+    detail that names the non-count residue.
+    """
+    manifest = _manifest_with(
+        _generic_test(
+            unique_id="test.shop.avg",
+            compiled_code="select avg(amount) from orders",
+            macro="expect_column_mean_to_be_between",
         )
     )
     result = read_manifest_tests(manifest, _make_model())
@@ -154,7 +189,34 @@ def test_aggregate_body_is_skipped_not_wrong_kept() -> None:
     assert len(result.skipped) == 1
     skip = result.skipped[0]
     assert skip.reason == "malformed-supported-test"
-    assert "aggregate" in skip.detail.lower()
+    # The narrowed detail names the non-count residue and states count scalars
+    # are now pruned (#267 DEC-005).
+    assert "non-count" in skip.detail.lower()
+    assert "#267" in skip.detail
+
+
+def test_nondeterministic_count_scalar_still_skips() -> None:
+    """A count-of-rows scalar with a non-deterministic body still skips.
+
+    The determinism gate lives in the common tail, so a count-scalar that falls
+    through the row-returning gate still hits it: a ``current_timestamp`` body
+    would make the prune verdict irreproducible → skip ``malformed-supported-test``
+    with the non-deterministic detail (NOT the count body reaching a candidate).
+    """
+    manifest = _manifest_with(
+        _generic_test(
+            unique_id="test.shop.recent_count",
+            compiled_code=("select count(*) from orders where created_at > current_timestamp()"),
+            macro="expect_row_values_to_have_recent_data",
+        )
+    )
+    result = read_manifest_tests(manifest, _make_model())
+
+    assert result.candidate.tests == ()
+    assert len(result.skipped) == 1
+    skip = result.skipped[0]
+    assert skip.reason == "malformed-supported-test"
+    assert "non-deterministic" in skip.detail.lower()
 
 
 def test_nondeterministic_body_is_skipped() -> None:
@@ -370,8 +432,8 @@ def test_all_skip_reasons_are_within_the_closed_literal() -> None:
         _generic_test(unique_id="test.shop.no_code", compiled_code=None),
         _generic_test(
             unique_id="test.shop.agg",
-            compiled_code="select count(*) from orders",
-            macro="expect_table_row_count_to_be_between",
+            compiled_code="select avg(amount) from orders",
+            macro="expect_column_mean_to_be_between",
         ),
     )
     result = read_manifest_tests(manifest, _make_model())
