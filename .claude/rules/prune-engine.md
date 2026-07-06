@@ -249,6 +249,15 @@ Manifest-ingested `custom_sql` candidates (`from_manifest=True`, see `ingest-lay
 - **`DropReason` stays the 5-value LOCK.** Non-deterministic / unparseable / can't-evaluate ingested
   tests route through the existing `kept-without-evidence` per the conservative-bias template — never
   a 6th reason. No new `PruneEvent` field / no `_PRUNE_AUDIT_SCHEMA_VERSION` bump.
+- **Count-of-rows scalar restructure (#267, LANDED).** A `from_manifest` body that is a bare count
+  scalar (`is_prunable_count_scalar`, no GROUP BY, single `exp.Count`) is NOT returned verbatim — the
+  compiler wraps it as a **pure f-string** `SELECT sf_agg_value FROM (SELECT (<body>) AS sf_agg_value)
+  AS sf_agg WHERE sf_agg_value <> 0` (re-validated via `validate_ingested_sql`), so the adapter's
+  `COUNT(*) AS failures` envelope yields 0 rows=drop / 1=kept instead of the always-1 bug. **No `import
+  sqlglot` in the compiler** — the classification comes from the ingest helper; the wrap is string-only,
+  so this is NOT a new sqlglot importer and needs no confinement scan. A scalar that isn't a prunable
+  count (belt-and-braces) → `_InvalidIdentifier` → `kept-without-evidence`. Row-returning bodies still
+  return verbatim. Narrow non-BigQuery cross-dialect classify/compile drift is tracked in #270.
 - **sqlglot extension.** The compiler consumes `signalforge.ingest._compiled_sql` (the 3rd sqlglot
   consumer after `draft/parser` and `ingest/_compiled_sql` itself); the `test_compiler_import_guard`
   (no `google.cloud`/`snowflake` under `prune/`) is unaffected — sqlglot is dialect-neutral parsing.
