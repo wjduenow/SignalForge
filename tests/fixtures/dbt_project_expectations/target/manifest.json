@@ -121,6 +121,84 @@
       "latest_version": null,
       "deprecation_date": null
     },
+    "test.signalforge_test_expectations.no_orders_above_threshold": {
+      "database": "dev",
+      "schema": "main_dbt_test__audit",
+      "name": "no_orders_above_threshold",
+      "resource_type": "test",
+      "package_name": "signalforge_test_expectations",
+      "path": "no_orders_above_threshold.sql",
+      "original_file_path": "tests/no_orders_above_threshold.sql",
+      "unique_id": "test.signalforge_test_expectations.no_orders_above_threshold",
+      "fqn": [
+        "signalforge_test_expectations",
+        "no_orders_above_threshold"
+      ],
+      "alias": "no_orders_above_threshold",
+      "checksum": {
+        "name": "sha256",
+        "checksum": "4f9a9e72197abddf26643288f568be9358a7f8a821469cb0c7a45abcd5331ce6"
+      },
+      "config": {
+        "enabled": true,
+        "alias": null,
+        "schema": "dbt_test__audit",
+        "database": null,
+        "tags": [],
+        "meta": {},
+        "group": null,
+        "materialized": "test",
+        "severity": "ERROR",
+        "store_failures": null,
+        "store_failures_as": null,
+        "where": null,
+        "limit": null,
+        "fail_calc": "count(*)",
+        "warn_if": "!= 0",
+        "error_if": "!= 0"
+      },
+      "tags": [],
+      "description": "",
+      "columns": {},
+      "meta": {},
+      "group": null,
+      "docs": {
+        "show": true,
+        "node_color": null
+      },
+      "patch_path": null,
+      "build_path": null,
+      "unrendered_config": {},
+      "created_at": null,
+      "relation_name": null,
+      "raw_code": "{#\n  Singular test whose compiled body is a bare scalar COUNT (issue 267 US-005):\n  exercises the count-of-rows manifest-ingest prune path. A single ref() call\n  and no GROUP BY, so it compiles to a bare top-level\n  SELECT count(star) FROM \"...\".\"...\".\"orders\" WHERE ... that\n  is_prunable_count_scalar graduates (US-001) and the ingest gate (US-002) plus\n  compiler restructure (US-003) route to a from_manifest custom_sql candidate\n  rather than skip-recording it.\n\n  Determinism: amount is 100.00 / 200.00 in the two fixture rows, so this WHERE\n  selects zero rows, count 0, and the 0-equals-pass convention makes it an\n  always-passes drop. The value is known from the fixture, not the LLM.\n\n  These are Jinja comments (deliberately NOT SQL line/block comments): dbt\n  strips them at compile time, so the compiled body is comment-free and the\n  warehouse adapter's validate_test_sql, which rejects SQL comment tokens,\n  accepts the restructured body and lets the count-scalar reach a real prune\n  verdict.\n#}\nselect count(*) from {{ ref('orders') }} where amount > 1000",
+      "language": "sql",
+      "refs": [
+        {
+          "name": "orders",
+          "package": null,
+          "version": null
+        }
+      ],
+      "sources": [],
+      "metrics": [],
+      "depends_on": {
+        "macros": [],
+        "nodes": [
+          "model.signalforge_test_expectations.orders"
+        ]
+      },
+      "compiled_path": "target/compiled/signalforge_test_expectations/tests/no_orders_above_threshold.sql",
+      "compiled": true,
+      "compiled_code": "\nselect count(*) from \"dev\".\"main\".\"orders\" where amount > 1000",
+      "extra_ctes_injected": true,
+      "extra_ctes": [],
+      "contract": {
+        "enforced": false,
+        "alias_types": true,
+        "checksum": null
+      }
+    },
     "test.signalforge_test_expectations.dbt_expectations_expect_column_values_to_not_be_null_orders_order_id.b0a7a423ad": {
       "database": "dev",
       "schema": "main_dbt_test__audit",
@@ -17208,6 +17286,9 @@
   "disabled": {},
   "parent_map": {
     "model.signalforge_test_expectations.orders": [],
+    "test.signalforge_test_expectations.no_orders_above_threshold": [
+      "model.signalforge_test_expectations.orders"
+    ],
     "test.signalforge_test_expectations.dbt_expectations_expect_column_values_to_not_be_null_orders_order_id.b0a7a423ad": [
       "model.signalforge_test_expectations.orders"
     ],
@@ -17230,8 +17311,10 @@
       "test.signalforge_test_expectations.dbt_expectations_expect_column_values_to_be_between_orders_amount__2000__1000.53d48a87d9",
       "test.signalforge_test_expectations.dbt_expectations_expect_column_values_to_not_be_null_orders_order_id.b0a7a423ad",
       "test.signalforge_test_expectations.dbt_expectations_expect_row_values_to_have_recent_data_orders_ordered_at__day__1.d490db60d4",
-      "test.signalforge_test_expectations.dbt_expectations_expect_table_row_count_to_be_between_orders_100__1.34812ce68b"
+      "test.signalforge_test_expectations.dbt_expectations_expect_table_row_count_to_be_between_orders_100__1.34812ce68b",
+      "test.signalforge_test_expectations.no_orders_above_threshold"
     ],
+    "test.signalforge_test_expectations.no_orders_above_threshold": [],
     "test.signalforge_test_expectations.dbt_expectations_expect_column_values_to_not_be_null_orders_order_id.b0a7a423ad": [],
     "test.signalforge_test_expectations.dbt_expectations_expect_column_values_to_be_between_orders_amount__2000__1000.53d48a87d9": [],
     "test.signalforge_test_expectations.dbt_expectations_expect_column_values_to_be_between_orders_amount__1000000__0.513de64a00": [],

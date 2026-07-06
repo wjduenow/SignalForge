@@ -450,30 +450,43 @@ def test_all_skip_reasons_are_within_the_closed_literal() -> None:
 
 
 def test_bridge_routes_real_expectations_fixture() -> None:
-    """The bridge routes each of the fixture's 5 dbt-compiled test nodes.
+    """The bridge routes each of the fixture's 6 dbt-compiled test nodes.
 
     Routing reflects the actual US-002 helper behaviour, NOT the fixture's
     design-time labels: dbt-expectations wraps every macro (including
     ``expect_table_row_count_to_be_between``) in a row-returning
     ``validation_errors`` shell, so only the ``now()``-referencing recent-data
-    body is skip-recorded (non-deterministic). The four other nodes become
-    ``custom_sql`` candidates the prune step then grades (always-passes / kept).
+    body is skip-recorded (non-deterministic). The four other dbt-expectations
+    nodes become ``custom_sql`` candidates the prune step then grades
+    (always-passes / kept). The #267-US-005 ``no_orders_above_threshold``
+    singular test compiles to a bare scalar ``COUNT(*)`` and is graduated to a
+    fifth candidate by the count-of-rows path (see
+    ``test_bridge_routes_scalar_count_singular_test`` for its own assertions).
     """
     manifest = load(_FIXTURE_DIR)
     model = manifest.get_model(_ORDERS_UID)
 
     result = read_manifest_tests(manifest, model)
 
-    # 4 candidates (not_null, 2× between, row_count-wrapper) + 1 skip (recent_data).
-    assert len(result.candidate.tests) == 4
+    # 5 candidates (not_null, 2× between, row_count-wrapper, scalar-count
+    # singular) + 1 skip (recent_data).
+    assert len(result.candidate.tests) == 5
     assert len(result.skipped) == 1
 
     skip = result.skipped[0]
     assert skip.reason == "malformed-supported-test"
     assert "non-deterministic" in skip.detail.lower()
 
-    # Every candidate is a model-level custom_sql carrying the real compiled SQL
-    # and a macro-named rationale (DEC-001 / DEC-015).
+    # The four dbt-expectations candidates carry a macro-named rationale
+    # (DEC-001 / DEC-015); the singular scalar-count node's rationale is its
+    # node unique_id (no ``test_metadata``), so it is excluded here.
+    macro_candidates = [
+        test
+        for test in result.candidate.tests
+        if (test.rationale or "").startswith("dbt-expectations ")
+    ]
+    assert len(macro_candidates) == 4
+
     macros_seen: set[str] = set()
     for test in result.candidate.tests:
         assert isinstance(test, CandidateTestCustomSQL)
@@ -481,11 +494,56 @@ def test_bridge_routes_real_expectations_fixture() -> None:
         assert test.column is None
         assert test.sql.strip()
         assert test.rationale is not None
-        assert test.rationale.startswith("dbt-expectations ")
-        macros_seen.add(test.rationale.split("(", 1)[0].split(" ", 1)[1])
+    for test in macro_candidates:
+        macros_seen.add((test.rationale or "").split("(", 1)[0].split(" ", 1)[1])
 
     assert macros_seen == {
         "expect_column_values_to_not_be_null",
         "expect_column_values_to_be_between",
         "expect_table_row_count_to_be_between",
     }
+
+
+def test_bridge_routes_scalar_count_singular_test() -> None:
+    """The #267-US-005 singular test compiles to a bare scalar ``COUNT(*)`` and
+    is graduated to a ``from_manifest`` candidate — NOT skip-recorded (DEC-008).
+
+    ``tests/no_orders_above_threshold.sql`` has a single ``ref('orders')`` and no
+    GROUP BY, so ``dbt compile`` produces a bare top-level
+    ``SELECT count(*) FROM "dev"."main"."orders" WHERE amount > 1000`` body. The
+    US-001 classifier (``is_prunable_count_scalar``) graduates it, the US-002
+    ingest gate routes it to a candidate, and US-003 restructures it — so the
+    count-of-rows manifest-ingest prune path turns it into a prunable
+    ``CandidateTestCustomSQL`` instead of dropping it into ``skipped``.
+
+    Its associated model must resolve to ``orders``: a singular test carries no
+    ``attached_node``, so ``associate_test_model`` falls back to the single
+    ``depends_on.nodes`` model entry — and the bridge only includes tests whose
+    association equals the queried model, so the candidate's mere presence proves
+    the association resolved.
+    """
+    manifest = load(_FIXTURE_DIR)
+    model = manifest.get_model(_ORDERS_UID)
+
+    result = read_manifest_tests(manifest, model)
+
+    singular_uid = "test.signalforge_test_expectations.no_orders_above_threshold"
+
+    # It is a candidate (associated to orders), never skip-recorded.
+    assert all(s.test_name != singular_uid for s in result.skipped)
+    matches = [
+        test
+        for test in result.candidate.tests
+        if isinstance(test, CandidateTestCustomSQL) and test.rationale == singular_uid
+    ]
+    assert len(matches) == 1
+
+    candidate = matches[0]
+    assert candidate.type == "custom_sql"
+    assert candidate.from_manifest is True
+    assert candidate.column is None
+    # Carries the real dbt-compiled bare-scalar-count body against the qualified
+    # ``orders`` relation (the US-003 restructure wraps it into failing-rows
+    # form at prune-compile time, downstream of this bridge).
+    assert "count(*)" in candidate.sql.lower()
+    assert '"orders"' in candidate.sql
