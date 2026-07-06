@@ -5763,17 +5763,18 @@ def test_prune_tests_ingested_count_scalar_tautology_dropped_always_passes(
 
 
 def test_prune_tests_ingested_count_scalar_real_failure_kept(tmp_path: Path) -> None:
-    """Engineered determinism: the restructured count-scalar body returns
-    failing rows (``failures=3``) on an untrusted model → the engine routes
+    """Engineered determinism: the restructured count-scalar body returns a
+    failing row (``failures=1``) on an untrusted model → the engine routes
     the decision to ``kept`` / ``reason="kept"`` (real signal survives).
 
-    Mirrors ``…_tautology_dropped_always_passes`` with the fake flipped to a
-    non-zero failure count, so the pair brackets both verdict outcomes of the
-    restructured shape.
+    The restructured ``… WHERE sf_agg_value <> 0`` wrap yields the adapter
+    ``failures`` count as **0 vs 1** (the row-count of the predicate, not the
+    underlying scalar COUNT), so this mirrors ``…_tautology_dropped_always_passes``
+    with the fake flipped to ``failures > 0``, bracketing both verdict outcomes.
     """
     audit_path = tmp_path / "prune.jsonl"
     fake = FakeBigQueryClient(project="fake_project")
-    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 3}])
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 1}])
     adapter = _make_adapter(fake)
 
     model = _make_orders_model()
@@ -5795,7 +5796,7 @@ def test_prune_tests_ingested_count_scalar_real_failure_kept(tmp_path: Path) -> 
     assert decision.test.type == "custom_sql"
     assert decision.decision == "kept"
     assert decision.reason == "kept"
-    assert decision.failures == 3
+    assert decision.failures == 1
     # The verdict lands on the SAME restructured, source-routed SQL — proving
     # the failing-rows form is what produced the kept decision.
     assert decision.compiled_sql == _EXPECTED_COUNT_SCALAR_RESTRUCTURE
@@ -5844,9 +5845,9 @@ def test_prune_tests_mixed_ingested_count_scalar_and_drafted_materialised(
     )
     # Distinct matchers make the pairing order-independent AND assert each
     # dispatched shape reached the warehouse:
-    #   * the ingested restructure (``sf_agg_value <> 0``) → failing (kept)
+    #   * the ingested restructure (``sf_agg_value <> 0``) → 1 failing row (kept)
     #   * the drafted not_null (``IS NULL``) → always-passing (dropped)
-    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 2}])
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 1}])
     fake.expect_query(matching=r"IS NULL", returns=[{"failures": 0}])
     fake.expect_abort_session(f"sess_{materialised_ref.name}")
     adapter = _make_adapter(fake)
@@ -5897,11 +5898,12 @@ def test_prune_tests_mixed_ingested_count_scalar_and_drafted_materialised(
     assert ingested.compiled_sql == _EXPECTED_COUNT_SCALAR_RESTRUCTURE
     assert "sf_agg_value <> 0" in ingested.compiled_sql
     assert "`fake_project`.`dataset`.`orders`" in ingested.compiled_sql
-    assert "_SESSION._sf_sample_" not in ingested.compiled_sql
+    assert "_SESSION" not in ingested.compiled_sql
+    assert "_sf_sample_" not in ingested.compiled_sql
     # Verdict lands on the restructured form (failing → kept).
     assert ingested.decision == "kept"
     assert ingested.reason == "kept"
-    assert ingested.failures == 2
+    assert ingested.failures == 1
 
     # The drafted not_null routes to the MATERIALISED temp table (per-test
     # override did NOT bypass it), and the SOURCE qualified name must NOT
@@ -5935,7 +5937,7 @@ def test_prune_tests_mixed_ingested_count_scalar_and_drafted_oneshot(
         returns=FakeTable(num_rows=1_000_000),
     )
     # Distinct matchers, order-independent, engineered verdicts per-test.
-    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 5}])
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 1}])
     fake.expect_query(matching=r"IS NULL", returns=[{"failures": 0}])
     adapter = _make_adapter(fake)
 
@@ -5985,7 +5987,7 @@ def test_prune_tests_mixed_ingested_count_scalar_and_drafted_oneshot(
     assert "_sf_sample_" not in ingested.compiled_sql
     assert ingested.decision == "kept"
     assert ingested.reason == "kept"
-    assert ingested.failures == 5
+    assert ingested.failures == 1
 
     # Drafted not_null: sampled via the CTE (per-test override did NOT bypass).
     assert "WITH sample" in not_null.compiled_sql

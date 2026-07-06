@@ -167,11 +167,16 @@ def test_is_prunable_count_scalar_true_for_single_count(sql: str) -> None:
         "SELECT count(*), max(x) FROM t",
         "SELECT * FROM t WHERE x < 0",
         "SELECT k, count(*) FROM t GROUP BY k",
+        # HAVING (even with no GROUP BY) filters the aggregate result → returns
+        # zero-or-one rows on a condition unrelated to the failing-row count, so
+        # `0 = pass` no longer holds. Must reject (CodeRabbit #269).
+        "SELECT count(*) FROM t HAVING count(*) > 3",
     ],
 )
 def test_is_prunable_count_scalar_false_for_non_count_scalar(sql: str) -> None:
     """Non-count aggregates, arithmetic-on-count, multi-projection, a
-    row-returning body, and a GROUP-BY body are all rejected (#267 DEC-001)."""
+    row-returning body, a GROUP-BY body, and a HAVING body are all rejected
+    (#267 DEC-001)."""
     assert is_prunable_count_scalar(sql) is False
 
 
