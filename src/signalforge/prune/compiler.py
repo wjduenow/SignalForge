@@ -67,6 +67,7 @@ from signalforge.draft.models import (
     CandidateTestUnique,
     CandidateTestUniqueCombination,
 )
+from signalforge.ingest._compiled_sql import is_deterministic_sql, validate_ingested_sql
 from signalforge.manifest.errors import (
     AmbiguousRefError,
     RefNotFoundError,
@@ -680,6 +681,51 @@ def _compile_custom_sql(
     model's own qualified name. When ``model is None`` (no model threaded
     through), the test cannot be resolved and routes to the sentinel.
     """
+    if test.from_manifest:
+        # #154 DEC-007 / DEC-013 — manifest ``compiled_code`` path. The body is
+        # already Jinja-resolved by dbt and references the relation with dbt's
+        # OWN quoting scheme, which neither the ``{{ this }}`` sample-substitution
+        # nor the partition-filter derived-table rewrite below can bind. So it
+        # runs FULL-SCOPE against the source, as-is (bounded by the adapter's
+        # ``maximum_bytes_billed`` cap). The engine routes an ingested candidate
+        # to ``source_table_ref`` via
+        # :func:`signalforge.prune.engine._test_requires_source_table`, so the
+        # compiled SQL is NEVER wrapped against a ``_SESSION._sf_sample_*`` temp
+        # table (``scope`` / ``sample_size`` / ``partition_filter`` are ignored
+        # on this branch). ``resolve_template_refs`` is skipped: a compiled body
+        # carries no ``{{ }}``, and running the resolver would risk a spurious
+        # residual-Jinja rejection.
+        #
+        # Determinism belt-and-braces (DEC-012): the ingest bridge (#154 US-003)
+        # is the PRIMARY determinism gate (it skip-records TABLESAMPLE / RAND /
+        # NOW / … bodies), but a non-deterministic body reaching the compiler
+        # still routes to ``kept-without-evidence`` here — a prune verdict that
+        # changed run-to-run would violate Architectural Commitment #5.
+        # Pass the ACTIVE dialect (the Dialect names already match sqlglot's) so
+        # a Snowflake / Databricks compiled body parses under the right dialect —
+        # otherwise a parse failure returns the permissive (deterministic=True)
+        # verdict and a non-deterministic construct could slip through this gate.
+        if not is_deterministic_sql(test.sql, dialect=dialect.name):
+            return _InvalidIdentifier(
+                reason=(
+                    "ingested custom_sql is non-deterministic "
+                    "(TABLESAMPLE / RAND / time-dependent function)"
+                )
+            )
+        # Comment-tolerant safety scan (DEC-013): dbt ``compiled_code`` routinely
+        # carries ``--`` line comments and ``/* */`` block comments that the
+        # ``#116`` :func:`validate_test_sql` rejects wholesale. The ingested
+        # validator strips them (string-literal-aware) before the ``;`` /
+        # unbalanced-paren injection scan, so a genuine injection still fails
+        # loud → ``_InvalidIdentifier`` → ``kept-without-evidence``.
+        try:
+            validate_ingested_sql(test.sql)
+        except QuerySyntaxError:
+            return _InvalidIdentifier(
+                reason="ingested custom_sql rejected by the comment-tolerant SQL safety scan"
+            )
+        return test.sql
+
     if model is None:
         # The orchestrator must thread ``model`` for custom_sql resolution.
         # Absent it, conservatively route to kept-without-evidence rather

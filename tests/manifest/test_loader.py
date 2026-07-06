@@ -47,10 +47,11 @@ from signalforge.manifest.loader import (
     MAX_MANIFEST_BYTES,
     _canonicalise_path,
     _detect_version,
+    associate_test_model,
     load,
     schema_version,
 )
-from signalforge.manifest.models import Manifest
+from signalforge.manifest.models import GenericTest, Manifest
 
 FIXTURES_DIR = Path(__file__).resolve().parent.parent / "fixtures"
 SMALL_PROJECT = FIXTURES_DIR / "dbt_project_small"
@@ -997,3 +998,175 @@ def test_get_model_by_file_path_for_disabled_model_raises_disabled(
     manifest = load(project)
     with pytest.raises(ModelDisabledError, match="is disabled in dbt config"):
         manifest.get_model("models/staging/stg_disabled.sql")
+
+
+# ---------------------------------------------------------------------------
+# 19. Generic-test node surface + association ladder (#154 US-001 — DEC-008/009)
+# ---------------------------------------------------------------------------
+
+GENERIC_TEST_NODES = FIXTURES_DIR / "manifest" / "generic_test_nodes.json"
+_V10_ATTACHED_KEY = (
+    "test.my_pkg.dbt_expectations_expect_column_values_to_be_between_my_model_amount__100__0"
+    ".abc12345de"
+)
+_V9_NO_ATTACHED_KEY = (
+    "test.my_pkg.relationships_child_model_customer_id__id__ref_dim_customers_.def67890ab"
+)
+
+
+def _generic_test(key: str) -> GenericTest:
+    """Build a :class:`GenericTest` from a hand-authored fixture node."""
+    nodes = json.loads(GENERIC_TEST_NODES.read_text())["nodes"]
+    return GenericTest.model_validate(nodes[key])
+
+
+@pytest.mark.integration
+def test_load_surfaces_test_nodes_into_manifest_tests(tmp_path: Path) -> None:
+    """``load()`` filters ``resource_type == "test"`` nodes into ``Manifest.tests``
+    (parallel to ``sources``) and keeps ``nodes`` model-only."""
+    project = tmp_path / "proj"
+    target = project / "target"
+    target.mkdir(parents=True)
+    test_nodes = json.loads(GENERIC_TEST_NODES.read_text())["nodes"]
+    manifest_doc = {
+        "metadata": {"dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json"},
+        "nodes": {
+            "model.my_pkg.my_model": {
+                "unique_id": "model.my_pkg.my_model",
+                "name": "my_model",
+                "resource_type": "model",
+                "package_name": "my_pkg",
+                "original_file_path": "models/my_model.sql",
+                "path": "my_model.sql",
+                "schema": "analytics",
+                "raw_code": "select 1 as id",
+                "columns": {},
+            },
+            # Test nodes live under the SAME top-level ``nodes`` key as models.
+            **test_nodes,
+        },
+        "disabled": {},
+        "sources": {},
+    }
+    (target / "manifest.json").write_text(json.dumps(manifest_doc), encoding="utf-8")
+
+    manifest = load(project)
+
+    # Test nodes routed to ``tests``; model stays in ``nodes``.
+    assert set(manifest.tests) == {_V10_ATTACHED_KEY, _V9_NO_ATTACHED_KEY}
+    assert all(isinstance(t, GenericTest) for t in manifest.tests.values())
+    assert set(manifest.nodes) == {"model.my_pkg.my_model"}
+    # No test unique_id leaked into ``nodes``.
+    assert not any(k.startswith("test.") for k in manifest.nodes)
+
+
+@pytest.mark.integration
+def test_load_parse_only_manifest_has_empty_tests() -> None:
+    """A parse-only small manifest (no test nodes) yields ``Manifest.tests == {}``."""
+    manifest = load(SMALL_PROJECT, manifest_path=SMALL_PROJECT / "target" / "manifest_v12.json")
+    assert manifest.tests == {}
+
+
+@pytest.mark.unit
+def test_associate_test_model_prefers_attached_node() -> None:
+    """v10+: ``attached_node`` is authoritative (DEC-009 rung 1)."""
+    gt = _generic_test(_V10_ATTACHED_KEY)
+    assert associate_test_model(gt) == "model.my_pkg.my_model"
+
+
+@pytest.mark.unit
+def test_associate_test_model_v9_disambiguates_multi_dep_by_file_key() -> None:
+    """v9 (no ``attached_node``): a relationships test has TWO model deps; the
+    tested model is picked out via ``file_key_name`` (``models.child_model``)."""
+    gt = _generic_test(_V9_NO_ATTACHED_KEY)
+    assert gt.attached_node is None
+    assert associate_test_model(gt) == "model.my_pkg.child_model"
+
+
+@pytest.mark.unit
+def test_associate_test_model_v9_single_dep() -> None:
+    """v9 single model dependency → that model, no disambiguation needed."""
+    gt = GenericTest.model_validate(
+        {
+            "unique_id": "test.my_pkg.not_null_my_model_id.aaa",
+            "compiled_code": "select * from t where id is null",
+            "column_name": "id",
+            "file_key_name": "models.my_model",
+            "depends_on": {"nodes": ["model.my_pkg.my_model"]},
+            "test_metadata": {"name": "not_null", "kwargs": {"column_name": "id"}},
+        }
+    )
+    assert associate_test_model(gt) == "model.my_pkg.my_model"
+
+
+@pytest.mark.unit
+def test_associate_test_model_v9_disambiguates_by_kwargs_model_ref() -> None:
+    """When ``file_key_name`` does not resolve, the ``ref('...')`` inside
+    ``test_metadata.kwargs.model`` is the fallback disambiguator."""
+    gt = GenericTest.model_validate(
+        {
+            "unique_id": "test.my_pkg.rel.bbb",
+            "column_name": "customer_id",
+            # file_key_name deliberately absent → forces the kwargs.model path.
+            "depends_on": {"nodes": ["model.my_pkg.dim_customers", "model.my_pkg.child_model"]},
+            "test_metadata": {
+                "name": "relationships",
+                "kwargs": {"model": "{{ get_where_subquery(ref('child_model')) }}"},
+            },
+        }
+    )
+    assert associate_test_model(gt) == "model.my_pkg.child_model"
+
+
+@pytest.mark.unit
+def test_associate_test_model_returns_none_when_no_model_dep() -> None:
+    """No model dependency and no ``attached_node`` → ``None`` (never guess)."""
+    gt = GenericTest.model_validate(
+        {
+            "unique_id": "test.my_pkg.orphan.ccc",
+            "depends_on": {"nodes": ["macro.dbt.test_not_null"]},
+        }
+    )
+    assert associate_test_model(gt) is None
+
+
+@pytest.mark.unit
+def test_associate_test_model_ambiguous_multi_dep_returns_none() -> None:
+    """Multiple model deps with no usable disambiguator → ``None`` (no guess)."""
+    gt = GenericTest.model_validate(
+        {
+            "unique_id": "test.my_pkg.rel.ddd",
+            # No attached_node, no file_key_name, no kwargs.model ref.
+            "depends_on": {"nodes": ["model.my_pkg.a_model", "model.my_pkg.b_model"]},
+        }
+    )
+    assert associate_test_model(gt) is None
+
+
+@pytest.mark.integration
+def test_catalog_overlay_preserves_manifest_tests(tmp_path: Path) -> None:
+    """The frozen ``model_copy`` catalog overlay rebuilds ``nodes`` but passes
+    ``Manifest.tests`` through untouched (#154 US-001 confirmation)."""
+    project = tmp_path / "proj"
+    target = project / "target"
+    target.mkdir(parents=True)
+
+    manifest_doc = json.loads(MANIFEST_WITH_COLUMNS.read_text())
+    # Inject the v10-attached test node under the shared ``nodes`` key so the
+    # loader routes it into ``Manifest.tests`` before the catalog overlay runs.
+    test_nodes = json.loads(GENERIC_TEST_NODES.read_text())["nodes"]
+    manifest_doc["nodes"][_V10_ATTACHED_KEY] = test_nodes[_V10_ATTACHED_KEY]
+    (target / "manifest.json").write_text(json.dumps(manifest_doc), encoding="utf-8")
+    shutil.copy(CATALOG_CANONICAL, target / "catalog.json")
+
+    manifest = load(project)
+
+    # Catalog overlay applied to model columns (proves the model_copy ran) ...
+    assert manifest.nodes[DIM_USERS_UID].columns["id"].data_type == "INT64"
+    # ... AND the test survived the rebuild untouched.
+    assert set(manifest.tests) == {_V10_ATTACHED_KEY}
+    surviving = manifest.tests[_V10_ATTACHED_KEY]
+    assert surviving.compiled_code is not None
+    assert surviving.attached_node == "model.my_pkg.my_model"
+    assert surviving.test_metadata is not None
+    assert surviving.test_metadata.namespace == "dbt_expectations"

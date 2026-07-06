@@ -2092,3 +2092,340 @@ def test_kept_row_count_between_lands_in_kept_tier(project_dir: Path) -> None:
     # (DEC-002 of #169) — NOT in proposed_test_files (custom_sql-only per DEC-002).
     assert "dbt_expectations.expect_table_row_count_to_be_between" in report.proposed_yaml
     assert report.proposed_test_files == ()
+
+
+# ---------------------------------------------------------------------------
+# #154 DEC-015 — macro identity into the diff ``why`` for INGESTED custom_sql;
+# ingested (read-only) tests on the kept/dropped/flagged table, NEVER in
+# ``proposed_test_files``.
+# ---------------------------------------------------------------------------
+
+# Mirrors the shape the ingest bridge synthesises for a dbt-compiled
+# dbt-expectations test node (``signalforge.ingest.reader._synthesize_rationale``):
+# the source-macro identity rides on the ``custom_sql`` test's ``rationale``.
+_INGESTED_MACRO_RATIONALE = (
+    "dbt-expectations expect_column_values_to_be_between("
+    "column=order_id, min_value=1, max_value=1000000)"
+)
+
+
+def _ingested_custom_sql(rationale: str = _INGESTED_MACRO_RATIONALE):
+    """A model-level ``custom_sql`` test carrying a synthesized macro rationale."""
+    from signalforge.draft.models import CandidateTestCustomSQL
+
+    return CandidateTestCustomSQL(
+        sql="select * from `proj`.`ds`.`orders` where order_id not between 1 and 1000000",
+        column=None,
+        rationale=rationale,
+        from_manifest=True,
+    )
+
+
+def _ingested_candidate(test) -> CandidateSchema:
+    """A model-level-only candidate holding one ingested ``custom_sql`` test."""
+    return CandidateSchema(
+        name="orders",
+        description="orders fact table",
+        columns=(),
+        tests=(test,),
+    )
+
+
+def _custom_sql_decision(test, *, decision: str, reason: str, why: str) -> PruneDecision:
+    return PruneDecision(
+        test_anchor="model",
+        test=test,
+        decision=decision,  # type: ignore[arg-type]
+        reason=reason,  # type: ignore[arg-type]
+        failures=0,
+        sampled_rows=1000,
+        scope="sample",
+        elapsed_ms=10,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="select 1",
+        why=why,
+    )
+
+
+def test_dropped_ingested_custom_sql_why_names_macro(project_dir: Path) -> None:
+    """DEC-015: a DROPPED ingested manifest test's ``why`` names its source macro.
+
+    The dropped tier bypasses the kept-row rationale cascade and previously
+    surfaced only ``decision.why`` (the prune verdict), leaving the operator
+    with no way to locate the dbt-expectations test to remove. #154 threads
+    the synthesized macro-identity rationale into the ``why`` (ahead of the
+    verdict, so the macro survives the ``max_why_chars`` head-cut). The
+    drop-reason CATEGORY still rides the separate ``drop_reason`` column.
+    """
+    model = _make_model()
+    test = _ingested_custom_sql()
+    candidate = _ingested_candidate(test)
+    decision = _custom_sql_decision(
+        test,
+        decision="dropped",
+        reason="always-passes",
+        why="ran on 1k sample, 0 failing rows",
+    )
+    prune_result = _make_prune_result(decisions=(decision,))
+
+    report = render_diff(
+        model, candidate, prune_result, project_dir=project_dir, write_sidecar=False
+    )
+
+    dropped = [e for e in report.entries if e.tier == "dropped" and e.test_type == "custom_sql"]
+    assert len(dropped) == 1
+    # The macro name is present so the operator can locate + remove the test.
+    assert "expect_column_values_to_be_between" in dropped[0].why
+    # The drop CATEGORY is not lost — it rides the separate drop_reason column.
+    assert dropped[0].drop_reason == "always-passes"
+    # max_why_chars is obeyed on this newly-threaded path.
+    assert len(dropped[0].why) <= DiffConfig().max_why_chars
+
+
+def test_dropped_builtin_test_with_rationale_why_is_unchanged(project_dir: Path) -> None:
+    """DEC-015 is scoped to ``custom_sql``: a dropped BUILT-IN test keeps ``decision.why``.
+
+    A ``not_null`` test carrying a drafter rationale must NOT get the macro
+    threading — its rationale is descriptive prose, not a locator, and would
+    mislead (mirrors the issue-#50 carve-out, here for the dropped tier). Its
+    ``why`` stays byte-identical to the pre-#154 ``decision.why``.
+    """
+    model = _make_model()
+    decision = PruneDecision(
+        test_anchor="column.customer_id",
+        test=CandidateTestNotNull(
+            column="customer_id",
+            rationale="drafter rationale that MUST NOT appear",
+        ),
+        decision="dropped",
+        reason="always-passes",
+        failures=0,
+        sampled_rows=1000,
+        scope="sample",
+        elapsed_ms=10,
+        compiled_sql_hash="0" * 16,
+        compiled_sql="select 1",
+        why="ran on 1k sample, 0 failing rows",
+    )
+    candidate = _make_candidate()
+    prune_result = _make_prune_result(decisions=(decision,))
+
+    report = render_diff(
+        model, candidate, prune_result, project_dir=project_dir, write_sidecar=False
+    )
+
+    dropped = [e for e in report.entries if e.tier == "dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].why == "ran on 1k sample, 0 failing rows"
+    assert "drafter rationale" not in dropped[0].why
+
+
+def test_drafted_custom_sql_why_is_unchanged(project_dir: Path) -> None:
+    """DEC-015 macro-``why`` is scoped to ``from_manifest`` INGESTED custom_sql.
+
+    A DRAFTED business-rule ``custom_sql`` (``from_manifest=False``, #116) carries
+    a natural-language drafter rationale — NOT a macro locator. It must keep its
+    ``why`` as ``decision.why`` on BOTH the dropped and kept-uncertain tiers,
+    byte-identical to pre-#154. (Regression guard for the QG finding: gating the
+    macro-``why`` on ``type == "custom_sql"`` instead of ``from_manifest`` leaked
+    the drafter rationale into ``generate``'s output and re-broke the issue-#50
+    kept-uncertain carve-out.)
+    """
+    model = _make_model()
+    drafted = _ingested_custom_sql(rationale="drafted business rule: amounts positive")
+    # A DRAFTED custom_sql: same shape, but not sourced from the manifest.
+    drafted = drafted.model_copy(update={"from_manifest": False})
+    assert drafted.from_manifest is False
+    candidate = _ingested_candidate(drafted)
+
+    # Dropped tier — rationale must NOT be prepended.
+    dropped_decision = _custom_sql_decision(
+        drafted, decision="dropped", reason="always-passes", why="ran on 1k sample, 0 failing rows"
+    )
+    dropped_report = render_diff(
+        model,
+        candidate,
+        _make_prune_result(decisions=(dropped_decision,)),
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+    dropped = [e for e in dropped_report.entries if e.tier == "dropped"]
+    assert len(dropped) == 1
+    assert dropped[0].why == "ran on 1k sample, 0 failing rows"
+    assert "drafted business rule" not in dropped[0].why
+
+    # Kept-uncertain tier — rationale must NOT be prepended (issue-#50 carve-out).
+    ku_decision = _custom_sql_decision(
+        drafted,
+        decision="kept",
+        reason="kept-without-evidence",
+        why="identifier rejected by SQL safety check",
+    )
+    ku_report = render_diff(
+        model,
+        candidate,
+        _make_prune_result(decisions=(ku_decision,)),
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+    ku = [e for e in ku_report.entries if e.tier == "kept-uncertain"]
+    assert len(ku) == 1
+    assert ku[0].why == "identifier rejected by SQL safety check"
+    assert "drafted business rule" not in ku[0].why
+
+
+def test_kept_uncertain_ingested_custom_sql_why_names_macro_and_cause(project_dir: Path) -> None:
+    """DEC-015: a kept-uncertain ingested ``custom_sql`` ``why`` carries macro + cause.
+
+    The issue-#50 carve-out surfaces ``decision.why`` (the
+    ``kept-without-evidence`` cause) for kept-uncertain rows. #154 threads the
+    macro identity in front of it so the operator gets BOTH the locator and
+    the cause — verified here with a generous ``max_why_chars`` so neither is
+    truncated away. (Under the default 80-char budget a long macro identity
+    wins the head-cut, which is the intended priority.)
+    """
+    model = _make_model()
+    test = _ingested_custom_sql()
+    candidate = _ingested_candidate(test)
+    decision = _custom_sql_decision(
+        test,
+        decision="kept",
+        reason="kept-without-evidence",
+        why="identifier rejected by SQL safety check",
+    )
+    prune_result = _make_prune_result(decisions=(decision,))
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        config=DiffConfig(max_why_chars=200),
+        project_dir=project_dir,
+        write_sidecar=False,
+    )
+
+    uncertain = [e for e in report.entries if e.tier == "kept-uncertain"]
+    assert len(uncertain) == 1
+    why = uncertain[0].why
+    assert "expect_column_values_to_be_between" in why  # macro locator
+    assert "identifier rejected by SQL safety check" in why  # issue-#50 cause preserved
+
+
+def test_kept_ingested_custom_sql_why_names_macro_via_cascade(project_dir: Path) -> None:
+    """DEC-015: a KEPT ingested ``custom_sql`` names the macro via the rationale cascade.
+
+    The kept-row cascade (rationale → evidence → decision.why) already prefers
+    the ``rationale``, so the synthesized macro identity surfaces with no new
+    threading. This test locks that the ingest bridge's rationale shape flows
+    through end-to-end.
+    """
+    model = _make_model()
+    test = _ingested_custom_sql()
+    candidate = _ingested_candidate(test)
+    decision = _custom_sql_decision(
+        test,
+        decision="kept",
+        reason="kept",
+        why="ran on 1k sample, 5 failing rows",
+    )
+    prune_result = _make_prune_result(decisions=(decision,))
+
+    report = render_diff(
+        model, candidate, prune_result, project_dir=project_dir, write_sidecar=False
+    )
+
+    kept = [e for e in report.entries if e.tier == "kept" and e.test_type == "custom_sql"]
+    assert len(kept) == 1
+    assert "expect_column_values_to_be_between" in kept[0].why
+
+
+def test_render_diff_emit_test_files_false_suppresses_proposed_files(project_dir: Path) -> None:
+    """DEC-015: ``emit_test_files=False`` keeps ingested tests off ``proposed_test_files``.
+
+    A read-only ingested run (``prune-existing``) must NOT re-surface an
+    external test as an authored ``.sql`` proposal — the test lives in the
+    operator's dbt project already. It still appears as a row on the
+    kept/dropped/flagged table.
+    """
+    model = _make_model()
+    test = _ingested_custom_sql()
+    candidate = _ingested_candidate(test)
+    decision = _custom_sql_decision(
+        test,
+        decision="kept",
+        reason="kept",
+        why="ran on 1k sample, 5 failing rows",
+    )
+    prune_result = _make_prune_result(decisions=(decision,))
+
+    report = render_diff(
+        model,
+        candidate,
+        prune_result,
+        project_dir=project_dir,
+        write_sidecar=False,
+        emit_test_files=False,
+    )
+
+    # Never surfaced as a proposed .sql file...
+    assert report.proposed_test_files == ()
+    # ...but the ingested test IS a row on the table.
+    assert any(e.test_type == "custom_sql" for e in report.entries)
+
+
+def test_render_diff_emit_test_files_default_true_still_emits(project_dir: Path) -> None:
+    """The ``emit_test_files`` default stays ``True`` — ``generate``'s #116 behaviour.
+
+    A kept ``custom_sql`` test is surfaced as a standalone ``.sql`` proposal
+    when ``emit_test_files`` is left at its default (the ``generate`` path,
+    which authors its own tests).
+    """
+    model = _make_model()
+    test = _ingested_custom_sql()
+    candidate = _ingested_candidate(test)
+    decision = _custom_sql_decision(
+        test,
+        decision="kept",
+        reason="kept",
+        why="ran on 1k sample, 5 failing rows",
+    )
+    prune_result = _make_prune_result(decisions=(decision,))
+
+    report = render_diff(
+        model, candidate, prune_result, project_dir=project_dir, write_sidecar=False
+    )
+
+    assert len(report.proposed_test_files) == 1
+
+
+def test_macro_why_preserves_cause_when_macro_is_long() -> None:
+    """PR-review (CodeRabbit): the kept-uncertain CAUSE must survive truncation.
+
+    A long macro locator must NOT consume the whole ``max_chars`` budget and drop
+    the ``base_why`` (the ``kept-without-evidence`` cause) — that would regress the
+    load-bearing "why could not be evaluated" signal (issue-#50 carve-out). The
+    budget reserves space for the cause and shortens the macro locator instead.
+    """
+    from signalforge.diff.engine import _macro_why
+
+    long_macro = "dbt-expectations expect_column_values_to_be_between(" + "x" * 200 + ")"
+    cause = "identifier rejected by SQL safety check"
+    # Kept-uncertain tier (cause_priority=True): the cause must survive.
+    why = _macro_why(long_macro, cause, max_chars=60, cause_priority=True)
+
+    assert len(why) <= 60
+    # The operator-actionable cause is preserved verbatim (never truncated away).
+    assert cause in why
+    # The macro locator is present but shortened (its head survives).
+    assert "dbt-expectations" in why
+
+    # When everything fits, the full "macro — cause" is returned regardless of mode.
+    short = _macro_why("macro_x", cause, max_chars=200, cause_priority=True)
+    assert short == f"macro_x — {cause}"
+
+    # Dropped tier (cause_priority=False, default): the macro LOCATOR leads (the
+    # drop_reason column separately carries the category), so under a tight budget
+    # the full macro head survives and the prose cause is what truncates.
+    dropped_why = _macro_why(long_macro, cause, max_chars=60)
+    assert len(dropped_why) <= 60
+    assert dropped_why.startswith("dbt-expectations expect_column_values_to_be_between")

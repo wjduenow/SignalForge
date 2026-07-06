@@ -65,6 +65,10 @@ class StrictCandidateTestCustomSQL(BaseModel):
     sql: str
     column: str | None = None
     rationale: str | None = None
+    # #154 US-004 — runtime-only provenance flag (Field(exclude=True) in
+    # production; never serialised, so committed fixtures carry no key). Mirrored
+    # here to keep the strict drift model in lockstep with production shape.
+    from_manifest: bool = False
 
 
 class StrictCandidateTestRowCountBetween(BaseModel):

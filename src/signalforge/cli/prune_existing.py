@@ -41,6 +41,26 @@ this path makes no LLM call, so ``--mode`` would be a dead flag. The
 genuinely-relevant warehouse knobs ``--scope`` / ``--sample-strategy``
 take its place. ``--min-score``, ``--estimate``, ``--select``, and
 ``--write`` are likewise dropped (DEC-002 / DEC-003).
+
+Manifest-tests + grade (#154 US-007)
+====================================
+
+Two opt-in flags extend the read-only pipeline:
+
+* ``--from-manifest`` (DEC-005) — ALSO prune the model's dbt-compiled
+  manifest test nodes (dbt-expectations / dbt-utils / in-house generic
+  tests). Each row-returning + deterministic ``compiled_code`` body is
+  merged into the prune set as a model-level ``custom_sql`` candidate via
+  :func:`signalforge.ingest.read_manifest_tests`. Off by default preserves
+  the existing schema.yml + ``tests/*.sql`` behaviour byte-for-byte.
+* ``--grade`` (DEC-002 / DEC-018) — run the LLM-as-judge grade stage
+  (between prune and diff) on the ingested manifest tests and feed the
+  grading report into the diff. It **requires** ``--from-manifest`` (only
+  manifest-ingested tests carry the synthesized macro rationale worth
+  judging); ``--grade`` without it raises the tier-2 :class:`CliInputError`
+  (exit 2). Off by default the command stays zero-credential / zero-cost —
+  a missing key surfaces as an ``LLMAuthError`` (exit 3) at grade-call time
+  (the implicit credential gate — no explicit key check).
 """
 
 from __future__ import annotations
@@ -53,6 +73,7 @@ from datetime import date
 from pathlib import Path
 
 from signalforge import diff as diff_module
+from signalforge import grade as grade_module
 from signalforge import ingest as ingest_module
 from signalforge import manifest as manifest_module
 from signalforge import prune as prune_module
@@ -68,18 +89,23 @@ from signalforge.cli._helpers import (
     setup_logging,
     should_emit_progress,
 )
-from signalforge.cli.errors import CliPathError
-from signalforge.draft.models import CandidateSchema
+from signalforge.cli.errors import CliInputError, CliPathError
+from signalforge.draft.models import CandidateSchema, CandidateTestCustomSQL
 from signalforge.warehouse.base import WarehouseAdapter
 
 __all__ = ["add_parser", "cmd_prune_existing"]
 
 
-# Three pipeline stages drive the progress UX (DEC-010): ingest → prune →
-# diff. Passed to ``emit_progress_*`` as ``total=3`` so the lines read
-# ``[1/3] ingest`` … ``[3/3] diff`` rather than the ``generate`` pipeline's
-# ``/5``.
-_TOTAL_STAGES = 3
+# The base (no-``--grade``) pipeline is three stages (DEC-010): ingest →
+# prune → diff, so the progress lines read ``[1/3] ingest`` … ``[3/3] diff``
+# rather than the ``generate`` pipeline's ``/5``. When ``--grade`` is active
+# (#154 US-007 / DEC-018) a grade stage lands between prune and diff and the
+# count renumbers to ``/4`` end-to-end (``[3/4] grade`` … ``[4/4] diff``) —
+# the ``generate`` ``--no-grade`` / ``[N/4]`` renumber precedent. The
+# effective total is resolved once in :func:`cmd_prune_existing` and threaded
+# through every ``emit_progress_*`` call.
+_BASE_STAGES = 3
+_GRADE_STAGES = 4
 
 
 def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[type-arg]
@@ -189,6 +215,55 @@ def add_parser(subparsers: argparse._SubParsersAction) -> None:  # type: ignore[
             "schema.yml tests; unrelated files are ignored. The DEFAULT "
             "directory is optional and silently skipped when absent; an "
             "explicit --tests-dir that does not exist fails loud."
+        ),
+    )
+    # #154 US-007 / DEC-005 — opt-in ingestion of the model's dbt-compiled
+    # manifest test nodes. Default OFF preserves byte-for-byte the existing
+    # schema.yml + tests/*.sql behaviour. When ON, the model's
+    # ``resource_type == "test"`` manifest nodes are read via
+    # ``ingest.read_manifest_tests`` (each row-returning + deterministic
+    # ``compiled_code`` becomes a model-level ``custom_sql`` candidate carrying
+    # a synthesized macro rationale) and merged into the prune set alongside
+    # the schema.yml / tests/*.sql candidates. Skip records (no compiled_code,
+    # aggregate/scalar shape, non-deterministic, safety-rejected) fold into the
+    # existing skipped-test report.
+    parser.add_argument(
+        "--from-manifest",
+        dest="from_manifest",
+        action="store_true",
+        help=(
+            "Also prune the model's dbt-compiled manifest test nodes "
+            "(dbt-expectations / dbt-utils / in-house generic tests). Reads "
+            "the already-Jinja-resolved compiled_code off each "
+            "resource_type=='test' node and prunes it through the custom_sql "
+            "pipeline, alongside the --schema and tests/*.sql candidates. "
+            "Requires a manifest built by `dbt compile` (or `dbt build` / "
+            "`dbt docs generate`); nodes without compiled_code are "
+            "skip-recorded with a remediation. Off by default."
+        ),
+    )
+    # #154 US-007 / DEC-002 / DEC-018 — opt-in LLM grade stage. Requires
+    # --from-manifest: schema.yml / singular tests carry rationale=None, so
+    # grading them is noise; only manifest-ingested tests get the synthesized
+    # macro rationale worth judging. The --grade-without---from-manifest error
+    # is input-validation → exit 2 (raised at handler entry). When set, the
+    # grade stage runs between prune and diff (progress renumbers to [N/4]) and
+    # writes the grade.json / grade.jsonl sidecars. Off by default preserves
+    # the zero-credential / zero-cost property of existing runs; a missing
+    # ANTHROPIC_API_KEY surfaces as LLMAuthError (tier 3) at grade-call time
+    # (the credential gate is implicit — no explicit key check).
+    parser.add_argument(
+        "--grade",
+        action="store_true",
+        help=(
+            "Run the LLM-as-judge grade stage on the ingested manifest tests "
+            "(requires --from-manifest; error otherwise). Scores each "
+            "manifest-ingested custom_sql test against the rubric and feeds "
+            "the grading report into the diff (adds the flagged tier). "
+            "Progress renumbers to [N/4]. Writes .signalforge/grade.json + "
+            ".signalforge/grade.jsonl. Off by default — existing runs stay "
+            "zero-credential / zero-cost. A missing ANTHROPIC_API_KEY surfaces "
+            "as an auth error (exit 3) at grade-call time."
         ),
     )
     parser.add_argument(
@@ -481,6 +556,44 @@ def _ingest_singular_tests(
     return merged, singular_result.skipped
 
 
+def _ingest_manifest_tests(
+    candidate: CandidateSchema,
+    *,
+    project_dir: Path,
+    model: manifest_module.Model,
+    manifest: manifest_module.Manifest,
+) -> tuple[CandidateSchema, tuple[ingest_module.SkippedTest, ...]]:
+    """Merge the model's dbt-compiled manifest test nodes into ``candidate``
+    (#154 US-007 / DEC-005).
+
+    Bridges the model's ``resource_type == "test"`` manifest nodes via
+    :func:`signalforge.ingest.read_manifest_tests`: each node whose
+    already-Jinja-resolved ``compiled_code`` is **row-returning AND
+    deterministic** becomes a model-level ``custom_sql`` candidate carrying a
+    synthesized macro-identity rationale (``from_manifest=True`` so the prune
+    engine routes it full-scope against the source relation and validates it
+    comment-tolerantly — #154 US-004). Nodes that cannot be pruned (absent
+    ``compiled_code``, aggregate/scalar-shaped, non-deterministic,
+    safety-rejected) are skip-recorded and folded into the caller's combined
+    skipped-test report (DEC-007 / DEC-010).
+
+    The manifest tests are model-level (``column=None``), so they append to
+    ``candidate.tests`` and need no anchor-contract re-check (the schema.yml
+    candidate's anchor contract was already validated by ``read_schema``).
+
+    Returns ``(merged_candidate, manifest_skipped)``. When the model has no
+    ingestable manifest test nodes the candidate is returned unchanged so the
+    output stays identical to the pre-``--from-manifest`` merge.
+    """
+    manifest_result = ingest_module.read_manifest_tests(manifest, model, project_dir=project_dir)
+    if not manifest_result.candidate.tests:
+        return candidate, manifest_result.skipped
+    merged = candidate.model_copy(
+        update={"tests": candidate.tests + manifest_result.candidate.tests}
+    )
+    return merged, manifest_result.skipped
+
+
 # ---------------------------------------------------------------------------
 # Subcommand entry point
 # ---------------------------------------------------------------------------
@@ -502,8 +615,25 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
     ``CliPruneExisting*`` wrappers), so they route to the correct tier via
     the MRO walk in :func:`map_exception_to_exit_code`.
 
-    Pipeline (DEC-002 … DEC-010):
+    #154 US-007 flags (DEC-005 / DEC-002 / DEC-018):
 
+    * ``--from-manifest`` ALSO ingests the model's dbt-compiled manifest
+      test nodes (``read_manifest_tests``) and merges the row-returning +
+      deterministic ``compiled_code`` bodies as ``custom_sql`` candidates
+      alongside the schema.yml / tests/*.sql set. Off by default the run is
+      byte-identical to the pre-#154 behaviour.
+    * ``--grade`` runs the LLM-as-judge grade stage on the merged candidate
+      (between prune and diff), feeds the grading report into
+      ``render_diff`` (enabling the ``flagged`` tier), and writes the
+      ``grade.json`` / ``grade.jsonl`` sidecars. It **requires**
+      ``--from-manifest`` — ``--grade`` without it raises the tier-2
+      :class:`CliInputError` (exit 2) at handler entry. Off by default the
+      run stays zero-credential / zero-cost.
+
+    Pipeline (DEC-002 … DEC-018):
+
+    0. ``--grade`` without ``--from-manifest`` → :class:`CliInputError`
+       (exit 2) BEFORE any project / warehouse work.
     1. Set process env: ``--no-color`` → ``NO_COLOR=1``; ``--profiles-dir``
        → ``DBT_PROFILES_DIR`` (mirrors ``generate`` — DEC-023 of
        ``cli-layer.md``).
@@ -521,44 +651,91 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
        existing=<schema candidate>)`` (US-014) ingests the operator's
        singular ``tests/*.sql`` (default ``<project_dir>/tests``,
        overridable via ``--tests-dir``), deduped against the schema.yml
-       tests; both sets of model-level tests merge into ONE candidate so
-       the warehouse prunes them together (DEC-010 / DEC-013). The default
-       directory is optional and silently skipped when absent.
+       tests. Under ``--from-manifest`` (#154 US-007 / DEC-005),
+       ``read_manifest_tests(manifest, model)`` ALSO ingests the model's
+       compiled manifest test nodes; all model-level tests merge into ONE
+       candidate so the warehouse prunes them together (DEC-010 / DEC-013).
+       The default ``tests/`` directory is optional and silently skipped
+       when absent.
     7. Skipped-test report (DEC-007) — summary + ``--verbose`` detail,
-       suppressed by ``--quiet``. Schema.yml and singular-test skips fold
-       into one report grouped by SkipReason.
+       suppressed by ``--quiet``. Schema.yml, singular-test, and
+       (under ``--from-manifest``) manifest-test skips fold into one report
+       grouped by SkipReason.
     8. Load + override :class:`PruneConfig` (``--scope`` /
        ``--sample-strategy`` via ``model_validate`` — DEC-002).
     9. Build the warehouse adapter via :func:`_make_warehouse_adapter`
        (DEC-009); ``prune_tests`` owns the ``with adapter:`` block, so the
        adapter is passed un-entered.
-    10. ``prune_tests(model, adapter, result.candidate, manifest,
+    10. ``prune_tests(model, adapter, candidate, manifest,
         as_of=args.as_of, ...)`` — ``--as-of`` (US-013 of #171 /
         DEC-001) threads through; ``None`` lets the engine resolve to
         ``date.today()`` at prune time.
-    11. Read the ``--schema`` text (UTF-8) for ``existing_schema``
-        (DEC-004).
-    12. Load + override :class:`DiffConfig` (``--format`` via
+    11. (``--grade`` only) ``grade_artifacts(model, candidate,
+        prune_result, config=<grade config>, client=None, ...)`` — scores
+        the merged candidate's manifest ``custom_sql`` tests and writes the
+        ``grade.json`` / ``grade.jsonl`` sidecars. ``grade_report`` stays
+        ``None`` without ``--grade``.
+    12. Read the ``--schema`` text (UTF-8) for ``existing_schema``
+        (DEC-004); load + override :class:`DiffConfig` (``--format`` via
         ``model_validate``); ``--dry-run`` → ``write_sidecar=False``.
-    13. ``render_diff(..., grading_report=None, existing_schema=<text>,
-        write_sidecar=not dry_run, ...)`` — ``grading_report=None`` means
-        the diff renders kept / kept-uncertain / dropped, never
-        ``flagged`` (DEC-004 / #104 DEC-011).
+    13. ``render_diff(..., grading_report=grade_report,
+        existing_schema=<text>, write_sidecar=not dry_run,
+        emit_test_files=False, ...)`` — ``grading_report`` is ``None``
+        (kept / kept-uncertain / dropped, never ``flagged`` — DEC-004 /
+        #104 DEC-011) unless ``--grade`` ran, in which case the report
+        enables the ``flagged`` tier. ``emit_test_files=False``
+        (#154 DEC-015): the ingested ``custom_sql`` tests are read-only
+        external tests — they appear on the table but are NOT re-surfaced
+        as proposed ``.sql`` files.
     14. ``render_to_text`` → stdout (trailing newline as ``generate``).
-    15. 3-stage progress to stderr (DEC-010): ``1/3 ingest``,
-        ``2/3 prune``, ``3/3 diff``.
+    15. Progress to stderr renumbers with ``--grade`` (DEC-010 / DEC-018):
+        ``1/3 ingest`` → ``2/3 prune`` → ``3/3 diff`` by default;
+        ``1/4 ingest`` → ``2/4 prune`` → ``3/4 grade`` → ``4/4 diff`` under
+        ``--grade``.
     """
     quiet = bool(getattr(args, "quiet", False))
     verbose = bool(getattr(args, "verbose", False))
     no_color = bool(getattr(args, "no_color", False))
+    from_manifest = bool(getattr(args, "from_manifest", False))
+    grade = bool(getattr(args, "grade", False))
     setup_logging(verbose=verbose, quiet=quiet)
     if no_color:
         os.environ["NO_COLOR"] = "1"
         os.environ.pop("FORCE_COLOR", None)
 
     progress_on = should_emit_progress(quiet=quiet, verbose=verbose)
+    # #154 US-007 / DEC-018 — the grade stage renumbers the progress count
+    # from ``/3`` to ``/4`` (grade lands between prune and diff). Resolve the
+    # effective total ONCE and thread it through every ``emit_progress_*``
+    # call; the diff stage number is likewise this total (``[3/3]`` without
+    # grade, ``[4/4]`` with).
+    total = _GRADE_STAGES if grade else _BASE_STAGES
 
     try:
+        # #154 US-007 / DEC-002 — ``--grade`` REQUIRES ``--from-manifest``:
+        # schema.yml / singular tests carry ``rationale=None``, so grading
+        # them is noise; only manifest-ingested tests get the synthesized
+        # macro rationale worth judging. This is an input-validation failure
+        # → CLI tier 2 (exit 2). A genuine argparse usage error can't express
+        # a cross-flag REQUIRES dependency (argparse only offers mutex groups),
+        # and raising ``SystemExit`` from the handler would break the
+        # ``main() -> int`` contract (``main`` only converts argparse's
+        # ``SystemExit`` around ``parse_args``, not around the dispatched
+        # handler), so we raise the codebase's tier-2 ``CliInputError`` — the
+        # boundary catch below maps it to exit 2 with the no-traceback floor
+        # (mirrors the ``--estimate`` provider-mismatch precedent in
+        # ``generate``).
+        if grade and not from_manifest:
+            raise CliInputError(
+                "--grade requires --from-manifest.",
+                remediation=(
+                    "Pass --from-manifest alongside --grade. Only "
+                    "manifest-ingested tests carry the synthesized macro "
+                    "rationale worth grading; schema.yml and tests/*.sql "
+                    "tests have no rationale, so grading them adds no signal."
+                ),
+            )
+
         project_dir = _resolve_project_dir(args)
 
         manifest_override = canonicalise_user_path(args.manifest, project_dir)
@@ -587,9 +764,9 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
         schema_path = canonicalise_user_path(args.schema, project_dir)
         assert schema_path is not None  # --schema is required (argparse)
 
-        # ---- 1/3: ingest ------------------------------------------------
+        # ---- 1/N: ingest ------------------------------------------------
         if progress_on:
-            emit_progress_entry(1, "ingest", "parsing schema.yml...", total=_TOTAL_STAGES)
+            emit_progress_entry(1, "ingest", "parsing schema.yml...", total=total)
         _t0 = time.monotonic()
         ingest_result = ingest_module.read_schema(schema_path, model, project_dir=project_dir)
         # Also ingest the operator's singular tests/*.sql (US-014). Each
@@ -609,17 +786,33 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
             manifest=manifest,
             schema_candidate=ingest_result.candidate,
         )
+        # #154 US-007 / DEC-005 — ``--from-manifest`` ALSO ingests the model's
+        # dbt-compiled manifest test nodes and merges the row-returning +
+        # deterministic ``compiled_code`` bodies (as ``from_manifest=True``
+        # ``custom_sql`` candidates) into the prune set. Off by default the
+        # candidate is untouched (byte-identical to the pre-#154 behaviour).
+        # The manifest skip records fold into the combined skipped-test report
+        # below (DEC-010 — includes the all-missing-compiled_code
+        # "run `dbt compile`" summary).
+        manifest_skipped: tuple[ingest_module.SkippedTest, ...] = ()
+        if from_manifest:
+            candidate, manifest_skipped = _ingest_manifest_tests(
+                candidate,
+                project_dir=project_dir,
+                model=model,
+                manifest=manifest,
+            )
         if progress_on:
-            emit_progress_done(1, "ingest", time.monotonic() - _t0, total=_TOTAL_STAGES)
+            emit_progress_done(1, "ingest", time.monotonic() - _t0, total=total)
 
         # Skipped-test report (DEC-007) — operator info, suppressed by
-        # ``--quiet``. Schema.yml skips and singular-test skips fold into one
-        # report, grouped by SkipReason.
-        all_skipped = ingest_result.skipped + singular_skipped
+        # ``--quiet``. Schema.yml, singular-test, and (under --from-manifest)
+        # manifest-test skips fold into one report, grouped by SkipReason.
+        all_skipped = ingest_result.skipped + singular_skipped + manifest_skipped
         if not quiet:
             _emit_skipped_report(all_skipped, verbose=verbose)
 
-        # ---- 2/3: prune -------------------------------------------------
+        # ---- 2/N: prune -------------------------------------------------
         # ``--scope`` / ``--sample-strategy`` overrides applied via
         # ``PruneConfig.model_validate`` (NOT ``model_copy``) so every
         # validator re-runs — mirrors generate.py (DEC-002).
@@ -646,7 +839,7 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
                 2,
                 "prune",
                 f"running {candidate_test_count} existing tests against warehouse...",
-                total=_TOTAL_STAGES,
+                total=total,
             )
         _t0 = time.monotonic()
         # US-013 of #171 / DEC-001 — ``--as-of`` threads through to the
@@ -664,13 +857,65 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
             as_of=getattr(args, "as_of", None),
         )
         if progress_on:
-            emit_progress_done(2, "prune", time.monotonic() - _t0, total=_TOTAL_STAGES)
+            emit_progress_done(2, "prune", time.monotonic() - _t0, total=total)
 
-        # ---- 3/3: diff --------------------------------------------------
+        # ---- 3/4: grade (opt-in — #154 US-007 / DEC-002 / DEC-018) -------
+        # ``--grade`` scores the ingested manifest tests via the LLM-as-judge
+        # rubric and feeds the grading report into the diff (enabling the
+        # ``flagged`` tier). ``client=None`` lets ``grade_artifacts`` thread it
+        # into ``call_llm``, which lazy-builds the provider client resolved
+        # from ``grade_config.provider`` (DEC-006 of #135) — a missing key
+        # surfaces as an ``LLMAuthError`` (tier 3) at call time, the implicit
+        # credential gate. Off by default (``grade`` False) leaves
+        # ``grade_report=None`` so the diff renders kept / kept-uncertain /
+        # dropped only and no grade side files are written (byte-identical to
+        # the pre-#154 zero-credential path).
+        grade_report = None
+        if grade:
+            grade_config = grade_module.load_grade_config(project_dir)
+            if progress_on:
+                emit_progress_entry(3, "grade", "scoring ingested tests...", total=total)
+            _t0 = time.monotonic()
+            # DEC-002: narrow the grade INPUT so the only TESTS scored are the
+            # manifest-ingested ``custom_sql`` ones — they alone carry the
+            # synthesized macro rationale worth judging. The operator's own
+            # schema.yml built-in / singular tests (``rationale=""``) are dropped
+            # here: grading them would spend LLM calls on empty rationales AND
+            # could flip a kept built-in into the ``flagged`` tier on a low
+            # empty-rationale score, surfacing the operator's existing tests as
+            # low-quality though they never opted in. (``grade_artifacts`` still
+            # scores the model-level ``description`` / ``rationale`` doc artifacts
+            # of the candidate — those are not a TEST and cannot flag one; the
+            # FULL ``candidate`` is still pruned + rendered.) Columns are dropped
+            # and the model-level tests filtered to ``from_manifest``, so a
+            # narrowed grade report means only ingested tests reach ``flagged``.
+            grade_candidate = candidate.model_copy(
+                update={
+                    "columns": (),
+                    "tests": tuple(
+                        t
+                        for t in candidate.tests
+                        if isinstance(t, CandidateTestCustomSQL) and t.from_manifest
+                    ),
+                }
+            )
+            grade_report = grade_module.grade_artifacts(
+                model,
+                grade_candidate,
+                prune_result,
+                config=grade_config,
+                client=None,
+                project_dir=project_dir,
+            )
+            if progress_on:
+                emit_progress_done(3, "grade", time.monotonic() - _t0, total=total)
+
+        # ---- N/N: diff --------------------------------------------------
         # Feed the operator's actual schema.yml as ``existing_schema``
         # (DEC-004) so the unified diff shows what to remove from THAT
-        # file. ``grading_report=None`` → kept / kept-uncertain / dropped,
-        # never ``flagged``.
+        # file. ``grading_report`` is ``None`` unless ``--grade`` ran → kept /
+        # kept-uncertain / dropped (never ``flagged``) on the no-grade path;
+        # with ``--grade`` the report enables the ``flagged`` tier.
         existing_schema_text = schema_path.read_text(encoding="utf-8")
         diff_config = diff_module.load_diff_config(project_dir)
         format_override = getattr(args, "format", None)
@@ -680,21 +925,30 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
             )
         dry_run = bool(getattr(args, "dry_run", False))
 
+        # The diff stage number is the effective total (``3`` without grade,
+        # ``4`` with) so the ``[N/total]`` count stays in lockstep.
         if progress_on:
-            emit_progress_entry(3, "diff", "rendering...", total=_TOTAL_STAGES)
+            emit_progress_entry(total, "diff", "rendering...", total=total)
         _t0 = time.monotonic()
         diff_report = diff_module.render_diff(
             model,
             candidate,
             prune_result,
-            grading_report=None,
+            grading_report=grade_report,
             existing_schema=existing_schema_text,
             config=diff_config,
             write_sidecar=not dry_run,
+            # DEC-015 of #154 — prune-existing is read-only and never drafts,
+            # so every ``custom_sql`` it prunes is EXTERNAL / ingested (from
+            # the operator's schema.yml, tests/*.sql, or manifest test nodes).
+            # An external test must never be re-surfaced as a proposed ``.sql``
+            # file — it lives in the operator's dbt project already and shows
+            # only as a row on the kept/dropped/flagged table.
+            emit_test_files=False,
             project_dir=project_dir,
         )
         if progress_on:
-            emit_progress_done(3, "diff", time.monotonic() - _t0, total=_TOTAL_STAGES)
+            emit_progress_done(total, "diff", time.monotonic() - _t0, total=total)
 
         rendered = diff_module.render_to_text(
             diff_report, config=diff_config, project_dir=project_dir

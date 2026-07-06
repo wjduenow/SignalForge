@@ -27,6 +27,7 @@ from signalforge.manifest.models import (
     Column,
     Config,
     DependsOn,
+    GenericTest,
     Manifest,
     Model,
     Ref,
@@ -34,7 +35,26 @@ from signalforge.manifest.models import (
 )
 
 FIXTURE_DIR = Path(__file__).parent.parent / "fixtures" / "dbt_project_small" / "target"
+GENERIC_TEST_NODES = (
+    Path(__file__).parent.parent / "fixtures" / "manifest" / "generic_test_nodes.json"
+)
 SUPPORTED_VERSIONS = (9, 10, 11, 12)
+
+# Hand-authored fixture keys (see tests/fixtures/manifest/generic_test_nodes.json).
+_V10_ATTACHED_KEY = (
+    "test.my_pkg.dbt_expectations_expect_column_values_to_be_between_my_model_amount__100__0"
+    ".abc12345de"
+)
+_V9_NO_ATTACHED_KEY = (
+    "test.my_pkg.relationships_child_model_customer_id__id__ref_dim_customers_.def67890ab"
+)
+
+
+def _load_generic_test_nodes() -> dict[str, Any]:
+    """Load the hand-authored ``resource_type == "test"`` node fragments."""
+    raw: dict[str, Any] = json.loads(GENERIC_TEST_NODES.read_text())
+    nodes: dict[str, Any] = raw["nodes"]
+    return nodes
 
 
 def _load_fixture(version: int) -> dict[str, Any]:
@@ -276,3 +296,98 @@ def test_ref_normalised_dict_shape() -> None:
     # Versioned ref — int form.
     ref_v = Ref.model_validate({"name": "dim_users", "package": None, "version": 2})
     assert ref_v.version == 2
+
+
+# ---------------------------------------------------------------------------
+# GenericTest + Manifest.tests (#154 US-001 — DEC-008, DEC-009)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_generic_test_validate_v10_attached_node() -> None:
+    """A v10+ generic-test node (with ``attached_node`` + populated
+    ``compiled_code``) round-trips through ``GenericTest`` with every declared
+    field populated and dbt's extra keys dropped via ``extra="ignore"``."""
+    node = _load_generic_test_nodes()[_V10_ATTACHED_KEY]
+    gt = GenericTest.model_validate(node)
+    assert gt.unique_id == _V10_ATTACHED_KEY
+    assert gt.compiled_code is not None and "validation_errors" in gt.compiled_code
+    assert gt.column_name == "amount"
+    assert gt.attached_node == "model.my_pkg.my_model"
+    assert gt.file_key_name == "models.my_model"
+    assert gt.depends_on.nodes == ["model.my_pkg.my_model"]
+    # test_metadata is the macro identity.
+    assert gt.test_metadata is not None
+    assert gt.test_metadata.name == "expect_column_values_to_be_between"
+    assert gt.test_metadata.namespace == "dbt_expectations"
+    assert gt.test_metadata.kwargs["min_value"] == 0
+    assert gt.test_metadata.kwargs["max_value"] == 100
+
+
+@pytest.mark.unit
+def test_generic_test_null_compiled_code_tolerated_silently() -> None:
+    """A parse-only manifest carries ``compiled_code: null``; the reader
+    tolerates it silently (mirrors ``Column.data_type = None``, #159).
+
+    The v9 fixture node also omits ``attached_node`` entirely — the field
+    defaults to ``None`` without failing validation."""
+    node = _load_generic_test_nodes()[_V9_NO_ATTACHED_KEY]
+    gt = GenericTest.model_validate(node)
+    assert gt.compiled_code is None
+    assert gt.attached_node is None  # absent key → default None (v9 shape)
+    assert gt.file_key_name == "models.child_model"
+    # Multi-model depends_on preserved (relationships test).
+    assert gt.depends_on.nodes == [
+        "model.my_pkg.dim_customers",
+        "model.my_pkg.child_model",
+    ]
+
+
+@pytest.mark.unit
+def test_manifest_tests_defaults_empty() -> None:
+    """``Manifest.tests`` defaults to an empty dict — no existing
+    ``Manifest(...)`` construction site (which omits ``tests``) breaks."""
+    manifest = Manifest(metadata={}, nodes={})
+    assert manifest.tests == {}
+
+
+@pytest.mark.unit
+def test_manifest_carries_generic_tests() -> None:
+    """A ``Manifest`` constructed with ``tests`` surfaces typed ``GenericTest``
+    values keyed by unique_id — parallel to ``nodes``/``sources``."""
+    nodes = _load_generic_test_nodes()
+    manifest = Manifest.model_validate({"metadata": {}, "nodes": {}, "tests": nodes})
+    assert set(manifest.tests) == {_V10_ATTACHED_KEY, _V9_NO_ATTACHED_KEY}
+    assert all(isinstance(t, GenericTest) for t in manifest.tests.values())
+    # ``nodes`` stays model-only: test nodes never leak into it.
+    assert manifest.nodes == {}
+
+
+@pytest.mark.unit
+def test_generic_test_drift_detector_extra_forbid() -> None:
+    """Drift sentinel for :class:`GenericTest` — mirrors the ``Model`` /
+    ``Source`` detectors. Both the v10-attached AND v9-no-attached shapes,
+    trimmed to declared keys, round-trip through an ``extra="forbid"`` mirror;
+    a poisoned unknown key is rejected."""
+
+    class StrictGenericTest(GenericTest):
+        model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
+
+    allowed_keys: set[str] = set()
+    for field_name, field_info in GenericTest.model_fields.items():
+        allowed_keys.add(field_name)
+        if field_info.alias is not None:
+            allowed_keys.add(field_info.alias)
+
+    nodes = _load_generic_test_nodes()
+    # Cover BOTH association shapes (v10+ attached_node present, v9 absent).
+    for key in (_V10_ATTACHED_KEY, _V9_NO_ATTACHED_KEY):
+        node = nodes[key]
+        trimmed = {k: v for k, v in node.items() if k in allowed_keys}
+        strict = StrictGenericTest.model_validate(trimmed)
+        assert strict.unique_id == key
+
+        poisoned = dict(trimmed)
+        poisoned["definitely_not_a_real_dbt_field"] = "boom"
+        with pytest.raises(ValidationError):
+            StrictGenericTest.model_validate(poisoned)

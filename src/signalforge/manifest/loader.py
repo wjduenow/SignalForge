@@ -66,7 +66,7 @@ from signalforge.manifest.errors import (
     SourceNotFoundError,
     UnsupportedManifestVersionError,
 )
-from signalforge.manifest.models import Column, Manifest, Model
+from signalforge.manifest.models import Column, GenericTest, Manifest, Model
 
 if TYPE_CHECKING:
     from signalforge.warehouse.models import TableRef
@@ -302,6 +302,17 @@ def load(
         if isinstance(v, dict) and v.get("resource_type") == "model"
     }
 
+    # DEC-008 of #154: Manifest.tests is dict[str, GenericTest] of *only* test
+    # resources. dbt writes ``resource_type == "test"`` nodes under the same
+    # top-level ``nodes`` key as models (the model filter above already
+    # iterates and discards them); this sibling filter keeps them, parallel to
+    # ``filtered_sources``. ``nodes`` stays model-only.
+    filtered_tests: dict[str, Any] = {
+        k: v
+        for k, v in raw_nodes.items()
+        if isinstance(v, dict) and v.get("resource_type") == "test"
+    }
+
     filtered_disabled: dict[str, list[Any]] = {}
     for k, v in raw_disabled.items():
         if not isinstance(v, list):
@@ -330,6 +341,7 @@ def load(
             "nodes": filtered_nodes,
             "disabled": filtered_disabled,
             "sources": filtered_sources,
+            "tests": filtered_tests,
         }
     )
 
@@ -489,6 +501,95 @@ def schema_version(manifest: Manifest) -> str:
 def iter_models(manifest: Manifest) -> Iterator[Model]:
     """Iterate over the enabled (``resource_type == "model"``) nodes."""
     return iter(manifest.nodes.values())
+
+
+_REF_CALL_RE = re.compile(r"""ref\(\s*['\"]([^'\"]+)['\"](?:\s*,\s*['\"]([^'\"]+)['\"])?\s*\)""")
+"""Bounded ``ref('name')`` / ``ref('pkg', 'name')`` extractor used to mine the
+tested-model name out of a generic test's ``test_metadata.kwargs.model`` Jinja
+string (e.g. ``{{ get_where_subquery(ref('my_model')) }}``). NO Jinja engine —
+this is a last-resort disambiguator for the v9 (no ``attached_node``) path."""
+
+
+def associate_test_model(test: GenericTest) -> str | None:
+    """Resolve the model ``unique_id`` a generic test is attached to (DEC-009).
+
+    Feature-detect precedence ladder — the loader **discards** the detected
+    manifest version, so association cannot version-branch:
+
+    1. :attr:`GenericTest.attached_node` (manifest schema v10+ / dbt 1.6+):
+       authoritative when present. Absent in v9.
+    2. Else fall back to ``depends_on.nodes`` filtered to ``model.*`` entries:
+
+       * exactly one model dependency → that model;
+       * more than one (e.g. a ``relationships`` test referencing both the
+         child model and the ``to`` model) → disambiguate by the tested-model
+         name mined from :attr:`GenericTest.file_key_name` (``models.<name>``),
+         then, failing that, from the ``ref('<name>')`` inside
+         ``test_metadata.kwargs.model``. If neither yields a unique match,
+         return ``None`` rather than guess.
+       * no model dependency → ``None``.
+
+    Returns the resolved model ``unique_id`` or ``None`` when the test cannot
+    be confidently associated. This is a stage-0 pure function: no logging, no
+    warehouse or filesystem access.
+    """
+    # 1. attached_node — authoritative on v10+ manifests.
+    if test.attached_node:
+        return test.attached_node
+
+    # 2. Fallback for v9 (no attached_node): mine depends_on.nodes.
+    model_nodes = [n for n in test.depends_on.nodes if n.startswith("model.")]
+    if not model_nodes:
+        return None
+    if len(model_nodes) == 1:
+        return model_nodes[0]
+
+    # More than one model dependency — disambiguate.
+    for candidate_name in (
+        _model_name_from_file_key(test.file_key_name),
+        _model_name_from_kwargs(test.test_metadata.kwargs if test.test_metadata else None),
+    ):
+        if candidate_name is None:
+            continue
+        matches = [n for n in model_nodes if n.rsplit(".", 1)[-1] == candidate_name]
+        if len(matches) == 1:
+            return matches[0]
+
+    return None
+
+
+def _model_name_from_file_key(file_key_name: str | None) -> str | None:
+    """Extract the resource name from dbt's ``<yaml_key>.<name>`` file_key_name.
+
+    ``"models.my_model"`` → ``"my_model"``. Returns ``None`` when the value is
+    absent or lacks the expected ``<key>.<name>`` shape.
+    """
+    if not file_key_name:
+        return None
+    parts = file_key_name.split(".")
+    if len(parts) < 2:
+        return None
+    return parts[-1]
+
+
+def _model_name_from_kwargs(kwargs: dict[str, Any] | None) -> str | None:
+    """Mine the tested-model name from a generic test's ``kwargs.model`` value.
+
+    dbt renders ``kwargs["model"]`` as a Jinja string wrapping the tested
+    model's ``ref()`` (e.g. ``{{ get_where_subquery(ref('my_model')) }}``).
+    Returns the last positional ``ref('...')`` argument (the model name),
+    or ``None`` when no ``ref('...')`` call is present.
+    """
+    if not kwargs:
+        return None
+    raw = kwargs.get("model")
+    if not isinstance(raw, str):
+        return None
+    match = _REF_CALL_RE.search(raw)
+    if match is None:
+        return None
+    # Two-arg ref('pkg', 'name') → group(2) is the name; one-arg → group(1).
+    return match.group(2) or match.group(1)
 
 
 # ---------------------------------------------------------------------------

@@ -30,8 +30,19 @@ from signalforge.manifest.errors import (
     UnsupportedJinjaError,
     UnsupportedManifestVersionError,
 )
-from signalforge.manifest.loader import load, resolve_ref, resolve_source
-from signalforge.manifest.models import Manifest, Model, Source
+from signalforge.manifest.loader import (
+    associate_test_model,
+    load,
+    resolve_ref,
+    resolve_source,
+)
+from signalforge.manifest.models import (
+    GenericTest,
+    Manifest,
+    Model,
+    Source,
+    TestMetadata,
+)
 from signalforge.manifest.select import SelectorAtom, parse_selector, select_models
 from signalforge.manifest.template import resolve_template_refs
 
@@ -40,8 +51,11 @@ __all__ = [
     "Manifest",
     "Model",
     "Source",
+    "GenericTest",
+    "TestMetadata",
     "resolve_ref",
     "resolve_source",
+    "associate_test_model",
     "ManifestError",
     "ManifestNotFoundError",
     "UnsupportedManifestVersionError",

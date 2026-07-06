@@ -1,0 +1,23 @@
+# #154 (US-006) compiled fixture .gitignore.
+#
+# Only `target/manifest.json` — the scrubbed `dbt compile` output committed by
+# US-006 — survives. The negation overrides the parent
+# `tests/fixtures/.gitignore` rule `dbt_project_*/target/manifest.json` (which
+# is meant for the parse-only small/medium fixtures that commit
+# `manifest_v<N>.json` instead). This project commits `manifest.json` directly
+# so `signalforge.manifest.load(fixture_dir)` finds it at the default path.
+!target/manifest.json
+
+# Everything else `dbt deps && dbt compile` leaves behind is reproducible.
+dbt_packages/
+dev.duckdb
+logs/
+.user.yml
+target/partial_parse.msgpack
+target/perf_info.json
+target/semantic_manifest.json
+target/graph.gpickle
+target/graph_summary.json
+target/run_results.json
+target/compiled/
+target/run/

@@ -742,6 +742,47 @@ def test_singular_test_pruned_alongside_schema(
     assert any("custom_sql" in aid for aid in artifact_ids), artifact_ids
 
 
+def test_prune_existing_never_emits_proposed_test_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``prune-existing`` never emits ``proposed_test_files`` — even for a KEPT
+    singular ``custom_sql`` and even WITHOUT ``--from-manifest`` (DEC-015).
+
+    ``prune-existing`` is read-only: every ``custom_sql`` it sees is EXTERNAL
+    (authored by the operator in ``tests/*.sql`` / schema.yml / the manifest),
+    so re-proposing it as a SignalForge-authored ``.sql`` would be wrong. #154
+    (US-005) passes ``emit_test_files=False`` unconditionally, so the
+    ``proposed_test_files`` section stays empty. This is a deliberate departure
+    from the pre-#154 default-emit behaviour — the "``--from-manifest`` off is
+    byte-unchanged" guarantee is scoped to *which tests are ingested*, NOT to the
+    (now always-suppressed) proposed-files section. This pins the suppression for
+    a KEPT singular custom_sql (the only shape that would otherwise emit one).
+    """
+    import json
+
+    project_dir, _ = _setup_project(tmp_path)
+    # A singular test that returns FAILING rows -> KEPT (the tier that would
+    # otherwise produce a ProposedTestFile).
+    _write_singular_test(
+        project_dir,
+        "assert_trip_id_kept.sql",
+        "select * from {{ this }} where trip_id is null\n",
+    )
+    argv = [*_minimal_schema_argv(project_dir), "--format", "json"]  # no --from-manifest
+    # schema.yml not_null (kept) + singular custom_sql returns failing rows (kept).
+    factory = _make_fake_adapter_factory(failure_counts=(5, 7))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    out = capsys.readouterr().out
+    assert code == 0
+    payload = json.loads(out)
+    kept_custom_sql = [
+        e for e in payload["entries"] if e["test_type"] == "custom_sql" and e["tier"] == "kept"
+    ]
+    assert len(kept_custom_sql) == 1  # the singular test IS kept ...
+    assert payload["proposed_test_files"] == []  # ... but no proposed file is emitted.
+
+
 def test_singular_test_for_other_model_ignored(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1048,3 +1089,327 @@ def test_prune_existing_help_text_lists_as_of_flag(
     assert code == 0
     assert "--as-of" in captured.out
     assert "YYYY-MM-DD" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# #154 US-007 — --from-manifest + --grade (DEC-005 / DEC-002 / DEC-018)
+# ---------------------------------------------------------------------------
+
+_FIXTURE_EXPECTATIONS = _FIXTURES / "dbt_project_expectations"
+_ORDERS_UID = "model.signalforge_test_expectations.orders"
+
+# A bigquery target under the fixture's profile name so ``load_profile``
+# accepts it (the committed profile is duckdb, which the warehouse layer's
+# ``DbtProfileTarget`` does not model). ``_make_warehouse_adapter`` is patched
+# with a fake, so the profile is never used to open a real connection — it only
+# needs to parse cleanly.
+_EXPECTATIONS_BQ_PROFILE = (
+    "signalforge_test_expectations:\n"
+    "  target: dev\n"
+    "  outputs:\n"
+    "    dev:\n"
+    "      type: bigquery\n"
+    "      method: oauth\n"
+    "      project: bigquery-public-data\n"
+    "      dataset: analytics\n"
+    "      location: US\n"
+)
+
+# A minimal external schema.yml for the orders model declaring its real
+# columns with NO supported tests, so the schema.yml side contributes ZERO
+# warehouse queries — the only tests pruned come from --from-manifest. This
+# makes the fake's expected query count exactly the manifest-test count.
+_ORDERS_EXTERNAL_SCHEMA = (
+    "version: 2\n"
+    "models:\n"
+    "  - name: orders\n"
+    "    columns:\n"
+    "      - name: order_id\n"
+    "      - name: amount\n"
+)
+
+
+def _setup_expectations_project(tmp_path: Path) -> tuple[Path, Path]:
+    """Copy the dbt-expectations fixture project into ``tmp_path``, rewrite its
+    duckdb profile to a parseable bigquery target, and plant a minimal external
+    schema.yml. Returns ``(project_dir, schema_path)``.
+
+    The committed ``target/manifest.json`` (carrying the five dbt-compiled test
+    nodes) is copied verbatim — ``--from-manifest`` reads its ``compiled_code``.
+    """
+    project_dir = tmp_path / "expectations"
+    shutil.copytree(_FIXTURE_EXPECTATIONS, project_dir)
+    (project_dir / "profiles.yml").write_text(_EXPECTATIONS_BQ_PROFILE, encoding="utf-8")
+    schema_path = project_dir / "models" / "external_schema.yml"
+    schema_path.write_text(_ORDERS_EXTERNAL_SCHEMA, encoding="utf-8")
+    return project_dir, schema_path
+
+
+def _expectations_argv(project_dir: Path, schema_path: Path, *extra: str) -> list[str]:
+    return [
+        "prune-existing",
+        _ORDERS_UID,
+        "--schema",
+        str(schema_path),
+        "--project-dir",
+        str(project_dir),
+        "--scope",
+        "full",
+        "--sample-strategy",
+        "oneshot",
+        *extra,
+    ]
+
+
+def test_grade_without_from_manifest_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
+    """``--grade`` REQUIRES ``--from-manifest`` (DEC-002): passing ``--grade``
+    alone is an input-validation failure → exit 2, no traceback, and the
+    stderr message names ``--from-manifest``. The check fires at handler entry
+    BEFORE any project / warehouse work (a bogus --project-dir never matters).
+    """
+    code = main(
+        [
+            "prune-existing",
+            "customers",
+            "--schema",
+            "schema.yml",
+            "--grade",
+            "--project-dir",
+            "/nonexistent",
+        ]
+    )
+    err = capsys.readouterr().err
+    assert code == 2
+    assert "Traceback" not in err
+    assert "--from-manifest" in err
+
+
+def test_from_manifest_off_ingests_no_manifest_tests(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Default (no ``--from-manifest``): the model's manifest test nodes are
+    NOT pruned — byte-identical to the pre-#154 schema.yml-only behaviour.
+
+    The external schema declares zero supported tests, so without
+    ``--from-manifest`` there are zero candidates and the prune engine's
+    empty-candidate short-circuit fires — the fake adapter (queued with NO
+    expectations) is never queried. Exactly the OFF contract.
+    """
+    import json
+
+    project_dir, schema_path = _setup_expectations_project(tmp_path)
+    argv = [*_expectations_argv(project_dir, schema_path), "--format", "json"]
+    # No --from-manifest: zero candidate tests → no warehouse query at all.
+    factory = _make_fake_adapter_factory(failure_counts=())
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    out = capsys.readouterr().out
+    assert code == 0
+    payload = json.loads(out)
+    test_entries = [e for e in payload["entries"] if e["test_type"] is not None]
+    assert test_entries == []
+
+
+def test_from_manifest_prunes_manifest_tests_onto_table(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--from-manifest`` merges the model's dbt-compiled manifest test nodes
+    (as ``custom_sql`` candidates) into the prune run: they appear on the diff
+    table (kept/dropped), NOT in proposed_test_files (read-only, DEC-015).
+
+    The fixture's orders model carries four row-returning + deterministic
+    dbt-expectations nodes (+ one non-deterministic skip). Engineered failure
+    counts give a real kept/dropped MIX so a prune regression to keep- or
+    drop-everything fails loud (testing-signal.md).
+    """
+    import json
+
+    project_dir, schema_path = _setup_expectations_project(tmp_path)
+    argv = [*_expectations_argv(project_dir, schema_path, "--from-manifest"), "--format", "json"]
+    # Four manifest custom_sql tests → four COUNT(*) queries. (0, 5) × 2 →
+    # two always-passes drops + two kept.
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    captured_io = capsys.readouterr()
+    assert code == 0, captured_io.err
+    payload = json.loads(captured_io.out)
+    test_entries = [e for e in payload["entries"] if e["test_type"] is not None]
+    # All four manifest tests are custom_sql and were pruned.
+    assert len(test_entries) == 4
+    assert all(e["test_type"] == "custom_sql" for e in test_entries)
+    kept = [e for e in test_entries if e["tier"] == "kept"]
+    dropped = [e for e in test_entries if e["tier"] == "dropped"]
+    assert len(kept) == 2
+    assert len(dropped) == 2
+    # grading_report=None (no --grade) → never flagged.
+    assert payload["flagged_count"] == 0
+    # Read-only: no proposed .sql files for the ingested external tests.
+    assert payload["proposed_test_files"] == []
+
+
+def test_from_manifest_skip_folds_into_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A non-prunable manifest node (the fixture's non-deterministic
+    recent-data body) is skip-recorded and folds into the stderr summary.
+    """
+    project_dir, schema_path = _setup_expectations_project(tmp_path)
+    argv = _expectations_argv(project_dir, schema_path, "--from-manifest")
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    err = capsys.readouterr().err
+    assert code == 0
+    # The fixture's one non-deterministic node → malformed-supported-test.
+    assert "Skipped 1 unsupported test:" in err
+    assert "malformed-supported-test×1" in err
+
+
+def test_from_manifest_grade_runs_grade_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--from-manifest --grade`` runs the grade stage between prune and diff
+    and feeds the grading report into the diff (DEC-002 / DEC-018).
+
+    ``grade_artifacts`` is faked (mirrors ``generate``'s test harness) so the
+    default suite covers the wiring with no live LLM call. The spy asserts the
+    grade stage saw a candidate NARROWED to the manifest-ingested
+    ``custom_sql`` tests only (DEC-002) — NOT the operator's schema.yml
+    built-ins, which must not be graded (they carry no rationale and grading
+    them could flip a kept built-in to ``flagged``; QG finding).
+    """
+    from typing import Any
+
+    from signalforge.cli import prune_existing as pe_mod
+    from tests.cli._factories import make_grading_report
+
+    project_dir, schema_path = _setup_expectations_project(tmp_path)
+
+    captured: dict[str, Any] = {}
+
+    def _fake_grade(model: Any, candidate: Any, prune_result: Any, **kwargs: Any) -> Any:
+        captured["called"] = True
+        captured["candidate"] = candidate
+        return make_grading_report(model)
+
+    monkeypatch.setattr(pe_mod.grade_module, "grade_artifacts", _fake_grade)
+
+    argv = _expectations_argv(project_dir, schema_path, "--from-manifest", "--grade")
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    err = capsys.readouterr().err
+    assert code == 0, err
+    assert captured.get("called") is True
+    # The grade stage saw a candidate NARROWED to the manifest-ingested tests:
+    # every graded test is a from_manifest custom_sql, and there is at least one
+    # (the operator's built-ins / columns were dropped from the grade input).
+    graded_candidate = captured["candidate"]
+    assert graded_candidate.columns == ()
+    assert len(graded_candidate.tests) >= 1
+    assert all(
+        t.type == "custom_sql" and getattr(t, "from_manifest", False)
+        for t in graded_candidate.tests
+    )
+
+
+def test_grade_missing_credential_exits_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A grade-stage ``LLMAuthError`` propagates to exit 3 with no traceback.
+
+    The credential gate is implicit (DEC-002 / DEC-018): ``prune-existing`` adds
+    no explicit ANTHROPIC_API_KEY check — a missing key surfaces as
+    ``LLMAuthError`` (tier 3) at grade-call time. This pins that the
+    ``prune-existing`` handler's single boundary catch maps the grade exception
+    to exit 3 (external-dependency tier) and never leaks a traceback. Faked so
+    the default suite covers the wiring with no live LLM call.
+    """
+    from typing import Any
+
+    from signalforge.cli import prune_existing as pe_mod
+    from signalforge.llm.errors import LLMAuthError
+
+    project_dir, schema_path = _setup_expectations_project(tmp_path)
+
+    def _raise_auth(*_a: Any, **_k: Any) -> Any:
+        raise LLMAuthError("no API key configured")
+
+    monkeypatch.setattr(pe_mod.grade_module, "grade_artifacts", _raise_auth)
+
+    argv = _expectations_argv(project_dir, schema_path, "--from-manifest", "--grade")
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    err = capsys.readouterr().err
+    assert code == 3, err
+    assert "Traceback" not in err
+
+
+def test_grade_renumbers_progress_to_four(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Under ``--grade`` the stderr progress renumbers to ``[N/4]`` — the grade
+    stage lands at ``[3/4]`` and diff at ``[4/4]`` (DEC-018). ``--verbose``
+    forces progress on regardless of TTY (should_emit_progress DEC-026).
+    """
+    from signalforge.cli import prune_existing as pe_mod
+    from tests.cli._factories import make_grading_report
+
+    project_dir, schema_path = _setup_expectations_project(tmp_path)
+    monkeypatch.setattr(
+        pe_mod.grade_module,
+        "grade_artifacts",
+        lambda model, candidate, prune_result, **kw: make_grading_report(model),
+    )
+
+    argv = _expectations_argv(project_dir, schema_path, "--from-manifest", "--grade", "--verbose")
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "[1/4]" in err
+    assert "[3/4]" in err  # grade stage
+    assert "[4/4]" in err  # diff stage
+    assert "grade" in err
+
+
+def test_no_grade_keeps_three_stage_progress(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without ``--grade`` the progress count stays ``[N/3]`` (no grade stage),
+    even under ``--from-manifest`` — the flag renumber is grade-driven only.
+    """
+    project_dir, schema_path = _setup_expectations_project(tmp_path)
+    argv = _expectations_argv(project_dir, schema_path, "--from-manifest", "--verbose")
+    factory = _make_fake_adapter_factory(failure_counts=(0, 5, 0, 5))
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "[3/3]" in err  # diff at 3/3
+    assert "[3/4]" not in err
+    assert "[4/4]" not in err
+
+
+def test_from_manifest_and_grade_flag_defaults() -> None:
+    """``--from-manifest`` and ``--grade`` default to ``False`` (opt-in)."""
+    from signalforge.cli import _build_parser
+
+    parser = _build_parser()
+    args = parser.parse_args(["prune-existing", "customers", "--schema", "schema.yml"])
+    assert args.from_manifest is False
+    assert args.grade is False
+
+
+def test_help_lists_from_manifest_and_grade(capsys: pytest.CaptureFixture[str]) -> None:
+    """``prune-existing --help`` names both new flags (surface 1 of the
+    5-surface parity contract for #154 US-007)."""
+    code = main(["prune-existing", "--help"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "--from-manifest" in out
+    assert "--grade" in out
+    assert "Traceback" not in out

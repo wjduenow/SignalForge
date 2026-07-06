@@ -973,3 +973,28 @@ def test_candidate_test_row_count_anomaly_by_period_repr_under_ansi_injection() 
     assert "EVIL_ANSI" not in rendered
     assert "EVIL_RAT" not in rendered
     assert "\x1b" not in rendered
+
+
+def test_custom_sql_from_manifest_is_excluded_from_serialization() -> None:
+    """DEC-016 byte-identity: ``from_manifest`` MUST NOT alter the serialized shape.
+
+    ``from_manifest`` is ``Field(default=False, exclude=True)`` precisely so the
+    diff ``candidate_hash``, the proposed YAML, and every committed ``custom_sql``
+    fixture stay byte-identical whether a test is manifest-ingested or drafted.
+    This pins that invariant directly: a plausible "why is this excluded?" cleanup
+    that drops ``exclude=True`` would silently change ``candidate_hash`` for every
+    ``custom_sql`` and break diff reproducibility — with NO other test failing
+    (verified via mutation testing at QG time), so this guard is load-bearing.
+    """
+    ingested = CandidateTestCustomSQL(sql="select 1", column=None, from_manifest=True)
+    drafted = CandidateTestCustomSQL(sql="select 1", column=None, from_manifest=False)
+
+    # The flag is readable at runtime (drives prune routing / diff scoping) ...
+    assert ingested.from_manifest is True
+    assert drafted.from_manifest is False
+
+    # ... but never serialized: absent from model_dump, and the two serializations
+    # are byte-identical (so the blake2b candidate_hash is invariant to the flag).
+    assert "from_manifest" not in ingested.model_dump()
+    assert "from_manifest" not in json.loads(ingested.model_dump_json())
+    assert ingested.model_dump_json() == drafted.model_dump_json()

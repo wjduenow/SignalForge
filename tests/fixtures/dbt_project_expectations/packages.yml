@@ -1,0 +1,7 @@
+# dbt-expectations 0.10.4 is the newest release compatible with dbt-core 1.8.x
+# (the v12 manifest-schema line SignalForge tests against). Pulls dbt_date as a
+# transitive dependency. `dbt deps` writes package-lock.yml (committed) for a
+# reproducible resolve.
+packages:
+  - package: calogica/dbt_expectations
+    version: 0.10.4
