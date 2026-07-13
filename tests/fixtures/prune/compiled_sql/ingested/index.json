@@ -1,0 +1,131 @@
+[
+  {
+    "dialect": "bigquery",
+    "expected_spans": 1,
+    "name": "bigquery_dbt_expectations_not_null",
+    "relation": [
+      "fake_project",
+      "dataset",
+      "orders"
+    ],
+    "temp": [
+      "_SESSION",
+      "_sf_sample_0f1e2d3c4b5a6978"
+    ]
+  },
+  {
+    "dialect": "bigquery",
+    "expected_spans": 1,
+    "name": "bigquery_dbt_expectations_between",
+    "relation": [
+      "fake_project",
+      "dataset",
+      "orders"
+    ],
+    "temp": [
+      "_SESSION",
+      "_sf_sample_0f1e2d3c4b5a6978"
+    ]
+  },
+  {
+    "dialect": "bigquery",
+    "expected_spans": 1,
+    "name": "bigquery_dbt_expectations_row_count_between",
+    "relation": [
+      "fake_project",
+      "dataset",
+      "orders"
+    ],
+    "temp": [
+      "_SESSION",
+      "_sf_sample_0f1e2d3c4b5a6978"
+    ]
+  },
+  {
+    "dialect": "snowflake",
+    "expected_spans": 1,
+    "name": "snowflake_dbt_expectations_not_null",
+    "relation": [
+      "ANALYTICS",
+      "PUBLIC",
+      "ORDERS"
+    ],
+    "temp": [
+      "ANALYTICS",
+      "PUBLIC",
+      "_sf_sample_0f1e2d3c4b5a6978"
+    ]
+  },
+  {
+    "dialect": "databricks",
+    "expected_spans": 1,
+    "name": "databricks_dbt_expectations_not_null",
+    "relation": [
+      "main",
+      "default",
+      "orders"
+    ],
+    "temp": [
+      "main",
+      "default",
+      "_sf_sample_0f1e2d3c4b5a6978"
+    ]
+  },
+  {
+    "dialect": "bigquery",
+    "expected_spans": 1,
+    "name": "bigquery_simple_where",
+    "relation": [
+      "fake_project",
+      "dataset",
+      "orders"
+    ],
+    "temp": [
+      "_SESSION",
+      "_sf_sample_0f1e2d3c4b5a6978"
+    ]
+  },
+  {
+    "dialect": "bigquery",
+    "expected_spans": 2,
+    "name": "bigquery_self_join",
+    "relation": [
+      "fake_project",
+      "dataset",
+      "orders"
+    ],
+    "temp": [
+      "_SESSION",
+      "_sf_sample_0f1e2d3c4b5a6978"
+    ]
+  },
+  {
+    "dialect": "bigquery",
+    "expected_spans": 1,
+    "name": "bigquery_subquery_and_comment",
+    "relation": [
+      "fake_project",
+      "dataset",
+      "orders"
+    ],
+    "temp": [
+      "_SESSION",
+      "_sf_sample_0f1e2d3c4b5a6978"
+    ]
+  },
+  {
+    "dialect": "snowflake",
+    "expected_spans": 2,
+    "name": "snowflake_self_join",
+    "relation": [
+      "ANALYTICS",
+      "PUBLIC",
+      "ORDERS"
+    ],
+    "temp": [
+      "ANALYTICS",
+      "PUBLIC",
+      "_sf_sample_0f1e2d3c4b5a6978"
+    ]
+  }
+]
