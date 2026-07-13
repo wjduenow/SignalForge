@@ -412,6 +412,22 @@ def test_zero_match_when_the_body_only_references_a_source() -> None:
     assert plan.spans == ()
 
 
+def test_single_backtick_dotted_relation_is_refused_not_mis_spliced() -> None:
+    """A single-backtick DOTTED relation (`` `proj.ds.tbl` ``) parses as a
+    3-part table but tokenizes as ONE arity-1 identifier, so no arity-3 run is
+    found → ``zero-match``. dbt-bigquery emits the per-component form, so this
+    is uncommon, but it must fail closed (→ source bypass) rather than guess an
+    offset. (Pins the reachability of the ``if not spans`` arm.)
+    """
+    plan = plan_relation_rewrite(
+        "select c from `proj.ds.tbl`", relation=_BQ_REL, dialect="bigquery"
+    )
+
+    assert not plan.samplable
+    assert plan.reason == "zero-match"
+    assert plan.spans == ()
+
+
 def test_case_variant_relation_fails_the_exact_match_on_a_case_sensitive_dialect() -> None:
     sql = "select * from `PROJ`.`DS`.`TBL`"
 

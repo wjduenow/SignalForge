@@ -110,39 +110,63 @@ _PRUNE_AUDIT_SCHEMA_VERSION: Final[int] = 4
 # and the full ingested body remains in the operator's own ``manifest.json``
 # / ``schema.yml`` / ``tests/*.sql`` source.
 #
-# 1000 chars per field keeps a worst-case double-SQL record (~2 KB of SQL +
-# the ``why`` / ``stats`` / ``sample_failures`` fields) comfortably inside
-# the 4000-byte line cap while still showing an operator enough SQL to
-# recognise the statement. The writer's oversize check is UNCHANGED — it
-# stays the fail-closed backstop for any other field that runs away
-# (e.g. a large ``sample_failures`` capture).
-_PRUNE_AUDIT_SQL_PREFIX_CHARS: Final[int] = 1000
+# The budget is measured in JSON-ESCAPED bytes — the cost the field actually
+# contributes to the audit LINE, which is what the byte cap it protects
+# (:data:`_PRUNE_AUDIT_RECORD_LIMIT_BYTES`) bounds. The SQL body is fully
+# adversary-controlled ``compiled_code`` (a poisoned manifest node whose string
+# literals / comments hold multibyte runs), and :func:`_write_prune_event`
+# serialises with the stdlib default ``ensure_ascii=True``, so ONE astral code
+# point (4 UTF-8 bytes) escapes to a 12-byte ``\uXXXX\uXXXX`` sequence. Measuring
+# raw code points (or raw UTF-8 bytes) therefore UNDER-counts by up to 3× — a
+# body of ~1000 emoji still blows the line cap and aborts the whole run, exactly
+# the failure this truncation exists to prevent. Bounding each SQL field's
+# json-escaped contribution to 1200 keeps a worst-case double-SQL record
+# (2 × 1200 + the markers + the ``why`` / ``stats`` / ``sample_failures`` fields)
+# inside the 4000-byte line cap. The writer's oversize check is UNCHANGED — it
+# stays the fail-closed backstop for any OTHER field that runs away (e.g. a large
+# ``sample_failures`` capture).
+_PRUNE_AUDIT_SQL_PREFIX_BUDGET: Final[int] = 1200
 
 #: Appended verbatim to any SQL body the audit truncates, so an operator
 #: reading ``prune.jsonl`` is never misled into thinking they hold the full
-#: statement. Rendered with ``.format(kept=..., total=...)``.
+#: statement. Rendered with ``.format(kept=..., total=...)`` (json-escaped
+#: bytes kept, total UTF-8 bytes of the original).
 _PRUNE_AUDIT_SQL_TRUNCATION_MARKER: Final[str] = (
     "\n-- [signalforge: SQL truncated for the audit record — "
-    "{kept} of {total} chars shown; the full statement is identified by "
-    "compiled_sql_hash]"
+    "~{kept} json-escaped bytes of {total} shown; the full statement is "
+    "identified by compiled_sql_hash]"
 )
 
 
-def _truncate_sql_for_audit(sql: str) -> str:
-    """Return ``sql`` bounded to :data:`_PRUNE_AUDIT_SQL_PREFIX_CHARS`.
+def _json_escaped_cost(ch: str) -> int:
+    """Bytes ``ch`` contributes to the audit line under ``json.dumps`` default
+    ``ensure_ascii=True`` (excluding the surrounding quotes)."""
+    return len(json.dumps(ch)) - 2
 
-    Under-cap input is returned unchanged (byte-identical to pre-#268 for
-    every drafted built-in, whose compiled SQL is a couple hundred chars).
-    Over-cap input is cut to the prefix and given the visible
-    :data:`_PRUNE_AUDIT_SQL_TRUNCATION_MARKER` suffix — the truncation must
-    never be silent, or an operator would read a syntactically-plausible
-    fragment as the whole statement.
+
+def _truncate_sql_for_audit(sql: str) -> str:
+    """Bound ``sql``'s contribution to the JSON audit line to
+    :data:`_PRUNE_AUDIT_SQL_PREFIX_BUDGET` json-escaped bytes.
+
+    Under-budget input is returned unchanged (byte-identical to pre-#268 for
+    every drafted built-in, whose compiled SQL is a couple hundred ASCII bytes,
+    each costing exactly 1). Over-budget input is cut at a CODE-POINT boundary —
+    accumulating each character's json-escaped cost so an adversarial multibyte
+    run (which escapes to up to 12 bytes per code point) can never push the
+    record over the line cap — and given the visible
+    :data:`_PRUNE_AUDIT_SQL_TRUNCATION_MARKER` suffix. The truncation must never
+    be silent, or an operator would read a syntactically-plausible fragment as
+    the whole statement.
     """
-    if len(sql) <= _PRUNE_AUDIT_SQL_PREFIX_CHARS:
-        return sql
-    return sql[:_PRUNE_AUDIT_SQL_PREFIX_CHARS] + _PRUNE_AUDIT_SQL_TRUNCATION_MARKER.format(
-        kept=_PRUNE_AUDIT_SQL_PREFIX_CHARS, total=len(sql)
-    )
+    cost = 0
+    for i, ch in enumerate(sql):
+        cost += _json_escaped_cost(ch)
+        if cost > _PRUNE_AUDIT_SQL_PREFIX_BUDGET:
+            kept = sql[:i]
+            return kept + _PRUNE_AUDIT_SQL_TRUNCATION_MARKER.format(
+                kept=cost - _json_escaped_cost(ch), total=len(sql.encode("utf-8"))
+            )
+    return sql
 
 
 def _truncate_test_for_audit(test: CandidateTest) -> CandidateTest:
@@ -160,9 +184,10 @@ def _truncate_test_for_audit(test: CandidateTest) -> CandidateTest:
     """
     if not isinstance(test, CandidateTestCustomSQL):
         return test
-    if len(test.sql) <= _PRUNE_AUDIT_SQL_PREFIX_CHARS:
+    truncated = _truncate_sql_for_audit(test.sql)
+    if truncated == test.sql:
         return test
-    return test.model_copy(update={"sql": _truncate_sql_for_audit(test.sql)})
+    return test.model_copy(update={"sql": truncated})
 
 
 class PruneEvent(BaseModel):
@@ -219,7 +244,7 @@ class PruneEvent(BaseModel):
     truncation (#268 DEC-012(3))."""
     compiled_sql: str
     """The compiled failing-rows SQL, truncated to a visibly-marked
-    :data:`_PRUNE_AUDIT_SQL_PREFIX_CHARS` prefix when over-cap (#268
+    :data:`_PRUNE_AUDIT_SQL_PREFIX_BUDGET` prefix when over-cap (#268
     DEC-012(3)). Use :attr:`compiled_sql_hash` to correlate the full
     statement; the in-memory
     :attr:`signalforge.prune.models.PruneDecision.compiled_sql` is
@@ -436,7 +461,7 @@ __all__ = (
     "PruneEvent",
     "_PRUNE_AUDIT_RECORD_LIMIT_BYTES",
     "_PRUNE_AUDIT_SCHEMA_VERSION",
-    "_PRUNE_AUDIT_SQL_PREFIX_CHARS",
+    "_PRUNE_AUDIT_SQL_PREFIX_BUDGET",
     "_PRUNE_AUDIT_SQL_TRUNCATION_MARKER",
     "_build_prune_event",
     "_compute_config_hash",

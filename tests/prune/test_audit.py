@@ -40,7 +40,7 @@ import pytest
 from signalforge.draft.models import CandidateTestCustomSQL, CandidateTestNotNull
 from signalforge.prune.audit import (
     _PRUNE_AUDIT_RECORD_LIMIT_BYTES,
-    _PRUNE_AUDIT_SQL_PREFIX_CHARS,
+    _PRUNE_AUDIT_SQL_PREFIX_BUDGET,
     PruneEvent,
     _build_prune_event,
     _compute_config_hash,
@@ -551,8 +551,9 @@ def test_real_dbt_expectations_body_does_not_abort_the_run(tmp_path: Path) -> No
         "longer exercises the run-aborting bug it exists to prevent"
     )
     # Both SQL surfaces must be over the per-field budget — truncating only one
-    # is not enough (the ingest reader admits bodies up to 256 KB).
-    assert len(body) > _PRUNE_AUDIT_SQL_PREFIX_CHARS
+    # is not enough (the ingest reader admits bodies up to 256 KB). The body is
+    # ASCII, so its json-escaped cost equals its length.
+    assert len(body) > _PRUNE_AUDIT_SQL_PREFIX_BUDGET
 
     # No raise: this is the whole point.
     _write_prune_event(event, audit_path)
@@ -564,6 +565,44 @@ def test_real_dbt_expectations_body_does_not_abort_the_run(tmp_path: Path) -> No
     # the ingest reader admits bodies up to 256 KB.
     assert len(payload["compiled_sql"]) < len(body)
     assert len(payload["test"]["sql"]) < len(body)
+
+
+def test_multibyte_compiled_code_does_not_abort_the_run(tmp_path: Path) -> None:
+    """#268 QG — the truncation budget is JSON-ESCAPED bytes, not code points
+    or raw UTF-8 bytes.
+
+    The writer serialises with the stdlib default ``ensure_ascii=True``, so one
+    astral code point (4 UTF-8 bytes) escapes to a 12-byte ``\\uXXXX\\uXXXX``
+    sequence on the audit line. A char budget — OR a raw-UTF-8-byte budget —
+    under-counts by up to 3×, so a body of ~1000 emoji still blows the 4000-byte
+    line cap and the writer aborts the WHOLE run: the exact failure this
+    truncation exists to prevent. A poisoned manifest node can pack such a run
+    into a string literal. Under a json-escaped budget the record stays inside
+    the cap.
+    """
+    # ~2000 astral code points inside a string literal: ~8 KB UTF-8 / ~24 KB
+    # json-escaped, comfortably under the 256 KiB ingest cap → a real candidate.
+    body = "select c from `p`.`d`.`t` where c = '" + ("\U0001f4a5" * 2000) + "'"
+    audit_path = tmp_path / "prune.jsonl"
+    event = _make_event(
+        test_anchor="model",
+        test=CandidateTestCustomSQL(sql=body, column=None, from_manifest=True),
+        compiled_sql=body,
+    )
+
+    # No raise — and the written line is genuinely inside the byte cap.
+    _write_prune_event(event, audit_path)
+    line = audit_path.read_text(encoding="utf-8").splitlines()[0]
+    assert len(line.encode("utf-8")) <= _PRUNE_AUDIT_RECORD_LIMIT_BYTES
+    payload = json.loads(line)
+    # Each truncated SQL surface's json-escaped contribution is within budget
+    # (+ the ASCII marker), and the multibyte cut left valid UTF-8 (the cut is
+    # at a code-point boundary, so no split surrogate).
+    for field in (payload["compiled_sql"], payload["test"]["sql"]):
+        escaped_cost = len(json.dumps(field)) - 2
+        assert escaped_cost <= _PRUNE_AUDIT_SQL_PREFIX_BUDGET + 200  # + ASCII marker
+        assert len(field) < len(body)  # genuinely truncated
+        field.encode("utf-8").decode("utf-8")  # round-trips — never raises
 
 
 def test_truncated_sql_is_visibly_marked_and_preserves_the_forensic_hash(

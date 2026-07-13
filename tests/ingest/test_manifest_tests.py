@@ -590,6 +590,18 @@ def test_oversize_compiled_code_is_skip_recorded_with_an_existing_skip_reason(
     assert "compiled_code" in skip.detail
 
 
+def test_compiled_code_size_cap_constant_is_256_kib() -> None:
+    """Pin the cap VALUE, not just the check's existence (#268 QG).
+
+    The over-cap test derives its body from the live constant, so it stays
+    green if the cap is silently RAISED — but raising it re-opens the
+    unbounded-sqlglot-parse defence this cap exists to close (a 300 KB body
+    would reach the parser). Mirrors the file-cap value pin
+    (``test_read_test_files_real_cap_constant_is_5mb``).
+    """
+    assert reader_module._COMPILED_CODE_SIZE_LIMIT_BYTES == 262_144
+
+
 def test_under_cap_compiled_code_still_becomes_a_candidate() -> None:
     """The cap must not swallow a realistic dbt-expectations body (negative pin)."""
     body = "select * from t where x = '" + "a" * 1_000 + "'"

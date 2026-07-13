@@ -741,9 +741,13 @@ def plan_relation_rewrite(sql: str, *, relation: Sequence[str], dialect: str) ->
     ast_matches = sum(1 for t in physical if _table_tuple(t) == target)
     spans = _relation_spans(tokens, target, dialect, arity=len(relation))
 
-    if not spans:  # pragma: no cover — the AST matched but the tokenizer found
-        # no run: only reachable if a relation component tokenizes as something
-        # other than VAR/IDENTIFIER. Fail closed rather than guess.
+    if not spans:
+        # The AST matched but the tokenizer found no run of the expected arity.
+        # Reachable in practice: a single-backtick DOTTED relation
+        # (`` `proj.ds.tbl` ``) parses as a 3-part table but tokenizes as ONE
+        # arity-1 identifier, so no arity-3 run is found. dbt-bigquery emits the
+        # per-component `` `proj`.`ds`.`tbl` `` form, so this is uncommon, but it
+        # must fail closed (→ source bypass) rather than guess.
         return _reject("zero-match")
     if len(spans) != ast_matches:
         # The tokenizer and the parser disagree about how many times the relation
