@@ -5431,6 +5431,39 @@ def _ingested_custom_sql_candidates(sql: str) -> CandidateSchema:
     )
 
 
+# --- #268 US-006 (DEC-014) — the ingested-routing observability -------------
+#
+# The engine logs lazy-format ``%s`` + ``json.dumps({...})`` (the DEC-017 grep
+# gate), so a test reads the SIGNAL, not the prose: decode the payload and
+# assert on the decoded dict. Keying on the message prefix keeps these helpers
+# from picking up any sibling INFO/DEBUG the engine emits.
+_INGESTED_ROUTING_INFO_PREFIX = "ingested custom_sql routing:"
+_INGESTED_BYPASS_DEBUG_PREFIX = "ingested custom_sql bypassed to source:"
+
+
+def _decode_log_payloads(
+    caplog: pytest.LogCaptureFixture, *, level: str, prefix: str
+) -> list[dict[str, object]]:
+    """Decode the ``json.dumps`` payload of every matching engine log record."""
+    payloads: list[dict[str, object]] = []
+    for record in caplog.records:
+        message = record.getMessage()
+        if record.levelname != level or not message.startswith(prefix):
+            continue
+        payloads.append(json.loads(message[len(prefix) :].strip()))
+    return payloads
+
+
+def _ingested_routing_payloads(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    """The decoded payload of every DEC-014 aggregate INFO (expected: exactly 1)."""
+    return _decode_log_payloads(caplog, level="INFO", prefix=_INGESTED_ROUTING_INFO_PREFIX)
+
+
+def _ingested_bypass_breadcrumbs(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    """The decoded payload of every DEC-014 per-test bypass DEBUG breadcrumb."""
+    return _decode_log_payloads(caplog, level="DEBUG", prefix=_INGESTED_BYPASS_DEBUG_PREFIX)
+
+
 def test_prune_tests_ingested_custom_sql_tautology_dropped_always_passes(
     tmp_path: Path,
 ) -> None:
@@ -5547,12 +5580,11 @@ def test_prune_tests_ingested_custom_sql_under_sample_evaluates_full_scope(
 
     The dispatched SQL references the source relation and NEVER a
     ``_SESSION._sf_sample_*`` temp table, no ``materialise_sample`` is called
-    (all candidates bypass to source), and exactly ONE INFO fires.
-
-    (That INFO's wording — "evaluating full-scope against source" — is accurate
-    for every bypassed body but becomes a half-truth once a sibling candidate IS
-    sampled. #268 US-006 replaces it with the DEC-014 aggregate INFO carrying
-    ``sampled_count`` / ``bypassed_to_source_count`` / ``bypass_reasons``.)"""
+    (all candidates bypass to source), and exactly ONE DEC-014 aggregate INFO
+    fires — reporting ``sampled_count=0`` and the ``below-min-samplable`` reason
+    that DEC-010 demoted this lone candidate with (US-006 replaced the old #154
+    "scope=sample requested" wording, which became a half-truth once a sibling
+    candidate could be sampled)."""
     audit_path = tmp_path / "prune.jsonl"
     fake = FakeBigQueryClient(project="fake_project")
     # Only expect the COUNT(*) — NO expect_materialise_sample / expect_get_table:
@@ -5590,15 +5622,18 @@ def test_prune_tests_ingested_custom_sql_under_sample_evaluates_full_scope(
     assert decision.decision == "dropped"
     assert decision.reason == "always-passes"
 
-    info_records = [
-        r
-        for r in caplog.records
-        if r.levelname == "INFO" and "scope=sample requested" in r.getMessage()
-    ]
-    assert len(info_records) == 1, (
-        "expected exactly ONE ingested-full-scope INFO; got "
-        f"{[r.getMessage() for r in info_records]}"
+    payloads = _ingested_routing_payloads(caplog)
+    assert len(payloads) == 1, (
+        f"expected exactly ONE ingested-routing INFO; got {len(payloads)}: {payloads}"
     )
+    assert payloads[0] == {
+        "model_unique_id": model.unique_id,
+        "sample_strategy": "materialised",
+        "ingested_count": 1,
+        "sampled_count": 0,
+        "bypassed_to_source_count": 1,
+        "bypass_reasons": {"below-min-samplable": 1},
+    }
     fake.assert_all_expectations_met()
 
 
@@ -5672,12 +5707,18 @@ def test_prune_tests_mixed_ingested_and_drafted_per_test_routing(
     assert "_SESSION" not in ingested_decision.compiled_sql
     assert "_sf_sample_" not in ingested_decision.compiled_sql
 
-    info_records = [
-        r
-        for r in caplog.records
-        if r.levelname == "INFO" and "scope=sample requested" in r.getMessage()
-    ]
-    assert len(info_records) == 1
+    # DEC-014 — the aggregate INFO explains WHY the ingested body was not
+    # sampled: ``oneshot`` has no temp table to rewrite its relation TO (DEC-002).
+    payloads = _ingested_routing_payloads(caplog)
+    assert len(payloads) == 1
+    assert payloads[0] == {
+        "model_unique_id": model.unique_id,
+        "sample_strategy": "oneshot",
+        "ingested_count": 1,
+        "sampled_count": 0,
+        "bypassed_to_source_count": 1,
+        "bypass_reasons": {"strategy-not-materialised": 1},
+    }
     fake.assert_all_expectations_met()
 
 
@@ -6759,4 +6800,272 @@ def test_prune_tests_full_scope_never_reports_a_bypass(tmp_path: Path) -> None:
     assert decision.scope == "full"
     assert decision.bypassed_to_source is False
     assert _read_audit_lines(audit_path)[0]["bypassed_to_source"] is False
+    fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# #268 US-006 (DEC-014) — ingested-routing observability.
+#
+# The #154 INFO ("scope=sample requested; evaluating full-scope against source")
+# became a LIE for the samplable subset once #268 let an ingested body bind the
+# materialised temp table. It is replaced by ONE aggregate INFO per
+# ``prune_tests`` call carrying a ``{reason: count}`` bypass histogram, plus one
+# DEBUG breadcrumb per bypassed ingested candidate.
+#
+# Assertions decode the ``json.dumps`` payload (the DEC-017 lazy-format logger
+# gate forbids f-strings anywhere in a ``_LOGGER`` call's argument subtree) —
+# they pin the SIGNAL, never the prose.
+# ---------------------------------------------------------------------------
+
+# A body joining a SECOND physical relation. ``plan_relation_rewrite`` refuses it
+# on the AST (``"multi-relation"``, DEC-006): rewriting only the model's own
+# relation would silently join a SAMPLE against a FULL sibling.
+_INGESTED_MULTI_RELATION_BODY = (
+    "select o.id\n"
+    "from `fake_project`.`dataset`.`orders` as o\n"
+    "join `fake_project`.`dataset`.`customers` as c on o.customer_id = c.id\n"
+    "where c.id is null"
+)
+
+
+def test_prune_tests_ingested_routing_info_reports_sampled_bypassed_and_reasons(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DEC-014 — the aggregate INFO on a REAL mixed batch: two samplable ingested
+    bodies (sampled onto the temp), one COUNT-scalar (``aggregate-scalar``), one
+    multi-relation body (``multi-relation``), plus a drafted ``not_null`` (not
+    ingested — it must not be counted at all).
+
+    Fires EXACTLY ONCE and reports ``sampled_count=2``,
+    ``bypassed_to_source_count=2`` and the ``{reason: count}`` histogram, so an
+    operator gets the SHAPE of the bypass without dropping to DEBUG. A per-batch
+    aggregate is the whole point: a single-candidate batch would pass a naive
+    implementation that emitted one INFO per test.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(source_ref, sample_size=100_000, returns=materialised_ref)
+    # Distinct matchers → order-independent pairing. The samplable body and the
+    # count-scalar share the ``status = 'BAD'`` predicate, so the samplable one
+    # anchors on the REWRITTEN relation (the count-scalar keeps dbt's source).
+    fake.expect_query(
+        matching=r"_sf_sample_[0-9a-f]{16}`\nwhere status = 'BAD'", returns=[{"failures": 0}]
+    )
+    fake.expect_query(matching=r"where customer_id is null", returns=[{"failures": 1}])
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 0}])
+    fake.expect_query(
+        matching=r"join `fake_project`\.`dataset`\.`customers`", returns=[{"failures": 0}]
+    )
+    fake.expect_query(matching=r"IS NULL", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_MULTI_RELATION_BODY, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    with caplog.at_level("INFO", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert result.total_tests == 5
+
+    payloads = _ingested_routing_payloads(caplog)
+    assert len(payloads) == 1, (
+        f"expected exactly ONE aggregate INFO per prune_tests call; got {len(payloads)}"
+    )
+    assert payloads[0] == {
+        "model_unique_id": model.unique_id,
+        "sample_strategy": "materialised",
+        # The drafted not_null is NOT an ingested candidate — 4, not 5.
+        "ingested_count": 4,
+        "sampled_count": 2,
+        "bypassed_to_source_count": 2,
+        "bypass_reasons": {"aggregate-scalar": 1, "multi-relation": 1},
+    }
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_ingested_bypass_debug_breadcrumb_per_non_sampled_candidate(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DEC-014 — one DEBUG breadcrumb per BYPASSED ingested candidate, carrying
+    its ``test_anchor`` + machine-readable ``reason``. The two SAMPLED bodies get
+    no breadcrumb (there is nothing to explain), and the drafted ``not_null``
+    gets none either.
+
+    DEBUG, not INFO: a wide model with 40 ingested tests would otherwise emit 40
+    INFO lines — the aggregate already carries the counts.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(source_ref, sample_size=100_000, returns=materialised_ref)
+    fake.expect_query(
+        matching=r"_sf_sample_[0-9a-f]{16}`\nwhere status = 'BAD'", returns=[{"failures": 0}]
+    )
+    fake.expect_query(matching=r"where customer_id is null", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 0}])
+    fake.expect_query(
+        matching=r"join `fake_project`\.`dataset`\.`customers`", returns=[{"failures": 0}]
+    )
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_MULTI_RELATION_BODY, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    with caplog.at_level("DEBUG", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    breadcrumbs = _ingested_bypass_breadcrumbs(caplog)
+    # Two bypassed candidates → two breadcrumbs. The two sampled ones get none.
+    assert len(breadcrumbs) == 2
+    reasons = {str(crumb["reason"]) for crumb in breadcrumbs}
+    assert reasons == {"aggregate-scalar", "multi-relation"}
+    for crumb in breadcrumbs:
+        assert crumb["model_unique_id"] == model.unique_id
+        assert crumb["test_anchor"] == "model"
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_ingested_routing_signals_silent_under_full_scope(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ``scope="full"`` run has nothing to explain — every candidate runs
+    full-scope by design — so neither the aggregate INFO nor any breadcrumb
+    fires. Preserves the pre-#268 log-silence on the full path."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+
+    with caplog.at_level("DEBUG", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            _ingested_custom_sql_candidates(_INGESTED_SOURCE_BODY),
+            manifest,
+            config=PruneConfig(scope="full", capture_failure_rows=0),
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert _ingested_routing_payloads(caplog) == []
+    assert _ingested_bypass_breadcrumbs(caplog) == []
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_ingested_routing_signals_silent_without_ingested_candidates(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ``scope="sample"`` batch carrying NO manifest-ingested candidate stays
+    log-silent too — the aggregate reports on ingested routing, and there is
+    none. Guards against an implementation that fires an empty INFO on every
+    sample-mode run."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(source_ref, sample_size=100_000, returns=materialised_ref)
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(),
+    )
+
+    with caplog.at_level("DEBUG", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=PruneConfig(
+                scope="sample",
+                sample_size=100_000,
+                capture_failure_rows=0,
+                sample_strategy="materialised",
+            ),
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert _ingested_routing_payloads(caplog) == []
+    assert _ingested_bypass_breadcrumbs(caplog) == []
     fake.assert_all_expectations_met()
