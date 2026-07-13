@@ -38,9 +38,20 @@ Conservative-bias / skip-when-uncertain: every analysis function returns the
 ``is_row_returning`` → ``True``) — the layer cannot positively reject what it cannot
 parse, and a genuinely malformed body is caught downstream (comment-tolerant
 validation here, or the warehouse adapter's ``kept-without-evidence`` routing).
+
+Totality over hostile input (#268 DEC-012(1)): the parse guard catches
+:data:`_PARSE_FAILURES` — ``sqlglot.errors.SqlglotError`` **plus** ``RecursionError``
+and ``ValueError``, neither of which is a ``SqlglotError``. A deeply-nested body
+(~2000 parens) blows sqlglot's recursive-descent parser with ``RecursionError``
+and an unknown ``dialect=`` name raises ``ValueError``; pre-#268 both escaped the
+``except`` and **aborted the whole prune run with no audit rows written** —
+fail-OPEN on the fail-closed audit contract. Every helper must stay total: parse
+failure of any shape → the helper's own conservative verdict, never a raise.
 """
 
 from __future__ import annotations
+
+from typing import Final
 
 import sqlglot
 import sqlglot.errors
@@ -52,6 +63,24 @@ __all__ = [
     "is_row_returning",
     "validate_ingested_sql",
 ]
+
+
+# Every exception shape a ``sqlglot.parse_one`` call can raise on hostile /
+# malformed input (#268 DEC-012(1)). ``RecursionError`` and ``ValueError`` are
+# NOT ``SqlglotError`` subclasses:
+#
+# * ``RecursionError`` — sqlglot's parser is recursive descent, so a body with
+#   ~2000-deep paren nesting exhausts the Python stack.
+# * ``ValueError`` — an unregistered ``dialect=`` name ("Unknown dialect 'x'.").
+#
+# Both escaped the pre-#268 ``except sqlglot.errors.SqlglotError`` and aborted
+# the whole prune run mid-flight with no audit rows written. Catch all three and
+# return the helper's conservative verdict so these functions are TOTAL.
+_PARSE_FAILURES: Final[tuple[type[BaseException], ...]] = (
+    sqlglot.errors.SqlglotError,
+    RecursionError,
+    ValueError,
+)
 
 
 # Non-deterministic SQL function names (upper-cased). Membership is checked
@@ -116,13 +145,16 @@ def is_deterministic_sql(sql: str, *, dialect: str = "bigquery") -> bool:
     ``current_timestamp_col`` (parsed as ``exp.Column``) nor on those tokens
     inside a string literal (parsed as ``exp.Literal``).
 
-    On a sqlglot parse failure, returns ``True`` (skip-when-uncertain): the
-    function makes the *positive* claim "this body is non-deterministic", and an
-    unparseable body affords no such claim; malformed SQL is caught elsewhere.
+    On a sqlglot parse failure of ANY shape (:data:`_PARSE_FAILURES` — a
+    ``SqlglotError``, a ``RecursionError`` from a deeply-nested body, or a
+    ``ValueError`` from an unknown ``dialect=``), returns ``True``
+    (skip-when-uncertain): the function makes the *positive* claim "this body is
+    non-deterministic", and an unparseable body affords no such claim; malformed
+    SQL is caught elsewhere.
     """
     try:
         tree = sqlglot.parse_one(sql, dialect=dialect)
-    except sqlglot.errors.SqlglotError:
+    except _PARSE_FAILURES:
         return True
     if tree is None:
         return True
@@ -184,14 +216,14 @@ def is_row_returning(sql: str, *, dialect: str = "bigquery") -> bool:
     verdict — the exact ``row_count_between`` bug (#154 DEC-004 / AR row 10). The
     ingest bridge skip-records scalar bodies so they never reach that wrap.
 
-    On a sqlglot parse failure (or a non-``SELECT`` root such as a ``UNION``),
-    returns ``True`` (skip-when-uncertain): "this body is scalar" is the
-    positive claim, and an unparseable / non-single-SELECT body affords no such
-    claim.
+    On a sqlglot parse failure of ANY shape (:data:`_PARSE_FAILURES`) or a
+    non-``SELECT`` root (such as a ``UNION``), returns ``True``
+    (skip-when-uncertain): "this body is scalar" is the positive claim, and an
+    unparseable / non-single-SELECT body affords no such claim.
     """
     try:
         tree = sqlglot.parse_one(sql, dialect=dialect)
-    except sqlglot.errors.SqlglotError:
+    except _PARSE_FAILURES:
         return True
     if tree is None:
         return True
@@ -235,14 +267,14 @@ def is_prunable_count_scalar(sql: str, *, dialect: str = "bigquery") -> bool:
       condition unrelated to the failing-row count, breaking ``0 = pass``);
     * a non-``SELECT`` root or an unparseable body.
 
-    On a sqlglot parse failure (or a non-single-``SELECT`` root such as a
-    ``UNION``), returns ``False`` (skip-when-uncertain): "this is a prunable
-    count scalar" is the *positive* claim, and an unparseable / non-single-SELECT
-    body affords no such claim.
+    On a sqlglot parse failure of ANY shape (:data:`_PARSE_FAILURES`) or a
+    non-single-``SELECT`` root (such as a ``UNION``), returns ``False``
+    (skip-when-uncertain): "this is a prunable count scalar" is the *positive*
+    claim, and an unparseable / non-single-SELECT body affords no such claim.
     """
     try:
         tree = sqlglot.parse_one(sql, dialect=dialect)
-    except sqlglot.errors.SqlglotError:
+    except _PARSE_FAILURES:
         return False
     if tree is None:
         return False
