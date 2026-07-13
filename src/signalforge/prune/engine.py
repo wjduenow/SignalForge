@@ -224,6 +224,7 @@ def _decide_anomaly_cold_start(
     elapsed_ms: int,
     scope: Scope,
     as_of: date | None,
+    bypassed_to_source: bool = False,
 ) -> PruneDecision:
     """Build a :class:`PruneDecision` for an anomaly test whose stats
     query returned fewer than ``min_samples_per_bucket`` periods (#171
@@ -251,6 +252,7 @@ def _decide_anomaly_cold_start(
         compiled_sql=compiled_sql,
         why=_why_kept_without_evidence_cold_start(stats.n_periods, min_required),
         sample_failures=None,
+        bypassed_to_source=bypassed_to_source,
         stats=stats,
         as_of=as_of,
     )
@@ -891,6 +893,7 @@ def _decide_from_test_result(
     capture_failure_rows: int,
     stats: AnomalyTestStats | None = None,
     as_of: date | None = None,
+    bypassed_to_source: bool = False,
 ) -> PruneDecision:
     """Route a successful :class:`TestResult` into a :class:`PruneDecision`.
 
@@ -921,6 +924,7 @@ def _decide_from_test_result(
             compiled_sql=compiled_sql,
             why=_why_always_passes(sampled_rows, scope),
             sample_failures=None,
+            bypassed_to_source=bypassed_to_source,
             stats=stats,
             as_of=as_of,
         )
@@ -938,6 +942,7 @@ def _decide_from_test_result(
             compiled_sql=compiled_sql,
             why=_why_failed_on_known_clean_data(failure_count, sampled_rows),
             sample_failures=sample_failures if capture_failure_rows > 0 else None,
+            bypassed_to_source=bypassed_to_source,
             stats=stats,
             as_of=as_of,
         )
@@ -954,6 +959,7 @@ def _decide_from_test_result(
         compiled_sql=compiled_sql,
         why=_why_kept(failure_count, sampled_rows, scope),
         sample_failures=sample_failures if capture_failure_rows > 0 else None,
+        bypassed_to_source=bypassed_to_source,
         stats=stats,
         as_of=as_of,
     )
@@ -966,6 +972,7 @@ def _decide_requires_future_data(
     sentinel: _RequiresFutureData,
     elapsed_ms: int,
     scope: Scope,
+    bypassed_to_source: bool = False,
 ) -> PruneDecision:
     """Build a :class:`PruneDecision` for a ``relationships`` test whose
     parent isn't in the manifest (DEC-026).
@@ -987,6 +994,7 @@ def _decide_requires_future_data(
         compiled_sql="",
         why=sentinel.reason,
         sample_failures=None,
+        bypassed_to_source=bypassed_to_source,
     )
 
 
@@ -997,6 +1005,7 @@ def _decide_kept_without_evidence_invalid_identifier(
     sentinel: _InvalidIdentifier,
     elapsed_ms: int,
     scope: Scope,
+    bypassed_to_source: bool = False,
 ) -> PruneDecision:
     """Build a :class:`PruneDecision` for a test whose ``column`` /
     ``field`` failed the SQL-identifier shape check (defence-in-depth).
@@ -1021,6 +1030,7 @@ def _decide_kept_without_evidence_invalid_identifier(
         compiled_sql="",
         why=sentinel.reason,
         sample_failures=None,
+        bypassed_to_source=bypassed_to_source,
     )
 
 
@@ -1035,6 +1045,7 @@ def _decide_kept_without_evidence_warehouse_error(
     scope: Scope,
     stats: AnomalyTestStats | None = None,
     as_of: date | None = None,
+    bypassed_to_source: bool = False,
 ) -> PruneDecision:
     """Build a :class:`PruneDecision` for a test that raised a typed
     :class:`WarehouseError` during execution.
@@ -1058,6 +1069,7 @@ def _decide_kept_without_evidence_warehouse_error(
         compiled_sql=compiled_sql,
         why=_why_kept_without_evidence_warehouse_error(exc),
         sample_failures=None,
+        bypassed_to_source=bypassed_to_source,
         stats=stats,
         as_of=as_of,
     )
@@ -1904,13 +1916,18 @@ def prune_tests(
             # verify failure) still bypasses to source — and if a routing bug
             # ever bound one to the temp table anyway, the compiler's DEC-007
             # fail-closed guard refuses it rather than full-scan production.
-            per_test_table_ref = (
-                source_table_ref
-                if _test_requires_source_table(
-                    test, bypass_strategy, samplable=_is_samplable(test_index)
-                )
-                else compile_table_ref
+            #
+            # #268 DEC-011: the SAME predicate that chooses the table ref also
+            # populates :attr:`PruneDecision.bypassed_to_source`. ``scope`` is
+            # copied from ``config.scope``, so a bypassed test is still recorded
+            # as ``scope="sample"`` — the flag is what tells a reviewer whether
+            # the verdict came from the sample or from a full scan of the
+            # source. Reading it off the same call means the audit field and the
+            # actual routing cannot drift.
+            bypassed_to_source = _test_requires_source_table(
+                test, bypass_strategy, samplable=_is_samplable(test_index)
             )
+            per_test_table_ref = source_table_ref if bypassed_to_source else compile_table_ref
 
             # Compile the candidate test to failing-rows SQL. Returns
             # either a string (the SELECT), a ``_RequiresFutureData``
@@ -1942,6 +1959,7 @@ def prune_tests(
                     sentinel=compile_result,
                     elapsed_ms=0,
                     scope=scope,
+                    bypassed_to_source=bypassed_to_source,
                 )
                 _write_audit_or_abort(
                     decision,
@@ -1959,6 +1977,7 @@ def prune_tests(
                     sentinel=compile_result,
                     elapsed_ms=0,
                     scope=scope,
+                    bypassed_to_source=bypassed_to_source,
                 )
                 _write_audit_or_abort(
                     decision,
@@ -2035,6 +2054,7 @@ def prune_tests(
                         compiled_sql_hash=_build_compiled_sql_hash_or_empty(stats_sql_active),
                         elapsed_ms=elapsed_ms,
                         scope=scope,
+                        bypassed_to_source=bypassed_to_source,
                         as_of=as_of,
                     )
                     _write_audit_or_abort(
@@ -2129,6 +2149,7 @@ def prune_tests(
                                 ),
                                 elapsed_ms=elapsed_ms,
                                 scope=scope,
+                                bypassed_to_source=bypassed_to_source,
                                 stats=stats,
                                 as_of=as_of,
                             )
@@ -2163,6 +2184,7 @@ def prune_tests(
                         compiled_sql_hash=_build_compiled_sql_hash_or_empty(stats_sql_active),
                         elapsed_ms=elapsed_ms,
                         scope=scope,
+                        bypassed_to_source=bypassed_to_source,
                         as_of=as_of,
                     )
                     _write_audit_or_abort(
@@ -2202,6 +2224,7 @@ def prune_tests(
                         compiled_sql_hash=violation_sql_hash,
                         elapsed_ms=elapsed_ms,
                         scope=scope,
+                        bypassed_to_source=bypassed_to_source,
                         stats=stats,
                         as_of=as_of,
                     )
@@ -2229,6 +2252,7 @@ def prune_tests(
                     scope=scope,
                     is_trusted=is_trusted,
                     capture_failure_rows=resolved_config.capture_failure_rows,
+                    bypassed_to_source=bypassed_to_source,
                     stats=stats,
                     as_of=as_of,
                 )
@@ -2273,6 +2297,7 @@ def prune_tests(
                     compiled_sql_hash=compiled_sql_hash,
                     elapsed_ms=elapsed_ms,
                     scope=scope,
+                    bypassed_to_source=bypassed_to_source,
                 )
                 _write_audit_or_abort(
                     decision,
@@ -2304,6 +2329,7 @@ def prune_tests(
                 scope=scope,
                 is_trusted=is_trusted,
                 capture_failure_rows=resolved_config.capture_failure_rows,
+                bypassed_to_source=bypassed_to_source,
             )
             _write_audit_or_abort(
                 decision,

@@ -7,7 +7,7 @@ of llm-drafter.md), same POSIX-atomic-append size cap, same
 
 The eight tests below assert each load-bearing property of the writer:
 
-* one JSONL line, all documented fields present, ``audit_schema_version == 3``
+* one JSONL line, all documented fields present, ``audit_schema_version == 4``
 * file mode bits are exactly ``0o600`` (POSIX-only)
 * ``os.fsync`` is called exactly once per write
 * oversize record raises BEFORE any file open (no on-disk artefact)
@@ -37,9 +37,10 @@ from unittest.mock import patch
 
 import pytest
 
-from signalforge.draft.models import CandidateTestNotNull
+from signalforge.draft.models import CandidateTestCustomSQL, CandidateTestNotNull
 from signalforge.prune.audit import (
     _PRUNE_AUDIT_RECORD_LIMIT_BYTES,
+    _PRUNE_AUDIT_SQL_PREFIX_CHARS,
     PruneEvent,
     _build_prune_event,
     _compute_config_hash,
@@ -80,7 +81,7 @@ def _make_event(**decision_overrides: Any) -> PruneEvent:
 
 def test_write_prune_event_emits_one_jsonl_line(tmp_path: Path) -> None:
     """Writer produces exactly one JSONL line; every documented field is
-    present; ``audit_schema_version == 3``.
+    present; ``audit_schema_version == 4``.
     """
     audit_path = tmp_path / "prune.jsonl"
     event = _make_event()
@@ -92,9 +93,10 @@ def test_write_prune_event_emits_one_jsonl_line(tmp_path: Path) -> None:
     assert len(lines) == 1
 
     payload = json.loads(lines[0])
-    assert payload["audit_schema_version"] == 3
+    assert payload["audit_schema_version"] == 4
     # Every documented field present (the issue #171 bump 2 → 3 adds
-    # ``as_of`` + ``stats`` per DEC-013).
+    # ``as_of`` + ``stats`` per DEC-013; the issue #268 bump 3 → 4 adds
+    # ``bypassed_to_source`` per DEC-011).
     expected_fields = {
         "audit_schema_version",
         "signalforge_version",
@@ -114,6 +116,7 @@ def test_write_prune_event_emits_one_jsonl_line(tmp_path: Path) -> None:
         "compiled_sql",
         "why",
         "sample_failures",
+        "bypassed_to_source",
         "as_of",
         "stats",
     }
@@ -162,11 +165,16 @@ def test_write_prune_event_oversize_raises_before_open(tmp_path: Path) -> None:
     """An oversize record raises :class:`PruneAuditRecordTooLargeError`
     BEFORE any file is opened — no on-disk artefact is left behind.
 
-    Constructed by stuffing ``compiled_sql`` past the 4000-byte cap.
+    Constructed by stuffing ``why`` past the 4000-byte cap. #268 DEC-012(3)
+    bounds the two SQL-bearing fields (``compiled_sql`` + a ``custom_sql``
+    ``test.sql``) inside :func:`_build_prune_event`, so they can no longer
+    drive a record over the cap — but the writer's fail-closed size gate
+    stays the backstop for every other field (a runaway ``why``, a large
+    ``sample_failures`` capture). Pinning it through an UNBOUNDED field keeps
+    that backstop under test rather than silently disabling it.
     """
     audit_path = tmp_path / "prune.jsonl"
-    huge_sql = "X" * 4500
-    event = _make_event(compiled_sql=huge_sql)
+    event = _make_event(why="X" * 4500)
 
     with pytest.raises(PruneAuditRecordTooLargeError) as excinfo:
         _write_prune_event(event, audit_path)
@@ -279,7 +287,7 @@ def test_write_prune_event_loops_on_short_writes(tmp_path: Path) -> None:
     assert contents.endswith("\n")
     assert len(contents.splitlines()) == 1
     payload = json.loads(contents.splitlines()[0])
-    assert payload["audit_schema_version"] == 3
+    assert payload["audit_schema_version"] == 4
     # The loop ran (at least two ``os.write`` calls — one short, one to
     # complete).
     assert call_count["n"] >= 2
@@ -466,3 +474,226 @@ def test_config_hash_excludes_as_of() -> None:
     # And both equal the hash for an event with no as_of at all.
     e_none = _make_event()
     assert e_none.config_hash == e1.config_hash
+
+
+# --- #268 DEC-012(3): SQL truncation keeps a real body from aborting the run --
+
+
+#: A realistic ``dbt_expectations.expect_column_values_to_be_in_set``
+#: ``compiled_code`` — the macro expands to a CTE chain plus one row per
+#: accepted value, so a modest enum easily clears 2 KB. Built (not copied from
+#: :file:`tests/fixtures/dbt_project_expectations`) because the committed
+#: fixture's largest body is only ~726 chars, well under the cap; the failure
+#: mode this pins needs a body of the size operators actually run.
+def _dbt_expectations_body() -> str:
+    values = ", ".join(f"'status_value_{i:03d}'" for i in range(100))
+    return (
+        "with all_values as (\n"
+        "    select\n"
+        "        status as value_field\n"
+        "    from `analytics-prod`.`marts_core`.`fct_orders`\n"
+        "    where status is not null\n"
+        "),\n"
+        "set_values as (\n"
+        f"    select cast(value_field as string) as value_field\n"
+        f"    from unnest([{values}]) as value_field\n"
+        "),\n"
+        "validation_errors as (\n"
+        "    select\n"
+        "        v.value_field\n"
+        "    from all_values v\n"
+        "    left join set_values s on v.value_field = s.value_field\n"
+        "    where s.value_field is null\n"
+        ")\n"
+        "select *\nfrom validation_errors\n"
+    )
+
+
+def test_real_dbt_expectations_body_does_not_abort_the_run(tmp_path: Path) -> None:
+    """#268 DEC-012(3) — THE regression pin. A real ~2 KB dbt-expectations
+    ``compiled_code`` must write a :class:`PruneEvent` WITHOUT raising
+    :class:`PruneAuditRecordTooLargeError`.
+
+    Before the fix this ABORTED THE WHOLE RUN: the body is serialised TWICE on
+    one record — once as ``test.sql`` (for a ``from_manifest`` candidate the
+    ``sql`` IS the dbt ``compiled_code``, per #154) and once as
+    ``compiled_sql`` — so ~2 KB of SQL became a >4000-byte JSONL line, the
+    writer's fail-closed size gate fired, and the error propagated out of
+    ``prune_tests`` → CLI exit 3, mid-batch, with earlier decisions already
+    fsync'd.
+
+    The 4000-byte cap is load-bearing (``PIPE_BUF`` atomic concurrent appends)
+    and is NOT raised; the SQL bodies are bounded instead.
+    """
+    body = _dbt_expectations_body()
+    audit_path = tmp_path / "prune.jsonl"
+    event = _make_event(
+        test_anchor="model",
+        test=CandidateTestCustomSQL(sql=body, column=None, from_manifest=True),
+        compiled_sql=body,
+    )
+
+    # Guard the guard: this test is only worth its keep if the UNTRUNCATED
+    # record would genuinely have blown the cap. Rebuild the pre-fix payload
+    # (the full body on both SQL surfaces) and assert it does — if the body
+    # ever shrinks below the threshold the assertion below becomes vacuous and
+    # this fires instead of passing silently.
+    untruncated = json.dumps(
+        {
+            **event.model_dump(mode="json"),
+            "compiled_sql": body,
+            "test": {"type": "custom_sql", "column": None, "sql": body, "rationale": None},
+        },
+        separators=(",", ":"),
+    )
+    assert len(untruncated.encode("utf-8")) > _PRUNE_AUDIT_RECORD_LIMIT_BYTES, (
+        "the fixture body no longer overflows the audit cap, so this test no "
+        "longer exercises the run-aborting bug it exists to prevent"
+    )
+    # Both SQL surfaces must be over the per-field budget — truncating only one
+    # is not enough (the ingest reader admits bodies up to 256 KB).
+    assert len(body) > _PRUNE_AUDIT_SQL_PREFIX_CHARS
+
+    # No raise: this is the whole point.
+    _write_prune_event(event, audit_path)
+
+    line = audit_path.read_text(encoding="utf-8").splitlines()[0]
+    assert len(line.encode("utf-8")) <= _PRUNE_AUDIT_RECORD_LIMIT_BYTES
+    payload = json.loads(line)
+    # BOTH SQL surfaces are bounded — truncating only one still aborts, because
+    # the ingest reader admits bodies up to 256 KB.
+    assert len(payload["compiled_sql"]) < len(body)
+    assert len(payload["test"]["sql"]) < len(body)
+
+
+def test_truncated_sql_is_visibly_marked_and_preserves_the_forensic_hash(
+    tmp_path: Path,
+) -> None:
+    """Truncation must never be silent, and must never break the forensic
+    chain (#268 DEC-012(3)).
+
+    ``compiled_sql_hash`` is computed by the engine over the FULL compiled SQL
+    and stored as its own field, so it survives the truncation intact — a
+    reviewer correlates the audit row back to the real statement through the
+    hash. The visible marker exists so nobody reads the surviving prefix as if
+    it were the whole statement.
+    """
+    body = _dbt_expectations_body()
+    audit_path = tmp_path / "prune.jsonl"
+    event = _make_event(
+        test=CandidateTestCustomSQL(sql=body, column=None, from_manifest=True),
+        compiled_sql=body,
+        compiled_sql_hash="feedfacecafe0000",
+    )
+    _write_prune_event(event, audit_path)
+    payload = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[0])
+
+    for field in (payload["compiled_sql"], payload["test"]["sql"]):
+        assert field.startswith(body[:100])  # the prefix is the real SQL
+        assert "signalforge: SQL truncated" in field  # ... and it says so
+        assert str(len(body)) in field  # ... naming the true length
+    # The forensic anchor is the hash of the FULL SQL — untouched.
+    assert payload["compiled_sql_hash"] == "feedfacecafe0000"
+
+
+def test_under_cap_sql_is_not_truncated(tmp_path: Path) -> None:
+    """Byte-identical to pre-#268 for every ordinary decision — a drafted
+    built-in's compiled SQL is a couple hundred chars and must round-trip
+    verbatim, marker-free. Without this pin the truncation could quietly
+    mangle every record.
+    """
+    sql = "SELECT COUNT(*) AS failures FROM (SELECT `id` FROM `p.d.t` WHERE `id` IS NULL) AS t"
+    audit_path = tmp_path / "prune.jsonl"
+    _write_prune_event(_make_event(compiled_sql=sql), audit_path)
+    payload = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["compiled_sql"] == sql
+    assert "truncated" not in payload["compiled_sql"]
+
+
+def test_build_prune_event_does_not_truncate_the_in_memory_decision() -> None:
+    """The truncation is an AUDIT-record concern only. The
+    :class:`PruneDecision` the engine returns to the diff / grade stages keeps
+    the FULL SQL — those stages render and grade the real statement.
+    """
+    body = _dbt_expectations_body()
+    decision = _make_decision(
+        test=CandidateTestCustomSQL(sql=body, column=None, from_manifest=True),
+        compiled_sql=body,
+    )
+    event = _build_prune_event(
+        decision=decision,
+        model_unique_id="model.test.x",
+        config_hash="abc123def456789a",
+    )
+    assert decision.compiled_sql == body
+    assert decision.test.sql == body  # type: ignore[union-attr]
+    assert event.compiled_sql != body
+    # ``from_manifest`` (``exclude=True``, #154) survives the ``model_copy``.
+    assert isinstance(event.test, CandidateTestCustomSQL)
+    assert event.test.from_manifest is True
+
+
+# --- #268 DEC-011: bypassed_to_source ---------------------------------------
+
+
+def test_bypassed_to_source_defaults_false_and_rides_from_decision_to_event() -> None:
+    """DEC-011 — the flag is carried from :class:`PruneDecision` onto the
+    audit-of-record :class:`PruneEvent`.
+
+    ``scope`` is copied from ``config.scope``, so a bypassed test is still
+    recorded as ``scope="sample"``; this flag is the ONLY thing in the audit
+    that distinguishes a genuinely-sampled verdict from a full scan of the
+    source.
+    """
+    assert _make_event().bypassed_to_source is False
+    assert _make_event(bypassed_to_source=True).bypassed_to_source is True
+
+
+def test_bypassed_to_source_serialises_to_jsonl(tmp_path: Path) -> None:
+    """The flag reaches disk — a reviewer reading ``prune.jsonl`` can tell the
+    two cases apart.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    _write_prune_event(_make_event(bypassed_to_source=True, scope="sample"), audit_path)
+    payload = json.loads(audit_path.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["bypassed_to_source"] is True
+    # The lie this field exists to expose: scope still reads "sample".
+    assert payload["scope"] == "sample"
+
+
+def test_v3_shaped_dict_replays_as_v4() -> None:
+    """A v3-shaped dict (no ``bypassed_to_source`` key at all) loads cleanly
+    into the current v4 :class:`PruneEvent`, defaulting the new field to
+    ``False``.
+
+    This is why :attr:`PruneEvent.audit_schema_version` is typed :class:`int`
+    and NOT :class:`typing.Literal` — audit replay across schema versions is a
+    real requirement, and a ``Literal[4]`` would reject every record already
+    on disk.
+    """
+    v3_dict: dict[str, Any] = dict(
+        audit_schema_version=3,
+        signalforge_version="0.1.0.dev0",
+        record_id="abc123",
+        timestamp="2026-04-30T12:00:00.000000Z",
+        config_hash="abc123def456789a",
+        model_unique_id="model.sf_demo.fct_orders",
+        test={"type": "not_null", "column": "id", "rationale": "PK."},
+        test_anchor="column.id",
+        decision="dropped",
+        reason="always-passes",
+        failures=0,
+        sampled_rows=100000,
+        scope="sample",
+        elapsed_ms=87,
+        compiled_sql_hash="0123456789abcdef",
+        compiled_sql="SELECT COUNT(*) AS failures FROM `p.d.t` WHERE id IS NULL",
+        why="Test passed on 100000 sample rows; no failures.",
+        sample_failures=None,
+        as_of=None,
+        stats=None,
+        # Deliberately NO ``bypassed_to_source`` — that is the v3 shape.
+    )
+    event = PruneEvent.model_validate(v3_dict)
+    assert event.audit_schema_version == 3
+    assert event.bypassed_to_source is False
