@@ -51,6 +51,7 @@ See ``plans/super/6-prune-engine.md`` for the full design.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import blake2b
@@ -618,6 +619,60 @@ def _is_multi_table(resolved_sql: str) -> bool:
     return _JOIN_RE.search(_strip_string_literals(resolved_sql)) is not None
 
 
+def _build_ingested_rewrite(
+    sql: str,
+    *,
+    spans: Sequence[tuple[int, int]],
+    table_ref: TableRef,
+    dialect: Dialect,
+) -> str:
+    """Splice every ``spans`` run in ``sql`` to the quoted ``table_ref`` (#268 DEC-001/015).
+
+    The relation-locate half lives in
+    :func:`signalforge.ingest._compiled_sql.plan_relation_rewrite` (the sqlglot
+    importer); this is the **pure string** half, so ``signalforge.prune`` stays
+    free of a sqlglot import (no 4th importer → no confinement scan is owed).
+    Mirrors #267's classify-at-ingest / restructure-at-compiler split.
+
+    Span semantics (DEC-015): ``spans`` are **character** offsets with an
+    **INCLUSIVE** end — ``sql[start : end + 1]`` is the token run. The splice
+    walks them **BACK-TO-FRONT** so an earlier span's replacement cannot shift
+    the offsets of a later one. ``sql`` MUST be the identical ``str`` object the
+    spans were computed against; offsets computed on one string and applied to
+    another (a comment-stripped or normalised copy) is exactly how this becomes
+    an injection.
+
+    The replacement is rendered by :func:`_qualified_table_name` — the project's
+    own fold-then-quote path, honouring :attr:`Dialect.identifier_case` and
+    :attr:`Dialect.quote_qualified_per_component`. Never f-string the temp
+    name; never let sqlglot's generator do the quoting.
+
+    Every byte OUTSIDE the spans is preserved verbatim, so dbt's comments and
+    indentation survive the rewrite intact.
+
+    The caller MUST prove the DEC-004 post-condition on the result with
+    :func:`signalforge.ingest._compiled_sql.verify_relation_rewrite` before it is
+    dispatched — this function does no verification of its own.
+    """
+    replacement = _qualified_table_name(table_ref, dialect)
+    out = sql
+    for start, end in sorted(spans, reverse=True):
+        out = out[:start] + replacement + out[end + 1 :]
+    return out
+
+
+#: The DEC-007 fail-closed refusal. Emitted when an ingested (``from_manifest``)
+#: body is handed a ``table_ref`` that is NOT the model's own source relation and
+#: no verified relation rewrite came with it. Without this guard a one-line engine
+#: change re-opens a **silent full-scan of production recorded as an
+#: evidence-backed verdict at ``scope="sample"``** — the worst outcome this system
+#: can produce (it would then ``always-passes``-drop a real test).
+_INGESTED_UNBOUND_REASON = (
+    "ingested custom_sql cannot be bound to a non-source table (the deterministic "
+    "sample) without a verified relation rewrite"
+)
+
+
 def _compile_custom_sql(
     test: CandidateTestCustomSQL,
     table_ref: TableRef,
@@ -629,6 +684,7 @@ def _compile_custom_sql(
     sample_size: int | None,
     sample_bucket: int | None,
     partition_filter: PartitionFilter | None,
+    ingested_sql_override: str | None = None,
 ) -> str | _RequiresFutureData | _InvalidIdentifier:
     """Compile a ``custom_sql`` singular test to a failing-rows SELECT.
 
@@ -687,19 +743,22 @@ def _compile_custom_sql(
     through), the test cannot be resolved and routes to the sentinel.
     """
     if test.from_manifest:
-        # #154 DEC-007 / DEC-013 — manifest ``compiled_code`` path. The body is
-        # already Jinja-resolved by dbt and references the relation with dbt's
-        # OWN quoting scheme, which neither the ``{{ this }}`` sample-substitution
-        # nor the partition-filter derived-table rewrite below can bind. So it
-        # runs FULL-SCOPE against the source, as-is (bounded by the adapter's
-        # ``maximum_bytes_billed`` cap). The engine routes an ingested candidate
-        # to ``source_table_ref`` via
-        # :func:`signalforge.prune.engine._test_requires_source_table`, so the
-        # compiled SQL is NEVER wrapped against a ``_SESSION._sf_sample_*`` temp
-        # table (``scope`` / ``sample_size`` / ``partition_filter`` are ignored
-        # on this branch). ``resolve_template_refs`` is skipped: a compiled body
+        # #154 DEC-013 / #268 DEC-001+007 — manifest ``compiled_code`` path. The
+        # body is already Jinja-resolved by dbt and references the relation with
+        # dbt's OWN quoting scheme, which neither the ``{{ this }}``
+        # sample-substitution nor the partition-filter derived-table rewrite below
+        # can bind (a string substitution cannot find a relation it did not
+        # render). ``resolve_template_refs`` is likewise skipped: a compiled body
         # carries no ``{{ }}``, and running the resolver would risk a spurious
         # residual-Jinja rejection.
+        #
+        # Since #268 the body CAN be sampled — but ONLY via a relation rewrite the
+        # engine planned (``plan_relation_rewrite``), spliced
+        # (:func:`_build_ingested_rewrite`) and PROVED against the DEC-004 AST
+        # post-condition (``verify_relation_rewrite``), then threaded back in as
+        # ``ingested_sql_override``. Absent that override the body is only ever
+        # dispatched against the model's OWN source relation — see the DEC-007
+        # fail-closed guard below.
         #
         # Determinism belt-and-braces (DEC-012): the ingest bridge (#154 US-003)
         # is the PRIMARY determinism gate (it skip-records TABLESAMPLE / RAND /
@@ -729,6 +788,22 @@ def _compile_custom_sql(
             return _InvalidIdentifier(
                 reason="ingested custom_sql rejected by the comment-tolerant SQL safety scan"
             )
+
+        # #268 DEC-007 — THE fail-closed guard. ``table_ref`` is the model's own
+        # source relation only when we can PROVE it: the model must be threaded AND
+        # its resolved relation must equal ``table_ref``. A ``model=None``
+        # (unprovable) or a ``table_ref`` pointing at the ``_SESSION._sf_sample_*``
+        # temp table is a NON-source binding — and an ingested body carries dbt's
+        # own quoting of the PRODUCTION relation, so dispatching it unrewritten
+        # would read production while the engine booked the verdict at
+        # ``scope="sample"``. That is a silent full-scan recorded as evidence, and
+        # an ``always-passes`` outcome from it would DROP A REAL TEST. Every
+        # non-source binding therefore requires a verified rewrite in hand;
+        # anything else refuses.
+        is_source_table_ref = (
+            model is not None and table_ref.qualified_name == model.resolve_this().qualified_name
+        )
+
         # #267 US-003 (DEC-002 / DEC-007) — a SCALAR (one-row) ingested body must
         # be restructured before it reaches the adapter's failing-rows envelope.
         # The adapter wraps every compiler output as
@@ -738,6 +813,15 @@ def _compile_custom_sql(
         # ``_compile_row_count_between`` was corrected for (US-007a). A
         # row-returning body is faithful under the envelope and returns verbatim.
         if not is_row_returning(test.sql, dialect=dialect.name):
+            # #268 DEC-003 — a count-of-rows scalar is NEVER sampled: an aggregate
+            # over a hash-mod'd sample is semantically meaningless
+            # (``business-rule-tests.md`` Direction-2), so the engine keeps it
+            # routed to source and never plans a rewrite for it. Should one reach
+            # the compiler bound to the sample temp table anyway, the DEC-007 guard
+            # still holds — refuse rather than book a full-scan (or a sampled
+            # count) as evidence. #267's verdicts at source are unchanged.
+            if not is_source_table_ref:
+                return _InvalidIdentifier(reason=_INGESTED_UNBOUND_REASON)
             if is_prunable_count_scalar(test.sql, dialect=dialect.name):
                 # DEC-002 — a single top-level COUNT-family scalar is soundly
                 # re-interpretable as a failing-rows count (dbt convention:
@@ -775,6 +859,44 @@ def _compile_custom_sql(
             return _InvalidIdentifier(
                 reason="ingested aggregate custom_sql is not a prunable count-of-rows shape"
             )
+
+        # Row-returning ingested body.
+        if ingested_sql_override is not None:
+            # #268 DEC-008 — the engine planned + spliced + PROVED this rewrite
+            # (``verify_relation_rewrite``: parses clean, ZERO residual source
+            # relations, exactly N temp relations) before threading it here, so
+            # routing and compilation agree structurally rather than
+            # coincidentally.
+            #
+            # DEC-007 defence in depth: "the engine verified it" does not excuse
+            # the compiler from re-checking a string it did not itself produce. A
+            # correct splice can only narrow the relation — it can introduce
+            # neither a non-deterministic construct nor an injection — but the two
+            # gates are cheap and total, and they are what keeps the safety
+            # contract from being bypassable by a single engine-side mistake.
+            if not is_deterministic_sql(ingested_sql_override, dialect=dialect.name):
+                return _InvalidIdentifier(
+                    reason=(
+                        "relation-rewritten ingested custom_sql is non-deterministic "
+                        "(TABLESAMPLE / RAND / time-dependent function)"
+                    )
+                )
+            try:
+                validate_ingested_sql(ingested_sql_override)
+            except QuerySyntaxError:
+                return _InvalidIdentifier(
+                    reason=(
+                        "relation-rewritten ingested custom_sql rejected by the "
+                        "comment-tolerant SQL safety scan"
+                    )
+                )
+            return ingested_sql_override
+
+        # #268 DEC-007 — no verified rewrite in hand, so the body may ONLY be
+        # dispatched when it is bound to the model's own source relation. Every
+        # other binding refuses (see ``is_source_table_ref`` above).
+        if not is_source_table_ref:
+            return _InvalidIdentifier(reason=_INGESTED_UNBOUND_REASON)
         return test.sql
 
     if model is None:
@@ -1785,6 +1907,7 @@ def _compile_test(
     sample_bucket: int | None = None,
     partition_filter: PartitionFilter | None = None,
     as_of: date | None = None,
+    ingested_sql_override: str | None = None,
 ) -> str | _RequiresFutureData | _InvalidIdentifier | tuple[str, str]:
     """Render a candidate test as a failing-rows SELECT.
 
@@ -1832,6 +1955,19 @@ def _compile_test(
       the parent stays at full so an orphan detected in the child
       sample is not a false positive of the parent's missing-from-sample
       row. ``partition_filter`` likewise applies to the child only.
+
+    ``ingested_sql_override`` (#268 DEC-007 / DEC-008) is consumed by EXACTLY ONE
+    arm — the ``from_manifest`` (manifest-``compiled_code``) ``custom_sql`` branch.
+    The engine precomputes the relation rewrite once per candidate (locate via
+    :func:`signalforge.ingest._compiled_sql.plan_relation_rewrite`, splice via
+    :func:`_build_ingested_rewrite`, prove via
+    :func:`signalforge.ingest._compiled_sql.verify_relation_rewrite`) and threads
+    the VERIFIED SQL string in, so routing and compilation cannot silently
+    disagree. When it is ``None`` and ``table_ref`` is not the model's own source
+    relation, the ingested arm fails closed with :class:`_InvalidIdentifier` — the
+    guard that prevents a silent full-scan of production being booked as an
+    evidence-backed verdict at ``scope="sample"``. Every other variant ignores
+    the kwarg.
     """
     if isinstance(test, CandidateTestNotNull):
         return _compile_not_null(
@@ -1885,6 +2021,7 @@ def _compile_test(
             sample_size=sample_size,
             sample_bucket=sample_bucket,
             partition_filter=partition_filter,
+            ingested_sql_override=ingested_sql_override,
         )
     if isinstance(test, CandidateTestRowCountBetween):
         # row_count_between bypasses scope / sample_size / sample_bucket /

@@ -34,8 +34,10 @@ from signalforge.draft.models import (
     CandidateTestUnique,
     CandidateTestUniqueCombination,
 )
+from signalforge.ingest._compiled_sql import plan_relation_rewrite, verify_relation_rewrite
 from signalforge.manifest.models import Column, Manifest, Model, Source
 from signalforge.prune.compiler import (
+    _build_ingested_rewrite,
     _compile_test,
     _compute_compiled_sql_hash,
     _InvalidIdentifier,
@@ -1020,12 +1022,18 @@ def test_compile_ingested_custom_sql_full_returns_body_as_is() -> None:
     assert actual == _INGESTED_COMPILED_SQL
 
 
-def test_compile_ingested_custom_sql_sample_scope_never_samples() -> None:
-    """DEC-007: even when scope=sample (+ sample args) is passed, an ingested
-    body is returned full-scope, as-is — NO deterministic-sample CTE, and the
-    dispatched SQL NEVER references a _SESSION._sf_sample_* temp table. dbt's
-    quoted relation cannot bind the {{ this }} substitution, so sampling it
-    would silently degrade to kept-without-evidence; full-scope is the fix."""
+def test_compile_ingested_custom_sql_sample_scope_without_override_never_samples() -> None:
+    """INVERTED by #268 (was ``…_sample_scope_never_samples``).
+
+    An ingested body is NO LONGER unconditionally full-scope — since #268 it can
+    be relation-rewritten onto the materialised sample. But that requires a
+    VERIFIED rewrite threaded in as ``ingested_sql_override``; the sample-mode
+    knobs alone (``scope="sample"`` + sample args) must NEVER by themselves
+    produce a sampled dispatch. With ``table_ref`` still bound to the model's own
+    source relation and no override in hand, the body compiles verbatim,
+    full-scope: NO deterministic-sample CTE (dbt's quoted relation cannot bind the
+    ``{{ this }}`` string substitution) and NO ``_SESSION._sf_sample_*`` reference.
+    """
     test = CandidateTestCustomSQL(sql=_INGESTED_COMPILED_SQL, from_manifest=True)
     actual = _compile_test(
         test,
@@ -1104,19 +1112,27 @@ def test_compile_ingested_custom_sql_injection_returns_sentinel() -> None:
     assert "safety scan" in result.reason
 
 
-def test_compile_ingested_custom_sql_needs_no_model() -> None:
-    """An ingested body is self-contained (no {{ this }} to resolve), so it
-    compiles even without a threaded model — unlike a drafted custom_sql,
-    which returns _InvalidIdentifier when model=None."""
+def test_compile_ingested_custom_sql_without_model_fails_closed() -> None:
+    """INVERTED by #268 (was ``…_needs_no_model``).
+
+    The ingested arm previously compiled without a threaded model — the body is
+    self-contained (no ``{{ this }}`` to resolve), so ``model`` was unused. The
+    #268 DEC-007 guard changes that contract: the compiler can only dispatch an
+    ingested body when it can **prove** ``table_ref`` IS the model's own source
+    relation, and that proof requires the model. ``model=None`` is unprovable, so
+    it fails closed → ``kept-without-evidence`` rather than risk dispatching
+    dbt's production-quoted body against a sample temp table.
+    """
     test = CandidateTestCustomSQL(sql=_INGESTED_COMPILED_SQL, from_manifest=True)
-    actual = _compile_test(
+    result = _compile_test(
         test,
         _make_orders_table_ref(),
         BIGQUERY_DIALECT,
         _make_manifest(),
         model=None,
     )
-    assert actual == _INGESTED_COMPILED_SQL
+    assert isinstance(result, _InvalidIdentifier)
+    assert "without a verified relation rewrite" in result.reason
 
 
 # #267 US-003 (DEC-002 / DEC-007): a SCALAR count-of-rows ingested body is
@@ -1216,6 +1232,236 @@ def test_compile_ingested_non_count_scalar_returns_sentinel() -> None:
     )
     assert isinstance(result, _InvalidIdentifier)
     assert "not a prunable count-of-rows shape" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# #268 US-003 — the ingested arm can now be relation-rewritten onto the
+# materialised sample, and the DEC-007 fail-closed guard that makes that safe.
+#
+# The guard is the single most load-bearing line in the ingested path: without
+# it, a one-line engine change re-opens a SILENT FULL-SCAN OF PRODUCTION recorded
+# as an evidence-backed verdict at scope="sample" — which would then
+# ``always-passes``-drop a real test. Every non-source ``table_ref`` therefore
+# demands a VERIFIED rewrite in hand; anything else refuses.
+# ---------------------------------------------------------------------------
+
+
+def _make_sample_table_ref() -> TableRef:
+    """The materialised-sample temp table the engine hands the compiler.
+
+    Mirrors ``BigQueryAdapter.materialise_sample``'s return shape: ``project=None``
+    (BigQuery rejects the three-part form even inside the owning session),
+    ``dataset="_SESSION"``, ``name="_sf_sample_<run_id>"``.
+    """
+    return TableRef(project=None, dataset="_SESSION", name="_sf_sample_deadbeefcafef00d")
+
+
+def _verified_ingested_override(
+    sql: str, *, temp: TableRef, dialect: Dialect = BIGQUERY_DIALECT
+) -> str:
+    """Reproduce the engine's (US-004) precompute: locate → splice → **prove**.
+
+    Locate the model's own relation in the foreign-rendered body
+    (:func:`plan_relation_rewrite`), splice the spans to the quoted temp table
+    (:func:`_build_ingested_rewrite` — the compiler's pure-string half), then
+    prove the DEC-004 AST post-condition (:func:`verify_relation_rewrite`: parses
+    clean, ZERO residual source relations, exactly N temp relations). Only a
+    rewrite that survives all three is legal to thread in as
+    ``ingested_sql_override``.
+    """
+    source_parts = tuple(_make_orders_model().resolve_this().qualified_name.split("."))
+    plan = plan_relation_rewrite(sql, relation=source_parts, dialect=dialect.name)
+    assert plan.samplable, f"fixture is not samplable: {plan.reason}"
+    rewritten = _build_ingested_rewrite(sql, spans=plan.spans, table_ref=temp, dialect=dialect)
+    assert verify_relation_rewrite(
+        rewritten,
+        source=source_parts,
+        temp=(temp.dataset, temp.name),
+        expected_n=len(plan.spans),
+        dialect=dialect.name,
+    )
+    return rewritten
+
+
+def test_build_ingested_rewrite_splices_back_to_front_preserving_every_other_byte() -> None:
+    """The pure-string splice half of #268 DEC-001 (no sqlglot in ``prune/``).
+
+    Spans are CHARACTER offsets with an INCLUSIVE end (DEC-015), so ``sql[s:e+1]``
+    is the token run; splicing BACK-TO-FRONT keeps an earlier replacement from
+    shifting a later span's offsets. Two spans of DIFFERENT source lengths are
+    used deliberately — a front-to-back splice would mis-aim the second one. Every
+    byte outside the spans (dbt's comments and indentation) survives verbatim, and
+    the replacement is rendered by ``_qualified_table_name`` (fold-then-quote),
+    never an f-string of the raw temp name.
+    """
+    sql = "AAAA<one>BBBB<longer-two>CCCC"
+    spans = ((4, 8), (13, 24))  # inclusive ends
+    assert sql[4:9] == "<one>"
+    assert sql[13:25] == "<longer-two>"
+
+    temp = _make_sample_table_ref()
+    out = _build_ingested_rewrite(sql, spans=spans, table_ref=temp, dialect=BIGQUERY_DIALECT)
+
+    quoted = _qualified_table_name(temp, BIGQUERY_DIALECT)
+    assert out == f"AAAA{quoted}BBBB{quoted}CCCC"
+    assert out.count(quoted) == 2
+    # Every non-span byte is preserved.
+    assert "<one>" not in out
+    assert "<longer-two>" not in out
+
+
+def test_compile_ingested_custom_sql_with_override_samples_and_never_reads_source() -> None:
+    """THE happy path #268 exists for: an ingested body bound to the materialised
+    sample temp table compiles to SQL that references ``_SESSION._sf_sample_*``
+    and **NEVER** the production source relation."""
+    temp = _make_sample_table_ref()
+    override = _verified_ingested_override(_INGESTED_COMPILED_SQL, temp=temp)
+
+    actual = _compile_test(
+        CandidateTestCustomSQL(sql=_INGESTED_COMPILED_SQL, from_manifest=True),
+        temp,
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="full",
+        ingested_sql_override=override,
+    )
+
+    assert isinstance(actual, str)
+    assert actual == override
+    assert "`_SESSION._sf_sample_deadbeefcafef00d`" in actual
+    # The load-bearing assertion: not one byte of the production relation survives.
+    assert "orders" not in actual
+    assert "fake_project" not in actual
+    assert "dataset" not in actual
+
+
+def test_compile_ingested_custom_sql_override_preserves_dbt_comments_and_indentation() -> None:
+    """Only the relation spans are spliced — dbt's ``--`` line comments, ``/* */``
+    block comments and indentation survive the rewrite BYTE-INTACT (DEC-015: the
+    splice is a character-offset operation on the identical ``str`` object, not a
+    re-render through a SQL generator)."""
+    body = (
+        "-- generated by dbt-expectations\n"
+        "select\n"
+        "    order_id\n"
+        "from `fake_project`.`dataset`.`orders`  /* the orders relation */\n"
+        "where total < 0  -- negative totals are failing rows"
+    )
+    temp = _make_sample_table_ref()
+    override = _verified_ingested_override(body, temp=temp)
+
+    actual = _compile_test(
+        CandidateTestCustomSQL(sql=body, from_manifest=True),
+        temp,
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        ingested_sql_override=override,
+    )
+
+    assert isinstance(actual, str)
+    assert actual == (
+        "-- generated by dbt-expectations\n"
+        "select\n"
+        "    order_id\n"
+        "from `_SESSION._sf_sample_deadbeefcafef00d`  /* the orders relation */\n"
+        "where total < 0  -- negative totals are failing rows"
+    )
+
+
+def test_compile_ingested_custom_sql_temp_table_ref_without_override_fails_closed() -> None:
+    """**THE guard (#268 DEC-007).**
+
+    An ingested body bound to the materialised-sample temp table with NO verified
+    rewrite in hand MUST refuse. The body carries dbt's own quoting of the
+    PRODUCTION relation, so dispatching it here would full-scan production while
+    the engine booked the verdict at ``scope="sample"`` — a silent prod scan
+    recorded as evidence, whose ``always-passes`` outcome would DROP A REAL TEST.
+    Route to ``_InvalidIdentifier`` → ``kept-without-evidence`` instead.
+    """
+    result = _compile_test(
+        CandidateTestCustomSQL(sql=_INGESTED_COMPILED_SQL, from_manifest=True),
+        _make_sample_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        scope="full",
+        ingested_sql_override=None,
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "without a verified relation rewrite" in result.reason
+
+
+def test_compile_ingested_count_scalar_temp_table_ref_without_override_fails_closed() -> None:
+    """DEC-003 — a count-of-rows scalar is NEVER sampled (an aggregate over a
+    hash-mod'd sample is semantically meaningless), so the engine keeps it routed
+    to source and never plans a rewrite for it. Should one nonetheless reach the
+    compiler bound to the temp table, the DEC-007 guard still holds: refuse rather
+    than emit the #267 composed wrap against a sample (or, worse, against
+    production while claiming a sampled verdict)."""
+    result = _compile_test(
+        CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_SQL, from_manifest=True),
+        _make_sample_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "without a verified relation rewrite" in result.reason
+
+
+def test_compile_ingested_custom_sql_source_table_ref_still_returns_body_verbatim() -> None:
+    """The unchanged contract: bound to the model's OWN source relation with no
+    override, the ingested body compiles verbatim (today's #154 behaviour). The
+    #268 guard is a no-op on the source binding."""
+    actual = _compile_test(
+        CandidateTestCustomSQL(sql=_INGESTED_COMPILED_SQL, from_manifest=True),
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        ingested_sql_override=None,
+    )
+    assert actual == _INGESTED_COMPILED_SQL
+
+
+def test_compile_ingested_custom_sql_override_is_revalidated_for_injection() -> None:
+    """DEC-007 defence in depth: "the engine verified it" does not excuse the
+    compiler from re-checking a string it did not produce. An override carrying a
+    top-level ``;`` fails the comment-tolerant safety scan → ``_InvalidIdentifier``,
+    never dispatched."""
+    result = _compile_test(
+        CandidateTestCustomSQL(sql=_INGESTED_COMPILED_SQL, from_manifest=True),
+        _make_sample_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        ingested_sql_override=(
+            "select order_id from `_SESSION._sf_sample_deadbeefcafef00d`; drop table x"
+        ),
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "safety scan" in result.reason
+
+
+def test_compile_ingested_custom_sql_override_is_revalidated_for_determinism() -> None:
+    """DEC-007 defence in depth: a non-deterministic override (a run-to-run-varying
+    verdict violates Architectural Commitment #5) is refused at the compiler even
+    though the engine's own gate should have caught it upstream."""
+    result = _compile_test(
+        CandidateTestCustomSQL(sql=_INGESTED_COMPILED_SQL, from_manifest=True),
+        _make_sample_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+        ingested_sql_override=(
+            "select order_id from `_SESSION._sf_sample_deadbeefcafef00d` "
+            "where created_at > CURRENT_TIMESTAMP()"
+        ),
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "non-deterministic" in result.reason
 
 
 def test_compile_drafted_custom_sql_still_samples_unchanged() -> None:
