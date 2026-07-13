@@ -268,3 +268,73 @@ def test_validate_ingested_sql_backslash_escaped_quote_keeps_comment_inside_stri
     # A real statement separator outside any string is still rejected.
     with pytest.raises(QuerySyntaxError):
         validate_ingested_sql("SELECT * FROM t WHERE label = 'it\\'s ok'; DROP TABLE t")
+
+
+# --------------------------------------------------------------------------- #
+# Hostile-input totality (#268 US-001 / DEC-012(1))
+# --------------------------------------------------------------------------- #
+
+
+def _deeply_nested_body(depth: int = 2000) -> str:
+    """A body whose paren nesting exceeds sqlglot's recursive-descent depth.
+
+    ``sqlglot.parse_one`` blows the Python recursion limit on this input and
+    raises ``RecursionError`` — which is a ``RuntimeError``, NOT a
+    ``sqlglot.errors.SqlglotError``, so pre-#268 it escaped every helper's
+    ``except`` and aborted the whole prune run with no audit rows written.
+    """
+    return "select * from t where " + "(" * depth + "1=1" + ")" * depth
+
+
+def test_deeply_nested_body_triggers_recursion_error_in_sqlglot() -> None:
+    """Pin the premise: the crafted body really does blow sqlglot's recursion.
+
+    Without this, the three conservative-verdict tests below could pass
+    vacuously if a future sqlglot grew an iterative parser — this test would
+    fail loudly first, telling the maintainer the hostile input needs re-crafting
+    rather than silently degrading the totality guarantee to an assertion about
+    a body that parses fine.
+    """
+    import sqlglot
+
+    with pytest.raises(RecursionError):
+        sqlglot.parse_one(_deeply_nested_body(), dialect="bigquery")
+
+
+def test_is_deterministic_sql_recursion_error_returns_conservative_true() -> None:
+    """A RecursionError must NOT escape — the helper degrades to ``True``."""
+    assert is_deterministic_sql(_deeply_nested_body()) is True
+
+
+def test_is_row_returning_recursion_error_returns_conservative_true() -> None:
+    """A RecursionError must NOT escape — the helper degrades to ``True``."""
+    assert is_row_returning(_deeply_nested_body()) is True
+
+
+def test_is_prunable_count_scalar_recursion_error_returns_conservative_false() -> None:
+    """A RecursionError must NOT escape — the helper degrades to ``False``."""
+    assert is_prunable_count_scalar(_deeply_nested_body()) is False
+
+
+def test_unknown_dialect_raises_value_error_from_sqlglot() -> None:
+    """Pin the premise: an unknown dialect name raises ``ValueError`` (not a
+    ``SqlglotError``), so it escaped the pre-#268 ``except`` too."""
+    import sqlglot
+
+    with pytest.raises(ValueError):
+        sqlglot.parse_one("SELECT 1", dialect="nope")
+
+
+def test_is_deterministic_sql_unknown_dialect_returns_conservative_true() -> None:
+    """An unknown ``dialect=`` must degrade, never escape as a ``ValueError``."""
+    assert is_deterministic_sql("SELECT a FROM t WHERE a > 0", dialect="nope") is True
+
+
+def test_is_row_returning_unknown_dialect_returns_conservative_true() -> None:
+    """An unknown ``dialect=`` must degrade, never escape as a ``ValueError``."""
+    assert is_row_returning("SELECT COUNT(*) FROM t", dialect="nope") is True
+
+
+def test_is_prunable_count_scalar_unknown_dialect_returns_conservative_false() -> None:
+    """An unknown ``dialect=`` must degrade, never escape as a ``ValueError``."""
+    assert is_prunable_count_scalar("SELECT COUNT(*) FROM t", dialect="nope") is False
