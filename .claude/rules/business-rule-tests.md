@@ -215,8 +215,23 @@ variant WITHOUT a 7th-type extension — the differentiator is a per-candidate
 - **Ingested tests are READ-ONLY** — they appear on the kept/dropped/flagged table, NEVER as
   `proposed_test_files` (we didn't author them). `prune-existing` passes `render_diff(emit_test_files=False)`
   unconditionally. Macro identity rides the synthesized rationale → diff `why` (DEC-015 of #154).
-- **Full-scope only in pass 1** (`scope=sample` deferred, #268); dbt-expectations' `validation_errors`
-  wrapper makes even its `expect_table_row_count` macro row-returning/prunable.
+- **`scope=sample` for ingested tests — LANDED (#268).** A batch of **≥2** samplable ingested bodies
+  under `sample_strategy=materialised` now rewrites the model's own relation in dbt's foreign-rendered
+  `compiled_code` to the `_SESSION._sf_sample_*` temp via sqlglot AST **locate** (`plan_relation_rewrite`
+  in `ingest/_compiled_sql`) + a byte-preserving **token splice** in the compiler (`_build_ingested_rewrite`,
+  no `import sqlglot` under `prune/`). `oneshot` still routes to source (the CTE approach it would need
+  failed on execution — sqlglot can't prepend a CTE). A #267 count-of-rows scalar is an **aggregate** →
+  stays at source (Direction-2). dbt-expectations' `validation_errors` wrapper makes the macro
+  row-returning, so those DO sample. **The Direction-1/2 rule is the load-bearing frame for the split:**
+  a `validation_errors`-shell body is row-level (sample it), a count scalar is metadata (keep at source);
+  the classifier answer is carried per-candidate in an `_IngestedSamplePlan`, and BOTH engine routing sites
+  (`all_bypass_to_source` + `per_test_table_ref`) read it (the #170 two-conditional rule). See
+  `prune-engine.md` § "Sampled manifest-ingested tests (#268)". **A count is NOT an integrity proof** — the
+  rewrite is gated by an AST **post-condition** on the *rewritten* SQL (`verify_relation_rewrite`: parses
+  clean, ZERO residual source-relation tables, exactly N temp tables), because `ast_match_count ==
+  span_count` is defeatable (a column-qualifier span leaves the `FROM` on production; a dotted CTE alias
+  shadows the relation) and either defeat silently DELETES a real test. Live-certified against BigQuery
+  (`tests/cli/test_e2e_bigquery_ingested_sample.py`).
 - **Count-of-rows scalar bodies now graduate (#267, LANDED).** A bare `SELECT count(*) …` scalar body
   (`COUNT(*)`/`COUNT(col)`/`COUNT(DISTINCT)`) is detected by `is_prunable_count_scalar` (a new
   `ingest/_compiled_sql` sqlglot classifier) and pruned, not skip-recorded. The compiler restructures it
