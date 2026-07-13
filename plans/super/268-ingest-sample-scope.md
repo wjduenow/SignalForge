@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Ticket | [#268](https://github.com/wjduenow/SignalForge/issues/268) |
-| Phase | `detailing` |
+| Phase | `published` |
 | Branch | `feature/268-ingest-sample-scope` |
 | Worktree | `../worktrees/SignalForge/268-ingest-sample-scope` |
 | Base | `dev` |
