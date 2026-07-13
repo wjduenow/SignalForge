@@ -562,6 +562,14 @@ class _IngestedSamplePlan:
         return self.reason is None and bool(self.spans)
 
 
+#: The refusal recorded for an ingested candidate the engine never even planned
+#: because the run's strategy cannot produce a temp table to rewrite the relation
+#: TO (``sample_strategy="oneshot"`` — DEC-002). ``_plan_ingested_samples``
+#: returns an EMPTY plan map in that case, so the DEC-014 histogram synthesises
+#: this reason from the absence of a plan rather than leaving the bypassed
+#: candidates unexplained.
+_INGESTED_REASON_NOT_MATERIALISED: str = "strategy-not-materialised"
+
 #: Engine-level (non-``plan_relation_rewrite``) refusal reasons. Kept as plain
 #: strings — they ride the DEC-014 histogram, never a typed error, and NEVER a
 #: 6th ``DropReason`` (the enum stays the locked 5-value Literal; a refused body
@@ -572,6 +580,7 @@ _INGESTED_REJECT_REASONS: frozenset[str] = frozenset(
         "below-min-samplable",
         "materialisation-failed",
         "verify-failed",
+        _INGESTED_REASON_NOT_MATERIALISED,
     }
 )
 
@@ -699,6 +708,104 @@ def _finalise_ingested_plans(
         else:
             finalised[index] = _IngestedSamplePlan(spans=(), reason="verify-failed")
     return finalised, overrides
+
+
+def _emit_ingested_routing_signals(
+    pairs: list[tuple[str, CandidateTest]],
+    plans: dict[int, _IngestedSamplePlan],
+    *,
+    model_unique_id: str,
+    scope: Scope,
+    sample_strategy: str,
+) -> None:
+    """Emit the #268 DEC-014 ingested-routing observability for ONE prune run.
+
+    Replaces the #154 DEC-007 INFO ("scope=sample requested; evaluating
+    full-scope against source"), which became a half-truth the moment a samplable
+    ingested body could be bound to the materialised temp table: some ingested
+    candidates now genuinely ARE sampled.
+
+    Two surfaces:
+
+    * ONE aggregate **INFO** per ``prune_tests`` call carrying
+      ``{model_unique_id, sample_strategy, ingested_count, sampled_count,
+      bypassed_to_source_count, bypass_reasons}``. ``bypass_reasons`` is a plain
+      ``{reason: count}`` histogram (keys drawn from
+      :data:`~signalforge.ingest._compiled_sql.RELATION_REWRITE_REASONS` ∪
+      :data:`_INGESTED_REJECT_REASONS`) so an operator sees the SHAPE of the
+      bypass without dropping to DEBUG.
+    * One **DEBUG** breadcrumb per bypassed ingested candidate, naming its
+      ``test_anchor`` + ``reason``. DEBUG, not INFO: a wide model with 40
+      ingested tests would otherwise emit 40 INFO lines, and the aggregate
+      already carries the counts.
+
+    Fires only on the ``scope="sample"`` path with at least one ingested
+    candidate — a ``scope="full"`` run has nothing to explain (everything runs
+    full-scope by design) and stays log-silent, exactly as it did pre-#268.
+
+    Call this AFTER the routing block resolves, so the plans reflect the FINAL
+    verdicts (including the ``materialisation-failed`` demotion and the
+    ``verify-failed`` post-condition refusals), not the pre-materialisation ones.
+
+    Observability only — this helper reads state and never mutates it.
+
+    The histogram dict is built OUTSIDE the ``json.dumps(...)`` call and every
+    value is interpolated with lazy-format ``%s``: the DEC-017 logger grep gate
+    walks the WHOLE argument subtree of a ``_LOGGER.<method>(...)`` call and
+    rejects any f-string, including one nested inside a dict literal.
+    """
+    if scope != "sample":
+        return
+
+    ingested_count = 0
+    sampled_count = 0
+    bypass_reasons: dict[str, int] = {}
+    bypassed: list[tuple[str, str]] = []
+    for index, (test_anchor, test) in enumerate(pairs):
+        if not (isinstance(test, CandidateTestCustomSQL) and test.from_manifest):
+            continue
+        ingested_count += 1
+        plan = plans.get(index)
+        if plan is not None and plan.samplable:
+            sampled_count += 1
+            continue
+        # An absent plan means ``_plan_ingested_samples`` never ran its gates —
+        # i.e. the strategy is ``oneshot`` (DEC-002); a present plan always
+        # carries a reason when it isn't samplable.
+        reason = (
+            plan.reason if plan is not None and plan.reason else _INGESTED_REASON_NOT_MATERIALISED
+        )
+        bypass_reasons[reason] = bypass_reasons.get(reason, 0) + 1
+        bypassed.append((test_anchor, reason))
+
+    if not ingested_count:
+        return
+
+    _LOGGER.info(
+        "ingested custom_sql routing: %s",
+        json.dumps(
+            {
+                "model_unique_id": model_unique_id,
+                "sample_strategy": sample_strategy,
+                "ingested_count": ingested_count,
+                "sampled_count": sampled_count,
+                "bypassed_to_source_count": len(bypassed),
+                # Sorted so two runs over the same batch emit byte-identical JSON.
+                "bypass_reasons": dict(sorted(bypass_reasons.items())),
+            }
+        ),
+    )
+    for test_anchor, reason in bypassed:
+        _LOGGER.debug(
+            "ingested custom_sql bypassed to source: %s",
+            json.dumps(
+                {
+                    "model_unique_id": model_unique_id,
+                    "test_anchor": test_anchor,
+                    "reason": reason,
+                }
+            ),
+        )
 
 
 def _test_requires_source_table(
@@ -1571,32 +1678,14 @@ def prune_tests(
     is_trusted = model.unique_id in resolved_config.trusted_models
     scope: Scope = resolved_config.scope
 
-    # #154 DEC-007 — one INFO when the operator requested ``scope=sample`` but
-    # the batch carries manifest-ingested ``custom_sql`` candidates. Those are
-    # ALWAYS evaluated full-scope against the source (dbt's own quoted relation
-    # cannot bind the deterministic sample), so the sample request is a no-op
-    # for them; the routing lives in :func:`_test_requires_source_table`. Fires
-    # at most once per ``prune_tests`` call, and only on the sample path — a
-    # ``scope=full`` run (or a batch with no ingested candidates) stays
-    # log-silent. Lazy-format JSON per the DEC-017 logger gate; never
-    # f-string-interpolate user-controlled values.
-    if scope == "sample":
-        ingested_count = sum(
-            1
-            for _, test in pairs
-            if isinstance(test, CandidateTestCustomSQL) and test.from_manifest
-        )
-        if ingested_count:
-            _LOGGER.info(
-                "ingested custom_sql: scope=sample requested; "
-                "evaluating full-scope against source: %s",
-                json.dumps(
-                    {
-                        "model_unique_id": model.unique_id,
-                        "ingested_count": ingested_count,
-                    }
-                ),
-            )
+    # The #154 DEC-007 INFO ("scope=sample requested; evaluating full-scope
+    # against source") used to fire here. It became a half-truth once #268 let a
+    # samplable ingested body bind the materialised temp table, so it is replaced
+    # by the DEC-014 aggregate INFO + per-test DEBUG breadcrumbs emitted from
+    # :func:`_emit_ingested_routing_signals` — which fires BELOW, after the
+    # routing block resolves, so it reports the FINAL verdicts (including the
+    # ``materialisation-failed`` / ``verify-failed`` demotions) rather than the
+    # pre-materialisation ones.
 
     total_budget_ms = resolved_config.total_budget_seconds * 1000
 
@@ -1844,6 +1933,19 @@ def prune_tests(
                 scope=scope,
                 sample_size=resolved_config.sample_size,
             )
+
+        # #268 DEC-014 — the ingested-routing observability. Emitted here, after
+        # every routing arm has settled ``ingested_plans`` (the
+        # materialisation-failed demotion and the verify-failed refusals
+        # included), so the counts and the reason histogram describe what
+        # ACTUALLY happened rather than the pre-materialisation guess. Read-only.
+        _emit_ingested_routing_signals(
+            pairs,
+            ingested_plans,
+            model_unique_id=model.unique_id,
+            scope=scope,
+            sample_strategy=resolved_config.sample_strategy,
+        )
 
         budget_exhausted = False
 
