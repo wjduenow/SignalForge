@@ -5,7 +5,7 @@
 | Field | Value |
 |---|---|
 | Ticket | [#268](https://github.com/wjduenow/SignalForge/issues/268) |
-| Phase | `published` |
+| Phase | `devolved` |
 | Branch | `feature/268-ingest-sample-scope` |
 | Worktree | `../worktrees/SignalForge/268-ingest-sample-scope` |
 | Base | `dev` |
@@ -606,3 +606,22 @@ foreign SQL, prove the post-condition on the rewritten AST.**
 **Depends on:** US-010.
 
 ## 6. Beads Manifest
+
+| Bead | Story | Depends on |
+|---|---|---|
+| `bd_1-scaffolding-ivr` | **epic** — #268 | — |
+| `bd_1-scaffolding-ivr.1` | US-001 — Harden the ingest sqlglot gates (#154 latent bugs) | — |
+| `bd_1-scaffolding-ivr.2` | US-002 — `plan_relation_rewrite` / `verify_relation_rewrite` | `.1` |
+| `bd_1-scaffolding-ivr.3` | US-003 — Compiler: ingested arm + fail-closed guard | `.2` |
+| `bd_1-scaffolding-ivr.4` | US-004 — Engine routing + materialisation fallback | `.3` |
+| `bd_1-scaffolding-ivr.5` | US-005 — Audit: `bypassed_to_source` + schema 3→4 ⚠️ **serialize** | `.4` |
+| `bd_1-scaffolding-ivr.6` | US-006 — Observability: INFO + DEBUG | `.4` |
+| `bd_1-scaffolding-ivr.7` | US-007 — Behavioural pins + parse-guard | `.5`, `.6` |
+| `bd_1-scaffolding-ivr.8` | US-008 — Gated BigQuery live cert (**merge gate**) | `.7` |
+| `bd_1-scaffolding-ivr.9` | US-009 — Docs + CHANGELOG | `.8` |
+| `bd_1-scaffolding-ivr.10` | Quality Gate — code review ×4 + CodeRabbit | `.9` |
+| `bd_1-scaffolding-ivr.11` | Patterns & Memory (orchestrator-only) | `.10` |
+
+The chain is near-linear by necessity — each layer's contract is the next layer's input. Only `.5` and
+`.6` can run in parallel (both depend on `.4`), and `.5` must be **serialized** against anything else
+touching the shared audit registry (`PruneEvent`, the strict drift mirror, `prune_event_v1.jsonl`).
