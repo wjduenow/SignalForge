@@ -80,6 +80,7 @@ class StrictPruneDecision(BaseModel):
     compiled_sql: str
     why: str
     sample_failures: tuple[dict[str, Any], ...] | None = None
+    bypassed_to_source: bool = False
     as_of: date | None = None
     stats: AnomalyTestStats | None = None
 
@@ -134,6 +135,7 @@ class StrictPruneEvent(BaseModel):
     compiled_sql: str
     why: str
     sample_failures: tuple[dict[str, Any], ...] | None = None
+    bypassed_to_source: bool = False
     as_of: date | None = None
     stats: AnomalyTestStats | None = None
 
@@ -205,7 +207,8 @@ def test_prune_event_fixture_audit_schema_version_is_current() -> None:
     Issue #55 bumped 1 → 2 when ``config_hash`` migrated from
     ``SHA-256[:16]`` to ``blake2b(digest_size=8)``. Issue #171 bumped
     2 → 3 when ``as_of`` (time-bound evaluation date) and ``stats``
-    (anomaly per-decision numerical state) landed.
+    (anomaly per-decision numerical state) landed. Issue #268 bumped
+    3 → 4 when ``bypassed_to_source`` landed (DEC-011).
     """
     from signalforge.prune.audit import _PRUNE_AUDIT_SCHEMA_VERSION
 
@@ -266,6 +269,45 @@ def test_prune_event_round_trips_legacy_schema_version_2_as_v3() -> None:
     assert event.audit_schema_version == 2
     assert event.as_of is None
     assert event.stats is None
+
+
+def test_prune_event_round_trips_legacy_schema_version_3_as_v4() -> None:
+    """A v3 ``prune.jsonl`` record (missing ``bypassed_to_source``) must still
+    validate cleanly against the current v4 :class:`PruneEvent`.
+
+    Issue #268 DEC-011: the bump 3 → 4 added ONE field with a ``False``
+    default, so v3 records replay as v4 with the new field ``False``. Same
+    load-bearing reason as the 1 → 2 and 2 → 3 replays above —
+    :attr:`PruneEvent.audit_schema_version` is typed :class:`int`, not
+    :class:`typing.Literal`, precisely so an operator's existing audit corpus
+    stays readable.
+    """
+    fixture_path = _FIXTURES_DIR / "prune_event_v1.jsonl"
+    first_line = fixture_path.read_text(encoding="utf-8").splitlines()[0]
+    payload = json.loads(first_line)
+    payload["audit_schema_version"] = 3
+    # A genuine v3 record never had this field — drop to simulate.
+    payload.pop("bypassed_to_source", None)
+    event = PruneEvent.model_validate(payload)
+    assert event.audit_schema_version == 3
+    assert event.bypassed_to_source is False
+
+
+def test_prune_event_fixture_covers_both_bypassed_to_source_states() -> None:
+    """The committed fixture must exercise BOTH ``bypassed_to_source`` states
+    (#268 DEC-011).
+
+    A fixture where every line carries ``False`` would validate happily against
+    a production model that had silently dropped the field's semantics — the
+    drift gate would still pass. Covering both states keeps the fixture
+    capable of failing.
+    """
+    fixture_path = _FIXTURES_DIR / "prune_event_v1.jsonl"
+    lines = [ln for ln in fixture_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    seen = {json.loads(ln)["bypassed_to_source"] for ln in lines}
+    assert seen == {True, False}, (
+        f"prune_event_v1.jsonl must cover both bypassed_to_source states; saw {seen}"
+    )
 
 
 # --- Field-set parity ------------------------------------------------------

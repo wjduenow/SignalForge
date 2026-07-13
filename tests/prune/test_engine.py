@@ -2426,7 +2426,7 @@ def test_prune_tests_materialised_strategy_against_pinned_fixture(
     assert row["model_unique_id"] == "model.shop.orders"
     assert "_SESSION" in row["compiled_sql"]
     assert re.search(r"_sf_sample_[0-9a-f]{16}", row["compiled_sql"]) is not None
-    assert row["audit_schema_version"] == 3
+    assert row["audit_schema_version"] == 4
 
     # Cross-check against the strict drift-detector mirror so the
     # in-memory snapshot remains valid against the read-back contract.
@@ -6582,3 +6582,181 @@ def test_test_requires_source_table_samplable_kwarg_is_pure_and_defaults_false()
         )
         is True
     )
+
+
+# --- #268 DEC-011: bypassed_to_source is set at the decision site ------------
+
+
+def test_prune_tests_bypassed_to_source_distinguishes_sampled_from_bypassed(
+    tmp_path: Path,
+) -> None:
+    """#268 DEC-011 — THE audit-legibility pin. In ONE batch at
+    ``scope="sample"`` + ``materialised``, three destinations produce three
+    honest ``bypassed_to_source`` values:
+
+      * 2× samplable manifest-ingested custom_sql → rewritten onto the temp →
+        ``False`` (they really did run against the sample);
+      * 1× manifest-ingested COUNT-scalar → routed past the sample to the
+        SOURCE → ``True``;
+      * 1× drafted ``not_null`` → the temp via the #22 substitution → ``False``.
+
+    ``scope`` is copied from ``config.scope``, so EVERY one of these four
+    decisions records ``scope="sample"`` — including the one that full-scanned
+    production. Without this flag a reviewer cannot tell them apart, which cuts
+    against Architectural Commitment #5. A single-variant batch would only
+    exercise the ``all_bypass_to_source`` short-circuit; the mixed batch is what
+    pins the per-test ``per_test_table_ref`` arm (the #170 two-conditional rule).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(source_ref, sample_size=100_000, returns=materialised_ref)
+    fake.expect_query(
+        matching=r"_sf_sample_[0-9a-f]{16}`\nwhere status = 'BAD'", returns=[{"failures": 0}]
+    )
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 2}])
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"IS NULL", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_BODY, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 4
+    by_sql = {
+        d.test.sql: d  # type: ignore[union-attr]
+        for d in result.decisions
+        if d.test.type == "custom_sql"
+    }
+    not_null = next(d for d in result.decisions if d.test.type == "not_null")
+
+    # Sampled → False. Cross-checked against the SQL that actually dispatched,
+    # so the flag cannot drift away from the routing it claims to describe.
+    for body in (_INGESTED_SOURCE_BODY, _INGESTED_SOURCE_BODY_2):
+        sampled = by_sql[body]
+        assert sampled.bypassed_to_source is False
+        assert _SAMPLE_TEMP_RE.search(sampled.compiled_sql) is not None
+    assert not_null.bypassed_to_source is False
+    assert "_SESSION._sf_sample_" in not_null.compiled_sql
+
+    # Bypassed → True, and the SQL confirms it hit the production relation.
+    scalar = by_sql[_INGESTED_COUNT_SCALAR_BODY]
+    assert scalar.bypassed_to_source is True
+    assert "`fake_project`.`dataset`.`orders`" in scalar.compiled_sql
+    assert "_sf_sample_" not in scalar.compiled_sql
+
+    # The lie the flag exists to expose: scope reads "sample" on all four.
+    assert {d.scope for d in result.decisions} == {"sample"}
+
+    # And it reaches the audit-of-record, not just the in-memory result.
+    audit_rows = _read_audit_lines(audit_path)
+    assert len(audit_rows) == 4
+    assert sum(1 for row in audit_rows if row["bypassed_to_source"]) == 1
+    assert all(row["scope"] == "sample" for row in audit_rows)
+    assert all(row["audit_schema_version"] == 4 for row in audit_rows)
+
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_row_count_between_records_bypassed_to_source(tmp_path: Path) -> None:
+    """#268 DEC-011 also fixes the LATENT LIE the metadata-aggregate variants
+    have carried since #169: ``row_count_between`` always routes past the sample
+    to the source (a ``COUNT(*)`` over a hash-mod'd sample returns the sample
+    size, not the model's real row count) — yet it was recorded as
+    ``scope="sample"`` with nothing to say otherwise.
+
+    Under ``scope="sample"`` the decision now honestly reports
+    ``bypassed_to_source=True``.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    result = prune_tests(
+        _make_orders_model(),
+        adapter,
+        _candidates_with_one_row_count_test(minimum=100, maximum=10_000),
+        _make_manifest(_make_orders_model()),
+        config=PruneConfig(
+            scope="sample",
+            sample_size=100_000,
+            capture_failure_rows=0,
+            sample_strategy="materialised",
+        ),
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_between"
+    assert decision.bypassed_to_source is True
+    assert decision.scope == "sample"  # the field that was, alone, misleading
+    assert "fake_project.dataset.orders" in decision.compiled_sql
+    assert _read_audit_lines(audit_path)[0]["bypassed_to_source"] is True
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_full_scope_never_reports_a_bypass(tmp_path: Path) -> None:
+    """Under ``scope="full"`` there is no sample to bypass, so
+    ``bypassed_to_source`` is ``False`` even for a metadata-aggregate variant
+    that would bypass under a sample scope.
+
+    Guards against the lazy implementation that keys the flag on the test's
+    VARIANT rather than on the routing the engine actually took.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    result = prune_tests(
+        _make_orders_model(),
+        adapter,
+        _candidates_with_one_row_count_test(minimum=100, maximum=10_000),
+        _make_manifest(_make_orders_model()),
+        config=PruneConfig(scope="full", capture_failure_rows=0),
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.scope == "full"
+    assert decision.bypassed_to_source is False
+    assert _read_audit_lines(audit_path)[0]["bypassed_to_source"] is False
+    fake.assert_all_expectations_met()
