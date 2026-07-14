@@ -68,12 +68,13 @@ work here — those three places own it.
 
 ## Roadmap anchors
 
-Current release: **v0.6.0** (live on PyPI; `dev` is on `0.7.0.dev0`). Shipped through v0.6 —
-draft → prune → grade → diff across **BigQuery + Snowflake**, multi-provider LLM (Anthropic /
-OpenAI / Gemini), external-test ingestion (`prune-existing`), multi-model `--select`, eight
-test primitives (incl. `row_count_between`, `unique_combination`, `row_count_anomaly_by_period`),
-and the bundled Claude Code skill (`install-skill`). Next on the roadmap: v0.7 Airflow operator,
-v0.8 GitHub Action, v0.9 rubric customization, v1.0 dbt Fusion / MCP. Don't pull later-version
+Current release: **v0.8.0** (live on PyPI; `dev` is on `0.9.0.dev0`). Shipped through v0.8 —
+draft → prune → grade → diff across **BigQuery + Snowflake + Databricks**, multi-provider LLM
+(Anthropic / OpenAI / Gemini), external-test ingestion (`prune-existing`), multi-model `--select`,
+eight test primitives (incl. `row_count_between`, `unique_combination`, `row_count_anomaly_by_period`),
+the bundled Claude Code skill (`install-skill`), and the Airflow operators + hook (v0.7).
+Next on the roadmap: v0.9 rubric customization, v0.10 GitHub Action, v1.0 dbt Fusion / MCP.
+Don't pull later-version
 scope into earlier work unless the user explicitly asks. The roadmap table in `README.md` is the
 source of truth for scope boundaries.
 

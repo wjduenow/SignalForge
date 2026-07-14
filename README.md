@@ -692,13 +692,14 @@ Shipped:
 | v0.5    | 2026-05-30 | **Installable Claude Code skill** — `signalforge install-skill` ships a SKILL.md that teaches Claude to drive the CLI against your dbt project                  |
 | v0.6    | 2026-06-09 | **Three new test primitives** (`row_count_between`, `unique_combination`, `row_count_anomaly_by_period` + `--as-of` time-bound reproducibility); grade-stage asyncio orchestrator (~9× faster); persistent grade cache + `--no-grade` / `--no-cache`; grade-to-100% completeness + opt-in cost ceilings; wide-table safety audit; per-provider judge defaults; bulk `--select` shared cache prefix |
 | v0.7    | 2026-06-17 | **Airflow integration** — three operators (`SignalForgeGenerateOperator`, `SignalForgePruneExistingOperator`, `SignalForgeDriftOperator`) + a `SignalForgeHook` (Airflow Connection/Variable → credentials) for scheduled run-over-run schema-drift / signal-rot detection in a DAG; behind the `[airflow]` optional extra so the core install stays Airflow-free. Deep dive: [`docs/airflow-ops.md`](docs/airflow-ops.md) |
+| v0.8    | 2026-07-03 | **Databricks warehouse adapter** (epic #219) — the third concrete adapter: deterministic sampling, materialised-sample CTAS + `oneshot`, `EXPLAIN COST` bytes estimation, `column_stats`, and a full error taxonomy, live-certified against Databricks Free Edition. Plus **Snowflake `column_stats`** (#258), so `safety: aggregate-only` now works on Snowflake too. Deep dive: [`docs/warehouse-adapter-ops.md`](docs/warehouse-adapter-ops.md) |
 
 Planned:
 
 | Version | Scope                                                                                                            |
 | ------- | ---------------------------------------------------------------------------------------------------------------- |
-| v0.8    | **GitHub Action** — PR-time invocation with inline comment integration (kept/dropped/flagged surfaced on the PR) |
 | v0.9    | **Rubric customization** — project-specific grading criteria; organization-wide style profiles                   |
+| v0.10   | **GitHub Action** — PR-time invocation with inline comment integration (kept/dropped/flagged surfaced on the PR) |
 | v1.0    | **dbt Fusion engine compatibility** — dbt MCP server consumption; first-class Fusion integration                 |
 
 Warehouse coverage beyond BigQuery + Snowflake + Databricks (the latter
