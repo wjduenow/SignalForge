@@ -5,7 +5,8 @@
 | Field | Value |
 |---|---|
 | Ticket | [#270](https://github.com/wjduenow/SignalForge/issues/270) |
-| Phase | `detailing` |
+| Phase | `published` |
+| PR | [#272](https://github.com/wjduenow/SignalForge/pull/272) |
 | Branch | `feature/270-count-scalar-prune-gaps` |
 | Worktree | `../worktrees/SignalForge/270-count-scalar-prune-gaps` |
 | Base | `dev` (at `f0bb1a6`, i.e. **after** #154 / #267 / #268) |
