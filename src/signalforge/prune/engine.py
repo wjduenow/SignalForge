@@ -1838,9 +1838,17 @@ def prune_tests(
                     # to rewrite the relation TO, so each body runs verbatim
                     # against the source (its pre-#268 behaviour). ``_is_samplable``
                     # closes over the NAME, so both routing sites see the demotion.
+                    # A plan already rejected (multi-relation / aggregate-scalar /
+                    # unparseable / below-min-samplable) KEEPS its reason, so the
+                    # DEC-014 histogram reports the true cause rather than
+                    # over-writing every entry with ``materialisation-failed``.
                     ingested_plans = {
-                        index: _IngestedSamplePlan(spans=(), reason="materialisation-failed")
-                        for index in ingested_plans
+                        index: (
+                            _IngestedSamplePlan(spans=(), reason="materialisation-failed")
+                            if plan.samplable
+                            else plan
+                        )
+                        for index, plan in ingested_plans.items()
                     }
                     ingested_overrides = {}
                     compile_table_ref = source_table_ref

@@ -89,8 +89,8 @@ prune gate for dbt-expectations / dbt-utils / in-house generic tests (Architectu
   schema/audit bump (`exclude=True` keeps `candidate_hash` byte-identical — guard that invariant
   with an explicit test; a mutation dropping it passed the whole suite at QG time).
 - **Five-gate classification, all reusing `signalforge.ingest._compiled_sql` (sqlglot-AST):**
-  **size cap** (`len(compiled_code.encode()) ≤ 256 KiB = `_COMPILED_CODE_SIZE_LIMIT_BYTES`, checked
-  BEFORE any parse; #268 — there is NO other cap on the manifest path, and an unbounded body would
+  **size cap** (`len(compiled_code.encode()) <= _COMPILED_CODE_SIZE_LIMIT_BYTES`, currently 256 KiB,
+  checked BEFORE any parse; #268 — there is NO other cap on the manifest path, and an unbounded body would
   reach sqlglot; over-cap → skip-record via the existing `malformed-supported-test` reason) →
   presence (`compiled_code` non-null) → `is_row_returning` (skip bare-scalar `SELECT COUNT(*)`;
   DEC-004) → `is_deterministic_sql` (skip `TABLESAMPLE`/`RAND`/`CURRENT_TIMESTAMP`/…; DEC-012) →

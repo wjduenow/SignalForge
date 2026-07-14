@@ -125,11 +125,13 @@ def test_fixture_count_floor_and_no_orphans() -> None:
     green while certifying nothing. Without the orphan check, a fixture added to
     disk but not to ``index.json`` would never be parsed.
     """
-    on_disk = sorted(path.name.removesuffix(".out.sql") for path in _FIXTURE_DIR.glob("*.out.sql"))
-    assert len(on_disk) >= _MIN_FIXTURES
-    assert on_disk == sorted(_CASE_NAMES)
-    for name in _CASE_NAMES:
-        assert (_FIXTURE_DIR / f"{name}.in.sql").is_file()
+    outputs = sorted(path.name.removesuffix(".out.sql") for path in _FIXTURE_DIR.glob("*.out.sql"))
+    assert len(outputs) >= _MIN_FIXTURES
+    assert outputs == sorted(_CASE_NAMES)
+    # Enumerate the INPUT fixtures too — an unindexed ``.in.sql`` (a fixture added
+    # to disk but never wired into ``index.json``) would otherwise pass unnoticed.
+    inputs = sorted(path.name.removesuffix(".in.sql") for path in _FIXTURE_DIR.glob("*.in.sql"))
+    assert inputs == sorted(_CASE_NAMES)
 
     # Both self-join shapes are present: a partial rewrite there would join a
     # SAMPLE against PRODUCTION, the sharpest hazard in the epic.

@@ -77,8 +77,12 @@ Import from `signalforge.ingest`.
   `dialect` is the sqlglot dialect the gates below parse `compiled_code` under;
   pass the active warehouse dialect (`adapter.dialect().name`) when you have one
   so the ingest gates and the prune compiler agree on a body (#268). A
-  disagreement can only make ingest *more* conservative (skip-record), never
-  produce a wrong verdict.
+  disagreement cannot produce a wrong verdict — not because the gates are
+  strictly more conservative (they are *permissive* on a parse failure, so a
+  mismatch could admit a body rather than skip-record it), but because the
+  downstream prune compilation stays **fail-closed**: a body the compiler
+  cannot safely rewrite/validate under the real dialect routes to
+  `kept-without-evidence`. The disagreement can cost signal, never correctness.
 
 The `schema` argument is overloaded **by type** — this str-vs-`Path` split
 is the contract:
@@ -398,8 +402,8 @@ under #154.
 
 ## Recognition of dbt-compiled manifest tests
 
-`read_manifest_tests(manifest, model, *, project_dir=None) -> IngestResult`
-(issue #154) prunes the tests you already author with `dbt-expectations`,
+`read_manifest_tests(manifest, model, *, project_dir=None, dialect="bigquery") -> IngestResult`
+(issue #154; `dialect` added in #268) prunes the tests you already author with `dbt-expectations`,
 `dbt-utils`, or your own in-house generic macros — **without** teaching
 SignalForge each macro's semantics. It leans on work dbt already did: after
 `dbt compile`, every `resource_type == "test"` node in `manifest.json`

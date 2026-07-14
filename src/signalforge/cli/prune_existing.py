@@ -593,9 +593,14 @@ def _ingest_manifest_tests(
     (``prune_tests`` owns the ``with adapter:`` block, so the handler builds the
     adapter late and un-entered). Passing a real dialect here would mean building
     the adapter earlier purely to read ``dialect().name`` — a plumbing change out
-    of scope for this seam. The default is safe: an ingest/compiler dialect
-    disagreement can only make the ingest gates *more* conservative (skip-record),
-    never produce a wrong verdict.
+    of scope for this seam. The default is safe not because the disagreement is
+    harmless in the gates — they are *permissive* on a parse failure
+    (``is_row_returning`` / ``is_deterministic_sql`` return ``True``), so a
+    mismatch could ADMIT a body rather than skip-record it — but because the
+    downstream compile path is **fail-closed**: an ingested body the compiler
+    cannot safely rewrite/validate under the real dialect routes to
+    ``kept-without-evidence`` via ``_InvalidIdentifier`` (or the DEC-007 guard),
+    never a wrong verdict. The disagreement can cost signal, never correctness.
     """
     manifest_result = ingest_module.read_manifest_tests(manifest, model, project_dir=project_dir)
     if not manifest_result.candidate.tests:

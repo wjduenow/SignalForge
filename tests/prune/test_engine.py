@@ -6462,6 +6462,74 @@ def test_prune_tests_materialisation_failure_falls_back_to_source_for_ingested_b
     fake.assert_all_expectations_met()
 
 
+def test_prune_tests_materialisation_failure_preserves_pre_materialisation_bypass_reasons(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DEC-014 + the QG fix — when materialisation fails and the batch falls back
+    to source, only the SAMPLABLE plans demote to ``materialisation-failed``. A
+    plan already refused at plan time (here a ``multi-relation`` body) KEEPS its
+    reason, so the aggregate INFO histogram reports the true cause instead of
+    over-writing every entry with ``materialisation-failed``.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=SamplingRequiresPartitionFilterError(
+            table="fake_project.dataset.orders", num_rows=200_000_000
+        ),
+    )
+    # After the fallback, every ingested body runs verbatim against the source.
+    fake.expect_query(matching=r"status = 'BAD'", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 0}])
+    fake.expect_query(
+        matching=r"join `fake_project`\.`dataset`\.`customers`", returns=[{"failures": 0}]
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_MULTI_RELATION_BODY, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    with caplog.at_level("INFO", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    payloads = _ingested_routing_payloads(caplog)
+    assert len(payloads) == 1
+    # The two samplable bodies demote to ``materialisation-failed``; the
+    # multi-relation body KEEPS its plan-time reason (the bug was over-writing it).
+    assert payloads[0]["bypass_reasons"] == {"materialisation-failed": 2, "multi-relation": 1}
+    assert payloads[0]["sampled_count"] == 0
+    assert payloads[0]["bypassed_to_source_count"] == 3
+    fake.assert_all_expectations_met()
+
+
 def test_prune_tests_materialisation_failure_with_drafted_test_still_degrades(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

@@ -284,9 +284,18 @@ The materialisation CTAS is a `SELECT *` (plus a whole-row hash), so it reads
 **every column** of the model. A narrow ingested test running against the source
 is column-pruned by the warehouse. The break-even is roughly
 `N × test_column_bytes > table_bytes` — so a **single** samplable ingested test
-can never pay for the CTAS, and the engine keeps it bypassing to source. From
-two samplable bodies upward the CTAS is paid once and every subsequent test
-reads the (much smaller) temp table.
+can never pay for the CTAS, and the engine keeps it bypassing to source.
+
+**The ≥ 2 gate is a coarse heuristic, not a break-even guarantee.** It rules out
+the always-losing single-test case, but it does **not** prove the CTAS pays for
+itself at exactly two: two narrow tests on a very wide table can still be cheaper
+run column-pruned at source than one whole-table `SELECT *` CTAS + two sampled
+scans. A precise decision would compare the estimated CTAS bytes against the
+summed per-test source bytes, which the engine does not do today (it has no
+per-candidate byte estimate at routing time). If your ingested tests are narrow
+and your models are very wide, prefer `--scope full` for the ingested pass, or
+raise the effective threshold by pruning fewer models per run. A cost-aware gate
+is tracked as a follow-up.
 
 Two consequences worth planning for:
 
@@ -855,7 +864,7 @@ safety) and `signalforge.draft.audit` (DEC-006/008/013 of llm-drafter).
 | `compiled_sql`         | string                              | The exact SELECT issued to the warehouse, truncated when over-cap (see below). Empty for `requires-future-data` and budget-exhausted. |
 | `why`                  | string                              | One-line human-readable rationale. Architectural Commitment #5.                                  |
 | `sample_failures`      | array of object or `null`           | Up to `capture_failure_rows` failing rows. `null` when capture is disabled or no failures.       |
-| `bypassed_to_source`   | boolean                             | **New in schema v4 (#268).** `true` when the test was routed *past* the sample to the source production table: a metadata-aggregate variant under a sample scope (`row_count_between` / `unique_combination` / `row_count_anomaly_by_period`), or a manifest-ingested `custom_sql` whose body could not be safely rewritten onto the sample relation. `false` under `scope="full"` (there is no sample to bypass), for tests that genuinely ran against the sample, and for decisions taken before any routing happened (prune disabled, budget exhausted, materialisation failed). Since `scope` is copied verbatim from the config, this is the only field that tells a reviewer whether the verdict came from the sample or from a full scan of the source. |
+| `bypassed_to_source`   | boolean                             | **New in schema v4 (#268).** `true` when the test was routed *past* the sample to the source production table: a metadata-aggregate variant under a sample scope (`row_count_between` / `unique_combination` / `row_count_anomaly_by_period`), or a manifest-ingested `custom_sql` whose body could not be safely rewritten onto the sample relation. `false` under `scope="full"` (there is no sample to bypass), for tests that genuinely ran against the sample, and for decisions taken with **no** routing at all (prune disabled, budget exhausted, or the blanket materialisation-failure degrade where a drafted row-level test forced every candidate to `kept-without-evidence` without compiling). Note the DEC-009 materialisation-failure **fallback** path is `true`, not `false`: when nothing in the batch needed the sample, the candidates re-route to and run against the source, so they *were* routed past the (attempted) sample. Since `scope` is copied verbatim from the config, this is the only field that tells a reviewer whether the verdict came from the sample or from a full scan of the source. |
 | `as_of`                | ISO date or `null`                  | Evaluation date for time-bound decisions (`row_count_anomaly_by_period`; #171). `null` otherwise. |
 | `stats`                | object or `null`                    | Method-tagged `AnomalyTestStats` from the anomaly stats query (#171). `null` otherwise.          |
 
@@ -865,8 +874,12 @@ real dbt-expectations `compiled_code` is routinely 1–2 KB, so an untruncated
 record blew the 4000-byte per-line cap and raised
 `PruneAuditRecordTooLargeError`, aborting the run mid-batch. The cap itself is
 load-bearing (`PIPE_BUF` atomic concurrent appends) and is not raised; instead
-**both** SQL surfaces are bounded to a 1000-character prefix with a **visible**
-truncation marker (`-- [signalforge: SQL truncated for the audit record …]`).
+**both** SQL surfaces are bounded to a 1200 JSON-escaped-byte prefix with a
+**visible** truncation marker (`-- [signalforge: SQL truncated for the audit
+record …]`). The metric is JSON-escaped bytes, not raw characters: the writer
+serialises with `ensure_ascii=True`, so a multibyte character can escape to up
+to 12 bytes on the line — a raw-character budget would under-count and a crafted
+multibyte body could still overflow the cap.
 `compiled_sql_hash` is computed over the full SQL, so the forensic chain
 survives, and the in-memory `PruneDecision` handed to the diff / grade stages is
 **not** truncated. Under-cap bodies (every drafted built-in) are byte-identical

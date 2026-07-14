@@ -602,6 +602,28 @@ def test_compiled_code_size_cap_constant_is_256_kib() -> None:
     assert reader_module._COMPILED_CODE_SIZE_LIMIT_BYTES == 262_144
 
 
+def test_lone_surrogate_compiled_code_does_not_crash_the_size_cap() -> None:
+    """#268 QG — a lone surrogate from a manifest JSON escape (`\\ud800`) must not
+    crash the size-cap encode.
+
+    ``"\\ud800".encode("utf-8")`` raises ``UnicodeEncodeError`` (NOT a
+    `_PARSE_FAILURES` type), which would escape this stage-0 reader and abort the
+    whole prune run — the class of bug US-001 closed for the sqlglot gates. The
+    cap encodes with ``surrogatepass`` so the body is measured, then a downstream
+    sqlglot gate refuses it → the candidate is skip-recorded, never a crash.
+    """
+    body = "select c from t where c = '\ud800'"  # a lone surrogate in a literal
+    manifest = _manifest_with(
+        _generic_test(unique_id="test.shop.surrogate", compiled_code=body, column_name="amount")
+    )
+
+    # No UnicodeEncodeError escapes; the body is handled (skip-recorded), not crashed.
+    result = read_manifest_tests(manifest, _make_model())
+    assert result.candidate.tests == ()
+    assert len(result.skipped) == 1
+    assert result.skipped[0].reason in _VALID_SKIP_REASONS
+
+
 def test_under_cap_compiled_code_still_becomes_a_candidate() -> None:
     """The cap must not swallow a realistic dbt-expectations body (negative pin)."""
     body = "select * from t where x = '" + "a" * 1_000 + "'"

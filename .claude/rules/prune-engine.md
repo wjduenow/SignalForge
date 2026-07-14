@@ -313,4 +313,4 @@ is rewritten to the `_SESSION._sf_sample_*` temp. The load-bearing patterns, all
 - **Live-certified (DEC-016).** The gated BigQuery e2e (`tests/cli/test_e2e_bigquery_ingested_sample.py`)
   is the merge gate — `failures == sample_size` proves the rewritten body bound to the same session as the
   CTAS. Snapshot/parse-guard certify SHAPE, not that the warehouse ACCEPTS the SQL (the #121/#124/#226
-  lesson). `oneshot` sampling is a follow-up (the CTE approach it needs failed on execution).
+  lesson). `oneshot` sampling is a follow-up (the CTE approach it would require was prototyped and failed on execution).

@@ -542,6 +542,13 @@ _OVERSIZE_SKIP_DETAIL = (
     "drop it."
 )
 
+_UNENCODABLE_SKIP_DETAIL = (
+    "compiled_code is not valid UTF-8 (it carries a lone surrogate, likely from a "
+    "corrupt or hand-edited manifest.json). SignalForge cannot hash, audit or run "
+    "a body it cannot encode, so it is skip-recorded rather than aborting the run. "
+    "Re-run `dbt compile` to regenerate the manifest."
+)
+
 
 def read_manifest_tests(
     manifest: Manifest,
@@ -695,7 +702,24 @@ def _classify_manifest_test(
         )
     # #268 DEC-012(2) — bound the body BEFORE any sqlglot parse. Byte length (not
     # character count) so a multi-byte payload cannot smuggle past the cap.
-    if len(cc.encode("utf-8")) > _COMPILED_CODE_SIZE_LIMIT_BYTES:
+    # The encode ALSO screens un-encodable bodies: a lone surrogate from a
+    # manifest JSON escape (``\ud800``) raises ``UnicodeEncodeError`` — not a
+    # ``_PARSE_FAILURES`` type, so it would escape this stage-0 reader and abort
+    # the whole prune run (the class of bug US-001 closed for the sqlglot gates).
+    # It cannot be skipped by encoding through it, either: a surrogate body IS a
+    # valid row-returning candidate to sqlglot, so it would resurface and crash
+    # `compiled_sql_hash` at prune time. A body SignalForge cannot UTF-8 encode
+    # cannot be safely hashed / audited / run, so skip-record it here.
+    try:
+        body_byte_len = len(cc.encode("utf-8"))
+    except UnicodeEncodeError:
+        return SkippedTest(
+            test_name=label,
+            column=test.column_name,
+            reason="malformed-supported-test",
+            detail=_UNENCODABLE_SKIP_DETAIL,
+        )
+    if body_byte_len > _COMPILED_CODE_SIZE_LIMIT_BYTES:
         return SkippedTest(
             test_name=label,
             column=test.column_name,
