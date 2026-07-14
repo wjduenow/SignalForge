@@ -66,7 +66,7 @@ import sqlglot.errors
 from sqlglot import exp
 from sqlglot.expressions.core import Expr
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
-from sqlglot.optimizer.scope import Scope, traverse_scope
+from sqlglot.optimizer.scope import Scope, build_scope, traverse_scope
 from sqlglot.tokenizer_core import Token, TokenType
 
 __all__ = [
@@ -219,15 +219,114 @@ def _projection_collapses(node: object) -> bool:
     return any(_projection_collapses(child) for child in iter_expressions())
 
 
+#: sqlglot ``Select.args`` keys that, on a PASS-THROUGH re-projection scope,
+#: either FILTER (``where`` / ``having`` / ``qualify``) or MULTIPLY-then-cut
+#: (``limit`` / ``offset`` / ``distinct``) the single row of the scope's source.
+#: Any of them on an outer pass-through hop means the outer select is no longer
+#: guaranteed to emit exactly one row, so :func:`_scope_produces_exactly_one_row`
+#: BAILS to row-returning. This is precisely the discriminator that spares
+#: dbt-expectations' ``validation_errors`` shell (whose outer select carries a
+#: ``WHERE not(expression = true)`` filtering the re-projected aggregate to
+#: 0-or-1 rows — a LEGITIMATELY row-returning body: 0 rows = the test passed;
+#: #270 AR-A / DEC-002). ``where`` is deliberately allowed ONLY on the BASE
+#: scalar-aggregate node (a ``COUNT`` over zero matching rows is still one row),
+#: never on a pass-through hop.
+_ONE_ROW_REDUCER_KEYS: Final[frozenset[str]] = frozenset(
+    {"where", "having", "qualify", "limit", "offset", "distinct"}
+)
+
+
+def _scope_produces_exactly_one_row(scope: Scope, depth: int = 0) -> bool:
+    """Return ``True`` iff ``scope`` provably emits exactly one row (#270 DEC-002).
+
+    Recurses through single-source PASS-THROUGH scopes to a base scalar-aggregate
+    scope. A scope is proven one-row only when it is either:
+
+    * the **base case** — a plain ``SELECT`` with **no ``GROUP BY`` / ``HAVING``**
+      whose every top-level projection is a collapsing aggregate (see
+      :func:`_projection_collapses`). ``WHERE`` is allowed here (a ``COUNT`` over
+      zero matching rows still yields one row); or
+    * a **pass-through** hop — a plain ``SELECT`` that neither filters nor
+      multiplies its source: no
+      ``WHERE``/``HAVING``/``QUALIFY``/``LIMIT``/``OFFSET``/``DISTINCT``
+      (:data:`_ONE_ROW_REDUCER_KEYS`), no ``JOIN`` / comma-join, a single ``FROM``
+      source that is a ``Table``/``Subquery`` (never UNNEST/TVF/VALUES) carrying
+      no ``PIVOT``/``UNPIVOT``/``TABLESAMPLE`` — whose source resolves via
+      ``scope.sources`` to a child :class:`~sqlglot.optimizer.scope.Scope`
+      (recurse, depth-capped at 32).
+
+    A ``FROM`` source that resolves to the ``exp.Table`` node itself (a physical
+    relation, not a child scope) is many-rowed → ``False``. Any set-op body
+    (``scope.expression`` is not an ``exp.Select``), multi-source ``FROM``, or
+    unproven shape → ``False``. Conservative by construction: an unproven or
+    over-deep body reads as row-returning (the caller skip-records only a proven
+    one-row body, and a false one-row verdict skip-records rather than drops).
+
+    NOTE the ``sel.args.get("from") or sel.args.get("from_")`` FROM lookup: the
+    pinned sqlglot (30.2.1) stores the FROM clause under the arg key ``"from_"``,
+    NOT ``"from"`` — hard-coding ``"from"`` would return ``None`` and silently
+    disable the whole rule. The ``or`` keeps it correct across a key rename.
+    """
+    if depth > 32:
+        return False
+    sel = scope.expression
+    if not isinstance(sel, exp.Select):  # a UNION / set-op body is not one-row.
+        return False
+    if sel.args.get("group") is not None:
+        return False
+
+    projections = sel.expressions
+    # BASE CASE: a scalar aggregate. HAVING would filter the aggregate result
+    # (0-or-1 rows on a condition unrelated to the single-row guarantee), so it
+    # disqualifies; WHERE does not (COUNT over zero matching rows is still one).
+    if (
+        sel.args.get("having") is None
+        and projections
+        and all(_projection_collapses(proj) for proj in projections)
+    ):
+        return True
+
+    # PASS-THROUGH: the outer select must neither filter nor multiply the single
+    # row of its source. ANY reducer key bails — this is what keeps the
+    # dbt-expectations ``validation_errors`` shell + ``max_recency`` row-returning.
+    if any(sel.args.get(key) is not None for key in _ONE_ROW_REDUCER_KEYS):
+        return False
+    if sel.args.get("joins"):  # JOIN / comma-join can multiply rows.
+        return False
+    frm = sel.args.get("from") or sel.args.get("from_")  # "from_" in sqlglot 30.2.1
+    if frm is None:
+        return False
+    src = frm.this
+    if not isinstance(src, (exp.Table, exp.Subquery)):
+        return False  # UNNEST / TVF / VALUES — not a single relation.
+    if src.args.get("pivots") or src.args.get("sample"):
+        return False  # PIVOT / UNPIVOT / TABLESAMPLE reshape / re-cardinalise.
+    child = scope.sources.get(src.alias_or_name)
+    if isinstance(child, Scope):
+        return _scope_produces_exactly_one_row(child, depth + 1)
+    return False  # a physical Table resolves to the exp.Table node → many rows.
+
+
 def is_row_returning(sql: str, *, dialect: str = "bigquery") -> bool:
     """Return ``False`` when ``sql`` is scalar/aggregate-shaped (one-row).
 
-    A body is scalar (returns ``False``) when it is a ``SELECT`` with **no
-    ``GROUP BY``** whose **every** top-level projection is a collapsing aggregate
-    (see :func:`_projection_collapses`). Everything else — a genuine
-    failing-rows ``SELECT … WHERE`` (``True``), a windowed aggregate (``True``),
-    an aggregate confined to a subquery whose outer projection is a plain column
-    or ``*`` (``True``), an aggregate with ``GROUP BY`` (``True``) — is
+    A body is scalar (returns ``False``) in either of two shapes:
+
+    * **direct** — a ``SELECT`` with **no ``GROUP BY``** whose **every** top-level
+      projection is a collapsing aggregate (see :func:`_projection_collapses`); or
+    * **re-projected** (#270 DEC-002) — a scalar count/aggregate wrapped in a
+      chain of single-source PASS-THROUGH scopes (a CTE or derived table), e.g.
+      ``WITH c AS (SELECT COUNT(*) n FROM t) SELECT n FROM c`` — cardinality-1 even
+      though its OUTER projection is a plain column. Proven by
+      :func:`_scope_produces_exactly_one_row`, which bails to row-returning on ANY
+      pass-through filter/multiply (so dbt-expectations' ``validation_errors``
+      shell and ``max_recency`` — which filter the re-projected aggregate to
+      0-or-1 rows — stay LEGITIMATELY row-returning).
+
+    Everything else — a genuine failing-rows ``SELECT … WHERE`` (``True``), a
+    windowed aggregate (``True``), an aggregate confined to a subquery whose outer
+    projection is a plain column or ``*`` (``True``), an aggregate with
+    ``GROUP BY`` (``True``), a pass-through of a PHYSICAL table (``True``) — is
     row-returning.
 
     Wrapping a scalar body in ``SELECT COUNT(*) AS failures FROM (<sql>) AS t``
@@ -260,7 +359,21 @@ def is_row_returning(sql: str, *, dialect: str = "bigquery") -> bool:
     if not projections:
         return True
 
-    return not all(_projection_collapses(proj) for proj in projections)
+    if all(_projection_collapses(proj) for proj in projections):
+        return False
+
+    # #270 DEC-002 — ADDITIVE branch, AFTER the direct all-collapse check above.
+    # A scalar count re-projected through a CTE / derived table reaches here (its
+    # outer projection is a plain column, so the check above sees it as
+    # row-returning). Prove exactly-one-row through the OUTERMOST scope — built on
+    # the FULL ``tree`` (not the ``Subquery``/``Paren``-unwrapped ``root``, which
+    # would hide the ``WITH``). A proof → scalar (``False`` → skip-recorded); any
+    # unproven shape → row-returning (``True``).
+    try:
+        root_scope = build_scope(tree)
+    except _PARSE_FAILURES:  # pragma: no cover — parse already succeeded above.
+        return True
+    return not (root_scope is not None and _scope_produces_exactly_one_row(root_scope))
 
 
 def is_prunable_count_scalar(sql: str, *, dialect: str = "bigquery") -> bool:
