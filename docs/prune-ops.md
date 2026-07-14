@@ -352,6 +352,36 @@ comment-bearing but otherwise-clean body passes. The determinism check that
 already ran at ingest is kept as a belt-and-braces `kept-without-evidence`
 fallback in the compiler (the total-compilation choke point).
 
+**Comment-bearing bodies now execute and earn a real verdict (#270).** Before
+#270 the story above stopped at ingest: the **adapter's** execution-time gate
+(`_sql_safety.validate_test_sql`, run first in `run_test_sql`) is the strict
+`#116` variant and still rejects `--` / `/* */` wholesale, so a comment-bearing
+`compiled_code` body — the common case for real dbt-expectations / dbt-utils /
+in-house generic tests — was accepted at ingest, compiled, then bounced at the
+warehouse and routed to `kept-without-evidence`; it never actually ran. The
+`from_manifest` compiler arm now **strips comments from the body once, before
+emitting it**, so the stripped SQL passes the adapter's strict gate and the body
+executes and gets a real kept / dropped verdict. The adapters and the warehouse
+layer are untouched — `validate_test_sql` keeps its strict contract for every
+other caller; the ingested body simply arrives comment-free. `compiled_sql` on
+the audit record is the stripped bytes (what actually ran); the raw
+`compiled_code` survives verbatim in the operator's manifest. As with every
+prune surface, a high drop rate is the working state, not the failure state
+([Expected drop rates](#expected-drop-rates)) — a comment-bearing test the
+warehouse data never violates now correctly drops as `always-passes` instead of
+shipping as an unevaluated `kept-without-evidence`.
+
+**Unparseable-under-the-live-dialect bodies are refused (#270).** A body that
+parses under the dialect ingest classified with but **not** under the live
+warehouse dialect would otherwise reach the always-`failures=1` wrap and book a
+misleading `kept`. The compiler now checks the body parses under the live
+dialect **first**; one that does not routes to `kept-without-evidence` before
+any wrap. `signalforge prune-existing` also threads the live
+`adapter.dialect().name` into
+[`read_manifest_tests`](ingest-ops.md#recognition-of-dbt-compiled-manifest-tests)
+so ingest classifies under the same dialect the compiler runs — closing the
+cross-dialect gap at both ends. The `DropReason` literal set stays **5-valued**.
+
 #### Count-of-rows scalar restructure (#267)
 
 A manifest-ingested body that is
