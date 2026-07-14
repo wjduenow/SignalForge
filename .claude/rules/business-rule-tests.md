@@ -242,6 +242,7 @@ variant WITHOUT a 7th-type extension — the differentiator is a per-candidate
   aggregates (`AVG`/`SUM`/`MIN`/`MAX`/multi/arithmetic-on-count) still skip-record (`SkipReason` 3-value
   unchanged); a scalar reaching the compiler that isn't a prunable count → `_InvalidIdentifier` →
   `kept-without-evidence` (DropReason 5-value unchanged). **`0=pass` is a REINTERPRETATION, not faithful to
-  dbt** (dbt scores a raw `count(*)` body as always-fail) — the ops docs say so plainly. Deferred edges
-  (cross-dialect classify/compile drift, CTE-reprojected counts, comment-intolerant adapter validation,
-  `--tests-dir` asymmetry) → #270.
+  dbt** (dbt scores a raw `count(*)` body as always-fail) — the ops docs say so plainly. The four deferred
+  edges (cross-dialect classify/compile drift, CTE-reprojected counts, comment-intolerant adapter
+  validation, `--tests-dir` asymmetry) **landed in #270** — see `ingest-layer.md` §"#270 …" and
+  `prune-engine.md` §"Ingested manifest-compiled tests: comment-strip + dialect-refusal (#270)".
